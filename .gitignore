@@ -1,0 +1,19 @@
+# Build output
+target/
+dist/
+node_modules/
+
+# Security scan output
+.scanloop/
+
+# Local env and secrets (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Test vaults and OS noise
+*.lockbox-backup
+.DS_Store
+Thumbs.db
