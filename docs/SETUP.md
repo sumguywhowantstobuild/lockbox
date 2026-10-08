@@ -46,10 +46,15 @@ project on this machine is protected. Change the global copy first, then copy it
 answer wins. It's a seatbelt, not a sandbox: it catches mistakes, but a
 deliberately disguised command could slip past.
 
-### Not installed yet
-- Rust toolchain: needed when the build starts. A first attempt on 2026-10-08 was stopped; `rustup` itself got
-  installed to `~/.cargo/bin`, the toolchain did not.
-- Visual Studio 2022 Build Tools (C++): the install on 2026-10-08 was stopped before anything was installed.
+### Installed 2026-10-08 (Plan 1, Task 1)
+| Tool | Version | How | Why |
+|---|---|---|---|
+| Visual Studio 2022 Build Tools, "Desktop development with C++" | 17.14 · Windows SDK 10.0.26100 | `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` (Ariel accepted the licence) | Rust on Windows needs Microsoft's C++ linker |
+| rustup | 1.29.1 | `winget install --id Rustlang.Rustup` | Installs and switches Rust versions |
+| Rust | 1.99.0 + rustfmt, clippy | `rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy` | The language of the Lockbox core; pinned so every machine builds the same |
+
+Checked: a test program builds and runs (`cargo new hello && cargo run`). `~/.cargo/bin` is on the user PATH; terminals
+opened before the install need restarting to see `cargo`.
 
 ## Troubleshooting log
 
@@ -57,6 +62,11 @@ deliberately disguised command could slip past.
 pip installs semgrep into `%APPDATA%\Python\Python311\Scripts`, which isn't on PATH, so `semgrep.exe` can't find its
 helper `pysemgrep`. Fix used here: the scan script calls semgrep by its full path, with that folder added to PATH only
 for the script's run. (Alternative: add the folder to your user PATH.)
+
+**winget says Build Tools are "already installed" after a stopped install**
+Stopping `winget` doesn't stop the Visual Studio installer it started; it can finish on its own. Check what's really
+there before retrying: `"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -all -requires
+Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`. A path printed means the C++ tools are in.
 
 **`node --test <folder>/` fails with `Cannot find module` (Node 24)**
 Node 24 treats a folder argument as a file to run. Pass the test files instead: `node --test "scripts/*.test.mjs"`.
