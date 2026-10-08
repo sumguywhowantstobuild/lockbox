@@ -102,7 +102,7 @@ export function check(input, { branch } = {}) {
 
 function respond(result) {
   if (!result) return;
-  const prefix = result.decision === "deny" ? "Blocked by the Lockbox safety guard" : "Safety guard: needs Ariel's OK";
+  const prefix = result.decision === "deny" ? "Blocked by the safety guard" : "Safety guard: needs Ariel's OK";
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",

@@ -40,7 +40,10 @@ Rules can't be forgotten the way instructions can. Three outcomes:
   (`reset --hard`, `clean -f`, deleting branches), opening or closing pull requests, creating or changing the GitHub
   repo, releases, shutdown, and any change to the guard or Claude settings.
 - **Allowed:** everything else, under normal permissions.
-Test it: `node --test .claude/hooks/safety-guard.test.mjs`. It's a seatbelt, not a sandbox: it catches mistakes, but a
+Test it: `node --test .claude/hooks/safety-guard.test.mjs`.
+**Global copy (the main version):** `~/.claude/hooks/safety-guard.mjs`, wired in `~/.claude/settings.json`, so every
+project on this machine is protected. Change the global copy first, then copy it here. When both run, the stricter
+answer wins. It's a seatbelt, not a sandbox: it catches mistakes, but a
 deliberately disguised command could slip past.
 
 ### Not installed yet
