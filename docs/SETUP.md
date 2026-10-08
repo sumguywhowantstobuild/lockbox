@@ -30,8 +30,23 @@ Never passwords or keys here, only where they're kept.
 
 These live on the dev machine only, not in this repo.
 
+### Safety guard (Claude Code hook, added 2026-10-08)
+`.claude/settings.json` runs `.claude/hooks/safety-guard.mjs` before every shell command and file edit Claude makes.
+Rules can't be forgotten the way instructions can. Three outcomes:
+- **Blocked:** wiping drives or system folders, deleting `.git`, formatting disks, turning off Windows security,
+  force push, push to `main` (or any push or merge while on `main`), skipping git checks, merging pull requests,
+  deleting or publishing the repo.
+- **Asks Ariel:** accepting licence agreements, installing software, piping a download into a shell, discarding work
+  (`reset --hard`, `clean -f`, deleting branches), opening or closing pull requests, creating or changing the GitHub
+  repo, releases, shutdown, and any change to the guard or Claude settings.
+- **Allowed:** everything else, under normal permissions.
+Test it: `node --test .claude/hooks/safety-guard.test.mjs`. It's a seatbelt, not a sandbox: it catches mistakes, but a
+deliberately disguised command could slip past.
+
 ### Not installed yet
-- Rust toolchain: needed when the build starts.
+- Rust toolchain: needed when the build starts. A first attempt on 2026-10-08 was stopped; `rustup` itself got
+  installed to `~/.cargo/bin`, the toolchain did not.
+- Visual Studio 2022 Build Tools (C++): the install on 2026-10-08 was stopped before anything was installed.
 
 ## Troubleshooting log
 
@@ -39,3 +54,6 @@ These live on the dev machine only, not in this repo.
 pip installs semgrep into `%APPDATA%\Python\Python311\Scripts`, which isn't on PATH, so `semgrep.exe` can't find its
 helper `pysemgrep`. Fix used here: the scan script calls semgrep by its full path, with that folder added to PATH only
 for the script's run. (Alternative: add the folder to your user PATH.)
+
+**`node --test <folder>/` fails with `Cannot find module` (Node 24)**
+Node 24 treats a folder argument as a file to run. Pass the test files instead: `node --test "scripts/*.test.mjs"`.
