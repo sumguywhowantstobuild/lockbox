@@ -32,7 +32,6 @@ const COMMAND_RULES = [
   ["ask", /\bgit\b[^|;&]*\bpush\b[^|;&]*(\s--delete\b|\s-d\b|\s:\S)/, "deletes a branch on GitHub"],
   ["ask", /\bgit\b[^|;&]*\breset\b[^|;&]*--hard\b/, "throws away uncommitted work"],
   ["ask", /\bgit\b[^|;&]*\bclean\b[^|;&]*\s-[a-z]*f/, "deletes untracked files"],
-  ["ask", /\bgit\b[^|;&]*\bbranch\b[^|;&]*\s(-d|--delete)\b/, "deletes a local branch"],
   ["ask", /\bgit\b[^|;&]*\b(checkout|restore)\b[^|;&]*\s(--\s+)?\.(\s|$)/, "throws away uncommitted changes"],
 
   // GitHub: merging, pull requests, visibility, releases
@@ -45,7 +44,7 @@ const COMMAND_RULES = [
 
   // Licences and installs
   ["ask", /--accept-(package|source)-agreements\b|--accept-licen[cs]e\b|\/acceptlicen[cs]e|--agree-tos\b|\baccepteula\b/, "accepts a licence agreement on Ariel's behalf"],
-  ["ask", /\b(winget|choco|scoop)\s+(install|upgrade|uninstall)\b|\binstall-(module|package|script)\b|\bnpm\s+(i|install)\s[^|;&]*(-g|--global)\b|\bcargo\s+install\b|\bpip3?\s+install\b|\brustup\s+(toolchain\s+)?(install|update|self)\b/, "installs or removes software on this computer"],
+  ["ask", /\b(winget|choco|scoop)\s+(install|upgrade|uninstall)\b|\binstall-(module|package|script)\b|\bnpm\s+(i|install)\s[^|;&]*(-g|--global)\b|\bcargo\s+install\b|\bpip3?\s+install\b|\brustup\s+(update|self|default)\b|\brustup\s+(toolchain\s+)?install\s+(?!\d+\.\d+(\.\d+)?(\s|$))/, "installs or removes software on this computer"],
   ["ask", /\b(iwr|irm|invoke-webrequest|invoke-restmethod|curl|wget)\b[^|;&]*\|\s*(iex|invoke-expression|sh|bash|pwsh|powershell)\b/, "downloads a script and runs it straight away"],
 ];
 
@@ -85,6 +84,12 @@ export function check(input, { branch } = {}) {
 
   for (const [decision, pattern, reason] of COMMAND_RULES) {
     if (pattern.test(cmd)) return { decision, reason };
+  }
+
+  // Case matters here: "git branch -d" only deletes merged branches (safe); "-D" forces it.
+  const cased = String(toolInput.command ?? "").replace(/\s+/g, " ");
+  if (/\bgit\b[^|;&]*\bbranch\b[^|;&]*(\s-D\b|\s(-d|--delete)\b[^|;&]*\s(-f|--force)\b|\s(-f|--force)\b[^|;&]*\s(-d|--delete)\b)/.test(cased)) {
+    return { decision: "ask", reason: "force-deletes a local branch, including unmerged work" };
   }
 
   const pushes = /\bgit\b[^|;&]*\bpush\b/.test(cmd);
