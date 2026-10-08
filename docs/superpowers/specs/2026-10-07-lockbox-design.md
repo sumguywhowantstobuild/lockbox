@@ -149,6 +149,8 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
   password change, because HKDF's output depends on its salt.)
 - **Password key:** Argon2id(password as UTF-8 after Unicode NFC normalisation, password-slot salt (16 random bytes),
   params) → 32 bytes.
+- **Minimum master password:** 12 characters (Unicode characters after NFC), enforced by the core when a password is
+  set (create, change password), never at unlock, so raising the minimum later can't lock out existing vaults.
 - **Argon2id parameters:**
   - **Calibrated at creation** to ~1 s, then **clamped** to memory 64–256 MiB, iterations 3–10, parallelism 4. (256 MiB
     leaves headroom for a future phone client.)
