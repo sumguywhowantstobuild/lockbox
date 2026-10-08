@@ -445,6 +445,7 @@ hold the clipboard open.
 | Some items unreadable at unlock | Orphan quarantine skipped, "Cleanup skipped: N damaged items" (6.4). |
 | Unreferenced blobs found | Moved to `files/orphaned/`, shown in the UI (6.4). |
 | Disk full / crash during save | Previous state remains (6.2–6.4); clear error shown. |
+| Not enough space, or file too big for the drive (FAT32 4 GiB limit) | Checked **before** any import or export starts; refused at once with the numbers ("needs 50 GB, 12 GB free"). |
 | Sharing violation (antivirus, indexer) | Retried with backoff, then a clear error (6.2). |
 | Operation running when the vault locks | Cancelled, partial output deleted (7.4). |
 | "Open" cleanup fails | Retry + visible message (7.2). |
