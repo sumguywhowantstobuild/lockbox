@@ -56,6 +56,14 @@ deliberately disguised command could slip past.
 Checked: a test program builds and runs (`cargo new hello && cargo run`). `~/.cargo/bin` is on the user PATH; terminals
 opened before the install need restarting to see `cargo`.
 
+### Workspace and CI (Plan 1, Task 1)
+- `rust-toolchain.toml` pins Rust 1.99.0 (with rustfmt and clippy); `cargo` in the repo picks it up automatically.
+- Checks to run before every commit: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+  `cargo test --locked`. `Cargo.lock` is committed so builds are repeatable.
+- `.github/workflows/ci.yml` runs the same three checks on Windows. It installs the pinned toolchain with
+  `rustup toolchain install` (newer rustup no longer installs one on `rustup show`), and both GitHub Actions are pinned
+  to commit SHAs so a moved tag can't change what runs.
+
 ## Troubleshooting log
 
 **semgrep: `executing pysemgrep failed ... No such file or directory`**

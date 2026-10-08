@@ -1,0 +1,7 @@
+[package]
+name = "lockbox-core"
+description = "Lockbox core: vault engine, encryption and keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
