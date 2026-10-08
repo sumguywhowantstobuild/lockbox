@@ -257,6 +257,9 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
   documented by Microsoft). **Process-crash safety is tested; power-loss safety is assumed**, not proven.
 
 ### 6.3 Header writes
+- **Creating a vault** is all-or-nothing: the whole folder is built in a hidden staging folder `.creating-<random>` in
+  the same parent (same drive), synced, then renamed to its final name. A crash leaves only a staging folder, never a
+  half-built vault. Staging folders left by a crash are deleted the next time a vault is created in that parent.
 - Write the new `vault.json` (6.2), then the same content to `vault.json.bak` (6.2).
 - **Interrupted between the two:** the next successful unlock notices they differ and rewrites `.bak`.
 - **Unlocking tries both headers.** If `vault.json` fails to parse, or its slot fails to unwrap and `.bak` differs from
