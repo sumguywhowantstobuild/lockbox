@@ -14,12 +14,29 @@ use crate::secret::Key32;
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 const ITEMS_DIR: &str = "items";
 const ITEM_EXT: &str = ".item";
 const SECS_PER_DAY: u64 = 86_400;
+const REVISION_OVERFLOW: CoreError = CoreError::InvalidInput {
+    what: "revision overflow",
+};
+
+#[cfg(test)]
+thread_local! {
+    /// IDs the next `new_item` calls must try first (last one first), to force collisions.
+    static FORCED_IDS: std::cell::RefCell<Vec<ItemId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn random_item_id() -> ItemId {
+    #[cfg(test)]
+    if let Some(id) = FORCED_IDS.with(|ids| ids.borrow_mut().pop()) {
+        return id;
+    }
+    ItemId::random()
+}
 
 /// The ID in an item file name: exactly 32 lowercase hex characters plus `.item`.
 fn item_id_from_file_name(name: &str) -> Option<ItemId> {
@@ -62,18 +79,57 @@ pub(super) fn load_all(
     Ok((items, damaged))
 }
 
+fn write_item_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write(path, bytes)?;
+    #[cfg(test)]
+    crate::fsio::failpoint::check("items.after_write")?;
+    Ok(())
+}
+
 impl Vault {
+    fn item_path(&self, id: &ItemId) -> PathBuf {
+        self.dir
+            .join(ITEMS_DIR)
+            .join(format!("{}{ITEM_EXT}", id.to_hex()))
+    }
+
+    /// An ID no loaded, damaged or existing file uses. Random IDs never collide in practice;
+    /// this is the guard that a broken random source must not turn into an overwritten file.
+    fn fresh_item_id(&self) -> Result<ItemId> {
+        loop {
+            let id = random_item_id();
+            let taken = self.items.contains_key(&id)
+                || self.damaged.contains(&id)
+                || self.item_path(&id).try_exists()?;
+            if !taken {
+                return Ok(id);
+            }
+        }
+    }
+
     /// Seals `item` into its file, then (only once that worked) replaces the in-memory copy.
+    /// If the write reports an error after the new file may already be in place (for example
+    /// the folder sync failed), memory takes whatever the file now holds, so the two agree.
+    /// The original error is returned either way.
     fn commit_item(&mut self, item: Item) -> Result<()> {
-        let dir = self.dir.join(ITEMS_DIR);
-        fs::create_dir_all(&dir)?;
+        fs::create_dir_all(self.dir.join(ITEMS_DIR))?;
         let bytes = seal_item(&item, &self.header.vault_id, &self.vault_key)?;
-        atomic_write(&dir.join(format!("{}{ITEM_EXT}", item.id.to_hex())), &bytes)?;
+        let path = self.item_path(&item.id);
+        if let Err(error) = write_item_file(&path, &bytes) {
+            let on_disk = read_retry(&path, MAX_ITEM_FILE).and_then(|bytes| {
+                open_item(&bytes, &item.id, &self.header.vault_id, &self.vault_key)
+            });
+            if let Ok(on_disk) = on_disk {
+                self.items.insert(on_disk.id, on_disk);
+            }
+            return Err(error);
+        }
         self.items.insert(item.id, item);
         Ok(())
     }
 
-    /// Puts an item in or out of the trash; nothing is written if it is already there.
+    /// Puts an item in or out of the trash. A real change counts as an edit (revision and
+    /// `modified_at`); an item already in that state is left alone and nothing is written.
     fn set_trashed(&mut self, id: &ItemId, at: Option<String>) -> Result<()> {
         let stored = self.get_item(id)?;
         if stored.trashed_at.is_some() == at.is_some() {
@@ -81,18 +137,25 @@ impl Vault {
         }
         let mut next = stored.clone();
         next.trashed_at = at;
+        next.revision = next.revision.checked_add(1).ok_or(REVISION_OVERFLOW)?;
+        next.modified_at = created_at_now();
         self.commit_item(next)
     }
 
-    /// Whether a `kind` item may sit in `new` (it was in `old`): a collection never sits in
-    /// one, and a collection newly named must exist and not be in the trash.
+    /// Whether the item `id`, as it will be (`kind`, in `new`; it was in `old`), may sit
+    /// there: a collection never sits in one, nothing sits in itself, and a collection newly
+    /// named must exist and not be in the trash.
     fn check_collection(
         &self,
+        id: &ItemId,
         kind: &ItemKind,
         new: Option<ItemId>,
         old: Option<ItemId>,
     ) -> Result<()> {
         let Some(target) = new else { return Ok(()) };
+        if target == *id {
+            return Err(CoreError::InvalidInput { what: "collection" });
+        }
         if matches!(kind, ItemKind::Collection) {
             return Err(CoreError::InvalidInput {
                 what: "collection inside a collection",
@@ -113,10 +176,11 @@ impl Vault {
         title: &str,
         collection: Option<ItemId>,
     ) -> Result<ItemId> {
-        self.check_collection(&kind, collection, None)?;
+        let id = self.fresh_item_id()?;
+        self.check_collection(&id, &kind, collection, None)?;
         let now = created_at_now();
         let item = Item {
-            id: ItemId::random(),
+            id,
             kind,
             title: title.to_owned(),
             notes: Zeroizing::new(String::new()),
@@ -129,7 +193,6 @@ impl Vault {
             purging: false,
             retired_blobs: Vec::new(),
         };
-        let id = item.id;
         self.commit_item(item)?;
         Ok(id)
     }
@@ -144,7 +207,7 @@ impl Vault {
                 what: "stale revision",
             });
         }
-        self.check_collection(&item.kind, item.collection, stored.collection)?;
+        self.check_collection(&item.id, &item.kind, item.collection, stored.collection)?;
         let was_collection = matches!(stored.kind, ItemKind::Collection);
         let has_members = || self.items.values().any(|m| m.collection == Some(item.id));
         if was_collection && !matches!(item.kind, ItemKind::Collection) && has_members() {
@@ -152,12 +215,7 @@ impl Vault {
                 what: "collection has items",
             });
         }
-        let revision = stored
-            .revision
-            .checked_add(1)
-            .ok_or(CoreError::InvalidInput {
-                what: "revision overflow",
-            })?;
+        let revision = stored.revision.checked_add(1).ok_or(REVISION_OVERFLOW)?;
         let mut next = stored.clone();
         next.kind = item.kind;
         next.title = item.title;
@@ -193,7 +251,8 @@ impl Vault {
     }
 
     /// Takes an item out of the trash, and its collection too if that is in the trash
-    /// (collection first, so a crash in between leaves a valid state).
+    /// (collection first, so a crash in between leaves a valid state). The link to the
+    /// collection is kept even if that collection is missing or damaged; the UI treats it as "no collection".
     pub fn restore_item(&mut self, id: &ItemId) -> Result<()> {
         let item = self.get_item(id)?;
         if item.trashed_at.is_none() {
@@ -400,7 +459,11 @@ mod tests {
         let vault = reopen(vault);
         let item = vault.get_item(&id).unwrap();
         assert!(item.trashed_at.is_none());
-        assert_eq!(item.revision, revision);
+        assert_eq!(
+            item.revision,
+            revision + 2,
+            "one for trash, one for restore"
+        );
 
         let mut vault = vault;
         let ghost = ItemId::random();
@@ -635,5 +698,140 @@ mod tests {
         assert_eq!(vault.items().count(), 0);
         let id = vault.new_item(ItemKind::Note, "first", None).unwrap();
         assert!(item_path(&vault, &id).exists());
+    }
+
+    /// Sets `modified_at` far in the past so a later change to it is visible.
+    fn age(vault: &mut Vault, id: &ItemId) {
+        vault.items.get_mut(id).unwrap().modified_at = "2000-01-01T00:00:00Z".into();
+    }
+
+    #[test]
+    fn trash_and_restore_are_real_changes_but_repeats_are_not() {
+        let (_parent, mut vault) = new_vault();
+        let id = vault.new_item(ItemKind::Note, "Plans", None).unwrap();
+        let before = vault.get_item(&id).unwrap().clone();
+        age(&mut vault, &id);
+
+        vault.trash_item(&id).unwrap();
+        let trashed = vault.get_item(&id).unwrap().clone();
+        assert_eq!(trashed.revision, before.revision + 1);
+        assert_ne!(trashed.modified_at, "2000-01-01T00:00:00Z");
+        // A copy taken before the trash is now stale.
+        invalid(vault.update_item(before), "stale revision");
+
+        let file = fs::read(item_path(&vault, &id)).unwrap();
+        vault.trash_item(&id).unwrap(); // already trashed
+        assert_eq!(vault.get_item(&id).unwrap().revision, trashed.revision);
+        assert_eq!(fs::read(item_path(&vault, &id)).unwrap(), file, "no write");
+
+        age(&mut vault, &id);
+        vault.restore_item(&id).unwrap();
+        let restored = vault.get_item(&id).unwrap().clone();
+        assert_eq!(restored.revision, trashed.revision + 1);
+        assert_ne!(restored.modified_at, "2000-01-01T00:00:00Z");
+        vault.restore_item(&id).unwrap(); // already active
+        assert_eq!(vault.get_item(&id).unwrap().revision, restored.revision);
+
+        // Counting past the last revision is refused and changes nothing.
+        vault.items.get_mut(&id).unwrap().revision = u64::MAX;
+        invalid(vault.trash_item(&id), "revision overflow");
+        assert!(!is_trashed(&vault, &id));
+    }
+
+    #[test]
+    fn delete_collection_counts_each_real_change_as_an_edit() {
+        let (_parent, mut vault) = new_vault();
+        let (work, a, b, loose) = with_collection(&mut vault);
+        vault.trash_item(&a).unwrap(); // a: revision 1
+        vault.delete_collection(&work).unwrap();
+        let revision = |id| vault.get_item(&id).unwrap().revision;
+        assert_eq!(revision(a), 1, "already trashed: untouched");
+        assert_eq!((revision(b), revision(work), revision(loose)), (1, 1, 0));
+
+        // Restoring a member restores the collection too: both are real changes.
+        vault.restore_item(&b).unwrap();
+        let revision = |id| vault.get_item(&id).unwrap().revision;
+        assert_eq!((revision(b), revision(work)), (2, 2));
+        vault.restore_item(&a).unwrap(); // collection already active: only a changes
+        let revision = |id| vault.get_item(&id).unwrap().revision;
+        assert_eq!((revision(a), revision(work)), (2, 2));
+    }
+
+    #[test]
+    fn a_note_cannot_be_filed_in_itself() {
+        let (_parent, mut vault) = new_vault();
+        let c = vault.new_item(ItemKind::Collection, "C", None).unwrap();
+        let mut edit = vault.get_item(&c).unwrap().clone();
+        edit.kind = ItemKind::Note;
+        edit.collection = Some(c);
+        invalid(vault.update_item(edit), "collection");
+        let item = vault.get_item(&c).unwrap();
+        assert!(matches!(item.kind, ItemKind::Collection) && item.collection.is_none());
+        assert_eq!(item.revision, 0);
+        // A plain note cannot name itself either.
+        let n = vault.new_item(ItemKind::Note, "N", None).unwrap();
+        let mut edit = vault.get_item(&n).unwrap().clone();
+        edit.collection = Some(n);
+        invalid(vault.update_item(edit), "collection");
+    }
+
+    fn force_next_id(id: ItemId) {
+        FORCED_IDS.with(|ids| ids.borrow_mut().push(id));
+    }
+
+    #[test]
+    fn a_colliding_id_never_overwrites_a_healthy_or_damaged_file() {
+        let (_parent, mut vault) = new_vault();
+        let healthy = vault.new_item(ItemKind::Note, "healthy", None).unwrap();
+        let sick = vault.new_item(ItemKind::Note, "sick", None).unwrap();
+        let (healthy_path, sick_path) = (item_path(&vault, &healthy), item_path(&vault, &sick));
+        let mut broken = fs::read(&sick_path).unwrap();
+        broken[40] ^= 1;
+        fs::write(&sick_path, &broken).unwrap();
+        let mut vault = reopen(vault);
+        assert_eq!(vault.damaged_items(), [sick]);
+        let healthy_bytes = fs::read(&healthy_path).unwrap();
+
+        // A folder with an item file's name is not loaded either, but its path is taken.
+        let squatter = ItemId([0xEE; 16]);
+        fs::create_dir(item_path(&vault, &squatter)).unwrap();
+        // Last pushed is tried first.
+        for id in [squatter, sick, healthy] {
+            force_next_id(id);
+        }
+        let first = vault.new_item(ItemKind::Note, "first", None).unwrap();
+        assert!(![healthy, sick, squatter].contains(&first));
+        assert_eq!(vault.get_item(&first).unwrap().title, "first");
+        FORCED_IDS.with(|ids| assert!(ids.borrow().is_empty(), "all forced IDs were tried"));
+
+        assert_eq!(fs::read(&healthy_path).unwrap(), healthy_bytes);
+        assert_eq!(fs::read(&sick_path).unwrap(), broken);
+        assert!(item_path(&vault, &squatter).is_dir());
+        assert_eq!(vault.get_item(&healthy).unwrap().title, "healthy");
+        assert_eq!(vault.damaged_items(), [sick]);
+    }
+
+    #[test]
+    fn an_error_after_the_file_landed_leaves_memory_matching_disk() {
+        let (_parent, mut vault) = new_vault();
+        let id = vault.new_item(ItemKind::Note, "Plans", None).unwrap();
+        let mut edit = vault.get_item(&id).unwrap().clone();
+        edit.title = "Changed".into();
+
+        failpoint::arm("items.after_write");
+        let result = vault.update_item(edit);
+        failpoint::disarm_all();
+
+        // The caller sees the error, but memory has the version the file now holds.
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        let item = vault.get_item(&id).unwrap();
+        assert_eq!((item.title.as_str(), item.revision), ("Changed", 1));
+        // Work continues from that state, and a reload agrees.
+        let mut next = item.clone();
+        next.title = "Changed again".into();
+        vault.update_item(next).unwrap();
+        let vault = reopen(vault);
+        let item = vault.get_item(&id).unwrap();
+        assert_eq!((item.title.as_str(), item.revision), ("Changed again", 2));
     }
 }
