@@ -30,6 +30,14 @@ Never passwords or keys here, only where they're kept.
 
 These live on the dev machine only, not in this repo.
 
+### Trial: Ponytail plugin (Lockbox only, from 2026-10-09)
+[DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) (MIT): makes the AI write the smallest complete
+solution. Enabled in `.claude/settings.local.json` (git-ignored, this machine and project only), pinned to tag
+`v5.1.0` (commit `9cc65d03`) with auto-update off; its hooks were read before enabling (local only, no network).
+Declined: its status-bar setup. Decide after Plan 1 Group B: keep, go global, or drop `/simplify` to avoid overlap.
+Remove: delete its two entries from `.claude/settings.local.json`, then `node scripts/uninstall.js` from a clone of
+the repo cleans `~/.claude/.ponytail-active` and `~/.config/ponytail/`.
+
 ### Safety guard (Claude Code hook, added 2026-10-08)
 `.claude/settings.json` runs `.claude/hooks/safety-guard.mjs` before every shell command and file edit Claude makes.
 Rules can't be forgotten the way instructions can. Three outcomes:
