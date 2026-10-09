@@ -38,10 +38,7 @@ macro_rules! id_type {
 
         impl $name {
             pub fn random() -> Self {
-                let mut bytes = [0u8; 16];
-                // No safe way to continue without OS randomness, so fail loudly.
-                getrandom::fill(&mut bytes).expect("OS random source failed");
-                Self(bytes)
+                Self(crate::secret::random_bytes())
             }
 
             pub fn to_hex(&self) -> String {
