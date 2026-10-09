@@ -1,5 +1,6 @@
 //! Binary fields in JSON: standard padded base64 (RFC 4648 section 4), used as
 //! `#[serde(with = "crate::serde_b64")]` on `[u8; N]` and `Vec<u8>` fields.
+//! For non-secret fields only: the intermediate `String` and `Vec` are not wiped.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Deserializer, Serializer, de::Error};

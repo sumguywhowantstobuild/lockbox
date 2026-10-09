@@ -254,10 +254,48 @@ mod tests {
     }
 
     #[test]
+    fn slot_ad_golden_bytes() {
+        // Built by hand (not via encode_ad) so field order and the empty-field rule are pinned.
+        let field = |out: &mut Vec<u8>, bytes: &[u8]| {
+            out.extend((bytes.len() as u32).to_le_bytes());
+            out.extend(bytes);
+        };
+        let vault_id = VaultId([0x11; 16]);
+        let salt = [0x22; 16];
+        let params = Argon2Params {
+            memory_kib: 0x0001_0000,
+            iterations: 3,
+            parallelism: 4,
+        };
+
+        let mut expected = b"lockbox/slot".to_vec();
+        field(&mut expected, &[1, 0]); // slot_version, u16 LE
+        field(&mut expected, &[0x11; 16]);
+        field(&mut expected, b"password");
+        field(&mut expected, &[0x22; 16]);
+        field(&mut expected, &[0, 0, 1, 0, 3, 0, 0, 0, 4, 0, 0, 0]); // m, t, p as u32 LE
+        assert_eq!(
+            slot_ad(1, &vault_id, SlotType::Password, &salt, Some(&params)),
+            expected
+        );
+
+        let mut expected = b"lockbox/slot".to_vec();
+        field(&mut expected, &[1, 0]);
+        field(&mut expected, &[0x11; 16]);
+        field(&mut expected, b"recovery");
+        field(&mut expected, &[0x22; 16]);
+        field(&mut expected, &[]); // no kdf: the field is still there, zero-length
+        assert_eq!(
+            slot_ad(1, &vault_id, SlotType::Recovery, &salt, None),
+            expected
+        );
+    }
+
+    #[test]
     fn tamper_detected() {
         let (vault_id, slot_key, _, slot) = sample();
         type Edit = fn(&mut KeySlot);
-        let edits: [(&str, Edit); 5] = [
+        let edits: [(&str, Edit); 6] = [
             ("ciphertext", |s| s.ciphertext[0] ^= 1),
             ("nonce", |s| s.nonce[0] ^= 1),
             ("salt", |s| s.salt[0] ^= 1),
@@ -265,6 +303,7 @@ mod tests {
                 s.kdf.as_mut().unwrap().iterations ^= 1;
             }),
             ("slot_type", |s| s.slot_type = SlotType::Recovery),
+            ("kdf removed", |s| s.kdf = None),
         ];
         for (what, edit) in edits {
             let mut bad = slot.clone();
@@ -277,6 +316,21 @@ mod tests {
                 "{what}"
             );
         }
+        // A slot wrapped without kdf must not unwrap once a kdf is added.
+        let no_kdf = wrap_slot(
+            SlotType::Recovery,
+            &vault_id,
+            [9; 16],
+            None,
+            &slot_key,
+            &Key32::from_bytes([2; 32]),
+        );
+        let mut added = no_kdf.clone();
+        added.kdf = sample().3.kdf;
+        assert!(matches!(
+            unwrap_slot(&added, &vault_id, &slot_key),
+            Err(CoreError::WrongPassword)
+        ));
         // A cut-short ciphertext is also just a failed unwrap.
         let mut short = slot.clone();
         short.ciphertext.truncate(10);
