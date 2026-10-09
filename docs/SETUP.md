@@ -73,6 +73,13 @@ opened before the install need restarting to see `cargo`.
   `rustup toolchain install` (newer rustup no longer installs one on `rustup show`), and both GitHub Actions are pinned
   to commit SHAs so a moved tag can't change what runs.
 
+### Windows file code and the Linux CI run (Plan 1, Task 8)
+- `crates/lockbox-core` depends on `windows-sys` 0.61 (Windows only) for safe file moves, disk-space and file-system
+  checks. Its `unsafe` is confined to `src/fsio/windows.rs`; the rest of the crate denies `unsafe`.
+- The CI Rust job is now a matrix (`windows-latest`, `ubuntu-latest`), so the non-Windows file code in
+  `src/fsio/portable.rs` is compiled and tested too. Job names are now `Rust: format, lint, test (<os>)`; update any
+  required-status-check rules on GitHub to match.
+
 ### GitHub repo (Plan 1, Task 1 Step 11)
 - Private repo created with `gh repo create lockbox --private --source . --remote origin` (account
   `sumguywhowantstobuild`). Ariel pushes `main`; feature branches are pushed for CI.

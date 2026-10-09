@@ -14,8 +14,13 @@ concurrency:
 
 jobs:
   rust:
-    name: "Rust: format, lint, test"
-    runs-on: windows-latest
+    name: "Rust: format, lint, test (${{ matrix.os }})"
+    # Windows is the shipped target; Linux compiles and tests the portable file code too.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

@@ -1,12 +1,15 @@
 //! Lockbox core: the vault engine. All encryption and key handling live here.
 
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: only `fsio::windows` may opt in, for documented Win32 calls.
+#![deny(unsafe_code)]
 
 pub mod ad;
 pub mod error;
+pub mod fsio;
 pub mod ids;
 pub mod kdf;
 pub mod limits;
+pub mod lockfile;
 pub mod recovery;
 pub mod secret;
 pub(crate) mod serde_b64;
