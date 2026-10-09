@@ -514,7 +514,7 @@ hold the clipboard open.
 - **Dependencies:** if the `zip` crate is used (for writing or reading the directory), it must be ≥ 2.3.0
   (CVE-2025-29787), and its extract functions are never used.
 - **Repo docs:** `README.md` (incl. "not independently audited"), `SECURITY.md` (R1–R7, limits, how to report a
-  vulnerability), `docs/SETUP.md`, `TRACKER.md`, `LICENSE` (MIT).
+  vulnerability), `docs/SETUP.md`, `LICENSE` (MIT).
 - **Greptile:** apply for the free open-source plan once the repo is public.
 - **Third-party skills and tools stay on the dev machine**, never committed.
 
