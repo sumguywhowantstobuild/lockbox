@@ -22,6 +22,7 @@ const CREATE_PARALLELISM: u32 = 4;
 
 /// Argon2id cost settings. Stored in key slots, so they are untrusted when read back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Argon2Params {
     pub memory_kib: u32,
     pub iterations: u32,

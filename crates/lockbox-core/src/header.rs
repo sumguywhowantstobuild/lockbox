@@ -40,6 +40,9 @@ pub struct VaultHeader {
     pub vault_id: VaultId,
     pub name: String,
     pub slots: Vec<KeySlot>,
+    /// Always written, `null` when absent; a missing key is rejected (serde would
+    /// otherwise quietly read it as `None`).
+    #[serde(deserialize_with = "Option::deserialize")]
     pub migration: Option<Migration>,
     /// Stored as given, not format-checked: the MAC covers it and it is only displayed.
     pub created_at: String,
@@ -129,6 +132,10 @@ pub fn verify_header_mac(h: &VaultHeader, vault_key: &Key32) -> bool {
 
 /// Writes `vault.json`, then the identical `vault.json.bak`. Each write is crash-safe,
 /// so at least one good copy exists at every moment.
+///
+/// An `Err` after `vault.json` was replaced means the new header is already live and
+/// `vault.json.bak` is one version behind (after a password change it still holds the
+/// old password slot). The caller must rewrite `.bak`, e.g. at the next unlock.
 pub fn write_headers(dir: &Path, h: &VaultHeader) -> Result<()> {
     let bytes = serialize_header(h);
     atomic_write(&dir.join(HEADER_FILE), &bytes)?;
@@ -239,6 +246,32 @@ mod tests {
             let back = parse_header(&serialize_header(&sample_with(name))).unwrap();
             assert_eq!(back.name, name);
         }
+    }
+
+    #[test]
+    fn limits_are_pinned() {
+        assert_eq!(MAX_HEADER_BYTES, 65_536);
+        assert_eq!(MAX_JSON_DEPTH, 32);
+        assert_eq!(CONTAINER_VERSION, 1);
+    }
+
+    #[test]
+    fn missing_migration_or_mac_rejected() {
+        for key in ["migration", "header_mac"] {
+            let mut json = to_value(&sample());
+            json.as_object_mut().unwrap().remove(key);
+            assert!(
+                matches!(parse_value(&json), Err(CoreError::Damaged { .. })),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_kdf_field_rejected() {
+        let mut json = to_value(&sample());
+        json["slots"][0]["kdf"]["extra"] = 1.into();
+        assert!(matches!(parse_value(&json), Err(CoreError::Damaged { .. })));
     }
 
     #[test]
