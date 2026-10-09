@@ -5,6 +5,7 @@
 pub mod ad;
 pub mod error;
 pub mod ids;
+pub mod kdf;
 pub mod limits;
 pub mod secret;
 

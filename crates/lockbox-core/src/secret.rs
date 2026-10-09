@@ -29,6 +29,15 @@ impl Key32 {
         Self(key)
     }
 
+    /// Lets `fill` write the key directly inside the wiped buffer (no stray copy).
+    pub(crate) fn fill_with(
+        fill: impl FnOnce(&mut [u8; 32]) -> crate::Result<()>,
+    ) -> crate::Result<Self> {
+        let mut key = Zeroizing::new([0u8; 32]);
+        fill(&mut key)?;
+        Ok(Self(key))
+    }
+
     /// Takes ownership of key bytes. The caller's own copy of `bytes` is not wiped here.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(Zeroizing::new(bytes))
