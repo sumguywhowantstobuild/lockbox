@@ -65,7 +65,8 @@ Checked: a test program builds and runs (`cargo new hello && cargo run`). `~/.ca
 opened before the install need restarting to see `cargo`.
 
 ### Workspace and CI (Plan 1, Task 1)
-- `rust-toolchain.toml` pins Rust 1.99.0 (with rustfmt and clippy); `cargo` in the repo picks it up automatically.
+- `rust-toolchain.toml` pins Rust 1.99.0 (minimal profile, plus rustfmt and clippy); `cargo` in the repo picks it up
+  automatically.
 - Checks to run before every commit: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked`. `Cargo.lock` is committed so builds are repeatable.
 - `.github/workflows/ci.yml` runs the same three checks on Windows. It installs the pinned toolchain with
@@ -80,6 +81,23 @@ opened before the install need restarting to see `cargo`.
   were rewritten to it with `git filter-branch --env-filter` before the first push (Ariel ran it; the safety guard
   blocks history rewrites for Claude).
 - First CI run on `plan-1-core` passed (format, lint, test).
+
+### Security scan (Plan 1, Task 2)
+- Run `node scripts/scan.mjs` (add `--json` for machine-readable output). It runs three tools over the whole repo and
+  writes their raw reports to `.scan/` (git-ignored): gitleaks (passwords/keys in git history), semgrep (risky code
+  patterns) and osv-scanner (dependencies with known vulnerabilities, from `Cargo.lock`, plus `package-lock.json` once
+  it exists).
+- Result: exit `0` CLEAN, `1` FINDINGS (fix them), `2` INCOMPLETE (a tool is missing or failed, so it never says
+  "clean" by accident). What counts as a finding: any gitleaks hit; semgrep `ERROR` or `WARNING`; osv score 4.0 or
+  higher, or no score at all. Lower scores and semgrep `INFO` are listed but don't fail.
+- gitleaks checks committed history only: a secret in a file you haven't committed yet isn't seen until you commit it.
+- Tools are found by name on PATH, except semgrep (see the troubleshooting entry below). To use another copy, set
+  `LOCKBOX_GITLEAKS`, `LOCKBOX_SEMGREP` or `LOCKBOX_OSV` to its path. The tests use this to swap in fake tools.
+- Tests: `node --test "scripts/*.test.mjs"`.
+- A semgrep hit we accept on purpose is silenced on that line with `// nosemgrep: <rule id> -- <reason>`.
+- CI job "Security scan" (Windows) installs pinned versions: gitleaks 8.30.1 and osv-scanner 2.6.0 downloaded from their
+  GitHub releases and checked against SHA-256 values copied from the releases (the job fails on a mismatch), and
+  `pip install semgrep==1.179.0`. Bumping a version means getting the new SHA-256 from the release page.
 
 ## Troubleshooting log
 
