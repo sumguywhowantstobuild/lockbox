@@ -6,6 +6,7 @@
 pub mod ad;
 pub mod error;
 pub mod fsio;
+pub mod header;
 pub mod ids;
 pub mod kdf;
 pub mod limits;

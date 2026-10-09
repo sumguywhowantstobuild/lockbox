@@ -1,5 +1,7 @@
 //! Secret key types. Keys are wiped from memory when dropped and never printed.
 
+use hkdf::Hkdf;
+use sha2::Sha256;
 use std::fmt;
 use zeroize::Zeroizing;
 
@@ -36,6 +38,16 @@ impl Key32 {
         let mut key = Zeroizing::new([0u8; 32]);
         fill(&mut key)?;
         Ok(Self(key))
+    }
+
+    /// HKDF-SHA256 (RFC 5869) from `ikm` into a new key, written straight into the wiped buffer.
+    pub(crate) fn hkdf_sha256(salt: Option<&[u8]>, ikm: &[u8], info: &[u8]) -> Self {
+        Self::fill_with(|out| {
+            Hkdf::<Sha256>::new(salt, ikm)
+                .expand(info, out)
+                .map_err(|_| crate::CoreError::InvalidInput { what: "key length" })
+        })
+        .expect("HKDF-SHA256 can produce 32 bytes")
     }
 
     /// Takes ownership of key bytes. The caller's own copy of `bytes` is not wiped here.

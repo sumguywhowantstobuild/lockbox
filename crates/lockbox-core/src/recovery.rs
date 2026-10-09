@@ -4,7 +4,6 @@
 
 use crate::error::{CoreError, Result};
 use crate::secret::{Key32, fill_random};
-use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use zeroize::Zeroizing;
@@ -113,12 +112,7 @@ impl RecoverySecret {
 
 /// The key that wraps the vault key in the recovery slot (HKDF-SHA256, spec 5.2).
 pub fn derive_recovery_key(secret: &RecoverySecret, salt: &[u8; 16]) -> Key32 {
-    Key32::fill_with(|out| {
-        Hkdf::<Sha256>::new(Some(salt), &*secret.0)
-            .expand(INFO, out)
-            .map_err(|_| CoreError::InvalidInput { what: "key length" })
-    })
-    .expect("HKDF-SHA256 can produce 32 bytes")
+    Key32::hkdf_sha256(Some(salt), &*secret.0, INFO)
 }
 
 #[cfg(test)]

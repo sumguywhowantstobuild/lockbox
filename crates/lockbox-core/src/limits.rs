@@ -2,6 +2,9 @@
 
 use crate::{CoreError, Result};
 
+/// Deepest JSON nesting accepted from any vault file.
+pub const MAX_JSON_DEPTH: usize = 32;
+
 /// Rejects `bytes` longer than `max_len` (`TooLarge`) or nested deeper than
 /// `max_depth` arrays/objects (`Damaged`). Brackets inside JSON strings are ignored.
 pub fn check_json(bytes: &[u8], max_len: usize, max_depth: usize) -> Result<()> {

@@ -16,11 +16,40 @@ where
     D: Deserializer<'de>,
     T: TryFrom<Vec<u8>>,
 {
-    let text = String::deserialize(d)?;
+    decode(&String::deserialize(d)?)
+}
+
+fn decode<T: TryFrom<Vec<u8>>, E: Error>(text: &str) -> Result<T, E> {
     let bytes = STANDARD
         .decode(text)
-        .map_err(|_| D::Error::custom("invalid base64"))?;
-    T::try_from(bytes).map_err(|_| D::Error::custom("wrong length"))
+        .map_err(|_| E::custom("invalid base64"))?;
+    T::try_from(bytes).map_err(|_| E::custom("wrong length"))
+}
+
+/// For `Option<[u8; N]>` / `Option<Vec<u8>>` fields: `None` is JSON `null`, and the
+/// field must be present (a missing field is an error, not `None`).
+pub mod option {
+    use super::*;
+
+    pub fn serialize<S: Serializer, T: AsRef<[u8]>>(
+        bytes: &Option<T>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(b) => super::serialize(b, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: TryFrom<Vec<u8>>,
+    {
+        Option::<String>::deserialize(d)?
+            .map(|text| decode(&text))
+            .transpose()
+    }
 }
 
 #[cfg(test)]
@@ -44,6 +73,38 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         assert_eq!(json, r#"{"fixed":"+/+/AA==","any":"Zm8="}"#);
         assert_eq!(serde_json::from_str::<Probe>(&json).unwrap(), p);
+    }
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct OptProbe {
+        #[serde(with = "crate::serde_b64::option")]
+        mac: Option<[u8; 4]>,
+    }
+
+    #[test]
+    fn option_round_trips_and_null_is_none() {
+        let some = OptProbe {
+            mac: Some([0xFB, 0xFF, 0xBF, 0x00]),
+        };
+        let json = serde_json::to_string(&some).unwrap();
+        assert_eq!(json, r#"{"mac":"+/+/AA=="}"#);
+        assert_eq!(serde_json::from_str::<OptProbe>(&json).unwrap(), some);
+        let none = OptProbe { mac: None };
+        let json = serde_json::to_string(&none).unwrap();
+        assert_eq!(json, r#"{"mac":null}"#);
+        assert_eq!(serde_json::from_str::<OptProbe>(&json).unwrap(), none);
+    }
+
+    #[test]
+    fn option_rejects_missing_field_and_wrong_length() {
+        for bad in [
+            "{}",
+            r#"{"mac":"AAAA"}"#,
+            r#"{"mac":"AAAAAAA="}"#,
+            r#"{"mac":"!"}"#,
+        ] {
+            assert!(serde_json::from_str::<OptProbe>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
