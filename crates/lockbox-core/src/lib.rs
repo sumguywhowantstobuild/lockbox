@@ -9,6 +9,8 @@ pub mod kdf;
 pub mod limits;
 pub mod recovery;
 pub mod secret;
+pub(crate) mod serde_b64;
+pub mod slots;
 
 pub use error::{CoreError, Result};
 
