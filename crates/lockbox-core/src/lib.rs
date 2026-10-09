@@ -1,5 +1,14 @@
 //! Lockbox core: the vault engine. All encryption and key handling live here.
 
+#![forbid(unsafe_code)]
+
+pub mod ad;
+pub mod error;
+pub mod ids;
+pub mod limits;
+
+pub use error::{CoreError, Result};
+
 /// The version of this crate, as set in `Cargo.toml`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
