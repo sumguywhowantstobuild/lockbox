@@ -44,7 +44,9 @@ the repo cleans `~/.claude/.ponytail-active` and `~/.config/ponytail/`.
 | Codex CLI | 0.162.0 | `npm install -g @openai/codex`, signed in with a ChatGPT plan (`codex login`) | A second opinion from a different AI company's model |
 
 Used only when Ariel asks for it; Claude reviewers stay the default. Run read-only, review text saved to a file:
-`codex exec -s read-only -C <repo> -o <review-file> "<review instructions>"`. The ChatGPT plan is temporary (about
+`codex exec --ignore-user-config -c 'windows.sandbox="unelevated"' -m gpt-6.1-sol -c 'model_reasoning_effort="high"'
+-s read-only -C <repo> -o <review-file> - < <prompt-file>` (`--ignore-user-config` keeps personal computer-use and
+browser tools out of the review; gpt-6.1-sol at high is the token-friendly choice, gpt-6-astra only if needed). The ChatGPT plan is temporary (about
 one month), so nothing in the build loop depends on Codex. Remove: `npm uninstall -g @openai/codex`.
 
 ### Safety guard (Claude Code hook, added 2026-10-08)
