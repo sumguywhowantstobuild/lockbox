@@ -136,8 +136,16 @@ pub fn verify_header_mac(h: &VaultHeader, vault_key: &Key32) -> bool {
 /// An `Err` after `vault.json` was replaced means the new header is already live and
 /// `vault.json.bak` is one version behind (after a password change it still holds the
 /// old password slot). The caller must rewrite `.bak`, e.g. at the next unlock.
+/// A header whose pretty-printed text exceeds [`MAX_HEADER_BYTES`] is refused with
+/// `TooLarge` before either file is touched.
 pub fn write_headers(dir: &Path, h: &VaultHeader) -> Result<()> {
     let bytes = serialize_header(h);
+    // The size of the bytes actually written: a file `parse_header` would refuse must never be saved.
+    if bytes.len() > MAX_HEADER_BYTES {
+        return Err(CoreError::TooLarge {
+            what: "vault header",
+        });
+    }
     atomic_write(&dir.join(HEADER_FILE), &bytes)?;
     atomic_write(&dir.join(HEADER_BACKUP), &bytes)
 }
@@ -342,12 +350,26 @@ mod tests {
 
     #[test]
     fn migration_marker_refused() {
+        let markers = [
+            json!({"from": 1, "to": 2}),
+            json!({"unfamiliar": [1, 2], "fields": {"a": null}}),
+            json!(false),
+            json!(0),
+            json!(""),
+            json!([]),
+        ];
+        for marker in markers {
+            let mut json = to_value(&sample());
+            json["migration"] = marker.clone();
+            assert!(
+                matches!(parse_value(&json), Err(CoreError::UnsupportedVersion)),
+                "{marker}"
+            );
+        }
+        // null means "no migration" and stays allowed.
         let mut json = to_value(&sample());
-        json["migration"] = json!({"from": 1, "to": 2});
-        assert!(matches!(
-            parse_value(&json),
-            Err(CoreError::UnsupportedVersion)
-        ));
+        json["migration"] = Value::Null;
+        assert!(parse_value(&json).is_ok());
     }
 
     #[test]
@@ -506,6 +528,34 @@ mod tests {
         h.slots[0].salt[0] ^= 1;
         h.slots.reverse();
         assert!(verify_header_mac(&h, &kat_key()));
+    }
+
+    #[test]
+    fn write_headers_refuses_oversized_and_leaves_files_alone() {
+        let dir = TempDir::new();
+        let read = |name: &str| std::fs::read(dir.path().join(name)).unwrap();
+        let mut h = sample();
+        write_headers(dir.path(), &h).unwrap();
+        let (main, bak) = (read("vault.json"), read("vault.json.bak"));
+
+        // Just over the limit once pretty-printed (the limit applies to the written bytes).
+        h.name = "x".repeat(MAX_HEADER_BYTES);
+        assert!(serialize_header(&h).len() > MAX_HEADER_BYTES);
+        assert!(matches!(
+            write_headers(dir.path(), &h),
+            Err(CoreError::TooLarge { .. })
+        ));
+        assert_eq!(read("vault.json"), main);
+        assert_eq!(read("vault.json.bak"), bak);
+        let leftovers = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 2, "no stray temp files");
+
+        // The largest header that still parses is accepted.
+        let base = serialize_header(&sample_with("")).len();
+        h.name = "x".repeat(MAX_HEADER_BYTES - base);
+        assert_eq!(serialize_header(&h).len(), MAX_HEADER_BYTES);
+        write_headers(dir.path(), &h).unwrap();
+        assert!(parse_header(&read("vault.json")).is_ok());
     }
 
     #[test]

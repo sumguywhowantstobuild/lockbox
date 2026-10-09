@@ -41,6 +41,7 @@ impl Key32 {
     }
 
     /// HKDF-SHA256 (RFC 5869) from `ikm` into a new key, written straight into the wiped buffer.
+    // shortcut: hkdf 0.13 leaves its PRK and last output block unwiped on the stack (no zeroize feature); upgrade when a release wipes them.
     pub(crate) fn hkdf_sha256(salt: Option<&[u8]>, ikm: &[u8], info: &[u8]) -> Self {
         Self::fill_with(|out| {
             Hkdf::<Sha256>::new(salt, ikm)
