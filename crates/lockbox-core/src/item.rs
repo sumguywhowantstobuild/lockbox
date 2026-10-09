@@ -33,9 +33,12 @@ const TAG_LEN: usize = 16;
 const BUCKET: usize = 512;
 const DAMAGED: CoreError = CoreError::Damaged { what: "item" };
 
-/// What an item is. Serialized with a lowercase `"kind"` tag.
+/// What an item is. Externally tagged, so a login reads straight into its wiped fields:
+/// `"note"` / `"file"` / `"collection"`, or `{"login": {"username": .., "password": .., "urls": [..]}}`.
+/// (An internally tagged enum would buffer every field, password included, in serde's
+/// unwiped private `Content` type first.)
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase", from = "KindOnDisk")]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum ItemKind {
     Login {
         username: String,
@@ -45,40 +48,6 @@ pub enum ItemKind {
     Note,
     File,
     Collection,
-}
-
-/// How `ItemKind` is read. serde ignores unknown fields on the unit variants of a tagged enum
-/// even with `deny_unknown_fields`; empty struct variants do reject them. Same JSON as `ItemKind`.
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
-enum KindOnDisk {
-    Login {
-        username: String,
-        password: Zeroizing<String>,
-        urls: Vec<String>,
-    },
-    Note {},
-    File {},
-    Collection {},
-}
-
-impl From<KindOnDisk> for ItemKind {
-    fn from(kind: KindOnDisk) -> Self {
-        match kind {
-            KindOnDisk::Login {
-                username,
-                password,
-                urls,
-            } => Self::Login {
-                username,
-                password,
-                urls,
-            },
-            KindOnDisk::Note {} => Self::Note,
-            KindOnDisk::File {} => Self::File,
-            KindOnDisk::Collection {} => Self::Collection,
-        }
-    }
 }
 
 impl ItemKind {
@@ -255,13 +224,13 @@ fn padded_plaintext(item: &Item) -> Result<Zeroizing<Vec<u8>>> {
     Ok(buf)
 }
 
-/// Strict inverse of the padding: a whole number of buckets, trailing zeros, then one `0x80`.
+/// Strict inverse of the padding: JSON, one `0x80`, then zeros to the next multiple of 512.
 fn unpad(plain: &[u8]) -> Result<&[u8]> {
-    if !plain.len().is_multiple_of(BUCKET) {
-        return Err(DAMAGED);
-    }
     match plain.iter().rposition(|&b| b != 0) {
-        Some(end) if plain[end] == 0x80 => Ok(&plain[..end]),
+        // Exactly the padding `seal_item` writes: no extra all-zero buckets.
+        Some(end) if plain[end] == 0x80 && plain.len() == (end + 1).next_multiple_of(BUCKET) => {
+            Ok(&plain[..end])
+        }
         _ => Err(DAMAGED),
     }
 }
@@ -594,6 +563,11 @@ mod tests {
             ("double marker", double_marker),
             ("empty", vec![]),
             ("only zeros", vec![0; 512]),
+            ("extra zero bucket", {
+                let mut p = pad(&json);
+                p.resize(p.len() + 512, 0);
+                p
+            }),
             ("no json", pad(b"")),
             ("trailing garbage", pad(&[json.as_slice(), b"x"].concat())),
             ("too deep", pad(&deep)),
@@ -644,15 +618,17 @@ mod tests {
     }
 
     #[test]
-    fn kind_tags_are_lowercase() {
+    fn kind_json_is_externally_tagged_and_lowercase() {
         for (item, tag) in [
-            (login(), "login"),
             (base(ItemKind::Note), "note"),
             (base(ItemKind::File), "file"),
             (base(ItemKind::Collection), "collection"),
         ] {
-            assert_eq!(json(&item)["kind"]["kind"], tag);
+            assert_eq!(json(&item)["kind"], tag);
         }
+        let login = json(&login());
+        assert_eq!(login["kind"]["login"]["username"], "ariel");
+        assert_eq!(login["kind"]["login"]["password"], "hunter2");
     }
 
     #[test]
@@ -668,20 +644,24 @@ mod tests {
         assert!(serde_json::from_value::<Item>(item).is_err());
 
         for kind in [
-            r#"{"kind":"login","username":"","password":"","urls":[],"extra":1}"#,
-            r#"{"kind":"note","extra":1}"#,
-            r#"{"kind":"file","extra":1}"#,
-            r#"{"kind":"collection","extra":1}"#,
+            r#"{"login":{"username":"","password":"","urls":[],"extra":1}}"#,
+            r#"{"login":{"username":"","password":""}}"#, // missing field
+            r#""login""#,                                 // login needs its fields
+            r#"{"note":{}}"#,
+            r#""Note""#,
+            r#""other""#,
+            r#"{"kind":"note"}"#, // the old internally tagged shape
         ] {
             assert!(serde_json::from_str::<ItemKind>(kind).is_err(), "{kind}");
         }
         for kind in [
-            r#"{"kind":"note"}"#,
-            r#"{"kind":"login","username":"","password":"","urls":[]}"#,
+            r#""note""#,
+            r#""file""#,
+            r#""collection""#,
+            r#"{"login":{"username":"","password":"","urls":[]}}"#,
         ] {
             assert!(serde_json::from_str::<ItemKind>(kind).is_ok(), "{kind}");
         }
-        assert!(serde_json::from_str::<ItemKind>(r#"{"kind":"Note"}"#).is_err());
     }
 
     #[test]
@@ -741,7 +721,7 @@ mod tests {
     fn plaintext_golden_bytes() {
         let expected_json = format!(
             concat!(
-                r#"{{"id":"{}","kind":{{"kind":"login","username":"ariel","password":"hunter2","urls":["https://example.com"]}},"#,
+                r#"{{"id":"{}","kind":{{"login":{{"username":"ariel","password":"hunter2","urls":["https://example.com"]}}}},"#,
                 r#""title":"Example","notes":"n","collection":null,"attachments":[],"revision":3,"#,
                 r#""created_at":"2026-10-09T00:00:00Z","modified_at":"2026-10-09T00:00:01Z","#,
                 r#""trashed_at":null,"purging":false,"retired_blobs":[]}}"#
