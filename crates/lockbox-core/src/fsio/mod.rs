@@ -139,6 +139,17 @@ pub fn clear_hidden(path: &Path) -> Result<()> {
     Ok(sys::clear_hidden(path)?)
 }
 
+/// Sets the hidden attribute (other attributes stay), e.g. on a staging folder.
+/// No-op where hiding is just a leading dot.
+pub fn set_hidden(path: &Path) -> Result<()> {
+    Ok(sys::set_hidden(path)?)
+}
+
+/// Flushes the folder itself to disk, so names created or renamed inside it survive a power cut.
+pub fn sync_dir(path: &Path) -> Result<()> {
+    Ok(sys::sync_dir(path)?)
+}
+
 /// Deletes `path`, clearing a read-only flag first. A missing file counts as success.
 pub fn remove_file_retry(path: &Path) -> Result<()> {
     match retry(|| {
@@ -468,6 +479,31 @@ mod tests {
         assert_eq!(path.parent().unwrap(), dir.path());
         // `create_new`: an existing file is never reused.
         assert!(sys::create_hidden(&path).is_err());
+    }
+
+    #[test]
+    fn sync_dir_works_on_a_folder_and_fails_on_a_missing_one() {
+        let dir = TempDir::new();
+        sync_dir(dir.path()).unwrap();
+        assert!(sync_dir(&dir.path().join("missing")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn set_hidden_hides_a_folder_and_keeps_other_attributes() {
+        use std::os::windows::fs::MetadataExt;
+        let dir = TempDir::new();
+        let folder = dir.path().join("staging");
+        std::fs::create_dir(&folder).unwrap();
+        set_hidden(&folder).unwrap();
+        let attrs = std::fs::metadata(&folder).unwrap().file_attributes();
+        assert_ne!(attrs & 0x2, 0, "not hidden");
+        assert_ne!(attrs & 0x10, 0, "directory bit lost");
+        clear_hidden(&folder).unwrap();
+        assert_eq!(
+            std::fs::metadata(&folder).unwrap().file_attributes() & 0x2,
+            0
+        );
     }
 
     #[cfg(windows)]

@@ -21,8 +21,9 @@ pub const CONTAINER_VERSION: u16 = 1;
 pub const MAX_HEADER_BYTES: usize = 65_536;
 
 const MAC_INFO: &[u8] = b"lockbox header mac v1";
-const HEADER_FILE: &str = "vault.json";
-const HEADER_BACKUP: &str = "vault.json.bak";
+/// File names inside a vault folder.
+pub const HEADER_FILE: &str = "vault.json";
+pub const HEADER_BACKUP: &str = "vault.json.bak";
 
 /// Marks a vault part-way through an upgrade. Version 1 never writes one and refuses
 /// to open a vault that has one.
@@ -147,6 +148,8 @@ pub fn write_headers(dir: &Path, h: &VaultHeader) -> Result<()> {
         });
     }
     atomic_write(&dir.join(HEADER_FILE), &bytes)?;
+    #[cfg(test)]
+    crate::fsio::failpoint::check("write_headers.before_backup")?;
     atomic_write(&dir.join(HEADER_BACKUP), &bytes)
 }
 

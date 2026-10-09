@@ -15,8 +15,10 @@ pub mod recovery;
 pub mod secret;
 pub(crate) mod serde_b64;
 pub mod slots;
+pub mod vault;
 
 pub use error::{CoreError, Result};
+pub use vault::{CleanupReport, CreatedVault, UnlockReport, Vault, read_vault_name};
 
 /// The version of this crate, as set in `Cargo.toml`.
 pub fn version() -> &'static str {

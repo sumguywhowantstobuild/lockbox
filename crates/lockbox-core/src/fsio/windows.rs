@@ -12,9 +12,9 @@ use std::path::Path;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_HIDDEN, GetDiskFreeSpaceExW, GetFileAttributesW, GetVolumeInformationW,
-    GetVolumePathNameW, INVALID_FILE_ATTRIBUTES, MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
+    FILE_ATTRIBUTE_HIDDEN, FILE_FLAG_BACKUP_SEMANTICS, GetDiskFreeSpaceExW, GetFileAttributesW,
+    GetVolumeInformationW, GetVolumePathNameW, INVALID_FILE_ATTRIBUTES, MOVE_FILE_FLAGS,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
 };
 
 use super::VolumeInfo;
@@ -76,23 +76,44 @@ pub fn clear_readonly(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Removes only the hidden bit from a file or folder; every other attribute stays.
-pub fn clear_hidden(path: &Path) -> io::Result<()> {
+/// Rewrites a file's or folder's attributes through `change`; skips the write if nothing changes.
+fn change_attributes(path: &Path, change: impl FnOnce(u32) -> u32) -> io::Result<()> {
     let wide = to_wide(path.as_os_str())?;
     // SAFETY: `wide` is a live NUL-terminated UTF-16 path; the call only reads it.
     let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
     if attrs == INVALID_FILE_ATTRIBUTES {
         return Err(io::Error::last_os_error());
     }
-    if attrs & FILE_ATTRIBUTE_HIDDEN == 0 {
+    let new = change(attrs);
+    if new == attrs {
         return Ok(());
     }
     // SAFETY: same `wide` path as above; the attribute value is passed by value.
-    let ok = unsafe { SetFileAttributesW(wide.as_ptr(), attrs & !FILE_ATTRIBUTE_HIDDEN) };
+    let ok = unsafe { SetFileAttributesW(wide.as_ptr(), new) };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Removes only the hidden bit from a file or folder; every other attribute stays.
+pub fn clear_hidden(path: &Path) -> io::Result<()> {
+    change_attributes(path, |attrs| attrs & !FILE_ATTRIBUTE_HIDDEN)
+}
+
+/// Adds only the hidden bit to a file or folder; every other attribute stays.
+pub fn set_hidden(path: &Path) -> io::Result<()> {
+    change_attributes(path, |attrs| attrs | FILE_ATTRIBUTE_HIDDEN)
+}
+
+/// Flushes a folder to disk. Opening a folder needs `FILE_FLAG_BACKUP_SEMANTICS`, and the
+/// flush needs a handle opened for writing; std supplies both safely.
+pub fn sync_dir(path: &Path) -> io::Result<()> {
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .sync_all()
 }
 
 /// Creates a new file with the hidden attribute set from the start; fails if it exists.

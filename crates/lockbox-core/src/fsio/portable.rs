@@ -7,8 +7,8 @@ use std::path::Path;
 
 use super::{VolumeInfo, parent_dir};
 
-/// Makes a rename durable: flush the folder that holds the new name.
-fn sync_dir(dir: &Path) -> io::Result<()> {
+/// Flushes a folder to disk; also what makes a rename durable.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
@@ -28,6 +28,11 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Hiding is just a leading dot here, so there is nothing to clear.
 pub fn clear_hidden(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Hiding is just a leading dot here, so there is nothing to set.
+pub fn set_hidden(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
