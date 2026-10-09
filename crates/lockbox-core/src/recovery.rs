@@ -25,7 +25,11 @@ impl fmt::Debug for RecoverySecret {
 
 /// The first 4 bits of SHA-256 of the secret, in the low half of the returned byte.
 fn checksum(secret: &[u8; 32]) -> u8 {
-    Sha256::digest(secret)[0] >> 4
+    let mut hash = Zeroizing::new([0u8; 32]);
+    Sha256::new()
+        .chain_update(secret)
+        .finalize_into((&mut *hash).into());
+    hash[0] >> 4
 }
 
 /// The 5 bits of `bits` (big-endian, 33 bytes) for symbol number `i`.
@@ -243,5 +247,64 @@ mod tests {
             a.as_bytes(),
             derive_recovery_key(&secret, &[1; 16]).as_bytes()
         );
+    }
+
+    #[test]
+    fn display_known_answers() {
+        // Expected strings computed independently with a Python script (see task-6-report.md).
+        let zeros = RecoverySecret(Zeroizing::new([0; 32]));
+        assert_eq!(
+            &**zeros.to_display(),
+            "0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0006"
+        );
+        let counting = RecoverySecret(Zeroizing::new(std::array::from_fn(|i| i as u8)));
+        let shown = "000G-40R4-0M30-E209-185G-R38E-1W81-24GK-2GAH-C5RR-34D1-P70X-3RFP";
+        assert_eq!(&**counting.to_display(), shown);
+        assert_eq!(*RecoverySecret::parse(shown).unwrap().0, *counting.0);
+    }
+
+    #[test]
+    fn derived_key_known_answer() {
+        // RFC 5869 HKDF-SHA256, independently computed with Python hmac/hashlib.
+        let secret = RecoverySecret(Zeroizing::new(std::array::from_fn(|i| i as u8)));
+        let salt: [u8; 16] = std::array::from_fn(|i| 100 + i as u8);
+        let key = derive_recovery_key(&secret, &salt);
+        let hex: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "a51e62b8529288c24770254cb810ad39c53c7d79096392b3945f2ab26bd66cbe"
+        );
+    }
+
+    #[test]
+    fn look_alike_and_stray_characters_rejected() {
+        let compact: String = zeros_and_ones().to_display().replace('-', "");
+        let rest = &compact[1..];
+        let cases = [
+            format!("\u{41E}{rest}"),  // Cyrillic capital O
+            format!("\u{FF10}{rest}"), // full-width digit zero
+            format!("\u{FF21}{rest}"), // full-width A
+            format!("\t{compact}"),    // tab
+            format!("{compact}\n"),    // trailing newline: the UI must trim it
+        ];
+        for text in cases {
+            assert!(
+                matches!(
+                    RecoverySecret::parse(&text),
+                    Err(CoreError::InvalidInput { .. })
+                ),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_checksum_nibble_is_a_typo() {
+        // The zero secret ends in 6 (checksum 0110); 7 differs only in the checksum bits.
+        let text = "0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0000-0007";
+        assert!(matches!(
+            RecoverySecret::parse(text),
+            Err(CoreError::RecoveryKeyTypo)
+        ));
     }
 }
