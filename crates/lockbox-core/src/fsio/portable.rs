@@ -13,14 +13,22 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 }
 
 pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    // If the folder sync fails after the rename, the new content is already in place even though an error is returned.
     fs::rename(from, to)?;
     sync_dir(parent_dir(to))
 }
 
 /// The caller has already checked that `to` does not exist.
+// shortcut: check-then-rename has a race, and Linux rename(2) silently replaces an existing
+// EMPTY folder. Upgrade to renameat2(RENAME_NOREPLACE) when the Android/Linux build matters.
 pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)?;
     sync_dir(parent_dir(to))
+}
+
+/// Hiding is just a leading dot here, so there is nothing to clear.
+pub fn clear_hidden(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// Deleting a file needs write access to its folder, not to the file.

@@ -12,8 +12,9 @@ use std::path::Path;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_HIDDEN, GetDiskFreeSpaceExW, GetVolumeInformationW, GetVolumePathNameW,
-    MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_ATTRIBUTE_HIDDEN, GetDiskFreeSpaceExW, GetFileAttributesW, GetVolumeInformationW,
+    GetVolumePathNameW, INVALID_FILE_ATTRIBUTES, MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
 };
 
 use super::VolumeInfo;
@@ -51,7 +52,9 @@ fn move_file(from: &Path, to: &Path, flags: MOVE_FILE_FLAGS) -> io::Result<()> {
     Ok(())
 }
 
-/// Replaces `to` with `from`; returns once the move is on disk.
+/// Replaces `to` with `from`. `MOVEFILE_WRITE_THROUGH` is passed as planned (Microsoft
+/// documents it as waiting for a copy-then-delete move to finish); the content itself
+/// is made durable by the caller's `sync_all` on the source before this move.
 pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     move_file(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
 }
@@ -69,6 +72,25 @@ pub fn clear_readonly(path: &Path) -> io::Result<()> {
     if perms.readonly() {
         perms.set_readonly(false);
         std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+/// Removes only the hidden bit from a file or folder; every other attribute stays.
+pub fn clear_hidden(path: &Path) -> io::Result<()> {
+    let wide = to_wide(path.as_os_str())?;
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 path; the call only reads it.
+    let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        return Err(io::Error::last_os_error());
+    }
+    if attrs & FILE_ATTRIBUTE_HIDDEN == 0 {
+        return Ok(());
+    }
+    // SAFETY: same `wide` path as above; the attribute value is passed by value.
+    let ok = unsafe { SetFileAttributesW(wide.as_ptr(), attrs & !FILE_ATTRIBUTE_HIDDEN) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -98,6 +120,7 @@ pub fn volume_info(dir: &Path) -> io::Result<VolumeInfo> {
     // SAFETY: `root` was NUL-terminated by `GetVolumePathNameW` on success. `free` is a
     // valid `u64` the call writes to; the two other outputs are documented as optional (null).
     let ok = unsafe { GetDiskFreeSpaceExW(root.as_ptr(), &mut free, null_mut(), null_mut()) };
+    // A failed query means "unknown", and unknown never blocks (see `check_space`).
     let free_bytes = (ok != 0).then_some(free);
 
     let mut fs_name = [0u16; FS_NAME_UNITS];
@@ -129,4 +152,35 @@ pub fn volume_info(dir: &Path) -> io::Result<VolumeInfo> {
         free_bytes,
         max_file_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fsio::testutil::TempDir;
+    use std::os::windows::fs::MetadataExt;
+
+    #[test]
+    fn clear_hidden_works_on_a_hidden_folder() {
+        let dir = TempDir::new();
+        let folder = dir.path().join("staging");
+        std::fs::create_dir(&folder).unwrap();
+        let wide = to_wide(folder.as_os_str()).unwrap();
+        // SAFETY: test only; `wide` is a live NUL-terminated path.
+        let ok = unsafe {
+            SetFileAttributesW(
+                wide.as_ptr(),
+                FILE_ATTRIBUTE_HIDDEN | 0x10, /* directory */
+            )
+        };
+        assert_ne!(ok, 0);
+        assert_ne!(
+            std::fs::metadata(&folder).unwrap().file_attributes() & FILE_ATTRIBUTE_HIDDEN,
+            0
+        );
+        clear_hidden(&folder).unwrap();
+        let attrs = std::fs::metadata(&folder).unwrap().file_attributes();
+        assert_eq!(attrs & FILE_ATTRIBUTE_HIDDEN, 0);
+        assert_ne!(attrs & 0x10, 0, "directory bit lost");
+    }
 }

@@ -120,12 +120,23 @@ pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
         return Err(exists());
     }
     retry(|| sys::rename_no_replace(from, to)).map_err(|e| {
-        if e.kind() == io::ErrorKind::AlreadyExists {
+        // AlreadyExists on Windows; Linux reports a non-empty target as DirectoryNotEmpty.
+        if matches!(
+            e.kind(),
+            io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+        ) {
             exists()
         } else {
             e.into()
         }
     })
+}
+
+/// Clears the hidden attribute (other attributes stay). Windows keeps a file's
+/// attributes when it is moved over another, so a hidden temp would make the saved
+/// file hidden; call this before the move. No-op where hiding is just a leading dot.
+pub fn clear_hidden(path: &Path) -> Result<()> {
+    Ok(sys::clear_hidden(path)?)
 }
 
 /// Deletes `path`, clearing a read-only flag first. A missing file counts as success.
@@ -159,6 +170,7 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<()> {
     let result = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
+        clear_hidden(&tmp)?;
         drop(file); // Windows cannot replace a file that is still open without delete sharing.
         #[cfg(test)]
         failpoint::check("atomic_write.before_replace")?;
@@ -287,6 +299,7 @@ mod tests {
         std::fs::write(&target, b"old").unwrap();
         std::fs::write(&from, b"new").unwrap();
         let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let (probed_tx, probed_rx) = std::sync::mpsc::channel::<()>();
         let holder_path = target.clone();
         let holder = std::thread::spawn(move || {
             // Share read + write but not delete, so replacing the file fails.
@@ -296,11 +309,14 @@ mod tests {
                 .open(holder_path)
                 .unwrap();
             opened_tx.send(()).unwrap();
+            // Start the hold only once the main thread has seen the refusal.
+            probed_rx.recv().unwrap();
             std::thread::sleep(Duration::from_millis(100));
         });
         opened_rx.recv().unwrap();
         // A single attempt really is refused while the file is held ...
         assert!(sys::replace_file(&from, &target).is_err());
+        probed_tx.send(()).unwrap();
         // ... and the retrying version gets through once it is released.
         replace_file(&from, &target).unwrap();
         holder.join().unwrap();
@@ -450,6 +466,38 @@ mod tests {
         assert!(name.starts_with('.') && name.ends_with(".tmp"));
         assert_eq!(name.len(), 1 + 16 + 4);
         assert_eq!(path.parent().unwrap(), dir.path());
+        // `create_new`: an existing file is never reused.
+        assert!(sys::create_hidden(&path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_result_is_not_hidden() {
+        use std::os::windows::fs::MetadataExt;
+        let hidden = |p: &Path| std::fs::metadata(p).unwrap().file_attributes() & 0x2 != 0;
+        let dir = TempDir::new();
+        let target = dir.path().join("vault.json");
+        atomic_write(&target, b"new target").unwrap();
+        assert!(!hidden(&target), "new target is hidden");
+        atomic_write(&target, b"replaced").unwrap();
+        assert!(!hidden(&target), "replaced target is hidden");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn clear_hidden_keeps_other_attributes() {
+        use std::os::windows::fs::MetadataExt;
+        let dir = TempDir::new();
+        let (f, path) = create_hidden_temp(dir.path(), ".tmp").unwrap();
+        drop(f);
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+        clear_hidden(&path).unwrap();
+        let attrs = std::fs::metadata(&path).unwrap().file_attributes();
+        assert_eq!(attrs & 0x2, 0, "still hidden");
+        assert_ne!(attrs & 0x1, 0, "read-only bit lost");
+        remove_file_retry(&path).unwrap();
     }
 
     #[cfg(windows)]

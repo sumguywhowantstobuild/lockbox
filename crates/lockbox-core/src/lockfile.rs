@@ -17,12 +17,13 @@ impl VaultLock {
     /// Opens (creating if needed) `.lock` in `vault_dir` and locks it.
     /// `VaultInUse` if another handle holds it.
     pub fn acquire(vault_dir: &Path) -> Result<VaultLock> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(vault_dir.join(".lock"))?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        // No FILE_SHARE_DELETE (read + write only): a held `.lock` cannot be deleted, so
+        // nobody can slip in a fresh one and open the same vault at the same time.
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1 | 2);
+        let file = options.open(vault_dir.join(".lock"))?;
         match file.try_lock() {
             Ok(()) => Ok(VaultLock { _file: file }),
             Err(TryLockError::WouldBlock) => Err(CoreError::VaultInUse),
@@ -44,6 +45,16 @@ mod tests {
             VaultLock::acquire(dir.path()),
             Err(CoreError::VaultInUse)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn held_lock_file_cannot_be_deleted() {
+        let dir = TempDir::new();
+        let lock = VaultLock::acquire(dir.path()).unwrap();
+        assert!(std::fs::remove_file(dir.path().join(".lock")).is_err());
+        drop(lock);
+        std::fs::remove_file(dir.path().join(".lock")).unwrap();
     }
 
     #[test]
