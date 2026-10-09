@@ -4,10 +4,12 @@
 #![deny(unsafe_code)]
 
 pub mod ad;
+pub(crate) mod aead;
 pub mod error;
 pub mod fsio;
 pub mod header;
 pub mod ids;
+pub mod item;
 pub mod kdf;
 pub mod limits;
 pub mod lockfile;

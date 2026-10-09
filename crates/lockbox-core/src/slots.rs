@@ -3,12 +3,11 @@
 //! encryption as associated data, so editing any of it makes unwrapping fail.
 
 use crate::ad::{encode_ad, v16};
+use crate::aead;
 use crate::error::{CoreError, Result};
 use crate::ids::VaultId;
 use crate::kdf::Argon2Params;
 use crate::secret::{Key32, random_bytes};
-use chacha20poly1305::XChaCha20Poly1305;
-use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -84,10 +83,7 @@ fn seal(
     // Room for the 16-byte tag, so the buffer never reallocates (and never leaves a stray copy).
     let mut buf = Zeroizing::new(Vec::with_capacity(plaintext.len() + 16));
     buf.extend_from_slice(plaintext);
-    XChaCha20Poly1305::new(slot_key.as_bytes().into())
-        .encrypt_in_place(&nonce.into(), &ad, &mut *buf)
-        // Only fails for inputs beyond the cipher's length limits; ours are tiny.
-        .expect("encrypting a key-sized plaintext cannot fail");
+    aead::encrypt_in_place(slot_key, &nonce, &ad, &mut buf);
     KeySlot {
         slot_type,
         slot_version: SLOT_VERSION,
@@ -132,8 +128,7 @@ pub fn unwrap_slot(slot: &KeySlot, vault_id: &VaultId, slot_key: &Key32) -> Resu
         slot.kdf.as_ref(),
     );
     let mut buf = Zeroizing::new(slot.ciphertext.clone());
-    XChaCha20Poly1305::new(slot_key.as_bytes().into())
-        .decrypt_in_place(&slot.nonce.into(), &ad, &mut *buf)
+    aead::decrypt_in_place(slot_key, &slot.nonce, &ad, &mut buf)
         .map_err(|_| CoreError::WrongPassword)?;
     Key32::fill_with(|key| {
         if buf.len() != key.len() {
@@ -147,7 +142,8 @@ pub fn unwrap_slot(slot: &KeySlot, vault_id: &VaultId, slot_key: &Key32) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chacha20poly1305::aead::{Aead, Payload};
+    use chacha20poly1305::XChaCha20Poly1305;
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 
     fn hex(s: &str) -> Vec<u8> {
         let digits: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
