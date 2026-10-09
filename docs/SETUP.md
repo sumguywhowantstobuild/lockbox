@@ -38,6 +38,15 @@ Declined: its status-bar setup. Decide after Plan 1 Group B: keep, go global, or
 Remove: delete its two entries from `.claude/settings.local.json`, then `node scripts/uninstall.js` from a clone of
 the repo cleans `~/.claude/.ponytail-active` and `~/.config/ponytail/`.
 
+### Optional: Codex CLI as an outside reviewer (from 2026-10-09)
+| Tool | Version | How | Why |
+|---|---|---|---|
+| Codex CLI | 0.162.0 | `npm install -g @openai/codex`, signed in with a ChatGPT plan (`codex login`) | A second opinion from a different AI company's model |
+
+Used only when Ariel asks for it; Claude reviewers stay the default. Run read-only, review text saved to a file:
+`codex exec -s read-only -C <repo> -o <review-file> "<review instructions>"`. The ChatGPT plan is temporary (about
+one month), so nothing in the build loop depends on Codex. Remove: `npm uninstall -g @openai/codex`.
+
 ### Safety guard (Claude Code hook, added 2026-10-08)
 `.claude/settings.json` runs `.claude/hooks/safety-guard.mjs` before every shell command and file edit Claude makes.
 Rules can't be forgotten the way instructions can. Three outcomes:
