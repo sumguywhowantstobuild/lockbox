@@ -72,6 +72,15 @@ opened before the install need restarting to see `cargo`.
   `rustup toolchain install` (newer rustup no longer installs one on `rustup show`), and both GitHub Actions are pinned
   to commit SHAs so a moved tag can't change what runs.
 
+### GitHub repo (Plan 1, Task 1 Step 11)
+- Private repo created with `gh repo create lockbox --private --source . --remote origin` (account
+  `sumguywhowantstobuild`). Ariel pushes `main`; feature branches are pushed for CI.
+- Commits use GitHub's noreply address so the personal email stays private once the repo is public:
+  `git config user.email 331128970+sumguywhowantstobuild@users.noreply.github.com` (this repo only). Earlier commits
+  were rewritten to it with `git filter-branch --env-filter` before the first push (Ariel ran it; the safety guard
+  blocks history rewrites for Claude).
+- First CI run on `plan-1-core` passed (format, lint, test).
+
 ## Troubleshooting log
 
 **semgrep: `executing pysemgrep failed ... No such file or directory`**
