@@ -10,7 +10,9 @@ publish = false
 [dependencies]
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "parallel", "zeroize"] }
 getrandom = "0.4"
+hkdf = "0.13"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
 thiserror = "2"
 unicode-normalization = "0.1"
 zeroize = "1.9"

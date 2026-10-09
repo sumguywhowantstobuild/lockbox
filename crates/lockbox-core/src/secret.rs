@@ -4,7 +4,7 @@ use std::fmt;
 use zeroize::Zeroizing;
 
 /// The one place the crate asks the OS for randomness.
-fn fill_random(buf: &mut [u8]) {
+pub(crate) fn fill_random(buf: &mut [u8]) {
     // No safe way to continue without OS randomness, so fail loudly.
     getrandom::fill(buf).expect("OS random source failed");
 }
