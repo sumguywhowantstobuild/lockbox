@@ -34,17 +34,21 @@ pub(crate) fn folder_name(name: &str, id: &VaultId) -> String {
     format!("{}{suffix}", if base.is_empty() { "Vault" } else { base })
 }
 
+/// Seconds since the Unix epoch.
+pub(super) fn now_secs() -> u64 {
+    // A clock set before 1970 is not worth failing a vault change over.
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// Now as `YYYY-MM-DDTHH:MM:SSZ` (RFC 3339, UTC).
 pub(super) fn created_at_now() -> String {
-    // A clock set before 1970 is not worth failing a vault creation over.
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    rfc3339_utc(secs)
+    rfc3339_utc(now_secs())
 }
 
 /// Seconds since the Unix epoch as `YYYY-MM-DDTHH:MM:SSZ`.
-fn rfc3339_utc(secs: u64) -> String {
+pub(super) fn rfc3339_utc(secs: u64) -> String {
     let (year, month, day) = civil_from_days((secs / 86_400) as i64);
     let rest = secs % 86_400;
     format!(

@@ -5,7 +5,7 @@
 //! `sys` surface and this module adds the shared retry and error handling on top.
 
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -159,6 +159,18 @@ pub fn remove_file_retry(path: &Path) -> Result<()> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
+}
+
+/// Reads `path`, retrying like the other operations while another program holds it. Reads
+/// at most `max + 1` bytes, so a file over `max` is noticed without loading all of it.
+pub(crate) fn read_retry(path: &Path, max: usize) -> Result<Vec<u8>> {
+    Ok(retry(|| {
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(max as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })?)
 }
 
 /// Creates a new, empty, hidden file `.<16 random hex chars><suffix>` in `dir`.

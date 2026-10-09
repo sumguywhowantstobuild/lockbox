@@ -1,6 +1,6 @@
 //! Opening a vault (spec 6.3): `vault.json` first, `.bak` as the fallback, then a careful repair.
 
-use super::{CleanupReport, UnlockReport, Vault};
+use super::{CleanupReport, UnlockReport, Vault, items};
 use crate::fsio::atomic_write;
 use crate::header::{
     HEADER_BACKUP, HEADER_FILE, MAX_HEADER_BYTES, VaultHeader, parse_header, verify_header_mac,
@@ -171,6 +171,8 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
         (Err(_), _) => return Err(main.err().unwrap_or(CoreError::NotFound)),
     };
 
+    // Before any repair write: an items folder that cannot be listed fails the unlock cleanly.
+    let (items, damaged) = items::load_all(dir, &used.header.vault_id, &key)?;
     let mac_ok = verify_header_mac(&used.header, &key);
     let (other, other_file) = if used_backup {
         (&main, HEADER_FILE)
@@ -191,6 +193,8 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
         dir: dir.to_path_buf(),
         header: used.header.clone(),
         vault_key: Arc::new(key),
+        items,
+        damaged,
         _lock: lock,
     };
     Ok((vault, report))

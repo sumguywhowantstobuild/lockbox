@@ -1,6 +1,7 @@
 //! The vault's life cycle (spec 5.3, 6.3): create, unlock, change password, regenerate
 //! the recovery key. Items and files are added on top of [`Vault`] by later modules.
 
+mod items;
 mod naming;
 mod unlock;
 
@@ -9,7 +10,8 @@ use crate::header::{
     CONTAINER_VERSION, HEADER_FILE, VaultHeader, header_mac, write_headers,
     write_headers_backup_first,
 };
-use crate::ids::VaultId;
+use crate::ids::{ItemId, VaultId};
+use crate::item::Item;
 use crate::kdf::{Argon2Params, check_new_password, derive_password_key};
 use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
@@ -17,6 +19,7 @@ use crate::secret::{Key32, random_bytes};
 use crate::slots::{KeySlot, SlotType, wrap_slot};
 use crate::{CoreError, Result};
 use naming::{created_at_now, validate_name};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -61,6 +64,10 @@ pub struct Vault {
     dir: PathBuf,
     header: VaultHeader,
     vault_key: Arc<Key32>,
+    /// Every item that opened at unlock, trashed ones included.
+    items: BTreeMap<ItemId, Item>,
+    /// Item files that did not open; never deleted or overwritten.
+    damaged: Vec<ItemId>,
     _lock: VaultLock,
 }
 
@@ -140,6 +147,8 @@ impl Vault {
             dir,
             header,
             vault_key: Arc::new(vault_key),
+            items: BTreeMap::new(),
+            damaged: Vec::new(),
         };
         Ok(CreatedVault { vault, recovery })
     }
