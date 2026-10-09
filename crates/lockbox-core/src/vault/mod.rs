@@ -42,6 +42,9 @@ pub struct UnlockReport {
     pub used_backup_header: bool,
     /// The header was changed outside Lockbox; see [`Vault::accept_header`].
     pub header_mac_mismatch: bool,
+    /// The other header copy needed repair but writing it failed (disk full, read-only
+    /// media). The vault is open anyway; the next unlock retries the repair.
+    pub header_repair_failed: bool,
     pub cleanup: CleanupReport,
 }
 
@@ -548,5 +551,31 @@ mod tests {
         assert!(!report.used_backup_header);
         drop(vault);
         assert_eq!(read_pair(&dir), (main.clone(), main));
+    }
+
+    /// A repair that cannot be written must not lock the user out of a healthy vault.
+    #[test]
+    fn failed_repair_write_does_not_block_unlock() {
+        let parent = TempDir::new();
+        let dir = Vault::create(parent.path(), "Family", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        fs::write(dir.join(HEADER_BACKUP), b"{\"truncated").unwrap();
+        let before = read_pair(&dir);
+
+        failpoint::arm("unlock.repair_write");
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        failpoint::disarm_all();
+        drop(vault);
+        assert!(report.header_repair_failed && !report.used_backup_header);
+        assert_eq!(read_pair(&dir), before);
+
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        drop(vault);
+        assert!(!report.header_repair_failed);
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, bak);
     }
 }

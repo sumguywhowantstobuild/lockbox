@@ -122,6 +122,12 @@ fn may_overwrite(other: &Result<HeaderFile>, used: &HeaderFile, unused: SlotType
     }
 }
 
+fn repair(file: &Path, bytes: &[u8]) -> Result<()> {
+    #[cfg(test)]
+    crate::fsio::failpoint::check("unlock.repair_write")?;
+    atomic_write(file, bytes)
+}
+
 /// Opens the vault in `dir`. A folder with no header at all is `NotFound`, checked
 /// before anything is created in it. The lock comes next, so nothing is read from a
 /// vault another process has open.
@@ -130,8 +136,9 @@ fn may_overwrite(other: &Result<HeaderFile>, used: &HeaderFile, unused: SlotType
 /// tried, but a parseable `vault.json` only falls back to a `.bak` of the same vault.
 /// Repair: the other copy is rewritten only when the header that unlocked passes its MAC
 /// and the rewrite can lose nothing unverified (see [`may_overwrite`]). Otherwise both
-/// files are left as they are; a MAC mismatch is only reported, and `accept_header`
-/// writes after the user agrees.
+/// files are left as they are. A repair that fails to write is reported in
+/// `header_repair_failed` and does not fail the unlock. A MAC mismatch is only reported,
+/// and `accept_header` writes after the user agrees.
 pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockReport)> {
     if !dir.join(HEADER_FILE).try_exists()? && !dir.join(HEADER_BACKUP).try_exists()? {
         return Err(CoreError::NotFound);
@@ -170,12 +177,14 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
     } else {
         (&backup, HEADER_BACKUP)
     };
-    if mac_ok && may_overwrite(other, used, credential.unused_slot()) {
-        atomic_write(&dir.join(other_file), &used.bytes)?;
-    }
+    // A failed repair is reported, not fatal: the next unlock tries again.
+    let header_repair_failed = mac_ok
+        && may_overwrite(other, used, credential.unused_slot())
+        && repair(&dir.join(other_file), &used.bytes).is_err();
     let report = UnlockReport {
         used_backup_header: used_backup,
         header_mac_mismatch: !mac_ok,
+        header_repair_failed,
         cleanup: CleanupReport::default(),
     };
     let vault = Vault {
