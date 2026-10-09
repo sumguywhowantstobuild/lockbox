@@ -62,6 +62,8 @@ jobs:
           Get-Verified 'https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_windows_amd64.exe' 'e0ed7644118b717b028c249ee9d3515024e55e8510747ca08906eb96765354d6' (Join-Path $bin 'osv-scanner.exe')
           "LOCKBOX_GITLEAKS=$bin\gitleaks.exe" >> $env:GITHUB_ENV
           "LOCKBOX_OSV=$bin\osv-scanner.exe" >> $env:GITHUB_ENV
+      - name: Scanner tests
+        run: node --test "scripts/*.test.mjs"
       - name: Scan
         env:
           LOCKBOX_SEMGREP: semgrep

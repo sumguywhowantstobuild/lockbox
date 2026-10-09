@@ -84,20 +84,24 @@ opened before the install need restarting to see `cargo`.
 
 ### Security scan (Plan 1, Task 2)
 - Run `node scripts/scan.mjs` (add `--json` for machine-readable output). It runs three tools over the whole repo and
-  writes their raw reports to `.scan/` (git-ignored): gitleaks (passwords/keys in git history), semgrep (risky code
-  patterns) and osv-scanner (dependencies with known vulnerabilities, from `Cargo.lock`, plus `package-lock.json` once
+  writes their raw reports to `.scan/` (git-ignored): gitleaks (passwords/keys, run twice: over committed history, and
+  over staged, unstaged and brand-new files, so it works before you commit), semgrep (risky code patterns) and osv-scanner (dependencies with known vulnerabilities, from `Cargo.lock`, plus `package-lock.json` once
   it exists).
 - Result: exit `0` CLEAN, `1` FINDINGS (fix them), `2` INCOMPLETE (a tool is missing or failed, so it never says
   "clean" by accident). What counts as a finding: any gitleaks hit; semgrep `ERROR` or `WARNING`; osv score 4.0 or
   higher, or no score at all. Lower scores and semgrep `INFO` are listed but don't fail.
-- gitleaks checks committed history only: a secret in a file you haven't committed yet isn't seen until you commit it.
+- The "uncommitted" gitleaks pass stages everything into a throwaway copy of git's index (`.scan/index`), so your real
+  staging area is never touched. Files git ignores (`.env`, `target/`) are not scanned.
+- A fake secret on purpose (e.g. in a test) is excused by a `gitleaks:allow` comment on that line. A secret already in
+  history can't be rewritten once pushed, so it goes in `.gitleaksignore` by its fingerprint (`commit:file:rule:line`,
+  printed in gitleaks' JSON report). Never loosen a gitleaks rule globally.
 - Tools are found by name on PATH, except semgrep (see the troubleshooting entry below). To use another copy, set
   `LOCKBOX_GITLEAKS`, `LOCKBOX_SEMGREP` or `LOCKBOX_OSV` to its path. The tests use this to swap in fake tools.
 - Tests: `node --test "scripts/*.test.mjs"`.
 - A semgrep hit we accept on purpose is silenced on that line with `// nosemgrep: <rule id> -- <reason>`.
 - CI job "Security scan" (Windows) installs pinned versions: gitleaks 8.30.1 and osv-scanner 2.6.0 downloaded from their
   GitHub releases and checked against SHA-256 values copied from the releases (the job fails on a mismatch), and
-  `pip install semgrep==1.179.0`. Bumping a version means getting the new SHA-256 from the release page.
+  `pip install semgrep==1.179.0`, then runs the scanner's own tests before the scan. Bumping a version means getting the new SHA-256 from the release page.
 
 ## Troubleshooting log
 

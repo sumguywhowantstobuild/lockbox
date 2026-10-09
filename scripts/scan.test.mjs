@@ -12,6 +12,7 @@ const clean = {
   LOCKBOX_SEMGREP: shim("semgrep"),
   LOCKBOX_OSV: shim("osv"),
   FAKE_GITLEAKS_REPORT: "[]",
+  FAKE_GITLEAKS_STAGED_REPORT: "[]",
   FAKE_SEMGREP_REPORT: '{"results":[]}',
   FAKE_OSV_REPORT: '{"results":[]}',
 };
@@ -50,7 +51,7 @@ test("all tools clean -> exit 0 and CLEAN", () => {
 });
 
 test("gitleaks finding -> exit 1, shown without the secret value", () => {
-  const leak = [{ RuleID: "generic-api-key", File: "src/a.rs", StartLine: 3, Secret: "hunter2-visible" }];
+  const leak = [{ RuleID: "generic-api-key", File: "src/a.rs", StartLine: 3, Secret: "hunter2-visible" }]; // gitleaks:allow (fake value)
   const { code, out } = run({ FAKE_GITLEAKS_EXIT: "1", FAKE_GITLEAKS_REPORT: JSON.stringify(leak) });
   assert.equal(code, 1);
   assert.match(out, /generic-api-key/);
@@ -59,9 +60,22 @@ test("gitleaks finding -> exit 1, shown without the secret value", () => {
 });
 
 test("semgrep missing -> exit 2 and INCOMPLETE", () => {
-  const { code, out } = run({ LOCKBOX_SEMGREP: "C:\no\such\dir\semgrep.exe" });
+  const { code, out } = run({ LOCKBOX_SEMGREP: "no-such-semgrep-binary" });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: semgrep not found/);
+});
+
+test("gitleaks finding in uncommitted changes -> exit 1, labelled as uncommitted", () => {
+  const leak = [{ RuleID: "generic-api-key", File: "src/new.rs", StartLine: 9 }];
+  const { code, out } = run({ FAKE_GITLEAKS_STAGED_EXIT: "1", FAKE_GITLEAKS_STAGED_REPORT: JSON.stringify(leak) });
+  assert.equal(code, 1);
+  assert.match(out, /\[gitleaks-uncommitted\] generic-api-key at src\/new\.rs:9/);
+});
+
+test("gitleaks exit 1 with no findings (its fatal-error code) -> exit 2, never clean", () => {
+  const { code, out } = run({ FAKE_GITLEAKS_EXIT: "1" });
+  assert.equal(code, 2);
+  assert.match(out, /INCOMPLETE: gitleaks exited with 1 but reported no findings/);
 });
 
 test("osv-scanner exit 128 (no packages) counts as clean", () => {
