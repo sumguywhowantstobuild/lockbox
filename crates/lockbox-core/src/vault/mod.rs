@@ -5,7 +5,10 @@ mod naming;
 mod unlock;
 
 use crate::fsio;
-use crate::header::{CONTAINER_VERSION, VaultHeader, header_mac, write_headers};
+use crate::header::{
+    CONTAINER_VERSION, HEADER_FILE, VaultHeader, header_mac, write_headers,
+    write_headers_backup_first,
+};
 use crate::ids::VaultId;
 use crate::kdf::{Argon2Params, check_new_password, derive_password_key};
 use crate::lockfile::VaultLock;
@@ -128,6 +131,7 @@ impl Vault {
             let _ = fsio::set_hidden(&staging); // best effort: only keeps the leftover out of sight
             return Err(e);
         }
+        // shortcut: if another instance opens the brand-new folder in this instant, create returns Err after publishing; the password still unlocks and recovery can be regenerated — revisit if create gets a UI retry.
         let vault = Vault {
             _lock: VaultLock::acquire(&dir)?,
             dir,
@@ -174,14 +178,17 @@ impl Vault {
             &key,
             &self.vault_key,
         );
-        self.replace_slot(slot)
+        self.replace_slot(slot, write_headers)
     }
 
     /// Replaces the recovery secret; the old one stops working. Returns the new one, to
     /// be shown to the user once.
     ///
-    /// An `Err` may leave `vault.json.bak` one version behind: the old recovery secret
-    /// may then still open the vault, from `.bak`, until the next successful unlock repairs it.
+    /// `vault.json.bak` is written first, so `vault.json` never holds a secret that was
+    /// not delivered. An `Err` therefore leaves the old secret working, but after a
+    /// failure on `vault.json`, `.bak` may hold an undelivered recovery slot until the next
+    /// recovery unlock or header write. If `vault.json` is lost before then, the vault
+    /// opens with the password only, and recovery must be regenerated.
     pub fn regenerate_recovery(&mut self) -> Result<RecoverySecret> {
         let secret = RecoverySecret::generate();
         let salt = random_bytes::<16>();
@@ -193,14 +200,17 @@ impl Vault {
             &derive_recovery_key(&secret, &salt),
             &self.vault_key,
         );
-        self.replace_slot(slot)?;
+        self.replace_slot(slot, write_headers_backup_first)?;
         Ok(secret)
     }
 
-    /// Writes the header with `slot` in place of the slot of the same type. The in-memory
-    /// header changes only once `vault.json` is written, and leftover `*.tmp` files (which
-    /// may hold the old slot) are removed afterwards.
-    fn replace_slot(&mut self, slot: KeySlot) -> Result<()> {
+    /// Writes the header with `slot` in place of the slot of the same type, using `write`
+    /// to pick the file order, then removes leftover `*.tmp` files (which may hold the old slot).
+    fn replace_slot(
+        &mut self,
+        slot: KeySlot,
+        write: fn(&Path, &VaultHeader) -> Result<()>,
+    ) -> Result<()> {
         let mut header = self.header.clone();
         let target = header
             .slots
@@ -208,8 +218,7 @@ impl Vault {
             .find(|s| s.slot_type == slot.slot_type)
             .ok_or(CoreError::Damaged { what: "key slots" })?;
         *target = slot;
-        write_headers(&self.dir, &header)?;
-        self.header = header;
+        self.commit(header, write)?;
         remove_leftover_tmp(&self.dir);
         Ok(())
     }
@@ -219,9 +228,29 @@ impl Vault {
     pub fn accept_header(&mut self) -> Result<()> {
         let mut header = self.header.clone();
         header.header_mac = Some(header_mac(&header, &self.vault_key));
-        write_headers(&self.dir, &header)?;
-        self.header = header;
-        Ok(())
+        self.commit(header, write_headers)
+    }
+
+    /// Writes `header` and makes it the live one. If the write fails part-way, the live
+    /// header becomes whatever `vault.json` now holds (the primary is the truth), so a
+    /// later change never rebuilds from a header that no file has.
+    fn commit(
+        &mut self,
+        header: VaultHeader,
+        write: fn(&Path, &VaultHeader) -> Result<()>,
+    ) -> Result<()> {
+        match write(&self.dir, &header) {
+            Ok(()) => {
+                self.header = header;
+                Ok(())
+            }
+            Err(e) => {
+                if let Ok(on_disk) = unlock::load(&self.dir.join(HEADER_FILE)) {
+                    self.header = on_disk.header;
+                }
+                Err(e)
+            }
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -402,7 +431,7 @@ mod tests {
         let dir = vault.dir().to_path_buf();
         let old_bak = fs::read(dir.join(HEADER_BACKUP)).unwrap();
 
-        failpoint::arm("write_headers.before_backup");
+        failpoint::arm("write_headers.before_second");
         let result = vault.change_password(NEW_PW);
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))));
@@ -430,5 +459,94 @@ mod tests {
         // (the error reported is the vault.json one, as ruled for "both copies failed").
         fs::remove_file(dir.join(HEADER_FILE)).unwrap();
         assert!(Vault::unlock_with_password(&dir, PW).is_err());
+    }
+
+    fn read_pair(dir: &Path) -> (Vec<u8>, Vec<u8>) {
+        (
+            fs::read(dir.join(HEADER_FILE)).unwrap(),
+            fs::read(dir.join(HEADER_BACKUP)).unwrap(),
+        )
+    }
+
+    fn is_wrong_password<T>(r: Result<T>) -> bool {
+        matches!(r, Err(CoreError::WrongPassword))
+    }
+
+    /// The vault object stays correct after a half-written change: a later change must
+    /// build on what vault.json holds, not on the header from before the failure.
+    #[test]
+    fn vault_stays_usable_after_a_partial_header_write() {
+        const NEW_PW: &str = "a different long password";
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.change_password(NEW_PW).is_err());
+        failpoint::disarm_all();
+        let new_recovery = vault.regenerate_recovery().unwrap();
+        drop(vault);
+
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, bak);
+        let (vault, _) = Vault::unlock_with_password(&dir, NEW_PW).unwrap();
+        drop(vault);
+        let (vault, _) = Vault::unlock_with_recovery(&dir, &new_recovery).unwrap();
+        drop(vault);
+        assert!(is_wrong_password(Vault::unlock_with_password(&dir, PW)));
+        fs::remove_file(dir.join(HEADER_FILE)).unwrap();
+        assert!(is_wrong_password(Vault::unlock_with_password(&dir, PW)));
+    }
+
+    #[test]
+    fn failed_backup_write_during_regeneration_changes_nothing() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let old = RecoverySecret::parse(&created.recovery.to_display()).unwrap();
+        let mut vault = created.vault;
+        let dir = vault.dir().to_path_buf();
+        let before = read_pair(&dir);
+
+        failpoint::arm("write_headers.before_first");
+        assert!(vault.regenerate_recovery().is_err());
+        failpoint::disarm_all();
+        drop(vault);
+
+        assert_eq!(read_pair(&dir), before);
+        let (vault, report) = Vault::unlock_with_recovery(&dir, &old).unwrap();
+        assert!(!report.used_backup_header);
+        drop(vault);
+        assert_eq!(read_pair(&dir), before);
+    }
+
+    /// `.bak` is written first, so a failure on vault.json leaves the primary on the old
+    /// recovery secret. Password unlock cannot tell the two recovery slots apart and
+    /// leaves both files alone; a recovery unlock with the old secret repairs `.bak`.
+    #[test]
+    fn failed_primary_write_during_regeneration_keeps_the_old_secret() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let old = RecoverySecret::parse(&created.recovery.to_display()).unwrap();
+        let mut vault = created.vault;
+        let dir = vault.dir().to_path_buf();
+        let (main_before, bak_before) = read_pair(&dir);
+
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.regenerate_recovery().is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, main_before);
+        assert_ne!(bak, bak_before);
+
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(!report.used_backup_header);
+        drop(vault);
+        assert_eq!(read_pair(&dir), (main.clone(), bak));
+
+        let (vault, report) = Vault::unlock_with_recovery(&dir, &old).unwrap();
+        assert!(!report.used_backup_header);
+        drop(vault);
+        assert_eq!(read_pair(&dir), (main.clone(), main));
     }
 }

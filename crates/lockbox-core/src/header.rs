@@ -140,6 +140,18 @@ pub fn verify_header_mac(h: &VaultHeader, vault_key: &Key32) -> bool {
 /// A header whose pretty-printed text exceeds [`MAX_HEADER_BYTES`] is refused with
 /// `TooLarge` before either file is touched.
 pub fn write_headers(dir: &Path, h: &VaultHeader) -> Result<()> {
+    write_pair(dir, h, [HEADER_FILE, HEADER_BACKUP])
+}
+
+/// Like [`write_headers`] but `vault.json.bak` first, then `vault.json`. For changes
+/// whose result the user must receive (a new recovery secret): the primary never holds
+/// something that was not committed to both files first. An `Err` after `.bak` was
+/// replaced leaves `.bak` one version ahead of `vault.json`.
+pub fn write_headers_backup_first(dir: &Path, h: &VaultHeader) -> Result<()> {
+    write_pair(dir, h, [HEADER_BACKUP, HEADER_FILE])
+}
+
+fn write_pair(dir: &Path, h: &VaultHeader, [first, second]: [&str; 2]) -> Result<()> {
     let bytes = serialize_header(h);
     // The size of the bytes actually written: a file `parse_header` would refuse must never be saved.
     if bytes.len() > MAX_HEADER_BYTES {
@@ -147,10 +159,12 @@ pub fn write_headers(dir: &Path, h: &VaultHeader) -> Result<()> {
             what: "vault header",
         });
     }
-    atomic_write(&dir.join(HEADER_FILE), &bytes)?;
     #[cfg(test)]
-    crate::fsio::failpoint::check("write_headers.before_backup")?;
-    atomic_write(&dir.join(HEADER_BACKUP), &bytes)
+    crate::fsio::failpoint::check("write_headers.before_first")?;
+    atomic_write(&dir.join(first), &bytes)?;
+    #[cfg(test)]
+    crate::fsio::failpoint::check("write_headers.before_second")?;
+    atomic_write(&dir.join(second), &bytes)
 }
 
 #[cfg(test)]

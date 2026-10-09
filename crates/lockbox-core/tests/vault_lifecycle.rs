@@ -151,9 +151,8 @@ fn old_password_fails_against_both_headers() {
     assert!(files_identical(&dir));
     assert!(is_wrong_password(Vault::unlock_with_password(&dir, PW)));
     // With vault.json gone only .bak is left, and it holds no old password slot either.
-    // (When both copies fail, the vault.json error is the one reported: here "not found".)
     fs::remove_file(dir.join(HEADER_FILE)).unwrap();
-    assert!(Vault::unlock_with_password(&dir, PW).is_err());
+    assert!(is_wrong_password(Vault::unlock_with_password(&dir, PW)));
     let (_, report) = Vault::unlock_with_password(&dir, NEW_PW).unwrap();
     assert!(report.used_backup_header);
     assert!(files_identical(&dir));
@@ -293,4 +292,100 @@ fn both_headers_damaged_reports_the_vault_json_error() {
         read_vault_name(&dir),
         Err(CoreError::Damaged { .. })
     ));
+}
+
+fn damage_slot(dir: &Path, file: &str, slot_type: SlotType) {
+    let mut header = read_header(dir, file);
+    let slot = header
+        .slots
+        .iter_mut()
+        .find(|s| s.slot_type == slot_type)
+        .unwrap();
+    slot.ciphertext[0] ^= 1;
+    write_header(dir, file, &header);
+}
+
+fn bytes_of(dir: &Path) -> (Vec<u8>, Vec<u8>) {
+    (
+        fs::read(dir.join(HEADER_FILE)).unwrap(),
+        fs::read(dir.join(HEADER_BACKUP)).unwrap(),
+    )
+}
+
+#[test]
+fn foreign_backup_is_never_used() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir_a, _) = make(parent.path(), "Alpha");
+    let (dir_b, _) = make(parent.path(), "Beta"); // same password, other vault
+    fs::copy(dir_b.join(HEADER_FILE), dir_a.join(HEADER_BACKUP)).unwrap();
+    damage_slot(&dir_a, HEADER_FILE, SlotType::Password);
+    let before = bytes_of(&dir_a);
+    assert!(is_wrong_password(Vault::unlock_with_password(&dir_a, PW)));
+    assert_eq!(bytes_of(&dir_a), before);
+}
+
+#[test]
+fn name_edited_in_vault_json_only_leaves_backup_untouched() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, _recovery) = make(parent.path(), "Family");
+    let mut header = read_header(&dir, HEADER_FILE);
+    header.name = "Renamed".to_owned();
+    write_header(&dir, HEADER_FILE, &header);
+    let before = bytes_of(&dir);
+    let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+    assert!(report.header_mac_mismatch && !report.used_backup_header);
+    drop(vault);
+    assert_eq!(bytes_of(&dir), before);
+}
+
+#[test]
+fn damaged_recovery_slot_in_vault_json_does_not_overwrite_the_good_backup() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, recovery) = make(parent.path(), "Family");
+    damage_slot(&dir, HEADER_FILE, SlotType::Recovery);
+    let before = bytes_of(&dir);
+    let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+    assert!(!report.used_backup_header && !report.header_mac_mismatch);
+    drop(vault);
+    assert_eq!(bytes_of(&dir), before);
+    // The recovery secret still works, from .bak.
+    let (vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+    assert!(report.used_backup_header);
+    drop(vault);
+}
+
+#[test]
+fn damaged_password_slot_in_one_copy_does_not_overwrite_the_good_one_on_recovery_unlock() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, recovery) = make(parent.path(), "Family");
+    damage_slot(&dir, HEADER_FILE, SlotType::Password);
+    let before = bytes_of(&dir);
+    let (vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+    assert!(!report.used_backup_header);
+    drop(vault);
+    assert_eq!(bytes_of(&dir), before);
+    // The password still works, from .bak.
+    let (_, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+    assert!(report.used_backup_header);
+}
+
+#[test]
+fn truncated_vault_json_with_wrong_password_is_wrong_password() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, _recovery) = make(parent.path(), "Family");
+    fs::write(dir.join(HEADER_FILE), b"{\"container_ver").unwrap();
+    assert!(is_wrong_password(Vault::unlock_with_password(
+        &dir,
+        "not the password"
+    )));
+}
+
+#[test]
+fn folder_without_headers_is_not_found_and_gets_no_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        Vault::unlock_with_password(dir.path(), PW),
+        Err(CoreError::NotFound)
+    ));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }

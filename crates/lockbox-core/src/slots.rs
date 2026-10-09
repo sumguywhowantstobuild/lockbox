@@ -34,7 +34,7 @@ impl SlotType {
 
 /// One wrapped copy of the vault key, as stored in `vault.json`. Nothing here is secret.
 /// `kdf` is `None` for slots whose key does not come from a password hash.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct KeySlot {
     #[serde(rename = "type")]

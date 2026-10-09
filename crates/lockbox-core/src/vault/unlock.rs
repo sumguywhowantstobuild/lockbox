@@ -1,9 +1,9 @@
-//! Opening a vault (spec 6.3): `vault.json` first, `.bak` as the fallback, then repair.
+//! Opening a vault (spec 6.3): `vault.json` first, `.bak` as the fallback, then a careful repair.
 
 use super::{CleanupReport, UnlockReport, Vault};
+use crate::fsio::atomic_write;
 use crate::header::{
     HEADER_BACKUP, HEADER_FILE, MAX_HEADER_BYTES, VaultHeader, parse_header, verify_header_mac,
-    write_headers,
 };
 use crate::kdf::{Argon2Params, derive_password_key};
 use crate::lockfile::VaultLock;
@@ -12,7 +12,7 @@ use crate::secret::Key32;
 use crate::slots::{KeySlot, SlotType, unwrap_slot};
 use crate::{CoreError, Result};
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,6 +20,16 @@ use std::sync::Arc;
 pub(super) enum Credential<'a> {
     Password(&'a str),
     Recovery(&'a RecoverySecret),
+}
+
+impl Credential<'_> {
+    /// The slot this credential does not open, so unlocking cannot vouch for it.
+    fn unused_slot(&self) -> SlotType {
+        match self {
+            Credential::Password(_) => SlotType::Recovery,
+            Credential::Recovery(_) => SlotType::Password,
+        }
+    }
 }
 
 /// The password key from the last Argon2 run, kept so a second header with the same
@@ -30,14 +40,21 @@ struct Derived {
     key: Key32,
 }
 
-/// Reads at most `MAX_HEADER_BYTES + 1` bytes, so an oversized file is noticed
-/// (`parse_header` refuses it) without loading all of it.
-fn read_header_file(path: &Path) -> io::Result<Vec<u8>> {
+/// A header file as read: the exact bytes (for copying) and what they parse to.
+pub(super) struct HeaderFile {
+    bytes: Vec<u8>,
+    pub(super) header: VaultHeader,
+}
+
+/// Reads and parses one header file. Reads at most `MAX_HEADER_BYTES + 1` bytes, so an
+/// oversized file is noticed (`parse_header` refuses it) without loading all of it.
+pub(super) fn load(path: &Path) -> Result<HeaderFile> {
     let mut bytes = Vec::new();
     File::open(path)?
         .take(MAX_HEADER_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    Ok(bytes)
+    let header = parse_header(&bytes)?;
+    Ok(HeaderFile { bytes, header })
 }
 
 /// A newer vault must say "update Lockbox", never be opened from an older `.bak`
@@ -54,16 +71,15 @@ fn slot_of(header: &VaultHeader, slot_type: SlotType) -> Result<&KeySlot> {
         .ok_or(CoreError::Damaged { what: "key slots" })
 }
 
-/// Parses one header copy and unwraps its slot for `credential`.
-fn try_copy(
-    bytes: &[u8],
+/// Unwraps the vault key from `header`'s slot for `credential`.
+fn unwrap_with(
+    header: &VaultHeader,
     credential: &Credential,
     cache: &mut Option<Derived>,
-) -> Result<(VaultHeader, Key32)> {
-    let header = parse_header(bytes)?;
-    let key = match credential {
+) -> Result<Key32> {
+    match credential {
         Credential::Password(password) => {
-            let slot = slot_of(&header, SlotType::Password)?;
+            let slot = slot_of(header, SlotType::Password)?;
             let params = slot.kdf.ok_or(CoreError::Damaged { what: "key slots" })?;
             let derived = match cache.take() {
                 Some(d) if d.salt == slot.salt && d.params == params => d,
@@ -75,62 +91,96 @@ fn try_copy(
             };
             let unwrapped = unwrap_slot(slot, &header.vault_id, &derived.key);
             *cache = Some(derived);
-            unwrapped?
+            unwrapped
         }
         Credential::Recovery(secret) => {
-            let slot = slot_of(&header, SlotType::Recovery)?;
+            let slot = slot_of(header, SlotType::Recovery)?;
             unwrap_slot(
                 slot,
                 &header.vault_id,
                 &derive_recovery_key(secret, &slot.salt),
-            )?
+            )
         }
-    };
-    Ok((header, key))
+    }
 }
 
-/// Opens the vault in `dir`. The lock comes first, so nothing is read from a vault
-/// another process has open.
+/// Whether the copy that did not unlock may be overwritten with the one that did. Only
+/// when that cannot destroy anything unverified: the other file is missing or unparseable,
+/// or it is the same vault and byte-identical in `unused`, the slot this unlock could not
+/// check (a differing one could be the good copy of a damaged slot).
+fn may_overwrite(other: &Result<HeaderFile>, used: &HeaderFile, unused: SlotType) -> bool {
+    match other {
+        Ok(other) => {
+            other.bytes != used.bytes
+                && other.header.vault_id == used.header.vault_id
+                && slot_of(&other.header, unused).ok() == slot_of(&used.header, unused).ok()
+        }
+        // A newer-format file or an unreadable one (not "missing") is not ours to replace.
+        Err(CoreError::UnsupportedVersion) => false,
+        Err(CoreError::Io(e)) => e.kind() == std::io::ErrorKind::NotFound,
+        Err(_) => true,
+    }
+}
+
+/// Opens the vault in `dir`. A folder with no header at all is `NotFound`, checked
+/// before anything is created in it. The lock comes next, so nothing is read from a
+/// vault another process has open.
+///
+/// Fallback: if `vault.json` does not parse, or its slot rejects the secret, `.bak` is
+/// tried, but a parseable `vault.json` only falls back to a `.bak` of the same vault.
+/// Repair: the other copy is rewritten only when the header that unlocked passes its MAC
+/// and the rewrite can lose nothing unverified (see [`may_overwrite`]). Otherwise both
+/// files are left as they are; a MAC mismatch is only reported, and `accept_header`
+/// writes after the user agrees.
 pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockReport)> {
+    if !dir.join(HEADER_FILE).try_exists()? && !dir.join(HEADER_BACKUP).try_exists()? {
+        return Err(CoreError::NotFound);
+    }
     let lock = VaultLock::acquire(dir)?;
-    let main = read_header_file(&dir.join(HEADER_FILE));
-    let backup = read_header_file(&dir.join(HEADER_BACKUP)).ok();
+    let main = load(&dir.join(HEADER_FILE));
+    let backup = load(&dir.join(HEADER_BACKUP));
     let mut cache = None;
 
-    let first = match &main {
-        Ok(bytes) => try_copy(bytes, &credential, &mut cache),
-        Err(e) => Err(io::Error::from(e.kind()).into()),
-    };
-    let (header, key, used, used_backup_header) = match first {
-        Ok((header, key)) => (header, key, main.as_deref().ok(), false),
-        Err(first_error) => {
-            let fallback = backup
-                .as_deref()
-                .filter(|b| may_try_backup(&first_error) && main.as_deref().ok() != Some(*b));
-            // Any failure of the backup is reported as the failure of `vault.json`.
-            let Some(bytes) = fallback else {
-                return Err(first_error);
-            };
-            let Ok((header, key)) = try_copy(bytes, &credential, &mut cache) else {
-                return Err(first_error);
-            };
-            (header, key, Some(bytes), true)
+    // `used_backup` is true when the copy that unlocked is `.bak`.
+    let (used, key, used_backup) = match (&main, &backup) {
+        (Ok(m), _) => match unwrap_with(&m.header, &credential, &mut cache) {
+            Ok(key) => (m, key, false),
+            Err(error) => {
+                let same_vault = backup.as_ref().ok().filter(|b| {
+                    may_try_backup(&error)
+                        && b.bytes != m.bytes
+                        && b.header.vault_id == m.header.vault_id
+                });
+                match same_vault.map(|b| (b, unwrap_with(&b.header, &credential, &mut cache))) {
+                    Some((b, Ok(key))) => (b, key, true),
+                    _ => return Err(error),
+                }
+            }
+        },
+        (Err(error), Ok(b)) if may_try_backup(error) => {
+            // A parsed header that rejects the secret is a wrong password, not damage.
+            (b, unwrap_with(&b.header, &credential, &mut cache)?, true)
         }
+        (Err(_), _) => return Err(main.err().unwrap_or(CoreError::NotFound)),
     };
 
-    // Repair: both files must hold exactly the copy that just worked.
-    let healthy = main.as_deref().ok() == used && backup.as_deref() == used;
-    if !healthy {
-        write_headers(dir, &header)?;
+    let mac_ok = verify_header_mac(&used.header, &key);
+    let (other, other_file) = if used_backup {
+        (&main, HEADER_FILE)
+    } else {
+        (&backup, HEADER_BACKUP)
+    };
+    if mac_ok && may_overwrite(other, used, credential.unused_slot()) {
+        atomic_write(&dir.join(other_file), &used.bytes)?;
     }
     let report = UnlockReport {
-        used_backup_header,
-        header_mac_mismatch: !verify_header_mac(&header, &key),
+        used_backup_header: used_backup,
+        header_mac_mismatch: !mac_ok,
         cleanup: CleanupReport::default(),
     };
     let vault = Vault {
         dir: dir.to_path_buf(),
-        header,
+        header: used.header.clone(),
         vault_key: Arc::new(key),
         _lock: lock,
     };
@@ -140,10 +190,11 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
 /// The vault's name, read without unlocking (for the list of vaults). Falls back to
 /// `.bak` like unlocking does; if both fail, the `vault.json` error is returned.
 pub fn read_vault_name(dir: &Path) -> Result<String> {
-    let read = |file| -> Result<VaultHeader> { parse_header(&read_header_file(&dir.join(file))?) };
-    match read(HEADER_FILE) {
-        Ok(header) => Ok(header.name),
-        Err(e) if may_try_backup(&e) => read(HEADER_BACKUP).map(|h| h.name).or(Err(e)),
+    match load(&dir.join(HEADER_FILE)) {
+        Ok(copy) => Ok(copy.header.name),
+        Err(e) if may_try_backup(&e) => load(&dir.join(HEADER_BACKUP))
+            .map(|c| c.header.name)
+            .or(Err(e)),
         Err(e) => Err(e),
     }
 }
