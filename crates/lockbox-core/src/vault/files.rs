@@ -286,6 +286,7 @@ impl Vault {
         }
         remove_file_retry(&self.item_path(id))?;
         self.items.remove(id);
+        self.reindex();
         Ok(())
     }
 }

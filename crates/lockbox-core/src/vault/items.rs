@@ -160,10 +160,12 @@ impl Vault {
             });
             if let Ok(on_disk) = on_disk {
                 self.items.insert(on_disk.id, on_disk);
+                self.reindex();
             }
             return Err(error);
         }
         self.items.insert(item.id, item);
+        self.reindex();
         Ok(())
     }
 

@@ -17,6 +17,7 @@ use crate::item::Item;
 use crate::kdf::{Argon2Params, check_new_password, derive_password_key};
 use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
+use crate::search::SearchIndex;
 use crate::secret::{Key32, random_bytes};
 use crate::slots::{KeySlot, SlotType, wrap_slot};
 use crate::{CoreError, Result};
@@ -86,6 +87,8 @@ pub struct Vault {
     vault_key: Arc<Key32>,
     /// Every item that opened at unlock, trashed ones included.
     items: BTreeMap<ItemId, Item>,
+    /// Search entries for `items`; rebuilt by `reindex` after every change to them.
+    index: SearchIndex,
     /// Item files that did not open; never deleted or overwritten.
     damaged: Vec<ItemId>,
     _lock: VaultLock,
@@ -168,6 +171,7 @@ impl Vault {
             header,
             vault_key: Arc::new(vault_key),
             items: BTreeMap::new(),
+            index: SearchIndex::default(),
             damaged: Vec::new(),
         };
         Ok(CreatedVault { vault, recovery })
@@ -295,6 +299,17 @@ impl Vault {
 
     pub fn id(&self) -> VaultId {
         self.header.vault_id
+    }
+
+    /// Items matching `q`, best first, at most `limit` (see [`SearchIndex::query`]).
+    pub fn search(&self, q: &str, limit: usize) -> Vec<ItemId> {
+        self.index.query(q, limit)
+    }
+
+    /// Rebuilds the whole search index. Call after every change to `items`: a collection
+    /// rename then reaches its members without any per-entry bookkeeping.
+    fn reindex(&mut self) {
+        self.index = SearchIndex::build(self.items.values());
     }
 }
 

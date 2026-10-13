@@ -15,6 +15,7 @@ pub mod kdf;
 pub mod limits;
 pub mod lockfile;
 pub mod recovery;
+pub mod search;
 pub mod secret;
 pub(crate) mod serde_b64;
 pub mod slots;

@@ -8,6 +8,7 @@ use crate::header::{
 use crate::kdf::{Argon2Params, derive_password_key};
 use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
+use crate::search::SearchIndex;
 use crate::secret::Key32;
 use crate::slots::{KeySlot, SlotType, unwrap_slot};
 use crate::{CoreError, Result};
@@ -187,6 +188,7 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
         dir: dir.to_path_buf(),
         header: used.header.clone(),
         vault_key: Arc::new(key),
+        index: SearchIndex::build(items.values()),
         items,
         damaged,
         _lock: lock,
