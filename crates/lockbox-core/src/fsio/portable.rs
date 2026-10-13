@@ -20,7 +20,9 @@ pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
 
 /// The caller has already checked that `to` does not exist.
 // shortcut: check-then-rename has a race, and Linux rename(2) silently replaces an existing
-// EMPTY folder. Upgrade to renameat2(RENAME_NOREPLACE) when the Android/Linux build matters.
+// EMPTY folder or any plain FILE (so it also covers cleanup's quarantine and move-back of
+// blobs, not just vault folders). Upgrade to renameat2(RENAME_NOREPLACE) when the
+// Android/Linux build matters.
 pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)?;
     sync_dir(parent_dir(to))

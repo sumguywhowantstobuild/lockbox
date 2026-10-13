@@ -256,7 +256,8 @@ impl Vault {
         published
     }
 
-    /// Permanently deletes a trashed item and all its blobs (spec 6.4): the item is first
+    /// Permanently deletes a trashed item and its blobs, except a blob another item still
+    /// attaches (spec 6.4): the item is first
     /// rewritten with `purging: true`, so a crash or error leaves an intent that a retry (or
     /// cleanup at unlock) finishes. A blob that is already gone is fine.
     pub fn purge_item(&mut self, id: &ItemId) -> Result<()> {
@@ -274,8 +275,13 @@ impl Vault {
         #[cfg(test)]
         crate::fsio::failpoint::check("purge.after_mark")?;
         let item = self.get_item(id)?;
+        // A blob that another item still attaches is not this item's to delete.
+        let in_use = self.attached_blobs(Some(id));
         let blobs = item.attachments.iter().map(|f| &f.file_id);
-        for blob in blobs.chain(&item.retired_blobs) {
+        for blob in blobs
+            .chain(&item.retired_blobs)
+            .filter(|b| !in_use.contains(b))
+        {
             remove_file_retry(&self.blob_path(blob))?;
         }
         remove_file_retry(&self.item_path(id))?;

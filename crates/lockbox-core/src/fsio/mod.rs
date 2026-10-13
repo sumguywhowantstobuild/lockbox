@@ -111,10 +111,10 @@ pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
     Ok(retry(|| sys::replace_file(from, to))?)
 }
 
-/// Moves the folder `from` to `to`, which must not exist (`InvalidInput` if it does).
+/// Moves the file or folder `from` to `to`, which must not exist (`InvalidInput` if it does).
 pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
     let exists = || CoreError::InvalidInput {
-        what: "vault folder exists",
+        what: "destination exists",
     };
     if to.try_exists()? {
         return Err(exists());
@@ -505,7 +505,7 @@ mod tests {
         assert!(matches!(
             rename_dir_no_replace(&from, &to),
             Err(CoreError::InvalidInput {
-                what: "vault folder exists"
+                what: "destination exists"
             })
         ));
         assert_eq!(std::fs::read(from.join("a")).unwrap(), b"a");

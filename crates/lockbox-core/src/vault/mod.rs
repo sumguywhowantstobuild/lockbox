@@ -386,7 +386,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(CoreError::InvalidInput {
-                what: "vault folder exists"
+                what: "destination exists"
             })
         ));
         assert_eq!(fs::read(existing.join("keep.txt")).unwrap(), b"mine");

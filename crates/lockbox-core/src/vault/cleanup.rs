@@ -9,9 +9,9 @@
 use super::files::{BLOB_EXT, FILES_DIR, blob_in};
 use super::items::ITEMS_DIR;
 use super::{CleanupReport, Vault};
-use crate::Result;
 use crate::fsio::{remove_file_retry, rename_dir_no_replace};
 use crate::ids::{FileId, ItemId};
+use crate::{CoreError, Result};
 use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
@@ -48,8 +48,9 @@ pub(super) fn remove_scraps(dir: &Path, report: &mut CleanupReport) {
 }
 
 /// The canonical blobs directly inside `folder` (regular files named `<32 lowercase hex>.blob`)
-/// with their sizes, sorted by ID. A missing folder holds none.
+/// with their sizes, sorted by ID. A missing folder holds none; a link is an error.
 fn list_blobs(folder: &Path) -> Result<Vec<(FileId, u64)>> {
+    check_folder(folder)?;
     let entries = match fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
@@ -82,6 +83,19 @@ fn move_blobs(ids: &[FileId], from: &Path, to: &Path) -> usize {
     ids.iter().filter(|id| moved(*id)).count()
 }
 
+/// Fails unless `folder` is a real folder or is missing. A link or junction (std reports both as
+/// links) could lead outside the vault, so cleanup never works through one.
+fn check_folder(folder: &Path) -> Result<()> {
+    match fs::symlink_metadata(folder) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(CoreError::InvalidInput {
+            what: "not a plain folder",
+        }),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn delete_blob(files: &Path, id: &FileId) -> Result<()> {
     #[cfg(test)]
     crate::fsio::failpoint::check("cleanup.delete_blob")?;
@@ -97,15 +111,17 @@ impl Vault {
         self.files_dir().join(ORPHANED_DIR)
     }
 
-    /// Blobs that some loaded item (trashed ones included) lists as an attachment.
-    fn attached_blobs(&self) -> HashSet<FileId> {
-        let attachments = self.items.values().flat_map(|i| &i.attachments);
+    /// Blobs that some loaded item (trashed ones included) lists as an attachment, not
+    /// counting the item `except`.
+    pub(super) fn attached_blobs(&self, except: Option<&ItemId>) -> HashSet<FileId> {
+        let others = self.items.values().filter(|i| Some(&i.id) != except);
+        let attachments = others.flat_map(|i| &i.attachments);
         attachments.map(|f| f.file_id).collect()
     }
 
     /// Blobs that some loaded item attaches or has retired.
     fn referenced_blobs(&self) -> HashSet<FileId> {
-        let mut blobs = self.attached_blobs();
+        let mut blobs = self.attached_blobs(None);
         blobs.extend(self.items.values().flat_map(|i| &i.retired_blobs));
         blobs
     }
@@ -114,13 +130,24 @@ impl Vault {
     /// blobs back from quarantine, then quarantine of the unreferenced.
     pub(super) fn run_cleanup(&mut self) -> CleanupReport {
         let mut report = CleanupReport::default();
-        for dir in [self.dir.clone(), self.dir.join(ITEMS_DIR), self.files_dir()] {
-            remove_scraps(&dir, &mut report);
+        remove_scraps(&self.dir, &mut report);
+        // A linked `items` or `files` folder could lead outside the vault: nothing is done in
+        // it, and the steps that need both folders are skipped.
+        let mut folders_usable = true;
+        for folder in [self.dir.join(ITEMS_DIR), self.files_dir()] {
+            if check_folder(&folder).is_ok() {
+                remove_scraps(&folder, &mut report);
+            } else {
+                report.failed += 1;
+                folders_usable = false;
+            }
         }
-        self.finish_purges(&mut report);
-        self.clear_retired(&mut report);
-        self.restore_referenced(&mut report);
-        self.quarantine_unreferenced(&mut report);
+        if folders_usable {
+            self.finish_purges(&mut report);
+            self.clear_retired(&mut report);
+            self.restore_attached(&mut report);
+            self.quarantine_unreferenced(&mut report);
+        }
         report
     }
 
@@ -143,7 +170,7 @@ impl Vault {
     /// A blob some item still attaches is only dropped from the list. Housekeeping, not an
     /// edit: the revision and modified time stay as they were.
     fn clear_retired(&mut self, report: &mut CleanupReport) {
-        let attached = self.attached_blobs();
+        let attached = self.attached_blobs(None);
         let files = self.files_dir();
         let todo: Vec<_> = self
             .items
@@ -169,17 +196,18 @@ impl Vault {
         }
     }
 
-    /// Moves quarantined blobs that an item references again back into `files/`. Runs even
-    /// when items are damaged: it only returns something to where an authenticated item expects it.
-    fn restore_referenced(&self, report: &mut CleanupReport) {
+    /// Moves quarantined blobs that an item attaches again back into `files/`. Runs even when
+    /// items are damaged: it only returns something to where an authenticated item expects it.
+    /// (Retired blobs are not moved back: their lists were just cleared.)
+    fn restore_attached(&self, report: &mut CleanupReport) {
         let Ok(found) = list_blobs(&self.orphaned_dir()) else {
             return report.failed += 1;
         };
-        let referenced = self.referenced_blobs();
+        let attached = self.attached_blobs(None);
         let ids: Vec<FileId> = found
             .into_iter()
             .map(|(id, _)| id)
-            .filter(|id| referenced.contains(id))
+            .filter(|id| attached.contains(id))
             .collect();
         let moved = move_blobs(&ids, &self.orphaned_dir(), &self.files_dir());
         report.orphans_restored = moved;
@@ -206,10 +234,12 @@ impl Vault {
         if ids.is_empty() {
             return;
         }
-        if fs::create_dir_all(self.orphaned_dir()).is_err() {
+        let orphaned = self.orphaned_dir();
+        let ready = check_folder(&orphaned).and_then(|()| Ok(fs::create_dir_all(&orphaned)?));
+        if ready.is_err() {
             return report.failed += ids.len();
         }
-        let moved = move_blobs(&ids, &files, &self.orphaned_dir());
+        let moved = move_blobs(&ids, &files, &orphaned);
         report.orphans_quarantined = moved;
         report.failed += ids.len() - moved;
     }
@@ -618,5 +648,146 @@ mod tests {
         fs::remove_dir_all(vault.orphaned_dir()).unwrap();
         assert!(vault.orphans().unwrap().is_empty());
         assert_eq!(vault.delete_orphans().unwrap(), 0);
+    }
+
+    /// Makes `link` a folder link (a junction on Windows, which needs no special rights; a
+    /// symlink elsewhere) to `target`. `false`, with a note, if the system refuses.
+    fn make_dir_link(link: &Path, target: &Path) -> bool {
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        if !made {
+            eprintln!("note: cannot create a folder link here; test skipped");
+        }
+        made
+    }
+
+    /// Replaces the folder `path` with a link to a folder outside the vault.
+    fn link_folder(path: &Path, outside: &Path) -> bool {
+        fs::remove_dir_all(path).unwrap();
+        make_dir_link(path, outside)
+    }
+
+    #[test]
+    fn std_reports_a_folder_link_as_a_link() {
+        let (outside, inside) = (TempDir::new(), TempDir::new());
+        let link = inside.path().join("link");
+        if make_dir_link(&link, outside.path()) {
+            let meta = fs::symlink_metadata(&link).unwrap();
+            assert!(meta.file_type().is_symlink() && !meta.is_dir());
+            assert!(check_folder(&link).is_err());
+            assert!(check_folder(outside.path()).is_ok());
+            assert!(check_folder(&inside.path().join("missing")).is_ok());
+        }
+    }
+
+    #[test]
+    fn linked_items_or_files_folder_is_left_alone() {
+        for name in ["items", "files"] {
+            let (_parent, vault) = new_vault();
+            let outside = TempDir::new();
+            let scraps = [
+                outside.path().join("a.tmp"),
+                outside.path().join("b.partial"),
+            ];
+            let stray = plant_blob(outside.path(), b"stray");
+            for scrap in &scraps {
+                fs::write(scrap, b"x").unwrap();
+            }
+            if !link_folder(&vault.dir().join(name), outside.path()) {
+                return;
+            }
+            let (vault, report) = reopen(vault);
+
+            assert!(report.failed >= 1, "{name}: {report:?}");
+            assert_eq!(report.partials_removed + report.temps_removed, 0);
+            assert_eq!(report.orphans_quarantined + report.orphans_restored, 0);
+            assert!(scraps.iter().all(|p| p.exists()), "{name}: scraps removed");
+            assert!(
+                blob_in(outside.path(), &stray).exists(),
+                "{name}: blob moved"
+            );
+            assert!(!outside.path().join("orphaned").exists());
+            drop(vault);
+        }
+    }
+
+    #[test]
+    fn linked_orphaned_folder_is_left_alone() {
+        let (parent, mut vault) = new_vault();
+        let (_id, file) = file_item(&parent, &mut vault, b"mine");
+        let outside = TempDir::new();
+        let (theirs, scrap) = (
+            plant_blob(outside.path(), b"theirs"),
+            outside.path().join("x.partial"),
+        );
+        fs::write(&scrap, b"x").unwrap();
+        let stray = plant_blob(&vault.files_dir(), b"stray");
+        // A referenced blob that sits in the "quarantine" must not be moved back out of it either.
+        fs::rename(
+            blob_in(&vault.files_dir(), &file),
+            blob_in(outside.path(), &file),
+        )
+        .unwrap();
+        if !link_folder(&vault.orphaned_dir(), outside.path()) {
+            return;
+        }
+        let (mut vault, report) = reopen(vault);
+
+        assert!(report.failed >= 1);
+        assert_eq!(
+            (report.orphans_quarantined, report.orphans_restored),
+            (0, 0)
+        );
+        assert!(
+            blob_in(&vault.files_dir(), &stray).exists(),
+            "stray was moved through the link"
+        );
+        assert!(!blob_in(&vault.files_dir(), &file).exists());
+        assert!(vault.orphans().is_err());
+        assert!(vault.delete_orphans().is_err());
+        assert!(blob_in(outside.path(), &theirs).exists() && scrap.exists());
+        assert!(blob_in(outside.path(), &file).exists());
+    }
+
+    #[test]
+    fn purge_keeps_a_blob_another_item_still_attaches() {
+        let _disarm = Disarm;
+        let (parent, mut vault) = new_vault();
+        let (doomed, shared) = file_item(&parent, &mut vault, b"shared bytes");
+        let keeper = vault.new_item(ItemKind::Note, "keeper", None).unwrap();
+        let mut next = edited(vault.get_item(&keeper).unwrap()).unwrap();
+        next.attachments = vault.get_item(&doomed).unwrap().attachments.clone();
+        vault.commit_item(next).unwrap();
+        vault.trash_item(&doomed).unwrap();
+        failpoint::arm("purge.after_mark");
+        assert!(vault.purge_item(&doomed).is_err());
+        failpoint::disarm_all();
+        let (vault, report) = reopen(vault);
+
+        assert_eq!((report.purges_finished, report.failed), (1, 0));
+        assert!(vault.get_item(&doomed).is_err());
+        assert!(!item_file(&vault, &doomed).exists());
+        assert!(blob_in(&vault.files_dir(), &shared).exists());
+        assert_eq!(exported(&parent, &vault, &keeper, &shared), b"shared bytes");
+
+        // The same holds for a purge the user starts.
+        let (mut vault, _) = reopen(vault);
+        let (other, shared2) = file_item(&parent, &mut vault, b"again");
+        let keeper2 = vault.new_item(ItemKind::Note, "keeper2", None).unwrap();
+        let mut next = edited(vault.get_item(&keeper2).unwrap()).unwrap();
+        next.attachments = vault.get_item(&other).unwrap().attachments.clone();
+        vault.commit_item(next).unwrap();
+        vault.trash_item(&other).unwrap();
+        vault.purge_item(&other).unwrap();
+        assert_eq!(exported(&parent, &vault, &keeper2, &shared2), b"again");
     }
 }

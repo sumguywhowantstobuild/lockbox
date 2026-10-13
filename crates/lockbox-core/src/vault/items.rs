@@ -855,14 +855,15 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        // Seven taken IDs, then a free one: found on the eighth try.
+        // Seven taken IDs, then a free one: found on the eighth try. The last ID queued is
+        // tried first, so the free one goes in first.
+        let free = ItemId([0xAB; 16]);
+        force_next_id(free);
         for id in taken[..7].iter().rev() {
             force_next_id(*id);
         }
-        let free = ItemId([0xAB; 16]);
-        force_next_id(free);
         assert_eq!(vault.fresh_item_id().unwrap(), free);
-        FORCED_IDS.with(|ids| ids.borrow_mut().clear());
+        FORCED_IDS.with(|ids| assert!(ids.borrow().is_empty(), "all eight were tried"));
 
         // Eight taken IDs in a row: a fixed-text error, not an endless loop.
         for id in &taken {
