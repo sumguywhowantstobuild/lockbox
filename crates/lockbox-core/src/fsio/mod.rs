@@ -211,6 +211,13 @@ pub fn create_hidden_temp(dir: &Path, suffix: &str) -> Result<(File, PathBuf)> {
     Ok((file, path))
 }
 
+/// The most memory this process has held in RAM at once, in bytes, or `None` where it is not
+/// measured (everywhere but Windows). Only for the large-file test; not a stable API.
+#[doc(hidden)]
+pub fn peak_memory_bytes() -> Option<u64> {
+    sys::peak_memory_bytes()
+}
+
 /// Writes `bytes` to `target` so a crash or power cut leaves either the old or the new
 /// content, never a mix: temp file in the same folder, flushed to disk, then swapped in.
 /// The temp file is removed if anything fails.
@@ -317,6 +324,15 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|n| n.ends_with(".tmp"))
             .collect()
+    }
+
+    #[test]
+    fn peak_memory_is_measured_on_windows_only() {
+        // A running test process holds at least a megabyte.
+        assert_eq!(
+            peak_memory_bytes().is_some_and(|b| b > 1 << 20),
+            cfg!(windows)
+        );
     }
 
     #[test]

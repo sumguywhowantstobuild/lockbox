@@ -16,6 +16,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetVolumeInformationW, GetVolumePathNameW, INVALID_FILE_ATTRIBUTES, MOVE_FILE_FLAGS,
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
 };
+use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 use super::VolumeInfo;
 
@@ -173,6 +175,20 @@ pub fn volume_info(dir: &Path) -> io::Result<VolumeInfo> {
         free_bytes,
         max_file_bytes,
     })
+}
+
+/// The most memory this process has had in RAM at once (peak working set), in bytes.
+pub fn peak_memory_bytes() -> Option<u64> {
+    let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: size,
+        ..Default::default()
+    };
+    // SAFETY: `GetCurrentProcess` takes no arguments and returns a pseudo-handle that needs
+    // no closing. `counters` is a valid, writable `PROCESS_MEMORY_COUNTERS` whose size is
+    // passed as `cb`, so the call cannot write past it.
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
+    (ok != 0).then_some(counters.PeakWorkingSetSize as u64)
 }
 
 #[cfg(test)]

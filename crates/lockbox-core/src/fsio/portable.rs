@@ -55,3 +55,8 @@ pub fn volume_info(_dir: &Path) -> io::Result<VolumeInfo> {
         max_file_bytes: None,
     })
 }
+
+/// Not measured on this platform.
+pub fn peak_memory_bytes() -> Option<u64> {
+    None
+}
