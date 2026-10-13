@@ -111,6 +111,13 @@ impl Vault {
         self.files_dir().join(ORPHANED_DIR)
     }
 
+    /// The quarantine folder for the public calls, after checking that `files/` is no link
+    /// either (a real-looking `orphaned/` inside a linked `files/` is outside the vault).
+    fn checked_orphaned_dir(&self) -> Result<PathBuf> {
+        check_folder(&self.files_dir())?;
+        Ok(self.orphaned_dir())
+    }
+
     /// Blobs that some loaded item (trashed ones included) lists as an attachment, not
     /// counting the item `except`.
     pub(super) fn attached_blobs(&self, except: Option<&ItemId>) -> HashSet<FileId> {
@@ -246,17 +253,18 @@ impl Vault {
 
     /// The quarantined blobs with their sizes in bytes, sorted by ID.
     pub fn orphans(&self) -> Result<Vec<(FileId, u64)>> {
-        list_blobs(&self.orphaned_dir())
+        list_blobs(&self.checked_orphaned_dir()?)
     }
 
     /// Permanently deletes the quarantined blobs that no item references, and returns how
     /// many. Stops at the first one that cannot be deleted.
     pub fn delete_orphans(&mut self) -> Result<usize> {
+        let orphaned = self.checked_orphaned_dir()?;
         let referenced = self.referenced_blobs();
         let mut deleted = 0;
-        for (id, _) in list_blobs(&self.orphaned_dir())? {
+        for (id, _) in list_blobs(&orphaned)? {
             if !referenced.contains(&id) {
-                remove_file_retry(&blob_in(&self.orphaned_dir(), &id))?;
+                remove_file_retry(&blob_in(&orphaned, &id))?;
                 deleted += 1;
             }
         }
@@ -789,5 +797,21 @@ mod tests {
         vault.trash_item(&other).unwrap();
         vault.purge_item(&other).unwrap();
         assert_eq!(exported(&parent, &vault, &keeper2, &shared2), b"again");
+    }
+
+    #[test]
+    fn orphan_calls_refuse_a_linked_files_folder() {
+        let (_parent, mut vault) = new_vault();
+        let outside = TempDir::new();
+        let quarantine = outside.path().join("orphaned");
+        fs::create_dir(&quarantine).unwrap();
+        let theirs = plant_blob(&quarantine, b"not ours");
+        if !link_folder(&vault.files_dir(), outside.path()) {
+            return;
+        }
+        // Not through `reopen`: cleanup would already refuse; this is the later calls.
+        assert!(vault.orphans().is_err());
+        assert!(vault.delete_orphans().is_err());
+        assert!(blob_in(&quarantine, &theirs).exists());
     }
 }
