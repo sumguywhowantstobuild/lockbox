@@ -70,17 +70,22 @@ fn invalid(what: &'static str) -> CoreError {
     CoreError::InvalidInput { what }
 }
 
-/// A fair number in `0..n`: random 32-bit values below `2^32 mod n` are thrown away, so every
-/// result is equally likely (plain `% n` would favour small numbers). `n == 0` gives 0.
+/// One rejection-sampling step: `x` is a uniformly random `u32`, `n > 0`. Values at or above
+/// the largest multiple of `n` that fits in 32 bits are rejected; the rest map evenly onto
+/// `0..n`. (Plain `x % n` would favour the small results.)
+fn accept(x: u32, n: u32) -> Option<u32> {
+    let zone = (1u64 << 32) - (1u64 << 32) % u64::from(n);
+    (u64::from(x) < zone).then(|| x % n)
+}
+
+/// A fair number in `0..n`. `n == 0` gives 0.
 fn uniform(n: u32) -> u32 {
     if n == 0 {
         return 0;
     }
-    let reject_below = n.wrapping_neg() % n; // 2^32 mod n
     loop {
-        let r = u32::from_le_bytes(random_bytes::<4>());
-        if r >= reject_below {
-            return r % n;
+        if let Some(v) = accept(u32::from_le_bytes(random_bytes::<4>()), n) {
+            return v;
         }
     }
 }
@@ -363,10 +368,17 @@ mod tests {
         };
         let p = generate_passphrase(&o).unwrap();
         for w in p.split(' ') {
-            let first = w.chars().next().unwrap();
+            // Compared in place: no copy of the generated word is made.
+            let mut chars = w.chars();
+            let first = chars.next().unwrap();
+            let rest = chars.as_str();
             assert!(first.is_ascii_uppercase());
-            let lowered = format!("{}{}", first.to_ascii_lowercase(), &w[1..]);
-            assert!(list.contains(lowered.as_str()), "rest of word changed");
+            let first = first.to_ascii_lowercase() as u8;
+            assert!(
+                list.iter()
+                    .any(|l| l.as_bytes()[0] == first && &l[1..] == rest),
+                "rest of word changed"
+            );
         }
     }
 
@@ -435,6 +447,25 @@ mod tests {
         for c in counts {
             assert!((9_500..=10_500).contains(&c), "bucket count {c}");
         }
+    }
+
+    #[test]
+    fn accept_rejects_the_uneven_tail_for_10() {
+        // 2^32 = 429496729 * 10 + 6, so the last 6 values (4294967290..) must be rejected.
+        assert_eq!(accept(0, 10), Some(0));
+        assert_eq!(accept(4_294_967_289, 10), Some(9));
+        assert_eq!(accept(4_294_967_290, 10), None);
+        assert_eq!(accept(u32::MAX, 10), None);
+    }
+
+    #[test]
+    fn accept_rejects_the_uneven_tail_for_2_pow_31_plus_1() {
+        // Only one multiple of n fits, so 2^31 + 1 and everything above it is rejected.
+        let n = (1u32 << 31) + 1;
+        assert_eq!(accept(0, n), Some(0));
+        assert_eq!(accept(1 << 31, n), Some(1 << 31));
+        assert_eq!(accept(n, n), None);
+        assert_eq!(accept(u32::MAX, n), None);
     }
 
     #[test]
