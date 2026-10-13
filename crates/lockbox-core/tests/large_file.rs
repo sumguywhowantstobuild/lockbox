@@ -125,9 +125,17 @@ fn large_file_round_trip_4_gib() {
 
     let cancel = CancelToken::new();
     let mut vault = open_light_vault(&temp.path().join("vault"));
-    // The peak only ever rises, so this is what unlocking alone cost (64 MiB of Argon2).
+    // The peak only ever rises: this is the high-water mark so far, which includes the process
+    // baseline, the 1 MiB source buffer and the 64 MiB Argon2 run of the unlock.
     let unlock_peak = peak_memory_bytes();
-    println!("peak memory after unlock, before any file work: {unlock_peak:?} bytes");
+    println!(
+        "peak after unlock (includes process baseline and the source buffer): {unlock_peak:?} bytes"
+    );
+    assert_eq!(
+        unlock_peak.is_some(),
+        cfg!(windows),
+        "the memory reading after unlock must work exactly where it is supported"
+    );
     let item = vault.new_file_item(None, &source, &cancel).unwrap();
     println!("imported: {:?}", started.elapsed());
     let file = vault.get_item(&item).unwrap().attachments[0].file_id;
@@ -141,8 +149,11 @@ fn large_file_round_trip_4_gib() {
 
     let peak = peak_memory_bytes();
     println!("total {:?}; peak memory {peak:?} bytes", started.elapsed());
-    // A failed Windows call must not pass as "not measured".
-    assert_eq!(peak.is_some(), cfg!(windows));
+    assert_eq!(
+        peak.is_some(),
+        cfg!(windows),
+        "the final memory reading must work exactly where it is supported"
+    );
     assert_eq!(export_len, LEN);
     assert_eq!(
         export_hash, source_hash,
@@ -154,10 +165,14 @@ fn large_file_round_trip_4_gib() {
             assert!(end < MAX_PEAK_BYTES, "peak memory was {end} bytes");
             // The end peak is dominated by the unlock, so the honest claim is that the
             // streaming of 4 GiB in and out never pushed memory above the unlock peak.
-            println!(
-                "peak {end} bytes against {unlock} bytes at unlock: streaming raised it by {} bytes",
-                end.saturating_sub(unlock)
-            );
+            if end == unlock {
+                println!("streaming never pushed memory above the unlock peak ({unlock} bytes)");
+            } else {
+                println!(
+                    "peak {end} bytes after streaming, {unlock} bytes after unlock: {} bytes higher",
+                    end.saturating_sub(unlock)
+                );
+            }
         }
         _ => println!("peak memory is not measured on this platform; that check is skipped"),
     }
