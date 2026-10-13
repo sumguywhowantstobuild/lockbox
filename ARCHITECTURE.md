@@ -13,8 +13,8 @@ can be reused for Android later.
 
 ## Code map
 
-Everything below is in `crates/lockbox-core/src/`. The public entry point is `Vault`. A "blob" is one stored file,
-encrypted.
+Everything below is in `crates/lockbox-core/src/`. App code should go through `Vault`; the low-level modules are public
+so the tests can build on them. A "blob" is one stored file, encrypted.
 
 | Module | Its one job |
 |---|---|
@@ -84,7 +84,8 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
 1. seals the item: JSON, padded to a multiple of 512 bytes, XChaCha20-Poly1305 with a fresh nonce (a one-time value)
    and associated data that binds vault and item ID (spec 5.4);
 2. writes it with `atomic_write` (hidden temp file in the same folder, flushed, unhidden, swapped over the target);
-3. only then replaces the in-memory copy and rebuilds the search index. If the write fails, memory is unchanged.
+3. only then replaces the in-memory copy and rebuilds the search index. If the write fails, the file is read back and
+   memory takes what is on disk (the old item, or the new one if it did land), so the two always agree.
 
 ### Import and export a file
 - **Import** (`attach_file`, `new_file_item`, `replace_attachment`): check length and free space, encrypt chunk by chunk
@@ -99,38 +100,44 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
   another item still attaches), then delete the item file. A crash in between is finished at the next unlock.
 
 ### Passwords and the recovery key
-`change_password` derives a new key with a fresh salt and writes `vault.json`, then `.bak`. `regenerate_recovery`
-writes `.bak` first, then `vault.json`, so the primary file never holds a secret the user did not receive. Neither
-changes the vault key (spec 5.3).
+`change_password` derives a new key with a fresh salt (a random value mixed into the password) and writes `vault.json`,
+then `.bak`. `regenerate_recovery` writes `.bak` first, then `vault.json`, so a failed write never leaves `vault.json`
+holding a secret the user did not receive. (If the process dies after both writes but before the caller shows the new
+secret, it is lost; the password still works.) Neither changes the vault key (spec 5.3).
 
 ## Rules the code must keep
 
 1. **All writes go through `atomic_write` or `replace_file`.** Nothing is written in place. A file gets its final name
    only by one of these two (header and item files by `atomic_write`; blobs and exports by a temp file and
-   `replace_file`), and a folder only by `rename_dir_no_replace`. (The empty `.lock` marker holds no data and is the
-   one exception.) Spec 6.2.
+   `replace_file`), and a folder only by `rename_dir_no_replace`. That same no-replace rename also moves blobs into and
+   out of `files/orphaned/` during cleanup; it is a rename, not a write. (The empty `.lock` marker holds no data and is
+   the one exception.) Spec 6.2.
 2. **`unsafe` only in `fsio::windows`.** (`unsafe` marks Rust code the compiler cannot check.) The crate root has
    `#![deny(unsafe_code)]`; that one module opts out, and each block carries a comment saying why it is sound.
-3. **Repair only what was verified.** The other header copy is overwritten only when the header that unlocked passed
-   its MAC, and the other copy is missing or unreadable, or is the same vault with an identical slot that this unlock
-   could not check. Otherwise both files stay as they are. Spec 6.3.
+3. **Repair only what was verified.** The other header copy is overwritten only when the header that unlocked passed its
+   MAC, and the other copy is missing or unparseable (never a file that failed to read for another reason, and never a
+   newer-format file), or is the same vault with an identical slot that this unlock could not check. Otherwise both
+   files stay as they are. Spec 6.3.
 4. **Nothing referenced is deleted automatically.** Deletion needs an intent written into an authenticated item
    (`purging`, `retired_blobs`). Unreferenced blobs are moved to `files/orphaned/`, never deleted, and not even moved
    if any item is damaged. Damaged items are never deleted. Cleanup refuses to work through a linked `items/` or
    `files/` folder. Spec 6.4.
-5. **Secrets live in `Zeroizing` buffers (memory wiped when released) or types that wipe themselves.** `Key32` is not
-   `Clone`, `Display` or serialisable. Sealing and opening items happens inside one pre-sized wiped buffer.
+5. **Secrets live in `Zeroizing` buffers (memory wiped when released) or types that wipe themselves.** `Key32` cannot be
+   copied, printed or saved by accident (no `Clone`, `Display` or serde). Sealing and opening items happens inside one
+   pre-sized wiped buffer.
 6. **No secrets in `Debug`, `Display` or errors.** Secret types print `<redacted>`; `CoreError` messages are fixed
-   strings; library error text that could quote data is replaced before it is passed on (requirement R5).
-7. **No hand-written cryptography.** Only the RustCrypto crates listed in
-   [SECURITY.md](SECURITY.md#how-lockbox-encrypts). The one thing written here is the small encoding around them (IDs,
-   associated data, base64).
+   wording with no input in them; library error text that could quote data is replaced before it is passed on
+   (requirement R5).
+7. **No hand-written cryptography.** Only the RustCrypto crates (a family of well-reviewed Rust encryption libraries)
+   listed in [SECURITY.md](SECURITY.md#how-lockbox-encrypts). The one thing written here is the small encoding around
+   them (IDs, associated data, base64).
 8. **One shared version of each piece of logic.** One XChaCha20-Poly1305 call (`aead.rs`), one random source and one
    HKDF helper (`secret.rs`), one retry helper and one atomic write (`fsio`), one timestamp
    formatter (`vault/naming.rs`). Fix a bug once, there.
 9. **Untrusted input is checked before work is done.** File sizes, JSON depth, Argon2 settings and version numbers are
    checked before parsing or deriving anything; an unknown or newer format is refused, never guessed at.
-10. **Disk first, memory second.** A change reaches the in-memory vault only after its file is written.
+10. **Disk first, memory second.** A change reaches the in-memory vault only after its file is written; after a failed
+    write, memory re-reads the file so it matches what is on disk.
 11. **Persistent formats are pinned by tests.** Associated-data bytes, key slots, the header MAC, item plaintext and
     the recovery-key display each have fixed expected values, so a refactor cannot silently change them.
 

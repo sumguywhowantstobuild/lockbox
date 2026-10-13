@@ -27,8 +27,8 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
   lanes, tuned to about one second on the PC that created the vault. A vault file asking for settings outside the
   accepted range is refused before any work starts.
 - **No secrets in error messages or logs (R5).** Error messages are written by us and never include what was typed or
-  stored; secret types print `<redacted>`. The property tests feed random and damaged input and check that no error
-  repeats it.
+  stored; secret types print `<redacted>`. The property tests feed random and damaged input and check, for inputs of 8
+  bytes or more, that no error contains the input or any 8-byte stretch of it.
 
 ## What Lockbox does not protect against
 
@@ -47,8 +47,8 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
   not deleted. An authenticated manifest (a tamper-proof list of every file) is left for the future sync design.
 - **Copies the operating system makes.** Windows may write secrets to the pagefile (memory it parks on disk), the
   hibernation file (memory saved when the PC hibernates), crash dumps (memory saved when a program crashes) or the print
-  spooler (the queue of print jobs), and Lockbox cannot control that. Use full-disk encryption (BitLocker). Deleted
-  files on an SSD are not guaranteed to be erased.
+  spooler (the queue of print jobs), and Lockbox cannot control that. Use full-disk encryption (BitLocker on Windows Pro
+  and above; "Device encryption" on supported Home PCs). Deleted files on an SSD are not guaranteed to be erased.
 - **Copies made by the interface and other programs.** Text typed or shown in the app's window passes through the
   webview's memory (a browser engine, planned for the UI), which cannot be wiped as reliably as Rust's. Files you open
   with another program may be copied by that program (autosaves, recent-file lists).
@@ -62,7 +62,7 @@ Only the Rust core exists (Plan 1). Requirements that need the desktop app are n
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp) |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | In the core, plaintext is written only when you save a decrypted copy to a place you choose. The app's "Open" and recovery-key printing do not exist yet |
+| R4 No plaintext written except on request | In the core, plaintext is written only when you save a decrypted copy to a place you choose. A crash during that save can leave a hidden partial copy behind (see "Honest limits"). The app's "Open" and recovery-key printing do not exist yet |
 | R5 No secrets in logs and errors | Built in the core (there is no logging yet) |
 | R6 Locking stops access | **Not built.** Locking lives in the desktop app (Plan 3). The core only offers a cancel switch for long operations |
 | R7 Documented limits | This file |
@@ -72,9 +72,9 @@ Only the Rust core exists (Plan 1). Requirements that need the desktop app are n
 Everything comes from well-reviewed libraries. We wrote no cryptography ourselves, only the small encoding around
 it (IDs, the extra context each encryption is bound to, base64). Exact versions are pinned in `Cargo.lock`.
 
-- **Password to key:** Argon2id (a deliberately slow, memory-hungry way to turn a password into a key), crate
-  `argon2`. The password is first normalised to Unicode NFC, so the same text typed on different keyboards unlocks the
-  same vault.
+- **Password to key:** Argon2id (a deliberately slow, memory-hungry way to turn a password into a key), crate `argon2`.
+  The password is first normalised to Unicode NFC (one standard way of writing letters that have accents), so the same
+  text typed on different keyboards unlocks the same vault.
 - **Vault key:** 256 random bits from the operating system (`getrandom`), made once per vault. It is stored only
   wrapped (encrypted) in two **key slots**, one opened by the password key and one by the recovery key.
 - **Recovery key:** 256 random bits plus a 4-bit typo check, shown as 52 characters. The key is derived from it with
@@ -87,12 +87,19 @@ it (IDs, the extra context each encryption is bound to, base64). Exact versions 
 - **Header stamp:** HMAC-SHA256 (crate `hmac`) over the readable header fields, with a key derived from the vault key.
 - **Wiping memory:** the `zeroize` crate clears keys and passwords when they are dropped.
 
-The formats are pinned by tests, including known-answer tests against published test vectors where they exist.
+The formats are pinned by tests, including known-answer tests (our output checked against answers published by the
+algorithms' authors) where such answers exist.
 
 ## Honest limits
 
-These are the weak spots and shortcuts we know about, each with a short reason why we accept it. Where a limit is a
-deliberate shortcut in the code, a `shortcut:` comment sits next to it.
+These are the weak spots and shortcuts we know about, each with a short reason why we accept it. Some of them are marked
+in the code with a `shortcut:` comment.
+
+### Review status
+
+- **Not independently audited.** No independent security expert has audited Lockbox, and none is planned (spec 11).
+  *Accepted:* the project's answer is tests, a written walk-through of this file against the code before each release,
+  and honesty about what is not covered.
 
 ### Memory and wiping
 
@@ -105,52 +112,76 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **Moving a key leaves a copy.** Passing a `Key32` by value can leave an unwiped copy on the stack (short-term working
   memory). *Accepted:* inherent to Rust; the vault key is shared by reference instead of copied.
 - **The JSON library's scratch buffers.** When an item contains characters that JSON escapes (quotes, backslashes, line
-  breaks, some non-English letters), `serde_json` copies the text through scratch buffers (temporary working memory) it
-  does not wipe, in a password or note. *Accepted:* fixing it means writing our own JSON reader or patching the library;
-  plain text is copied straight into wiped fields.
+  breaks, tabs and other control characters), `serde_json` copies the text through scratch buffers (temporary working
+  memory) it does not wipe, in a password or note. *Accepted:* fixing it means writing our own JSON reader or patching
+  the library; plain text is copied straight into wiped fields.
 - **JSON error messages can quote text.** If an item that passed authentication is nevertheless malformed, the library's
   error text may quote part of it into an unwiped string before we replace it with a fixed message. *Accepted:*
   reaching it needs malformed content that was authenticated, which means a bug of ours or someone who already holds the
   vault key; guarding every field would be large and error-prone.
-- **HKDF leaves two temporary blocks.** `hkdf` 0.13 does not wipe its internal pseudo-random key or its last output
-  block. It affects deriving the recovery key and the header-stamp key. *Accepted:* wiping it means hand-writing HKDF
-  (forbidden) or patching the crate; exploiting it needs a live memory read. We will upgrade when a release wipes them.
-- **Titles, usernames and URLs are not wiped.** Item titles, login usernames and URLs, and the search index built from
-  them, are ordinary strings and stay in memory until freed, even after locking. Passwords and notes are wiped.
-  *Accepted:* these are less secret, and wiping only the search copy would protect nothing.
+- **HKDF leaves two temporary blocks.** `hkdf` 0.13 does not wipe its internal working key or its last output block. It
+  affects deriving the recovery key and the header-stamp key. *Accepted:* wiping it means hand-writing HKDF (forbidden)
+  or patching the crate; exploiting it needs a live memory read. We will upgrade when a release wipes them.
+- **Titles, usernames, URLs and attached file names are not wiped.** Item titles, login usernames and URLs, the names of
+  attached files (which can be revealing, such as a client's contract), and the search index built from the first three,
+  are ordinary strings and stay in memory until freed, even after locking. Passwords and notes are wiped. *Accepted:*
+  these are less secret than passwords, and wiping only the search copy would protect nothing.
+- **The cipher keeps its own copy of the key while it works.** Each encrypt or decrypt call builds a cipher object that
+  holds a copy of the key (spec 5.6). Lockbox builds it for that one operation and drops it straight away, and the
+  `chacha20poly1305` library's wiping option is on. *Accepted:* the copy lives only for the call and is wiped when
+  dropped.
 - **Other libraries' internals.** How well Argon2, SHA-2 and HMAC wipe their own working memory is up to those
   libraries. We turn on their wiping options where they exist. *Accepted:* part of using reviewed libraries.
 - **If the system's random source fails, Lockbox stops** (it "panics", Rust's word for a controlled crash) rather than
   continue without randomness. *Accepted:* continuing would be worse.
-- **Unlocking uses a lot of memory for a moment.** Argon2id deliberately takes 64 to 256 MiB while it runs. The
-  200 MB "flat memory" check for big files was measured with the smallest accepted setting, not a typical vault's.
-  *Accepted:* the memory cost is what makes guessing expensive.
+- **Unlocking uses a lot of memory for a moment.** Argon2id deliberately takes 64 to 256 MiB while it runs for a vault
+  Lockbox creates, and Lockbox will read a vault file that asks for up to 1 GiB, so unlocking such a file can use that
+  much. The 200 MB "flat memory" check for big files was measured with the smallest accepted setting, not a typical
+  vault's. *Accepted:* the memory cost is what makes guessing expensive, and the upper limit stops a damaged or hostile
+  file from asking for more.
 
 ### Crashes, power cuts and half-finished writes
 
 - **Power loss is assumed safe, not proven.** Windows renames over an existing file are relied on to be atomic (all or
-  nothing), though Microsoft does not formally document it. Crashes of Lockbox itself are tested; power cuts are not
-  (spec 6.2). *Accepted:* it is how nearly all software saves files on Windows.
+  nothing), though Microsoft does not formally document it. Crashes of Lockbox itself are tested by simulation (the
+  tests make each step fail in turn and rebuild the folder a crash would leave); no process is actually killed and power
+  cuts are not tested (spec 6.2). *Accepted:* it is how nearly all software saves files on Windows.
+- **A crash during "Save a copy" can leave a decrypted file behind.** The copy is first built in a hidden temp file
+  (`.<random>.lockbox-partial`) beside the destination, and moved into place only after every chunk has been checked. If
+  Lockbox crashes, is killed or loses power while that temp file exists, it stays there as plaintext (part of the file
+  you chose to export). The core has no output journal yet (it has the hook only; the desktop app adds the real one in
+  Plan 3, spec 7.2), and the cleanup at unlock only tidies inside the vault folder. A normal failure or cancel removes
+  the temp file. *Accepted:* it is a copy you asked to have in plaintext, it is hidden, and the journal that deletes
+  such leftovers at the next launch is planned.
 - **A stale `.bak` after a half-failed password change.** The header is stored twice (`vault.json` and
   `vault.json.bak`). If a password change writes the first and fails on the second, the change reports an error and
-  `.bak` still holds the old password slot. The old password may then open the vault, from `.bak`, until the next
-  successful unlock repairs it. There is no key rotation. *Accepted:* it follows from the two-copy design; and because a
-  password change does not change the vault key, an old password plus any older copy of the header already works
-  (see "Old copies of the vault").
+  `.bak` still holds the old password slot. Until the next unlock, either password opens the vault, and whichever is
+  used first wins: the new password makes Lockbox repair `.bak`, but the old password opens from `.bak` and then copies
+  it over `vault.json`, silently undoing the password change (the only sign is the "opened from the backup header"
+  notice, and the new password stops working). There is no key rotation. *Accepted:* it follows from the two-copy
+  design; and because a password change does not change the vault key, an old password plus any older copy of the header
+  already works (see "Old copies of the vault").
 - **The regenerate-recovery double fault.** A new recovery key is written to `.bak` first and then `vault.json`. If the
   second write fails, the old recovery key keeps working and the new one is never shown. If `vault.json` is then
-  destroyed before the next repair, `.bak` takes over, and its recovery slot belongs to the key that was never shown,
-  so recovery is lost (the password still works and a new recovery key can be made). *Accepted:* it needs two failures
-  in a row; the other write order could leave a vault with no working recovery key at all.
+  destroyed before the next repair, `.bak` takes over, and its recovery slot belongs to the key that was never shown, so
+  recovery is lost (the password still works and a new recovery key can be made). *Accepted:* it needs two failures in a
+  row; the other write order could leave a vault with no working recovery key at all.
+- **A new recovery key can be lost if the process dies right after writing it.** If Lockbox is killed after both header
+  files are written but before the caller shows the new recovery key, the old key no longer works and the new one was
+  never seen (the password still works and a new recovery key can be made). *Accepted:* a very narrow window, the same
+  kind as the "create reports an error after publishing" case below.
 - **A foreign `.bak` can take over an unreadable `vault.json`.** If `vault.json` cannot be read and the `.bak` is from a
   different vault that has the same password, it unlocks and repairs `vault.json`; the items then show as damaged.
   *Accepted:* the original header was already unreadable and it needs the same password.
-- **A changed header can be accepted by a later change.** If the header was edited outside Lockbox (the "changed outside
-  Lockbox" warning), changing the password or regenerating the recovery key before answering that warning signs the
-  edited name or date again. *Accepted for now:* the app must make the user accept or decline first (Plan 3).
-- **Re-reading the header after a failed write.** Lockbox re-reads `vault.json` to learn what is live. If that re-read
-  also fails, or the file was swapped in that instant, it keeps its previous idea of the header. *Accepted:* a double
-  fault, or an outside actor at that exact moment.
+- **A later header change can copy an edited header into both files.** If the header was edited outside Lockbox (the
+  "changed outside Lockbox" warning), changing the password or regenerating the recovery key before answering that
+  warning writes the edited name or date into both header files, so the untouched copy in `.bak` is overwritten. The
+  tamper stamp is not renewed, so the warning keeps appearing until the user accepts it. *Accepted for now:* the app
+  must make the user accept or decline the warning before any other header change (Plan 3).
+- **Re-reading the header after a failed write.** After a failed header write, Lockbox reloads `vault.json` and adopts
+  whatever header it now holds, without checking its vault ID or its tamper stamp; if the reload itself fails, it keeps
+  its previous header. Reaching the first case needs an outside actor to change `vault.json` during the failed write.
+  *Accepted:* a narrow window that needs write access to the folder, and the next unlock checks the stamp again.
 - **Odd header files read as damaged.** A `vault.json` saved with a byte-order mark (an invisible marker some editors
   add), or a version number out of range, reads as damaged rather than "update Lockbox", so Lockbox may fall back to
   `.bak` and repair the unreadable file from it. *Accepted:* only a header that passed its checks is ever copied over
@@ -160,8 +191,10 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   that instant can make the first report an error after the vault was already created (the password still works and
   the recovery key can be regenerated). *Accepted:* it takes two instances at the same moment, and a retry fixes it.
 - **Windows hidden-attribute edge cases.** Lockbox hides its temporary files and un-hides them before moving them into
-  place; a few unusual cases (a file with only the hidden attribute, a failure on a missing file) are not tested.
-  *Accepted:* if one went wrong, the write would report an error and clean up its temp file, not lose data.
+  place. A few unusual cases are not tested: a file with only the hidden attribute, a failure on a missing file, and
+  un-hiding a temp file that is still open (it works with the sharing Rust's standard library uses, but would fail if
+  the file were opened more restrictively). *Accepted:* if one went wrong, the write would report an error and clean up
+  its temp file, not lose data.
 
 ### Someone who can already write inside your vault folder
 
@@ -171,10 +204,11 @@ Lockbox defends.
 - **Swapping the export destination.** Before saving a decrypted copy, Lockbox checks that the destination is not
   inside the vault. A local attacker could swap a folder link into place between that check and the save.
   *Accepted:* the window is tiny and the attacker already has the access to cause harm.
-- **Linked `items/` or `files/` folders.** Cleanup refuses to work through a link or junction (a Windows folder link)
-  and reports it only as a failed cleanup. Unlocking, purging and exporting still work through one. *Accepted:*
-  reaching it needs write access inside the vault folder already; the guard covers the steps that delete or move
-  files (cleanup, deleting quarantined files).
+- **Linked `items/` or `files/` folders.** Cleanup and deleting quarantined files refuse to work through a link or
+  junction (a Windows folder link) and report it only as a failed cleanup. Unlocking, saving items, importing, exporting
+  and purging still work through one. *Accepted:* reaching it needs write access inside the vault folder already; the
+  guard covers the automatic steps that move or delete files, and a purge you ask for only deletes `<random id>.blob`
+  files that an authenticated item names.
 - **Non-Windows rename race (Android only).** On non-Windows systems "rename without replacing" is a check followed by a
   rename, so a racing outside process could cause a quarantined file to be replaced. Replacing a file there can also
   report failure after the new file is already in place. *Accepted:* the non-Windows code only ships with the Android
@@ -184,38 +218,42 @@ Lockbox defends.
 
 - **No rollback protection (spec 6.6).** Described under "What Lockbox does not protect against". *Accepted:* it needs
   the authenticated manifest of the sync design.
-- **Some recovery-key typos are not caught.** The 4-bit check catches a mistyped symbol 15 times in 16; the rest
-  simply fail to unlock. *Accepted:* a short check keeps the key easy to type.
+- **Some recovery-key typos are not caught.** The 4-bit check catches a mistyped symbol about 15 times in 16 (the test
+  requires at least 14 in 16); the rest simply fail to unlock. *Accepted:* a short check keeps the key easy to type.
 - **Guess cost can end up below the 1-second target.** Calibration times each size once, so a noisy PC can pick
   settings that are cheaper than intended, but never below the minimum (64 MiB, 3 passes). A password change keeps the
   vault's existing settings rather than calibrating again. *Accepted:* the floor is the guarantee; the target is a goal.
-- **Not independently audited.** No independent security expert has audited Lockbox, and none is planned (spec 11).
-  *Accepted:* the project's answer is tests, a written walk-through of this file against the code before each release,
-  and honesty about what is not covered.
 
 ### Smaller shortcuts
 
-- Every stored file is labelled `application/octet-stream`; there is no file-type table yet.
+- Every stored file is labelled `application/octet-stream`; there is no file-type table yet. *Accepted:* the label is
+  only display information and the file's bytes are unaffected; how files are opened is decided with the interface.
 - A stored file's name is kept as text; a name that is not valid Unicode (very rare on Windows) is stored with
-  replacement characters.
+  replacement characters. *Accepted:* the name is only a label shown to you, and an export goes to the name you choose.
 - An item can point at a collection whose file is damaged or missing; the link is kept, so it reattaches if the
-  collection is restored from a backup, and the interface is meant to show such items under "no collection".
-- Search does not fold accents: "e" does not find "é".
+  collection is restored from a backup, and the interface is meant to show such items under "no collection". *Accepted:*
+  refusing to restore the item would trap it in the trash behind a file that may never be repaired.
+- Search does not fold accents: "e" does not find "é". *Accepted:* a convenience gap, not a security one; the interface
+  may add it.
 - The core does not cap password length (the interface will); a very long password only costs time and memory.
-- A vault's creation time is stored as given and not format-checked. It is display-only and covered by the header stamp.
-- Windows file-system limits (such as FAT32's 4 GiB file size) are checked through the volume's reported limits and
-  tested with a simulated volume, not on real FAT media. Removable, FAT32 and network drives are meant to be refused by
-  the desktop app (Plan 3), which does not exist yet.
-- The word list has four hyphenated words (such as "t-shirt") that look like two words with the default `-` separator.
-  The password generator's guaranteed one-of-each-character-class rule favours small classes very slightly; the effect
-  on strength is negligible at length 8 and up.
+  *Accepted:* capping is an interface decision, and the only one who pays is the person typing it.
+- A vault's creation time is stored as given and not format-checked. *Accepted:* it is display-only, covered by the
+  header stamp, and checking it would need a date library for no gain.
+- File-system limits (such as FAT32's 4 GiB file size) are checked through the volume's reported limits and tested with
+  a simulated volume, not on real FAT media. *Accepted:* the check is simple arithmetic on what the system reports;
+  testing on real media waits for the desktop app that refuses those drives.
+- The word list has four hyphenated words (such as "t-shirt") that look like two words with the default `-` separator,
+  and the password generator's guaranteed one-of-each-character-class rule favours small classes very slightly.
+  *Accepted:* neither changes strength in a way that matters (negligible at length 8 and up); the list is used exactly
+  as published.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the desktop shell
-(locking, idle timer, clipboard clearing, dialogs, the "Open" folder, the output journal that cleans up leftover
-decrypted files after a crash), backup and restore, opening a backup read-only, the vault registry and the UI.
-Until read-only opening exists, unlocking a vault can write to it (header repair and cleanup).
+These are described in the spec but do not exist, so nothing here should be relied on yet: the desktop shell (locking,
+idle timer, clipboard clearing, dialogs, the "Open" folder, the output journal that cleans up leftover decrypted files
+after a crash), backup and restore, opening a backup read-only, the vault registry, the checks on where a vault may live
+(refusing removable, FAT32 and network drives; warning about OneDrive, Google Drive and Dropbox folders, spec 6.10) and
+the UI. Until read-only opening exists, unlocking a vault can write to it (header repair and cleanup).
 
 ## How this is checked
 

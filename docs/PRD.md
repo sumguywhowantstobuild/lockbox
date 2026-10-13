@@ -18,7 +18,8 @@ about its limits.
 
 ## Target users
 
-Taken from the spec's framing; nothing here goes beyond it.
+Drawn from the spec's framing. The first two follow it directly; the third is inferred from the spec calling Lockbox a
+public portfolio project.
 
 - **A privacy-minded individual on Windows** who wants to keep passwords and notes on their own PC: no cloud, no
   server, nobody else holding the data.
@@ -34,9 +35,13 @@ other password managers (see "Not in v1" under [Scope](#scope)).
 
 | Phase | Ships | Design choice made now |
 |---|---|---|
-| **1 (v1)** | Windows app for Ariel | Rust core is a separate library with no Windows or Tauri code |
+| **1 (v1)** | Windows app for Ariel | Rust core is a separate library with no Windows or Tauri code\* |
 | 2 | Share with friends: download website, code-signed installer, auto-updates | Vault format is versioned; app refuses vaults newer than itself |
 | 3 | Android app + sync between devices without a server | Vault = folder of small independent files, a reasonable base for sync |
+
+\* The core has one small Windows-only file-system module (`fsio/windows.rs`) behind a platform switch, with a portable
+fallback (`fsio/portable.rs`); it has no Tauri code. The sentence above is the spec's wording; Ariel decides the final
+wording.
 
 **Sync is a future protocol design, not a v1 property.** Revision numbers alone do not resolve concurrent edits,
 deletion conflicts, partially copied files, or two devices changing the password. Phase 3 needs its own spec covering
@@ -103,10 +108,10 @@ implementation plan, not the spec. Plans 3 and 4 are the desktop shell and the U
 | Measure | Target | Where it comes from | How it is checked |
 |---|---|---|---|
 | Opening a big vault | 5 000 items: unlock under 3 s (not counting the roughly 1 s password check), search under 50 ms, release build | Plan 1 | `five_thousand_items_fast` (run on purpose, see the [README](../README.md#build-and-test)) |
-| Big files | A file of 4 GiB + 1 byte goes in and comes out with the same SHA-256 (a fingerprint of its contents), and memory stays flat (peak under 200 MB) | Spec 3 and 9 (256 GiB limit; a multi-GB local test before release); the 4 GiB size and 200 MB limit are from Plan 1 | `large_file_round_trip_4_gib` (run on purpose) |
+| Big files | A file of 4 GiB + 1 byte goes in and comes out with the same SHA-256 (a fingerprint of its contents), and memory stays flat (peak under 200 MB) | [Scope](#scope) (256 GiB limit) and spec 9 (a multi-GB local test before release); the 4 GiB size and 200 MB limit are from Plan 1 | `large_file_round_trip_4_gib` (run on purpose) |
 | Cost of guessing a password | Each guess costs one Argon2id run (a deliberately slow password-to-key step) of at least 64 MiB, 3 iterations, parallelism 4, calibrated to about 1 s | Spec R3 and 5.2 | Unit tests on the settings and their bounds |
-| Typos in the recovery key | A mistyped recovery key is caught 15 times in 16, before any unlock attempt | Spec 5.2 | Test in the core's recovery module |
-| Auto-lock and clipboard defaults | Lock after 5 minutes idle; clear the clipboard after 30 seconds | Spec 7.1 (Settings) | Desktop app tests (Plan 3) |
+| Typos in the recovery key | A mistyped recovery key is caught about 15 times in 16, before any unlock attempt | Spec 5.2 | Test in the core's recovery module (it requires at least 14 in 16) |
+| Auto-lock and clipboard defaults | Lock after 5 minutes idle; clear the clipboard after 30 seconds | [Screens](#screens) (Settings) | Desktop app tests (Plan 3) |
 | Backups of any size | An archive over 4 GiB backs up and restores (ZIP64 is the zip format for archives that big) | Spec 9 | Backup and restore tests (Plan 2) |
 | "Reviewed" release | All five review conditions hold, and each of R1–R7 is walked through against `SECURITY.md` before a release | [Spec 1](superpowers/specs/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox) | Written sign-off by Ariel before each release |
 | v1 done | Every v1 feature works on Windows and the five review conditions hold | Spec 1 | All of the above |

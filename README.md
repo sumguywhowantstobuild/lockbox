@@ -4,8 +4,8 @@
 
 Lockbox is a password manager and encrypted file vault for Windows that keeps everything on your own PC: no server, no
 cloud. Besides passwords and notes, it is meant to store real files such as client contracts, design files and project
-archives, grouped by client or project. It is an open-source portfolio project, built to production standards: tested,
-reviewed and honest about its limits.
+archives, grouped by client or project. It is an open-source portfolio project, aiming for production standards: tested,
+documented and honest about its limits.
 
 > **Status: work in progress. Not independently audited. Don't store real passwords in it yet.**
 >
@@ -14,7 +14,8 @@ reviewed and honest about its limits.
 
 ## What exists today
 
-Only the first of five planned stages is built, and there is nothing to run yet.
+Only the first of five planned stages is built, and there is nothing to run yet. Together the five plans make up Phase
+1, the Windows app (see the [phases](docs/PRD.md#phases)).
 
 | Plan | What it delivers | State |
 |---|---|---|
@@ -22,19 +23,19 @@ Only the first of five planned stages is built, and there is nothing to run yet.
 | 2 | Backup, restore, and opening a backup read-only | Not started |
 | 3 | Desktop shell (built with Tauri, a toolkit for desktop apps): sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Not started |
 | 4 | The user interface (clickable design mockups first) | Not started |
-| 5 | Release: installer, final README and security review | Not started |
+| 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
 
 The core can already create and unlock vaults (with the password, or with the recovery key: a long code shown once that
 opens the vault if you forget the password), change the password, make a new recovery key, keep logins, notes, files and
-collections as encrypted items, store files of up to 256 GiB in encrypted chunks, tidy up after a crash, search items in
-memory and generate passwords and passphrases. It has no screens.
+collections as encrypted items, store files in encrypted chunks (the limit is 256 GiB; the largest file tested is just
+over 4 GiB), tidy up after a crash, search items in memory and generate passwords and passphrases. It has no screens.
 
 ## Build and test
 
 You need Windows (developed on Windows 11; the code also builds on Linux, where CI, the automatic checks GitHub runs,
-tests the non-Windows file code), Git, and Rust. On Windows, Rust also needs Microsoft's C++ linker: Visual Studio 2022
-Build Tools with "Desktop development with C++". Setup details and troubleshooting are in
-[docs/SETUP.md](docs/SETUP.md).
+tests the non-Windows file code), Git, and Rust. The security scan and its self-tests also need Node.js. On Windows,
+Rust also needs Microsoft's C++ linker: Visual Studio 2022 Build Tools with "Desktop development with C++". Setup
+details and troubleshooting are in [docs/SETUP.md](docs/SETUP.md).
 
 ```
 rustup toolchain install     # installs the Rust version this project pins (1.99.0), from rust-toolchain.toml
@@ -47,6 +48,7 @@ The same checks that CI runs on every push:
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+node --test "scripts/*.test.mjs"   # the scanner's own tests (needs Node.js)
 node scripts/scan.mjs        # security scan; needs gitleaks, semgrep and osv-scanner, see docs/SETUP.md
 ```
 
@@ -66,9 +68,9 @@ Windows.
 
 - Read [SECURITY.md](SECURITY.md): what Lockbox protects against, what it doesn't, and every known limit. It also says
   how to report a vulnerability privately.
-- Use full-disk encryption (BitLocker, built into Windows). Windows may copy secrets to the pagefile (memory it parks
-  on disk), the hibernation file and crash dumps (memory copies saved when a program crashes), and Lockbox cannot
-  control that.
+- Use full-disk encryption (BitLocker on Windows Pro and above; "Device encryption" on supported Home PCs). Windows may
+  copy secrets to the pagefile (memory it parks on disk), the hibernation file and crash dumps (memory copies saved when
+  a program crashes), and Lockbox cannot control that.
 - The design asks for five things before a release counts as "reviewed": passing tests in CI, a clean security scan,
   every change reviewed in a pull request, a written walk-through of `SECURITY.md` against the code signed off before
   each release, and this README stating plainly that the code is not independently audited. Today the tests and the scan

@@ -6,9 +6,10 @@
 //! reveals only a size bucket. The AD binds the version, vault and item id, so a file cannot
 //! be moved to another slot or vault unnoticed.
 //!
-//! Known limit: `serde_json` copies a JSON string that contains escape sequences (`\"`, `\n`,
-//! `é`...) through scratch buffers it does not wipe. Plain strings are copied straight
-//! into the wiped fields.
+//! Known limit: `serde_json` copies a JSON string that contains escape sequences (`\"`, `\\`, `\n`,
+//! tabs and other control characters) through scratch buffers it does not wipe. Plain strings
+//! (non-English letters are not escaped, so they count as plain) are copied straight into the
+//! wiped fields.
 
 use crate::ad::{encode_ad, v16};
 use crate::aead;
