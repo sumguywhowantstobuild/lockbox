@@ -8,6 +8,7 @@ pub(crate) mod aead;
 pub mod blob;
 pub mod error;
 pub mod fsio;
+pub mod generator;
 pub mod header;
 pub mod ids;
 pub mod item;
