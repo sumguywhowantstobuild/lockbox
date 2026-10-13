@@ -171,6 +171,18 @@ mod tests {
         assert_eq!(find(&decomposed, "caf\u{e9}"), [id(3)]);
     }
 
+    /// Lowercasing can change a text's length ("İ" becomes "i" + U+0307); both sides must agree.
+    #[test]
+    fn expanding_lowercase_matches_both_ways() {
+        let items = [
+            item(1, ItemKind::Note, "\u{130}stanbul trip"),
+            item(2, ItemKind::Note, "i\u{307}zmir hotel"),
+        ];
+        assert_eq!(find(&items, "i\u{307}stanbul"), [id(1)]);
+        assert_eq!(find(&items, "\u{130}zmir"), [id(2)]);
+        assert_eq!(find(&items, "\u{130}stanbul"), [id(1)]);
+    }
+
     #[test]
     fn passwords_and_notes_not_indexed() {
         let mut one = login(1, "Site", "bob", &[]);

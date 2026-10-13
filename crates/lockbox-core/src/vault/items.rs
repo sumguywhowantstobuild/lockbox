@@ -890,6 +890,9 @@ mod tests {
         assert!(matches!(result, Err(CoreError::Io(_))));
         let item = vault.get_item(&id).unwrap();
         assert_eq!((item.title.as_str(), item.revision), ("Changed", 1));
+        // Search follows memory, not the error.
+        assert!(vault.search("plans", 10).is_empty());
+        assert_eq!(vault.search("changed", 10), [id]);
         // Work continues from that state, and a reload agrees.
         let mut next = item.clone();
         next.title = "Changed again".into();
