@@ -211,8 +211,9 @@ pub fn create_hidden_temp(dir: &Path, suffix: &str) -> Result<(File, PathBuf)> {
     Ok((file, path))
 }
 
-/// The most memory this process has held in RAM at once, in bytes, or `None` where it is not
-/// measured (everywhere but Windows). Only for the large-file test; not a stable API.
+/// The most memory this process has held in RAM at once, in bytes. `None` where it is not
+/// measured (everywhere but Windows), and on Windows if the system call fails. Only for the
+/// large-file test; not a stable API.
 #[doc(hidden)]
 pub fn peak_memory_bytes() -> Option<u64> {
     sys::peak_memory_bytes()

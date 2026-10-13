@@ -163,11 +163,12 @@ fn seal_blob(data: &[u8], fref: &FileRef) -> Vec<u8> {
     sealed
 }
 
-fn open_blob(sealed: &[u8], fref: &FileRef) -> lockbox_core::Result<Vec<u8>> {
+/// Opens `sealed`, which the caller declares to be `declared_len` bytes long.
+fn open_blob(sealed: &[u8], declared_len: u64, fref: &FileRef) -> lockbox_core::Result<Vec<u8>> {
     let mut out = Vec::new();
     decrypt_stream(
         &mut &*sealed,
-        sealed.len() as u64,
+        declared_len,
         &mut out,
         &VAULT_ID,
         fref,
@@ -290,7 +291,7 @@ proptest! {
         let fref = file_ref_for(data.len() as u64);
         let sealed = seal_blob(&data, &fref);
         prop_assert_eq!(sealed.len() as u64, blob_len(data.len() as u64));
-        prop_assert_eq!(open_blob(&sealed, &fref).unwrap(), data);
+        prop_assert_eq!(open_blob(&sealed, sealed.len() as u64, &fref).unwrap(), data);
     }
 
     #[test]
@@ -314,7 +315,7 @@ proptest! {
         // A record whose size matches the input (a blob is its data plus 16 bytes), so the
         // size check passes and the chunk is what gets rejected.
         let fref = file_ref_for((bytes.len() as u64).saturating_sub(16));
-        assert_refused(open_blob(&bytes, &fref), &bytes)?;
+        assert_refused(open_blob(&bytes, bytes.len() as u64, &fref), &bytes)?;
     }
 
     #[test]
@@ -342,7 +343,11 @@ proptest! {
 
     #[test]
     fn decrypt_stream_survives_corruption(bytes in mangled(&VALID_BLOB.1[..])) {
-        let result = open_blob(&bytes, &VALID_BLOB.0);
+        // The size the record promises, not the size of what arrived: a blob that is cut or
+        // extended passes the size check and fails in the read loop, where the real bytes
+        // run out or are left over.
+        let declared = blob_len(VALID_BLOB.0.length);
+        let result = open_blob(&bytes, declared, &VALID_BLOB.0);
         if bytes == VALID_BLOB.1 {
             prop_assert!(result.is_ok());
         } else {

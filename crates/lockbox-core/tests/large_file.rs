@@ -68,7 +68,8 @@ fn hash_file(path: &Path) -> ([u8; 32], u64) {
 /// A vault whose password slot uses the cheapest Argon2 settings the reader accepts
 /// (64 MiB), built and opened through the public API. `Vault::create` calibrates up to
 /// 256 MiB, and that alone would push this process's peak memory past the limit checked
-/// below.
+/// below. It writes these same settings (65 536 KiB, 3, 4) on a machine where one run
+/// takes 1 s or more, so this is a vault `create` can produce.
 fn open_light_vault(dir: &Path) -> Vault {
     fs::create_dir_all(dir.join("items")).unwrap();
     fs::create_dir_all(dir.join("files").join("orphaned")).unwrap();
@@ -124,6 +125,9 @@ fn large_file_round_trip_4_gib() {
 
     let cancel = CancelToken::new();
     let mut vault = open_light_vault(&temp.path().join("vault"));
+    // The peak only ever rises, so this is what unlocking alone cost (64 MiB of Argon2).
+    let unlock_peak = peak_memory_bytes();
+    println!("peak memory after unlock, before any file work: {unlock_peak:?} bytes");
     let item = vault.new_file_item(None, &source, &cancel).unwrap();
     println!("imported: {:?}", started.elapsed());
     let file = vault.get_item(&item).unwrap().attachments[0].file_id;
@@ -137,15 +141,25 @@ fn large_file_round_trip_4_gib() {
 
     let peak = peak_memory_bytes();
     println!("total {:?}; peak memory {peak:?} bytes", started.elapsed());
+    // A failed Windows call must not pass as "not measured".
+    assert_eq!(peak.is_some(), cfg!(windows));
     assert_eq!(export_len, LEN);
     assert_eq!(
         export_hash, source_hash,
         "the exported file differs from the source"
     );
     println!("SHA-256 equal: {}", hex(&export_hash));
-    match peak {
-        Some(bytes) => assert!(bytes < MAX_PEAK_BYTES, "peak memory was {bytes} bytes"),
-        None => println!("peak memory is not measured on this platform; that check is skipped"),
+    match (unlock_peak, peak) {
+        (Some(unlock), Some(end)) => {
+            assert!(end < MAX_PEAK_BYTES, "peak memory was {end} bytes");
+            // The end peak is dominated by the unlock, so the honest claim is that the
+            // streaming of 4 GiB in and out never pushed memory above the unlock peak.
+            println!(
+                "peak {end} bytes against {unlock} bytes at unlock: streaming raised it by {} bytes",
+                end.saturating_sub(unlock)
+            );
+        }
+        _ => println!("peak memory is not measured on this platform; that check is skipped"),
     }
 }
 
