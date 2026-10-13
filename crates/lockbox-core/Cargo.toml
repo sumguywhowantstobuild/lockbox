@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+aead-stream = { version = "0.6", default-features = false }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "parallel", "zeroize"] }
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }

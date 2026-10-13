@@ -100,7 +100,7 @@ fn is_transient(e: &io::Error) -> bool {
     cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 5))
 }
 
-fn parent_dir(path: &Path) -> &Path {
+pub(crate) fn parent_dir(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
@@ -173,15 +173,26 @@ pub(crate) fn read_retry(path: &Path, max: usize) -> Result<Vec<u8>> {
     })?)
 }
 
-/// Creates a new, empty, hidden file `.<16 random hex chars><suffix>` in `dir`.
-/// Fails rather than reuse an existing file.
-pub fn create_hidden_temp(dir: &Path, suffix: &str) -> Result<(File, PathBuf)> {
+/// A fresh name `.<16 random hex chars><suffix>` in `dir` for a hidden temp file; nothing is created.
+/// Lets a caller record the path (e.g. in the output journal) before the file exists.
+pub fn hidden_temp_path(dir: &Path, suffix: &str) -> PathBuf {
     let hex: String = random_bytes::<8>()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let path = dir.join(format!(".{hex}{suffix}"));
-    let file = sys::create_hidden(&path)?;
+    dir.join(format!(".{hex}{suffix}"))
+}
+
+/// Creates the new, empty, hidden file `path`. Fails rather than reuse an existing file.
+pub fn create_hidden_file(path: &Path) -> Result<File> {
+    Ok(sys::create_hidden(path)?)
+}
+
+/// Creates a new, empty, hidden file `.<16 random hex chars><suffix>` in `dir`.
+/// Fails rather than reuse an existing file.
+pub fn create_hidden_temp(dir: &Path, suffix: &str) -> Result<(File, PathBuf)> {
+    let path = hidden_temp_path(dir, suffix);
+    let file = create_hidden_file(&path)?;
     Ok((file, path))
 }
 

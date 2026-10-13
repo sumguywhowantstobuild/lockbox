@@ -86,8 +86,40 @@ fn write_item_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// A new item with nothing attached, at revision 0 ("never edited").
+pub(super) fn blank_item(
+    id: ItemId,
+    kind: ItemKind,
+    title: &str,
+    collection: Option<ItemId>,
+) -> Item {
+    let now = created_at_now();
+    Item {
+        id,
+        kind,
+        title: title.to_owned(),
+        notes: Zeroizing::new(String::new()),
+        collection,
+        attachments: Vec::new(),
+        revision: 0,
+        created_at: now.clone(),
+        modified_at: now,
+        trashed_at: None,
+        purging: false,
+        retired_blobs: Vec::new(),
+    }
+}
+
+/// A copy of `stored` counted as one more edit: next revision, modified now.
+pub(super) fn edited(stored: &Item) -> Result<Item> {
+    let mut next = stored.clone();
+    next.revision = next.revision.checked_add(1).ok_or(REVISION_OVERFLOW)?;
+    next.modified_at = created_at_now();
+    Ok(next)
+}
+
 impl Vault {
-    fn item_path(&self, id: &ItemId) -> PathBuf {
+    pub(super) fn item_path(&self, id: &ItemId) -> PathBuf {
         self.dir
             .join(ITEMS_DIR)
             .join(format!("{}{ITEM_EXT}", id.to_hex()))
@@ -95,7 +127,7 @@ impl Vault {
 
     /// An ID no loaded, damaged or existing file uses. Random IDs never collide in practice;
     /// this is the guard that a broken random source must not turn into an overwritten file.
-    fn fresh_item_id(&self) -> Result<ItemId> {
+    pub(super) fn fresh_item_id(&self) -> Result<ItemId> {
         loop {
             let id = random_item_id();
             let taken = self.items.contains_key(&id)
@@ -111,7 +143,7 @@ impl Vault {
     /// If the write reports an error after the new file may already be in place (for example
     /// the folder sync failed), memory takes whatever the file now holds, so the two agree.
     /// The original error is returned either way.
-    fn commit_item(&mut self, item: Item) -> Result<()> {
+    pub(super) fn commit_item(&mut self, item: Item) -> Result<()> {
         fs::create_dir_all(self.dir.join(ITEMS_DIR))?;
         let bytes = seal_item(&item, &self.header.vault_id, &self.vault_key)?;
         let path = self.item_path(&item.id);
@@ -135,17 +167,15 @@ impl Vault {
         if stored.trashed_at.is_some() == at.is_some() {
             return Ok(());
         }
-        let mut next = stored.clone();
+        let mut next = edited(stored)?;
         next.trashed_at = at;
-        next.revision = next.revision.checked_add(1).ok_or(REVISION_OVERFLOW)?;
-        next.modified_at = created_at_now();
         self.commit_item(next)
     }
 
     /// Whether the item `id`, as it will be (`kind`, in `new`; it was in `old`), may sit
     /// there: a collection never sits in one, nothing sits in itself, and a collection newly
     /// named must exist and not be in the trash.
-    fn check_collection(
+    pub(super) fn check_collection(
         &self,
         id: &ItemId,
         kind: &ItemKind,
@@ -178,22 +208,7 @@ impl Vault {
     ) -> Result<ItemId> {
         let id = self.fresh_item_id()?;
         self.check_collection(&id, &kind, collection, None)?;
-        let now = created_at_now();
-        let item = Item {
-            id,
-            kind,
-            title: title.to_owned(),
-            notes: Zeroizing::new(String::new()),
-            collection,
-            attachments: Vec::new(),
-            revision: 0,
-            created_at: now.clone(),
-            modified_at: now,
-            trashed_at: None,
-            purging: false,
-            retired_blobs: Vec::new(),
-        };
-        self.commit_item(item)?;
+        self.commit_item(blank_item(id, kind, title, collection))?;
         Ok(id)
     }
 
@@ -215,14 +230,11 @@ impl Vault {
                 what: "collection has items",
             });
         }
-        let revision = stored.revision.checked_add(1).ok_or(REVISION_OVERFLOW)?;
-        let mut next = stored.clone();
+        let mut next = edited(stored)?;
         next.kind = item.kind;
         next.title = item.title;
         next.notes = item.notes;
         next.collection = item.collection;
-        next.revision = revision;
-        next.modified_at = created_at_now();
         self.commit_item(next)
     }
 

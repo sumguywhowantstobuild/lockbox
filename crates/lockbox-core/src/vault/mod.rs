@@ -1,6 +1,7 @@
 //! The vault's life cycle (spec 5.3, 6.3): create, unlock, change password, regenerate
 //! the recovery key. Items and files are added on top of [`Vault`] by later modules.
 
+mod files;
 mod items;
 mod naming;
 mod unlock;

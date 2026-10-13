@@ -5,6 +5,7 @@
 
 pub mod ad;
 pub(crate) mod aead;
+pub mod blob;
 pub mod error;
 pub mod fsio;
 pub mod header;
