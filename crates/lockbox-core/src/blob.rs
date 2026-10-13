@@ -41,6 +41,14 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
+
+    /// `Err(Cancelled)` once cancelled.
+    pub(crate) fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        Ok(())
+    }
 }
 
 /// Where temporary plaintext files are written down before they exist, so a crash cannot
@@ -85,10 +93,29 @@ pub(crate) fn check_length(length: u64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCED_FILE_ID: std::cell::Cell<Option<FileId>> = const { std::cell::Cell::new(None) };
+}
+
+fn next_file_id() -> FileId {
+    #[cfg(test)]
+    if let Some(id) = FORCED_FILE_ID.with(|id| id.take()) {
+        return id;
+    }
+    FileId::random()
+}
+
+/// Makes the next `new_file_ref` on this thread use `id`, to force a name collision.
+#[cfg(test)]
+pub(crate) fn force_next_file_id(id: FileId) {
+    FORCED_FILE_ID.with(|cell| cell.set(Some(id)));
+}
+
 /// A fresh file record for a file of `length` bytes: new ID, key and nonce prefix.
 pub(crate) fn new_file_ref(length: u64, name: String, media_type: String) -> FileRef {
     FileRef {
-        file_id: FileId::random(),
+        file_id: next_file_id(),
         blob_version: BLOB_VERSION,
         chunk_size: CHUNK_SIZE,
         file_key: Key32::random(),
@@ -151,7 +178,9 @@ fn fill(src: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 
 /// Whether the source has nothing more to give.
 fn at_end(src: &mut impl Read) -> std::io::Result<bool> {
-    Ok(fill(src, &mut [0u8; 1])? == 0)
+    // Wiped: a source that grew hands over one real plaintext byte here.
+    let mut probe = Zeroizing::new([0u8; 1]);
+    Ok(fill(src, &mut *probe)? == 0)
 }
 
 /// One wiped buffer for every chunk. Its capacity covers the largest chunk plus tag, so
@@ -187,9 +216,7 @@ pub fn encrypt_stream(
     let mut buf = chunk_buffer();
     let seal_failed = |_| CoreError::InvalidInput { what: "chunk" };
     let mut read_chunk = |index: u64, buf: &mut Vec<u8>| -> Result<()> {
-        if cancel.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
+        cancel.check()?;
         buf.resize(plain_len(fref, index), 0);
         if fill(src, buf)? != buf.len() {
             return Err(SIZE_CHANGED);
@@ -237,9 +264,7 @@ pub fn decrypt_stream(
         DecryptorBE32::<Cipher>::new(fref.file_key.as_bytes().into(), stream_nonce(fref));
     let mut buf = chunk_buffer();
     let mut read_chunk = |index: u64, buf: &mut Vec<u8>| -> Result<()> {
-        if cancel.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
+        cancel.check()?;
         buf.resize(plain_len(fref, index) + TAG_LEN as usize, 0);
         // A short read means the blob shrank after the size check.
         if fill(src, buf)? != buf.len() {

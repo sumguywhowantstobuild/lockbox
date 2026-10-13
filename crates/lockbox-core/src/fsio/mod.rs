@@ -176,11 +176,26 @@ pub(crate) fn read_retry(path: &Path, max: usize) -> Result<Vec<u8>> {
 /// A fresh name `.<16 random hex chars><suffix>` in `dir` for a hidden temp file; nothing is created.
 /// Lets a caller record the path (e.g. in the output journal) before the file exists.
 pub fn hidden_temp_path(dir: &Path, suffix: &str) -> PathBuf {
+    #[cfg(test)]
+    if let Some(name) = FORCED_TEMP_NAME.with(|n| n.borrow_mut().take()) {
+        return dir.join(name);
+    }
     let hex: String = random_bytes::<8>()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     dir.join(format!(".{hex}{suffix}"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_TEMP_NAME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Makes the next `hidden_temp_path` on this thread return `dir/name`, to force a collision.
+#[cfg(test)]
+pub(crate) fn force_next_temp_name(name: &str) {
+    FORCED_TEMP_NAME.with(|n| *n.borrow_mut() = Some(name.to_owned()));
 }
 
 /// Creates the new, empty, hidden file `path`. Fails rather than reuse an existing file.
@@ -221,10 +236,18 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 pub(crate) mod failpoint {
     use crate::Result;
+    use crate::blob::CancelToken;
     use std::cell::RefCell;
 
     thread_local! {
         static ARMED: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+        static CANCELS: RefCell<Vec<(&'static str, CancelToken)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Cancels `token` when the step `name` is reached (the step itself succeeds), to test
+    /// a cancel that arrives at exactly that stage.
+    pub fn arm_cancel(name: &'static str, token: CancelToken) {
+        CANCELS.with(|c| c.borrow_mut().push((name, token)));
     }
 
     pub fn arm(name: &'static str) {
@@ -233,10 +256,18 @@ pub(crate) mod failpoint {
 
     pub fn disarm_all() {
         ARMED.with(|a| a.borrow_mut().clear());
+        CANCELS.with(|c| c.borrow_mut().clear());
     }
 
     /// Fails with an `Io` error while `name` is armed.
     pub fn check(name: &'static str) -> Result<()> {
+        CANCELS.with(|c| {
+            for (armed, token) in c.borrow().iter() {
+                if *armed == name {
+                    token.cancel();
+                }
+            }
+        });
         if ARMED.with(|a| a.borrow().contains(&name)) {
             return Err(std::io::Error::other(name).into());
         }

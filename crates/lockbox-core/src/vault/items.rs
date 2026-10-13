@@ -20,6 +20,10 @@ use zeroize::Zeroizing;
 const ITEMS_DIR: &str = "items";
 const ITEM_EXT: &str = ".item";
 const SECS_PER_DAY: u64 = 86_400;
+/// An item whose purge was started is frozen: only `purge_item` may touch it again.
+pub(super) const BEING_DELETED: CoreError = CoreError::InvalidInput {
+    what: "being deleted",
+};
 const REVISION_OVERFLOW: CoreError = CoreError::InvalidInput {
     what: "revision overflow",
 };
@@ -217,6 +221,9 @@ impl Vault {
     /// revision must be the stored one, else `InvalidInput { "stale revision" }`.
     pub fn update_item(&mut self, item: Item) -> Result<()> {
         let stored = self.get_item(&item.id)?;
+        if stored.purging {
+            return Err(BEING_DELETED);
+        }
         if item.revision != stored.revision {
             return Err(CoreError::InvalidInput {
                 what: "stale revision",
@@ -254,6 +261,9 @@ impl Vault {
 
     /// Moves an item to the trash. A collection goes through `delete_collection` instead.
     pub fn trash_item(&mut self, id: &ItemId) -> Result<()> {
+        if self.get_item(id)?.purging {
+            return Err(BEING_DELETED);
+        }
         if matches!(self.get_item(id)?.kind, ItemKind::Collection) {
             return Err(CoreError::InvalidInput {
                 what: "use delete_collection",
@@ -267,11 +277,20 @@ impl Vault {
     /// collection is kept even if that collection is missing or damaged; the UI treats it as "no collection".
     pub fn restore_item(&mut self, id: &ItemId) -> Result<()> {
         let item = self.get_item(id)?;
+        if item.purging {
+            return Err(BEING_DELETED);
+        }
         if item.trashed_at.is_none() {
             return Ok(());
         }
         // A collection that is gone altogether is not this call's problem.
-        if let Some(collection) = item.collection.filter(|c| self.items.contains_key(c)) {
+        let collection = item.collection.filter(|c| self.items.contains_key(c));
+        // Checked before anything changes, so there is no half-restore: a collection that is
+        // being purged is never brought back as a side effect of restoring one of its items.
+        if collection.is_some_and(|c| self.items[&c].purging) {
+            return Err(BEING_DELETED);
+        }
+        if let Some(collection) = collection {
             self.set_trashed(&collection, None)?;
         }
         self.set_trashed(id, None)

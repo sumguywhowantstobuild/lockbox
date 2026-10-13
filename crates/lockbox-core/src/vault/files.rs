@@ -7,7 +7,7 @@
 //! which first records its intent in the item.
 
 use super::Vault;
-use super::items::{blank_item, edited};
+use super::items::{BEING_DELETED, blank_item, edited};
 use crate::blob::{
     CancelToken, OutputJournal, blob_len, check_length, decrypt_stream, encrypt_stream,
     new_file_ref,
@@ -61,10 +61,24 @@ impl Vault {
     /// the trash (or being purged) and is not a collection.
     fn file_holder(&self, id: &ItemId) -> Result<&Item> {
         let item = self.get_item(id)?;
-        if item.trashed_at.is_some() || item.purging || matches!(item.kind, ItemKind::Collection) {
+        if item.purging {
+            return Err(BEING_DELETED);
+        }
+        if item.trashed_at.is_some() || matches!(item.kind, ItemKind::Collection) {
             return Err(NOT_FILE_HOLDER);
         }
         Ok(item)
+    }
+
+    /// Refuses an export folder that is the vault folder or inside it. Both paths are resolved
+    /// first (links, junctions, `..`, short names), so an alias cannot get past the check.
+    fn refuse_inside_vault(&self, folder: &Path) -> Result<()> {
+        if fs::canonicalize(folder)?.starts_with(fs::canonicalize(&self.dir)?) {
+            return Err(CoreError::InvalidInput {
+                what: "destination inside vault",
+            });
+        }
+        Ok(())
     }
 
     /// Encrypts the file at `src` into a published blob and returns its record. The blob is
@@ -79,6 +93,8 @@ impl Vault {
         let fref = self.import_stream(&mut file, len, name, cancel)?;
         #[cfg(test)]
         crate::fsio::failpoint::check("import.before_item_write")?;
+        // A cancel here leaves the published blob as an orphan (cleanup sets it aside), no item.
+        cancel.check()?;
         Ok(fref)
     }
 
@@ -104,12 +120,17 @@ impl Vault {
             }
         };
         let partial = dir.join(format!("{}.blob.partial", fref.file_id.to_hex()));
+        // Owned only once this succeeds; if the name is taken, nothing is removed.
+        let mut out = File::create_new(&partial)?;
         let written = (|| {
-            let mut out = File::create_new(&partial)?;
             let vault_id = &self.header.vault_id;
             encrypt_stream(src, declared_len, &mut out, vault_id, &fref, cancel)?;
             out.sync_all()?;
             drop(out); // Windows cannot move a file that is still open.
+            #[cfg(test)]
+            crate::fsio::failpoint::check("import.before_publish")?;
+            // Last chance to stop: once the rename starts, publication completes.
+            cancel.check()?;
             replace_file(&partial, &self.blob_path(&fref.file_id))
         })();
         if let Err(error) = written {
@@ -191,6 +212,7 @@ impl Vault {
             .find(|f| f.file_id == *file)
             .ok_or(CoreError::NotFound)?;
         let folder = parent_dir(dest);
+        self.refuse_inside_vault(folder)?;
         check_space(fref.length, fref.length, &volume_info(folder)?)?;
         let mut blob = File::open(self.blob_path(file)).map_err(|e| match e.kind() {
             ErrorKind::NotFound => CoreError::Damaged {
@@ -202,14 +224,25 @@ impl Vault {
 
         let temp = hidden_temp_path(folder, ".lockbox-partial");
         journal.record(&temp);
+        // Owned only once this succeeds; if the name is taken, the other file is not ours to delete.
+        let mut out = match create_hidden_file(&temp) {
+            Ok(out) => out,
+            Err(error) => {
+                journal.clear(&temp);
+                return Err(error);
+            }
+        };
         let published = (|| {
-            let mut out = create_hidden_file(&temp)?;
             let vault_id = &self.header.vault_id;
             decrypt_stream(&mut blob, blob_size, &mut out, vault_id, fref, cancel)?;
             out.sync_all()?;
             drop(out);
             // Windows keeps a file's attributes when it replaces another: unhide first.
             clear_hidden(&temp)?;
+            #[cfg(test)]
+            crate::fsio::failpoint::check("export.before_publish")?;
+            // Last chance to stop: once the rename starts, publication completes.
+            cancel.check()?;
             replace_file(&temp, dest)
         })();
         // Only a temp that is really gone leaves the journal; otherwise launch cleanup retries.
@@ -570,5 +603,244 @@ mod tests {
         let (_held, len) = open_source(&src).unwrap();
         assert_eq!(len, 5);
         assert!(fs::OpenOptions::new().write(true).open(&src).is_err());
+    }
+
+    // ---- review fixes (round 1) ----
+
+    use crate::blob::{NoJournal, OutputJournal, force_next_file_id};
+    use crate::fsio::force_next_temp_name;
+    use std::cell::RefCell;
+
+    /// Remembers every journal call, in order.
+    #[derive(Default)]
+    struct Recorder(RefCell<Vec<(&'static str, PathBuf)>>);
+
+    impl OutputJournal for Recorder {
+        fn record(&self, temp: &Path) {
+            self.0.borrow_mut().push(("record", temp.to_path_buf()));
+        }
+        fn clear(&self, temp: &Path) {
+            self.0.borrow_mut().push(("clear", temp.to_path_buf()));
+        }
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A vault holding one file item, plus a folder to export into.
+    fn vault_with_file() -> (TempDir, Vault, ItemId, FileId) {
+        let (parent, mut vault) = new_vault();
+        let src = source(&parent, "a.txt", b"hello");
+        let id = vault
+            .new_file_item(None, &src, &CancelToken::new())
+            .unwrap();
+        let file = vault.get_item(&id).unwrap().attachments[0].file_id;
+        (parent, vault, id, file)
+    }
+
+    // A. A cancel that arrives after streaming still stops publication.
+
+    #[test]
+    fn cancel_before_import_publish_leaves_nothing() {
+        let _cleanup = Cleanup;
+        let (parent, mut vault) = new_vault();
+        let src = source(&parent, "a.txt", b"hello");
+        let cancel = CancelToken::new();
+        failpoint::arm_cancel("import.before_publish", cancel.clone());
+        let result = vault.new_file_item(None, &src, &cancel);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert!(blob_files(&vault).is_empty(), "no .partial, no .blob");
+        assert_eq!(vault.items().count(), 0);
+    }
+
+    #[test]
+    fn cancel_before_item_commit_commits_no_item() {
+        let _cleanup = Cleanup;
+        let (parent, mut vault) = new_vault();
+        let src = source(&parent, "a.txt", b"hello");
+        let note = vault.new_item(ItemKind::Note, "n", None).unwrap();
+        let cancel = CancelToken::new();
+        failpoint::arm_cancel("import.before_item_write", cancel.clone());
+        let result = vault.attach_file(&note, &src, &cancel);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        let item = vault.get_item(&note).unwrap();
+        assert!(item.attachments.is_empty() && item.revision == 0);
+
+        let result = vault.new_file_item(None, &src, &cancel);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(vault.items().count(), 1, "no new item");
+        // The blob had been published already: it stays as an orphan for cleanup. No .partial.
+        let files = blob_files(&vault);
+        assert!(!files.is_empty() && files.iter().all(|f| f.ends_with(".blob")));
+    }
+
+    #[test]
+    fn cancel_before_export_publish_keeps_the_destination() {
+        let _cleanup = Cleanup;
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let dest = out.join("a.txt");
+        fs::write(&dest, b"OLD").unwrap();
+        let cancel = CancelToken::new();
+        failpoint::arm_cancel("export.before_publish", cancel.clone());
+        let journal = Recorder::default();
+        let result = vault.export_file(&id, &file, &dest, &journal, &cancel);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(fs::read(&dest).unwrap(), b"OLD");
+        assert_eq!(file_names(&out), ["a.txt"], "no temp left");
+        let calls = journal.0.borrow();
+        assert_eq!(
+            calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            ["record", "clear"]
+        );
+    }
+
+    // B. Only a temp this call created is ever removed.
+
+    #[test]
+    fn import_temp_collision_leaves_the_other_file_alone() {
+        let _cleanup = Cleanup;
+        let (parent, mut vault) = new_vault();
+        let src = source(&parent, "a.txt", b"hello");
+        let id = FileId([0x5A; 16]);
+        let stale = vault
+            .dir()
+            .join("files")
+            .join(format!("{}.blob.partial", id.to_hex()));
+        fs::write(&stale, b"someone else's").unwrap();
+        force_next_file_id(id);
+        let result = vault.new_file_item(None, &src, &CancelToken::new());
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert_eq!(fs::read(&stale).unwrap(), b"someone else's");
+        assert_eq!(vault.items().count(), 0);
+    }
+
+    #[test]
+    fn export_temp_collision_leaves_the_other_file_alone() {
+        let _cleanup = Cleanup;
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let name = ".0123456789abcdef.lockbox-partial";
+        fs::write(out.join(name), b"someone else's").unwrap();
+        force_next_temp_name(name);
+        let journal = Recorder::default();
+        let dest = out.join("a.txt");
+        let result = vault.export_file(&id, &file, &dest, &journal, &CancelToken::new());
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert_eq!(fs::read(out.join(name)).unwrap(), b"someone else's");
+        assert!(!dest.exists());
+        let calls = journal.0.borrow();
+        assert_eq!(
+            calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            ["record", "clear"]
+        );
+        assert_eq!(calls[0].1, out.join(name));
+        assert_eq!(calls[1].1, out.join(name));
+    }
+
+    // C. An item being purged is frozen.
+
+    fn being_deleted<T: std::fmt::Debug>(r: Result<T>) -> bool {
+        matches!(
+            r,
+            Err(CoreError::InvalidInput {
+                what: "being deleted"
+            })
+        )
+    }
+
+    #[test]
+    fn purging_items_are_frozen_until_the_purge_is_retried() {
+        let _cleanup = Cleanup;
+        let (parent, mut vault, id, file) = vault_with_file();
+        let src = source(&parent, "b.txt", b"b");
+        vault.trash_item(&id).unwrap();
+        failpoint::arm("purge.after_mark");
+        assert!(vault.purge_item(&id).is_err());
+        failpoint::disarm_all();
+        assert!(vault.get_item(&id).unwrap().purging);
+
+        let before = vault.get_item(&id).unwrap().revision;
+        assert!(being_deleted(vault.restore_item(&id)));
+        assert!(being_deleted(vault.trash_item(&id)));
+        assert!(being_deleted(
+            vault.update_item(vault.get_item(&id).unwrap().clone())
+        ));
+        let cancel = CancelToken::new();
+        assert!(being_deleted(vault.attach_file(&id, &src, &cancel)));
+        assert!(being_deleted(
+            vault.replace_attachment(&id, &file, &src, &cancel)
+        ));
+        let item = vault.get_item(&id).unwrap();
+        assert!(item.trashed_at.is_some() && item.purging && item.revision == before);
+
+        vault.purge_item(&id).unwrap();
+        assert!(matches!(vault.get_item(&id), Err(CoreError::NotFound)));
+        assert!(blob_files(&vault).is_empty());
+    }
+
+    #[test]
+    fn restoring_a_member_never_restores_a_purging_collection() {
+        let _cleanup = Cleanup;
+        let (_parent, mut vault) = new_vault();
+        let collection = vault.new_item(ItemKind::Collection, "C", None).unwrap();
+        let member = vault
+            .new_item(ItemKind::Note, "m", Some(collection))
+            .unwrap();
+        vault.delete_collection(&collection).unwrap();
+        failpoint::arm("purge.after_mark");
+        assert!(vault.purge_item(&collection).is_err());
+        failpoint::disarm_all();
+        assert!(being_deleted(vault.restore_item(&member)));
+        let c = vault.get_item(&collection).unwrap();
+        assert!(c.trashed_at.is_some() && c.purging, "collection untouched");
+        assert!(vault.get_item(&member).unwrap().trashed_at.is_some());
+        vault.purge_item(&collection).unwrap();
+    }
+
+    // D. Export never writes into the vault itself.
+
+    #[test]
+    fn export_into_the_vault_is_refused() {
+        let (_parent, vault, id, file) = vault_with_file();
+        let blob = blob_path(&vault, &file);
+        let header = vault.dir().join("vault.json");
+        let (blob_before, header_before) = (fs::read(&blob).unwrap(), fs::read(&header).unwrap());
+        let journal = Recorder::default();
+        let aliased = vault.dir().join("files").join("..").join("vault.json");
+        for dest in [&blob, &header, &aliased] {
+            let result = vault.export_file(&id, &file, dest, &journal, &CancelToken::new());
+            assert!(matches!(
+                result,
+                Err(CoreError::InvalidInput {
+                    what: "destination inside vault"
+                })
+            ));
+        }
+        assert_eq!(fs::read(&blob).unwrap(), blob_before);
+        assert_eq!(fs::read(&header).unwrap(), header_before);
+        assert!(
+            journal.0.borrow().is_empty(),
+            "refused before any journal call"
+        );
+        assert!(
+            file_names(vault.dir())
+                .iter()
+                .all(|n| !n.ends_with(".lockbox-partial"))
+        );
+        // Beside the vault folder is fine.
+        let outside = vault.dir().parent().unwrap().join("copy.txt");
+        vault
+            .export_file(&id, &file, &outside, &NoJournal, &CancelToken::new())
+            .unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"hello");
     }
 }
