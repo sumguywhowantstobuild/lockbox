@@ -1,6 +1,6 @@
 //! Opening a vault (spec 6.3): `vault.json` first, `.bak` as the fallback, then a careful repair.
 
-use super::{CleanupReport, UnlockReport, Vault, items};
+use super::{UnlockReport, Vault, items};
 use crate::fsio::atomic_write;
 use crate::header::{
     HEADER_BACKUP, HEADER_FILE, MAX_HEADER_BYTES, VaultHeader, parse_header, verify_header_mac,
@@ -183,19 +183,20 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
     let header_repair_failed = mac_ok
         && may_overwrite(other, used, credential.unused_slot())
         && repair(&dir.join(other_file), &used.bytes).is_err();
-    let report = UnlockReport {
-        used_backup_header: used_backup,
-        header_mac_mismatch: !mac_ok,
-        header_repair_failed,
-        cleanup: CleanupReport::default(),
-    };
-    let vault = Vault {
+    let mut vault = Vault {
         dir: dir.to_path_buf(),
         header: used.header.clone(),
         vault_key: Arc::new(key),
         items,
         damaged,
         _lock: lock,
+    };
+    // Last, once the vault is built: nothing else can run before cleanup has finished.
+    let report = UnlockReport {
+        used_backup_header: used_backup,
+        header_mac_mismatch: !mac_ok,
+        header_repair_failed,
+        cleanup: vault.run_cleanup(),
     };
     Ok((vault, report))
 }

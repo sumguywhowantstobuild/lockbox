@@ -17,9 +17,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-const ITEMS_DIR: &str = "items";
+pub(super) const ITEMS_DIR: &str = "items";
 const ITEM_EXT: &str = ".item";
 const SECS_PER_DAY: u64 = 86_400;
+const ID_ATTEMPTS: u32 = 8;
 /// An item whose purge was started is frozen: only `purge_item` may touch it again.
 pub(super) const BEING_DELETED: CoreError = CoreError::InvalidInput {
     what: "being deleted",
@@ -131,8 +132,9 @@ impl Vault {
 
     /// An ID no loaded, damaged or existing file uses. Random IDs never collide in practice;
     /// this is the guard that a broken random source must not turn into an overwritten file.
+    /// After [`ID_ATTEMPTS`] taken IDs in a row the source is treated as broken and this fails.
     pub(super) fn fresh_item_id(&self) -> Result<ItemId> {
-        loop {
+        for _ in 0..ID_ATTEMPTS {
             let id = random_item_id();
             let taken = self.items.contains_key(&id)
                 || self.damaged.contains(&id)
@@ -141,6 +143,7 @@ impl Vault {
                 return Ok(id);
             }
         }
+        Err(std::io::Error::other("no free item id").into())
     }
 
     /// Seals `item` into its file, then (only once that worked) replaces the in-memory copy.
@@ -681,11 +684,11 @@ mod tests {
             format!("{}.item", &hex[1..]),
             format!("{hex}0.item"),
             format!("{hex}.item.bak"),
-            format!("{hex}.tmp"),
             format!(".{hex}.item"),
             "notes.txt".to_owned(),
             "desktop.ini".to_owned(),
         ];
+        // (`*.tmp` and `*.partial` names are not junk but scraps: cleanup at unlock removes them.)
         for name in &junk {
             fs::write(items.join(name), b"not an item").unwrap();
         }
@@ -840,6 +843,33 @@ mod tests {
         assert!(item_path(&vault, &squatter).is_dir());
         assert_eq!(vault.get_item(&healthy).unwrap().title, "healthy");
         assert_eq!(vault.damaged_items(), [sick]);
+    }
+
+    #[test]
+    fn a_broken_random_source_gives_up_after_eight_taken_ids() {
+        let (_parent, mut vault) = new_vault();
+        let taken: Vec<ItemId> = (0..8)
+            .map(|i| {
+                vault
+                    .new_item(ItemKind::Note, &format!("n{i}"), None)
+                    .unwrap()
+            })
+            .collect();
+        // Seven taken IDs, then a free one: found on the eighth try.
+        for id in taken[..7].iter().rev() {
+            force_next_id(*id);
+        }
+        let free = ItemId([0xAB; 16]);
+        force_next_id(free);
+        assert_eq!(vault.fresh_item_id().unwrap(), free);
+        FORCED_IDS.with(|ids| ids.borrow_mut().clear());
+
+        // Eight taken IDs in a row: a fixed-text error, not an endless loop.
+        for id in &taken {
+            force_next_id(*id);
+        }
+        assert!(matches!(vault.fresh_item_id(), Err(CoreError::Io(_))));
+        FORCED_IDS.with(|ids| assert!(ids.borrow().is_empty(), "all eight were tried"));
     }
 
     #[test]

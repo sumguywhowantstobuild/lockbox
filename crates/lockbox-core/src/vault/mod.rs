@@ -1,6 +1,7 @@
 //! The vault's life cycle (spec 5.3, 6.3): create, unlock, change password, regenerate
 //! the recovery key. Items and files are added on top of [`Vault`] by later modules.
 
+mod cleanup;
 mod files;
 mod items;
 mod naming;
@@ -34,9 +35,27 @@ pub use unlock::read_vault_name;
 const KDF_TARGET: Duration = Duration::from_secs(1);
 const STAGING_PREFIX: &str = ".creating-";
 
-/// What startup cleanup did. Empty until the cleanup task fills it in.
+/// What the cleanup at unlock did (spec 6.4). Cleanup never fails an unlock: anything it
+/// could not do is counted in `failed` and tried again at the next unlock.
 #[derive(Debug, Default)]
-pub struct CleanupReport {}
+pub struct CleanupReport {
+    /// `*.partial` files removed (interrupted imports).
+    pub partials_removed: usize,
+    /// `*.tmp` files removed (interrupted writes).
+    pub temps_removed: usize,
+    /// Entries cleared from `retired_blobs` lists (the blob is deleted, or no longer exists).
+    pub retired_deleted: usize,
+    /// Items whose interrupted purge was finished.
+    pub purges_finished: usize,
+    /// Unreferenced blobs moved to `files/orphaned/` (never deleted).
+    pub orphans_quarantined: usize,
+    /// Quarantined blobs that an item references again, moved back to `files/`.
+    pub orphans_restored: usize,
+    /// Damaged item files: when not zero, no blob was quarantined.
+    pub skipped_damaged: usize,
+    /// Actions that failed and will be tried again at the next unlock.
+    pub failed: usize,
+}
 
 /// What unlocking noticed. The caller shows a warning for each flag that is set.
 #[derive(Debug)]
@@ -300,18 +319,11 @@ fn remove_stale_staging(parent: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Deletes `*.tmp` files directly inside the vault folder (crashed header writes). Best
-/// effort: the change that called this has succeeded, and unlock cleanup repeats it.
+/// Deletes leftover `*.tmp` (and `*.partial`) files directly inside the vault folder (crashed
+/// header writes). Best effort: the change that called this has succeeded, and unlock cleanup
+/// repeats it.
 fn remove_leftover_tmp(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let is_tmp = entry.file_name().to_string_lossy().ends_with(".tmp");
-        if is_tmp && entry.file_type().is_ok_and(|t| t.is_file()) {
-            let _ = fsio::remove_file_retry(&entry.path());
-        }
-    }
+    cleanup::remove_scraps(dir, &mut CleanupReport::default());
 }
 
 #[cfg(test)]

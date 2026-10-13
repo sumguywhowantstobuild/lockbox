@@ -23,13 +23,19 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
-const FILES_DIR: &str = "files";
+pub(super) const FILES_DIR: &str = "files";
+pub(super) const BLOB_EXT: &str = ".blob";
 // shortcut: every file is labelled "application/octet-stream" (no MIME table); upgrade when
 // Plan 3 decides how files are opened and shown.
 const MEDIA_TYPE: &str = "application/octet-stream";
 const NOT_FILE_HOLDER: CoreError = CoreError::InvalidInput {
     what: "item cannot hold files",
 };
+
+/// Where the blob `id` lives (or would live) inside the folder `folder`.
+pub(super) fn blob_in(folder: &Path, id: &FileId) -> PathBuf {
+    folder.join(format!("{}{BLOB_EXT}", id.to_hex()))
+}
 
 /// Opens the file to import and returns it with its size. On Windows other programs may
 /// still read it but none can write to it while it is open.
@@ -52,9 +58,7 @@ fn open_source(path: &Path) -> Result<(File, u64)> {
 
 impl Vault {
     fn blob_path(&self, id: &FileId) -> PathBuf {
-        self.dir
-            .join(FILES_DIR)
-            .join(format!("{}.blob", id.to_hex()))
+        blob_in(&self.dir.join(FILES_DIR), id)
     }
 
     /// The item as it is now, if it may take part in a file change: it exists, is not in

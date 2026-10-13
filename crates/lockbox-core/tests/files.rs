@@ -209,9 +209,12 @@ fn replace_records_retired_blob() {
     );
     assert!(blob_path(&vault, &new).exists());
 
-    // The record survives a restart, and the old file cannot be named any more.
+    // The next unlock deletes the old blob and clears the record (no new revision); the old
+    // file cannot be named any more.
     let vault = reopen(vault);
-    assert_eq!(vault.get_item(&id).unwrap().retired_blobs, [old]);
+    let item = vault.get_item(&id).unwrap();
+    assert!(item.retired_blobs.is_empty() && item.revision == 1);
+    assert!(!blob_path(&vault, &old).exists());
     let dest = parent.path().join("out");
     assert!(matches!(
         vault.export_file(&id, &old, &dest, &NoJournal, &cancel),
