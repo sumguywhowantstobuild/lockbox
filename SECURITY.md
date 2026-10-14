@@ -170,9 +170,13 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   files are written but before the caller shows the new recovery key, the old key no longer works and the new one was
   never seen (the password still works and a new recovery key can be made). *Accepted:* a very narrow window, the same
   kind as the "Concurrent vault creation in one folder" case below.
-- **A foreign `.bak` can take over an unreadable `vault.json`.** If `vault.json` cannot be read and the `.bak` is from a
-  different vault that has the same password, it unlocks and repairs `vault.json`; the items then show as damaged.
+- **A foreign `.bak` can take over an unreadable `vault.json`.** If `vault.json` is missing or unparseable and the `.bak` is from
+  a different vault that has the same password, it unlocks and repairs `vault.json`; the items then show as damaged.
   *Accepted:* the original header was already unreadable and it needs the same password.
+- **An unreadable or newer-format header copy is left alone at unlock, but a later header write can overwrite it.** If
+  the other header copy is unreadable even after retries, or is in a newer format, unlock does not touch it and cannot
+  check its slots. A later password change, recovery regeneration or accept can still overwrite it. *Accepted:* blocking
+  those writes would let a permanently unreadable `.bak` lock the user out of credential changes.
 - **Header writes are refused while the two copies disagree on a slot.** An unlock checks only the key slot for the
   credential it was given (the password slot after a password unlock, the recovery slot after a recovery unlock). If the
   other slot (the recovery slot after a password unlock, the password slot after a recovery unlock) differs between

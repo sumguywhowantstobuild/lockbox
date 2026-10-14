@@ -70,7 +70,9 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
 2. Read `vault.json` and `vault.json.bak`: at most 64 KiB each, strict parse, Argon2 settings checked before any
    derivation (spec 6.1, 5.2).
 3. Unwrap the vault key from `vault.json`. If that fails, or the file cannot be read, try `.bak` (spec 6.3). A readable
-   `vault.json` falls back only to a `.bak` of the same vault, and a newer format is never replaced by an older copy.
+   `vault.json` falls back only to a `.bak` of the same vault, and at unlock a newer format is never replaced by an
+   older copy (a later header write can still replace it; see SECURITY.md, "An unreadable or newer-format header copy
+   is left alone at unlock").
    The derived key is reused when salt and settings match, so there is one Argon2 run, not two.
 4. Open every file in `items/` with the vault key. A file that does not open goes on the damaged list and is never
    deleted or overwritten.
@@ -120,9 +122,10 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
 
 1. **All writes go through `atomic_write` or `replace_file`.** Nothing is written in place. A file gets its final name
    only by one of these two (header and item files by `atomic_write`; blobs and exports by a temp file and
-   `replace_file`), and a folder only by `rename_dir_no_replace`. That same no-replace rename also moves blobs into and
-   out of `files/orphaned/` during cleanup; it is a rename, not a write. (The empty `.lock` marker holds no data and is
-   the one exception.) Spec 6.2.
+   `replace_file`), and the vault folder itself only by `rename_dir_no_replace`. (The folders inside it, `items/`,
+   `files/` and `files/orphaned/`, are empty working folders created in place with `create_dir_all`.) That same
+   no-replace rename also moves blobs into and out of `files/orphaned/` during cleanup; it is a rename, not a write.
+   (The empty `.lock` marker holds no data and is the one exception.) Spec 6.2.
 2. **`unsafe` only in `fsio::windows`.** (`unsafe` marks Rust code the compiler cannot check.) The crate root has
    `#![deny(unsafe_code)]`; that one module opts out, and each block carries a comment saying why it is sound.
 3. **Repair only what was verified.** The other header copy is overwritten only when the header that unlocked passed its

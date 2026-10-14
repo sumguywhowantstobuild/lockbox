@@ -1,7 +1,7 @@
 //! Opening a vault (spec 6.3): `vault.json` first, `.bak` as the fallback, then a careful repair.
 
 use super::{HeaderGuard, UnlockReport, Unverified, Vault, items};
-use crate::fsio::atomic_write;
+use crate::fsio::{atomic_write, read_retry};
 use crate::header::{
     HEADER_BACKUP, HEADER_FILE, MAX_HEADER_BYTES, VaultHeader, parse_header, verify_header_mac,
 };
@@ -12,8 +12,6 @@ use crate::search::SearchIndex;
 use crate::secret::Key32;
 use crate::slots::{KeySlot, SlotType, unwrap_slot};
 use crate::{CoreError, Result};
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -47,13 +45,11 @@ pub(super) struct HeaderFile {
     pub(super) header: VaultHeader,
 }
 
-/// Reads and parses one header file. Reads at most `MAX_HEADER_BYTES + 1` bytes, so an
-/// oversized file is noticed (`parse_header` refuses it) without loading all of it.
+/// Reads and parses one header file, retrying while another program holds it. `read_retry`
+/// reads at most `MAX_HEADER_BYTES + 1` bytes, so an oversized file is noticed
+/// (`parse_header` refuses it) without loading all of it.
 pub(super) fn load(path: &Path) -> Result<HeaderFile> {
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(MAX_HEADER_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    let bytes = read_retry(path, MAX_HEADER_BYTES)?;
     let header = parse_header(&bytes)?;
     Ok(HeaderFile { bytes, header })
 }
@@ -240,5 +236,57 @@ pub fn read_vault_name(dir: &Path) -> Result<String> {
             .map(|c| c.header.name)
             .or(Err(e)),
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fsio::testutil::TempDir;
+
+    #[test]
+    fn load_refuses_an_oversized_header() {
+        let dir = TempDir::new();
+        let path = dir.path().join(HEADER_FILE);
+        std::fs::write(&path, vec![b' '; MAX_HEADER_BYTES + 100]).unwrap();
+        assert!(matches!(load(&path), Err(CoreError::TooLarge { .. })));
+    }
+
+    #[test]
+    fn load_reports_a_missing_file_as_not_found() {
+        let dir = TempDir::new();
+        let result = load(&dir.path().join(HEADER_FILE));
+        assert!(
+            matches!(result, Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_retries_while_another_program_holds_the_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = TempDir::new();
+        let path = dir.path().join(HEADER_FILE);
+        std::fs::write(&path, b"{}").unwrap();
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let (probed_tx, probed_rx) = std::sync::mpsc::channel::<()>();
+        let holder_path = path.clone();
+        let holder = std::thread::spawn(move || {
+            // Share nothing, so every other open fails with a sharing violation.
+            let _held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(holder_path)
+                .unwrap();
+            opened_tx.send(()).unwrap();
+            probed_rx.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        opened_rx.recv().unwrap();
+        assert!(std::fs::File::open(&path).is_err());
+        probed_tx.send(()).unwrap();
+        // `{}` is not a header, so a parse error (not an I/O one) proves the read got through.
+        assert!(!matches!(load(&path), Err(CoreError::Io(_))));
+        holder.join().unwrap();
     }
 }
