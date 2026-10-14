@@ -7,7 +7,10 @@ and restore, and read-only vaults come in later plans and are not here yet. The 
 are in the [design spec](docs/superpowers/specs/2026-10-07-lockbox-design.md); this file cites its sections as "spec
 5.2" and so on.
 
-The core is a library with no UI. All encryption and every key stay inside it. It has Windows-specific file code
+The core is a library with no UI. It does all the encryption and holds every key. Its Rust API is internal to the app:
+the place where secrets must not cross is the IPC boundary (the bridge between the Rust core and the UI, built in Plan
+3). *Known gap:* the public API still exposes internal helpers (raw keys, header writes, file-system helpers). Narrowing
+it is the first job of Plan 3; none of it reaches a UI today. The core has Windows-specific file code
 (`fsio/windows.rs`) and a portable fallback (`fsio/portable.rs`), so the same code builds and is tested on Linux CI and
 can be reused for Android later.
 
@@ -85,7 +88,8 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
    and associated data that binds vault and item ID (spec 5.4);
 2. writes it with `atomic_write` (hidden temp file in the same folder, flushed, unhidden, swapped over the target);
 3. only then replaces the in-memory copy and rebuilds the search index. If the write fails, the file is read back and
-   memory takes what is on disk (the old item, or the new one if it did land), so the two always agree.
+   memory takes what is on disk (the old item, or the new one if it did land) when that read-back works; if it does
+   not, memory is left as it was.
 
 ### Import and export a file
 - **Import** (`attach_file`, `new_file_item`, `replace_attachment`): check length and free space, encrypt chunk by chunk
@@ -100,6 +104,11 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
   another item still attaches), then delete the item file. A crash in between is finished at the next unlock.
 
 ### Passwords and the recovery key
+Every header write first asks a private guard on the open vault. It refuses (with a fixed message) while a header
+changed outside Lockbox has not been accepted, while the other header copy holds a slot this unlock could not check
+(only a write that replaces that slot may go ahead), and after a failed write left `vault.json` in a state Lockbox
+cannot vouch for (reopen the vault). A successful write clears it.
+
 `change_password` derives a new key with a fresh salt (a random value mixed into the password) and writes `vault.json`,
 then `.bak`. `regenerate_recovery` writes `.bak` first, then `vault.json`, so a failed write never leaves `vault.json`
 holding a secret the user did not receive. (If the process dies after both writes but before the caller shows the new
@@ -137,7 +146,8 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
 9. **Untrusted input is checked before work is done.** File sizes, JSON depth, Argon2 settings and version numbers are
    checked before parsing or deriving anything; an unknown or newer format is refused, never guessed at.
 10. **Disk first, memory second.** A change reaches the in-memory vault only after its file is written; after a failed
-    write, memory re-reads the file so it matches what is on disk.
+    write, memory re-reads the file and takes it when the read-back works. For the header, memory adopts `vault.json`
+    only if it holds the previous or the intended header; anything else blocks later header writes.
 11. **Persistent formats are pinned by tests.** Associated-data bytes, key slots, the header MAC, item plaintext and
     the recovery-key display each have fixed expected values, so a refactor cannot silently change them.
 

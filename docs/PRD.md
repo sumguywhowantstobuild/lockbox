@@ -40,8 +40,7 @@ other password managers (see "Not in v1" under [Scope](#scope)).
 | 3 | Android app + sync between devices without a server | Vault = folder of small independent files, a reasonable base for sync |
 
 \* The core has one small Windows-only file-system module (`fsio/windows.rs`) behind a platform switch, with a portable
-fallback (`fsio/portable.rs`); it has no Tauri code. The sentence above is the spec's wording; Ariel decides the final
-wording.
+fallback (`fsio/portable.rs`); it has no Tauri code.
 
 **Sync is a future protocol design, not a v1 property.** Revision numbers alone do not resolve concurrent edits,
 deletion conflicts, partially copied files, or two devices changing the password. Phase 3 needs its own spec covering

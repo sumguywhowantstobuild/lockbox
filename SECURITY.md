@@ -149,8 +149,8 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **A crash during "Save a copy" can leave a decrypted file behind.** The copy is first built in a hidden temp file
   (`.<random>.lockbox-partial`) beside the destination, and moved into place only after every chunk has been checked. If
   Lockbox crashes, is killed or loses power while that temp file exists, it stays there as plaintext (part of the file
-  you chose to export). The core has no output journal yet (it has the hook only; the desktop app adds the real one in
-  Plan 3, spec 7.2), and the cleanup at unlock only tidies inside the vault folder. A normal failure or cancel removes
+  you chose to export). The core has no output journal yet (a record of temp files to delete at the next launch; the core has
+  the hook only, and the desktop app adds the real one in Plan 3, spec 7.2), and the cleanup at unlock only tidies inside the vault folder. A normal failure or cancel removes
   the temp file. *Accepted:* it is a copy you asked to have in plaintext, it is hidden, and the journal that deletes
   such leftovers at the next launch is planned.
 - **A stale `.bak` after a half-failed password change.** The header is stored twice (`vault.json` and
@@ -169,19 +169,30 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **A new recovery key can be lost if the process dies right after writing it.** If Lockbox is killed after both header
   files are written but before the caller shows the new recovery key, the old key no longer works and the new one was
   never seen (the password still works and a new recovery key can be made). *Accepted:* a very narrow window, the same
-  kind as the "create reports an error after publishing" case below.
+  kind as the "Concurrent vault creation in one folder" case below.
 - **A foreign `.bak` can take over an unreadable `vault.json`.** If `vault.json` cannot be read and the `.bak` is from a
   different vault that has the same password, it unlocks and repairs `vault.json`; the items then show as damaged.
   *Accepted:* the original header was already unreadable and it needs the same password.
-- **A later header change can copy an edited header into both files.** If the header was edited outside Lockbox (the
-  "changed outside Lockbox" warning), changing the password or regenerating the recovery key before answering that
-  warning writes the edited name or date into both header files, so the untouched copy in `.bak` is overwritten. The
-  tamper stamp is not renewed, so the warning keeps appearing until the user accepts it. *Accepted for now:* the app
-  must make the user accept or decline the warning before any other header change (Plan 3).
-- **Re-reading the header after a failed write.** After a failed header write, Lockbox reloads `vault.json` and adopts
-  whatever header it now holds, without checking its vault ID or its tamper stamp; if the reload itself fails, it keeps
-  its previous header. Reaching the first case needs an outside actor to change `vault.json` during the failed write.
-  *Accepted:* a narrow window that needs write access to the folder, and the next unlock checks the stamp again.
+- **Header writes are refused while the two copies disagree on a slot.** An unlock can check only the key slot for the
+  credential it was given (the recovery slot after a password unlock, the password slot after a recovery unlock). If the
+  other slot differs between `vault.json` and `.bak` (for example one copy was damaged), Lockbox cannot tell which is
+  good, so it leaves both files alone and remembers the slot as unverified. Until that slot is replaced, any header
+  write that would copy it over the other file is refused with a fixed message ("header copies disagree"). That
+  includes accepting a changed header. Regenerating the recovery key replaces the recovery slot, and changing the
+  password replaces the password slot, so each is allowed when it is the unchecked one, and clears the block.
+  *Accepted:* the user may have to unlock with the other credential or replace the unchecked one first.
+- **A header changed outside Lockbox must be accepted before any other header change.** While the "changed outside
+  Lockbox" warning is pending, changing the password or regenerating the recovery key is refused, so the authentic
+  `.bak` is never overwritten by the edited header before the user agrees. Accepting is the only way forward (there is
+  no "decline" yet; the app's screen for it comes in Plan 3).
+- **After a failed header write, Lockbox does not trust what it finds.** It reads `vault.json` back and uses it only if
+  it is exactly the header from before or the one it just tried to write. Anything else, or a read that fails, means
+  Lockbox cannot vouch for the file, so every later header write on that open vault is refused until the vault is
+  reopened. A header Lockbox did not write is never adopted. The original error is still reported. *Accepted:* the user
+  must reopen the vault after such a failure.
+- **The Rust API still exposes internal helpers.** The core's public functions include raw keys, header writes and
+  file-system helpers that skip the vault's checks. Nothing reaches a UI today (there is none), but the API does not yet
+  enforce the boundary. Narrowing it to key-free views is the first job of Plan 3.
 - **Odd header files read as damaged.** A `vault.json` saved with a byte-order mark (an invisible marker some editors
   add), or a version number out of range, reads as damaged rather than "update Lockbox", so Lockbox may fall back to
   `.bak` and repair the unreadable file from it. *Accepted:* only a header that passed its checks is ever copied over
@@ -208,7 +219,7 @@ Lockbox defends.
   junction (a Windows folder link) and report it only as a failed cleanup. Unlocking, saving items, importing, exporting
   and purging still work through one. *Accepted:* reaching it needs write access inside the vault folder already; the
   guard covers the automatic steps that move or delete files, and a purge you ask for only deletes `<random id>.blob`
-  files that an authenticated item names.
+  files that an authenticated item names, and then that item's own `items/<id>.item` file.
 - **Non-Windows rename race (Android only).** On non-Windows systems "rename without replacing" is a check followed by a
   rename, so a racing outside process could cause a quarantined file to be replaced. Replacing a file there can also
   report failure after the new file is already in place. *Accepted:* the non-Windows code only ships with the Android
