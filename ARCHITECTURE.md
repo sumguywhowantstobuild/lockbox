@@ -150,7 +150,7 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
 10. **Disk first, memory second.** A change reaches the in-memory vault only after its file is written; after a failed
     write, memory re-reads the file and takes it when the read-back works. For the header, memory adopts `vault.json`
     only if it holds the previous or the intended header state (it does not prove authorship); anything else blocks later
-    header writes.
+    header writes. While a key slot is unverified, any failed header write blocks them until the vault is reopened.
 11. **Persistent formats are pinned by tests.** Associated-data bytes, key slots, the header MAC, item plaintext and
     the recovery-key display each have fixed expected values, so a refactor cannot silently change them.
 

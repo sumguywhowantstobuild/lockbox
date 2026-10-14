@@ -350,9 +350,12 @@ impl Vault {
     /// back: it is accepted only when it holds `primary` (the write landed) or the header
     /// from before. Anything else, or a failed read-back, blocks every later header write on
     /// this `Vault`, so a header whose state Lockbox cannot establish is never copied over a
-    /// good one. (When the open header came from `.bak` and a pair write failed before
-    /// touching `vault.json`, that file holds neither, so this errs on the side of
-    /// blocking.) The original error is returned either way.
+    /// good one. While a slot is unverified (each file holds its own version of it), any
+    /// failed write blocks without a read-back: the saved per-file slots cannot be kept in
+    /// step with a half-written pair, and reopening re-reads both files. (When the open
+    /// header came from `.bak` and a pair write failed before touching `vault.json`, that
+    /// file holds neither state, so this errs on the side of blocking.) The original error
+    /// is returned either way.
     fn commit(
         &mut self,
         header: VaultHeader,
@@ -362,6 +365,8 @@ impl Vault {
         let result = write(&self.dir);
         if result.is_ok() {
             self.header = header;
+        } else if self.guard.unverified.is_some() {
+            self.guard.uncertain = true;
         } else {
             let on_disk = unlock::load(&self.dir.join(HEADER_FILE))
                 .ok()
@@ -739,6 +744,8 @@ mod tests {
         assert_eq!(read_pair(&dir), before);
     }
 
+    const NEW: &str = "a different long password";
+
     fn what<T>(r: Result<T>) -> &'static str {
         match r {
             Err(CoreError::InvalidInput { what }) => what,
@@ -779,10 +786,10 @@ mod tests {
         assert_eq!(fs::read(dir.join(HEADER_BACKUP)).unwrap(), bak);
     }
 
-    /// A failed accept that is read back as the previous state keeps both blocks, and the
-    /// retry then works. `.bak` is written first, so it already has the accepted header.
+    /// A failed accept in the combined state blocks every header write until reopened;
+    /// reopening re-reads both files and the accept can then be repeated.
     #[test]
-    fn failed_accept_keeps_the_blocks_and_can_be_retried() {
+    fn failed_accept_requires_reopen_then_can_be_retried() {
         let parent = TempDir::new();
         let created = Vault::create(parent.path(), "Family", PW).unwrap();
         let dir = created.vault.dir().to_path_buf();
@@ -795,26 +802,25 @@ mod tests {
         failpoint::arm("write_headers.before_second");
         assert!(matches!(vault.accept_header(), Err(CoreError::Io(_))));
         failpoint::disarm_all();
-        assert_eq!(fs::read(dir.join(HEADER_FILE)).unwrap(), primary);
 
-        assert!(
-            what(vault.change_password("a different long password"))
-                .contains("accept the header change")
-        );
-        assert!(what(vault.regenerate_recovery()).contains("accept the header change"));
+        assert!(what(vault.accept_header()).contains("reopen the vault"));
+        assert!(what(vault.change_password(NEW)).contains("reopen the vault"));
+        assert!(what(vault.regenerate_recovery()).contains("reopen the vault"));
         assert_eq!(fs::read(dir.join(HEADER_FILE)).unwrap(), primary);
+        drop(vault);
 
+        let (mut vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(report.header_mac_mismatch);
         vault.accept_header().unwrap();
-        assert!(
-            what(vault.change_password("a different long password")).contains("copies disagree")
-        );
+        assert!(what(vault.change_password(NEW)).contains("copies disagree"));
         vault.regenerate_recovery().unwrap();
         assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
     }
 
-    /// A failed replacement leaves the unverified-slot block in place.
+    /// A failed replacement while a slot is unverified blocks until reopened; the reopened
+    /// vault still has the slot block, and the replacement then works.
     #[test]
-    fn failed_replacement_keeps_the_slot_block() {
+    fn failed_replacement_requires_reopen_and_keeps_the_slot_block() {
         let parent = TempDir::new();
         let created = Vault::create(parent.path(), "Family", PW).unwrap();
         let dir = created.vault.dir().to_path_buf();
@@ -829,10 +835,12 @@ mod tests {
         assert!(vault.regenerate_recovery().is_err());
         failpoint::disarm_all();
 
-        assert!(
-            what(vault.change_password("a different long password")).contains("copies disagree")
-        );
+        assert!(what(vault.change_password(NEW)).contains("reopen the vault"));
         assert_eq!(read_pair(&dir), before);
+        drop(vault);
+
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(what(vault.change_password(NEW)).contains("copies disagree"));
         vault.regenerate_recovery().unwrap();
     }
 
@@ -868,5 +876,52 @@ mod tests {
         assert_eq!(after.name, header.name);
         vault.regenerate_recovery().unwrap();
         assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
+    }
+
+    /// Round 3: with per-file slots in play, a failed header write must not leave a vault
+    /// that can still write. Backup unlock with both primary slots damaged, a password
+    /// change that dies between the two writes, then nothing may write until reopened.
+    #[test]
+    fn failed_write_with_unverified_slots_requires_reopen() {
+        const NEW_PW: &str = "a different long password";
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let recovery = created.recovery;
+        drop(created.vault);
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        for slot in &mut header.slots {
+            slot.ciphertext[0] ^= 1;
+        }
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+
+        let (mut vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert!(report.used_backup_header);
+        failpoint::arm("write_headers.before_second");
+        assert!(matches!(
+            vault.change_password(NEW_PW),
+            Err(CoreError::Io(_))
+        ));
+        failpoint::disarm_all();
+        let before = read_pair(&dir);
+
+        for result in [
+            what(vault.accept_header()),
+            what(vault.change_password(NEW_PW)),
+            what(vault.regenerate_recovery().map(|_| ())),
+        ] {
+            assert!(result.contains("reopen the vault"), "{result}");
+        }
+        assert_eq!(read_pair(&dir), before);
+        drop(vault);
+
+        // Reopened, the state matches the files: vault.json has the new password slot and
+        // .bak the old one, which stays unverified until a supported change replaces it.
+        let (mut vault, _) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert!(what(vault.regenerate_recovery().map(|_| ())).contains("copies disagree"));
+        vault.change_password(NEW_PW).unwrap();
+        drop(vault);
+        assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
+        assert!(Vault::unlock_with_password(&dir, NEW_PW).is_ok());
     }
 }

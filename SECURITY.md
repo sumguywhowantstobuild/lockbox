@@ -193,8 +193,9 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **After a failed header write, Lockbox does not trust what it finds.** It reads `vault.json` back and accepts it
   only if it is exactly the previous header state or the intended one (it does not prove who wrote it; the previous
   state may itself hold edits made outside Lockbox). Anything else, or a read that fails, means Lockbox cannot
-  establish the state, so every later header write on that open vault is refused until the vault is reopened. The
-  original error is still reported. *Accepted:* the user must reopen the vault after such a failure; that includes a
+  establish the state, so every later header write on that open vault is refused until the vault is reopened. While two
+  copies disagree on a key slot, any failed header write blocks this way without a read-back, because the per-file slots
+  cannot be kept in step with a half-written pair; reopening re-reads both files. The original error is still reported. *Accepted:* the user must reopen the vault after such a failure; that includes a
   failed accept when the vault was opened from `.bak` and `vault.json` was not yet touched.
 - **The Rust API still exposes internal helpers.** The core's public functions include raw keys, header writes and
   file-system helpers that skip the vault's checks. Nothing reaches a UI today (there is none), but the API does not yet
