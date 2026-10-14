@@ -13,7 +13,7 @@ const clean = {
   LOCKBOX_OSV: shim("osv"),
   FAKE_GITLEAKS_REPORT: "[]",
   FAKE_GITLEAKS_STAGED_REPORT: "[]",
-  FAKE_SEMGREP_REPORT: '{"results":[]}',
+  FAKE_SEMGREP_REPORT: '{"results":[],"errors":[]}',
   FAKE_OSV_REPORT: '{"results":[]}',
 };
 
@@ -28,6 +28,7 @@ const run = (overrides = {}, args = []) => {
 const semgrepResult = (severity) =>
   JSON.stringify({
     results: [{ check_id: "rules.demo", path: "src/a.rs", start: { line: 7 }, extra: { severity } }],
+    errors: [],
   });
 
 const osvResult = (score) =>
@@ -78,10 +79,33 @@ test("gitleaks exit 1 with no findings (its fatal-error code) -> exit 2, never c
   assert.match(out, /INCOMPLETE: gitleaks exited with 1 but reported no findings/);
 });
 
-test("osv-scanner exit 128 (no packages) counts as clean", () => {
+test("osv-scanner exit 128 (no packages) -> exit 2, this workspace always has packages", () => {
   const { code, out } = run({ FAKE_OSV_EXIT: "128", FAKE_OSV_REPORT: undefined });
-  assert.equal(code, 0);
-  assert.match(out, /CLEAN/);
+  assert.equal(code, 2);
+  assert.match(out, /INCOMPLETE: osv-scanner found no packages to scan/);
+});
+
+test("missing Cargo.lock -> exit 2, dependencies would go unchecked", () => {
+  const { code, out } = run({ LOCKBOX_CARGO_LOCK: "no/such/Cargo.lock" });
+  assert.equal(code, 2);
+  assert.match(out, /INCOMPLETE: osv-scanner needs Cargo\.lock, which is missing/);
+});
+
+test("semgrep scan errors -> exit 2, files it could not scan are not clean", () => {
+  const errors = JSON.stringify({ results: [], errors: [{ type: "PartialParsing", level: "warn" }] });
+  const { code, out } = run({ FAKE_SEMGREP_REPORT: errors });
+  assert.equal(code, 2);
+  assert.match(out, /INCOMPLETE: semgrep reported 1 scan error/);
+  // A report with no errors list at all is not trusted either.
+  const bare = run({ FAKE_SEMGREP_REPORT: '{"results":[]}' });
+  assert.equal(bare.code, 2);
+  assert.match(bare.out, /semgrep wrote no readable report/);
+});
+
+test("git failing to list files -> exit 2, semgrep would scan nothing", () => {
+  const { code, out } = run({ GIT_DIR: "no/such/git/dir" });
+  assert.equal(code, 2);
+  assert.match(out, /semgrep could not list the files to scan/);
 });
 
 test("a tool exiting 2 -> exit 2, never clean", () => {

@@ -3,6 +3,7 @@
 // Exit 0 = CLEAN, 1 = FINDINGS, 2 = INCOMPLETE (a tool is missing or failed, so "clean" can't be claimed).
 // Usage: node scripts/scan.mjs [--json]
 // Env LOCKBOX_GITLEAKS / LOCKBOX_SEMGREP / LOCKBOX_OSV point at a tool; a .mjs path is run with this Node (tests use that).
+// LOCKBOX_CARGO_LOCK overrides where the required Cargo.lock is looked for (tests only).
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
@@ -11,6 +12,7 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = join(root, ".scan");
 // pip installs semgrep here (not on PATH); see docs/SETUP.md troubleshooting.
+const cargoLock = process.env.LOCKBOX_CARGO_LOCK ?? join(root, "Cargo.lock");
 const semgrepDir = process.env.APPDATA && join(process.env.APPDATA, "Python", "Python311", "Scripts");
 
 // gitleaks exit 1 means "leaks found" but is also its fatal-error code, hence findingsExit below.
@@ -28,7 +30,8 @@ const gitleaks = {
     })),
 };
 
-// One entry per tool. okExit: exit codes that mean "ran fine". emptyExit: an ok code that writes no report.
+// One entry per tool. okExit: exit codes that mean "ran fine". emptyExit: an ok code that means there was nothing to scan.
+// scanErrors: how many files or rules the tool could not handle; any makes the scan INCOMPLETE.
 // findingsExit: an ok code that promises findings, so an empty list with it is a failure, not a clean scan.
 const tools = [
   { ...gitleaks, name: "gitleaks", args: (out) => gitleaks.args(out, []) }, // committed history
@@ -52,6 +55,7 @@ const tools = [
       "--json", "--output", out,
       ...repoFiles(),
     ],
+    scanErrors: (r) => r.errors.length, // no errors list at all throws: the report is not trusted
     findings: (r) =>
       r.results.map((f) => ({
         fail: f.extra.severity !== "INFO",
@@ -63,13 +67,16 @@ const tools = [
     env: "LOCKBOX_OSV",
     bin: "osv-scanner",
     okExit: [0, 1, 128],
-    emptyExit: 128, // no packages found
+    emptyExit: 128, // no packages found: never expected, this is a Rust workspace
     findingsExit: 1,
-    args: (out) => [
-      "scan", "source",
-      ...["Cargo.lock", "package-lock.json"].filter((f) => existsSync(join(root, f))).flatMap((f) => ["-L", f]),
-      "--format", "json", "--output-file", out,
-    ],
+    args: (out) => {
+      if (!existsSync(cargoLock)) throw new Error("needs Cargo.lock, which is missing");
+      return [
+        "scan", "source",
+        ...["Cargo.lock", "package-lock.json"].filter((f) => existsSync(join(root, f))).flatMap((f) => ["-L", f]),
+        "--format", "json", "--output-file", out,
+      ];
+    },
     findings: (r) =>
       r.results.flatMap((res) =>
         res.packages.flatMap((p) =>
@@ -91,6 +98,7 @@ const tools = [
 // the directory (semgrep already honours .gitignore) once the repo has a few hundred files.
 function repoFiles() {
   const r = spawnSync("git", ["ls-files", "--cached", "--others", "--exclude-standard"], { cwd: root, encoding: "utf8" });
+  if (r.status !== 0) throw new Error("could not list the files to scan (git ls-files failed)");
   return r.stdout.split("\n").filter((f) => f && existsSync(join(root, f)));
 }
 
@@ -110,8 +118,14 @@ function run(tool) {
     }
   }
   const reportPath = join(".scan", `${tool.name}.json`);
+  let args;
+  try {
+    args = tool.args(reportPath);
+  } catch (e) {
+    return { incomplete: `${tool.name} ${e.message}` };
+  }
   // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- cmd is a fixed tool name or an env override set by whoever runs the scan
-  const res = spawnSync(cmd, [...prefix, ...tool.args(reportPath)], { cwd: root, env, encoding: "utf8" });
+  const res = spawnSync(cmd, [...prefix, ...args], { cwd: root, env, encoding: "utf8" });
 
   if (res.error?.code === "ENOENT") return { incomplete: `${tool.name} not found` };
   if (res.error) return { incomplete: `${tool.name} could not start (${res.error.message})` };
@@ -119,13 +133,16 @@ function run(tool) {
     const why = (res.stderr ?? "").trim().split("\n").slice(-1)[0];
     return { incomplete: `${tool.name} exited with ${res.status}${why ? ` (${why})` : ""}` };
   }
-  if (res.status === tool.emptyExit) return { findings: [] };
-  let findings;
+  if (res.status === tool.emptyExit) return { incomplete: `${tool.name} found no packages to scan` };
+  let findings, errors;
   try {
-    findings = tool.findings(JSON.parse(readFileSync(join(root, reportPath), "utf8")));
+    const report = JSON.parse(readFileSync(join(root, reportPath), "utf8"));
+    errors = tool.scanErrors?.(report) ?? 0;
+    findings = tool.findings(report);
   } catch {
     return { incomplete: `${tool.name} wrote no readable report` };
   }
+  if (errors) return { incomplete: `${tool.name} reported ${errors} scan error${errors === 1 ? "" : "s"}` };
   if (res.status === tool.findingsExit && !findings.length) {
     return { incomplete: `${tool.name} exited with ${res.status} but reported no findings` };
   }
