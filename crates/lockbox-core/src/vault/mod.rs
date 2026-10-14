@@ -10,7 +10,7 @@ mod unlock;
 use crate::fsio;
 use crate::header::{
     CONTAINER_VERSION, HEADER_FILE, VaultHeader, header_mac, serialize_header, write_headers,
-    write_headers_backup_first,
+    write_headers_backup_first, write_headers_each,
 };
 use crate::ids::{ItemId, VaultId};
 use crate::item::Item;
@@ -80,24 +80,35 @@ pub struct CreatedVault {
 }
 
 /// Whether, and why, header writes are held back (final review 1 to 3). Every header write
-/// asks [`HeaderGuard::check`] first; a successful write clears it.
+/// asks [`HeaderGuard::check`] first. A credential change that goes through clears it;
+/// accepting clears only the pending consent.
 #[derive(Debug, Default)]
 struct HeaderGuard {
     /// `header_mac_mismatch` is pending: the user has not accepted the changed header, so
     /// only `accept_header` may write (anything else would overwrite the authentic `.bak`).
     // shortcut: no "decline" path; only accept_header resolves this, until Plan 3's UI can ask the user.
     consent_pending: bool,
-    /// The other header copy differs in this slot type, which the unlock could not check,
-    /// so only a write that replaces that slot may go ahead (any other would copy the
-    /// unverified slot over the other file's, possibly good, one).
-    unverified: Option<SlotType>,
+    /// The other header copy differs in a slot the unlock could not check, so only a write
+    /// that replaces that slot may go ahead (any other would copy the unverified slot over
+    /// the other file's, possibly good, one). `accept_header` is the exception: it keeps
+    /// each file's own copy of that slot.
+    unverified: Option<Unverified>,
     /// A header write failed and `vault.json` now holds a header Lockbox cannot vouch for.
     uncertain: bool,
 }
 
+/// The slot an unlock could not check, as the other header file holds it.
+#[derive(Debug)]
+struct Unverified {
+    slot_type: SlotType,
+    other: KeySlot,
+    /// Whether the other file is `vault.json.bak` (else `vault.json`).
+    other_is_backup: bool,
+}
+
 impl HeaderGuard {
     /// `replacing` is the slot type the write replaces; `None` is `accept_header`, the only
-    /// write the pending consent lets through.
+    /// write the pending consent lets through, and which never spreads a slot.
     fn check(&self, replacing: Option<SlotType>) -> Result<()> {
         let refuse = |what| Err(CoreError::InvalidInput { what });
         if self.uncertain {
@@ -106,8 +117,8 @@ impl HeaderGuard {
         if self.consent_pending && replacing.is_some() {
             return refuse("accept the header change first");
         }
-        match self.unverified {
-            Some(slot) if replacing != Some(slot) => {
+        match &self.unverified {
+            Some(u) if replacing.is_some_and(|t| t != u.slot_type) => {
                 refuse("header copies disagree; replace the unchecked credential first")
             }
             _ => Ok(()),
@@ -294,50 +305,74 @@ impl Vault {
             .find(|s| s.slot_type == slot.slot_type)
             .ok_or(CoreError::Damaged { what: "key slots" })?;
         *target = slot;
-        self.commit(header, write)?;
+        let primary = header.clone();
+        self.commit(header, &primary, |dir| write(dir, &primary))?;
+        // The guard let this write through, so it replaced the unverified slot (if any), and
+        // no consent was pending.
+        self.guard = HeaderGuard::default();
         remove_leftover_tmp(&self.dir);
         Ok(())
     }
 
     /// Accepts a header changed outside Lockbox (after [`UnlockReport::header_mac_mismatch`]):
     /// signs the current header again and saves it. Call only after the user agreed.
+    ///
+    /// If the unlock left a key slot unchecked (the two copies differ in it), each file gets
+    /// the accepted header with its OWN version of that slot: the MAC does not cover slots,
+    /// so nothing unverified is lost and no choice between the copies is made. The
+    /// slot block stays until a credential change replaces that slot.
     pub fn accept_header(&mut self) -> Result<()> {
         self.guard.check(None)?;
         let mut header = self.header.clone();
         header.header_mac = Some(header_mac(&header, &self.vault_key));
-        self.commit(header, write_headers)
+        let mut other = header.clone();
+        let mut other_is_primary = false;
+        if let Some(u) = &self.guard.unverified {
+            if let Some(slot) = other.slots.iter_mut().find(|s| s.slot_type == u.slot_type) {
+                *slot = u.other.clone();
+            }
+            other_is_primary = !u.other_is_backup;
+        }
+        let (primary, backup) = if other_is_primary {
+            (other, header.clone())
+        } else {
+            (header.clone(), other)
+        };
+        self.commit(header, &primary, |dir| {
+            write_headers_each(dir, &primary, &backup)
+        })?;
+        self.guard.consent_pending = false;
+        Ok(())
     }
 
-    /// Writes `header` and makes it the live one. If the write fails part-way, `vault.json`
-    /// is read back and adopted only when it holds the header from before or the one just
-    /// written. Anything else, or a failed read-back, blocks every later header write on
-    /// this `Vault`, so a header Lockbox cannot vouch for is never copied over a good one.
-    /// The original error is returned either way.
+    /// Runs `write` (which saves `header`, or the pair of headers whose `vault.json` half is
+    /// `primary`) and makes `header` the live one. If it fails part-way, `vault.json` is read
+    /// back: it is accepted only when it holds `primary` (the write landed) or the header
+    /// from before. Anything else, or a failed read-back, blocks every later header write on
+    /// this `Vault`, so a header whose state Lockbox cannot establish is never copied over a
+    /// good one. (When the open header came from `.bak` and a pair write failed before
+    /// touching `vault.json`, that file holds neither, so this errs on the side of
+    /// blocking.) The original error is returned either way.
     fn commit(
         &mut self,
         header: VaultHeader,
-        write: fn(&Path, &VaultHeader) -> Result<()>,
+        primary: &VaultHeader,
+        write: impl FnOnce(&Path) -> Result<()>,
     ) -> Result<()> {
-        match write(&self.dir, &header) {
-            Ok(()) => {
+        let result = write(&self.dir);
+        if result.is_ok() {
+            self.header = header;
+        } else {
+            let on_disk = unlock::load(&self.dir.join(HEADER_FILE))
+                .ok()
+                .map(|f| serialize_header(&f.header));
+            if on_disk == Some(serialize_header(primary)) {
                 self.header = header;
-                // The guard let this write through, so it is resolved: the unverified slot
-                // was replaced, or the changed header was accepted.
-                self.guard = HeaderGuard::default();
-                Ok(())
-            }
-            Err(e) => {
-                let known = unlock::load(&self.dir.join(HEADER_FILE)).ok().filter(|f| {
-                    let bytes = serialize_header(&f.header);
-                    bytes == serialize_header(&self.header) || bytes == serialize_header(&header)
-                });
-                match known {
-                    Some(f) => self.header = f.header,
-                    None => self.guard.uncertain = true,
-                }
-                Err(e)
+            } else if on_disk != Some(serialize_header(&self.header)) {
+                self.guard.uncertain = true;
             }
         }
+        result
     }
 
     pub fn name(&self) -> &str {
@@ -702,5 +737,136 @@ mod tests {
             assert!(matches!(result, Err(CoreError::InvalidInput { .. })));
         }
         assert_eq!(read_pair(&dir), before);
+    }
+
+    fn what<T>(r: Result<T>) -> &'static str {
+        match r {
+            Err(CoreError::InvalidInput { what }) => what,
+            _ => "not refused",
+        }
+    }
+
+    /// Edits the name in `vault.json` and damages its slot `n` (0 password, 1 recovery).
+    fn edit_and_damage(dir: &Path, n: usize) {
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        header.name = "Renamed".to_owned();
+        header.slots[n].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+    }
+
+    /// A failed read-back after a failed write also blocks every later header write.
+    #[test]
+    fn failed_read_back_blocks_later_header_writes() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        fs::remove_file(dir.join(HEADER_FILE)).unwrap();
+        let bak = fs::read(dir.join(HEADER_BACKUP)).unwrap();
+
+        failpoint::arm("write_headers.before_first");
+        let result = vault.change_password("a different long password");
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+
+        for result in [
+            what(vault.regenerate_recovery()),
+            what(vault.change_password("a different long password")),
+            what(vault.accept_header()),
+        ] {
+            assert!(result.contains("reopen the vault"), "{result}");
+        }
+        assert!(!dir.join(HEADER_FILE).exists());
+        assert_eq!(fs::read(dir.join(HEADER_BACKUP)).unwrap(), bak);
+    }
+
+    /// A failed accept that is read back as the previous state keeps both blocks, and the
+    /// retry then works. `.bak` is written first, so it already has the accepted header.
+    #[test]
+    fn failed_accept_keeps_the_blocks_and_can_be_retried() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        drop(created);
+        edit_and_damage(&dir, 1);
+        let primary = fs::read(dir.join(HEADER_FILE)).unwrap();
+        let (mut vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(report.header_mac_mismatch);
+
+        failpoint::arm("write_headers.before_second");
+        assert!(matches!(vault.accept_header(), Err(CoreError::Io(_))));
+        failpoint::disarm_all();
+        assert_eq!(fs::read(dir.join(HEADER_FILE)).unwrap(), primary);
+
+        assert!(
+            what(vault.change_password("a different long password"))
+                .contains("accept the header change")
+        );
+        assert!(what(vault.regenerate_recovery()).contains("accept the header change"));
+        assert_eq!(fs::read(dir.join(HEADER_FILE)).unwrap(), primary);
+
+        vault.accept_header().unwrap();
+        assert!(
+            what(vault.change_password("a different long password")).contains("copies disagree")
+        );
+        vault.regenerate_recovery().unwrap();
+        assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
+    }
+
+    /// A failed replacement leaves the unverified-slot block in place.
+    #[test]
+    fn failed_replacement_keeps_the_slot_block() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        drop(created);
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        header.slots[1].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        let before = read_pair(&dir);
+
+        failpoint::arm("write_headers.before_first");
+        assert!(vault.regenerate_recovery().is_err());
+        failpoint::disarm_all();
+
+        assert!(
+            what(vault.change_password("a different long password")).contains("copies disagree")
+        );
+        assert_eq!(read_pair(&dir), before);
+        vault.regenerate_recovery().unwrap();
+    }
+
+    /// Accepting when the open header came from `.bak`: `vault.json` is "the other file" and
+    /// keeps its own (here damaged) recovery slot. A failure before it is touched cannot be
+    /// reconciled, so it blocks; a clean accept works and the slot can then be replaced.
+    #[test]
+    fn accept_from_the_backup_keeps_the_primarys_own_slot() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        drop(created);
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        for slot in &mut header.slots {
+            slot.ciphertext[0] ^= 1;
+        }
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        let damaged = fs::read(dir.join(HEADER_FILE)).unwrap();
+
+        let (mut vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(report.used_backup_header);
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.accept_header().is_err());
+        failpoint::disarm_all();
+        assert_eq!(fs::read(dir.join(HEADER_FILE)).unwrap(), damaged);
+        assert!(what(vault.regenerate_recovery()).contains("reopen the vault"));
+        drop(vault);
+
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        vault.accept_header().unwrap();
+        let after = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        assert_eq!(after.slots[1], header.slots[1]); // its own, still damaged
+        assert_eq!(after.name, header.name);
+        vault.regenerate_recovery().unwrap();
+        assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
     }
 }

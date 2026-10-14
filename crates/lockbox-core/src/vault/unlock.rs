@@ -1,6 +1,6 @@
 //! Opening a vault (spec 6.3): `vault.json` first, `.bak` as the fallback, then a careful repair.
 
-use super::{HeaderGuard, UnlockReport, Vault, items};
+use super::{HeaderGuard, UnlockReport, Unverified, Vault, items};
 use crate::fsio::atomic_write;
 use crate::header::{
     HEADER_BACKUP, HEADER_FILE, MAX_HEADER_BYTES, VaultHeader, parse_header, verify_header_mac,
@@ -114,7 +114,7 @@ fn may_overwrite(other: &Result<HeaderFile>, used: &HeaderFile, unused: SlotType
         Ok(other) => {
             other.bytes != used.bytes
                 && other.header.vault_id == used.header.vault_id
-                && !disagrees_in(other, used, unused)
+                && differing_slot(other, used, unused).is_none()
         }
         // A newer-format file or an unreadable one (not "missing") is not ours to replace.
         Err(CoreError::UnsupportedVersion) => false,
@@ -123,10 +123,16 @@ fn may_overwrite(other: &Result<HeaderFile>, used: &HeaderFile, unused: SlotType
     }
 }
 
-/// Whether the other copy is the same vault yet holds a different `unused` slot.
-fn disagrees_in(other: &HeaderFile, used: &HeaderFile, unused: SlotType) -> bool {
-    other.header.vault_id == used.header.vault_id
-        && slot_of(&other.header, unused).ok() != slot_of(&used.header, unused).ok()
+/// The other copy's `unused` slot, when it is the same vault yet holds a different one.
+fn differing_slot<'a>(
+    other: &'a HeaderFile,
+    used: &HeaderFile,
+    unused: SlotType,
+) -> Option<&'a KeySlot> {
+    let theirs = slot_of(&other.header, unused).ok()?;
+    (other.header.vault_id == used.header.vault_id
+        && Some(theirs) != slot_of(&used.header, unused).ok())
+    .then_some(theirs)
 }
 
 fn repair(file: &Path, bytes: &[u8]) -> Result<()> {
@@ -194,8 +200,13 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
     let unused = credential.unused_slot();
     let unverified = other
         .as_ref()
-        .is_ok_and(|o| disagrees_in(o, used, unused))
-        .then_some(unused);
+        .ok()
+        .and_then(|o| differing_slot(o, used, unused))
+        .map(|slot| Unverified {
+            slot_type: unused,
+            other: slot.clone(),
+            other_is_backup: !used_backup,
+        });
     let mut vault = Vault {
         guard: HeaderGuard {
             consent_pending: !mac_ok,

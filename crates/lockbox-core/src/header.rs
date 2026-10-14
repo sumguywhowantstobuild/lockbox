@@ -140,7 +140,7 @@ pub fn verify_header_mac(h: &VaultHeader, vault_key: &Key32) -> bool {
 /// A header whose pretty-printed text exceeds [`MAX_HEADER_BYTES`] is refused with
 /// `TooLarge` before either file is touched.
 pub fn write_headers(dir: &Path, h: &VaultHeader) -> Result<()> {
-    write_pair(dir, h, [HEADER_FILE, HEADER_BACKUP])
+    write_pair(dir, [(HEADER_FILE, h), (HEADER_BACKUP, h)])
 }
 
 /// Like [`write_headers`] but `vault.json.bak` first, then `vault.json`. For changes
@@ -148,24 +148,30 @@ pub fn write_headers(dir: &Path, h: &VaultHeader) -> Result<()> {
 /// something that was not committed to both files first. An `Err` after `.bak` was
 /// replaced leaves `.bak` one version ahead of `vault.json`.
 pub fn write_headers_backup_first(dir: &Path, h: &VaultHeader) -> Result<()> {
-    write_pair(dir, h, [HEADER_BACKUP, HEADER_FILE])
+    write_pair(dir, [(HEADER_BACKUP, h), (HEADER_FILE, h)])
 }
 
-fn write_pair(dir: &Path, h: &VaultHeader, [first, second]: [&str; 2]) -> Result<()> {
-    let bytes = serialize_header(h);
+/// Like [`write_headers_backup_first`] but each file gets its own header. For accepting a
+/// changed header while the two copies still differ in a key slot that must be kept as is.
+pub fn write_headers_each(dir: &Path, primary: &VaultHeader, backup: &VaultHeader) -> Result<()> {
+    write_pair(dir, [(HEADER_BACKUP, backup), (HEADER_FILE, primary)])
+}
+
+fn write_pair(dir: &Path, files: [(&str, &VaultHeader); 2]) -> Result<()> {
+    let bytes = files.map(|(_, h)| serialize_header(h));
     // Size only: the content is the caller's job. This just keeps a header that `parse_header`
-    // would refuse for its length from being saved.
-    if bytes.len() > MAX_HEADER_BYTES {
+    // would refuse for its length from being saved; both are checked before either is written.
+    if bytes.iter().any(|b| b.len() > MAX_HEADER_BYTES) {
         return Err(CoreError::TooLarge {
             what: "vault header",
         });
     }
     #[cfg(test)]
     crate::fsio::failpoint::check("write_headers.before_first")?;
-    atomic_write(&dir.join(first), &bytes)?;
+    atomic_write(&dir.join(files[0].0), &bytes[0])?;
     #[cfg(test)]
     crate::fsio::failpoint::check("write_headers.before_second")?;
-    atomic_write(&dir.join(second), &bytes)
+    atomic_write(&dir.join(files[1].0), &bytes[1])
 }
 
 #[cfg(test)]

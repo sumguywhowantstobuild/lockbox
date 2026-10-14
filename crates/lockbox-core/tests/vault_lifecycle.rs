@@ -405,7 +405,6 @@ fn unverified_recovery_slot_blocks_password_change_until_it_is_replaced() {
     let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
 
     assert!(is_refused(vault.change_password(NEW_PW)));
-    assert!(is_refused(vault.accept_header()));
     assert_eq!(bytes_of(&dir), before);
     // Replacing the unverified slot is allowed, and clears the block.
     let new_recovery = vault.regenerate_recovery().unwrap();
@@ -475,4 +474,102 @@ fn composed_and_decomposed_passwords_match_but_a_leading_space_counts() {
         &dir,
         decomposed.trim_start()
     )));
+}
+
+/// What a refusal said, to tell the three guard messages apart.
+fn refusal<T>(r: Result<T, CoreError>) -> &'static str {
+    match r {
+        Err(CoreError::InvalidInput { what }) => what,
+        _ => "not refused",
+    }
+}
+
+fn slot_bytes(dir: &Path, file: &str, slot_type: SlotType) -> Vec<u8> {
+    let header = read_header(dir, file);
+    let slot = header.slots.iter().find(|s| s.slot_type == slot_type);
+    serde_json::to_vec(slot.unwrap()).unwrap()
+}
+
+/// Edits the name in `vault.json` and damages `slot_type` there; `.bak` stays authentic.
+fn edit_and_damage_primary(dir: &Path, slot_type: SlotType) {
+    damage_slot(dir, HEADER_FILE, slot_type);
+    let mut header = read_header(dir, HEADER_FILE);
+    header.name = "Renamed".to_owned();
+    write_header(dir, HEADER_FILE, &header);
+}
+
+/// Final re-review: a changed header (consent pending) and a slot the unlock could not check
+/// (unverified) at once must still have a way out, without the alternate credential and
+/// without discarding either copy's slot.
+#[test]
+fn combined_state_is_resolved_by_accepting_then_replacing_the_slot() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, _recovery) = make(parent.path(), "Family");
+    edit_and_damage_primary(&dir, SlotType::Recovery);
+    let (own_main, own_bak) = (
+        slot_bytes(&dir, HEADER_FILE, SlotType::Recovery),
+        slot_bytes(&dir, HEADER_BACKUP, SlotType::Recovery),
+    );
+    let before = bytes_of(&dir);
+    let (mut vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+    assert!(report.header_mac_mismatch);
+
+    // Before accepting, each credential change names the consent.
+    assert!(refusal(vault.change_password(NEW_PW)).contains("accept the header change"));
+    assert!(refusal(vault.regenerate_recovery()).contains("accept the header change"));
+    assert_eq!(bytes_of(&dir), before);
+
+    vault.accept_header().unwrap();
+    // Each copy has the accepted name and keeps its own recovery slot.
+    for file in [HEADER_FILE, HEADER_BACKUP] {
+        assert_eq!(read_header(&dir, file).name, "Renamed");
+    }
+    assert_eq!(slot_bytes(&dir, HEADER_FILE, SlotType::Recovery), own_main);
+    assert_eq!(slot_bytes(&dir, HEADER_BACKUP, SlotType::Recovery), own_bak);
+    // Consent is gone; the slot block stays.
+    let kept = bytes_of(&dir);
+    assert!(refusal(vault.change_password(NEW_PW)).contains("copies disagree"));
+    assert_eq!(bytes_of(&dir), kept);
+
+    let new_recovery = vault.regenerate_recovery().unwrap();
+    drop(vault);
+    assert!(files_identical(&dir));
+    let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+    assert!(!report.header_mac_mismatch && !report.used_backup_header);
+    drop(vault);
+    assert!(Vault::unlock_with_recovery(&dir, &new_recovery).is_ok());
+}
+
+/// The reciprocal: recovery unlock, damaged password slot, then `change_password` resolves.
+#[test]
+fn combined_state_reciprocal_is_resolved_by_accepting_then_changing_the_password() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, recovery) = make(parent.path(), "Family");
+    edit_and_damage_primary(&dir, SlotType::Password);
+    let (own_main, own_bak) = (
+        slot_bytes(&dir, HEADER_FILE, SlotType::Password),
+        slot_bytes(&dir, HEADER_BACKUP, SlotType::Password),
+    );
+    let before = bytes_of(&dir);
+    let (mut vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+    assert!(report.header_mac_mismatch);
+
+    assert!(refusal(vault.change_password(NEW_PW)).contains("accept the header change"));
+    assert!(refusal(vault.regenerate_recovery()).contains("accept the header change"));
+    assert_eq!(bytes_of(&dir), before);
+
+    vault.accept_header().unwrap();
+    assert_eq!(slot_bytes(&dir, HEADER_FILE, SlotType::Password), own_main);
+    assert_eq!(slot_bytes(&dir, HEADER_BACKUP, SlotType::Password), own_bak);
+    let kept = bytes_of(&dir);
+    assert!(refusal(vault.regenerate_recovery()).contains("copies disagree"));
+    assert_eq!(bytes_of(&dir), kept);
+
+    vault.change_password(NEW_PW).unwrap();
+    drop(vault);
+    assert!(files_identical(&dir));
+    let (vault, report) = Vault::unlock_with_password(&dir, NEW_PW).unwrap();
+    assert!(!report.header_mac_mismatch);
+    drop(vault);
+    assert!(is_wrong_password(Vault::unlock_with_password(&dir, PW)));
 }
