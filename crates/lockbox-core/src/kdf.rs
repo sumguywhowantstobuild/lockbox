@@ -163,6 +163,8 @@ pub(crate) fn argon2id_raw(
     const BAD_INPUT: CoreError = CoreError::InvalidInput {
         what: "key derivation input",
     };
+    #[cfg(test)]
+    ARGON2_RUNS.with(|n| n.set(n.get() + 1));
     let mut builder = ParamsBuilder::new();
     builder.m_cost(m).t_cost(t).p_cost(p);
     if let Some(ad) = ad {
@@ -184,6 +186,12 @@ pub(crate) fn argon2id_raw(
             },
             _ => BAD_INPUT,
         })
+}
+
+// How many times Argon2 was entered on this thread, so a test can prove it never ran.
+#[cfg(test)]
+thread_local! {
+    static ARGON2_RUNS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -257,11 +265,19 @@ mod tests {
                 params.validate_for_read(),
                 Err(CoreError::ParamsOutOfBounds)
             ));
-            let start = Instant::now();
+            let runs = ARGON2_RUNS.with(|n| n.get());
             let result = derive_password_key("a long enough password", &SALT, &params);
             assert!(matches!(result, Err(CoreError::ParamsOutOfBounds)));
-            assert!(start.elapsed() < Duration::from_millis(10), "{params:?}");
+            assert_eq!(
+                ARGON2_RUNS.with(|n| n.get()),
+                runs,
+                "{params:?} reached Argon2"
+            );
         }
+        // The counter does count: a valid derivation moves it.
+        let runs = ARGON2_RUNS.with(|n| n.get());
+        derive_password_key("a long enough password", &SALT, &MIN).unwrap();
+        assert_eq!(ARGON2_RUNS.with(|n| n.get()), runs + 1);
     }
 
     #[test]

@@ -389,3 +389,90 @@ fn folder_without_headers_is_not_found_and_gets_no_lock_file() {
     ));
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+
+fn is_refused<T>(r: Result<T, CoreError>) -> bool {
+    matches!(r, Err(CoreError::InvalidInput { .. }))
+}
+
+/// Final review, Important 1: a password unlock cannot check the recovery slot, so while
+/// the two copies disagree on it, nothing may write it over the good one.
+#[test]
+fn unverified_recovery_slot_blocks_password_change_until_it_is_replaced() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, _recovery) = make(parent.path(), "Family");
+    damage_slot(&dir, HEADER_FILE, SlotType::Recovery);
+    let before = bytes_of(&dir);
+    let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+
+    assert!(is_refused(vault.change_password(NEW_PW)));
+    assert!(is_refused(vault.accept_header()));
+    assert_eq!(bytes_of(&dir), before);
+    // Replacing the unverified slot is allowed, and clears the block.
+    let new_recovery = vault.regenerate_recovery().unwrap();
+    vault.change_password(NEW_PW).unwrap();
+    drop(vault);
+    assert!(files_identical(&dir));
+    assert!(Vault::unlock_with_recovery(&dir, &new_recovery).is_ok());
+    assert!(Vault::unlock_with_password(&dir, NEW_PW).is_ok());
+}
+
+/// The reciprocal: a recovery unlock cannot check the password slot.
+#[test]
+fn unverified_password_slot_blocks_regeneration_until_it_is_replaced() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, recovery) = make(parent.path(), "Family");
+    damage_slot(&dir, HEADER_FILE, SlotType::Password);
+    let before = bytes_of(&dir);
+    let (mut vault, _) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+
+    assert!(is_refused(vault.regenerate_recovery()));
+    assert_eq!(bytes_of(&dir), before);
+
+    vault.change_password(NEW_PW).unwrap();
+    let new_recovery = vault.regenerate_recovery().unwrap();
+    drop(vault);
+    assert!(files_identical(&dir));
+    assert!(is_wrong_password(Vault::unlock_with_password(&dir, PW)));
+    assert!(Vault::unlock_with_password(&dir, NEW_PW).is_ok());
+    assert!(Vault::unlock_with_recovery(&dir, &new_recovery).is_ok());
+}
+
+/// Final review, Important 2: until the user accepts a header changed outside Lockbox,
+/// no credential change may overwrite the authentic .bak.
+#[test]
+fn pending_header_change_blocks_credential_changes_until_accepted() {
+    let parent = tempfile::tempdir().unwrap();
+    let (dir, _recovery) = make(parent.path(), "Family");
+    let mut header = read_header(&dir, HEADER_FILE);
+    header.name = "Renamed".to_owned();
+    write_header(&dir, HEADER_FILE, &header);
+    let before = bytes_of(&dir);
+    let (mut vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+    assert!(report.header_mac_mismatch);
+
+    assert!(is_refused(vault.change_password(NEW_PW)));
+    assert!(is_refused(vault.regenerate_recovery()));
+    assert_eq!(bytes_of(&dir), before);
+
+    vault.accept_header().unwrap();
+    vault.change_password(NEW_PW).unwrap();
+    vault.regenerate_recovery().unwrap();
+}
+
+/// Review Focus 1: the password is normalised (NFC) but never trimmed, so a leading space
+/// is part of it; composed and decomposed "e acute" are the same password.
+#[test]
+fn composed_and_decomposed_passwords_match_but_a_leading_space_counts() {
+    let composed = " caf\u{e9} au lait 2026";
+    let decomposed = " cafe\u{301} au lait 2026";
+    assert_ne!(composed, decomposed);
+    let parent = tempfile::tempdir().unwrap();
+    let created = Vault::create(parent.path(), "Family", composed).unwrap();
+    let dir = created.vault.dir().to_path_buf();
+    drop(created);
+    assert!(Vault::unlock_with_password(&dir, decomposed).is_ok());
+    assert!(is_wrong_password(Vault::unlock_with_password(
+        &dir,
+        decomposed.trim_start()
+    )));
+}

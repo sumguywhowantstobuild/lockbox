@@ -659,7 +659,8 @@ mod tests {
     }
 
     /// Makes `link` a folder link (a junction on Windows, which needs no special rights; a
-    /// symlink elsewhere) to `target`. `false`, with a note, if the system refuses.
+    /// symlink elsewhere) to `target`. On Windows a refusal fails the test; elsewhere it
+    /// returns `false` with a note (symlinks can be forbidden there).
     fn make_dir_link(link: &Path, target: &Path) -> bool {
         #[cfg(windows)]
         let made = std::process::Command::new("cmd")
@@ -672,6 +673,9 @@ mod tests {
             .is_ok_and(|o| o.status.success());
         #[cfg(not(windows))]
         let made = std::os::unix::fs::symlink(target, link).is_ok();
+        #[cfg(windows)]
+        assert!(made, "cannot create a junction on Windows");
+        #[cfg(not(windows))]
         if !made {
             eprintln!("note: cannot create a folder link here; test skipped");
         }

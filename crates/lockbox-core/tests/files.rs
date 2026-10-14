@@ -374,3 +374,29 @@ fn purge_needs_the_trash_and_removes_everything() {
     );
     assert!(matches!(vault.purge_item(&id), Err(CoreError::NotFound)));
 }
+
+/// Review Focus 4: a source another handle still has open for writing may keep changing,
+/// so it is refused (a sharing violation), leaving no item, `.partial` or `.blob`.
+#[cfg(windows)]
+#[test]
+fn source_open_for_writing_elsewhere_is_refused_and_leaves_nothing() {
+    let parent = tempfile::tempdir().unwrap();
+    let mut vault = new_vault(parent.path());
+    let src = write(parent.path(), "busy.txt", b"still being written");
+    let writer = fs::OpenOptions::new().write(true).open(&src).unwrap();
+
+    let result = vault.new_file_item(None, &src, &CancelToken::new());
+    match result {
+        Err(CoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(32), "{e:?}"),
+        other => panic!("expected a sharing violation, got {other:?}"),
+    }
+    drop(writer);
+    assert_eq!(vault.items().count(), 0);
+    let files = vault.dir().join("files");
+    assert!(
+        !files.exists() || names_in(&files) == ["orphaned"],
+        "{:?}",
+        names_in(&files)
+    );
+    assert_eq!(names_in(&vault.dir().join("items")), Vec::<String>::new());
+}

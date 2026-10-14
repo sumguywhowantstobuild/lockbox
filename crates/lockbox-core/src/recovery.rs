@@ -245,7 +245,26 @@ mod tests {
 
     #[test]
     fn display_known_answers() {
-        // Expected strings computed independently with a Python script (see task-6-report.md).
+        // The known answers below come from this script (Python 3 standard library only), which is
+        // independent of our encoder. Run it to reproduce them:
+        //
+        //   import hashlib, hmac
+        //   A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        //   def display(sec):
+        //       n = int.from_bytes(sec, "big") << 4 | (hashlib.sha256(sec).digest()[0] >> 4)
+        //       s = "".join(A[(n >> (5*(51-i))) & 31] for i in range(52))
+        //       return "-".join(s[i:i+4] for i in range(0, 52, 4))
+        //   def hkdf(ikm, salt, info, L=32):
+        //       prk = hmac.new(salt, ikm, hashlib.sha256).digest()          # extract
+        //       okm, t, i = b"", b"", 1
+        //       while len(okm) < L:                                         # expand
+        //           t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest(); okm += t; i += 1
+        //       return okm[:L]
+        //   zero = bytes(32); seq = bytes(range(32))
+        //   print(display(zero)); print(display(seq))
+        //   print(hkdf(seq, bytes(range(100,116)), b"lockbox recovery key v1").hex())
+        //
+        // HKDF case: ikm = bytes 0..31, salt = bytes 100..115, info = "lockbox recovery key v1".
         let zeros = RecoverySecret(Zeroizing::new([0; 32]));
         assert_eq!(
             &**zeros.to_display(),
@@ -259,7 +278,7 @@ mod tests {
 
     #[test]
     fn derived_key_known_answer() {
-        // RFC 5869 HKDF-SHA256, independently computed with Python hmac/hashlib.
+        // RFC 5869 HKDF-SHA256; the script above computes it independently (hmac/hashlib).
         let secret = RecoverySecret(Zeroizing::new(std::array::from_fn(|i| i as u8)));
         let salt: [u8; 16] = std::array::from_fn(|i| 100 + i as u8);
         let key = derive_recovery_key(&secret, &salt);
