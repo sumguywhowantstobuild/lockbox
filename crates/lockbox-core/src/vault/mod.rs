@@ -9,7 +9,7 @@ mod unlock;
 
 use crate::fsio;
 use crate::header::{
-    CONTAINER_VERSION, HEADER_FILE, VaultHeader, header_mac, write_headers,
+    CONTAINER_VERSION, HEADER_FILE, VaultHeader, header_mac, serialize_header, write_headers,
     write_headers_backup_first,
 };
 use crate::ids::{ItemId, VaultId};
@@ -79,6 +79,42 @@ pub struct CreatedVault {
     pub recovery: RecoverySecret,
 }
 
+/// Whether, and why, header writes are held back (final review 1 to 3). Every header write
+/// asks [`HeaderGuard::check`] first; a successful write clears it.
+#[derive(Debug, Default)]
+struct HeaderGuard {
+    /// `header_mac_mismatch` is pending: the user has not accepted the changed header, so
+    /// only `accept_header` may write (anything else would overwrite the authentic `.bak`).
+    // shortcut: no "decline" path; only accept_header resolves this, until Plan 3's UI can ask the user.
+    consent_pending: bool,
+    /// The other header copy differs in this slot type, which the unlock could not check,
+    /// so only a write that replaces that slot may go ahead (any other would copy the
+    /// unverified slot over the other file's, possibly good, one).
+    unverified: Option<SlotType>,
+    /// A header write failed and `vault.json` now holds a header Lockbox cannot vouch for.
+    uncertain: bool,
+}
+
+impl HeaderGuard {
+    /// `replacing` is the slot type the write replaces; `None` is `accept_header`, the only
+    /// write the pending consent lets through.
+    fn check(&self, replacing: Option<SlotType>) -> Result<()> {
+        let refuse = |what| Err(CoreError::InvalidInput { what });
+        if self.uncertain {
+            return refuse("header state unknown; reopen the vault");
+        }
+        if self.consent_pending && replacing.is_some() {
+            return refuse("accept the header change first");
+        }
+        match self.unverified {
+            Some(slot) if replacing != Some(slot) => {
+                refuse("header copies disagree; replace the unchecked credential first")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// An open vault. Holds the vault's lock until dropped, and the vault key (wiped on drop).
 #[derive(Debug)]
 pub struct Vault {
@@ -91,6 +127,7 @@ pub struct Vault {
     index: SearchIndex,
     /// Item files that did not open; never deleted or overwritten.
     damaged: Vec<ItemId>,
+    guard: HeaderGuard,
     _lock: VaultLock,
 }
 
@@ -173,6 +210,7 @@ impl Vault {
             items: BTreeMap::new(),
             index: SearchIndex::default(),
             damaged: Vec::new(),
+            guard: HeaderGuard::default(),
         };
         Ok(CreatedVault { vault, recovery })
     }
@@ -194,6 +232,7 @@ impl Vault {
     /// An `Err` may leave `vault.json.bak` one version behind: the old password may then
     /// still open the vault, from `.bak`, until the next successful unlock repairs it.
     pub fn change_password(&mut self, new_password: &str) -> Result<()> {
+        self.guard.check(Some(SlotType::Password))?;
         check_new_password(new_password)?;
         let old = self
             .header
@@ -226,6 +265,7 @@ impl Vault {
     /// recovery unlock or header write. If `vault.json` is lost before then, the vault
     /// opens with the password only, and recovery must be regenerated.
     pub fn regenerate_recovery(&mut self) -> Result<RecoverySecret> {
+        self.guard.check(Some(SlotType::Recovery))?;
         let secret = RecoverySecret::generate();
         let salt = random_bytes::<16>();
         let slot = wrap_slot(
@@ -262,14 +302,17 @@ impl Vault {
     /// Accepts a header changed outside Lockbox (after [`UnlockReport::header_mac_mismatch`]):
     /// signs the current header again and saves it. Call only after the user agreed.
     pub fn accept_header(&mut self) -> Result<()> {
+        self.guard.check(None)?;
         let mut header = self.header.clone();
         header.header_mac = Some(header_mac(&header, &self.vault_key));
         self.commit(header, write_headers)
     }
 
-    /// Writes `header` and makes it the live one. If the write fails part-way, the live
-    /// header becomes whatever `vault.json` now holds (the primary is the truth), so a
-    /// later change never rebuilds from a header that no file has.
+    /// Writes `header` and makes it the live one. If the write fails part-way, `vault.json`
+    /// is read back and adopted only when it holds the header from before or the one just
+    /// written. Anything else, or a failed read-back, blocks every later header write on
+    /// this `Vault`, so a header Lockbox cannot vouch for is never copied over a good one.
+    /// The original error is returned either way.
     fn commit(
         &mut self,
         header: VaultHeader,
@@ -278,11 +321,19 @@ impl Vault {
         match write(&self.dir, &header) {
             Ok(()) => {
                 self.header = header;
+                // The guard let this write through, so it is resolved: the unverified slot
+                // was replaced, or the changed header was accepted.
+                self.guard = HeaderGuard::default();
                 Ok(())
             }
             Err(e) => {
-                if let Ok(on_disk) = unlock::load(&self.dir.join(HEADER_FILE)) {
-                    self.header = on_disk.header;
+                let known = unlock::load(&self.dir.join(HEADER_FILE)).ok().filter(|f| {
+                    let bytes = serialize_header(&f.header);
+                    bytes == serialize_header(&self.header) || bytes == serialize_header(&header)
+                });
+                match known {
+                    Some(f) => self.header = f.header,
+                    None => self.guard.uncertain = true,
                 }
                 Err(e)
             }
@@ -345,7 +396,7 @@ fn remove_leftover_tmp(dir: &Path) {
 mod tests {
     use super::*;
     use crate::fsio::{failpoint, testutil::TempDir};
-    use crate::header::{HEADER_BACKUP, HEADER_FILE};
+    use crate::header::{HEADER_BACKUP, HEADER_FILE, parse_header, serialize_header};
 
     const PW: &str = "correct horse battery";
 
@@ -614,5 +665,42 @@ mod tests {
         assert!(!report.header_repair_failed);
         let (main, bak) = read_pair(&dir);
         assert_eq!(main, bak);
+    }
+
+    /// Final review, Important 3: a write that fails on an unverified disk state must not
+    /// let a later change spread that state. Unlock falls back to a good `.bak` (primary
+    /// password slot damaged), the repair fails, then the password change fails before it
+    /// writes anything: `vault.json` holds a header Lockbox cannot vouch for.
+    #[test]
+    fn failed_write_on_an_unknown_header_blocks_later_header_writes() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        drop(created);
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        header.slots[0].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+
+        failpoint::arm("unlock.repair_write");
+        let (mut vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        failpoint::disarm_all();
+        assert!(report.used_backup_header && report.header_repair_failed);
+        let before = read_pair(&dir);
+
+        failpoint::arm("write_headers.before_first");
+        assert!(matches!(
+            vault.change_password("a different long password"),
+            Err(CoreError::Io(_))
+        ));
+        failpoint::disarm_all();
+
+        for result in [
+            vault.regenerate_recovery().map(|_| ()),
+            vault.change_password("a different long password"),
+            vault.accept_header(),
+        ] {
+            assert!(matches!(result, Err(CoreError::InvalidInput { .. })));
+        }
+        assert_eq!(read_pair(&dir), before);
     }
 }

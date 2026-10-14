@@ -1,8 +1,9 @@
 //! The items of an unlocked vault (spec 5.4): one sealed file each in `items/`, all of them
 //! also held in memory while the vault is open.
 //!
-//! Every change is written first, then the in-memory copy is replaced: an `Err` leaves
-//! memory as it was. Collections are flat (a collection holds items, never collections), and
+//! Every change is written first, then the in-memory copy is replaced. After a failed write,
+//! memory adopts the item file when it reads back and opens (the write may have landed before
+//! the error); otherwise memory is unchanged. Collections are flat (a collection holds items, never collections), and
 //! "deleting" anything only moves it to the trash; purging is a later task's job.
 
 use super::Vault;

@@ -1,6 +1,6 @@
 //! Opening a vault (spec 6.3): `vault.json` first, `.bak` as the fallback, then a careful repair.
 
-use super::{UnlockReport, Vault, items};
+use super::{HeaderGuard, UnlockReport, Vault, items};
 use crate::fsio::atomic_write;
 use crate::header::{
     HEADER_BACKUP, HEADER_FILE, MAX_HEADER_BYTES, VaultHeader, parse_header, verify_header_mac,
@@ -114,13 +114,19 @@ fn may_overwrite(other: &Result<HeaderFile>, used: &HeaderFile, unused: SlotType
         Ok(other) => {
             other.bytes != used.bytes
                 && other.header.vault_id == used.header.vault_id
-                && slot_of(&other.header, unused).ok() == slot_of(&used.header, unused).ok()
+                && !disagrees_in(other, used, unused)
         }
         // A newer-format file or an unreadable one (not "missing") is not ours to replace.
         Err(CoreError::UnsupportedVersion) => false,
         Err(CoreError::Io(e)) => e.kind() == std::io::ErrorKind::NotFound,
         Err(_) => true,
     }
+}
+
+/// Whether the other copy is the same vault yet holds a different `unused` slot.
+fn disagrees_in(other: &HeaderFile, used: &HeaderFile, unused: SlotType) -> bool {
+    other.header.vault_id == used.header.vault_id
+        && slot_of(&other.header, unused).ok() != slot_of(&used.header, unused).ok()
 }
 
 fn repair(file: &Path, bytes: &[u8]) -> Result<()> {
@@ -184,7 +190,18 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
     let header_repair_failed = mac_ok
         && may_overwrite(other, used, credential.unused_slot())
         && repair(&dir.join(other_file), &used.bytes).is_err();
+    // Both files are left alone then, so later header writes must not spread the unchecked slot.
+    let unused = credential.unused_slot();
+    let unverified = other
+        .as_ref()
+        .is_ok_and(|o| disagrees_in(o, used, unused))
+        .then_some(unused);
     let mut vault = Vault {
+        guard: HeaderGuard {
+            consent_pending: !mac_ok,
+            unverified,
+            uncertain: false,
+        },
         dir: dir.to_path_buf(),
         header: used.header.clone(),
         vault_key: Arc::new(key),

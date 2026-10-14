@@ -153,7 +153,8 @@ pub fn write_headers_backup_first(dir: &Path, h: &VaultHeader) -> Result<()> {
 
 fn write_pair(dir: &Path, h: &VaultHeader, [first, second]: [&str; 2]) -> Result<()> {
     let bytes = serialize_header(h);
-    // The size of the bytes actually written: a file `parse_header` would refuse must never be saved.
+    // Size only: the content is the caller's job. This just keeps a header that `parse_header`
+    // would refuse for its length from being saved.
     if bytes.len() > MAX_HEADER_BYTES {
         return Err(CoreError::TooLarge {
             what: "vault header",
