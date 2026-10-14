@@ -107,7 +107,9 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
 Every header write first asks a private guard on the open vault. It refuses (with a fixed message) while a header
 changed outside Lockbox has not been accepted, while the other header copy holds a slot this unlock could not check
 (only a write that replaces that slot may go ahead), and after a failed write left `vault.json` in a state Lockbox
-cannot vouch for (reopen the vault). A successful write clears it.
+cannot establish (reopen the vault). A credential change that goes through clears it. `accept_header` clears only the
+pending consent; if a slot is unverified it writes each file with the accepted header and that file's own version of the
+slot, backup first, and the slot block stays until a credential change replaces it.
 
 `change_password` derives a new key with a fresh salt (a random value mixed into the password) and writes `vault.json`,
 then `.bak`. `regenerate_recovery` writes `.bak` first, then `vault.json`, so a failed write never leaves `vault.json`
@@ -147,7 +149,8 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
    checked before parsing or deriving anything; an unknown or newer format is refused, never guessed at.
 10. **Disk first, memory second.** A change reaches the in-memory vault only after its file is written; after a failed
     write, memory re-reads the file and takes it when the read-back works. For the header, memory adopts `vault.json`
-    only if it holds the previous or the intended header; anything else blocks later header writes.
+    only if it holds the previous or the intended header state (it does not prove authorship); anything else blocks later
+    header writes.
 11. **Persistent formats are pinned by tests.** Associated-data bytes, key slots, the header MAC, item plaintext and
     the recovery-key display each have fixed expected values, so a refactor cannot silently change them.
 

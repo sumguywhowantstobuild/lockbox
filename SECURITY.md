@@ -173,23 +173,29 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **A foreign `.bak` can take over an unreadable `vault.json`.** If `vault.json` cannot be read and the `.bak` is from a
   different vault that has the same password, it unlocks and repairs `vault.json`; the items then show as damaged.
   *Accepted:* the original header was already unreadable and it needs the same password.
-- **Header writes are refused while the two copies disagree on a slot.** An unlock can check only the key slot for the
-  credential it was given (the recovery slot after a password unlock, the password slot after a recovery unlock). If the
-  other slot differs between `vault.json` and `.bak` (for example one copy was damaged), Lockbox cannot tell which is
-  good, so it leaves both files alone and remembers the slot as unverified. Until that slot is replaced, any header
-  write that would copy it over the other file is refused with a fixed message ("header copies disagree"). That
-  includes accepting a changed header. Regenerating the recovery key replaces the recovery slot, and changing the
-  password replaces the password slot, so each is allowed when it is the unchecked one, and clears the block.
-  *Accepted:* the user may have to unlock with the other credential or replace the unchecked one first.
+- **Header writes are refused while the two copies disagree on a slot.** An unlock checks only the key slot for the
+  credential it was given (the password slot after a password unlock, the recovery slot after a recovery unlock). If the
+  other slot (the recovery slot after a password unlock, the password slot after a recovery unlock) differs between
+  `vault.json` and `.bak` (for example one copy was damaged), Lockbox cannot tell which is good, so it leaves both files
+  alone and remembers that slot as unverified. Until that slot is replaced, any header write that would copy it over
+  the other file is refused with a fixed message ("header copies disagree"). Regenerating the recovery key replaces the
+  recovery slot, and changing the password replaces the password slot, so each is allowed when it is the unchecked one,
+  and clears the block. *Accepted:* the user may have to replace the unchecked credential first.
 - **A header changed outside Lockbox must be accepted before any other header change.** While the "changed outside
-  Lockbox" warning is pending, changing the password or regenerating the recovery key is refused, so the authentic
-  `.bak` is never overwritten by the edited header before the user agrees. Accepting is the only way forward (there is
-  no "decline" yet; the app's screen for it comes in Plan 3).
-- **After a failed header write, Lockbox does not trust what it finds.** It reads `vault.json` back and uses it only if
-  it is exactly the header from before or the one it just tried to write. Anything else, or a read that fails, means
-  Lockbox cannot vouch for the file, so every later header write on that open vault is refused until the vault is
-  reopened. A header Lockbox did not write is never adopted. The original error is still reported. *Accepted:* the user
-  must reopen the vault after such a failure.
+  Lockbox" warning is pending, changing the password or regenerating the recovery key is refused ("accept the header
+  change first"), so the authentic `.bak` is never overwritten by the edited header before the user agrees. There is
+  no "decline" yet; the app's screen for it comes in Plan 3.
+- **Both at once.** If the header was changed and a slot is unverified, accepting writes each file with the accepted
+  name and date and a fresh stamp but keeps that file's OWN version of the unverified slot (the stamp does not cover
+  slots, so nothing unchecked is thrown away and no copy is preferred). The consent clears; the slot block stays, and
+  replacing that slot (regenerate the recovery key, or change the password) ends it, so the other credential is not
+  needed. *Accepted:* until then the two files differ in that slot.
+- **After a failed header write, Lockbox does not trust what it finds.** It reads `vault.json` back and accepts it
+  only if it is exactly the previous header state or the intended one (it does not prove who wrote it; the previous
+  state may itself hold edits made outside Lockbox). Anything else, or a read that fails, means Lockbox cannot
+  establish the state, so every later header write on that open vault is refused until the vault is reopened. The
+  original error is still reported. *Accepted:* the user must reopen the vault after such a failure; that includes a
+  failed accept when the vault was opened from `.bak` and `vault.json` was not yet touched.
 - **The Rust API still exposes internal helpers.** The core's public functions include raw keys, header writes and
   file-system helpers that skip the vault's checks. Nothing reaches a UI today (there is none), but the API does not yet
   enforce the boundary. Narrowing it to key-free views is the first job of Plan 3.
