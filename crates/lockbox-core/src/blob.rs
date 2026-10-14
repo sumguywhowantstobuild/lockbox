@@ -80,9 +80,10 @@ pub fn chunk_count(length: u64) -> u64 {
     length.div_ceil(CHUNK).max(1)
 }
 
-/// Exact size of the stored blob: the plaintext plus a 16-byte tag per chunk.
+/// Exact size of the stored blob: the plaintext plus a 16-byte tag per chunk. Saturates at
+/// `u64::MAX` for lengths no file can have, so callers' size checks simply fail.
 pub fn blob_len(length: u64) -> u64 {
-    length + TAG_LEN * chunk_count(length)
+    length.saturating_add(TAG_LEN * chunk_count(length))
 }
 
 /// `TooLarge` when `length` is over [`MAX_FILE_BYTES`].
@@ -373,6 +374,14 @@ mod tests {
         assert_eq!(chunk_count(MIB as u64), 1);
         assert_eq!(chunk_count(MIB as u64 + 1), 2);
         assert_eq!(chunk_count(MAX_FILE_BYTES), 262_144);
+    }
+
+    /// Review Minor: both helpers are public, so no `u64` may overflow them.
+    #[test]
+    fn lengths_never_overflow() {
+        assert_eq!(chunk_count(u64::MAX), u64::MAX.div_ceil(MIB as u64));
+        assert_eq!(blob_len(u64::MAX), u64::MAX);
+        assert_eq!(blob_len(MAX_FILE_BYTES), MAX_FILE_BYTES + 16 * 262_144);
     }
 
     #[test]
