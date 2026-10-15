@@ -17,3 +17,10 @@ node_modules/
 *.lockbox-backup
 .DS_Store
 Thumbs.db
+
+# Private: personal AI instructions, local agent settings and workspaces, private notes
+CLAUDE.local.md
+.claude/settings.local.json
+.superpowers/
+TRACKER.md
+PROCESS-NOTES.md

@@ -121,6 +121,17 @@ opened before the install need restarting to see `cargo`.
   GitHub releases and checked against SHA-256 values copied from the releases (the job fails on a mismatch), and
   `pip install semgrep==1.179.0`, then runs the scanner's own tests before the scan. Bumping a version means getting the new SHA-256 from the release page.
 
+### History cleanup before going public (2026-10-15)
+- Private files were removed from every saved version with git-filter-repo 2.47.0
+  (`python -m pip install --user git-filter-repo==2.47.0`; it lands in `%APPDATA%\Python\Python311\Scripts`, which
+  isn't on PATH, like semgrep). Removed: `TRACKER.md`, `PROCESS-NOTES.md`, the old `CLAUDE.md` and
+  `docs/superpowers/plans/`; the plans now live in the private notes repo. The leftover `refs/original/*` from the
+  earlier `filter-branch` (personal email) were deleted. Ariel ran it; the safety guard blocks history rewrites for
+  Claude. A full `git clone --mirror` backup was taken first, outside the repo.
+- Every commit ID changed, so `.gitleaksignore` now points at the fake test key's new commit, `f66dd77`.
+- `CLAUDE.md` is now one line that imports `CONTRIBUTING.md` (the public project rules). Personal working style goes
+  in `CLAUDE.local.md`, which is git-ignored and imports a file from the private notes repo.
+
 ## Troubleshooting log
 
 **semgrep: `executing pysemgrep failed ... No such file or directory`**
