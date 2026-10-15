@@ -118,6 +118,15 @@ impl Vault {
         Ok(self.orphaned_dir())
     }
 
+    /// Deletes a blob from `files/` and from the quarantine, where an unlock may have moved it
+    /// while its item file was missing. Nothing is deleted through a linked quarantine.
+    pub(super) fn delete_blob_everywhere(&self, id: &FileId) -> Result<()> {
+        let orphaned = self.orphaned_dir();
+        check_folder(&orphaned)?;
+        delete_blob(&self.files_dir(), id)?;
+        remove_file_retry(&blob_in(&orphaned, id))
+    }
+
     /// Blobs that some loaded item (trashed ones included) lists as an attachment, not
     /// counting the item `except`.
     pub(super) fn attached_blobs(&self, except: Option<&ItemId>) -> HashSet<FileId> {
@@ -178,7 +187,6 @@ impl Vault {
     /// edit: the revision and modified time stay as they were.
     fn clear_retired(&mut self, report: &mut CleanupReport) {
         let attached = self.attached_blobs(None);
-        let files = self.files_dir();
         let todo: Vec<_> = self
             .items
             .values()
@@ -188,7 +196,7 @@ impl Vault {
         for mut item in todo {
             let listed = item.retired_blobs.len();
             item.retired_blobs.retain(|blob| {
-                let done = attached.contains(blob) || delete_blob(&files, blob).is_ok();
+                let done = attached.contains(blob) || self.delete_blob_everywhere(blob).is_ok();
                 report.failed += usize::from(!done);
                 !done
             });
@@ -420,6 +428,68 @@ mod tests {
         assert_eq!(report.retired_deleted, 0);
         assert!(vault.get_item(&id).unwrap().retired_blobs.is_empty());
         assert_eq!(exported(&parent, &vault, &id, &new), b"second");
+    }
+
+    /// Moves `blob` from `files/` into the quarantine, as an unlock does while its item file
+    /// is missing.
+    fn quarantine(vault: &Vault, blob: &FileId) {
+        fs::rename(
+            blob_in(&vault.files_dir(), blob),
+            blob_in(&vault.orphaned_dir(), blob),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_retired_blob_in_quarantine_is_deleted_too() {
+        let (parent, mut vault) = new_vault();
+        let (id, old, _new) = with_retired(&parent, &mut vault);
+        quarantine(&vault, &old);
+        let (vault, report) = reopen(vault);
+
+        assert_eq!((report.retired_deleted, report.failed), (1, 0));
+        assert!(!blob_in(&vault.orphaned_dir(), &old).exists());
+        assert!(vault.get_item(&id).unwrap().retired_blobs.is_empty());
+    }
+
+    #[test]
+    fn a_purging_items_blob_in_quarantine_is_deleted_too() {
+        let _disarm = Disarm;
+        let (parent, mut vault) = new_vault();
+        let (id, file) = file_item(&parent, &mut vault, b"bye");
+        vault.trash_item(&id).unwrap();
+        failpoint::arm("purge.after_mark");
+        assert!(vault.purge_item(&id).is_err());
+        failpoint::disarm_all();
+        quarantine(&vault, &file);
+        let (vault, report) = reopen(vault);
+
+        assert_eq!((report.purges_finished, report.failed), (1, 0));
+        assert!(!item_file(&vault, &id).exists());
+        assert!(!blob_in(&vault.orphaned_dir(), &file).exists());
+    }
+
+    #[test]
+    fn a_retired_blob_is_not_deleted_through_a_linked_quarantine() {
+        let (parent, mut vault) = new_vault();
+        let (id, old, _new) = with_retired(&parent, &mut vault);
+        let outside = TempDir::new();
+        quarantine(&vault, &old);
+        fs::rename(
+            blob_in(&vault.orphaned_dir(), &old),
+            blob_in(outside.path(), &old),
+        )
+        .unwrap();
+        if !link_folder(&vault.orphaned_dir(), outside.path()) {
+            return;
+        }
+        let (vault, report) = reopen(vault);
+
+        assert!(report.failed >= 1);
+        assert_eq!(report.retired_deleted, 0);
+        assert!(blob_in(outside.path(), &old).exists());
+        // The entry stays, so the next unlock tries again.
+        assert_eq!(vault.get_item(&id).unwrap().retired_blobs, [old]);
     }
 
     #[test]

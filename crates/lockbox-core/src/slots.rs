@@ -113,13 +113,21 @@ pub fn wrap_slot(
     )
 }
 
+/// Refuses a slot written by a newer Lockbox. Call before deriving its key, so a slot that
+/// cannot be opened costs no Argon2 run.
+pub fn check_slot_version(slot: &KeySlot) -> Result<()> {
+    if slot.slot_version == SLOT_VERSION {
+        Ok(())
+    } else {
+        Err(CoreError::UnsupportedVersion)
+    }
+}
+
 /// Recovers the vault key. Any failure to authenticate (wrong key, other vault, or an
 /// edited slot) is reported as `WrongPassword`; the cipher cannot tell these apart.
 /// Does not validate `slot.kdf`: whoever derives `slot_key` from it must do that first.
 pub fn unwrap_slot(slot: &KeySlot, vault_id: &VaultId, slot_key: &Key32) -> Result<Key32> {
-    if slot.slot_version != SLOT_VERSION {
-        return Err(CoreError::UnsupportedVersion);
-    }
+    check_slot_version(slot)?;
     let ad = slot_ad(
         slot.slot_version,
         vault_id,

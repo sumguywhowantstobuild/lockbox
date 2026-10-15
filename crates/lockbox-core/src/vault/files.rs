@@ -259,7 +259,8 @@ impl Vault {
     /// Permanently deletes a trashed item and its blobs, except a blob another item still
     /// attaches (spec 6.4): the item is first
     /// rewritten with `purging: true`, so a crash or error leaves an intent that a retry (or
-    /// cleanup at unlock) finishes. A blob that is already gone is fine.
+    /// cleanup at unlock) finishes. Blobs are deleted from the quarantine too; a blob that is
+    /// already gone is fine.
     pub fn purge_item(&mut self, id: &ItemId) -> Result<()> {
         let stored = self.get_item(id)?;
         if stored.trashed_at.is_none() {
@@ -282,7 +283,7 @@ impl Vault {
             .chain(&item.retired_blobs)
             .filter(|b| !in_use.contains(b))
         {
-            remove_file_retry(&self.blob_path(blob))?;
+            self.delete_blob_everywhere(blob)?;
         }
         remove_file_retry(&self.item_path(id))?;
         self.items.remove(id);

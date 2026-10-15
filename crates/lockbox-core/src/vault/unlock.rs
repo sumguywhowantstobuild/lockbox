@@ -10,7 +10,7 @@ use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
 use crate::search::SearchIndex;
 use crate::secret::Key32;
-use crate::slots::{KeySlot, SlotType, unwrap_slot};
+use crate::slots::{KeySlot, SlotType, check_slot_version, unwrap_slot};
 use crate::{CoreError, Result};
 use std::path::Path;
 use std::sync::Arc;
@@ -77,6 +77,7 @@ fn unwrap_with(
     match credential {
         Credential::Password(password) => {
             let slot = slot_of(header, SlotType::Password)?;
+            check_slot_version(slot)?;
             let params = slot.kdf.ok_or(CoreError::Damaged { what: "key slots" })?;
             let derived = match cache.take() {
                 Some(d) if d.salt == slot.salt && d.params == params => d,
@@ -92,6 +93,7 @@ fn unwrap_with(
         }
         Credential::Recovery(secret) => {
             let slot = slot_of(header, SlotType::Recovery)?;
+            check_slot_version(slot)?;
             unwrap_slot(
                 slot,
                 &header.vault_id,
@@ -250,6 +252,31 @@ mod tests {
         let path = dir.path().join(HEADER_FILE);
         std::fs::write(&path, vec![b' '; MAX_HEADER_BYTES + 100]).unwrap();
         assert!(matches!(load(&path), Err(CoreError::TooLarge { .. })));
+    }
+
+    #[test]
+    fn unknown_slot_version_is_refused_before_any_key_derivation() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", "correct horse battery").unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        drop(created.vault);
+        let mut header = load(&dir.join(HEADER_FILE)).unwrap().header;
+        for slot in &mut header.slots {
+            slot.slot_version += 1;
+            // Settings `derive_password_key` refuses at once: reaching it would not be
+            // `UnsupportedVersion`, so this proves the version is checked first.
+            slot.kdf = slot.kdf.map(|p| Argon2Params { memory_kib: 1, ..p });
+        }
+        let credentials = [
+            Credential::Password("correct horse battery"),
+            Credential::Recovery(&created.recovery),
+        ];
+        for credential in &credentials {
+            assert!(matches!(
+                unwrap_with(&header, credential, &mut None),
+                Err(CoreError::UnsupportedVersion)
+            ));
+        }
     }
 
     #[test]
