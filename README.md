@@ -74,7 +74,7 @@ Windows.
   each release, and this README stating plainly that the code is not independently audited. Today the tests and the scan
   run on every push and this statement is made. Plan 1 was reviewed in pull request #1 (by Greptile, an automated code
   reviewer, and by separate review agents), and the walk-through will happen when there is a release. See the
-  [design spec](docs/superpowers/specs/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox).
+  [design spec](docs/design/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox).
 
 ## Documents
 
@@ -83,7 +83,7 @@ Windows.
 | [docs/PRD.md](docs/PRD.md) | What Lockbox is for: users, features, user stories, how success is measured |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the built core is organised, how data flows, and the rules the code keeps |
 | [SECURITY.md](SECURITY.md) | Threat model, the encryption used, honest limits, how to report a vulnerability |
-| [Design spec](docs/superpowers/specs/2026-10-07-lockbox-design.md) | The full technical design: cryptography, file formats, error handling, tests |
+| [Design spec](docs/design/2026-10-07-lockbox-design.md) | The full technical design: cryptography, file formats, error handling, tests |
 | [docs/SETUP.md](docs/SETUP.md) | Tools and setup steps, with troubleshooting |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Rules for anyone changing the code, and the checks to run before pushing |
 

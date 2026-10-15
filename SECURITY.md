@@ -3,7 +3,7 @@
 Lockbox is a work in progress and **has not been independently audited**. Don't store real passwords in it yet. This
 file says what Lockbox is built to protect, what it does not protect, how it encrypts, and every limit we know about.
 The requirements R1–R7 are defined in the
-[design spec](docs/superpowers/specs/2026-10-07-lockbox-design.md#security-requirements-v1).
+[design spec](docs/design/2026-10-07-lockbox-design.md#security-requirements-v1).
 
 ## Reporting a vulnerability
 

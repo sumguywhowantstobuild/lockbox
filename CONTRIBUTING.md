@@ -11,8 +11,9 @@ Found a security problem? Don't open a public issue; follow [SECURITY.md](SECURI
   Android app can reuse it.
 - **Design first:** what Lockbox does is in [docs/PRD.md](docs/PRD.md), how it's built in
   [ARCHITECTURE.md](ARCHITECTURE.md), and the full design (encryption, file formats) in
-  [docs/superpowers/specs/2026-10-07-lockbox-design.md](docs/superpowers/specs/2026-10-07-lockbox-design.md).
-  A change that alters the design updates those documents in the same pull request.
+  [docs/design/2026-10-07-lockbox-design.md](docs/design/2026-10-07-lockbox-design.md).
+  A change that alters the design updates those documents in the same pull request. New design specs go in
+  `docs/design/`.
 - **Dev setup:** [docs/SETUP.md](docs/SETUP.md) lists every tool and version. Record any new setup step there.
 
 ## Rules

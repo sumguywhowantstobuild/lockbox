@@ -1,7 +1,7 @@
 # Lockbox — Product Requirements
 
 This is the product side of Lockbox: who it is for, what it does, and how we will know it works. The purpose, phases,
-scope and screens below were moved here from the [design spec](superpowers/specs/2026-10-07-lockbox-design.md); the spec
+scope and screens below were moved here from the [design spec](design/2026-10-07-lockbox-design.md); the spec
 keeps the engineering side (architecture, cryptography, file formats, error handling, tests). Numbers such as 5.3 or R3
 refer to sections and requirements of that spec.
 
@@ -107,7 +107,7 @@ engine (Plan 1), not in the spec. Plans 3 and 4 are the desktop shell and the UI
 | Typos in the recovery key | A mistyped recovery key is caught about 15 times in 16, before any unlock attempt | Spec 5.2 | Test in the core's recovery module (it requires at least 14 in 16) |
 | Auto-lock and clipboard defaults | Lock after 5 minutes idle; clear the clipboard after 30 seconds | [Screens](#screens) (Settings) | Desktop app tests (Plan 3) |
 | Backups of any size | An archive over 4 GiB backs up and restores (ZIP64 is the zip format for archives that big) | Spec 9 | Backup and restore tests (Plan 2) |
-| "Reviewed" release | All five review conditions hold, and each of R1–R7 is walked through against `SECURITY.md` before a release | [Spec 1](superpowers/specs/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox) | Written sign-off by Ariel before each release |
+| "Reviewed" release | All five review conditions hold, and each of R1–R7 is walked through against `SECURITY.md` before a release | [Spec 1](design/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox) | Written sign-off by Ariel before each release |
 | v1 done | Every v1 feature works on Windows and the five review conditions hold | Spec 1 | All of the above |
 
 ## Security and review requirements
@@ -115,8 +115,8 @@ engine (Plan 1), not in the spec. Plans 3 and 4 are the desktop shell and the UI
 The security requirements R1–R7 and the definition of a "reviewed" release stay in the spec, because the code and the
 reviews cite them by number:
 
-- [Security requirements (v1)](superpowers/specs/2026-10-07-lockbox-design.md#security-requirements-v1)
-- [What "reviewed" means for Lockbox](superpowers/specs/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox)
+- [Security requirements (v1)](design/2026-10-07-lockbox-design.md#security-requirements-v1)
+- [What "reviewed" means for Lockbox](design/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox)
 
 ## Screens
 

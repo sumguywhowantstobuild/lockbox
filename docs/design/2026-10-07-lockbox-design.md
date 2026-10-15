@@ -4,7 +4,7 @@
 
 ## 1. Purpose
 
-Moved to [docs/PRD.md](../../PRD.md#purpose).
+Moved to [docs/PRD.md](../PRD.md#purpose).
 
 ### Security requirements (v1)
 | ID | Requirement |
@@ -32,11 +32,11 @@ Scans and passing tests alone do not make it "secure"; they are evidence for the
 
 ## 2. Phases
 
-Moved to [docs/PRD.md](../../PRD.md#phases).
+Moved to [docs/PRD.md](../PRD.md#phases).
 
 ## 3. Scope
 
-Moved to [docs/PRD.md](../../PRD.md#scope).
+Moved to [docs/PRD.md](../PRD.md#scope).
 
 ## 4. Architecture
 
@@ -335,7 +335,7 @@ copies.
 
 ### 7.1 Screens
 
-Moved to [docs/PRD.md](../../PRD.md#screens).
+Moved to [docs/PRD.md](../PRD.md#screens).
 
 ### 7.2 Decrypted output: Save a copy and Open
 **Rule: verify fully, then publish.** Nothing is placed at its final location or launched until the whole stream has
