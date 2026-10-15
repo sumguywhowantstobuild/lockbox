@@ -30,6 +30,25 @@ Never passwords or keys here, only where they're kept.
 
 These live on the dev machine only, not in this repo.
 
+### Trial: Ponytail plugin (Lockbox only, from 2026-10-09)
+[DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) (MIT): makes the AI write the smallest complete
+solution. Enabled in `.claude/settings.local.json` (git-ignored, this machine and project only), pinned to tag
+`v5.1.0` (commit `9cc65d03`) with auto-update off; its hooks were read before enabling (local only, no network).
+Declined: its status-bar setup. Decide after Plan 1 Group B: keep, go global, or drop `/simplify` to avoid overlap.
+Remove: delete its two entries from `.claude/settings.local.json`, then `node scripts/uninstall.js` from a clone of
+the repo cleans `~/.claude/.ponytail-active` and `~/.config/ponytail/`.
+
+### Optional: Codex CLI as an outside reviewer (from 2026-10-09)
+| Tool | Version | How | Why |
+|---|---|---|---|
+| Codex CLI | 0.162.0 | `npm install -g @openai/codex`, signed in with a ChatGPT plan (`codex login`) | A second opinion from a different AI company's model |
+
+Used only when Ariel asks for it; Claude reviewers stay the default. Run read-only, review text saved to a file:
+`codex exec --ignore-user-config -c 'windows.sandbox="unelevated"' -m gpt-6.1-sol -c 'model_reasoning_effort="high"'
+-s read-only -C <repo> -o <review-file> - < <prompt-file>` (`--ignore-user-config` keeps personal computer-use and
+browser tools out of the review; gpt-6.1-sol at high is the token-friendly choice, gpt-6-astra only if needed). The ChatGPT plan is temporary (about
+one month), so nothing in the build loop depends on Codex. Remove: `npm uninstall -g @openai/codex`.
+
 ### Safety guard (Claude Code hook, added 2026-10-08)
 `.claude/settings.json` runs `.claude/hooks/safety-guard.mjs` before every shell command and file edit Claude makes.
 Rules can't be forgotten the way instructions can. Three outcomes:
@@ -55,6 +74,67 @@ deliberately disguised command could slip past.
 
 Checked: a test program builds and runs (`cargo new hello && cargo run`). `~/.cargo/bin` is on the user PATH; terminals
 opened before the install need restarting to see `cargo`.
+
+### Workspace and CI (Plan 1, Task 1)
+- `rust-toolchain.toml` pins Rust 1.99.0 (minimal profile, plus rustfmt and clippy); `cargo` in the repo picks it up
+  automatically.
+- Checks to run before every commit: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+  `cargo test --locked`. `Cargo.lock` is committed so builds are repeatable.
+- `.github/workflows/ci.yml` runs the same three checks on Windows. It installs the pinned toolchain with
+  `rustup toolchain install` (newer rustup no longer installs one on `rustup show`), and both GitHub Actions are pinned
+  to commit SHAs so a moved tag can't change what runs.
+
+### Windows file code and the Linux CI run (Plan 1, Task 8)
+- `crates/lockbox-core` depends on `windows-sys` 0.61 (Windows only) for safe file moves, disk-space and file-system
+  checks. Its `unsafe` is confined to `src/fsio/windows.rs`; the rest of the crate denies `unsafe`.
+- The CI Rust job is now a matrix (`windows-latest`, `ubuntu-latest`), so the non-Windows file code in
+  `src/fsio/portable.rs` is compiled and tested too. Job names are now `Rust: format, lint, test (<os>)`; update any
+  required-status-check rules on GitHub to match.
+
+### GitHub repo (Plan 1, Task 1 Step 11)
+- Private repo created with `gh repo create lockbox --private --source . --remote origin` (account
+  `sumguywhowantstobuild`). Ariel pushes `main`; feature branches are pushed for CI.
+- Commits use GitHub's noreply address so the personal email stays private once the repo is public:
+  `git config user.email 331128970+sumguywhowantstobuild@users.noreply.github.com` (this repo only). Earlier commits
+  were rewritten to it with `git filter-branch --env-filter` before the first push (Ariel ran it; the safety guard
+  blocks history rewrites for Claude).
+- First CI run on `plan-1-core` passed (format, lint, test).
+- Re-created 2026-10-15 after the history cleanup (below): a force-push leaves the old commits reachable on GitHub by
+  their ID (and linked from old CI runs), so the repo was deleted (`gh auth refresh -h github.com -s delete_repo`,
+  `gh repo delete`), created again with the same command and both branches pushed with `git push -u`.
+  Ariel ran it; the safety guard blocks repo deletion for Claude. Old CI run history went with the old repo.
+
+### Security scan (Plan 1, Task 2)
+- Run `node scripts/scan.mjs` (add `--json` for machine-readable output). It runs three tools over the whole repo and
+  writes their raw reports to `.scan/` (git-ignored): gitleaks (passwords/keys, run twice: over committed history, and
+  over staged, unstaged and brand-new files, so it works before you commit), semgrep (risky code patterns) and osv-scanner (dependencies with known vulnerabilities, from `Cargo.lock`, plus `package-lock.json` once
+  it exists).
+- Result: exit `0` CLEAN, `1` FINDINGS (fix them), `2` INCOMPLETE (a tool is missing or failed, so it never says
+  "clean" by accident). What counts as a finding: any gitleaks hit; semgrep `ERROR` or `WARNING`; osv score 4.0 or
+  higher, or no score at all. Lower scores and semgrep `INFO` are listed but don't fail.
+- The "uncommitted" gitleaks pass stages everything into a throwaway copy of git's index (`.scan/index`), so your real
+  staging area is never touched. Files git ignores (`.env`, `target/`) are not scanned.
+- A fake secret on purpose (e.g. in a test) is excused by a `gitleaks:allow` comment on that line. A secret already in
+  history can't be rewritten once pushed, so it goes in `.gitleaksignore` by its fingerprint (`commit:file:rule:line`,
+  printed in gitleaks' JSON report). Never loosen a gitleaks rule globally.
+- Tools are found by name on PATH, except semgrep (see the troubleshooting entry below). To use another copy, set
+  `LOCKBOX_GITLEAKS`, `LOCKBOX_SEMGREP` or `LOCKBOX_OSV` to its path. The tests use this to swap in fake tools.
+- Tests: `node --test "scripts/*.test.mjs"`.
+- A semgrep hit we accept on purpose is silenced on that line with `// nosemgrep: <rule id> -- <reason>`.
+- CI job "Security scan" (Windows) installs pinned versions: gitleaks 8.30.1 and osv-scanner 2.6.0 downloaded from their
+  GitHub releases and checked against SHA-256 values copied from the releases (the job fails on a mismatch), and
+  `pip install semgrep==1.179.0`, then runs the scanner's own tests before the scan. Bumping a version means getting the new SHA-256 from the release page.
+
+### History cleanup before going public (2026-10-15)
+- Private files were removed from every saved version with git-filter-repo 2.47.0
+  (`python -m pip install --user git-filter-repo==2.47.0`; it lands in `%APPDATA%\Python\Python311\Scripts`, which
+  isn't on PATH, like semgrep). Removed: `TRACKER.md`, `PROCESS-NOTES.md`, the old `CLAUDE.md` and
+  `docs/superpowers/plans/`; the plans now live in the private notes repo. The leftover `refs/original/*` from the
+  earlier `filter-branch` (personal email) were deleted. Ariel ran it; the safety guard blocks history rewrites for
+  Claude. A full `git clone --mirror` backup was taken first, outside the repo.
+- Every commit ID changed, so `.gitleaksignore` now points at the fake test key's new commit, `f66dd77`.
+- `CLAUDE.md` is now one line that imports `CONTRIBUTING.md` (the public project rules). Personal working style goes
+  in `CLAUDE.local.md`, which is git-ignored and imports a file from the private notes repo.
 
 ## Troubleshooting log
 

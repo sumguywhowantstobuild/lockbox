@@ -1,0 +1,2 @@
+# Test fixture: a fake value in scripts/scan.test.mjs, committed in f66dd77 before the line was marked gitleaks:allow.
+f66dd77c891a11e92587363b47c6b5b041448c00:scripts/scan.test.mjs:generic-api-key:53

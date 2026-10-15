@@ -39,7 +39,7 @@ const ASK = [
 const ALLOW = [
   "git status", "git add -A", "git commit -m 'feat(core): ids'", "git log --oneline -5",
   "git push -u origin plan-1-core", "git checkout -b plan-1-core", "git merge main",
-  "cargo test --locked", "cargo fmt --check", "rm -rf target", "rm -rf /c/Users/Ariel/projects/lockbox/target",
+  "cargo test --locked", "cargo fmt --check", "rm -rf target", "rm -rf /c/Users/dev/projects/lockbox/target",
   "rm .gitignore.bak", "node --test scripts/", "gh run watch", "gh pr view 3", "gh pr checks 3",
   "cat .claude/settings.json", "ls ~/.cargo/bin", "npm install", "winget --version", "git branch -d old", "git branch --delete old", "git restore src/lib.rs",
   "git checkout -- src/lib.rs", "rustup toolchain install 1.99.0 --component rustfmt,clippy", "rustup component add clippy", "rustup show",
@@ -65,7 +65,7 @@ test("on main: any push or merge is blocked", () => {
 });
 test("editing the guard or settings asks Ariel", () => {
   for (const tool of ["Edit", "Write"]) {
-    const r = check({ tool_name: tool, tool_input: { file_path: "C:\\Users\\Ariel\\projects\\lockbox\\.claude\\settings.json" } });
+    const r = check({ tool_name: tool, tool_input: { file_path: "C:\\Users\\dev\\projects\\lockbox\\.claude\\settings.json" } });
     assert.equal(decision(r), "ask");
   }
   assert.equal(decision(check({ tool_name: "Edit", tool_input: { file_path: "C:\\x\\.claude\\hooks\\safety-guard.mjs" } })), "ask");

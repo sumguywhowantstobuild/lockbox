@@ -1,0 +1,30 @@
+[package]
+name = "lockbox-core"
+description = "Lockbox core: vault engine, encryption and keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+aead-stream = { version = "0.6", default-features = false }
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "parallel", "zeroize"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = "0.4"
+hkdf = "0.13"
+hmac = { version = "0.13", features = ["zeroize"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = { version = "0.11", features = ["zeroize"] }
+thiserror = "2"
+unicode-normalization = "0.1"
+zeroize = { version = "1.9", features = ["serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std"] }
+tempfile = "3.27.0"

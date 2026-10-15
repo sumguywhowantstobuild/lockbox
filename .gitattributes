@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.png binary
+
+# The EFF wordlist must stay byte-for-byte as published (see THIRD-PARTY-NOTICES.md).
+crates/lockbox-core/wordlists/eff_large_wordlist.txt -text

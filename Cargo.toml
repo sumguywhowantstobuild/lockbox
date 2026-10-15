@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.99"
+
+# The property tests push megabytes through the cipher, and an unoptimised debug build takes
+# minutes (measured: 0.5 s per 3 MiB, against 4 ms like this). The cipher crates alone are not
+# enough, because the generic cipher code is compiled inside lockbox-core, so it is optimised
+# too. Only `opt-level` changes: debug assertions and overflow checks stay on.
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.lockbox-core]
+opt-level = 3

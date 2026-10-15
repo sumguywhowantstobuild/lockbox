@@ -4,12 +4,7 @@
 
 ## 1. Purpose
 
-Lockbox is a local-only password manager and encrypted file vault for Windows, with no server. Besides passwords and
-notes, it stores real files (client contracts, design files, project archives), grouped by client or project. Its
-differentiators are a better UI and file storage organised by client/project.
-
-It is a public, open-source portfolio project. It must be production quality: tested, reviewed, documented, and honest
-about its limits.
+Moved to [docs/PRD.md](../../PRD.md#purpose).
 
 ### Security requirements (v1)
 | ID | Requirement |
@@ -37,37 +32,11 @@ Scans and passing tests alone do not make it "secure"; they are evidence for the
 
 ## 2. Phases
 
-| Phase | Ships | Design choice made now |
-|---|---|---|
-| **1 (this spec)** | Windows app for Ariel | Rust core is a separate library with no Windows or Tauri code |
-| 2 | Share with friends: download website, code-signed installer, auto-updates | Vault format is versioned; app refuses vaults newer than itself |
-| 3 | Android app + sync between devices without a server | Vault = folder of small independent files, a reasonable base for sync |
-
-**Sync is a future protocol design, not a v1 property.** Revision numbers alone do not resolve concurrent edits,
-deletion conflicts, partially copied files, or two devices changing the password. Phase 3 needs its own spec covering
-conflict handling, deletion tombstones and an authenticated manifest; the container version (6.1) is the upgrade path.
+Moved to [docs/PRD.md](../../PRD.md#phases).
 
 ## 3. Scope
 
-### v1 features
-- **Vaults**, each with its own password; unlocking one doesn't unlock the others.
-- **Collections** inside a vault, one per client or project.
-- **Items:** Login, Secure note, File. Logins and notes can have files attached. **Maximum file size: 256 GiB.**
-- **Password generator:** length, character sets, passphrase mode.
-- **Auto-lock** after idle time and when Windows locks, sleeps or hibernates; **clipboard clearing** after copying.
-- **Ctrl+K quick search** across unlocked vaults, with quick actions.
-- **Recovery key** per vault, shown once at creation; **Regenerate recovery key**.
-- **Change password** (with the warning in 5.3).
-- **Encrypted backup and restore** of a vault.
-- **Open a backup (or a pre-restore copy) read-only**, to browse it or copy single items out.
-- **Add existing vault folder** (e.g. after moving a vault).
-
-### v1.1 (next, not in this spec)
-Rotate vault key (re-encrypt everything) · password health check · built-in 2FA codes (TOTP) · Windows Hello unlock.
-
-### Not in v1
-Browser autofill extension · sync · mobile · sharing between people · importing from other password managers ·
-vaults on removable drives.
+Moved to [docs/PRD.md](../../PRD.md#scope).
 
 ## 4. Architecture
 
@@ -365,19 +334,8 @@ copies.
 ## 7. Screens and behaviour
 
 ### 7.1 Screens
-| Screen | Contents |
-|---|---|
-| First run | Create first vault: name, password with strength meter, then the recovery key. Must confirm it's saved (print / save as PDF / checkbox) before continuing. |
-| Lock screen | Known vaults (from the registry and `vault.json` names); pick one, enter its password. Vaults unlock independently. "Forgot password?" and "Add existing vault folder". |
-| Main window | Three columns: sidebar (vaults → collections, trash, orphaned files) · item list (filter, sort) · item details (copy/reveal, attached files: Open / Save a copy / Replace file). Read-only vaults labelled. |
-| Ctrl+K | Search across unlocked vaults; actions: copy password, copy username, new item, lock all. |
-| Generator | Pop-out beside password fields, plus a standalone screen. |
-| Settings | Auto-lock idle time (default 5 min), clipboard clear delay (default 30 s), theme, backup, change password, regenerate recovery key. |
-| Backup / restore | Export a vault; restore it (6.8); open a backup read-only (6.9). |
-| Forgot password | Enter recovery key → set a new password. |
 
-**Visual design** (colours, type, polish) is decided at the start of the UI work with Ariel's `design-bakeoff` skill:
-clickable mockups, approved before screens are built.
+Moved to [docs/PRD.md](../../PRD.md#screens).
 
 ### 7.2 Decrypted output: Save a copy and Open
 **Rule: verify fully, then publish.** Nothing is placed at its final location or launched until the whole stream has
@@ -514,7 +472,8 @@ hold the clipboard open.
 - **Dependencies:** if the `zip` crate is used (for writing or reading the directory), it must be ≥ 2.3.0
   (CVE-2025-29787), and its extract functions are never used.
 - **Repo docs:** `README.md` (incl. "not independently audited"), `SECURITY.md` (R1–R7, limits, how to report a
-  vulnerability), `docs/SETUP.md`, `TRACKER.md`, `LICENSE` (MIT).
+  vulnerability), `docs/PRD.md` (the product side of this spec), `ARCHITECTURE.md` (code map and rules of the built
+  core), `docs/SETUP.md`, `LICENSE` (MIT).
 - **Greptile:** apply for the free open-source plan once the repo is public.
 - **Third-party skills and tools stay on the dev machine**, never committed.
 
