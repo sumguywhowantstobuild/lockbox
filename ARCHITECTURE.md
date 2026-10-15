@@ -1,5 +1,3 @@
-> **Draft — awaiting Ariel's approval.**
-
 # Architecture
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plan 1). The desktop shell, the UI, backup
@@ -67,8 +65,8 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
 ### Unlock (`unlock_with_password`, `unlock_with_recovery`)
 1. No `vault.json` and no `.bak`: `NotFound`, and nothing is created. Otherwise take the `.lock` first, so nothing is
    read while another process has the vault open.
-2. Read `vault.json` and `vault.json.bak`: at most 64 KiB each, strict parse, Argon2 settings checked before any
-   derivation (spec 6.1, 5.2).
+2. Read `vault.json` and `vault.json.bak`: at most 64 KiB each, strict parse, Argon2 settings and the key slot's
+   version checked before any derivation (spec 6.1, 5.2).
 3. Unwrap the vault key from `vault.json`. If that fails, or the file cannot be read, try `.bak` (spec 6.3). A readable
    `vault.json` falls back only to a `.bak` of the same vault, and at unlock a newer format is never replaced by an
    older copy (a later header write can still replace it; see SECURITY.md, "An unreadable or newer-format header copy
@@ -79,7 +77,7 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
 5. Check the header MAC. Repair the other header copy only if the MAC passed and the repair destroys nothing unverified
    (see rules). A failed repair is reported in the result; it does not fail the unlock.
 6. Run cleanup (spec 6.4), in this order: delete `*.tmp` and `*.partial` leftovers; finish purges that were started;
-   delete blobs listed as retired; move quarantined blobs back if an item references them again; move unreferenced
+   delete blobs listed as retired, from `files/` and the quarantine; move quarantined blobs back if an item references them again; move unreferenced
    blobs to `files/orphaned/`, unless any item was damaged. It never fails an unlock; what did not work is counted and
    tried again next time.
 7. The search index is built from the open items. The caller gets the vault and a report of what was noticed.
@@ -102,8 +100,10 @@ Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault
   destination (recorded first through the journal hook, a list that lets a crash cleanup find leftovers), checks the
   whole stream, flushes, unhides, checks for cancel, then `replace_file` over the destination (spec 7.2). A failed or
   cancelled export leaves an existing destination alone.
-- **Purge** (`purge_item`, trashed items only): rewrite the item with `purging: true`, delete its blobs (never one
-  another item still attaches), then delete the item file. A crash in between is finished at the next unlock.
+- **Purge** (`purge_item`, trashed items only): rewrite the item with `purging: true`, delete its blobs from `files/`
+  and the quarantine (never one another item still attaches; refused while `files/` or `files/orphaned/` is a link),
+  then delete the item file. A crash in between is finished at the next unlock. *Known gap:* deleting the item file
+  does not yet check that `items/` is a real folder; a follow-up adds that check.
 
 ### Passwords and the recovery key
 Every header write first asks a private guard on the open vault. It refuses (with a fixed message) while a header

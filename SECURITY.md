@@ -1,5 +1,3 @@
-> **Draft — awaiting Ariel's approval.**
-
 # Security
 
 Lockbox is a work in progress and **has not been independently audited**. Don't store real passwords in it yet. This
@@ -149,9 +147,9 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **A crash during "Save a copy" can leave a decrypted file behind.** The copy is first built in a hidden temp file
   (`.<random>.lockbox-partial`) beside the destination, and moved into place only after every chunk has been checked. If
   Lockbox crashes, is killed or loses power while that temp file exists, it stays there as plaintext (part of the file
-  you chose to export). The core has no output journal yet (a record of temp files to delete at the next launch; the core has
-  the hook only, and the desktop app adds the real one in Plan 3, spec 7.2), and the cleanup at unlock only tidies inside the vault folder. A normal failure or cancel removes
-  the temp file. *Accepted:* it is a copy you asked to have in plaintext, it is hidden, and the journal that deletes
+  you chose to export). The core has no output journal yet (a record of temp files to delete at the next launch; the
+  core has the hook only, and the desktop app adds the real one in Plan 3, spec 7.2), and the cleanup at unlock only
+  tidies inside the vault folder. A normal failure or cancel removes the temp file. *Accepted:* it is a copy you asked to have in plaintext, it is hidden, and the journal that deletes
   such leftovers at the next launch is planned.
 - **A stale `.bak` after a half-failed password change.** The header is stored twice (`vault.json` and
   `vault.json.bak`). If a password change writes the first and fails on the second, the change reports an error and
@@ -199,8 +197,9 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   state may itself hold edits made outside Lockbox). Anything else, or a read that fails, means Lockbox cannot
   establish the state, so every later header write on that open vault is refused until the vault is reopened. While two
   copies disagree on a key slot, any failed header write blocks this way without a read-back, because the per-file slots
-  cannot be kept in step with a half-written pair; reopening re-reads both files. The original error is still reported. *Accepted:* the user must reopen the vault after such a failure; that includes a
-  failed accept when the vault was opened from `.bak` and `vault.json` was not yet touched.
+  cannot be kept in step with a half-written pair; reopening re-reads both files. The original error is still
+  reported. *Accepted:* the user must reopen the vault after such a failure; that includes a failed accept when the
+  vault was opened from `.bak` and `vault.json` was not yet touched.
 - **The Rust API still exposes internal helpers.** The core's public functions include raw keys, header writes and
   file-system helpers that skip the vault's checks. Nothing reaches a UI today (there is none), but the API does not yet
   enforce the boundary. Narrowing it to key-free views is the first job of Plan 3.
@@ -227,10 +226,11 @@ Lockbox defends.
   inside the vault. A local attacker could swap a folder link into place between that check and the save.
   *Accepted:* the window is tiny and the attacker already has the access to cause harm.
 - **Linked `items/` or `files/` folders.** Cleanup and deleting quarantined files refuse to work through a link or
-  junction (a Windows folder link) and report it only as a failed cleanup. Unlocking, saving items, importing, exporting
-  and purging still work through one. *Accepted:* reaching it needs write access inside the vault folder already; the
-  guard covers the automatic steps that move or delete files, and a purge you ask for only deletes `<random id>.blob`
-  files that an authenticated item names, and then that item's own `items/<id>.item` file.
+  junction (a Windows folder link) and report it only as a failed cleanup. A purge refuses a linked `files/` or
+  `files/orphaned/` before deleting any file content. Unlocking, saving items, importing and exporting still work
+  through one, and a purge's last step, deleting the item's own `items/<id>.item` file, does not yet check `items/`
+  (a follow-up adds that check). *Accepted:* reaching it needs write access inside the vault folder already, and the
+  steps that delete file content are guarded.
 - **Non-Windows rename race (Android only).** On non-Windows systems "rename without replacing" is a check followed by a
   rename, so a racing outside process could cause a quarantined file to be replaced. Replacing a file there can also
   report failure after the new file is already in place. *Accepted:* the non-Windows code only ships with the Android

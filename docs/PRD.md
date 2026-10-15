@@ -1,5 +1,3 @@
-> **Draft — awaiting Ariel's approval.**
-
 # Lockbox — Product Requirements
 
 This is the product side of Lockbox: who it is for, what it does, and how we will know it works. The purpose, phases,
@@ -17,9 +15,6 @@ It is a public, open-source portfolio project. It must be production quality: te
 about its limits.
 
 ## Target users
-
-Drawn from the spec's framing. The first two follow it directly; the third is inferred from the spec calling Lockbox a
-public portfolio project.
 
 - **A privacy-minded individual on Windows** who wants to keep passwords and notes on their own PC: no cloud, no
   server, nobody else holding the data.
@@ -100,8 +95,8 @@ Each story is one thing a person can do with a v1 feature. Engineering detail li
 
 ## Success measures
 
-Where the design spec states a number, it is used as written. Numbers marked "Plan 1" were set in the Plan 1
-implementation plan, not the spec. Plans 3 and 4 are the desktop shell and the UI (see the
+Where the design spec states a number, it is used as written. Numbers marked "Plan 1" were set while building the core
+engine (Plan 1), not in the spec. Plans 3 and 4 are the desktop shell and the UI (see the
 [README](../README.md#what-exists-today)).
 
 | Measure | Target | Where it comes from | How it is checked |
@@ -136,5 +131,5 @@ reviews cite them by number:
 | Backup / restore | Export a vault; restore it (spec 6.8); open a backup read-only (spec 6.9). |
 | Forgot password | Enter recovery key → set a new password. |
 
-**Visual design** (colours, type, polish) is decided at the start of the UI work with Ariel's `design-bakeoff` skill:
-clickable mockups, approved before screens are built.
+**Visual design** (colours, type, polish) is decided at the start of the UI work: clickable mockups, approved before
+screens are built.

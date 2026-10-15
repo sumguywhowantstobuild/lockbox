@@ -1,5 +1,3 @@
-> **Draft — awaiting Ariel's approval.**
-
 # Lockbox
 
 Lockbox is a password manager and encrypted file vault for Windows that keeps everything on your own PC: no server, no
@@ -19,7 +17,7 @@ Only the first of five planned stages is built, and there is nothing to run yet.
 
 | Plan | What it delivers | State |
 |---|---|---|
-| 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built, being finished |
+| 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
 | 2 | Backup, restore, and opening a backup read-only | Not started |
 | 3 | Desktop shell (built with Tauri, a toolkit for desktop apps): sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Not started |
 | 4 | The user interface (clickable design mockups first) | Not started |
@@ -74,8 +72,8 @@ Windows.
 - The design asks for five things before a release counts as "reviewed": passing tests in CI, a clean security scan,
   every change reviewed in a pull request, a written walk-through of `SECURITY.md` against the code signed off before
   each release, and this README stating plainly that the code is not independently audited. Today the tests and the scan
-  run on every push and this statement is made. Plan 1 has not been merged yet, so the pull-request review is still
-  ahead, and the walk-through will happen when there is a release. See the
+  run on every push and this statement is made. Plan 1 was reviewed in pull request #1 (by Greptile, an automated code
+  reviewer, and by separate review agents), and the walk-through will happen when there is a release. See the
   [design spec](docs/superpowers/specs/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox).
 
 ## Documents
@@ -87,6 +85,7 @@ Windows.
 | [SECURITY.md](SECURITY.md) | Threat model, the encryption used, honest limits, how to report a vulnerability |
 | [Design spec](docs/superpowers/specs/2026-10-07-lockbox-design.md) | The full technical design: cryptography, file formats, error handling, tests |
 | [docs/SETUP.md](docs/SETUP.md) | Tools and setup steps, with troubleshooting |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Rules for anyone changing the code, and the checks to run before pushing |
 
 ## Licence
 
