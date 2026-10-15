@@ -99,6 +99,10 @@ opened before the install need restarting to see `cargo`.
   were rewritten to it with `git filter-branch --env-filter` before the first push (Ariel ran it; the safety guard
   blocks history rewrites for Claude).
 - First CI run on `plan-1-core` passed (format, lint, test).
+- Re-created 2026-10-15 after the history cleanup (below): a force-push leaves the old commits reachable on GitHub by
+  their ID (and linked from old CI runs), so the repo was deleted (`gh auth refresh -h github.com -s delete_repo`,
+  `gh repo delete`), created again with the same command and both branches pushed with `git push -u`.
+  Ariel ran it; the safety guard blocks repo deletion for Claude. Old CI run history went with the old repo.
 
 ### Security scan (Plan 1, Task 2)
 - Run `node scripts/scan.mjs` (add `--json` for machine-readable output). It runs three tools over the whole repo and
