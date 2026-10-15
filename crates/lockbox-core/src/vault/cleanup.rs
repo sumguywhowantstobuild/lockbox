@@ -119,9 +119,10 @@ impl Vault {
     }
 
     /// Deletes a blob from `files/` and from the quarantine, where an unlock may have moved it
-    /// while its item file was missing. Nothing is deleted through a linked quarantine.
+    /// while its item file was missing. Nothing is deleted through a linked `files/` or
+    /// quarantine (a user purge reaches here without the checks unlock cleanup makes).
     pub(super) fn delete_blob_everywhere(&self, id: &FileId) -> Result<()> {
-        let orphaned = self.orphaned_dir();
+        let orphaned = self.checked_orphaned_dir()?;
         check_folder(&orphaned)?;
         delete_blob(&self.files_dir(), id)?;
         remove_file_retry(&blob_in(&orphaned, id))
@@ -871,6 +872,52 @@ mod tests {
         vault.trash_item(&other).unwrap();
         vault.purge_item(&other).unwrap();
         assert_eq!(exported(&parent, &vault, &keeper2, &shared2), b"again");
+    }
+
+    /// A trashed file item, ready for the user to purge.
+    fn trashed_file_item(parent: &TempDir, vault: &mut Vault) -> (ItemId, FileId) {
+        let (id, file) = file_item(parent, vault, b"bye");
+        vault.trash_item(&id).unwrap();
+        (id, file)
+    }
+
+    #[test]
+    fn purge_refuses_a_linked_files_folder() {
+        let (parent, mut vault) = new_vault();
+        let (id, file) = trashed_file_item(&parent, &mut vault);
+        let outside = TempDir::new();
+        let quarantine = outside.path().join("orphaned");
+        fs::create_dir(&quarantine).unwrap();
+        fs::rename(
+            blob_in(&vault.files_dir(), &file),
+            blob_in(outside.path(), &file),
+        )
+        .unwrap();
+        fs::copy(blob_in(outside.path(), &file), blob_in(&quarantine, &file)).unwrap();
+        if !link_folder(&vault.files_dir(), outside.path()) {
+            return;
+        }
+
+        assert!(vault.purge_item(&id).is_err());
+        assert!(blob_in(outside.path(), &file).exists());
+        assert!(blob_in(&quarantine, &file).exists());
+        assert!(vault.get_item(&id).unwrap().purging);
+    }
+
+    #[test]
+    fn purge_refuses_a_linked_orphaned_folder() {
+        let (parent, mut vault) = new_vault();
+        let (id, file) = trashed_file_item(&parent, &mut vault);
+        let outside = TempDir::new();
+        let theirs = plant_blob(outside.path(), b"theirs");
+        if !link_folder(&vault.orphaned_dir(), outside.path()) {
+            return;
+        }
+
+        assert!(vault.purge_item(&id).is_err());
+        assert!(blob_in(outside.path(), &theirs).exists());
+        assert!(blob_in(&vault.files_dir(), &file).exists());
+        assert!(vault.get_item(&id).unwrap().purging);
     }
 
     #[test]
