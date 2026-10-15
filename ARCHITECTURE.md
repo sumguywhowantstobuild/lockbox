@@ -2,7 +2,7 @@
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plan 1). The desktop shell, the UI, backup
 and restore, and read-only vaults come in later plans and are not here yet. The target design and the reasons behind it
-are in the [design spec](docs/superpowers/specs/2026-10-07-lockbox-design.md); this file cites its sections as "spec
+are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as "spec
 5.2" and so on.
 
 The core is a library with no UI. It does all the encryption and holds every key. Its Rust API is internal to the app:
@@ -161,13 +161,13 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
 
 | Topic | Spec section |
 |---|---|
-| Key hierarchy, key slots, header MAC | [5.2](docs/superpowers/specs/2026-10-07-lockbox-design.md#52-key-hierarchy) |
-| Password change, recovery, regenerate | [5.3](docs/superpowers/specs/2026-10-07-lockbox-design.md#53-password-change-recovery-and-recovery-key-regeneration) |
-| Item format | [5.4](docs/superpowers/specs/2026-10-07-lockbox-design.md#54-items) |
-| File (blob) format | [5.5](docs/superpowers/specs/2026-10-07-lockbox-design.md#55-files-blobs) |
-| Memory handling and honest limits | [5.6](docs/superpowers/specs/2026-10-07-lockbox-design.md#56-memory-and-honest-limits-all-go-into-securitymd) |
-| Folder layout, safe writes, header writes | [6.1–6.3](docs/superpowers/specs/2026-10-07-lockbox-design.md#61-layout) |
-| Multi-file changes and cleanup | [6.4](docs/superpowers/specs/2026-10-07-lockbox-design.md#64-multi-file-changes-and-cleanup) |
-| Rollback limit | [6.6](docs/superpowers/specs/2026-10-07-lockbox-design.md#66-rollback-and-deletion-v1-limit) |
-| Saving decrypted files | [7.2](docs/superpowers/specs/2026-10-07-lockbox-design.md#72-decrypted-output-save-a-copy-and-open) |
-| Tests expected | [9](docs/superpowers/specs/2026-10-07-lockbox-design.md#9-testing-acceptance-criteria) |
+| Key hierarchy, key slots, header MAC | [5.2](docs/design/2026-10-07-lockbox-design.md#52-key-hierarchy) |
+| Password change, recovery, regenerate | [5.3](docs/design/2026-10-07-lockbox-design.md#53-password-change-recovery-and-recovery-key-regeneration) |
+| Item format | [5.4](docs/design/2026-10-07-lockbox-design.md#54-items) |
+| File (blob) format | [5.5](docs/design/2026-10-07-lockbox-design.md#55-files-blobs) |
+| Memory handling and honest limits | [5.6](docs/design/2026-10-07-lockbox-design.md#56-memory-and-honest-limits-all-go-into-securitymd) |
+| Folder layout, safe writes, header writes | [6.1–6.3](docs/design/2026-10-07-lockbox-design.md#61-layout) |
+| Multi-file changes and cleanup | [6.4](docs/design/2026-10-07-lockbox-design.md#64-multi-file-changes-and-cleanup) |
+| Rollback limit | [6.6](docs/design/2026-10-07-lockbox-design.md#66-rollback-and-deletion-v1-limit) |
+| Saving decrypted files | [7.2](docs/design/2026-10-07-lockbox-design.md#72-decrypted-output-save-a-copy-and-open) |
+| Tests expected | [9](docs/design/2026-10-07-lockbox-design.md#9-testing-acceptance-criteria) |
