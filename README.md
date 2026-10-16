@@ -72,9 +72,9 @@ Windows.
 - The design asks for five things before a release counts as "reviewed": passing tests in CI, a clean security scan,
   every change reviewed in a pull request, a written walk-through of `SECURITY.md` against the code signed off before
   each release, and this README stating plainly that the code is not independently audited. Today the tests and the scan
-  run on every push and this statement is made. Plan 1 was reviewed in pull request #1 (by Greptile, an automated code
-  reviewer, and by separate review agents), and the walk-through will happen when there is a release. See the
-  [design spec](docs/design/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox).
+  run on every push and this statement is made. Plan 1 was reviewed in a pull request (by Greptile, an automated code
+  reviewer, plus separate review passes) before the code was published, and the walk-through will happen when there
+  is a release. See the [design spec](docs/design/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox).
 
 ## Documents
 

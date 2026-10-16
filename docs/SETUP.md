@@ -1,110 +1,58 @@
-# Setup runbook
+# Development setup
 
-Every setup step for Lockbox, the choice made and one line on why. Updated as we go.
-It becomes the README's "build it yourself" section and the starting point for the next app.
+Every tool needed to build and check Lockbox, the version used and one line on why.
 Never passwords or keys here, only where they're kept.
 
 ## Dev machine (Windows 11)
 
-### Already present
+### Base tools
 | Tool | Version | Used for |
 |---|---|---|
 | Git | 2.41.0 | Version control |
-| Node.js | 24.12.0 | Frontend tooling (React, TypeScript) |
-| GitHub CLI (`gh`) | — | Pull requests, CI status, Greptile review loop |
+| Node.js | 24.12.0 | Frontend tooling (React, TypeScript) and the scan scripts |
+| GitHub CLI (`gh`) | — | Pull requests and CI status |
 | Python | 3.11.4 | Runs semgrep |
 
-### Installed 2026-10-07
+### Security tools
 | Tool | Version | How | Why |
 |---|---|---|---|
 | gitleaks | 8.30.1 | `winget install --id Gitleaks.Gitleaks --source winget` | Finds passwords/keys accidentally committed to git |
 | osv-scanner | 2.6.0 | `winget install --id Google.OSVScanner --source winget` | Flags dependencies with known vulnerabilities |
 | semgrep | 1.179.0 | `python -m pip install --user semgrep` | Spots risky code patterns |
-| opensrc | 0.7.3 | `npm install -g opensrc@0.7.3` | Lets the AI read a library's real source instead of guessing |
+| opensrc | 0.7.3 | `npm install -g opensrc@0.7.3` | Fetches a library's published source, to read before using its API |
 
-### Claude Code skills (global, `~/.claude/skills/`)
-| Skill | Source | Why |
-|---|---|---|
-| greploop, check-pr | [greptileai/skills](https://github.com/greptileai/skills) (MIT) | Greptile review loop on every pull request |
-| code-structure | [michaelshimeles/skills](https://github.com/michaelshimeles/skills) | Keeps one shared version of repeated logic |
-
-These live on the dev machine only, not in this repo.
-
-### Trial: Ponytail plugin (Lockbox only, from 2026-10-09)
-[DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) (MIT): makes the AI write the smallest complete
-solution. Enabled in `.claude/settings.local.json` (git-ignored, this machine and project only), pinned to tag
-`v5.1.0` (commit `9cc65d03`) with auto-update off; its hooks were read before enabling (local only, no network).
-Declined: its status-bar setup. Decide after Plan 1 Group B: keep, go global, or drop `/simplify` to avoid overlap.
-Remove: delete its two entries from `.claude/settings.local.json`, then `node scripts/uninstall.js` from a clone of
-the repo cleans `~/.claude/.ponytail-active` and `~/.config/ponytail/`.
-
-### Optional: Codex CLI as an outside reviewer (from 2026-10-09)
+### Rust toolchain
 | Tool | Version | How | Why |
 |---|---|---|---|
-| Codex CLI | 0.162.0 | `npm install -g @openai/codex`, signed in with a ChatGPT plan (`codex login`) | A second opinion from a different AI company's model |
-
-Used only when Ariel asks for it; Claude reviewers stay the default. Run read-only, review text saved to a file:
-`codex exec --ignore-user-config -c 'windows.sandbox="unelevated"' -m gpt-6.1-sol -c 'model_reasoning_effort="high"'
--s read-only -C <repo> -o <review-file> - < <prompt-file>` (`--ignore-user-config` keeps personal computer-use and
-browser tools out of the review; gpt-6.1-sol at high is the token-friendly choice, gpt-6-astra only if needed). The ChatGPT plan is temporary (about
-one month), so nothing in the build loop depends on Codex. Remove: `npm uninstall -g @openai/codex`.
-
-### Safety guard (Claude Code hook, added 2026-10-08)
-`.claude/settings.json` runs `.claude/hooks/safety-guard.mjs` before every shell command and file edit Claude makes.
-Rules can't be forgotten the way instructions can. Three outcomes:
-- **Blocked:** wiping drives or system folders, deleting `.git`, formatting disks, turning off Windows security,
-  force push, push to `main` (or any push or merge while on `main`), skipping git checks, merging pull requests,
-  deleting or publishing the repo.
-- **Asks Ariel:** accepting licence agreements, installing software, piping a download into a shell, discarding work
-  (`reset --hard`, `clean -f`, deleting branches), opening or closing pull requests, creating or changing the GitHub
-  repo, releases, shutdown, and any change to the guard or Claude settings.
-- **Allowed:** everything else, under normal permissions.
-Test it: `node --test .claude/hooks/safety-guard.test.mjs`.
-**Global copy (the main version):** `~/.claude/hooks/safety-guard.mjs`, wired in `~/.claude/settings.json`, so every
-project on this machine is protected. Change the global copy first, then copy it here. When both run, the stricter
-answer wins. It's a seatbelt, not a sandbox: it catches mistakes, but a
-deliberately disguised command could slip past.
-
-### Installed 2026-10-08 (Plan 1, Task 1)
-| Tool | Version | How | Why |
-|---|---|---|---|
-| Visual Studio 2022 Build Tools, "Desktop development with C++" | 17.14 · Windows SDK 10.0.26100 | `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` (Ariel accepted the licence) | Rust on Windows needs Microsoft's C++ linker |
+| Visual Studio 2022 Build Tools, "Desktop development with C++" | 17.14 · Windows SDK 10.0.26100 | `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` (accept the licence) | Rust on Windows needs Microsoft's C++ linker |
 | rustup | 1.29.1 | `winget install --id Rustlang.Rustup` | Installs and switches Rust versions |
 | Rust | 1.99.0 + rustfmt, clippy | `rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy` | The language of the Lockbox core; pinned so every machine builds the same |
 
-Checked: a test program builds and runs (`cargo new hello && cargo run`). `~/.cargo/bin` is on the user PATH; terminals
-opened before the install need restarting to see `cargo`.
+Check: a test program builds and runs (`cargo new hello && cargo run`). `~/.cargo/bin` must be on the user PATH;
+terminals opened before the install need restarting to see `cargo`.
 
-### Workspace and CI (Plan 1, Task 1)
+## Workspace and CI
 - `rust-toolchain.toml` pins Rust 1.99.0 (minimal profile, plus rustfmt and clippy); `cargo` in the repo picks it up
   automatically.
 - Checks to run before every commit: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked`. `Cargo.lock` is committed so builds are repeatable.
-- `.github/workflows/ci.yml` runs the same three checks on Windows. It installs the pinned toolchain with
+- `.github/workflows/ci.yml` runs the same three checks. It installs the pinned toolchain with
   `rustup toolchain install` (newer rustup no longer installs one on `rustup show`), and both GitHub Actions are pinned
   to commit SHAs so a moved tag can't change what runs.
 
-### Windows file code and the Linux CI run (Plan 1, Task 8)
+### Windows file code and the Linux CI run
 - `crates/lockbox-core` depends on `windows-sys` 0.61 (Windows only) for safe file moves, disk-space and file-system
   checks. Its `unsafe` is confined to `src/fsio/windows.rs`; the rest of the crate denies `unsafe`.
-- The CI Rust job is now a matrix (`windows-latest`, `ubuntu-latest`), so the non-Windows file code in
-  `src/fsio/portable.rs` is compiled and tested too. Job names are now `Rust: format, lint, test (<os>)`; update any
-  required-status-check rules on GitHub to match.
+- The CI Rust job is a matrix (`windows-latest`, `ubuntu-latest`), so the non-Windows file code in
+  `src/fsio/portable.rs` is compiled and tested too. Job names are `Rust: format, lint, test (<os>)`;
+  required-status-check rules on GitHub must match them.
 
-### GitHub repo (Plan 1, Task 1 Step 11)
-- Private repo created with `gh repo create lockbox --private --source . --remote origin` (account
-  `sumguywhowantstobuild`). Ariel pushes `main`; feature branches are pushed for CI.
-- Commits use GitHub's noreply address so the personal email stays private once the repo is public:
-  `git config user.email 331128970+sumguywhowantstobuild@users.noreply.github.com` (this repo only). Earlier commits
-  were rewritten to it with `git filter-branch --env-filter` before the first push (Ariel ran it; the safety guard
-  blocks history rewrites for Claude).
-- First CI run on `plan-1-core` passed (format, lint, test).
-- Re-created 2026-10-15 after the history cleanup (below): a force-push leaves the old commits reachable on GitHub by
-  their ID (and linked from old CI runs), so the repo was deleted (`gh auth refresh -h github.com -s delete_repo`,
-  `gh repo delete`), created again with the same command and both branches pushed with `git push -u`.
-  Ariel ran it; the safety guard blocks repo deletion for Claude. Old CI run history went with the old repo.
+## Commit identity
+Commits use GitHub's noreply address so no personal email is published:
+`git config user.email <id>+<username>@users.noreply.github.com` (this repo only). Merges made on GitHub's website use
+the account's email setting, so turn on "Keep my email addresses private" in GitHub's email settings too.
 
-### Security scan (Plan 1, Task 2)
+## Security scan
 - Run `node scripts/scan.mjs` (add `--json` for machine-readable output). It runs three tools over the whole repo and
   writes their raw reports to `.scan/` (git-ignored): gitleaks (passwords/keys, run twice: over committed history, and
   over staged, unstaged and brand-new files, so it works before you commit), semgrep (risky code patterns) and osv-scanner (dependencies with known vulnerabilities, from `Cargo.lock`, plus `package-lock.json` once
@@ -124,17 +72,6 @@ opened before the install need restarting to see `cargo`.
 - CI job "Security scan" (Windows) installs pinned versions: gitleaks 8.30.1 and osv-scanner 2.6.0 downloaded from their
   GitHub releases and checked against SHA-256 values copied from the releases (the job fails on a mismatch), and
   `pip install semgrep==1.179.0`, then runs the scanner's own tests before the scan. Bumping a version means getting the new SHA-256 from the release page.
-
-### History cleanup before going public (2026-10-15)
-- Private files were removed from every saved version with git-filter-repo 2.47.0
-  (`python -m pip install --user git-filter-repo==2.47.0`; it lands in `%APPDATA%\Python\Python311\Scripts`, which
-  isn't on PATH, like semgrep). Removed: `TRACKER.md`, `PROCESS-NOTES.md`, the old `CLAUDE.md` and
-  `docs/superpowers/plans/`; the plans now live in the private notes repo. The leftover `refs/original/*` from the
-  earlier `filter-branch` (personal email) were deleted. Ariel ran it; the safety guard blocks history rewrites for
-  Claude. A full `git clone --mirror` backup was taken first, outside the repo.
-- Every commit ID changed, so `.gitleaksignore` now points at the fake test key's new commit, `f66dd77`.
-- `CLAUDE.md` is now one line that imports `CONTRIBUTING.md` (the public project rules). Personal working style goes
-  in `CLAUDE.local.md`, which is git-ignored and imports a file from the private notes repo.
 
 ## Troubleshooting log
 

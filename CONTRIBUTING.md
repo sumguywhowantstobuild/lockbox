@@ -1,7 +1,7 @@
 # Contributing to Lockbox
 
 Lockbox is a local-only password manager and encrypted file vault for Windows (see [README.md](README.md)). These
-rules apply to everyone who changes the code, people and AI coding agents alike.
+rules apply to everyone who changes the code.
 
 Found a security problem? Don't open a public issue; follow [SECURITY.md](SECURITY.md).
 
@@ -37,9 +37,4 @@ node scripts/scan.mjs
 ```
 
 `node scripts/scan.mjs` runs the security scanners (secrets, risky code, vulnerable dependencies); see
-[docs/SETUP.md](docs/SETUP.md#security-scan-plan-1-task-2) for what it reports and how to handle a finding.
-
-## AI coding agents
-`CLAUDE.md` points Claude Code at this file. `.claude/settings.json` runs a safety guard
-(`.claude/hooks/safety-guard.mjs`) before every command and file edit an agent makes; it blocks things like force
-pushes, pushes to `main` and history rewrites. Test it with `node --test .claude/hooks/safety-guard.test.mjs`.
+[docs/SETUP.md](docs/SETUP.md#security-scan) for what it reports and how to handle a finding.

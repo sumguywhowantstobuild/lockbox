@@ -463,8 +463,8 @@ hold the clipboard open.
 
 ## 10. Workflow, repo and tooling
 
-- **Change flow:** branch → tests + security scan → pull request → CI → `/greploop` (Greptile) → Ariel approves → merge.
-  Nothing is pushed to `main` or released without Ariel's go. Commits under Ariel's GitHub account, no AI co-author.
+- **Change flow:** branch → tests + security scan → pull request → CI → Greptile review → Ariel approves → merge.
+  Nothing is pushed to `main` or released without Ariel's go. Commits under Ariel's GitHub account.
 - **CI (GitHub Actions, `windows-latest`):** `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, frontend lint +
   tests + build, Tauri build, and the security scan.
 - **Security scan:** our own `scripts/scan.mjs` running gitleaks (secrets), semgrep (risky code) and osv-scanner
@@ -475,7 +475,7 @@ hold the clipboard open.
   vulnerability), `docs/PRD.md` (the product side of this spec), `ARCHITECTURE.md` (code map and rules of the built
   core), `docs/SETUP.md`, `LICENSE` (MIT).
 - **Greptile:** apply for the free open-source plan once the repo is public.
-- **Third-party skills and tools stay on the dev machine**, never committed.
+- **Personal editor and tool settings stay on the dev machine**, never committed.
 
 ## 11. Decisions and deferred items
 
