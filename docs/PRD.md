@@ -54,6 +54,7 @@ path.
 - **Recovery key** per vault, shown once at creation; **Regenerate recovery key**.
 - **Change password** (with the warning in spec 5.3).
 - **Encrypted backup and restore** of a vault.
+- **Test a backup** without restoring it.
 - **Open a backup (or a pre-restore copy) read-only**, to browse it or copy single items out.
 - **Add existing vault folder** (e.g. after moving a vault).
 

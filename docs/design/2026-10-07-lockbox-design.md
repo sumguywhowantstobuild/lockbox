@@ -1,6 +1,6 @@
 # Lockbox — Design Spec
 
-**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 4 (after independent review), awaiting approval
+**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 5 (2026-10-17, Plan 2 decisions)
 
 ## 1. Purpose
 
@@ -50,7 +50,7 @@ Moved to [docs/PRD.md](../PRD.md#scope).
 │                      │                                │
 │  Core library (Rust, crate: lockbox-core)             │
 │  Crypto, vault format, items, files, search index,    │
-│  generator, backup/restore. No Tauri/Windows deps.    │
+│  generator, backup/restore. No Tauri deps.            │
 └──────────────────────┬────────────────────────────────┘
                        │
    Disk: one folder per vault. Default parent: %USERPROFILE%\Lockbox Vaults\
@@ -59,7 +59,8 @@ Moved to [docs/PRD.md](../PRD.md#scope).
 - **UI:** screens and user input. Holds decrypted data only while displaying it (4.1).
 - **Desktop shell:** OS integration (system idle time, Windows lock/sleep events via a native message window, clipboard,
   file dialogs, single instance, window), unlocked vault sessions, journals, and validation of every command.
-- **Core:** all cryptography, file formats and the search index. **Keys never leave the core.**
+- **Core:** all cryptography, file formats and the search index. **Keys never leave the core.** It has no Tauri
+  dependencies; its Windows-specific filesystem operations are isolated in one platform filesystem module (see the PRD).
 
 ### 4.1 What crosses into the UI
 | Data | Crosses IPC? | When |
@@ -214,8 +215,9 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
 - **Three independent versions:** `container_version` (vault.json layout and folder rules), `item_version` (per item),
   `slot_version` (per key slot), plus `blob_version` (per stored file, in its item). The app opens vaults whose container
   version it knows and refuses newer ones with "Update Lockbox to open this vault."
-- **Parser limits:** `vault.json` ≤ 64 KiB, item file ≤ 1 MiB + overhead, JSON nesting depth ≤ 32, strict schemas.
-  Anything over the limits is refused before parsing.
+- **Parser limits:** `vault.json` ≤ 64 KiB, item file ≤ 1 MiB + overhead, JSON nesting depth ≤ 32, strict schemas,
+  `backup-manifest.json` ≤ 64 MiB (6.7, checked against the archive's declared entry size before any of it is read
+  into memory). Anything over the limits is refused before parsing.
 
 ### 6.2 Writing files
 - Every file write goes to a temp file `*.tmp` in the same folder, created hidden, flushed to disk, then renamed over the
@@ -230,15 +232,16 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
   the same parent (same drive), synced, then renamed to its final name. A crash leaves only a staging folder, never a
   half-built vault. Staging folders left by a crash are deleted the next time a vault is created in that parent.
 - Write the new `vault.json` (6.2), then the same content to `vault.json.bak` (6.2).
-- **Interrupted between the two:** the next successful unlock notices they differ and rewrites `.bak`.
+- **Interrupted between the two:** the next successful unlock of a writable session notices they differ and rewrites
+  `.bak`. A read-only opening never repairs: it writes nothing (6.9).
 - **Unlocking tries both headers.** If `vault.json` fails to parse, or its slot fails to unwrap and `.bak` differs from
   it, Lockbox tries the matching slot in `.bak` (reusing the derived key when the salt and parameters are equal, so no
   extra Argon2 cost). Recovery follows the same rule.
 - **When `.bak` is used**, a visible warning says: "Opened from the backup header. If you changed this vault's password
-  recently, it may need your *previous* password. Change the password again after unlocking." After unlocking, both
-  headers are rewritten.
-- After a password change completes, `.bak` is rewritten and leftover header `*.tmp` files are deleted at the next
-  unlock, so **no copy of the old password slot remains in the vault folder** (older backups and external copies: 5.3).
+  recently, it may need your *previous* password. Change the password again after unlocking." After unlocking a
+  writable session, both headers are rewritten.
+- After a password change completes, `.bak` is rewritten and, for writable sessions, leftover header `*.tmp` files are
+  deleted at the next unlock, so **no copy of the old password slot remains in the vault folder** (older backups and external copies: 5.3).
 
 ### 6.4 Multi-file changes and cleanup
 The **item file is the commit point**; **nothing referenced is ever deleted inline**, and deletions happen only when an
@@ -248,7 +251,7 @@ authenticated item records the intent.
   `retired_blobs` field → the old blob is deleted later by cleanup.
 - **Purge an item:** rewrite the item with `purging: true` → delete its blobs → delete the item file. A crash midway
   leaves a `purging` item, which cleanup finishes.
-- **Cleanup** runs **once per unlock, under the vault's write lock, before the session accepts any command**, so it
+- **Cleanup** (writable sessions only; a read-only open does none, 6.9) runs **once per unlock, under the vault's write lock, before the session accepts any command**, so it
   can never race an import:
   - Delete all `*.partial` and `*.tmp` files (none can belong to a running operation at that moment).
   - Delete blobs listed in `retired_blobs` of authenticated items, then clear those lists. Finish `purging` items.
@@ -278,45 +281,140 @@ design.
 ### 6.7 Backup
 - **Consistent snapshot:** backups are made only by Lockbox. While a backup runs, the vault's writes are paused (the
   backup holds the vault's write lock); edits show "Backup in progress."
+- **Refused** while a header change waits for the user's OK (5.2), or while the two header copies disagree on a key
+  slot, so that a backup always restores with either credential. Also refused over 250 000 payload entries.
+- **Contents:** the item files of every current item of the open vault (including items created since unlock), plus
+  the blobs those items attach, each **authenticated as it is copied**. Damaged items are left out and reported. Also
+  left out: damaged or missing blobs, retired blobs and `files/orphaned/`. The backup report counts each.
 - **Format:** one `.lockbox-backup` file, a **ZIP64** archive with no compression, containing `vault.json`, `items/`,
-  `files/` (excluding `orphaned/`) and a `backup-manifest.json` listing every entry's path, size and SHA-256. The manifest
-  carries an **HMAC-SHA256** keyed by HKDF(vault key, info = `"lockbox backup manifest v1"`), so after unlocking,
-  restore can prove the backup is complete (nothing added, removed or swapped).
-- **Verify, then publish:** the backup is written to a hidden temp file beside the destination, re-read and checked
-  against the manifest, then renamed into place. A failed or cancelled backup never replaces an existing backup file.
+  `files/` (excluding `orphaned/`) and a `backup-manifest.json`. The manifest lists every archive entry except itself,
+  with its path, size and SHA-256; the archive holds exactly the listed entries plus the one `backup-manifest.json`,
+  which is authenticated by its MAC. The manifest carries an **HMAC-SHA256** keyed by HKDF(vault key,
+  info = `"lockbox backup manifest v1"`), so after unlocking, restore can prove the backup is complete (nothing added,
+  removed or swapped).
+  - **Manifest MAC message** = `encode_ad("lockbox/backup-manifest", manifest_version ‖ vault_id ‖ created_at ‖ for each
+    entry: path ‖ size (u64 LE) ‖ sha256)`.
+  - **Allowed entry names (exact):** `vault.json`, `backup-manifest.json`, `items/<32 lowercase hex>.item`,
+    `files/<32 lowercase hex>.blob`.
+  - **Limits, applied the same way when testing a backup, restoring and opening read-only:** `backup-manifest.json` ≤
+    64 MiB (67 108 864 bytes), checked against the archive's declared entry size before any of it is read into memory
+    (not only before parsing); JSON nesting depth ≤ 32; at most 250 000 payload entries, so the
+    manifest lists at most 250 001 entries and the archive holds at most 250 002 records.
+- **Verify, then publish:** the backup is written to a hidden temp file beside the destination, recorded in the output
+  journal (7.2), re-read and checked against the manifest, then renamed into place. A failed or cancelled backup never
+  replaces an existing backup file.
 - Before starting, Lockbox checks the destination's free space and file-size limit (e.g. FAT32's 4 GiB) and refuses
   with the reason if it can't hold the backup.
+- **Reading backups: Lockbox's own strict parser.** The `zip` crate only writes backups. Lockbox reads them with its own
+  parser, which accepts exactly this subset and refuses anything else with the name of the failed check:
+  - The end record sits at exactly `file_len − 22` and has an empty comment.
+  - One disk.
+  - ZIP64 end locator and record present when any 16/32-bit field is saturated.
+  - Central directory: contiguous, ending where the end record (or ZIP64 record) starts.
+  - Every record:
+    - flags `0` (bit 11 is allowed)
+    - method `0`
+    - compressed size equals uncompressed size
+    - name ≤ 64 bytes, from the allowlist
+    - comment length `0`, disk start `0`
+    - not a directory or link: no MS-DOS directory attribute, and unix type bits either `0` or regular file
+    - extra fields: only ZIP64 `0x0001`
+  - Every local header: right signature, same flags, same method, same name bytes, and sizes that match the central
+    record (directly, or through its ZIP64 extra field).
+  - Sorted by header offset, the ranges `[header_offset, data_end)` **tile `[0, cd_offset)` exactly**: no gap, overlap,
+    duplicate or prepended data.
+  - All arithmetic is checked.
+- **Test a backup:** any backup can be checked without restoring. Inside the archive, it checks the manifest MAC, every
+  entry's SHA-256, every item and every file stream, and reports files the items attach that the backup lacks. Nothing
+  is written.
 
 ### 6.8 Restore
-Nothing in the vaults folder changes until every check passes, and the swap is journaled so a crash can't lose both
-copies.
-1. **Inspect before writing anything.** Lockbox parses the ZIP central directory itself (never a library
-   "extract all") and validates every entry: only expected names (`vault.json`, `backup-manifest.json`,
-   `items/<hex>.item`, `files/<hex>.blob`); no absolute paths, `..`, drive letters, links, duplicates or unexpected
-   files; entry count and declared sizes within limits; total size vs free space. The entry list must **match the
-   manifest exactly.**
-2. **Extract into a staging folder** `.restore-<random>` **in the destination's parent folder** (same drive, so the
-   final step is a rename), enforcing each entry's byte limit while writing and checking each SHA-256.
-3. **Unlock** with the backup's password **or recovery key** (the backup may hold an older password; the UI says the
-   restored vault's password is the backup's). Verify the manifest HMAC, then **authenticate every item and every
-   complete file stream.**
-4. **Swap, journaled:**
-   - If a vault with the same ID exists, the user chooses: replace it, or open the backup read-only instead (6.9).
+The existing vault is untouched until extraction and authentication have succeeded, and the swap is journaled so a crash
+can't lose both copies. The order is: unlock before extracting, so a wrong password fails at once.
+1. **Inspect before writing anything.** Lockbox reads the archive with its own parser (6.7), never a library
+   "extract all", and validates every entry: only the allowed names; no absolute paths, `..`, drive letters, links,
+   duplicates or unexpected files; entry count, manifest size and declared sizes within the limits in 6.7; total size vs
+   free space. The entry list must **match the manifest exactly** (the listed entries plus `backup-manifest.json`
+   itself). Refused while a restore journal exists.
+2. **Unlock from the archive** with the backup's header and the user's password **or recovery key** (the backup may hold
+   an older password; the UI says the restored vault's password is the backup's). Then verify the header MAC and the
+   manifest MAC.
+3. **Choose the destination** in the chosen parent folder:
+   - The folder of the vault with the same ID: replace it (**several such folders → refuse**). The user may instead open
+     the backup read-only (6.9).
+   - Otherwise a new folder `<name>-<short-id>`. **If that name is taken by anything, refuse before writing.**
+   - Restore never merges into, or replaces, a folder that is not the same vault.
+4. **Journal `extracting`, then extract** into a staging folder `.restore-<32 lowercase hex>` **in the destination's
+   parent folder** (same drive, so the final step is a rename). The journal is
+   `%LOCALAPPDATA%\Lockbox\restore-journal.json`. Every entry is hash-checked against the manifest as it is written,
+   every item opened, and every blob authenticated as it is written (`authenticate_copy`); each entry's byte limit is
+   enforced while writing.
+5. **Swap, journaled:**
    - Lock and close the existing vault (release `.lock` and every handle).
-   - Write a restore journal `%LOCALAPPDATA%\Lockbox\restore-journal.json` (paths and step).
-   - Rename existing → `<folder>.before-restore`, then staging → `<folder>`, retrying on sharing violations (6.2).
-   - Mark the journal done. `<folder>.before-restore` is kept and listed in the UI (open read-only, or delete).
-5. **Recovery at startup:** if a journal is unfinished, roll back (rename `.before-restore` back when the target is
-   missing) or finish, depending on its step. `.restore-*` folders are deleted only when the journal says so.
-6. On any validation failure, the staging folder is deleted; the existing vault is untouched.
+   - When the swap starts, before any rename, choose the first unused name of `<folder>.before-restore`,
+     `<folder>.before-restore-2` … `-99`, so an earlier pre-restore copy is never replaced. If all are taken, the
+     restore is refused before any rename; the staged restore stays for the user to free a name.
+   - Journal `swapping`, then rename existing → the chosen `.before-restore` name, then staging → `<folder>`, retrying
+     on sharing violations (6.2).
+   - A rename refused by a brief lock, before anything has moved, keeps the staged restore for a retry.
+   - **Cancellation:** a restore checks for cancellation up to the start of the swap. Once the swap has started it is
+     never cancelled: it finishes, or the recovery table below rolls it back, and the journal is kept until recovery
+     succeeds. The restore holds its own key from unlocking the backup (step 2), independent of any session of the
+     destination vault (7.4).
+   - Deleting the journal marks the restore done. The `.before-restore` folder is kept and listed in the UI (open
+     read-only, or delete).
+6. **Recovery at startup:** a journal found at launch is acted on by what is on disk, using the table below. Terms: S =
+   staging folder, T = target folder, B = the `.before-restore` folder (`before_restore`).
+   - **Journal validation** comes first. A failure gives `Damaged { what: "restore journal" }` and touches nothing:
+     - S, T and B (when present) are absolute, with only normal components after the prefix and root (no `.` or `..`),
+       and have the same parent.
+     - S's name matches `.restore-<32 lowercase hex>`. T's name does not start with `.restore-` and does not contain
+       `.before-restore`. B's name is T's name plus `.before-restore` or `.before-restore-<2..=99>`.
+     - The three names differ pairwise under case-insensitive comparison (`to_lowercase`), because Windows names are
+       case-insensitive.
+     - `extracting` has `before_restore == None`.
+     - Before deleting or renaming, each path that exists must be a real folder by `symlink_metadata`: not a link,
+       junction or reparse point.
+
+   | Journal | Disk state | Action | Result |
+   |---|---|---|---|
+   | none | – | nothing | `NothingToDo` |
+   | `extracting` | any | remove S | `StagingRemoved` |
+   | `swapping`, B none | T exists, S gone | nothing | `Finished` |
+   | `swapping`, B none | T missing | remove S | `RolledBack` (no T: a new-destination restore leaves nothing) |
+   | `swapping`, B none | T and S exist (T is not ours) | remove S, leave T | `RolledBack` |
+   | `swapping`, B some | B missing, T exists | remove S | `RolledBack` |
+   | `swapping`, B some | B exists, T missing | rename B → T, then remove S | `RolledBack` |
+   | `swapping`, B some | B and T exist, S gone | nothing (B kept) | `Finished` |
+   | any other | – | touch nothing, keep journal | `Err(InvalidInput { what: "restore state unclear" })` |
+
+   Every row but the last ends with `remove_staging_then_journal`: the staging folder is always deleted before the
+   journal, and the journal stays until cleanup has worked. If a rename or the staging removal fails, the result is
+   `Err(RestorePending)` and the journal is kept. Recovery is idempotent: a crash during recovery leaves a state the
+   table handles on the next run.
+   - A journal that cannot be acted on can be dismissed by the user. Dismissing deletes only a validated staging folder,
+     never the vault or a pre-restore copy.
+
+A validation failure in the archive or during extraction deletes only this operation's own staging folder (the journal
+is kept until that cleanup has worked); the existing vault is untouched. A journal-validation failure touches nothing.
 
 ### 6.9 Read-only vaults
 - A `.lockbox-backup` file or a `.before-restore` folder can be opened **read-only**, alongside the live vault.
+- **Opening a folder read-only writes nothing:** no `.lock`, no header repair, no cleanup.
 - Sessions are keyed by **location**, not vault_id, so two copies of the same vault can be open at once; read-only ones
   are labelled in the UI and reject every write.
 - Backups are browsed **directly inside the archive** (entries are stored uncompressed, so blobs are read by offset)
-  after the same validation as restore step 1; nothing is extracted except files the user saves or opens.
-- Single items can be copied from a read-only vault into the live one.
+  after the structural and entry-list checks of restore step 1 (not its restore-journal or extraction-space checks);
+  nothing is extracted except files the user saves or opens.
+- **A backup opened read-only unlocks and verifies both MACs, as in restore step 2, before any item is shown.** It then
+  checks every item against the manifest at open. Blobs are authenticated when exported or copied: file IDs are never
+  reused, so the AEAD binds them.
+- **An export is refused** when its destination is the backup itself, or inside the folder being viewed.
+- **Copying an item** from a read-only vault into the live one:
+  - The copy gets a new item ID, and each attachment a new file ID and key. Attachments are re-encrypted in memory,
+    never as plaintext on disk.
+  - Its collection is kept only if the live vault has that collection and it is not in the trash. Collections
+    themselves are not copied, and the copy is never trashed.
 
 ### 6.10 Locations, locking and filesystems
 - **Default vault location:** `%USERPROFILE%\Lockbox Vaults\`. Never inside Tauri's app-data folders
@@ -324,7 +422,7 @@ copies.
   never in the Roaming profile (tested).
 - **Vault registry:** the list of known vault locations is kept in `%LOCALAPPDATA%\Lockbox\vaults.json` (locations
   only, no secrets). "Add existing vault folder" adds one.
-- `.lock` is held with an **OS exclusive file lock** (`LockFileEx`) while the vault is open. A stale `.lock` without a
+- For writable sessions, `.lock` is held with an **OS exclusive file lock** (`LockFileEx`) while the vault is open. A stale `.lock` without a
   held lock (after a crash) is ignored and re-locked.
 - **Supported:** local, fixed NTFS drives. **Refused in v1:** removable drives, FAT32, network drives. **Warned:**
   folders inside OneDrive, Google Drive or Dropbox (not supported in v1).
@@ -387,7 +485,8 @@ hold the clipboard open.
   doing only that fast step there (clipboard with a timeout). **Launching an opened file happens after the lock is
   released**, so a blocking "How do you want to open this file?" dialog can never delay locking.
 - **Long operations** check for cancellation between chunks, delete their partial output (via 6.4 / 7.2 rules) and
-  report "Cancelled: vault locked."
+  report "Cancelled: vault locked." A restore holds its own key from unlocking the backup, independent of any session
+  of the destination vault; locking or closing the destination vault cancels a restore only before its swap starts (6.8).
 
 ## 8. Error handling
 
@@ -408,8 +507,9 @@ hold the clipboard open.
 | Operation running when the vault locks | Cancelled, partial output deleted (7.4). |
 | "Open" cleanup fails | Retry + visible message (7.2). |
 | Backup destination too small / FAT32 limit | Refused before starting, with the reason (6.7). |
-| Backup or restore validation fails | Nothing changes; the error names the check that failed. |
-| Crash during restore swap | Journal rolls back or finishes at next launch (6.8). |
+| Backup or restore validation fails | Nothing changes; the error names the check that failed (6.7, 6.8). |
+| Restore destination name taken by an unrelated folder, or several folders with the same vault ID | Refused before anything is written (6.8). |
+| Crash during restore swap or recovery | Journal rolls back or finishes at next launch, decided by what is on disk (6.8). A journal that can't be acted on is kept and can be dismissed by the user. |
 | Unsupported vault location | Removable, FAT32 or network drive refused; cloud-synced folders warned (6.10). |
 | Drive disappears while unlocked | That vault locks and shows as "unavailable" (6.10). |
 | Second app instance | Single instance focuses the existing window; `.lock` prevents two writers on one vault. |
@@ -440,13 +540,17 @@ hold the clipboard open.
   and absolute paths, links, duplicates, entries missing from or extra to the manifest, declared/actual size mismatches,
   oversized entries) → refused **before any file is written**; a rewritten manifest (bad HMAC) or a tampered item/blob →
   refused after unlock with the vault untouched; restore with the recovery key; a crash at each step of the swap →
-  journal recovers with no data lost; a > 4 GiB archive round-trips (ZIP64).
+  journal recovers with no data lost; a > 4 GiB archive round-trips (ZIP64); test a backup finds a tampered,
+  rolled-back or missing entry without writing anything; a damaged blob in the live vault still gives a backup that
+  restores; an unrelated folder at the destination name is refused; a second restore keeps the first
+  `.before-restore`; a crash during recovery itself recovers on the next run.
 - **Read-only vaults:** a backup and a `.before-restore` folder open read-only next to the live vault; every write is
   refused; copying an item into the live vault works.
 - **Locking:** lock during unlock, reveal, search, import, Save a copy, Open, backup and restore → no data returned after
   the lock, partial output deleted, key released; a response with an old generation is discarded by the UI; a clipboard
   write racing a lock either completes before it (and is then cleared) or never happens; locking isn't delayed by a
-  blocked file launch; idle timer pauses during long operations; Windows lock still cancels them.
+  blocked file launch; idle timer pauses during long operations; Windows lock still cancels them; a restore is cancelled only before its swap
+  starts, and a lock or close of the destination vault during the swap leaves it to finish or roll back by the journal.
 - **Decrypted output:** a tampered blob or a cancellation never alters an existing destination file; leftovers listed in
   the output journal are deleted at the next launch; file-name sanitisation; executable types require confirmation.
 - **"Open" cleanup:** read-only copies are removed (attribute cleared first); a file held open by another process →
@@ -469,12 +573,11 @@ hold the clipboard open.
   tests + build, Tauri build, and the security scan.
 - **Security scan:** our own `scripts/scan.mjs` running gitleaks (secrets), semgrep (risky code) and osv-scanner
   (vulnerable dependencies), with one pass/fail result. Calls semgrep by full path (see `docs/SETUP.md`).
-- **Dependencies:** if the `zip` crate is used (for writing or reading the directory), it must be ≥ 2.3.0
-  (CVE-2025-29787), and its extract functions are never used.
+- **Dependencies:** the `zip` crate (≥ 2.3.0) only writes backups; Lockbox reads them with its own strict parser (6.7).
 - **Repo docs:** `README.md` (incl. "not independently audited"), `SECURITY.md` (R1–R7, limits, how to report a
   vulnerability), `docs/PRD.md` (the product side of this spec), `ARCHITECTURE.md` (code map and rules of the built
   core), `docs/SETUP.md`, `LICENSE` (MIT).
-- **Greptile:** apply for the free open-source plan once the repo is public.
+- **Greptile:** free Starter plan (decided 2026-10-17).
 - **Personal editor and tool settings stay on the dev machine**, never committed.
 
 ## 11. Decisions and deferred items
@@ -488,6 +591,11 @@ hold the clipboard open.
   removable drives refused · regenerate recovery key and read-only backups in v1 · Argon2 calibration clamped ·
   header MAC · item padding · recovery-key checksum · dialogs and URLs handled in Rust · search index in Rust ·
   manual trash purge · migration protocol documented now, implemented with v2.
+
+**Decided in Plan 2 (2026-10-17):**
+- Strict own archive reader (the `zip` crate only writes) · blobs authenticated as they are copied · unlock before
+  extract · numbered `.before-restore` (an earlier pre-restore copy is never replaced) · an unrelated folder at the
+  destination is refused · journaled recovery decided by disk state · test a backup · read-only folders write nothing.
 
 **Deferred, with a known home:**
 - Rotate vault key: v1.1.
