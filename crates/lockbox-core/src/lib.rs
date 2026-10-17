@@ -15,6 +15,7 @@ pub mod item;
 pub mod kdf;
 pub mod limits;
 pub mod lockfile;
+pub mod manifest;
 pub mod recovery;
 pub mod search;
 pub mod secret;
