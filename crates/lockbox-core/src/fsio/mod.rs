@@ -344,6 +344,16 @@ pub(crate) mod testutil {
         }
     }
 
+    /// The names directly inside `dir`, sorted.
+    pub fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
     /// Makes `link` a folder link to `target`: a junction on Windows (needs no special rights),
     /// a symlink elsewhere. Panics when it cannot, so a link test never passes by skipping.
     pub fn make_dir_link(link: &Path, target: &Path) {

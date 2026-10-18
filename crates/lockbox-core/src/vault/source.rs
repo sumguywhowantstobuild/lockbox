@@ -4,8 +4,8 @@
 //! writes: a folder source is only read, and an archive is held open read-only.
 
 use super::cleanup::{check_folder, list_blobs};
-use super::files::{FILES_DIR, blob_in};
-use super::items::{ITEMS_DIR, item_id_from_file_name};
+use super::files::{FILES_DIR, attachments, blob_in};
+use super::items::{ITEMS_DIR, item_file_in, item_id_from_file_name};
 use super::unlock::{Credential, HeaderFile, choose_header, load};
 use crate::archive::{BackupArchive, EntryKind};
 use crate::blob::{CancelToken, authenticate_copy};
@@ -28,7 +28,7 @@ const MANIFEST_MAC: CoreError = CoreError::Damaged {
 const WRONG_VAULT: CoreError = CoreError::Damaged {
     what: "backup: wrong vault",
 };
-const ENTRY_HASH: CoreError = CoreError::Damaged {
+pub(super) const ENTRY_HASH: CoreError = CoreError::Damaged {
     what: "backup: entry hash",
 };
 const HEADER_MAC: CoreError = CoreError::Damaged {
@@ -58,11 +58,13 @@ pub(super) enum VaultSource {
     Archive(BackupArchive),
 }
 
-fn item_name(id: &ItemId) -> String {
+/// The archive entry name of an item file.
+pub(super) fn item_name(id: &ItemId) -> String {
     format!("items/{}.item", id.to_hex())
 }
 
-fn blob_name(id: &FileId) -> String {
+/// The archive entry name of a blob.
+pub(super) fn blob_name(id: &FileId) -> String {
     format!("files/{}.blob", id.to_hex())
 }
 
@@ -122,7 +124,7 @@ impl VaultSource {
 
     pub(super) fn item_bytes(&self, id: &ItemId) -> Result<Vec<u8>> {
         match self {
-            Self::Folder(dir) => read_retry(&dir.join(item_path(id)), MAX_ITEM_FILE),
+            Self::Folder(dir) => read_retry(&item_file_in(dir, id), MAX_ITEM_FILE),
             Self::Archive(a) => a
                 .entry(&item_name(id))
                 .ok_or(FILE_MISSING)
@@ -133,7 +135,7 @@ impl VaultSource {
     /// The size of the item file, for the summary.
     fn item_len(&self, id: &ItemId) -> Result<u64> {
         match self {
-            Self::Folder(dir) => Ok(fs::metadata(dir.join(item_path(id)))?.len()),
+            Self::Folder(dir) => Ok(fs::metadata(item_file_in(dir, id))?.len()),
             Self::Archive(a) => a.entry(&item_name(id)).map(|e| e.size).ok_or(FILE_MISSING),
         }
     }
@@ -181,10 +183,6 @@ impl VaultSource {
     }
 }
 
-fn item_path(id: &ItemId) -> PathBuf {
-    Path::new(ITEMS_DIR).join(format!("{}.item", id.to_hex()))
-}
-
 /// A vault opened from a source: its header, key and every item that opened.
 pub(super) struct Opened {
     pub header: VaultHeader,
@@ -195,7 +193,7 @@ pub(super) struct Opened {
 }
 
 /// An archive's manifest as path to SHA-256; `None` for a folder, which has no manifest.
-fn listed(src: &VaultSource) -> Option<HashMap<&str, [u8; 32]>> {
+fn manifest_hashes(src: &VaultSource) -> Option<HashMap<&str, [u8; 32]>> {
     let VaultSource::Archive(a) = src else {
         return None;
     };
@@ -234,7 +232,7 @@ pub(super) fn unlock_source(
     let (used, key, _) = choose_header(&main, &backup, credential)?;
     cancel.check()?;
     let vault_id = used.header.vault_id;
-    let listed = listed(src);
+    let listed = manifest_hashes(src);
     if let VaultSource::Archive(a) = src {
         if !verify_manifest_mac_cancellable(a.manifest(), &key, cancel)? {
             return Err(MANIFEST_MAC);
@@ -279,13 +277,8 @@ pub(super) fn check_opened(opened: &Opened) -> Result<()> {
 }
 
 /// Every attachment of every loaded item, trashed ones included.
-pub(super) fn attached_refs(opened: &Opened) -> HashMap<FileId, &FileRef> {
-    opened
-        .items
-        .values()
-        .flat_map(|i| &i.attachments)
-        .map(|f| (f.file_id, f))
-        .collect()
+pub(super) fn attached_refs(opened: &Opened) -> BTreeMap<FileId, &FileRef> {
+    attachments(opened.items.values())
 }
 
 /// What a backup holds, as found by [`verify_backup`].
@@ -315,7 +308,7 @@ pub(super) fn verify_contents(
     if blobs.iter().any(|id| !refs.contains_key(id)) {
         return Err(UNEXPECTED_FILE);
     }
-    let listed = listed(src);
+    let listed = manifest_hashes(src);
     let vault_id = &opened.header.vault_id;
     let mut bytes = 0u64;
     for id in opened.items.keys() {
@@ -366,7 +359,7 @@ mod tests {
     use crate::archive::testkit::{ManifestMode, build_backup, rewrite_backup};
     use crate::blob::NoJournal;
     use crate::fsio::failpoint;
-    use crate::fsio::testutil::{TempDir, make_dir_link};
+    use crate::fsio::testutil::{TempDir, make_dir_link, names};
     use crate::item::ItemKind;
     use crate::recovery::RecoverySecret;
     use crate::vault::Vault;
@@ -448,15 +441,6 @@ mod tests {
             Err(CoreError::Damaged { what }) => what,
             other => panic!("expected Damaged, got {other:?}"),
         }
-    }
-
-    fn names(dir: &Path) -> Vec<String> {
-        let mut v: Vec<String> = fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        v.sort();
-        v
     }
 
     /// Bytes of the regular files directly inside `dir`.

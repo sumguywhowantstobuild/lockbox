@@ -4,8 +4,9 @@
 //! manifest, and only then renamed over the destination (spec 7.2, verify then publish).
 
 use super::Vault;
-use super::files::{FILES_DIR, blob_in, refuse_inside};
+use super::files::{FILES_DIR, attachments, blob_in, refuse_inside};
 use super::naming::created_at_now;
+use super::source::{ENTRY_HASH, blob_name, item_name};
 use crate::archive::{ArchiveWriter, BackupArchive, copy_hashed};
 use crate::blob::{CancelToken, OutputJournal, authenticate_copy};
 use crate::fsio::{
@@ -35,9 +36,6 @@ const HEADER_CHANGED: CoreError = CoreError::Damaged {
 };
 const MISMATCH: CoreError = CoreError::Damaged {
     what: "backup: manifest mismatch",
-};
-const ENTRY_HASH: CoreError = CoreError::Damaged {
-    what: "backup: entry hash",
 };
 /// Room per entry for its local header, central record and manifest line.
 const PER_ENTRY: u64 = 512;
@@ -87,16 +85,6 @@ fn check_destination(dest: &Path) -> Result<()> {
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
     }
-}
-
-/// Every attachment of `items`, once each, sorted by ID.
-fn attachments<'a>(
-    items: impl Iterator<Item = &'a crate::item::Item>,
-) -> BTreeMap<FileId, &'a FileRef> {
-    items
-        .flat_map(|i| &i.attachments)
-        .map(|f| (f.file_id, f))
-        .collect()
 }
 
 /// Re-reads the finished temp: structure, the manifest as written, and every entry's
@@ -287,7 +275,7 @@ impl Vault {
                 report.skipped_damaged_items += 1;
                 continue;
             };
-            let name = format!("items/{}.item", id.to_hex());
+            let name = item_name(id);
             let size = bytes.len() as u64;
             let sha = w.add(&name, &mut &bytes[..], size, cancel)?;
             listed(name, size, sha, &mut report);
@@ -306,7 +294,7 @@ impl Vault {
                 other => other?,
             };
             let size = src.metadata()?.len();
-            let name = format!("files/{}.blob", id.to_hex());
+            let name = blob_name(&id);
             let copied = w.add_with(&name, |dst| {
                 authenticate_copy(&mut src, size, &mut &mut *dst, vault_id, fref, cancel)
             })?;
@@ -342,7 +330,8 @@ mod tests {
     use crate::CoreError;
     use crate::archive::BackupArchive;
     use crate::blob::NoJournal;
-    use crate::fsio::{VolumeInfo, failpoint, set_volume_override, testutil::TempDir};
+    use crate::fsio::testutil::{TempDir, names};
+    use crate::fsio::{VolumeInfo, failpoint, set_volume_override};
     use crate::header::{HEADER_FILE, parse_header, serialize_header};
     use crate::ids::{FileId, ItemId};
     use crate::item::ItemKind;
@@ -434,15 +423,6 @@ mod tests {
 
     fn blob_entry(id: &FileId) -> String {
         format!("files/{}.blob", id.to_hex())
-    }
-
-    fn names(dir: &Path) -> Vec<String> {
-        let mut v: Vec<String> = fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        v.sort();
-        v
     }
 
     /// The archive's entry names (manifest excluded), sorted; opening it must succeed.

@@ -19,6 +19,7 @@ use crate::fsio::{
 use crate::ids::{FileId, ItemId};
 use crate::item::{FileRef, Item, ItemKind};
 use crate::{CoreError, Result};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,16 @@ const NOT_FILE_HOLDER: CoreError = CoreError::InvalidInput {
 /// Where the blob `id` lives (or would live) inside the folder `folder`.
 pub(super) fn blob_in(folder: &Path, id: &FileId) -> PathBuf {
     folder.join(format!("{}{BLOB_EXT}", id.to_hex()))
+}
+
+/// Every attachment of `items`, once each, sorted by ID.
+pub(super) fn attachments<'a>(
+    items: impl Iterator<Item = &'a Item>,
+) -> BTreeMap<FileId, &'a FileRef> {
+    items
+        .flat_map(|i| &i.attachments)
+        .map(|f| (f.file_id, f))
+        .collect()
 }
 
 /// Refuses an output folder that is the vault folder `dir` or inside it. Both paths are

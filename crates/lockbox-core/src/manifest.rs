@@ -23,6 +23,8 @@ pub const MAX_MANIFEST_BYTES: usize = 67_108_864;
 pub const MAX_ENTRIES: usize = 250_000;
 
 const MAC_INFO: &[u8] = b"lockbox backup manifest v1";
+/// Bytes of the MAC message hashed between two cancellation checks.
+const MAC_PIECE: usize = 1 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,21 +72,18 @@ fn manifest_hmac_start(vault_key: &Key32) -> Hmac<Sha256> {
 }
 
 /// HMAC-SHA256 over [`mac_message`].
-fn manifest_hmac(m: &BackupManifest, vault_key: &Key32) -> Hmac<Sha256> {
-    manifest_hmac_start(vault_key).chain_update(mac_message(m))
-}
-
-/// Bytes of the MAC message hashed between two cancellation checks.
-const MAC_PIECE: usize = 1 << 20;
-
 pub fn manifest_mac(m: &BackupManifest, vault_key: &Key32) -> [u8; 32] {
-    manifest_hmac(m, vault_key).finalize().into_bytes().into()
+    manifest_hmac_start(vault_key)
+        .chain_update(mac_message(m))
+        .finalize()
+        .into_bytes()
+        .into()
 }
 
 /// False if the manifest has no MAC or it does not match. The comparison is constant-time.
 pub fn verify_manifest_mac(m: &BackupManifest, vault_key: &Key32) -> bool {
-    m.mac
-        .is_some_and(|mac| manifest_hmac(m, vault_key).verify_slice(&mac).is_ok())
+    // A token nobody holds is never cancelled, so this is the same check without a way out.
+    verify_manifest_mac_cancellable(m, vault_key, &CancelToken::new()).unwrap_or(false)
 }
 
 /// [`verify_manifest_mac`] for a manifest that may be tens of MiB: the same MAC message is fed
