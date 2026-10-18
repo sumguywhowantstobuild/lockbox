@@ -3,6 +3,7 @@
 //! prove a backup is complete: nothing added, removed or swapped. Nothing here is secret.
 
 use crate::ad::{encode_ad, v16};
+use crate::blob::CancelToken;
 use crate::error::{CoreError, Result};
 use crate::ids::VaultId;
 use crate::limits::{MAX_JSON_DEPTH, check_json};
@@ -62,13 +63,19 @@ fn mac_message(m: &BackupManifest) -> Vec<u8> {
     encode_ad("lockbox/backup-manifest", &fields)
 }
 
-/// HMAC-SHA256 over [`mac_message`], keyed by a key derived from (not equal to) the vault key.
-fn manifest_hmac(m: &BackupManifest, vault_key: &Key32) -> Hmac<Sha256> {
+/// An HMAC-SHA256 keyed by a key derived from (not equal to) the vault key, nothing fed in yet.
+fn manifest_hmac_start(vault_key: &Key32) -> Hmac<Sha256> {
     let key = Key32::hkdf_sha256(None, vault_key.as_bytes(), MAC_INFO);
-    Hmac::<Sha256>::new_from_slice(key.as_bytes())
-        .expect("HMAC accepts keys of any length")
-        .chain_update(mac_message(m))
+    Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts keys of any length")
 }
+
+/// HMAC-SHA256 over [`mac_message`].
+fn manifest_hmac(m: &BackupManifest, vault_key: &Key32) -> Hmac<Sha256> {
+    manifest_hmac_start(vault_key).chain_update(mac_message(m))
+}
+
+/// Bytes of the MAC message hashed between two cancellation checks.
+const MAC_PIECE: usize = 1 << 20;
 
 pub fn manifest_mac(m: &BackupManifest, vault_key: &Key32) -> [u8; 32] {
     manifest_hmac(m, vault_key).finalize().into_bytes().into()
@@ -78,6 +85,28 @@ pub fn manifest_mac(m: &BackupManifest, vault_key: &Key32) -> [u8; 32] {
 pub fn verify_manifest_mac(m: &BackupManifest, vault_key: &Key32) -> bool {
     m.mac
         .is_some_and(|mac| manifest_hmac(m, vault_key).verify_slice(&mac).is_ok())
+}
+
+/// [`verify_manifest_mac`] for a manifest that may be tens of MiB: the same MAC message is fed
+/// to the HMAC in pieces of at most 1 MiB, `cancel` is checked before each piece and once more
+/// after the last, so even a tiny signed manifest sees a cancel that arrived meanwhile.
+pub(crate) fn verify_manifest_mac_cancellable(
+    m: &BackupManifest,
+    vault_key: &Key32,
+    cancel: &CancelToken,
+) -> Result<bool> {
+    let Some(mac) = m.mac else {
+        return Ok(false);
+    };
+    let mut hmac = manifest_hmac_start(vault_key);
+    for piece in mac_message(m).chunks(MAC_PIECE) {
+        cancel.check()?;
+        hmac.update(piece);
+        #[cfg(test)]
+        crate::fsio::failpoint::check("manifest.mac_piece")?;
+    }
+    cancel.check()?;
+    Ok(hmac.verify_slice(&mac).is_ok())
 }
 
 pub fn serialize_manifest(m: &BackupManifest) -> Vec<u8> {
@@ -185,6 +214,59 @@ mod tests {
             assert!(!verify_manifest_mac(&bad, &key()), "{what}");
         }
         assert!(!verify_manifest_mac(&m, &Key32::from_bytes([8; 32])));
+    }
+
+    #[test]
+    fn cancellable_mac_agrees_with_the_plain_one() {
+        let token = CancelToken::new();
+        let mut m = sample();
+        m.entries.push(entry("items/a.item", 9, 0x22));
+        // Small, and several pieces long: both must give the plain verdict.
+        for created_at in ["2026-10-17T00:00:00Z".to_owned(), "x".repeat(3 << 20)] {
+            m.created_at = created_at;
+            let m = signed(m.clone());
+            assert!(verify_manifest_mac_cancellable(&m, &key(), &token).unwrap());
+            let wrong = Key32::from_bytes([8; 32]);
+            assert!(!verify_manifest_mac_cancellable(&m, &wrong, &token).unwrap());
+            let mut bad = m.clone();
+            bad.entries[0].size += 1;
+            assert!(!verify_manifest_mac_cancellable(&bad, &key(), &token).unwrap());
+            bad.mac = None;
+            assert!(!verify_manifest_mac_cancellable(&bad, &key(), &token).unwrap());
+        }
+    }
+
+    /// A manifest over 1 MiB is hashed in pieces, and a cancel during the first piece stops it
+    /// before the rest; a cancel during the only piece of a tiny one is still seen.
+    #[test]
+    fn mac_check_is_cancellable() {
+        use crate::fsio::failpoint;
+        let mut big = sample();
+        big.created_at = "x".repeat(3 << 20);
+        let big = signed(big);
+        let pieces = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = pieces.clone();
+        failpoint::observe(
+            "manifest.mac_piece",
+            Box::new(move || counter.set(counter.get() + 1)),
+        );
+        let token = CancelToken::new();
+        failpoint::arm_cancel("manifest.mac_piece", token.clone());
+        let result = verify_manifest_mac_cancellable(&big, &key(), &token);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(pieces.get(), 1, "stopped after the first piece");
+
+        let token = CancelToken::new();
+        failpoint::arm_cancel("manifest.mac_piece", token.clone());
+        let result = verify_manifest_mac_cancellable(&signed(sample()), &key(), &token);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        let result = verify_manifest_mac_cancellable(&big, &key(), &cancelled);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
     }
 
     /// A manifest with `n` entries as JSON text, built directly (fast for 250 000).

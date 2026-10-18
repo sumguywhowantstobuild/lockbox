@@ -13,7 +13,7 @@ use crate::fsio::{open_shared_read, read_retry};
 use crate::header::{HEADER_BACKUP, HEADER_FILE, VaultHeader, verify_header_mac};
 use crate::ids::{FileId, ItemId, VaultId};
 use crate::item::{FileRef, Item, MAX_ITEM_FILE, open_item};
-use crate::manifest::verify_manifest_mac;
+use crate::manifest::verify_manifest_mac_cancellable;
 use crate::secret::Key32;
 use crate::{CoreError, Result};
 use sha2::{Digest, Sha256};
@@ -71,7 +71,11 @@ impl VaultSource {
     /// header and no fallback.
     pub(super) fn header(&self) -> (Result<HeaderFile>, Result<HeaderFile>) {
         match self {
-            Self::Folder(dir) => (load(&dir.join(HEADER_FILE)), load(&dir.join(HEADER_BACKUP))),
+            // The root itself too: a linked vault folder could lead anywhere.
+            Self::Folder(dir) => match check_folder(dir) {
+                Ok(()) => (load(&dir.join(HEADER_FILE)), load(&dir.join(HEADER_BACKUP))),
+                Err(e) => (Err(e), Err(CoreError::NotFound)),
+            },
             Self::Archive(a) => (
                 a.entry(HEADER_FILE)
                     .ok_or(NO_HEADER)
@@ -232,7 +236,7 @@ pub(super) fn unlock_source(
     let vault_id = used.header.vault_id;
     let listed = listed(src);
     if let VaultSource::Archive(a) = src {
-        if !verify_manifest_mac(a.manifest(), &key) {
+        if !verify_manifest_mac_cancellable(a.manifest(), &key, cancel)? {
             return Err(MANIFEST_MAC);
         }
         if a.manifest().vault_id != vault_id {
@@ -740,5 +744,77 @@ mod tests {
         let opened = unlock_source(&src, &Credential::Password(PW), &token).unwrap();
         let summary = verify_contents(&src, &opened, &token).unwrap();
         assert_eq!(summary, verify(&dest, Credential::Password(PW)).unwrap());
+    }
+
+    /// A folder link (a junction on Windows, which needs no special rights; a symlink elsewhere).
+    /// On Windows a refusal fails the test; elsewhere it returns `false` and the test is skipped,
+    /// as in `cleanup.rs`.
+    fn make_dir_link(link: &Path, target: &Path) -> bool {
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        #[cfg(windows)]
+        assert!(made, "cannot create a junction on Windows");
+        #[cfg(not(windows))]
+        if !made {
+            eprintln!("note: cannot create a folder link here; test skipped");
+        }
+        made
+    }
+
+    #[track_caller]
+    fn not_plain<T>(result: Result<T>) {
+        let error = result.err();
+        let ok = matches!(
+            error,
+            Some(CoreError::InvalidInput {
+                what: "not a plain folder"
+            })
+        );
+        assert!(ok, "{error:?}");
+    }
+
+    /// "No linked folders": a vault folder that is itself a link to a real vault is refused.
+    #[test]
+    fn linked_source_root_refused() {
+        let mut f = Fixture::new();
+        f.file_item(b"x");
+        let link = f.parent.path().join("link");
+        if make_dir_link(&link, f.vault.dir()) {
+            let src = VaultSource::Folder(link);
+            let token = CancelToken::new();
+            not_plain(unlock_source(&src, &Credential::Password(PW), &token));
+        }
+    }
+
+    #[test]
+    fn linked_items_or_files_child_refused() {
+        for name in ["items", "files"] {
+            let mut f = Fixture::new();
+            f.file_item(b"x");
+            let dir = f.vault.dir().to_path_buf();
+            let outside = TempDir::new();
+            fs::remove_dir_all(dir.join(name)).unwrap();
+            if !make_dir_link(&dir.join(name), outside.path()) {
+                continue;
+            }
+            let src = VaultSource::Folder(dir);
+            let token = CancelToken::new();
+            let opened = unlock_source(&src, &Credential::Password(PW), &token);
+            if name == "items" {
+                not_plain(opened);
+            } else {
+                // Items load; the linked `files` folder stops the check that needs the blobs.
+                not_plain(verify_contents(&src, &opened.unwrap(), &token));
+            }
+        }
     }
 }
