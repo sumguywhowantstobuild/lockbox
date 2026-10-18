@@ -708,30 +708,56 @@ mod tests {
     #[test]
     fn space_checked_first() {
         let _cleanup = Cleanup;
-        let (parent, vault) = new_vault();
+        let (parent, mut vault) = new_vault();
+        let note = vault.new_item(ItemKind::Note, "a", None).unwrap();
+        let (id, file) = file_item(&parent, &mut vault, &[5u8; 10_000]);
         let out = out_dir(&parent);
         let dest = out.join("v.lockbox-backup");
         fs::write(&dest, b"OLD").unwrap();
         let journal = Recorder::default();
 
-        set_volume_override(Some(VolumeInfo {
-            free_bytes: Some(MIB as u64),
-            max_file_bytes: None,
-        }));
+        // Worked out here from the files on disk: vault.json, 2 item files, one blob, plus
+        // 512 bytes for each of the 5 entries (manifest included) and 64 KiB.
+        let len = |p: PathBuf| fs::metadata(p).unwrap().len();
+        let blob = len(blob_file(&vault, &file));
+        assert_eq!(blob, crate::blob::blob_len(10_000));
+        let estimate = len(vault.dir().join(HEADER_FILE))
+            + len(vault.item_path(&note))
+            + len(vault.item_path(&id))
+            + blob
+            + 5 * 512
+            + 64 * 1024;
+        // `check_space` keeps a 64 MiB margin on top of what is needed.
+        let just_enough = estimate + 64 * MIB as u64;
+        let volume = |free_bytes, max_file_bytes| {
+            set_volume_override(Some(VolumeInfo {
+                free_bytes: Some(free_bytes),
+                max_file_bytes,
+            }))
+        };
+
+        volume(just_enough - 1, None);
         let result = vault.backup(&dest, &journal, &CancelToken::new());
-        assert!(matches!(result, Err(CoreError::NotEnoughSpace { .. })));
+        assert!(
+            matches!(result, Err(CoreError::NotEnoughSpace { needed, available })
+                if needed == estimate && available == just_enough - 1),
+            "{result:?}"
+        );
 
         // Stands in for FAT32's 4 GiB file limit: the estimate alone is over 64 KiB.
-        set_volume_override(Some(VolumeInfo {
-            free_bytes: Some(u64::MAX),
-            max_file_bytes: Some(1024),
-        }));
+        volume(u64::MAX, Some(1024));
         let result = vault.backup(&dest, &journal, &CancelToken::new());
         assert!(matches!(result, Err(CoreError::FileSystemLimit { .. })));
 
         assert_eq!(names(&out), ["v.lockbox-backup"]);
         assert_eq!(fs::read(&dest).unwrap(), b"OLD");
         assert!(journal.0.borrow().is_empty());
+
+        // Exactly enough room: the backup goes ahead.
+        volume(just_enough, Some(estimate));
+        let report = vault.backup(&dest, &journal, &CancelToken::new()).unwrap();
+        assert_eq!((report.items, report.files), (2, 1));
+        assert_eq!(names(&out), ["v.lockbox-backup"]);
     }
 
     /// Review Focus 3: an existing backup stays byte-identical until the new one verified.
@@ -772,16 +798,16 @@ mod tests {
         let out = out_dir(&parent);
         let folder = out.join("folder.lockbox-backup");
         fs::create_dir(&folder).unwrap();
-        let mut unusable = vec![folder];
-        #[cfg(windows)]
-        {
-            let read_only = out.join("ro.lockbox-backup");
-            fs::write(&read_only, b"OLD").unwrap();
-            let mut perms = fs::metadata(&read_only).unwrap().permissions();
+        // Windows cannot replace a read-only file, so only there is it an unusable destination.
+        let read_only = cfg!(windows).then(|| {
+            let path = out.join("ro.lockbox-backup");
+            fs::write(&path, b"OLD").unwrap();
+            let mut perms = fs::metadata(&path).unwrap().permissions();
             perms.set_readonly(true);
-            fs::set_permissions(&read_only, perms).unwrap();
-            unusable.push(read_only);
-        }
+            fs::set_permissions(&path, perms).unwrap();
+            path
+        });
+        let unusable: Vec<PathBuf> = std::iter::once(folder).chain(read_only.clone()).collect();
         let before = names(&out);
         let journal = Recorder::default();
         for dest in &unusable {
@@ -792,8 +818,9 @@ mod tests {
         }
         assert_eq!(names(&out), before);
         assert!(journal.0.borrow().is_empty());
-        #[cfg(windows)]
-        crate::fsio::remove_file_retry(&out.join("ro.lockbox-backup")).unwrap();
+        if let Some(path) = &read_only {
+            crate::fsio::remove_file_retry(path).unwrap();
+        }
     }
 
     #[test]
