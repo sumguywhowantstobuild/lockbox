@@ -66,6 +66,11 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     move_file(from, to, MOVEFILE_WRITE_THROUGH)
 }
 
+/// Moves the file `from` to `to`; fails (`AlreadyExists`) if anything is at `to`.
+pub fn rename_file_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    rename_no_replace(from, to)
+}
+
 // On Windows `set_readonly(false)` clears only the read-only attribute. The lint's
 // worry (world-writable Unix modes) does not apply.
 #[allow(clippy::permissions_set_readonly_false)]

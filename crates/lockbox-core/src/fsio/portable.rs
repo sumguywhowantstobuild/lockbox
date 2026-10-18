@@ -28,6 +28,15 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     sync_dir(parent_dir(to))
 }
 
+/// Moves the file `from` to `to`; fails (`AlreadyExists`) if anything is at `to`, a dangling
+/// link included. A hard link is created first because `link(2)` refuses an existing name where
+/// `rename(2)` would replace it.
+pub fn rename_file_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    fs::hard_link(from, to)?;
+    fs::remove_file(from)?;
+    sync_dir(parent_dir(to))
+}
+
 /// Hiding is just a leading dot here, so there is nothing to clear.
 pub fn clear_hidden(_path: &Path) -> io::Result<()> {
     Ok(())

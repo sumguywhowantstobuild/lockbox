@@ -1,13 +1,14 @@
 //! Restore, part 1 (spec 6.8 steps 1 to 4): unlock the backup, choose the destination and
 //! extract into a hidden staging folder, with every check done.
 
-use super::cleanup::ORPHANED_DIR;
+use super::cleanup::{ORPHANED_DIR, check_folder};
 use super::files::FILES_DIR;
 use super::folder_name;
 use super::items::ITEMS_DIR;
 use super::journal::{
-    JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, new_staging_path, read_journal,
-    remove_staging_then_journal, write_journal,
+    IN_PROGRESS, JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, create_journal,
+    is_pre_restore_name, journal_exists, new_staging_path, plain_absolute, remove_journal_if_owner,
+    remove_staging_then_journal, validate_journal,
 };
 use super::source::{
     VaultSource, attached_blobs, attached_refs, check_listed, check_opened, copy_blob,
@@ -29,8 +30,8 @@ use std::fs::{self, File};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
-const RESTORE_IN_PROGRESS: CoreError = CoreError::InvalidInput {
-    what: "restore in progress",
+const BAD_PATH: CoreError = CoreError::InvalidInput {
+    what: "restore path",
 };
 const SEVERAL_COPIES: CoreError = CoreError::InvalidInput {
     what: "several copies of this vault",
@@ -69,12 +70,15 @@ fn find_existing(parent: &Path, id: &VaultId, cancel: &CancelToken) -> Result<Op
         cancel.check()?;
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        // A link is not a folder here (`file_type` does not follow it).
-        if name.starts_with('.') || name.contains(".before-restore") || !entry.file_type()?.is_dir()
-        {
+        // A link is not a folder here (`file_type` does not follow it), nor is any other
+        // reparse point (`check_folder`).
+        if name.starts_with('.') || is_pre_restore_name(&name) || !entry.file_type()?.is_dir() {
             continue;
         }
         let dir = entry.path();
+        if check_folder(&dir).is_err() {
+            continue;
+        }
         let header = load(&dir.join(HEADER_FILE)).or_else(|_| load(&dir.join(HEADER_BACKUP)));
         if !header.is_ok_and(|h| h.header.vault_id == *id) {
             continue;
@@ -112,11 +116,16 @@ impl PreparedRestore {
         journal: &Path,
         cancel: &CancelToken,
     ) -> Result<PreparedRestore> {
-        if read_journal(journal)?.is_some() {
-            return Err(RESTORE_IN_PROGRESS);
+        // Anything at the journal path counts, a damaged or newer journal too: only recovery
+        // reads it.
+        if journal_exists(journal)? {
+            return Err(IN_PROGRESS);
         }
-        // The journal names its folders by absolute paths.
+        // The journal names its folders by absolute paths with only normal components.
         let parent = std::path::absolute(parent)?;
+        if !plain_absolute(&parent) {
+            return Err(BAD_PATH);
+        }
         let src = VaultSource::Archive(BackupArchive::open(archive, cancel)?);
         let opened = unlock_source(&src, &credential, cancel)?;
         check_opened(&opened)?;
@@ -149,7 +158,22 @@ impl PreparedRestore {
             target: target.clone(),
             before_restore: None,
         };
-        write_journal(journal, &entry)?;
+        validate_journal(&entry)?;
+        #[cfg(test)]
+        crate::fsio::failpoint::check("restore.before_journal")?;
+        // Fails, touching nothing, if another restore published its journal meanwhile.
+        create_journal(journal, &entry)?;
+        // Until the folder exists it is not ours to remove: whatever is at that path stays, and
+        // only this operation's journal goes.
+        let created: Result<()> = (|| {
+            #[cfg(test)]
+            crate::fsio::failpoint::check("restore.before_staging")?;
+            Ok(fs::create_dir(&staging)?)
+        })();
+        if let Err(e) = created {
+            let _ = remove_journal_if_owner(journal, &staging);
+            return Err(e);
+        }
         // From here on, dropping this (an error below included) cleans up.
         let prepared = PreparedRestore {
             archive: src,
@@ -165,13 +189,13 @@ impl PreparedRestore {
         Ok(prepared)
     }
 
-    /// Creates the hidden staging folder and writes every entry into it, then `vault.json.bak`.
+    /// Hides the staging folder (made by `prepare`) and writes every entry into it, then
+    /// `vault.json.bak`.
     /// Each entry gets a new file that is synced and closed before the next, then read back
     /// from disk: the bytes on disk, not the ones just written, must hash to the manifest.
     fn extract(&self, refs: &BTreeMap<FileId, &FileRef>, cancel: &CancelToken) -> Result<()> {
         let staging = &self.staging;
         let (items, files) = (staging.join(ITEMS_DIR), staging.join(FILES_DIR));
-        fs::create_dir(staging)?;
         set_hidden(staging)?;
         fs::create_dir(&items)?;
         fs::create_dir_all(files.join(ORPHANED_DIR))?;
@@ -251,16 +275,20 @@ mod tests {
     use crate::archive::testkit::{
         ManifestMode, central_offset, patch, resize_entry, rewrite_backup,
     };
-    use crate::fsio::testutil::{TempDir, names};
+    use crate::fsio::testutil::{TempDir, make_dir_link, names};
     use crate::fsio::{VolumeInfo, failpoint, set_volume_override};
     use crate::item::ItemKind;
     use crate::vault::folder_name;
     use crate::vault::journal::{
-        JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, read_journal, write_journal,
+        JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, plain_absolute, read_journal,
+        write_journal,
     };
     use crate::vault::source::item_name;
     use crate::vault::source::tests::{Fixture, MIB, PW, flip_blob_second_chunk, flip_item};
+    use std::cell::{Cell, RefCell};
     use std::fs;
+    use std::path::Component;
+    use std::rc::Rc;
 
     /// Always resets, so a failing test cannot leak a failpoint or volume on this thread.
     struct Cleanup;
@@ -275,13 +303,22 @@ mod tests {
     struct Dest {
         parent: TempDir,
         journal_dir: TempDir,
+        /// How often a prepare got as far as writing its journal.
+        reached_journal: Rc<Cell<u32>>,
     }
 
     impl Dest {
         fn new() -> Dest {
+            let reached_journal = Rc::new(Cell::new(0));
+            let count = reached_journal.clone();
+            failpoint::observe(
+                "restore.before_journal",
+                Box::new(move || count.set(count.get() + 1)),
+            );
             Dest {
                 parent: TempDir::new(),
                 journal_dir: TempDir::new(),
+                reached_journal,
             }
         }
 
@@ -311,6 +348,18 @@ mod tests {
         fn assert_untouched(&self) {
             assert_eq!(names(self.parent()), Vec::<String>::new());
             assert!(!self.journal().exists(), "journal left behind");
+        }
+
+        /// Refused before any write: nothing on disk, and the journal write was never reached
+        /// (a clean-up afterwards would hide that).
+        #[track_caller]
+        fn assert_not_written(&self) {
+            self.assert_untouched();
+            assert_eq!(
+                self.reached_journal.get(),
+                0,
+                "the journal write was reached"
+            );
         }
     }
 
@@ -443,7 +492,7 @@ mod tests {
         let d = Dest::new();
         let result = d.prepare(&backup, Credential::Password("not the password"));
         assert!(matches!(error(result), CoreError::WrongPassword));
-        d.assert_untouched();
+        d.assert_not_written();
     }
 
     #[test]
@@ -485,7 +534,7 @@ mod tests {
             damaged(d.prepare(&traversal, Credential::Password(PW))),
             "backup: entry name"
         );
-        d.assert_untouched();
+        d.assert_not_written();
 
         // An entry the manifest does not list.
         let mismatch = copy("mismatch.lockbox-backup");
@@ -501,7 +550,7 @@ mod tests {
             damaged(d.prepare(&mismatch, Credential::Password(PW))),
             "backup: manifest mismatch"
         );
-        d.assert_untouched();
+        d.assert_not_written();
 
         // An entry that runs one byte into the next.
         let overlap = copy("overlap.lockbox-backup");
@@ -512,7 +561,7 @@ mod tests {
             damaged(d.prepare(&overlap, Credential::Password(PW))),
             "backup: layout"
         );
-        d.assert_untouched();
+        d.assert_not_written();
     }
 
     #[test]
@@ -532,6 +581,7 @@ mod tests {
             [squatter.file_name().unwrap().to_str().unwrap()]
         );
         assert!(!d.journal().exists());
+        assert_eq!(d.reached_journal.get(), 0);
     }
 
     #[test]
@@ -566,26 +616,188 @@ mod tests {
         assert_eq!(invalid(result), "several copies of this vault");
         assert_eq!(names(d.parent()), ["Family-a", "Family-b"]);
         assert!(!d.journal().exists());
+        assert_eq!(d.reached_journal.get(), 0);
     }
 
+    /// Any entry at the journal path is "in progress": a valid journal, a corrupt one, a newer
+    /// one, a folder, a dangling link. Only recovery parses it; nothing here replaces it.
     #[test]
     fn restore_in_progress_refused() {
         let (_f, backup) = backed_up();
-        let d = Dest::new();
-        let journal = RestoreJournal {
+        let valid = RestoreJournal {
             version: RESTORE_JOURNAL_VERSION,
             step: JournalStep::Swapping,
-            staging: d.parent().join(format!(".restore-{}", "ab".repeat(16))),
-            target: d.parent().join("Family-abababab"),
+            staging: PathBuf::from("staging"),
+            target: PathBuf::from("target"),
             before_restore: None,
         };
-        write_journal(&d.journal(), &journal).unwrap();
-        let before = fs::read(d.journal()).unwrap();
+        let newer = serde_json::json!({"version": 2, "step": "extracting", "new": true});
+        type Plant<'a> = Box<dyn Fn(&Path) + 'a>;
+        let cases: [(&str, Plant); 5] = [
+            ("valid", Box::new(|p| write_journal(p, &valid).unwrap())),
+            (
+                "corrupt",
+                Box::new(|p| fs::write(p, b"{ not json").unwrap()),
+            ),
+            (
+                "unsupported version",
+                Box::new(|p| fs::write(p, newer.to_string()).unwrap()),
+            ),
+            ("folder", Box::new(|p| fs::create_dir(p).unwrap())),
+            (
+                "dangling link",
+                Box::new(|p| {
+                    let gone = TempDir::new();
+                    make_dir_link(p, gone.path());
+                    drop(gone);
+                }),
+            ),
+        ];
+        for (what, plant) in cases {
+            let d = Dest::new();
+            plant(&d.journal());
+            let before = fs::symlink_metadata(d.journal()).unwrap().file_type();
+            let bytes = fs::read(d.journal()).ok();
+
+            let result = d.prepare(&backup, Credential::Password(PW));
+            assert_eq!(invalid(result), "restore in progress", "{what}");
+            let after = fs::symlink_metadata(d.journal()).unwrap().file_type();
+            assert_eq!(before, after, "{what}");
+            assert_eq!(fs::read(d.journal()).ok(), bytes, "{what}");
+            assert_eq!(names(d.parent()), Vec::<String>::new(), "{what}");
+            assert_eq!(d.reached_journal.get(), 0, "{what}");
+            failpoint::disarm_all();
+        }
+    }
+
+    /// A second prepare has passed every check and is about to publish its journal when a
+    /// first one completes. It must fail without touching the first one's journal or staging
+    /// folder, and its own clean-up must leave them alone.
+    #[test]
+    fn a_second_prepare_cannot_take_over_the_first_ones_journal() {
+        let _reset = Cleanup;
+        let (_f, backup) = backed_up();
+        let d = Dest::new();
+        let first: Rc<RefCell<Option<PreparedRestore>>> = Rc::default();
+        let (slot, archive) = (first.clone(), backup.clone());
+        let (parent, journal) = (d.parent().to_owned(), d.journal());
+        failpoint::observe(
+            "restore.before_journal",
+            Box::new(move || {
+                let cancel = CancelToken::new();
+                let credential = Credential::Password(PW);
+                let p = PreparedRestore::prepare(&archive, &parent, credential, &journal, &cancel);
+                *slot.borrow_mut() = Some(p.unwrap());
+            }),
+        );
 
         let result = d.prepare(&backup, Credential::Password(PW));
         assert_eq!(invalid(result), "restore in progress");
-        assert_eq!(fs::read(d.journal()).unwrap(), before);
-        assert_eq!(names(d.parent()), Vec::<String>::new());
+
+        let staging = staging_in(d.parent());
+        assert!(staging.join("vault.json.bak").exists());
+        assert_eq!(
+            read_journal(&d.journal()).unwrap().unwrap().staging,
+            staging
+        );
+        let first = first.borrow_mut().take().unwrap();
+        drop(first);
+        d.assert_untouched();
+    }
+
+    /// The generated staging path is taken by something else just before it is created: that
+    /// folder is left as it is, and only this operation's journal goes.
+    #[test]
+    fn staging_collision_keeps_the_existing_folder() {
+        let _reset = Cleanup;
+        let (_f, backup) = backed_up();
+        let d = Dest::new();
+        let journal = d.journal();
+        failpoint::observe(
+            "restore.before_staging",
+            Box::new(move || {
+                let staging = read_journal(&journal).unwrap().unwrap().staging;
+                fs::create_dir(&staging).unwrap();
+                fs::write(staging.join("sentinel"), b"mine").unwrap();
+            }),
+        );
+
+        let result = d.prepare(&backup, Credential::Password(PW));
+        assert!(matches!(error(result), CoreError::Io(_)));
+        let squatter = staging_in(d.parent());
+        assert_eq!(names(&squatter), ["sentinel"]);
+        assert_eq!(fs::read(squatter.join("sentinel")).unwrap(), b"mine");
+        assert!(!d.journal().exists(), "this operation's journal is gone");
+    }
+
+    /// Journal paths have only normal components. Windows resolves `..` when it makes a path
+    /// absolute; elsewhere it is refused. Either way none reaches the journal.
+    #[test]
+    fn parent_with_dot_dot_never_reaches_the_journal() {
+        let (_f, backup) = backed_up();
+        let d = Dest::new();
+        let sub = d.parent().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let odd = sub.join("..");
+        assert!(!plain_absolute(&odd));
+
+        let credential = Credential::Password(PW);
+        let result =
+            PreparedRestore::prepare(&backup, &odd, credential, &d.journal(), &CancelToken::new());
+        match result {
+            Err(e) => {
+                assert!(matches!(
+                    e,
+                    CoreError::InvalidInput {
+                        what: "restore path"
+                    }
+                ));
+                d.assert_not_written();
+            }
+            Ok(p) => {
+                let journal = read_journal(&d.journal()).unwrap().unwrap();
+                assert!(
+                    journal
+                        .staging
+                        .components()
+                        .all(|c| c != Component::ParentDir)
+                );
+                assert!(
+                    journal
+                        .target
+                        .components()
+                        .all(|c| c != Component::ParentDir)
+                );
+                assert_eq!(journal.staging.parent().unwrap(), d.parent());
+                drop(p);
+            }
+        }
+    }
+
+    /// A pre-restore copy is never a candidate, whatever its letter case (Windows names are
+    /// case-insensitive, so `Family.BEFORE-RESTORE` is `Family.before-restore`).
+    #[test]
+    fn case_variant_pre_restore_copy_is_not_a_candidate() {
+        let (f, backup) = backed_up();
+        // With a live copy: it is chosen, with no "several copies".
+        let d = Dest::new();
+        let live = plant_vault(&f, d.parent(), "Family-old");
+        plant_vault(&f, d.parent(), "Family.BEFORE-RESTORE");
+        plant_vault(&f, d.parent(), "Family-old.Before-Restore-2");
+        let p = d.prepare(&backup, Credential::Password(PW)).unwrap();
+        assert_eq!(p.existing(), Some(live.as_path()));
+        drop(p);
+
+        // Without one: not chosen, a new folder is the target.
+        let d = Dest::new();
+        plant_vault(&f, d.parent(), "Family.BEFORE-RESTORE");
+        let p = d.prepare(&backup, Credential::Password(PW)).unwrap();
+        assert_eq!(p.existing(), None);
+        let target = read_journal(&d.journal()).unwrap().unwrap().target;
+        assert_eq!(
+            target,
+            d.parent().join(folder_name("Family", &f.vault.id()))
+        );
     }
 
     #[test]
@@ -650,7 +862,7 @@ mod tests {
         let d = Dest::new();
         let result = d.prepare(&backup, Credential::Password(PW));
         assert_eq!(damaged(result), "backup: damaged item");
-        d.assert_untouched();
+        d.assert_not_written();
     }
 
     #[test]
@@ -670,7 +882,7 @@ mod tests {
         let d = Dest::new();
         let result = d.prepare(&backup, Credential::Password(PW));
         assert_eq!(damaged(result), "backup: unexpected file");
-        d.assert_untouched();
+        d.assert_not_written();
     }
 
     #[test]
@@ -684,7 +896,7 @@ mod tests {
         }));
         let result = d.prepare(&backup, Credential::Password(PW));
         assert!(matches!(error(result), CoreError::NotEnoughSpace { .. }));
-        d.assert_untouched();
+        d.assert_not_written();
     }
 
     #[test]

@@ -83,11 +83,32 @@ fn move_blobs(ids: &[FileId], from: &Path, to: &Path) -> usize {
     ids.iter().filter(|id| moved(*id)).count()
 }
 
-/// Fails unless `folder` is a real folder or is missing. A link or junction (std reports both as
-/// links) could lead outside the vault, so cleanup never works through one.
+/// `FILE_ATTRIBUTE_REPARSE_POINT`. std's `is_dir` is false for a symlink or junction, but a
+/// directory with any other kind of reparse point still reports as a directory.
+const REPARSE_POINT: u32 = 0x400;
+
+/// Whether the Windows file attributes mark a reparse point of any kind.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn is_reparse_point(attributes: u32) -> bool {
+    attributes & REPARSE_POINT != 0
+}
+
+/// Whether `meta` is a reparse point (always false where there are none).
+fn reparse_point(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    return is_reparse_point(std::os::windows::fs::MetadataExt::file_attributes(meta));
+    #[cfg(not(windows))]
+    return {
+        let _ = meta;
+        false
+    };
+}
+
+/// Fails unless `folder` is a real folder or is missing. A link, junction or any other reparse
+/// point could lead outside the vault, so cleanup never works through one.
 pub(super) fn check_folder(folder: &Path) -> Result<()> {
     match fs::symlink_metadata(folder) {
-        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(meta) if meta.is_dir() && !reparse_point(&meta) => Ok(()),
         Ok(_) => Err(CoreError::InvalidInput {
             what: "not a plain folder",
         }),
@@ -294,6 +315,37 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     const PW: &str = "correct horse battery";
+
+    /// Any reparse point is refused, whatever its tag; a plain folder or a folder with other
+    /// attributes (hidden, read-only, archive) is not. A reparse point that is not a link
+    /// (a cloud placeholder, say) cannot be made without privileges, so this tests the check
+    /// on attribute values, and `check_folder` on a real junction (`linked_*` tests).
+    #[test]
+    fn reparse_point_attribute_is_recognised() {
+        const DIRECTORY: u32 = 0x10;
+        for (attributes, reparse) in [
+            (DIRECTORY, false),
+            (DIRECTORY | 0x2 | 0x1 | 0x20, false),
+            (DIRECTORY | 0x400, true),
+            (0x400, true),
+            (DIRECTORY | 0x2 | 0x400, true),
+        ] {
+            assert_eq!(is_reparse_point(attributes), reparse, "{attributes:#x}");
+        }
+    }
+
+    #[test]
+    fn check_folder_accepts_plain_and_missing_folders_only() {
+        let dir = TempDir::new();
+        check_folder(dir.path()).unwrap();
+        check_folder(&dir.path().join("missing")).unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, b"x").unwrap();
+        assert!(check_folder(&file).is_err());
+        let link = dir.path().join("link");
+        make_dir_link(&link, dir.path());
+        assert!(check_folder(&link).is_err());
+    }
 
     /// Always disarms, so a failing test cannot leak a failpoint into the next one on this thread.
     struct Disarm;

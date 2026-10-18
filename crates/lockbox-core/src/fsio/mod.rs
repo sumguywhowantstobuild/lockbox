@@ -121,17 +121,26 @@ pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
     if to.try_exists()? {
         return Err(DESTINATION_EXISTS);
     }
-    retry(|| sys::rename_no_replace(from, to)).map_err(|e| {
-        // AlreadyExists on Windows; Linux reports a non-empty target as DirectoryNotEmpty.
-        if matches!(
-            e.kind(),
-            io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
-        ) {
-            DESTINATION_EXISTS
-        } else {
-            e.into()
-        }
-    })
+    retry(|| sys::rename_no_replace(from, to)).map_err(taken_or_io)
+}
+
+/// Moves the file `from` to `to`, which must not exist at all: not a file, a folder or a
+/// (dangling) link; `InvalidInput` if anything is there. Unlike [`rename_dir_no_replace`] the
+/// check and the move are one step, so a competing writer cannot slip in between.
+pub fn rename_file_no_replace(from: &Path, to: &Path) -> Result<()> {
+    retry(|| sys::rename_file_no_replace(from, to)).map_err(taken_or_io)
+}
+
+fn taken_or_io(e: io::Error) -> CoreError {
+    // AlreadyExists on Windows; Linux reports a non-empty target as DirectoryNotEmpty.
+    if matches!(
+        e.kind(),
+        io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+    ) {
+        DESTINATION_EXISTS
+    } else {
+        e.into()
+    }
 }
 
 /// Clears the hidden attribute (other attributes stay). Windows keeps a file's
@@ -158,6 +167,16 @@ pub fn remove_file_retry(path: &Path) -> Result<()> {
         sys::clear_readonly(path)?;
         fs::remove_file(path)
     }) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Deletes the folder `path` and everything in it, retrying like the other operations while
+/// another program briefly holds something inside. A missing folder counts as success. The
+/// caller decides whether `path` is a folder it may delete.
+pub fn remove_dir_all_retry(path: &Path) -> Result<()> {
+    match retry(|| fs::remove_dir_all(path)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
@@ -236,6 +255,21 @@ pub fn peak_memory_bytes() -> Option<u64> {
 /// content, never a mix: temp file in the same folder, flushed to disk, then swapped in.
 /// The temp file is removed if anything fails.
 pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<()> {
+    write_then_publish(target, bytes, replace_file)
+}
+
+/// [`atomic_write`] for a `target` that must not exist at all (`InvalidInput` "destination
+/// exists" if anything is there, a dangling link included): the first writer wins and nobody
+/// else's file is replaced.
+pub fn atomic_create(target: &Path, bytes: &[u8]) -> Result<()> {
+    write_then_publish(target, bytes, rename_file_no_replace)
+}
+
+fn write_then_publish(
+    target: &Path,
+    bytes: &[u8],
+    publish: impl FnOnce(&Path, &Path) -> Result<()>,
+) -> Result<()> {
     let (mut file, tmp) = create_hidden_temp(parent_dir(target), ".tmp")?;
     let result = (|| {
         file.write_all(bytes)?;
@@ -244,7 +278,7 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<()> {
         drop(file); // Windows cannot replace a file that is still open without delete sharing.
         #[cfg(test)]
         failpoint::check("atomic_write.before_replace")?;
-        replace_file(&tmp, target)
+        publish(&tmp, target)
     })();
     if result.is_err() {
         let _ = remove_file_retry(&tmp);
@@ -422,6 +456,76 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
         atomic_write(&target, b"new content").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new content");
+    }
+
+    /// `atomic_create` publishes only to a name that is free, whatever else is there.
+    #[test]
+    fn atomic_create_never_replaces_anything() {
+        use super::testutil::make_dir_link;
+        let dir = TempDir::new();
+        let target = dir.path().join("journal.json");
+        atomic_create(&target, b"first").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+        let exists = |r: Result<()>| {
+            assert!(matches!(
+                r,
+                Err(CoreError::InvalidInput {
+                    what: "destination exists"
+                })
+            ));
+        };
+        exists(atomic_create(&target, b"second"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        exists(atomic_create(&folder, b"x"));
+        let gone = TempDir::new();
+        let link = dir.path().join("link");
+        make_dir_link(&link, gone.path());
+        drop(gone);
+        exists(atomic_create(&link, b"x"));
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+        assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn remove_dir_all_retry_removes_a_tree_and_forgives_a_missing_one() {
+        let dir = TempDir::new();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("a").join("b")).unwrap();
+        std::fs::write(tree.join("a").join("b").join("f"), b"x").unwrap();
+        remove_dir_all_retry(&tree).unwrap();
+        assert!(!tree.exists());
+        remove_dir_all_retry(&tree).unwrap();
+    }
+
+    /// A program holding a file in the tree for a moment (antivirus) does not stop the removal.
+    #[cfg(windows)]
+    #[test]
+    fn remove_dir_all_retry_waits_out_a_brief_hold() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = TempDir::new();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        let held = tree.join("held");
+        std::fs::write(&held, b"x").unwrap();
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // Share read + write but not delete, so deleting the file fails while it is open.
+            let _held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1 | 2)
+                .open(held)
+                .unwrap();
+            opened_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        });
+        opened_rx.recv().unwrap();
+        assert!(std::fs::remove_dir_all(&tree).is_err(), "the hold works");
+        remove_dir_all_retry(&tree).unwrap();
+        holder.join().unwrap();
+        assert!(!tree.exists());
     }
 
     #[test]

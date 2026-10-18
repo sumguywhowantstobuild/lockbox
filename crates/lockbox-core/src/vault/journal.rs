@@ -4,22 +4,30 @@
 
 use super::backup::not_found;
 use super::cleanup::check_folder;
-use crate::fsio::{atomic_write, read_retry, remove_file_retry};
+use crate::fsio::{
+    atomic_create, atomic_write, parent_dir, read_retry, remove_dir_all_retry, remove_file_retry,
+};
 use crate::ids::VaultId;
 use crate::limits::{MAX_JSON_DEPTH, check_json};
 use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The journal version this build reads and writes.
 pub(super) const RESTORE_JOURNAL_VERSION: u16 = 1;
 /// Largest journal accepted.
 const MAX_JOURNAL_BYTES: usize = 65_536;
 const STAGING_PREFIX: &str = ".restore-";
+/// What a pre-restore folder's name adds to the vault folder's.
+const PRE_RESTORE: &str = ".before-restore";
 const DAMAGED: CoreError = CoreError::Damaged {
     what: "restore journal",
+};
+/// Something is already at the journal path: a restore, or what is left of one.
+pub(super) const IN_PROGRESS: CoreError = CoreError::InvalidInput {
+    what: "restore in progress",
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,13 +67,115 @@ pub(super) fn validate_staging_name(path: &Path) -> Result<()> {
     }
 }
 
-/// Writes the journal to `path`, replacing any earlier one.
-pub(super) fn write_journal(path: &Path, j: &RestoreJournal) -> Result<()> {
-    // Fails on a path that is not valid Unicode, before anything is written.
-    let bytes = serde_json::to_vec_pretty(j).map_err(|_| CoreError::InvalidInput {
+/// Whether a folder name is that of a pre-restore copy, in any letter case (Windows names are
+/// case-insensitive, so `Family.BEFORE-RESTORE` is one too).
+pub(super) fn is_pre_restore_name(name: &str) -> bool {
+    name.to_lowercase().contains(PRE_RESTORE)
+}
+
+/// An absolute path made only of a prefix, a root and normal names: no `.`, no `..`.
+pub(super) fn plain_absolute(path: &Path) -> bool {
+    path.is_absolute()
+        && path.components().all(|c| {
+            matches!(
+                c,
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+            )
+        })
+}
+
+/// The name of the last component of `path`, if it is valid Unicode.
+fn name_of(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|n| n.to_str())
+}
+
+/// Spec 6.8 journal validation, the part that needs no disk: paths absolute and plain with one
+/// parent between them; the staging name; a target that is neither a staging name nor a
+/// pre-restore name; a pre-restore name that is the target's plus `.before-restore` or
+/// `.before-restore-<2..=99>`; no two names equal when compared without case (Windows names
+/// are case-insensitive); and no pre-restore folder before the swap.
+pub(super) fn validate_journal(j: &RestoreJournal) -> Result<()> {
+    let paths = [&j.staging, &j.target]
+        .into_iter()
+        .chain(j.before_restore.as_ref());
+    let parent = j.staging.parent();
+    if parent.is_none()
+        || !paths
+            .clone()
+            .all(|p| plain_absolute(p) && p.parent() == parent)
+    {
+        return Err(DAMAGED);
+    }
+    validate_staging_name(&j.staging)?;
+    let target = name_of(&j.target).ok_or(DAMAGED)?;
+    if target.to_lowercase().starts_with(STAGING_PREFIX) || is_pre_restore_name(target) {
+        return Err(DAMAGED);
+    }
+    match (&j.before_restore, j.step) {
+        (None, _) => {}
+        (Some(_), JournalStep::Extracting) => return Err(DAMAGED),
+        (Some(b), JournalStep::Swapping) => {
+            let numbered = name_of(b)
+                .and_then(|b| b.strip_prefix(target))
+                .and_then(|b| b.strip_prefix(PRE_RESTORE))
+                .ok_or(DAMAGED)?;
+            let number = numbered.strip_prefix('-');
+            let ok = numbered.is_empty()
+                || number.is_some_and(|n| {
+                    n.bytes().all(|b| b.is_ascii_digit())
+                        && !n.starts_with('0')
+                        && matches!(n.parse::<u8>(), Ok(2..=99))
+                });
+            if !ok {
+                return Err(DAMAGED);
+            }
+        }
+    }
+    let mut names: Vec<String> = paths
+        .filter_map(|p| name_of(p).map(str::to_lowercase))
+        .collect();
+    let all = names.len();
+    names.sort();
+    names.dedup();
+    if names.len() != all {
+        return Err(DAMAGED);
+    }
+    Ok(())
+}
+
+/// Whether anything at all is at `path`: a file, a folder, a link, even a dangling one.
+pub(super) fn journal_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Serializes `j`. Fails on a path that is not valid Unicode, before anything is written.
+fn journal_bytes(j: &RestoreJournal) -> Result<Vec<u8>> {
+    serde_json::to_vec_pretty(j).map_err(|_| CoreError::InvalidInput {
         what: "restore journal",
-    })?;
-    atomic_write(path, &bytes)
+    })
+}
+
+/// Publishes the first journal of an operation. It fails with "restore in progress", and
+/// changes nothing, if anything at all is already at `path`: the journal belongs to whoever
+/// put it there. Later updates by that owner use [`write_journal`].
+pub(super) fn create_journal(path: &Path, j: &RestoreJournal) -> Result<()> {
+    atomic_create(path, &journal_bytes(j)?).map_err(|e| match e {
+        CoreError::InvalidInput {
+            what: "destination exists",
+        } => IN_PROGRESS,
+        other => other,
+    })
+}
+
+/// Replaces the journal at `path` with a new version of the owner's own journal.
+// Used by the swap step, which moves the journal from `extracting` to `swapping`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn write_journal(path: &Path, j: &RestoreJournal) -> Result<()> {
+    atomic_write(path, &journal_bytes(j)?)
 }
 
 /// Reads the journal at `path`; a missing file is `None`. Order matters, as for the header:
@@ -90,20 +200,50 @@ pub(super) fn read_journal(path: &Path) -> Result<Option<RestoreJournal>> {
         .map_err(|_| DAMAGED)
 }
 
-/// Removes the staging folder, then the journal, and only if the first worked (the journal is
-/// what lets the next launch finish the job). A name that is not a staging name, or a staging
-/// path that is not a real folder (a link, junction or reparse point), is refused and
-/// nothing is touched. A staging folder that is already gone counts as removed.
-pub(super) fn remove_staging_then_journal(staging: &Path, journal: &Path) -> Result<()> {
+/// Removes the staging folder, retrying while another program holds something in it. Refused,
+/// with nothing touched: a name that is not a staging name; a folder whose real name in its
+/// parent is not exactly that name (Windows finds a folder under any letter case, but only
+/// `.restore-` in lowercase followed by lowercase hex is a staging folder); a path that is
+/// not a real folder (a link, junction or other reparse point). A folder that is already gone
+/// counts as removed.
+pub(super) fn remove_staging(staging: &Path) -> Result<()> {
     validate_staging_name(staging)?;
+    match fs::symlink_metadata(staging) {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    let name = staging.file_name().ok_or(DAMAGED)?;
+    let real = fs::read_dir(parent_dir(staging))?
+        .filter_map(std::result::Result::ok)
+        .any(|entry| entry.file_name() == name);
+    if !real {
+        return Err(DAMAGED);
+    }
     check_folder(staging)?;
     #[cfg(test)]
     crate::fsio::failpoint::check("restore.remove_staging")?;
-    match fs::remove_dir_all(staging) {
-        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e.into()),
-        _ => {}
+    remove_dir_all_retry(staging)
+}
+
+/// Removes the journal at `journal` if it is readable and still names `staging`. A journal of
+/// another operation, an unreadable one and a missing one are left alone.
+// shortcut: reading and then deleting is not atomic, so an operation that publishes a journal
+// in between loses it; restore is one at a time (one app instance, "restore in progress"
+// gate) - upgrade with a lock file if that ever stops being true.
+pub(super) fn remove_journal_if_owner(journal: &Path, staging: &Path) -> Result<()> {
+    match read_journal(journal) {
+        Ok(Some(j)) if j.staging == staging => remove_file_retry(journal),
+        _ => Ok(()),
     }
-    remove_file_retry(journal)
+}
+
+/// Removes the staging folder, then the journal, and only if the first worked (the journal is
+/// what lets the next launch finish the job) and only if it still names this staging folder.
+/// See [`remove_staging`] for what is refused.
+pub(super) fn remove_staging_then_journal(staging: &Path, journal: &Path) -> Result<()> {
+    remove_staging(staging)?;
+    remove_journal_if_owner(journal, staging)
 }
 
 #[cfg(test)]
@@ -225,13 +365,19 @@ mod tests {
         assert_ne!(fresh, new_staging_path(dir));
     }
 
-    /// A staging folder with a file in a subfolder, and a journal file.
+    /// A staging folder with a file in a subfolder, and the journal that names it.
     fn staged(dir: &Path) -> (PathBuf, PathBuf) {
         let staging = new_staging_path(dir);
         fs::create_dir_all(staging.join("items")).unwrap();
         fs::write(staging.join("items").join("x.item"), b"x").unwrap();
         let journal = dir.join("j.json");
-        fs::write(&journal, b"{}").unwrap();
+        let entry = RestoreJournal {
+            step: JournalStep::Extracting,
+            staging: staging.clone(),
+            before_restore: None,
+            ..self::journal(dir)
+        };
+        write_journal(&journal, &entry).unwrap();
         (staging, journal)
     }
 
@@ -242,10 +388,221 @@ mod tests {
         remove_staging_then_journal(&staging, &journal).unwrap();
         assert!(!staging.exists() && !journal.exists());
         // Already gone counts as removed, and so does a journal that is gone.
-        fs::write(&journal, b"{}").unwrap();
+        let (staging, journal) = staged(dir.path());
+        fs::remove_dir_all(&staging).unwrap();
         remove_staging_then_journal(&staging, &journal).unwrap();
         assert!(!journal.exists());
         remove_staging_then_journal(&staging, &journal).unwrap();
+    }
+
+    /// The journal goes only if it still names this staging folder: another operation's stays.
+    #[test]
+    fn another_operations_journal_is_left_alone() {
+        let dir = TempDir::new();
+        let (staging, journal) = staged(dir.path());
+        let other = new_staging_path(dir.path());
+        let theirs = RestoreJournal {
+            staging: other.clone(),
+            ..self::journal(dir.path())
+        };
+        // Another operation has taken the journal over.
+        write_journal(&journal, &theirs).unwrap();
+        let bytes = fs::read(&journal).unwrap();
+
+        remove_staging_then_journal(&staging, &journal).unwrap();
+        assert!(!staging.exists(), "this operation's folder goes");
+        assert_eq!(fs::read(&journal).unwrap(), bytes);
+        // An unreadable or a missing journal is left alone and not reported either.
+        fs::write(&journal, b"garbage").unwrap();
+        remove_journal_if_owner(&journal, &other).unwrap();
+        assert!(journal.exists());
+        remove_journal_if_owner(&dir.path().join("none"), &other).unwrap();
+        // Its owner removes it.
+        write_journal(&journal, &theirs).unwrap();
+        remove_journal_if_owner(&journal, &other).unwrap();
+        assert!(!journal.exists());
+    }
+
+    /// The first publish never replaces anything, whatever is at the path.
+    #[test]
+    fn create_journal_refuses_any_existing_entry() {
+        let dir = TempDir::new();
+        let path = dir.path().join("restore-journal.json");
+        let j = journal(dir.path());
+        create_journal(&path, &j).unwrap();
+        assert_eq!(read_journal(&path).unwrap().unwrap().target, j.target);
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            create_journal(&path, &journal(dir.path())),
+            Err(CoreError::InvalidInput {
+                what: "restore in progress"
+            })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(names(dir.path()), ["restore-journal.json"]);
+
+        let folder = dir.path().join("folder");
+        fs::create_dir(&folder).unwrap();
+        assert!(create_journal(&folder, &j).is_err());
+        let gone = TempDir::new();
+        let link = dir.path().join("link");
+        make_dir_link(&link, gone.path());
+        drop(gone);
+        assert!(matches!(
+            create_journal(&link, &j),
+            Err(CoreError::InvalidInput {
+                what: "restore in progress"
+            })
+        ));
+        assert!(fs::symlink_metadata(&link).is_ok());
+        assert!(
+            journal_exists(&link).unwrap() && !journal_exists(&dir.path().join("none")).unwrap()
+        );
+    }
+
+    /// Windows finds a folder under any spelling; only its real name makes it a staging folder.
+    #[cfg(windows)]
+    #[test]
+    fn a_staging_name_in_another_letter_case_is_not_removed() {
+        let dir = TempDir::new();
+        let hex = "0123456789abcdef".repeat(2);
+        let real = dir.path().join(format!(".RESTORE-{}", hex.to_uppercase()));
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("keep"), b"keep").unwrap();
+        let asked = dir.path().join(format!(".restore-{hex}"));
+        validate_staging_name(&asked).unwrap();
+        assert!(asked.exists(), "Windows resolves the lowercase spelling");
+        let journal = dir.path().join("j.json");
+        fs::write(&journal, b"{}").unwrap();
+
+        assert!(remove_staging_then_journal(&asked, &journal).is_err());
+        assert!(real.join("keep").exists() && journal.exists());
+    }
+
+    /// A journal that passes validation. Nothing is created: only the paths are looked at.
+    fn valid() -> RestoreJournal {
+        let dir = std::env::temp_dir().join("lockbox-journal-paths");
+        RestoreJournal {
+            staging: dir.join(format!(".restore-{}", "ab".repeat(16))),
+            ..journal(&dir)
+        }
+    }
+
+    #[test]
+    fn journal_paths_follow_the_recovery_rules() {
+        validate_journal(&valid()).unwrap();
+        let ok = || RestoreJournal {
+            step: JournalStep::Extracting,
+            before_restore: None,
+            ..valid()
+        };
+        validate_journal(&ok()).unwrap();
+        let j = valid();
+        let parent = j.target.parent().unwrap().to_owned();
+        let t = j.target.clone();
+        let with_b = |b: &str| RestoreJournal {
+            before_restore: Some(parent.join(b)),
+            ..valid()
+        };
+        let named = |s: String| RestoreJournal {
+            target: parent.join(s),
+            ..valid()
+        };
+        let hex = "cd".repeat(16);
+        let bad: Vec<(&str, RestoreJournal)> = vec![
+            (
+                "relative staging",
+                RestoreJournal {
+                    staging: PathBuf::from(format!(".restore-{hex}")),
+                    ..valid()
+                },
+            ),
+            (
+                "dot dot",
+                RestoreJournal {
+                    target: parent.join("..").join("Family-x"),
+                    ..valid()
+                },
+            ),
+            (
+                "other parent",
+                RestoreJournal {
+                    target: parent.join("sub").join("Family-x"),
+                    ..valid()
+                },
+            ),
+            (
+                "staging name",
+                RestoreJournal {
+                    staging: parent.join("Family-x"),
+                    ..valid()
+                },
+            ),
+            ("target is a staging name", named(format!(".restore-{hex}"))),
+            (
+                "target is a staging name, other case",
+                named(format!(".RESTORE-{hex}")),
+            ),
+            (
+                "target holds before-restore",
+                named("Family.before-restore".into()),
+            ),
+            (
+                "target holds before-restore, other case",
+                named("Family.BEFORE-RESTORE".into()),
+            ),
+            ("pre-restore name unrelated", with_b("Other.before-restore")),
+            (
+                "pre-restore number 1",
+                with_b("Family-abababab.before-restore-1"),
+            ),
+            (
+                "pre-restore number 100",
+                with_b("Family-abababab.before-restore-100"),
+            ),
+            (
+                "pre-restore number 02",
+                with_b("Family-abababab.before-restore-02"),
+            ),
+            (
+                "pre-restore number +5",
+                with_b("Family-abababab.before-restore-+5"),
+            ),
+            (
+                "same name as target",
+                RestoreJournal {
+                    before_restore: Some(t.clone()),
+                    ..valid()
+                },
+            ),
+            (
+                "extracting with a pre-restore folder",
+                RestoreJournal {
+                    step: JournalStep::Extracting,
+                    ..valid()
+                },
+            ),
+        ];
+        for (what, j) in bad {
+            assert!(
+                matches!(
+                    validate_journal(&j),
+                    Err(CoreError::Damaged {
+                        what: "restore journal"
+                    })
+                ),
+                "{what}"
+            );
+        }
+        for good in [
+            "Family-abababab.before-restore-2",
+            "Family-abababab.before-restore-99",
+        ] {
+            validate_journal(&with_b(good)).unwrap();
+        }
+        assert!(!plain_absolute(&parent.join("..")));
+        assert!(plain_absolute(&parent));
+        assert!(!plain_absolute(Path::new("relative")));
     }
 
     #[test]
