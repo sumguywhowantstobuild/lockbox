@@ -240,6 +240,13 @@ pub(super) struct JournalLock {
 /// same process waits for the first. Recovery holds the lock for its whole run and uses
 /// [`remove_staging`] and [`remove_journal_if_owner`] with it.
 pub(super) fn lock_journal(journal: &Path) -> Result<JournalLock> {
+    let file = open_lock_file(journal)?;
+    file.lock()?;
+    Ok(JournalLock { _file: file })
+}
+
+/// A new handle on `<journal>.lock`, created if missing, not yet locked.
+fn open_lock_file(journal: &Path) -> Result<File> {
     let mut name = journal.file_name().ok_or(DAMAGED)?.to_owned();
     name.push(".lock");
     let mut options = OpenOptions::new();
@@ -248,10 +255,50 @@ pub(super) fn lock_journal(journal: &Path) -> Result<JournalLock> {
     // be deleted and replaced by a fresh one that someone else then locks as well.
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1 | 2);
-    let file = options.open(journal.with_file_name(name))?;
-    file.lock()?;
-    Ok(JournalLock { _file: file })
+    Ok(options.open(journal.with_file_name(name))?)
 }
+
+/// Test probe: whether anyone holds the journal lock right now, asked through a separate
+/// handle with `try_lock`, which never waits (and releases at once if it got the lock).
+#[cfg(test)]
+pub(super) fn lock_is_held(journal: &Path) -> bool {
+    use std::fs::TryLockError;
+    match open_lock_file(journal).unwrap().try_lock() {
+        Ok(()) => false,
+        Err(TryLockError::WouldBlock) => true,
+        Err(TryLockError::Error(e)) => panic!("probing the journal lock: {e}"),
+    }
+}
+
+/// Test hook: every time the failpoint `name` is reached, asserts that the journal lock is
+/// held at that moment. The counter says how often it was reached, so a test also proves the
+/// critical section ran.
+#[cfg(test)]
+pub(super) fn observe_lock_held(
+    name: &'static str,
+    journal: &Path,
+) -> std::rc::Rc<std::cell::Cell<u32>> {
+    let (journal, count) = (
+        journal.to_owned(),
+        std::rc::Rc::new(std::cell::Cell::new(0)),
+    );
+    let seen = count.clone();
+    crate::fsio::failpoint::observe(
+        name,
+        Box::new(move || {
+            assert!(
+                lock_is_held(&journal),
+                "the journal lock is not held at {name}"
+            );
+            seen.set(seen.get() + 1);
+        }),
+    );
+    count
+}
+
+/// How long a test waits for something that must happen before it calls it a hang.
+#[cfg(test)]
+pub(super) const WATCHDOG: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Removes the journal at `journal` if it is readable and still names `staging`. A journal of
 /// another operation, an unreadable one and a missing one are left alone. The lock proves
@@ -289,11 +336,10 @@ mod tests {
     use super::*;
     use crate::fsio::failpoint;
     use crate::fsio::testutil::{TempDir, make_dir_link, names};
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     fn journal(dir: &Path) -> RestoreJournal {
         RestoreJournal {
@@ -466,63 +512,70 @@ mod tests {
         assert!(!journal.exists());
     }
 
-    /// A's cleanup has read that the journal is A's and is about to delete it. Nobody else can
-    /// take the lock in that moment, so B cannot publish (and then lose its journal to A's
-    /// delete, or to a stale second cleanup of A) until A's cleanup is over.
+    /// A's cleanup has read that the journal is A's and is about to delete it. At that moment
+    /// the lock is held (asked through a separate handle), so B, which starts right there and
+    /// asks for it, can publish only after A's delete: it would fail "restore in progress"
+    /// against A's journal otherwise. A stale second cleanup of A then leaves B's journal.
     #[test]
     fn nobody_publishes_between_the_owner_check_and_the_delete() {
         let dir = TempDir::new();
         let (staging_a, journal) = staged(dir.path());
         let staging_b = new_staging_path(dir.path());
-        let b_thread = {
-            let (journal, staging_b, dir) =
-                (journal.clone(), staging_b.clone(), dir.path().to_owned());
-            move |acquired: mpsc::Sender<()>| {
-                let lock = lock_journal(&journal).unwrap();
-                acquired.send(()).unwrap();
-                let entry = RestoreJournal {
-                    step: JournalStep::Extracting,
-                    staging: staging_b,
-                    before_restore: None,
-                    ..self::journal(&dir)
-                };
-                create_journal(&journal, &entry).unwrap();
-                drop(lock);
-            }
-        };
-        let running = Rc::new(RefCell::new(None));
-        let (slot, b_thread) = (running.clone(), Cell::new(Some(b_thread)));
+        let held = observe_lock_held("journal.before_owner_delete", &journal);
+        // B is started inside the critical section, right after the probe has run.
+        let b = Rc::new(RefCell::new(None));
+        let (slot, journal_b, staging, parent) = (
+            b.clone(),
+            journal.clone(),
+            staging_b.clone(),
+            dir.path().to_owned(),
+        );
         failpoint::observe(
             "journal.before_owner_delete",
             Box::new(move || {
-                let (acquired, taken) = mpsc::channel();
-                let run = b_thread.take().unwrap();
-                let handle = thread::spawn(move || run(acquired));
-                // B is waiting for the lock, which A's cleanup holds.
-                let early = taken.recv_timeout(Duration::from_millis(300));
-                assert_eq!(early, Err(mpsc::RecvTimeoutError::Timeout));
-                *slot.borrow_mut() = Some((handle, taken));
+                let (journal, staging, parent) =
+                    (journal_b.clone(), staging.clone(), parent.clone());
+                *slot.borrow_mut() = Some(thread::spawn(move || {
+                    let lock = lock_journal(&journal).unwrap();
+                    let entry = RestoreJournal {
+                        step: JournalStep::Extracting,
+                        staging,
+                        before_restore: None,
+                        ..self::journal(&parent)
+                    };
+                    create_journal(&journal, &entry).unwrap();
+                    drop(lock);
+                }));
             }),
         );
         remove_staging_then_journal(&staging_a, &journal).unwrap();
         failpoint::disarm_all();
+        assert_eq!(held.get(), 1, "the critical section was reached once");
 
-        let (handle, taken) = running.borrow_mut().take().unwrap();
-        taken.recv().unwrap();
-        handle.join().unwrap();
+        b.borrow_mut().take().unwrap().join().unwrap();
         assert!(!staging_a.exists());
         assert_eq!(read_journal(&journal).unwrap().unwrap().staging, staging_b);
-        // A second, stale cleanup of A finds B's journal and leaves it.
+        // A second, stale cleanup of A finds B's journal and leaves it ...
         remove_staging_then_journal(&staging_a, &journal).unwrap();
         assert_eq!(read_journal(&journal).unwrap().unwrap().staging, staging_b);
+        // ... and the lock is free again once nobody is working on the journal.
+        assert!(!lock_is_held(&journal));
     }
 
     #[test]
     fn the_lock_is_exclusive_and_lives_beside_the_journal() {
         let dir = TempDir::new();
         let journal = dir.path().join("restore-journal.json");
+        assert!(!lock_is_held(&journal));
         let first = lock_journal(&journal).unwrap();
+        assert!(lock_is_held(&journal), "a second handle cannot take it");
         assert_eq!(names(dir.path()), ["restore-journal.json.lock"]);
+        #[cfg(windows)]
+        assert!(
+            fs::remove_file(dir.path().join("restore-journal.json.lock")).is_err(),
+            "a held lock file cannot be deleted"
+        );
+        // A waiter gets it once the first holder lets go (the watchdog only catches a hang).
         let (tx, rx) = mpsc::channel();
         let again = journal.clone();
         let handle = thread::spawn(move || {
@@ -530,15 +583,11 @@ mod tests {
             tx.send(()).unwrap();
             drop(second);
         });
-        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
-        #[cfg(windows)]
-        assert!(
-            fs::remove_file(dir.path().join("restore-journal.json.lock")).is_err(),
-            "a held lock file cannot be deleted"
-        );
         drop(first);
-        rx.recv().unwrap();
+        rx.recv_timeout(WATCHDOG)
+            .expect("the waiter never got the lock");
         handle.join().unwrap();
+        assert!(!lock_is_held(&journal));
         // The lock file is not a journal.
         assert!(!journal_exists(&journal).unwrap());
     }

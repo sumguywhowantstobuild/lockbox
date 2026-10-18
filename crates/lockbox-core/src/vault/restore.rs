@@ -168,6 +168,8 @@ impl PreparedRestore {
             if journal_exists(journal)? {
                 return Err(IN_PROGRESS);
             }
+            #[cfg(test)]
+            crate::fsio::failpoint::check("restore.under_lock")?;
             if let Err(e) = create_journal(journal, &entry) {
                 // An error reported after the journal landed leaves one that is ours; it goes.
                 // Anyone else's is not named after this staging folder and stays.
@@ -292,8 +294,8 @@ mod tests {
     use crate::item::ItemKind;
     use crate::vault::folder_name;
     use crate::vault::journal::{
-        JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, lock_journal, plain_absolute,
-        read_journal, write_journal,
+        JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, lock_is_held, observe_lock_held,
+        plain_absolute, read_journal, write_journal,
     };
     use crate::vault::source::item_name;
     use crate::vault::source::tests::{Fixture, MIB, PW, flip_blob_second_chunk, flip_item};
@@ -301,9 +303,6 @@ mod tests {
     use std::fs;
     use std::path::Component;
     use std::rc::Rc;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
 
     /// Always resets, so a failing test cannot leak a failpoint or volume on this thread.
     struct Cleanup;
@@ -720,33 +719,30 @@ mod tests {
         d.assert_untouched();
     }
 
-    /// The presence check and the publish happen under the journal lock: while another holder
-    /// has it (a cleanup, a recovery), a prepare that is ready to publish waits.
+    /// The presence check and the publish happen under the journal lock, and so does the
+    /// clean-up that follows: at each of those moments a separate handle cannot take the lock,
+    /// and right after each it can.
     #[test]
-    fn prepare_publishes_under_the_journal_lock() {
+    fn prepare_and_its_cleanup_run_under_the_journal_lock() {
+        let _reset = Cleanup;
         let (_f, backup) = backed_up();
         let d = Dest::new();
-        let lock = lock_journal(&d.journal()).unwrap();
-        let (reached, at_the_door) = mpsc::channel();
-        let (parent, journal) = (d.parent().to_owned(), d.journal());
-        let handle = thread::spawn(move || {
-            failpoint::observe(
-                "restore.before_journal",
-                Box::new(move || reached.send(()).unwrap()),
-            );
-            let credential = Credential::Password(PW);
-            let cancel = CancelToken::new();
-            PreparedRestore::prepare(&backup, &parent, credential, &journal, &cancel).map(drop)
-        });
-        at_the_door.recv().unwrap();
-        thread::sleep(Duration::from_millis(300));
-        assert!(!handle.is_finished(), "prepare went past the lock");
-        assert!(!d.journal().exists());
-        assert_eq!(names(d.parent()), Vec::<String>::new());
+        assert!(!lock_is_held(&d.journal()));
+        let at_publish = observe_lock_held("restore.under_lock", &d.journal());
+        let p = d.prepare(&backup, Credential::Password(PW)).unwrap();
+        assert_eq!(
+            at_publish.get(),
+            1,
+            "the presence check and publish ran once"
+        );
+        assert!(!lock_is_held(&d.journal()), "the lock was not released");
+        assert!(read_journal(&d.journal()).unwrap().is_some());
 
-        drop(lock);
-        handle.join().unwrap().unwrap();
-        d.assert_untouched(); // The prepared restore was dropped inside the thread.
+        let at_cleanup = observe_lock_held("journal.before_owner_delete", &d.journal());
+        drop(p);
+        assert_eq!(at_cleanup.get(), 1, "the owner check and delete ran once");
+        assert!(!lock_is_held(&d.journal()), "the lock was not released");
+        d.assert_untouched();
     }
 
     /// A publish that reports an error after the journal had already landed (the portable
@@ -758,8 +754,15 @@ mod tests {
         let (_f, backup) = backed_up();
         let d = Dest::new();
         failpoint::arm("publish.after_link");
+        let at_cleanup = observe_lock_held("journal.before_owner_delete", &d.journal());
         let result = d.prepare(&backup, Credential::Password(PW));
         assert!(matches!(error(result), CoreError::Io(_)));
+        assert_eq!(
+            at_cleanup.get(),
+            1,
+            "our journal was removed under the lock"
+        );
+        assert!(!lock_is_held(&d.journal()));
         assert_eq!(d.reached_journal.get(), 1);
         d.assert_untouched();
         assert_eq!(names(d.journal_dir.path()), ["restore-journal.json.lock"]);
@@ -782,8 +785,15 @@ mod tests {
             }),
         );
 
+        let at_cleanup = observe_lock_held("journal.before_owner_delete", &d.journal());
         let result = d.prepare(&backup, Credential::Password(PW));
         assert!(matches!(error(result), CoreError::Io(_)));
+        assert_eq!(
+            at_cleanup.get(),
+            1,
+            "our journal was removed under the lock"
+        );
+        assert!(!lock_is_held(&d.journal()));
         let squatter = staging_in(d.parent());
         assert_eq!(names(&squatter), ["sentinel"]);
         assert_eq!(fs::read(squatter.join("sentinel")).unwrap(), b"mine");
