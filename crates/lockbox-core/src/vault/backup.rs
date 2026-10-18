@@ -16,11 +16,11 @@ use crate::fsio::{
 use crate::header::{
     HEADER_FILE, MAX_HEADER_BYTES, parse_header, serialize_header, verify_header_mac,
 };
-use crate::ids::{FileId, ItemId};
-use crate::item::{FileRef, MAX_ITEM_FILE, open_item};
+use crate::ids::FileId;
+use crate::item::{FileRef, Item, MAX_ITEM_FILE, open_item, same_item};
 use crate::manifest::{
-    BackupManifest, MANIFEST_FILE, MANIFEST_VERSION, MAX_ENTRIES, ManifestEntry, manifest_mac,
-    serialize_manifest,
+    BackupManifest, MANIFEST_FILE, MANIFEST_VERSION, MAX_ENTRIES, ManifestEntry,
+    manifest_mac_cancellable, serialize_manifest,
 };
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
@@ -34,8 +34,10 @@ const NOT_WRITABLE: CoreError = CoreError::InvalidInput {
 const HEADER_CHANGED: CoreError = CoreError::Damaged {
     what: "header changed on disk",
 };
-const MISMATCH: CoreError = CoreError::Damaged {
-    what: "backup: manifest mismatch",
+/// The finished temp does not read back as the manifest that was written. Its own text, apart
+/// from the archive reader's "backup: manifest mismatch" for a malformed archive.
+const MANIFEST_READBACK: CoreError = CoreError::Damaged {
+    what: "backup: manifest readback",
 };
 /// Room per entry for its local header, central record and manifest line.
 const PER_ENTRY: u64 = 512;
@@ -52,7 +54,8 @@ pub struct BackupReport {
     pub items: usize,
     /// Blobs written.
     pub files: usize,
-    /// Bytes of `vault.json`, the items and the blobs written (the manifest not counted).
+    /// Bytes of `vault.json`, the item files and the blobs written (the manifest not counted).
+    /// So it includes `vault.json`, which `BackupSummary::bytes` does not.
     pub bytes: u64,
     /// Items left out: damaged at unlock, or whose file no longer opens to the loaded revision.
     pub skipped_damaged_items: usize,
@@ -92,10 +95,10 @@ fn check_destination(dest: &Path) -> Result<()> {
 fn verify(temp: &Path, manifest: &BackupManifest, cancel: &CancelToken) -> Result<()> {
     let archive = BackupArchive::open(temp, cancel)?;
     if archive.manifest() != manifest {
-        return Err(MISMATCH);
+        return Err(MANIFEST_READBACK);
     }
     for m in &manifest.entries {
-        let e = archive.entry(&m.path).ok_or(MISMATCH)?;
+        let e = archive.entry(&m.path).ok_or(MANIFEST_READBACK)?;
         if copy_hashed(&mut archive.reader(e), e.size, &mut io::sink(), cancel)? != m.sha256 {
             return Err(ENTRY_HASH);
         }
@@ -103,17 +106,28 @@ fn verify(temp: &Path, manifest: &BackupManifest, cancel: &CancelToken) -> Resul
     Ok(())
 }
 
-/// Test hook: once the temp is written and closed, flips one data byte of `vault.json`
-/// inside it, so the re-read must catch it.
+/// Test hook: once the temp is written and closed, flips one data byte inside it, so the
+/// re-read must catch it: in `vault.json` (`backup.corrupt_temp`) or in the first digit of the
+/// manifest's `created_at` (`backup.corrupt_manifest`), which leaves the manifest valid JSON.
 #[cfg(test)]
 fn corrupt_if_armed(temp: &Path) -> Result<()> {
+    use crate::fsio::failpoint;
     use std::io::{Read, Seek, SeekFrom, Write};
-    if crate::fsio::failpoint::check("backup.corrupt_temp").is_ok() {
+    let header = failpoint::check("backup.corrupt_temp").is_err();
+    let manifest = failpoint::check("backup.corrupt_manifest").is_err();
+    if !header && !manifest {
         return Ok(());
     }
-    let archive = BackupArchive::open(temp, &CancelToken::new())?;
-    let at = archive.entry(HEADER_FILE).ok_or(MISMATCH)?.offset;
-    drop(archive);
+    let at = if header {
+        let archive = BackupArchive::open(temp, &CancelToken::new())?;
+        archive.entry(HEADER_FILE).ok_or(MANIFEST_READBACK)?.offset
+    } else {
+        // The manifest is the last entry, so its text is the last `created_at` in the file.
+        let key = br#""created_at":""#;
+        let bytes = fs::read(temp)?;
+        let found = bytes.windows(key.len()).rposition(|w| w == key);
+        (found.ok_or(MANIFEST_READBACK)? + key.len()) as u64
+    };
     let mut file = fs::OpenOptions::new().read(true).write(true).open(temp)?;
     let mut byte = [0u8];
     file.seek(SeekFrom::Start(at))?;
@@ -150,7 +164,7 @@ impl Vault {
                 what: "backup entries",
             });
         }
-        let estimate = self.estimate(&blobs)?;
+        let estimate = self.estimate(&blobs, cancel)?;
         check_space(estimate, estimate, &volume_info(folder)?)?;
 
         let temp = hidden_temp_path(folder, ".lockbox-backup-partial");
@@ -205,19 +219,22 @@ impl Vault {
 
     /// `vault.json`, every item file and every attached blob as they are on disk now, plus
     /// room for the archive's own records. A file that cannot be measured counts as empty.
-    fn estimate(&self, blobs: &BTreeMap<FileId, &FileRef>) -> Result<u64> {
-        let size = |path: &Path| fs::metadata(path).map_or(0, |m| m.len());
+    /// `cancel` is checked before each file is measured.
+    fn estimate(&self, blobs: &BTreeMap<FileId, &FileRef>, cancel: &CancelToken) -> Result<u64> {
         let files = self.dir.join(FILES_DIR);
         let entries = (self.items.len() + blobs.len() + 2) as u64;
-        let sizes = std::iter::once(size(&self.dir.join(HEADER_FILE)))
-            .chain(self.items.keys().map(|id| size(&self.item_path(id))))
-            .chain(blobs.keys().map(|id| size(&blob_in(&files, id))));
-        let base = entries
+        let paths = std::iter::once(self.dir.join(HEADER_FILE))
+            .chain(self.items.keys().map(|id| self.item_path(id)))
+            .chain(blobs.keys().map(|id| blob_in(&files, id)));
+        let mut total = entries
             .checked_mul(PER_ENTRY)
             .and_then(|n| n.checked_add(SLACK));
-        sizes
-            .fold(base, |sum, s| sum?.checked_add(s))
-            .ok_or(CoreError::TooLarge { what: "backup" })
+        for path in paths {
+            cancel.check()?;
+            let size = fs::metadata(path).map_or(0, |m| m.len());
+            total = total.and_then(|sum| sum.checked_add(size));
+        }
+        total.ok_or(CoreError::TooLarge { what: "backup" })
     }
 
     /// The on-disk `vault.json`, which must hold exactly the open header.
@@ -234,14 +251,16 @@ impl Vault {
         Ok(bytes)
     }
 
-    /// The item file on disk, if it still opens to the loaded revision.
-    fn current_item_file(&self, id: &ItemId, revision: u64) -> Result<Option<Vec<u8>>> {
-        let bytes = match read_retry(&self.item_path(id), MAX_ITEM_FILE) {
+    /// The item file on disk, if it still opens to exactly the loaded `item` (every field, not
+    /// only the revision: the blobs a backup carries come from the loaded item, so the file
+    /// has to say the same).
+    fn current_item_file(&self, item: &Item) -> Result<Option<Vec<u8>>> {
+        let bytes = match read_retry(&self.item_path(&item.id), MAX_ITEM_FILE) {
             Err(e) if not_found(&e) => return Ok(None),
             other => other?,
         };
-        let current = open_item(&bytes, id, &self.header.vault_id, &self.vault_key)
-            .is_ok_and(|item| item.revision == revision);
+        let current = open_item(&bytes, &item.id, &self.header.vault_id, &self.vault_key)
+            .is_ok_and(|on_disk| same_item(&on_disk, item));
         Ok(current.then_some(bytes))
     }
 
@@ -271,7 +290,7 @@ impl Vault {
         let mut included = Vec::new();
         for (id, item) in &self.items {
             cancel.check()?;
-            let Some(bytes) = self.current_item_file(id, item.revision)? else {
+            let Some(bytes) = self.current_item_file(item)? else {
                 report.skipped_damaged_items += 1;
                 continue;
             };
@@ -314,7 +333,11 @@ impl Vault {
             entries,
             mac: None,
         };
-        manifest.mac = Some(manifest_mac(&manifest, &self.vault_key));
+        manifest.mac = Some(manifest_mac_cancellable(
+            &manifest,
+            &self.vault_key,
+            cancel,
+        )?);
         let bytes = serialize_manifest(&manifest);
         w.add(MANIFEST_FILE, &mut &bytes[..], bytes.len() as u64, cancel)?;
         let file = w.finish()?;
@@ -334,8 +357,9 @@ mod tests {
     use crate::fsio::{VolumeInfo, failpoint, set_volume_override};
     use crate::header::{HEADER_FILE, parse_header, serialize_header};
     use crate::ids::{FileId, ItemId};
-    use crate::item::ItemKind;
+    use crate::item::{ItemKind, seal_item};
     use crate::manifest::verify_manifest_mac;
+    use crate::vault::{Credential, verify_backup};
     use std::cell::RefCell;
     use std::fs;
     use std::path::PathBuf;
@@ -596,6 +620,33 @@ mod tests {
         );
     }
 
+    /// An item file that opens and has the loaded revision but holds other content (here, the
+    /// attachment of another item) is not what the vault shows: it is left out, and the backup
+    /// still verifies. Forged with the vault's own key, so only a full comparison catches it.
+    #[test]
+    fn disk_item_that_differs_at_the_same_revision_is_left_out() {
+        let (parent, mut vault) = new_vault();
+        let (swapped, _) = file_item(&parent, &mut vault, b"first");
+        let (other, _) = file_item(&parent, &mut vault, b"second");
+        let mut forged = vault.get_item(&swapped).unwrap().clone();
+        forged.attachments = vault.get_item(&other).unwrap().attachments.clone();
+        assert_eq!(forged.revision, vault.get_item(&swapped).unwrap().revision);
+        let sealed = seal_item(&forged, &vault.header.vault_id, &vault.vault_key).unwrap();
+        fs::write(vault.item_path(&swapped), sealed).unwrap();
+        let dest = parent.path().join("v.lockbox-backup");
+
+        let report = vault
+            .backup(&dest, &NoJournal, &CancelToken::new())
+            .unwrap();
+        assert_eq!(
+            (report.items, report.files, report.skipped_damaged_items),
+            (1, 1, 1)
+        );
+        assert!(!entry_names(&dest).contains(&item_entry(&swapped)));
+        let summary = verify_backup(&dest, Credential::Password(PW), &CancelToken::new()).unwrap();
+        assert_eq!((summary.items, summary.files), (1, 1));
+    }
+
     /// Unlocks after `edit` changed the closed vault's `vault.json`, then backs up into an
     /// empty folder. Returns what the backup was refused with; asserts nothing was written.
     fn refused_after(edit: impl FnOnce(&mut crate::header::VaultHeader)) -> &'static str {
@@ -629,6 +680,34 @@ mod tests {
             what,
             "header copies disagree; replace the unchecked credential first"
         );
+    }
+
+    /// A failed header write that leaves the on-disk state unknown blocks backups too.
+    #[test]
+    fn refused_while_header_state_unknown() {
+        let _cleanup = Cleanup;
+        let (parent, vault) = new_vault();
+        let dir = vault.dir().to_path_buf();
+        drop(vault);
+        let path = dir.join(HEADER_FILE);
+        let mut header = parse_header(&fs::read(&path).unwrap()).unwrap();
+        header.slots[0].ciphertext[0] ^= 1;
+        fs::write(&path, serialize_header(&header)).unwrap();
+        failpoint::arm("unlock.repair_write");
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        failpoint::disarm_all();
+        failpoint::arm("write_headers.before_first");
+        assert!(vault.change_password("a different long password").is_err());
+        failpoint::disarm_all();
+        assert!(vault.guard.uncertain);
+
+        let out = out_dir(&parent);
+        let journal = Recorder::default();
+        let what =
+            refused(vault.backup(&out.join("v.lockbox-backup"), &journal, &CancelToken::new()));
+        assert_eq!(what, "header state unknown; reopen the vault");
+        assert!(names(&out).is_empty());
+        assert!(journal.0.borrow().is_empty());
     }
 
     #[test]
@@ -819,23 +898,73 @@ mod tests {
         journal.assert_recorded_then_cleared();
     }
 
+    /// The cancel is seen while the space estimate stats the files, before any temp exists.
+    #[test]
+    fn cancel_during_the_space_estimate_stops_before_any_temp() {
+        let (parent, mut vault) = new_vault();
+        file_item(&parent, &mut vault, b"x");
+        let out = out_dir(&parent);
+        let token = CancelToken::new();
+        token.cancel();
+        let journal = Recorder::default();
+
+        let result = vault.backup(&out.join("v.lockbox-backup"), &journal, &token);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert!(names(&out).is_empty());
+        assert!(journal.0.borrow().is_empty(), "no temp was ever named");
+    }
+
+    /// Signing the manifest checks the cancel too: stopped there, nothing is published.
+    #[test]
+    fn cancel_while_signing_the_manifest_stops() {
+        let _cleanup = Cleanup;
+        let (parent, mut vault) = new_vault();
+        file_item(&parent, &mut vault, b"x");
+        let out = out_dir(&parent);
+        let token = CancelToken::new();
+        failpoint::arm_cancel("manifest.mac_piece", token.clone());
+        let journal = Recorder::default();
+
+        let result = vault.backup(&out.join("v.lockbox-backup"), &journal, &token);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert!(names(&out).is_empty(), "no temp left");
+        journal.assert_recorded_then_cleared();
+    }
+
+    /// Both read-back failures publish nothing, and an existing destination is left as it was.
     #[test]
     fn verify_failure_never_publishes() {
         let _cleanup = Cleanup;
         let (parent, mut vault) = new_vault();
         file_item(&parent, &mut vault, b"x");
         let out = out_dir(&parent);
-        let journal = Recorder::default();
-        failpoint::arm("backup.corrupt_temp");
+        let dest = out.join("v.lockbox-backup");
+        for (failpoint_name, what) in [
+            ("backup.corrupt_temp", "backup: entry hash"),
+            ("backup.corrupt_manifest", "backup: manifest readback"),
+        ] {
+            for old in [false, true] {
+                if old {
+                    fs::write(&dest, b"OLD").unwrap();
+                }
+                let journal = Recorder::default();
+                failpoint::arm(failpoint_name);
 
-        let result = vault.backup(&out.join("v.lockbox-backup"), &journal, &CancelToken::new());
-        assert!(matches!(
-            result,
-            Err(CoreError::Damaged {
-                what: "backup: entry hash"
-            })
-        ));
-        assert!(names(&out).is_empty(), "nothing published, no temp left");
-        journal.assert_recorded_then_cleared();
+                let result = vault.backup(&dest, &journal, &CancelToken::new());
+                failpoint::disarm_all();
+                assert!(
+                    matches!(result, Err(CoreError::Damaged { what: w }) if w == what),
+                    "{failpoint_name}: {result:?}"
+                );
+                if old {
+                    assert_eq!(fs::read(&dest).unwrap(), b"OLD");
+                    assert_eq!(names(&out), ["v.lockbox-backup"], "no temp left");
+                    fs::remove_file(&dest).unwrap();
+                } else {
+                    assert!(names(&out).is_empty(), "nothing published, no temp left");
+                }
+                journal.assert_recorded_then_cleared();
+            }
+        }
     }
 }

@@ -71,32 +71,14 @@ fn manifest_hmac_start(vault_key: &Key32) -> Hmac<Sha256> {
     Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts keys of any length")
 }
 
-/// HMAC-SHA256 over [`mac_message`].
-pub fn manifest_mac(m: &BackupManifest, vault_key: &Key32) -> [u8; 32] {
-    manifest_hmac_start(vault_key)
-        .chain_update(mac_message(m))
-        .finalize()
-        .into_bytes()
-        .into()
-}
-
-/// False if the manifest has no MAC or it does not match. The comparison is constant-time.
-pub fn verify_manifest_mac(m: &BackupManifest, vault_key: &Key32) -> bool {
-    // A token nobody holds is never cancelled, so this is the same check without a way out.
-    verify_manifest_mac_cancellable(m, vault_key, &CancelToken::new()).unwrap_or(false)
-}
-
-/// [`verify_manifest_mac`] for a manifest that may be tens of MiB: the same MAC message is fed
-/// to the HMAC in pieces of at most 1 MiB, `cancel` is checked before each piece and once more
-/// after the last, so even a tiny signed manifest sees a cancel that arrived meanwhile.
-pub(crate) fn verify_manifest_mac_cancellable(
+/// The HMAC over [`mac_message`], for signing and verifying alike. A manifest may be tens of
+/// MiB, so the message is fed in pieces of at most 1 MiB; `cancel` is checked before each piece
+/// and once more after the last, so even a tiny manifest sees a cancel that arrived meanwhile.
+fn manifest_hmac(
     m: &BackupManifest,
     vault_key: &Key32,
     cancel: &CancelToken,
-) -> Result<bool> {
-    let Some(mac) = m.mac else {
-        return Ok(false);
-    };
+) -> Result<Hmac<Sha256>> {
     let mut hmac = manifest_hmac_start(vault_key);
     for piece in mac_message(m).chunks(MAC_PIECE) {
         cancel.check()?;
@@ -105,7 +87,45 @@ pub(crate) fn verify_manifest_mac_cancellable(
         crate::fsio::failpoint::check("manifest.mac_piece")?;
     }
     cancel.check()?;
-    Ok(hmac.verify_slice(&mac).is_ok())
+    Ok(hmac)
+}
+
+/// HMAC-SHA256 over [`mac_message`].
+pub fn manifest_mac(m: &BackupManifest, vault_key: &Key32) -> [u8; 32] {
+    // A token nobody holds is never cancelled, so this is the same signing without a way out.
+    manifest_mac_cancellable(m, vault_key, &CancelToken::new())
+        .expect("a token nobody holds is never cancelled")
+}
+
+/// [`manifest_mac`] that stops when `cancel` is set (see [`manifest_hmac`]).
+pub(crate) fn manifest_mac_cancellable(
+    m: &BackupManifest,
+    vault_key: &Key32,
+    cancel: &CancelToken,
+) -> Result<[u8; 32]> {
+    Ok(manifest_hmac(m, vault_key, cancel)?
+        .finalize()
+        .into_bytes()
+        .into())
+}
+
+/// False if the manifest has no MAC or it does not match. The comparison is constant-time.
+pub fn verify_manifest_mac(m: &BackupManifest, vault_key: &Key32) -> bool {
+    verify_manifest_mac_cancellable(m, vault_key, &CancelToken::new()).unwrap_or(false)
+}
+
+/// [`verify_manifest_mac`] that stops when `cancel` is set (see [`manifest_hmac`]).
+pub(crate) fn verify_manifest_mac_cancellable(
+    m: &BackupManifest,
+    vault_key: &Key32,
+    cancel: &CancelToken,
+) -> Result<bool> {
+    let Some(mac) = m.mac else {
+        return Ok(false);
+    };
+    Ok(manifest_hmac(m, vault_key, cancel)?
+        .verify_slice(&mac)
+        .is_ok())
 }
 
 pub fn serialize_manifest(m: &BackupManifest) -> Vec<u8> {
@@ -265,6 +285,35 @@ mod tests {
         let cancelled = CancelToken::new();
         cancelled.cancel();
         let result = verify_manifest_mac_cancellable(&big, &key(), &cancelled);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+    }
+
+    /// Signing feeds the MAC in the same pieces as verifying and checks the cancel before each,
+    /// and the bytes it produces are those of the plain `manifest_mac`.
+    #[test]
+    fn signing_is_cancellable() {
+        use crate::fsio::failpoint;
+        let mut big = sample();
+        big.created_at = "x".repeat(3 << 20);
+        let pieces = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = pieces.clone();
+        failpoint::observe(
+            "manifest.mac_piece",
+            Box::new(move || counter.set(counter.get() + 1)),
+        );
+        let token = CancelToken::new();
+        failpoint::arm_cancel("manifest.mac_piece", token.clone());
+        let result = manifest_mac_cancellable(&big, &key(), &token);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(pieces.get(), 1, "stopped after the first piece");
+
+        let live = CancelToken::new();
+        let mac = manifest_mac_cancellable(&big, &key(), &live).unwrap();
+        assert_eq!(mac, manifest_mac(&big, &key()));
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        let result = manifest_mac_cancellable(&sample(), &key(), &cancelled);
         assert!(matches!(result, Err(CoreError::Cancelled)));
     }
 

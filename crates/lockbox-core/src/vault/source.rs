@@ -229,10 +229,22 @@ pub(super) fn unlock_source(
 ) -> Result<Opened> {
     cancel.check()?;
     let (main, backup) = src.header();
-    let (used, key, _) = choose_header(&main, &backup, credential)?;
+    let listed = manifest_hashes(src);
+    let (used, key, _) = match choose_header(&main, &backup, credential) {
+        Ok(chosen) => chosen,
+        Err(error) => {
+            // A `vault.json` that no longer matches the manifest fails every credential, but
+            // that is damage, not a wrong password. (A folder has no manifest to compare.)
+            if let (CoreError::WrongPassword | CoreError::InvalidRecoveryKey, Ok(header)) =
+                (&error, &main)
+            {
+                check_listed(&listed, HEADER_FILE, Sha256::digest(&header.bytes).into())?;
+            }
+            return Err(error);
+        }
+    };
     cancel.check()?;
     let vault_id = used.header.vault_id;
-    let listed = manifest_hashes(src);
     if let VaultSource::Archive(a) = src {
         if !verify_manifest_mac_cancellable(a.manifest(), &key, cancel)? {
             return Err(MANIFEST_MAC);
@@ -290,8 +302,14 @@ pub struct BackupSummary {
     pub files: usize,
     /// Attachments whose blob the backup does not hold.
     pub missing_files: usize,
-    /// Bytes of the item files and the blobs.
+    /// Bytes of the item files plus the blobs. Not `vault.json` and not the manifest, so it is
+    /// smaller than [`BackupReport::bytes`](super::BackupReport) of the backup it describes by
+    /// the size of `vault.json`.
     pub bytes: u64,
+    /// When the backup was made, as the manifest says (RFC 3339, UTC). The manifest's MAC has
+    /// been checked, so it is the time the backup's maker signed. Empty for a vault folder,
+    /// which has no manifest.
+    pub created_at: String,
 }
 
 /// The checks that need the blobs, in this order: [`check_opened`]; every blob present is
@@ -337,6 +355,10 @@ pub(super) fn verify_contents(
         // Every blob is attached and listed once, so the rest of the attachments are absent.
         missing_files: refs.len() - blobs.len(),
         bytes,
+        created_at: match src {
+            VaultSource::Archive(a) => a.manifest().created_at.clone(),
+            VaultSource::Folder(_) => String::new(),
+        },
     })
 }
 
@@ -481,7 +503,14 @@ mod tests {
             files: 2,
             missing_files: 0,
             bytes: file_bytes(&dir.join("items")) + file_bytes(&dir.join("files")),
+            // Read from the archive's manifest, which the MAC check has just authenticated.
+            created_at: BackupArchive::open(&dest, &CancelToken::new())
+                .unwrap()
+                .manifest()
+                .created_at
+                .clone(),
         };
+        assert!(want.created_at.ends_with('Z'), "{}", want.created_at);
         assert_eq!(verify(&dest, Credential::Password(PW)).unwrap(), want);
         assert_eq!(
             verify(&dest, Credential::Recovery(&f.recovery)).unwrap(),
@@ -511,6 +540,32 @@ mod tests {
         rewrite_backup(&dest, flip_item, ManifestMode::Rehash { key: None });
         let result = verify(&dest, Credential::Password(PW));
         assert_eq!(refused(result), "backup: manifest mac");
+    }
+
+    /// A `vault.json` that was damaged inside the archive fails every credential. The manifest
+    /// knows its hash, so that is damage, not a wrong password; a genuinely wrong password
+    /// (see `wrong_password_is_wrong_password`) still is one.
+    #[test]
+    fn damaged_header_in_archive_is_damage_not_a_wrong_password() {
+        let mut f = Fixture::new();
+        f.file_item(b"x");
+        let dest = f.backup("a.lockbox-backup");
+        rewrite_backup(
+            &dest,
+            |m| {
+                let bytes = m.get_mut(HEADER_FILE).unwrap();
+                let mut header = crate::header::parse_header(bytes).unwrap();
+                header.slots[0].ciphertext[0] ^= 1;
+                let damaged = crate::header::serialize_header(&header);
+                assert_eq!(damaged.len(), bytes.len());
+                *bytes = damaged;
+            },
+            ManifestMode::Keep,
+        );
+        let result = verify(&dest, Credential::Password(PW));
+        assert_eq!(refused(result), "backup: entry hash");
+        let result = verify(&dest, Credential::Password("not the password"));
+        assert_eq!(refused(result), "backup: entry hash");
     }
 
     #[test]
@@ -728,7 +783,16 @@ mod tests {
         let token = CancelToken::new();
         let opened = unlock_source(&src, &Credential::Password(PW), &token).unwrap();
         let summary = verify_contents(&src, &opened, &token).unwrap();
-        assert_eq!(summary, verify(&dest, Credential::Password(PW)).unwrap());
+        // A folder has no manifest, so no creation time.
+        assert_eq!(summary.created_at, "");
+        let from_archive = verify(&dest, Credential::Password(PW)).unwrap();
+        assert_eq!(
+            summary,
+            BackupSummary {
+                created_at: String::new(),
+                ..from_archive
+            }
+        );
     }
 
     #[track_caller]

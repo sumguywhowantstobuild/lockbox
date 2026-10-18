@@ -225,6 +225,13 @@ fn padded_plaintext(item: &Item) -> Result<Zeroizing<Vec<u8>>> {
     Ok(buf)
 }
 
+/// True when `a` and `b` are the same item in every field. `Item` has no `PartialEq` (a file
+/// key is not compared with `==`), so this compares what is written to disk: the JSON of all
+/// fields (none is skipped), padded the same way.
+pub(crate) fn same_item(a: &Item, b: &Item) -> bool {
+    matches!((padded_plaintext(a), padded_plaintext(b)), (Ok(a), Ok(b)) if a == b)
+}
+
 /// Strict inverse of the padding: JSON, one `0x80`, then zeros to the next multiple of 512.
 fn unpad(plain: &[u8]) -> Result<&[u8]> {
     match plain.iter().rposition(|&b| b != 0) {
@@ -340,6 +347,41 @@ mod tests {
     /// Items have no `PartialEq` (keys must not be compared casually); JSON covers every field.
     fn json(item: &Item) -> serde_json::Value {
         serde_json::to_value(item).unwrap()
+    }
+
+    #[test]
+    fn same_item_sees_every_field() {
+        let mut full = login();
+        full.attachments = vec![file_ref()];
+        assert!(same_item(&full, &full.clone()));
+
+        type Edit = fn(&mut Item);
+        let edits: [(&str, Edit); 9] = [
+            ("title", |i| i.title.push('x')),
+            ("notes", |i| i.notes.push('x')),
+            ("collection", |i| i.collection = Some(ItemId([1; 16]))),
+            ("revision", |i| i.revision += 1),
+            ("modified_at", |i| i.modified_at.push('x')),
+            ("trashed_at", |i| i.trashed_at = Some("t".into())),
+            ("purging", |i| i.purging = true),
+            ("retired", |i| i.retired_blobs.push(FileId([9; 16]))),
+            ("file key", |i| {
+                i.attachments[0].file_key = Key32::from_bytes([0x43; 32]);
+            }),
+        ];
+        for (what, edit) in edits {
+            let mut other = full.clone();
+            edit(&mut other);
+            assert!(!same_item(&full, &other), "{what}");
+        }
+        let mut other = full.clone();
+        other.attachments[0].file_id = FileId([0x34; 16]);
+        assert!(!same_item(&full, &other), "attachment id");
+        other = full.clone();
+        if let ItemKind::Login { username, .. } = &mut other.kind {
+            username.push('x');
+        }
+        assert!(!same_item(&full, &other), "login username");
     }
 
     fn json_len(item: &Item) -> usize {
