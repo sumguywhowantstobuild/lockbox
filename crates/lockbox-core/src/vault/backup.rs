@@ -43,7 +43,7 @@ const MANIFEST_READBACK: CoreError = CoreError::Damaged {
 const PER_ENTRY: u64 = 512;
 const SLACK: u64 = 64 * 1024;
 
-fn not_found(e: &CoreError) -> bool {
+pub(super) fn not_found(e: &CoreError) -> bool {
     matches!(e, CoreError::Io(e) if e.kind() == ErrorKind::NotFound)
 }
 
@@ -112,7 +112,6 @@ fn verify(temp: &Path, manifest: &BackupManifest, cancel: &CancelToken) -> Resul
 #[cfg(test)]
 fn corrupt_if_armed(temp: &Path) -> Result<()> {
     use crate::fsio::failpoint;
-    use std::io::{Read, Seek, SeekFrom, Write};
     let header = failpoint::check("backup.corrupt_temp").is_err();
     let manifest = failpoint::check("backup.corrupt_manifest").is_err();
     if !header && !manifest {
@@ -128,14 +127,7 @@ fn corrupt_if_armed(temp: &Path) -> Result<()> {
         let found = bytes.windows(key.len()).rposition(|w| w == key);
         (found.ok_or(MANIFEST_READBACK)? + key.len()) as u64
     };
-    let mut file = fs::OpenOptions::new().read(true).write(true).open(temp)?;
-    let mut byte = [0u8];
-    file.seek(SeekFrom::Start(at))?;
-    file.read_exact(&mut byte)?;
-    byte[0] ^= 1;
-    file.seek(SeekFrom::Start(at))?;
-    file.write_all(&byte)?;
-    Ok(())
+    Ok(crate::fsio::testutil::flip_byte(temp, at)?)
 }
 
 impl Vault {

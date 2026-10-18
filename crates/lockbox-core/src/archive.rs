@@ -754,6 +754,26 @@ pub(crate) mod testkit {
         le(bytes, central_offset(bytes, name) + 42, 4)
     }
 
+    /// Moves `name`'s end by `delta` bytes in its central and local ZIP64 fields (both hold both
+    /// sizes), so its range no longer tiles the file.
+    pub(crate) fn resize_entry(b: &mut [u8], name: &str, delta: i64) {
+        let (c, l) = (central_offset(b, name), entry_offset(b, name));
+        let field = |at: usize, b: &[u8]| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let at = c + 46 + name.len() + 4;
+        let size = field(at, b)
+            .checked_add_signed(delta)
+            .unwrap()
+            .to_le_bytes();
+        for at in [
+            at,
+            at + 8,
+            l + 30 + name.len() + 4,
+            l + 30 + name.len() + 12,
+        ] {
+            patch(b, at, &size);
+        }
+    }
+
     pub(crate) enum ManifestMode<'a> {
         /// The original manifest, unchanged.
         Keep,
@@ -880,21 +900,7 @@ mod tests {
     /// Sets an entry's size in its central and local ZIP64 fields (both hold both sizes).
     fn resized(name: &str, delta: i64) -> Vec<u8> {
         let mut b = base();
-        let (c, l) = (central_offset(&b, name), entry_offset(&b, name));
-        let field = |at: usize, b: &[u8]| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
-        let at = c + 46 + name.len() + 4;
-        let size = field(at, &b)
-            .checked_add_signed(delta)
-            .unwrap()
-            .to_le_bytes();
-        for at in [
-            at,
-            at + 8,
-            l + 30 + name.len() + 4,
-            l + 30 + name.len() + 12,
-        ] {
-            patch(&mut b, at, &size);
-        }
+        resize_entry(&mut b, name, delta);
         b
     }
 

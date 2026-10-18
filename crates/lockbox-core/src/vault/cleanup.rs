@@ -17,7 +17,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-const ORPHANED_DIR: &str = "orphaned";
+pub(super) const ORPHANED_DIR: &str = "orphaned";
 
 /// Deletes the regular files directly inside `dir` whose names end in `.partial` or `.tmp`
 /// (folders and links are never touched), counting them in `report`.

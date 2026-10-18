@@ -5,7 +5,9 @@ mod backup;
 mod cleanup;
 mod files;
 mod items;
+mod journal;
 mod naming;
+mod restore;
 mod source;
 mod unlock;
 
@@ -32,6 +34,7 @@ use std::time::Duration;
 
 pub use backup::BackupReport;
 pub(crate) use naming::folder_name;
+pub use restore::PreparedRestore;
 pub use source::{BackupSummary, verify_backup};
 pub use unlock::{Credential, read_vault_name};
 

@@ -111,13 +111,15 @@ pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
     Ok(retry(|| sys::replace_file(from, to))?)
 }
 
+/// A destination that is already taken.
+pub(crate) const DESTINATION_EXISTS: CoreError = CoreError::InvalidInput {
+    what: "destination exists",
+};
+
 /// Moves the file or folder `from` to `to`, which must not exist (`InvalidInput` if it does).
 pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
-    let exists = || CoreError::InvalidInput {
-        what: "destination exists",
-    };
     if to.try_exists()? {
-        return Err(exists());
+        return Err(DESTINATION_EXISTS);
     }
     retry(|| sys::rename_no_replace(from, to)).map_err(|e| {
         // AlreadyExists on Windows; Linux reports a non-empty target as DirectoryNotEmpty.
@@ -125,7 +127,7 @@ pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
             e.kind(),
             io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
         ) {
-            exists()
+            DESTINATION_EXISTS
         } else {
             e.into()
         }
@@ -352,6 +354,21 @@ pub(crate) mod testutil {
             .collect();
         v.sort();
         v
+    }
+
+    /// Flips the lowest bit of the byte at offset `at` of the file `path`: one data byte of damage.
+    pub fn flip_byte(path: &Path, at: u64) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let mut byte = [0u8];
+        file.seek(SeekFrom::Start(at))?;
+        file.read_exact(&mut byte)?;
+        byte[0] ^= 1;
+        file.seek(SeekFrom::Start(at))?;
+        file.write_all(&byte)
     }
 
     /// Makes `link` a folder link to `target`: a junction on Windows (needs no special rights),

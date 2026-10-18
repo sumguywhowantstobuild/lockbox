@@ -19,7 +19,7 @@ use crate::{CoreError, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{self, ErrorKind, Read};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 const MANIFEST_MAC: CoreError = CoreError::Damaged {
@@ -37,7 +37,7 @@ const HEADER_MAC: CoreError = CoreError::Damaged {
 const DAMAGED_ITEM: CoreError = CoreError::Damaged {
     what: "backup: damaged item",
 };
-const UNEXPECTED_FILE: CoreError = CoreError::Damaged {
+pub(super) const UNEXPECTED_FILE: CoreError = CoreError::Damaged {
     what: "backup: unexpected file",
 };
 const DAMAGED_FILE: CoreError = CoreError::Damaged {
@@ -193,7 +193,7 @@ pub(super) struct Opened {
 }
 
 /// An archive's manifest as path to SHA-256; `None` for a folder, which has no manifest.
-fn manifest_hashes(src: &VaultSource) -> Option<HashMap<&str, [u8; 32]>> {
+pub(super) fn manifest_hashes(src: &VaultSource) -> Option<HashMap<&str, [u8; 32]>> {
     let VaultSource::Archive(a) = src else {
         return None;
     };
@@ -207,7 +207,7 @@ fn manifest_hashes(src: &VaultSource) -> Option<HashMap<&str, [u8; 32]>> {
 }
 
 /// An archive entry must hash to what its manifest lists. A folder has nothing to compare.
-fn check_listed(
+pub(super) fn check_listed(
     listed: &Option<HashMap<&str, [u8; 32]>>,
     name: &str,
     hash: [u8; 32],
@@ -293,6 +293,41 @@ pub(super) fn attached_refs(opened: &Opened) -> BTreeMap<FileId, &FileRef> {
     attachments(opened.items.values())
 }
 
+/// The IDs of the blobs `src` holds, each of which an item attaches (`refs`); a blob nobody
+/// attaches is `Damaged { "backup: unexpected file" }`.
+pub(super) fn attached_blobs(
+    src: &VaultSource,
+    refs: &BTreeMap<FileId, &FileRef>,
+) -> Result<Vec<FileId>> {
+    let blobs = src.blob_ids()?;
+    if blobs.iter().any(|id| !refs.contains_key(id)) {
+        return Err(UNEXPECTED_FILE);
+    }
+    Ok(blobs)
+}
+
+/// Streams the stored blob `id` into `dst` while authenticating it against `fref`, checks its
+/// hash against the manifest (an archive only) and returns its size. A blob that fails
+/// authentication is `Damaged { "backup: damaged file" }`; `dst` must then be thrown away.
+pub(super) fn copy_blob(
+    src: &VaultSource,
+    id: &FileId,
+    fref: &FileRef,
+    vault_id: &VaultId,
+    listed: &Option<HashMap<&str, [u8; 32]>>,
+    dst: &mut impl Write,
+    cancel: &CancelToken,
+) -> Result<u64> {
+    let (mut blob, size) = src.blob(id)?;
+    let hash =
+        authenticate_copy(&mut blob, size, dst, vault_id, fref, cancel).map_err(|e| match e {
+            CoreError::Damaged { .. } => DAMAGED_FILE,
+            other => other,
+        })?;
+    check_listed(listed, &blob_name(id), hash)?;
+    Ok(size)
+}
+
 /// What a backup holds, as found by [`verify_backup`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct BackupSummary {
@@ -322,10 +357,7 @@ pub(super) fn verify_contents(
 ) -> Result<BackupSummary> {
     check_opened(opened)?;
     let refs = attached_refs(opened);
-    let blobs = src.blob_ids()?;
-    if blobs.iter().any(|id| !refs.contains_key(id)) {
-        return Err(UNEXPECTED_FILE);
-    }
+    let blobs = attached_blobs(src, &refs)?;
     let listed = manifest_hashes(src);
     let vault_id = &opened.header.vault_id;
     let mut bytes = 0u64;
@@ -335,16 +367,8 @@ pub(super) fn verify_contents(
     }
     for id in &blobs {
         cancel.check()?;
-        let (mut blob, size) = src.blob(id)?;
         let sink = &mut io::sink();
-        let hash =
-            authenticate_copy(&mut blob, size, sink, vault_id, refs[id], cancel).map_err(|e| {
-                match e {
-                    CoreError::Damaged { .. } => DAMAGED_FILE,
-                    other => other,
-                }
-            })?;
-        check_listed(&listed, &blob_name(id), hash)?;
+        let size = copy_blob(src, id, refs[id], vault_id, &listed, sink, cancel)?;
         bytes = bytes.saturating_add(size);
     }
     Ok(BackupSummary {
@@ -376,7 +400,8 @@ pub fn verify_backup(
 }
 
 #[cfg(test)]
-mod tests {
+// `pub(super)`: restore's tests build their backups with the same fixture.
+pub(super) mod tests {
     use super::*;
     use crate::archive::testkit::{ManifestMode, build_backup, rewrite_backup};
     use crate::blob::NoJournal;
@@ -388,17 +413,17 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    const PW: &str = "correct horse battery";
-    const MIB: usize = 1 << 20;
+    pub(in crate::vault) const PW: &str = "correct horse battery";
+    pub(in crate::vault) const MIB: usize = 1 << 20;
 
-    struct Fixture {
-        parent: TempDir,
-        vault: Vault,
-        recovery: RecoverySecret,
+    pub(in crate::vault) struct Fixture {
+        pub(in crate::vault) parent: TempDir,
+        pub(in crate::vault) vault: Vault,
+        pub(in crate::vault) recovery: RecoverySecret,
     }
 
     impl Fixture {
-        fn new() -> Self {
+        pub(in crate::vault) fn new() -> Self {
             let parent = TempDir::new();
             let created = Vault::create(parent.path(), "Family", PW).unwrap();
             fs::create_dir(parent.path().join("out")).unwrap();
@@ -409,12 +434,12 @@ mod tests {
             }
         }
 
-        fn out(&self) -> PathBuf {
+        pub(in crate::vault) fn out(&self) -> PathBuf {
             self.parent.path().join("out")
         }
 
         /// A file item holding `bytes`: the item's and the file's IDs.
-        fn file_item(&mut self, bytes: &[u8]) -> (ItemId, FileId) {
+        pub(in crate::vault) fn file_item(&mut self, bytes: &[u8]) -> (ItemId, FileId) {
             let src = self.parent.path().join("src.bin");
             fs::write(&src, bytes).unwrap();
             let id = self
@@ -424,7 +449,7 @@ mod tests {
             (id, self.vault.get_item(&id).unwrap().attachments[0].file_id)
         }
 
-        fn attach(&mut self, item: &ItemId, bytes: &[u8]) -> FileId {
+        pub(in crate::vault) fn attach(&mut self, item: &ItemId, bytes: &[u8]) -> FileId {
             let src = self.parent.path().join("attach.bin");
             fs::write(&src, bytes).unwrap();
             self.vault
@@ -432,7 +457,7 @@ mod tests {
                 .unwrap()
         }
 
-        fn blob_file(&self, id: &FileId) -> PathBuf {
+        pub(in crate::vault) fn blob_file(&self, id: &FileId) -> PathBuf {
             self.vault
                 .dir()
                 .join("files")
@@ -440,7 +465,7 @@ mod tests {
         }
 
         /// Backs the open vault up into the output folder as `name`.
-        fn backup(&self, name: &str) -> PathBuf {
+        pub(in crate::vault) fn backup(&self, name: &str) -> PathBuf {
             let dest = self.out().join(name);
             self.vault
                 .backup(&dest, &NoJournal, &CancelToken::new())
@@ -448,7 +473,7 @@ mod tests {
             dest
         }
 
-        fn key(&self) -> &Key32 {
+        pub(in crate::vault) fn key(&self) -> &Key32 {
             &self.vault.vault_key
         }
     }
@@ -475,13 +500,13 @@ mod tests {
             .sum()
     }
 
-    fn flip_item(m: &mut BTreeMap<String, Vec<u8>>) {
+    pub(in crate::vault) fn flip_item(m: &mut BTreeMap<String, Vec<u8>>) {
         let (_, bytes) = m.iter_mut().find(|(n, _)| n.starts_with("items/")).unwrap();
         // Past the 30-byte header, inside the sealed part.
         bytes[40] ^= 1;
     }
 
-    fn flip_blob_second_chunk(m: &mut BTreeMap<String, Vec<u8>>) {
+    pub(in crate::vault) fn flip_blob_second_chunk(m: &mut BTreeMap<String, Vec<u8>>) {
         let (_, bytes) = m.iter_mut().find(|(n, _)| n.starts_with("files/")).unwrap();
         bytes[MIB + 100] ^= 1;
     }

@@ -26,8 +26,8 @@ pub mod vault;
 
 pub use error::{CoreError, Result};
 pub use vault::{
-    BackupReport, BackupSummary, CleanupReport, CreatedVault, Credential, UnlockReport, Vault,
-    read_vault_name, verify_backup,
+    BackupReport, BackupSummary, CleanupReport, CreatedVault, Credential, PreparedRestore,
+    UnlockReport, Vault, read_vault_name, verify_backup,
 };
 
 /// The version of this crate, as set in `Cargo.toml`.
