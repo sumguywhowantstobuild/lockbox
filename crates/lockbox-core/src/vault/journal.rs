@@ -11,7 +11,7 @@ use crate::ids::VaultId;
 use crate::limits::{MAX_JSON_DEPTH, check_json};
 use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
@@ -226,16 +226,54 @@ pub(super) fn remove_staging(staging: &Path) -> Result<()> {
     remove_dir_all_retry(staging)
 }
 
+/// The exclusive lock on `<journal>.lock`, beside the journal, until dropped. Whoever looks at
+/// the journal in order to publish, replace or remove it holds it, so no one can publish or
+/// remove in between a look and the act. The OS releases it when the handle closes, so a crash
+/// never leaves it held, and a leftover lock file that nobody holds is simply locked again.
+#[derive(Debug)]
+pub(super) struct JournalLock {
+    _file: File,
+}
+
+/// Takes the journal lock, waiting for whoever holds it (they hold it for a read and a delete,
+/// not for a restore). Never call it while already holding the lock: a second handle in the
+/// same process waits for the first. Recovery holds the lock for its whole run and uses
+/// [`remove_staging`] and [`remove_journal_if_owner`] with it.
+pub(super) fn lock_journal(journal: &Path) -> Result<JournalLock> {
+    let mut name = journal.file_name().ok_or(DAMAGED)?.to_owned();
+    name.push(".lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // No FILE_SHARE_DELETE (read + write only), as for the vault lock: a held lock file cannot
+    // be deleted and replaced by a fresh one that someone else then locks as well.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1 | 2);
+    let file = options.open(journal.with_file_name(name))?;
+    file.lock()?;
+    Ok(JournalLock { _file: file })
+}
+
 /// Removes the journal at `journal` if it is readable and still names `staging`. A journal of
-/// another operation, an unreadable one and a missing one are left alone.
-// shortcut: reading and then deleting is not atomic, so an operation that publishes a journal
-// in between loses it; restore is one at a time (one app instance, "restore in progress"
-// gate) - upgrade with a lock file if that ever stops being true.
-pub(super) fn remove_journal_if_owner(journal: &Path, staging: &Path) -> Result<()> {
+/// another operation, an unreadable one and a missing one are left alone. The lock proves
+/// nobody can publish or remove a journal between the read and the delete.
+pub(super) fn remove_journal_if_owner(
+    _lock: &JournalLock,
+    journal: &Path,
+    staging: &Path,
+) -> Result<()> {
     match read_journal(journal) {
-        Ok(Some(j)) if j.staging == staging => remove_file_retry(journal),
+        Ok(Some(j)) if j.staging == staging => {
+            #[cfg(test)]
+            crate::fsio::failpoint::check("journal.before_owner_delete")?;
+            remove_file_retry(journal)
+        }
         _ => Ok(()),
     }
+}
+
+/// [`remove_journal_if_owner`] under a lock taken just for it.
+pub(super) fn remove_own_journal(journal: &Path, staging: &Path) -> Result<()> {
+    remove_journal_if_owner(&lock_journal(journal)?, journal, staging)
 }
 
 /// Removes the staging folder, then the journal, and only if the first worked (the journal is
@@ -243,7 +281,7 @@ pub(super) fn remove_journal_if_owner(journal: &Path, staging: &Path) -> Result<
 /// See [`remove_staging`] for what is refused.
 pub(super) fn remove_staging_then_journal(staging: &Path, journal: &Path) -> Result<()> {
     remove_staging(staging)?;
-    remove_journal_if_owner(journal, staging)
+    remove_own_journal(journal, staging)
 }
 
 #[cfg(test)]
@@ -251,6 +289,11 @@ mod tests {
     use super::*;
     use crate::fsio::failpoint;
     use crate::fsio::testutil::{TempDir, make_dir_link, names};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     fn journal(dir: &Path) -> RestoreJournal {
         RestoreJournal {
@@ -414,13 +457,90 @@ mod tests {
         assert_eq!(fs::read(&journal).unwrap(), bytes);
         // An unreadable or a missing journal is left alone and not reported either.
         fs::write(&journal, b"garbage").unwrap();
-        remove_journal_if_owner(&journal, &other).unwrap();
+        remove_own_journal(&journal, &other).unwrap();
         assert!(journal.exists());
-        remove_journal_if_owner(&dir.path().join("none"), &other).unwrap();
+        remove_own_journal(&dir.path().join("none"), &other).unwrap();
         // Its owner removes it.
         write_journal(&journal, &theirs).unwrap();
-        remove_journal_if_owner(&journal, &other).unwrap();
+        remove_own_journal(&journal, &other).unwrap();
         assert!(!journal.exists());
+    }
+
+    /// A's cleanup has read that the journal is A's and is about to delete it. Nobody else can
+    /// take the lock in that moment, so B cannot publish (and then lose its journal to A's
+    /// delete, or to a stale second cleanup of A) until A's cleanup is over.
+    #[test]
+    fn nobody_publishes_between_the_owner_check_and_the_delete() {
+        let dir = TempDir::new();
+        let (staging_a, journal) = staged(dir.path());
+        let staging_b = new_staging_path(dir.path());
+        let b_thread = {
+            let (journal, staging_b, dir) =
+                (journal.clone(), staging_b.clone(), dir.path().to_owned());
+            move |acquired: mpsc::Sender<()>| {
+                let lock = lock_journal(&journal).unwrap();
+                acquired.send(()).unwrap();
+                let entry = RestoreJournal {
+                    step: JournalStep::Extracting,
+                    staging: staging_b,
+                    before_restore: None,
+                    ..self::journal(&dir)
+                };
+                create_journal(&journal, &entry).unwrap();
+                drop(lock);
+            }
+        };
+        let running = Rc::new(RefCell::new(None));
+        let (slot, b_thread) = (running.clone(), Cell::new(Some(b_thread)));
+        failpoint::observe(
+            "journal.before_owner_delete",
+            Box::new(move || {
+                let (acquired, taken) = mpsc::channel();
+                let run = b_thread.take().unwrap();
+                let handle = thread::spawn(move || run(acquired));
+                // B is waiting for the lock, which A's cleanup holds.
+                let early = taken.recv_timeout(Duration::from_millis(300));
+                assert_eq!(early, Err(mpsc::RecvTimeoutError::Timeout));
+                *slot.borrow_mut() = Some((handle, taken));
+            }),
+        );
+        remove_staging_then_journal(&staging_a, &journal).unwrap();
+        failpoint::disarm_all();
+
+        let (handle, taken) = running.borrow_mut().take().unwrap();
+        taken.recv().unwrap();
+        handle.join().unwrap();
+        assert!(!staging_a.exists());
+        assert_eq!(read_journal(&journal).unwrap().unwrap().staging, staging_b);
+        // A second, stale cleanup of A finds B's journal and leaves it.
+        remove_staging_then_journal(&staging_a, &journal).unwrap();
+        assert_eq!(read_journal(&journal).unwrap().unwrap().staging, staging_b);
+    }
+
+    #[test]
+    fn the_lock_is_exclusive_and_lives_beside_the_journal() {
+        let dir = TempDir::new();
+        let journal = dir.path().join("restore-journal.json");
+        let first = lock_journal(&journal).unwrap();
+        assert_eq!(names(dir.path()), ["restore-journal.json.lock"]);
+        let (tx, rx) = mpsc::channel();
+        let again = journal.clone();
+        let handle = thread::spawn(move || {
+            let second = lock_journal(&again).unwrap();
+            tx.send(()).unwrap();
+            drop(second);
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+        #[cfg(windows)]
+        assert!(
+            fs::remove_file(dir.path().join("restore-journal.json.lock")).is_err(),
+            "a held lock file cannot be deleted"
+        );
+        drop(first);
+        rx.recv().unwrap();
+        handle.join().unwrap();
+        // The lock file is not a journal.
+        assert!(!journal_exists(&journal).unwrap());
     }
 
     /// The first publish never replaces anything, whatever is at the path.

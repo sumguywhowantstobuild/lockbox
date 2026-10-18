@@ -128,7 +128,12 @@ pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
 /// (dangling) link; `InvalidInput` if anything is there. Unlike [`rename_dir_no_replace`] the
 /// check and the move are one step, so a competing writer cannot slip in between.
 pub fn rename_file_no_replace(from: &Path, to: &Path) -> Result<()> {
-    retry(|| sys::rename_file_no_replace(from, to)).map_err(taken_or_io)
+    retry(|| sys::rename_file_no_replace(from, to)).map_err(taken_or_io)?;
+    // An error here is one reported after the file landed, as the portable version can (it
+    // links first, then removes the source and syncs the folder).
+    #[cfg(test)]
+    failpoint::check("publish.after_link")?;
+    Ok(())
 }
 
 fn taken_or_io(e: io::Error) -> CoreError {

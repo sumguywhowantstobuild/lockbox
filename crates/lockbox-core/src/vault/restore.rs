@@ -7,8 +7,8 @@ use super::folder_name;
 use super::items::ITEMS_DIR;
 use super::journal::{
     IN_PROGRESS, JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, create_journal,
-    is_pre_restore_name, journal_exists, new_staging_path, plain_absolute, remove_journal_if_owner,
-    remove_staging_then_journal, validate_journal,
+    is_pre_restore_name, journal_exists, lock_journal, new_staging_path, plain_absolute,
+    remove_journal_if_owner, remove_own_journal, remove_staging_then_journal, validate_journal,
 };
 use super::source::{
     VaultSource, attached_blobs, attached_refs, check_listed, check_opened, copy_blob,
@@ -161,8 +161,20 @@ impl PreparedRestore {
         validate_journal(&entry)?;
         #[cfg(test)]
         crate::fsio::failpoint::check("restore.before_journal")?;
-        // Fails, touching nothing, if another restore published its journal meanwhile.
-        create_journal(journal, &entry)?;
+        {
+            // The look at the journal path and the publish are one step for everybody who
+            // takes the lock; the early check above only refuses sooner.
+            let lock = lock_journal(journal)?;
+            if journal_exists(journal)? {
+                return Err(IN_PROGRESS);
+            }
+            if let Err(e) = create_journal(journal, &entry) {
+                // An error reported after the journal landed leaves one that is ours; it goes.
+                // Anyone else's is not named after this staging folder and stays.
+                let _ = remove_journal_if_owner(&lock, journal, &staging);
+                return Err(e);
+            }
+        }
         // Until the folder exists it is not ours to remove: whatever is at that path stays, and
         // only this operation's journal goes.
         let created: Result<()> = (|| {
@@ -171,7 +183,7 @@ impl PreparedRestore {
             Ok(fs::create_dir(&staging)?)
         })();
         if let Err(e) = created {
-            let _ = remove_journal_if_owner(journal, &staging);
+            let _ = remove_own_journal(journal, &staging);
             return Err(e);
         }
         // From here on, dropping this (an error below included) cleans up.
@@ -280,8 +292,8 @@ mod tests {
     use crate::item::ItemKind;
     use crate::vault::folder_name;
     use crate::vault::journal::{
-        JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, plain_absolute, read_journal,
-        write_journal,
+        JournalStep, RESTORE_JOURNAL_VERSION, RestoreJournal, lock_journal, plain_absolute,
+        read_journal, write_journal,
     };
     use crate::vault::source::item_name;
     use crate::vault::source::tests::{Fixture, MIB, PW, flip_blob_second_chunk, flip_item};
@@ -289,6 +301,9 @@ mod tests {
     use std::fs;
     use std::path::Component;
     use std::rc::Rc;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     /// Always resets, so a failing test cannot leak a failpoint or volume on this thread.
     struct Cleanup;
@@ -703,6 +718,51 @@ mod tests {
         let first = first.borrow_mut().take().unwrap();
         drop(first);
         d.assert_untouched();
+    }
+
+    /// The presence check and the publish happen under the journal lock: while another holder
+    /// has it (a cleanup, a recovery), a prepare that is ready to publish waits.
+    #[test]
+    fn prepare_publishes_under_the_journal_lock() {
+        let (_f, backup) = backed_up();
+        let d = Dest::new();
+        let lock = lock_journal(&d.journal()).unwrap();
+        let (reached, at_the_door) = mpsc::channel();
+        let (parent, journal) = (d.parent().to_owned(), d.journal());
+        let handle = thread::spawn(move || {
+            failpoint::observe(
+                "restore.before_journal",
+                Box::new(move || reached.send(()).unwrap()),
+            );
+            let credential = Credential::Password(PW);
+            let cancel = CancelToken::new();
+            PreparedRestore::prepare(&backup, &parent, credential, &journal, &cancel).map(drop)
+        });
+        at_the_door.recv().unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(!handle.is_finished(), "prepare went past the lock");
+        assert!(!d.journal().exists());
+        assert_eq!(names(d.parent()), Vec::<String>::new());
+
+        drop(lock);
+        handle.join().unwrap().unwrap();
+        d.assert_untouched(); // The prepared restore was dropped inside the thread.
+    }
+
+    /// A publish that reports an error after the journal had already landed (the portable
+    /// version links first, then unlinks the temp and syncs the folder) leaves a journal that is
+    /// ours: it goes, and nothing else is left.
+    #[test]
+    fn a_publish_that_fails_after_the_journal_landed_is_cleaned_up() {
+        let _reset = Cleanup;
+        let (_f, backup) = backed_up();
+        let d = Dest::new();
+        failpoint::arm("publish.after_link");
+        let result = d.prepare(&backup, Credential::Password(PW));
+        assert!(matches!(error(result), CoreError::Io(_)));
+        assert_eq!(d.reached_journal.get(), 1);
+        d.assert_untouched();
+        assert_eq!(names(d.journal_dir.path()), ["restore-journal.json.lock"]);
     }
 
     /// The generated staging path is taken by something else just before it is created: that
