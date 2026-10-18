@@ -343,6 +343,25 @@ pub(crate) mod testutil {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+
+    /// Makes `link` a folder link to `target`: a junction on Windows (needs no special rights),
+    /// a symlink elsewhere. Panics when it cannot, so a link test never passes by skipping.
+    pub fn make_dir_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            assert!(made, "cannot create a junction on Windows");
+        }
+        #[cfg(not(windows))]
+        std::os::unix::fs::symlink(target, link).expect("cannot create a symlink");
+    }
 }
 
 #[cfg(test)]

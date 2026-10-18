@@ -365,7 +365,8 @@ mod tests {
     use super::*;
     use crate::archive::testkit::{ManifestMode, build_backup, rewrite_backup};
     use crate::blob::NoJournal;
-    use crate::fsio::{failpoint, testutil::TempDir};
+    use crate::fsio::failpoint;
+    use crate::fsio::testutil::{TempDir, make_dir_link};
     use crate::item::ItemKind;
     use crate::recovery::RecoverySecret;
     use crate::vault::Vault;
@@ -746,30 +747,6 @@ mod tests {
         assert_eq!(summary, verify(&dest, Credential::Password(PW)).unwrap());
     }
 
-    /// A folder link (a junction on Windows, which needs no special rights; a symlink elsewhere).
-    /// On Windows a refusal fails the test; elsewhere it returns `false` and the test is skipped,
-    /// as in `cleanup.rs`.
-    fn make_dir_link(link: &Path, target: &Path) -> bool {
-        #[cfg(windows)]
-        let made = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(link)
-            .arg(target)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        #[cfg(not(windows))]
-        let made = std::os::unix::fs::symlink(target, link).is_ok();
-        #[cfg(windows)]
-        assert!(made, "cannot create a junction on Windows");
-        #[cfg(not(windows))]
-        if !made {
-            eprintln!("note: cannot create a folder link here; test skipped");
-        }
-        made
-    }
-
     #[track_caller]
     fn not_plain<T>(result: Result<T>) {
         let error = result.err();
@@ -788,11 +765,10 @@ mod tests {
         let mut f = Fixture::new();
         f.file_item(b"x");
         let link = f.parent.path().join("link");
-        if make_dir_link(&link, f.vault.dir()) {
-            let src = VaultSource::Folder(link);
-            let token = CancelToken::new();
-            not_plain(unlock_source(&src, &Credential::Password(PW), &token));
-        }
+        make_dir_link(&link, f.vault.dir());
+        let src = VaultSource::Folder(link);
+        let token = CancelToken::new();
+        not_plain(unlock_source(&src, &Credential::Password(PW), &token));
     }
 
     #[test]
@@ -803,9 +779,7 @@ mod tests {
             let dir = f.vault.dir().to_path_buf();
             let outside = TempDir::new();
             fs::remove_dir_all(dir.join(name)).unwrap();
-            if !make_dir_link(&dir.join(name), outside.path()) {
-                continue;
-            }
+            make_dir_link(&dir.join(name), outside.path());
             let src = VaultSource::Folder(dir);
             let token = CancelToken::new();
             let opened = unlock_source(&src, &Credential::Password(PW), &token);

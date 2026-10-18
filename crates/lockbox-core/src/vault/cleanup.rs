@@ -285,7 +285,8 @@ impl Vault {
 mod tests {
     use super::*;
     use crate::blob::{CancelToken, NoJournal};
-    use crate::fsio::{failpoint, testutil::TempDir};
+    use crate::fsio::failpoint;
+    use crate::fsio::testutil::{TempDir, make_dir_link};
     use crate::ids::ItemId;
     use crate::item::ItemKind;
     use crate::vault::items::edited;
@@ -481,9 +482,7 @@ mod tests {
             blob_in(outside.path(), &old),
         )
         .unwrap();
-        if !link_folder(&vault.orphaned_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.orphaned_dir(), outside.path());
         let (vault, report) = reopen(vault);
 
         assert!(report.failed >= 1);
@@ -729,47 +728,22 @@ mod tests {
         assert_eq!(vault.delete_orphans().unwrap(), 0);
     }
 
-    /// Makes `link` a folder link (a junction on Windows, which needs no special rights; a
-    /// symlink elsewhere) to `target`. On Windows a refusal fails the test; elsewhere it
-    /// returns `false` with a note (symlinks can be forbidden there).
-    fn make_dir_link(link: &Path, target: &Path) -> bool {
-        #[cfg(windows)]
-        let made = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(link)
-            .arg(target)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        #[cfg(not(windows))]
-        let made = std::os::unix::fs::symlink(target, link).is_ok();
-        #[cfg(windows)]
-        assert!(made, "cannot create a junction on Windows");
-        #[cfg(not(windows))]
-        if !made {
-            eprintln!("note: cannot create a folder link here; test skipped");
-        }
-        made
-    }
-
     /// Replaces the folder `path` with a link to a folder outside the vault.
-    fn link_folder(path: &Path, outside: &Path) -> bool {
+    fn link_folder(path: &Path, outside: &Path) {
         fs::remove_dir_all(path).unwrap();
-        make_dir_link(path, outside)
+        make_dir_link(path, outside);
     }
 
     #[test]
     fn std_reports_a_folder_link_as_a_link() {
         let (outside, inside) = (TempDir::new(), TempDir::new());
         let link = inside.path().join("link");
-        if make_dir_link(&link, outside.path()) {
-            let meta = fs::symlink_metadata(&link).unwrap();
-            assert!(meta.file_type().is_symlink() && !meta.is_dir());
-            assert!(check_folder(&link).is_err());
-            assert!(check_folder(outside.path()).is_ok());
-            assert!(check_folder(&inside.path().join("missing")).is_ok());
-        }
+        make_dir_link(&link, outside.path());
+        let meta = fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink() && !meta.is_dir());
+        assert!(check_folder(&link).is_err());
+        assert!(check_folder(outside.path()).is_ok());
+        assert!(check_folder(&inside.path().join("missing")).is_ok());
     }
 
     #[test]
@@ -785,9 +759,7 @@ mod tests {
             for scrap in &scraps {
                 fs::write(scrap, b"x").unwrap();
             }
-            if !link_folder(&vault.dir().join(name), outside.path()) {
-                return;
-            }
+            link_folder(&vault.dir().join(name), outside.path());
             let (vault, report) = reopen(vault);
 
             assert!(report.failed >= 1, "{name}: {report:?}");
@@ -820,9 +792,7 @@ mod tests {
             blob_in(outside.path(), &file),
         )
         .unwrap();
-        if !link_folder(&vault.orphaned_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.orphaned_dir(), outside.path());
         let (mut vault, report) = reopen(vault);
 
         assert!(report.failed >= 1);
@@ -894,9 +864,7 @@ mod tests {
         )
         .unwrap();
         fs::copy(blob_in(outside.path(), &file), blob_in(&quarantine, &file)).unwrap();
-        if !link_folder(&vault.files_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.files_dir(), outside.path());
 
         assert!(vault.purge_item(&id).is_err());
         assert!(blob_in(outside.path(), &file).exists());
@@ -910,9 +878,7 @@ mod tests {
         let (id, file) = trashed_file_item(&parent, &mut vault);
         let outside = TempDir::new();
         let theirs = plant_blob(outside.path(), b"theirs");
-        if !link_folder(&vault.orphaned_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.orphaned_dir(), outside.path());
 
         assert!(vault.purge_item(&id).is_err());
         assert!(blob_in(outside.path(), &theirs).exists());
@@ -927,9 +893,7 @@ mod tests {
         let quarantine = outside.path().join("orphaned");
         fs::create_dir(&quarantine).unwrap();
         let theirs = plant_blob(&quarantine, b"not ours");
-        if !link_folder(&vault.files_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.files_dir(), outside.path());
         // Not through `reopen`: cleanup would already refuse; this is the later calls.
         assert!(vault.orphans().is_err());
         assert!(vault.delete_orphans().is_err());
