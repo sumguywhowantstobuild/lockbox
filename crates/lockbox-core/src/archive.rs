@@ -85,6 +85,9 @@ const SAT16: u16 = u16::MAX;
 const MAX_NAME: usize = 64;
 const MAX_CD_PER_ENTRY: u64 = 256;
 const PIECE: usize = 1 << 20;
+/// Test failpoints reached after each piece of the directory or manifest is read.
+const DIRECTORY_PIECE: &str = "archive.directory_piece";
+const MANIFEST_PIECE: &str = "archive.manifest_piece";
 
 const NOT_ARCHIVE: &str = "backup: not a backup archive";
 const END: &str = "backup: end record";
@@ -133,6 +136,28 @@ fn read_full(file: &File, buf: &mut [u8], offset: u64, what: &'static str) -> Re
             Err(CoreError::Io(e)) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => return Err(e),
         }
+    }
+    Ok(())
+}
+
+/// Fills `buf` from `offset` in pieces of at most 1 MiB, checking `cancel` before each.
+/// `step` names the test failpoint reached after each piece.
+#[cfg_attr(not(test), allow(unused_variables))]
+fn read_pieces(
+    file: &File,
+    buf: &mut [u8],
+    offset: u64,
+    what: &'static str,
+    step: &'static str,
+    cancel: &CancelToken,
+) -> Result<()> {
+    let mut at = offset;
+    for piece in buf.chunks_mut(PIECE) {
+        cancel.check()?;
+        read_full(file, piece, at, what)?;
+        at = at.checked_add(piece.len() as u64).ok_or(damaged(what))?;
+        #[cfg(test)]
+        crate::fsio::failpoint::check(step)?;
     }
     Ok(())
 }
@@ -289,7 +314,17 @@ fn parse_central(mut cd: &[u8], count: u64, cancel: &CancelToken) -> Result<Vec<
 
 /// The local header must repeat the central record: flags, method, name and sizes (directly,
 /// or both saturated with a ZIP64 field holding both). Sets where the data starts and ends.
-fn check_local(file: &File, r: &mut Record) -> Result<()> {
+/// The header's offset comes from the file, so each part of it must lie before `limit` (the
+/// directory start) before it is read.
+fn check_local(file: &File, r: &mut Record, limit: u64) -> Result<()> {
+    let inside = |start: u64, len: usize| {
+        start
+            .checked_add(len as u64)
+            .is_some_and(|end| end <= limit)
+    };
+    if !inside(r.header_offset, LOCAL_LEN) {
+        return Err(damaged(LOCAL));
+    }
     let mut fixed = [0u8; LOCAL_LEN];
     read_full(file, &mut fixed, r.header_offset, LOCAL)?;
     let name_len = r.name.len();
@@ -300,9 +335,14 @@ fn check_local(file: &File, r: &mut Record) -> Result<()> {
     {
         return Err(damaged(LOCAL));
     }
-    let mut var = vec![0u8; name_len + usize::from(le16(&fixed, 28))];
-    let var_at = r.header_offset.checked_add(LOCAL_LEN as u64);
-    read_full(file, &mut var, var_at.ok_or(damaged(LOCAL))?, LOCAL)?;
+    let var_len = name_len + usize::from(le16(&fixed, 28));
+    // Cannot overflow: the fixed part ends at or before `limit`.
+    let var_at = r.header_offset + LOCAL_LEN as u64;
+    if !inside(var_at, var_len) {
+        return Err(damaged(LOCAL));
+    }
+    let mut var = vec![0u8; var_len];
+    read_full(file, &mut var, var_at, LOCAL)?;
     let zip64 = zip64_extra(&var[name_len..])?;
     let (compressed, uncompressed) = (le32(&fixed, 18), le32(&fixed, 22));
     let direct = zip64.is_none()
@@ -350,12 +390,14 @@ impl BackupArchive {
         }
         // 4. The directory, in pieces, each after a cancel check.
         let mut cd = vec![0u8; usize::try_from(cd_size).map_err(|_| damaged(DIRECTORY))?];
-        let mut at = cd_offset;
-        for piece in cd.chunks_mut(PIECE) {
-            cancel.check()?;
-            read_full(&file, piece, at, DIRECTORY)?;
-            at += piece.len() as u64; // stays at or below cd_end, checked above
-        }
+        read_pieces(
+            &file,
+            &mut cd,
+            cd_offset,
+            DIRECTORY,
+            DIRECTORY_PIECE,
+            cancel,
+        )?;
         // 5. Each record.
         let mut records = parse_central(&cd, count, cancel)?;
         drop(cd);
@@ -364,12 +406,12 @@ impl BackupArchive {
         if records.windows(2).any(|w| w[0].name == w[1].name) {
             return Err(damaged(DUPLICATE));
         }
-        // 7. Local headers.
+        // 7. Local headers, all before the directory.
         for (i, r) in records.iter_mut().enumerate() {
             if i % 1000 == 0 {
                 cancel.check()?;
             }
-            check_local(&file, r)?;
+            check_local(&file, r, cd_offset)?;
         }
         // 8. Sorted by position, the entries fill everything before the directory exactly.
         records.sort_unstable_by_key(|r| r.header_offset);
@@ -402,11 +444,13 @@ impl BackupArchive {
         }
         let at = entries.iter().position(|e| e.kind == EntryKind::Manifest);
         let manifest_entry = entries.remove(at.ok_or(damaged("backup: no manifest"))?);
-        // 10. The manifest, whose size is already within MAX_MANIFEST_BYTES.
+        // 10. The manifest, whose size is already within MAX_MANIFEST_BYTES and whose range
+        // lies inside the tiled entries.
+        let size = usize::try_from(manifest_entry.size).map_err(|_| damaged(TOO_LARGE))?;
+        let mut bytes = vec![0u8; size];
+        let at = manifest_entry.offset;
+        read_pieces(&file, &mut bytes, at, LAYOUT, MANIFEST_PIECE, cancel)?;
         cancel.check()?;
-        let file = Arc::new(file);
-        let mut bytes = Vec::new();
-        entry_reader(&file, &manifest_entry).read_to_end(&mut bytes)?;
         let manifest = parse_manifest(&bytes)?;
         // 11. The manifest lists exactly the other entries, each once, with their sizes.
         let mut listed = BTreeMap::new();
@@ -425,7 +469,7 @@ impl BackupArchive {
         // Cannot overflow: the entries tile part of the file.
         let total_size = entries.iter().map(|e| e.size).sum();
         Ok(BackupArchive {
-            file,
+            file: Arc::new(file),
             path: std::fs::canonicalize(path)?,
             manifest,
             entries,
@@ -1019,6 +1063,7 @@ mod tests {
                 "backup: central directory",
             ),
             (
+                // `directory_cap_refuses_before_reading` proves no piece is read first.
                 "directory over count x 256",
                 {
                     // Offsets kept consistent, so only the size bound can refuse it.
@@ -1374,6 +1419,112 @@ mod tests {
         assert!(!archive.is_same_file(&dir.path().join("missing")).unwrap());
     }
 
+    /// Counts how often the failpoint `step` is reached on this thread.
+    fn count_steps(step: &'static str) -> std::rc::Rc<std::cell::Cell<usize>> {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = seen.clone();
+        failpoint::observe(step, Box::new(move || counter.set(counter.get() + 1)));
+        seen
+    }
+
+    /// Review finding 6: the size cap refuses before any of the directory is read. The
+    /// fixture keeps every offset consistent; only the cap stands in its way.
+    #[test]
+    fn directory_cap_refuses_before_reading() {
+        let mut b = base();
+        let (eocd, zip64) = (b.len() - 22, b.len() - 98);
+        let size: u64 = 5 * 256 + 1;
+        let offset = zip64 as u64 - size;
+        patch(&mut b, zip64 + 40, &size.to_le_bytes());
+        patch(&mut b, zip64 + 48, &offset.to_le_bytes());
+        patch(
+            &mut b,
+            eocd + 16,
+            &u32::try_from(offset).unwrap().to_le_bytes(),
+        );
+        let pieces = count_steps(DIRECTORY_PIECE);
+        let refused_with = refused(&b);
+        failpoint::disarm_all();
+        assert_eq!(refused_with, "backup: central directory");
+        assert_eq!(pieces.get(), 0, "the directory was read");
+        // The same observer does fire for a valid archive.
+        let pieces = count_steps(DIRECTORY_PIECE);
+        open_bytes(&base()).unwrap();
+        failpoint::disarm_all();
+        assert_eq!(pieces.get(), 1);
+    }
+
+    /// Review finding 3: the manifest is read in 1 MiB pieces with a cancel check before
+    /// each, and once more before parsing.
+    #[test]
+    fn manifest_read_is_cancellable() {
+        let p = payload();
+        // Large enough for three pieces; never parsed, as the cancel comes first.
+        let manifest = vec![b' '; 2 * MIB + 10];
+        let bytes = write_archive(&[], &refs(&p), Some(&manifest));
+        let token = CancelToken::new();
+        let pieces = count_steps(MANIFEST_PIECE);
+        failpoint::arm_cancel(MANIFEST_PIECE, token.clone());
+        let dir = TempDir::new();
+        let path = dir.path().join("m.lockbox-backup");
+        std::fs::write(&path, &bytes).unwrap();
+        let result = BackupArchive::open(&path, &token);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(pieces.get(), 1, "stopped after the first piece");
+
+        // A cancel during the last (here the only) piece is still caught before parsing.
+        let small = build_backup(&refs(&p), None);
+        std::fs::write(&path, &small).unwrap();
+        let token = CancelToken::new();
+        failpoint::arm_cancel(MANIFEST_PIECE, token.clone());
+        let result = BackupArchive::open(&path, &token);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+    }
+
+    /// `base()` with `name`'s central header offset moved into its ZIP64 field as `offset`
+    /// (the record grows by 8 bytes; the directory size and locator follow).
+    fn with_zip64_offset(name: &str, offset: u64) -> Vec<u8> {
+        let mut b = base();
+        let c = central_offset(&b, name);
+        let extra = c + 46 + name.len();
+        patch(&mut b, c + 42, &u32::MAX.to_le_bytes());
+        patch(&mut b, c + 30, &28u16.to_le_bytes()); // extra field length 20 -> 28
+        patch(&mut b, extra + 2, &24u16.to_le_bytes()); // ZIP64 data 16 -> 24
+        let tail = b.split_off(extra + 20);
+        b.extend(offset.to_le_bytes());
+        b.extend(tail);
+        let (locator, zip64) = (b.len() - 22 - 20, b.len() - 98);
+        let field = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let cd_size = field(&b, zip64 + 40) + 8;
+        patch(&mut b, zip64 + 40, &cd_size.to_le_bytes());
+        patch(&mut b, locator + 8, &(zip64 as u64).to_le_bytes());
+        b
+    }
+
+    /// Review finding 4: a local header offset from the file is range-checked before any
+    /// read, so an extreme one is a named refusal, never an I/O error.
+    #[test]
+    fn extreme_local_offsets_refused() {
+        let item1 = item(1);
+        let real = entry_offset(&base(), &item1) as u64;
+        open_bytes(&with_zip64_offset(&item1, real)).unwrap();
+        let len = with_zip64_offset(&item1, real).len() as u64;
+        for offset in [u64::MAX, u64::MAX - 29, len - 10, len] {
+            assert_eq!(
+                refused(&with_zip64_offset(&item1, offset)),
+                "backup: local header",
+                "{offset}"
+            );
+        }
+        // The fixed part fits but the name runs into the directory.
+        let mut b = base();
+        let at = entry_offset(&b, MANIFEST_FILE) + 28;
+        patch(&mut b, at, &u16::MAX.to_le_bytes());
+        assert_eq!(refused(&b), "backup: local header");
+    }
+
     #[test]
     fn open_cancel() {
         let dir = TempDir::new();
@@ -1402,9 +1553,14 @@ mod tests {
         let mut changed = vec![1; 300];
         changed[0] = 0;
         assert_eq!(a.manifest().entry(&item(1)).unwrap().sha256, sha(&changed));
+        let old_mac = a.manifest().mac;
+        assert!(old_mac.is_some());
         drop(a);
+        // A forger without the key: new hashes, the exact old MAC, which no longer verifies.
         rewrite_backup(&path, edit, ManifestMode::Rehash { key: None });
         let a = BackupArchive::open(&path, &CancelToken::new()).unwrap();
+        assert_eq!(a.manifest().mac, old_mac);
+        assert_eq!(a.manifest().entry(&item(1)).unwrap().sha256, sha(&[1; 300]));
         assert!(!crate::manifest::verify_manifest_mac(a.manifest(), &key));
         drop(a);
         let add = |m: &mut std::collections::BTreeMap<String, Vec<u8>>| {
