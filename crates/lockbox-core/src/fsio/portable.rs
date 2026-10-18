@@ -48,6 +48,15 @@ pub fn create_hidden(path: &Path) -> io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
 }
 
+/// There are no share modes here; callers that need the file unchanged must not rely on it.
+pub fn open_shared_read(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buf, offset)
+}
+
 /// Free space and file-size limits are not measured on this platform.
 pub fn volume_info(_dir: &Path) -> io::Result<VolumeInfo> {
     Ok(VolumeInfo {

@@ -173,6 +173,17 @@ pub(crate) fn read_retry(path: &Path, max: usize) -> Result<Vec<u8>> {
     })?)
 }
 
+/// Opens `path` for reading. On Windows the handle shares read access only, so nobody can
+/// change, replace or delete the file while it is held. Elsewhere a plain open.
+pub fn open_shared_read(path: &Path) -> Result<File> {
+    Ok(retry(|| sys::open_shared_read(path))?)
+}
+
+/// Reads up to `buf.len()` bytes at `offset`; 0 means end of file.
+pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> Result<usize> {
+    Ok(retry(|| sys::read_at(file, buf, offset))?)
+}
+
 /// A fresh name `.<16 random hex chars><suffix>` in `dir` for a hidden temp file; nothing is created.
 /// Lets a caller record the path (e.g. in the output journal) before the file exists.
 pub fn hidden_temp_path(dir: &Path, suffix: &str) -> PathBuf {
@@ -247,9 +258,18 @@ pub(crate) mod failpoint {
     use crate::blob::CancelToken;
     use std::cell::RefCell;
 
+    type Observer = (&'static str, Box<dyn FnMut()>);
+
     thread_local! {
         static ARMED: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
         static CANCELS: RefCell<Vec<(&'static str, CancelToken)>> = const { RefCell::new(Vec::new()) };
+        static OBSERVERS: RefCell<Vec<Observer>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Runs `f` each time the step `name` is reached, before its usual behaviour, so a test
+    /// can look at the disk at exactly that point.
+    pub fn observe(name: &'static str, f: Box<dyn FnMut()>) {
+        OBSERVERS.with(|o| o.borrow_mut().push((name, f)));
     }
 
     /// Cancels `token` when the step `name` is reached (the step itself succeeds), to test
@@ -265,10 +285,22 @@ pub(crate) mod failpoint {
     pub fn disarm_all() {
         ARMED.with(|a| a.borrow_mut().clear());
         CANCELS.with(|c| c.borrow_mut().clear());
+        OBSERVERS.with(|o| o.borrow_mut().clear());
     }
 
     /// Fails with an `Io` error while `name` is armed.
     pub fn check(name: &'static str) -> Result<()> {
+        // Taken out while they run, so an observer may itself reach a failpoint.
+        let mut observers = OBSERVERS.take();
+        for (watched, f) in observers.iter_mut() {
+            if *watched == name {
+                f();
+            }
+        }
+        OBSERVERS.with(|o| {
+            let added = std::mem::replace(&mut *o.borrow_mut(), observers);
+            o.borrow_mut().extend(added);
+        });
         CANCELS.with(|c| {
             for (armed, token) in c.borrow().iter() {
                 if *armed == name {
@@ -364,6 +396,20 @@ mod tests {
         assert!(matches!(result, Err(CoreError::Io(_))));
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
         assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn failpoint_observer_runs_before_the_step() {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = seen.clone();
+        failpoint::observe("x.step", Box::new(move || counter.set(counter.get() + 1)));
+        failpoint::arm("x.step");
+        assert!(failpoint::check("x.step").is_err());
+        failpoint::check("x.other").unwrap();
+        assert_eq!(seen.get(), 1);
+        failpoint::disarm_all();
+        failpoint::check("x.step").unwrap();
+        assert_eq!(seen.get(), 1);
     }
 
     #[test]

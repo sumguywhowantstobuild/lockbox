@@ -12,6 +12,7 @@ use crate::item::FileRef;
 use crate::secret::{Key32, random_bytes};
 use aead_stream::{DecryptorBE32, EncryptorBE32, Nonce, StreamBE32};
 use chacha20poly1305::XChaCha20Poly1305;
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -68,7 +69,7 @@ impl OutputJournal for NoJournal {
 
 const CHUNK: u64 = CHUNK_SIZE as u64;
 const TAG_LEN: u64 = 16;
-const SIZE_CHANGED: CoreError = CoreError::InvalidInput {
+pub(crate) const SIZE_CHANGED: CoreError = CoreError::InvalidInput {
     what: "source size changed",
 };
 const DAMAGED: CoreError = CoreError::Damaged { what: "file" };
@@ -164,7 +165,7 @@ fn plain_len(fref: &FileRef, index: u64) -> usize {
 }
 
 /// Reads until `buf` is full or the source ends; returns how many bytes arrived.
-fn fill(src: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+pub(crate) fn fill(src: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
     while filled < buf.len() {
         match src.read(&mut buf[filled..]) {
@@ -178,7 +179,7 @@ fn fill(src: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 }
 
 /// Whether the source has nothing more to give.
-fn at_end(src: &mut impl Read) -> std::io::Result<bool> {
+pub(crate) fn at_end(src: &mut impl Read) -> std::io::Result<bool> {
     // Wiped: a source that grew hands over one real plaintext byte here.
     let mut probe = Zeroizing::new([0u8; 1]);
     Ok(fill(src, &mut *probe)? == 0)
@@ -290,6 +291,62 @@ pub fn decrypt_stream(
         .map_err(|_| DAMAGED)?;
     dst.write_all(&buf)?;
     Ok(())
+}
+
+/// Hands out `src`'s bytes and copies each one into `dst` and the hasher as it goes.
+struct Tee<'a, R, W> {
+    src: &'a mut R,
+    dst: &'a mut W,
+    hash: Sha256,
+    #[cfg(test)]
+    read: u64,
+}
+
+impl<R: Read, W: Write> Read for Tee<'_, R, W> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.src.read(buf)?;
+        self.dst.write_all(&buf[..n])?;
+        self.hash.update(&buf[..n]);
+        #[cfg(test)]
+        {
+            const STEP: u64 = CHUNK + TAG_LEN;
+            let before = self.read;
+            self.read += n as u64;
+            if self.read / STEP > before / STEP {
+                crate::fsio::failpoint::check("tee.after_chunk").map_err(std::io::Error::other)?;
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// Copies a blob of `blob_size` bytes from `src` to `dst` unchanged while authenticating every
+/// chunk, and returns the SHA-256 of the bytes copied. Any authentication failure is
+/// `Damaged { "file" }`; `dst` must then be thrown away, as it may hold part of the blob.
+pub fn authenticate_copy(
+    src: &mut impl Read,
+    blob_size: u64,
+    dst: &mut impl Write,
+    vault_id: &VaultId,
+    fref: &FileRef,
+    cancel: &CancelToken,
+) -> Result<[u8; 32]> {
+    let mut tee = Tee {
+        src,
+        dst,
+        hash: Sha256::new(),
+        #[cfg(test)]
+        read: 0,
+    };
+    decrypt_stream(
+        &mut tee,
+        blob_size,
+        &mut std::io::sink(),
+        vault_id,
+        fref,
+        cancel,
+    )?;
+    Ok(tee.hash.finalize().into())
 }
 
 #[cfg(test)]
@@ -631,6 +688,56 @@ mod tests {
         );
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert_eq!(out.1.len(), MIB);
+    }
+
+    #[test]
+    fn authenticate_copy_tees_and_checks() {
+        let len = 2 * MIB + 5; // three chunks
+        let f = fref(len);
+        let blob = seal(&plain(len), &f);
+        let copy = |blob: &[u8]| {
+            let mut dst = Vec::new();
+            let result = authenticate_copy(
+                &mut Trickle(Cursor::new(blob), 70_000),
+                blob.len() as u64,
+                &mut dst,
+                &VAULT,
+                &f,
+                &CancelToken::new(),
+            );
+            (result, dst)
+        };
+        let (hash, dst) = copy(&blob);
+        assert_eq!(dst, blob);
+        assert_eq!(hash.unwrap(), <[u8; 32]>::from(Sha256::digest(&blob)));
+
+        let mut tampered = blob.clone();
+        tampered[MIB + 16 + 3] ^= 1; // inside chunk 1
+        assert!(matches!(
+            copy(&tampered).0,
+            Err(CoreError::Damaged { what: "file" })
+        ));
+    }
+
+    #[test]
+    fn authenticate_copy_cancels_after_a_chunk() {
+        let len = 3 * MIB;
+        let f = fref(len);
+        let blob = seal(&plain(len), &f);
+        let cancel = CancelToken::new();
+        crate::fsio::failpoint::arm_cancel("tee.after_chunk", cancel.clone());
+        let mut dst = Vec::new();
+        let result = authenticate_copy(
+            &mut Cursor::new(&blob),
+            blob.len() as u64,
+            &mut dst,
+            &VAULT,
+            &f,
+            &cancel,
+        );
+        crate::fsio::failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(dst.len(), MIB + 16);
     }
 
     #[test]

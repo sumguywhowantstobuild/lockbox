@@ -127,6 +127,21 @@ pub fn create_hidden(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Opens for reading and shares read access only, so nobody can write, rename, replace or
+/// delete the file while this handle is open.
+pub fn open_shared_read(path: &Path) -> io::Result<File> {
+    const FILE_SHARE_READ: u32 = 1;
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+}
+
+/// Reads at `offset` without depending on (or caring about) the handle's position.
+pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+}
+
 pub fn volume_info(dir: &Path) -> io::Result<VolumeInfo> {
     let dir = to_wide(dir.as_os_str())?;
 
