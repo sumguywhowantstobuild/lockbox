@@ -569,7 +569,7 @@ hold the clipboard open.
 
 - **Change flow:** branch → tests + security scan → pull request → CI → Greptile review → Ariel approves → merge.
   Nothing is pushed to `main` or released without Ariel's go. Commits under Ariel's GitHub account.
-- **CI (GitHub Actions, `windows-latest`):** `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, frontend lint +
+- **CI (GitHub Actions, pinned Windows image):** `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, frontend lint +
   tests + build, Tauri build, and the security scan.
 - **Security scan:** our own `scripts/scan.mjs` running gitleaks (secrets), semgrep (risky code) and osv-scanner
   (vulnerable dependencies), with one pass/fail result. Calls semgrep by full path (see `docs/SETUP.md`).
