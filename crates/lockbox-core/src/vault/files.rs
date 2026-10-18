@@ -37,6 +37,17 @@ pub(super) fn blob_in(folder: &Path, id: &FileId) -> PathBuf {
     folder.join(format!("{}{BLOB_EXT}", id.to_hex()))
 }
 
+/// Refuses an output folder that is the vault folder `dir` or inside it. Both paths are
+/// resolved first (links, junctions, `..`, short names), so an alias cannot get past the check.
+pub(super) fn refuse_inside(folder: &Path, dir: &Path) -> Result<()> {
+    if fs::canonicalize(folder)?.starts_with(fs::canonicalize(dir)?) {
+        return Err(CoreError::InvalidInput {
+            what: "destination inside vault",
+        });
+    }
+    Ok(())
+}
+
 /// Opens the file to import and returns it with its size. On Windows other programs may
 /// still read it but none can write to it while it is open.
 fn open_source(path: &Path) -> Result<(File, u64)> {
@@ -72,17 +83,6 @@ impl Vault {
             return Err(NOT_FILE_HOLDER);
         }
         Ok(item)
-    }
-
-    /// Refuses an export folder that is the vault folder or inside it. Both paths are resolved
-    /// first (links, junctions, `..`, short names), so an alias cannot get past the check.
-    fn refuse_inside_vault(&self, folder: &Path) -> Result<()> {
-        if fs::canonicalize(folder)?.starts_with(fs::canonicalize(&self.dir)?) {
-            return Err(CoreError::InvalidInput {
-                what: "destination inside vault",
-            });
-        }
-        Ok(())
     }
 
     /// Encrypts the file at `src` into a published blob and returns its record. The blob is
@@ -216,7 +216,7 @@ impl Vault {
             .find(|f| f.file_id == *file)
             .ok_or(CoreError::NotFound)?;
         let folder = parent_dir(dest);
-        self.refuse_inside_vault(folder)?;
+        refuse_inside(folder, &self.dir)?;
         check_space(fref.length, fref.length, &volume_info(folder)?)?;
         let mut blob = File::open(self.blob_path(file)).map_err(|e| match e.kind() {
             ErrorKind::NotFound => CoreError::Damaged {

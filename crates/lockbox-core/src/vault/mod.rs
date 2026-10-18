@@ -1,6 +1,7 @@
 //! The vault's life cycle (spec 5.3, 6.3): create, unlock, change password, regenerate
 //! the recovery key. Items and files are added on top of [`Vault`] by later modules.
 
+mod backup;
 mod cleanup;
 mod files;
 mod items;
@@ -29,6 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use unlock::Credential;
 
+pub use backup::BackupReport;
 pub(crate) use naming::folder_name;
 pub use unlock::read_vault_name;
 
