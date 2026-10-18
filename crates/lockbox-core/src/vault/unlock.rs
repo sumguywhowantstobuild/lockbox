@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// What the user typed to open the vault.
-pub(super) enum Credential<'a> {
+pub enum Credential<'a> {
     Password(&'a str),
     Recovery(&'a RecoverySecret),
 }
@@ -41,17 +41,23 @@ struct Derived {
 
 /// A header file as read: the exact bytes (for copying) and what they parse to.
 pub(super) struct HeaderFile {
-    bytes: Vec<u8>,
+    pub(super) bytes: Vec<u8>,
     pub(super) header: VaultHeader,
+}
+
+impl HeaderFile {
+    /// Parses `bytes` (a folder's `vault.json` or an archive's), keeping them for copying.
+    pub(super) fn from_bytes(bytes: Vec<u8>) -> Result<HeaderFile> {
+        let header = parse_header(&bytes)?;
+        Ok(HeaderFile { bytes, header })
+    }
 }
 
 /// Reads and parses one header file, retrying while another program holds it. `read_retry`
 /// reads at most `MAX_HEADER_BYTES + 1` bytes, so an oversized file is noticed
 /// (`parse_header` refuses it) without loading all of it.
 pub(super) fn load(path: &Path) -> Result<HeaderFile> {
-    let bytes = read_retry(path, MAX_HEADER_BYTES)?;
-    let header = parse_header(&bytes)?;
-    Ok(HeaderFile { bytes, header })
+    HeaderFile::from_bytes(read_retry(path, MAX_HEADER_BYTES)?)
 }
 
 /// A newer vault must say "update Lockbox", never be opened from an older `.bak`
@@ -139,6 +145,67 @@ fn repair(file: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write(file, bytes)
 }
 
+/// An owned copy of an error held by reference. An I/O error keeps its OS code, else its kind.
+fn copy_error(error: &CoreError) -> CoreError {
+    match error {
+        CoreError::WrongPassword => CoreError::WrongPassword,
+        CoreError::RecoveryKeyTypo => CoreError::RecoveryKeyTypo,
+        CoreError::InvalidRecoveryKey => CoreError::InvalidRecoveryKey,
+        CoreError::Damaged { what } => CoreError::Damaged { what },
+        CoreError::PasswordTooShort { min } => CoreError::PasswordTooShort { min: *min },
+        CoreError::NotEnoughSpace { needed, available } => CoreError::NotEnoughSpace {
+            needed: *needed,
+            available: *available,
+        },
+        CoreError::FileSystemLimit { max_file } => CoreError::FileSystemLimit {
+            max_file: *max_file,
+        },
+        CoreError::UnsupportedVersion => CoreError::UnsupportedVersion,
+        CoreError::ParamsOutOfBounds => CoreError::ParamsOutOfBounds,
+        CoreError::TooLarge { what } => CoreError::TooLarge { what },
+        CoreError::InvalidInput { what } => CoreError::InvalidInput { what },
+        CoreError::VaultInUse => CoreError::VaultInUse,
+        CoreError::NotFound => CoreError::NotFound,
+        CoreError::Cancelled => CoreError::Cancelled,
+        CoreError::Io(e) => CoreError::Io(match e.raw_os_error() {
+            Some(code) => std::io::Error::from_raw_os_error(code),
+            None => e.kind().into(),
+        }),
+    }
+}
+
+/// Picks the header copy that opens with `credential` (the `.bak` fallback rule, shared by
+/// unlocking a folder and unlocking a backup) and returns it with the vault key and whether it
+/// is `backup`. A parseable `main` only falls back to a `backup` of the same vault. Writes nothing.
+pub(super) fn choose_header<'a>(
+    main: &'a Result<HeaderFile>,
+    backup: &'a Result<HeaderFile>,
+    credential: &Credential,
+) -> Result<(&'a HeaderFile, Key32, bool)> {
+    let mut cache = None;
+    Ok(match (main, backup) {
+        (Ok(m), _) => match unwrap_with(&m.header, credential, &mut cache) {
+            Ok(key) => (m, key, false),
+            Err(error) => {
+                let same_vault = backup.as_ref().ok().filter(|b| {
+                    may_try_backup(&error)
+                        && b.bytes != m.bytes
+                        && b.header.vault_id == m.header.vault_id
+                });
+                match same_vault.map(|b| (b, unwrap_with(&b.header, credential, &mut cache))) {
+                    Some((b, Ok(key))) => (b, key, true),
+                    _ => return Err(error),
+                }
+            }
+        },
+        (Err(error), Ok(b)) if may_try_backup(error) => {
+            // A parsed header that rejects the secret is a wrong password, not damage.
+            (b, unwrap_with(&b.header, credential, &mut cache)?, true)
+        }
+        (Err(error), _) => return Err(copy_error(error)),
+    })
+}
+
 /// Opens the vault in `dir`. A folder with no header at all is `NotFound`, checked
 /// before anything is created in it. The lock comes next, so nothing is read from a
 /// vault another process has open.
@@ -157,30 +224,8 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
     let lock = VaultLock::acquire(dir)?;
     let main = load(&dir.join(HEADER_FILE));
     let backup = load(&dir.join(HEADER_BACKUP));
-    let mut cache = None;
-
     // `used_backup` is true when the copy that unlocked is `.bak`.
-    let (used, key, used_backup) = match (&main, &backup) {
-        (Ok(m), _) => match unwrap_with(&m.header, &credential, &mut cache) {
-            Ok(key) => (m, key, false),
-            Err(error) => {
-                let same_vault = backup.as_ref().ok().filter(|b| {
-                    may_try_backup(&error)
-                        && b.bytes != m.bytes
-                        && b.header.vault_id == m.header.vault_id
-                });
-                match same_vault.map(|b| (b, unwrap_with(&b.header, &credential, &mut cache))) {
-                    Some((b, Ok(key))) => (b, key, true),
-                    _ => return Err(error),
-                }
-            }
-        },
-        (Err(error), Ok(b)) if may_try_backup(error) => {
-            // A parsed header that rejects the secret is a wrong password, not damage.
-            (b, unwrap_with(&b.header, &credential, &mut cache)?, true)
-        }
-        (Err(_), _) => return Err(main.err().unwrap_or(CoreError::NotFound)),
-    };
+    let (used, key, used_backup) = choose_header(&main, &backup, &credential)?;
 
     // Before any repair write: an items folder that cannot be listed fails the unlock cleanly.
     let (items, damaged) = items::load_all(dir, &used.header.vault_id, &key)?;

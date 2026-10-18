@@ -49,7 +49,7 @@ pub(super) fn remove_scraps(dir: &Path, report: &mut CleanupReport) {
 
 /// The canonical blobs directly inside `folder` (regular files named `<32 lowercase hex>.blob`)
 /// with their sizes, sorted by ID. A missing folder holds none; a link is an error.
-fn list_blobs(folder: &Path) -> Result<Vec<(FileId, u64)>> {
+pub(super) fn list_blobs(folder: &Path) -> Result<Vec<(FileId, u64)>> {
     check_folder(folder)?;
     let entries = match fs::read_dir(folder) {
         Ok(entries) => entries,
@@ -85,7 +85,7 @@ fn move_blobs(ids: &[FileId], from: &Path, to: &Path) -> usize {
 
 /// Fails unless `folder` is a real folder or is missing. A link or junction (std reports both as
 /// links) could lead outside the vault, so cleanup never works through one.
-fn check_folder(folder: &Path) -> Result<()> {
+pub(super) fn check_folder(folder: &Path) -> Result<()> {
     match fs::symlink_metadata(folder) {
         Ok(meta) if meta.is_dir() => Ok(()),
         Ok(_) => Err(CoreError::InvalidInput {

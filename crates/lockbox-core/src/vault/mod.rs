@@ -6,6 +6,7 @@ mod cleanup;
 mod files;
 mod items;
 mod naming;
+mod source;
 mod unlock;
 
 use crate::fsio;
@@ -28,11 +29,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use unlock::Credential;
 
 pub use backup::BackupReport;
 pub(crate) use naming::folder_name;
-pub use unlock::read_vault_name;
+pub use source::{BackupSummary, verify_backup};
+pub use unlock::{Credential, read_vault_name};
 
 /// How long one password check should take on this machine.
 const KDF_TARGET: Duration = Duration::from_secs(1);

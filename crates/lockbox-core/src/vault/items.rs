@@ -45,7 +45,7 @@ fn random_item_id() -> ItemId {
 }
 
 /// The ID in an item file name: exactly 32 lowercase hex characters plus `.item`.
-fn item_id_from_file_name(name: &str) -> Option<ItemId> {
+pub(super) fn item_id_from_file_name(name: &str) -> Option<ItemId> {
     name.strip_suffix(ITEM_EXT)
         .and_then(|hex| ItemId::from_hex(hex).ok())
 }

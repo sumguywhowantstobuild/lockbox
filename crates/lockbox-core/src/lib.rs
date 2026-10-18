@@ -25,7 +25,10 @@ pub mod slots;
 pub mod vault;
 
 pub use error::{CoreError, Result};
-pub use vault::{BackupReport, CleanupReport, CreatedVault, UnlockReport, Vault, read_vault_name};
+pub use vault::{
+    BackupReport, BackupSummary, CleanupReport, CreatedVault, Credential, UnlockReport, Vault,
+    read_vault_name, verify_backup,
+};
 
 /// The version of this crate, as set in `Cargo.toml`.
 pub fn version() -> &'static str {
