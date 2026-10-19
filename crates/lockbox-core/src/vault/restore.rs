@@ -822,7 +822,10 @@ mod tests {
                         what: "restore path"
                     }
                 ));
-                d.assert_not_written();
+                // Only the test's own `sub` folder is there: nothing else was written.
+                assert_eq!(names(d.parent()), vec!["sub".to_string()]);
+                assert!(!d.journal().exists(), "journal left behind");
+                assert_eq!(d.reached_journal.get(), 0, "the journal write was reached");
             }
             Ok(p) => {
                 let journal = read_journal(&d.journal()).unwrap().unwrap();
