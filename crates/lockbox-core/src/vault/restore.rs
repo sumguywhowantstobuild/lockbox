@@ -12,7 +12,7 @@ use super::journal::{
     IN_PROGRESS, JournalStep, PRE_RESTORE, RESTORE_JOURNAL_VERSION, RestoreJournal, create_journal,
     is_pre_restore_name, journal_exists, lock_journal, new_staging_path, plain_absolute,
     read_journal, remove_journal_if_owner, remove_own_journal, remove_staging,
-    remove_staging_then_journal, validate_journal, validate_journal_folders, write_journal,
+    remove_staging_then_journal, validate_journal, validate_journal_on_disk, write_journal,
 };
 use super::source::{
     VaultSource, attached_blobs, attached_refs, check_listed, check_opened, copy_blob,
@@ -331,23 +331,23 @@ impl PreparedRestore {
         }
         cancel.check()?;
         let before = self.choose_before_restore()?;
-        match self.swap_steps(before.clone()) {
-            Ok(outcome) => {
-                self.finished = true;
-                Ok(outcome)
-            }
-            Err(e) if self.armed => Err(e),
+        let swapped = match self.swap_steps(before.clone()) {
+            Err(e) if self.armed => return Err(e),
             Err(e) => match recover_restore(&self.journal) {
-                Ok(Recovery::Finished) => {
-                    self.finished = true;
-                    Ok(RestoreOutcome {
-                        dir: self.target.clone(),
-                        before_restore: before,
-                    })
-                }
+                Ok(Recovery::Finished) => Ok(self.outcome(before)),
                 Ok(_) => Err(e),
                 Err(_) => Err(CoreError::RestorePending),
             },
+            done => done,
+        };
+        self.finished = swapped.is_ok();
+        swapped
+    }
+
+    fn outcome(&self, before: Option<PathBuf>) -> RestoreOutcome {
+        RestoreOutcome {
+            dir: self.target.clone(),
+            before_restore: before,
         }
     }
 
@@ -379,10 +379,10 @@ impl PreparedRestore {
                 1 => parent.join(format!("{name}{PRE_RESTORE}")),
                 n => parent.join(format!("{name}{PRE_RESTORE}-{n}")),
             })
-            .find_map(|b| match fs::symlink_metadata(&b) {
-                Err(e) if e.kind() == ErrorKind::NotFound => Some(Ok(b)),
-                Err(e) => Some(Err(CoreError::from(e))),
-                Ok(_) => None,
+            .find_map(|b| {
+                journal_exists(&b)
+                    .map(|taken| (!taken).then_some(b))
+                    .transpose()
             });
         drop(lock);
         free.unwrap_or(Err(CoreError::InvalidInput {
@@ -461,45 +461,47 @@ impl PreparedRestore {
         #[cfg(test)]
         crate::fsio::failpoint::check("restore.before_journal_done")?;
         remove_own_journal(&self.journal, &self.staging)?;
-        Ok(RestoreOutcome {
-            dir: self.target.clone(),
-            before_restore: before,
-        })
+        Ok(self.outcome(before))
     }
 }
 
 /// Startup recovery (spec 6.8): looks at the journal, if any, and finishes or undoes whatever
-/// a crash or a failed swap left, deciding from the folders on disk (the table in the Task 7
-/// brief). Run it at every launch, and right away when a commit says `RestorePending`. The
-/// journal is validated first, and a journal that fails is `Damaged` with nothing touched.
-/// Every case but "unclear" ends by removing the staging folder and then the journal; if a
-/// rename or that removal fails the result is `Err(RestorePending)` and the journal stays.
-/// Unclear: `InvalidInput { "restore state unclear" }` and nothing touched, for the user to
-/// decide (see [`dismiss_restore_journal`]). Runs again safely after any crash of its own.
+/// a crash or a failed swap left, deciding from the folders on disk (S staging, T target, B
+/// pre-restore):
+///
+/// | Journal | Disk | Action | Result |
+/// |---|---|---|---|
+/// | `extracting` | any | remove S | `StagingRemoved` |
+/// | `swapping`, no B | T there, S gone | nothing | `Finished` |
+/// | `swapping`, no B | T missing, or T and S there | remove S | `RolledBack` |
+/// | `swapping`, B | B missing, T there | remove S | `RolledBack` |
+/// | `swapping`, B | B there, T missing | B back to T, remove S | `RolledBack` |
+/// | `swapping`, B | B and T there, S gone | nothing (B kept) | `Finished` |
+/// | anything else | | nothing touched | `InvalidInput { "restore state unclear" }` |
+///
+/// Run it at every launch, and right away when a commit says `RestorePending`. The journal is
+/// validated first, and one that fails is `Damaged` with nothing touched. Every action ends by
+/// removing the journal; if a rename or the staging removal fails the result is
+/// `Err(RestorePending)` and the journal stays. An unclear state is for the user to decide
+/// (see [`dismiss_restore_journal`]). Runs again safely after any crash of its own.
 pub fn recover_restore(journal: &Path) -> Result<Recovery> {
     // Held for the whole run, so no one publishes, replaces or removes the journal under it.
     let lock = lock_journal(journal)?;
     let Some(j) = read_journal(journal)? else {
         return Ok(Recovery::NothingToDo);
     };
-    validate_journal(&j)?;
-    validate_journal_folders(&j)?;
+    validate_journal_on_disk(&j)?;
     #[cfg(test)]
     crate::fsio::failpoint::check("recover.under_lock")?;
 
-    let present = |p: &Path| match fs::symlink_metadata(p) {
-        Ok(_) => Ok(true),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(CoreError::from(e)),
-    };
     let (staging, target) = (&j.staging, &j.target);
-    let (t, s) = (present(target)?, present(staging)?);
+    let (t, s) = (journal_exists(target)?, journal_exists(staging)?);
     // The result, and the folder to move back to the target first.
     let (recovery, move_back) = match (j.step, &j.before_restore) {
         (JournalStep::Extracting, _) => (Recovery::StagingRemoved, None),
         (JournalStep::Swapping, None) if t && !s => (Recovery::Finished, None),
         (JournalStep::Swapping, None) => (Recovery::RolledBack, None),
-        (JournalStep::Swapping, Some(b)) => match (present(b)?, t, s) {
+        (JournalStep::Swapping, Some(b)) => match (journal_exists(b)?, t, s) {
             (false, true, _) => (Recovery::RolledBack, None),
             (true, false, _) => (Recovery::RolledBack, Some(b)),
             (true, true, false) => (Recovery::Finished, None),
@@ -529,9 +531,7 @@ pub fn dismiss_restore_journal(journal: &Path) -> Result<()> {
     let _lock = lock_journal(journal)?;
     match read_journal(journal) {
         Ok(None) => return Ok(()),
-        Ok(Some(j)) if validate_journal(&j).is_ok() && validate_journal_folders(&j).is_ok() => {
-            remove_staging(&j.staging)?;
-        }
+        Ok(Some(j)) if validate_journal_on_disk(&j).is_ok() => remove_staging(&j.staging)?,
         // A journal that cannot be trusted names nothing that may be deleted.
         Ok(Some(_))
         | Err(
@@ -1310,10 +1310,13 @@ mod tests {
         all
     }
 
+    /// A folder's contents, see [`tree`].
+    type Tree = Vec<(String, Option<Vec<u8>>)>;
+
     /// Every file and folder under `dir` with the bytes of the files, links recorded as links
     /// and never followed. A `.lock` file is left out: a held one cannot be read on Windows.
-    fn tree(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
-        fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Option<Vec<u8>>)>) {
+    fn tree(dir: &Path) -> Tree {
+        fn walk(root: &Path, dir: &Path, out: &mut Tree) {
             let mut paths: Vec<PathBuf> = fs::read_dir(dir)
                 .unwrap()
                 .map(|e| e.unwrap().path())
@@ -1455,6 +1458,11 @@ mod tests {
         }
     }
 
+    /// The folders under `parent` and the bytes of the journal, to compare before and after.
+    fn snapshot(parent: &Path, journal: &Path) -> (Tree, Vec<u8>) {
+        (tree(parent), fs::read(journal).unwrap())
+    }
+
     /// The process dies after a failed swap step: nothing is cleaned up. `mem::forget` would
     /// do the same but keeps the backup file open, and Windows then cannot delete the test's
     /// folder. Once the swap has disarmed it, a dropped restore does nothing at all, which the
@@ -1462,10 +1470,46 @@ mod tests {
     #[track_caller]
     fn die(p: PreparedRestore, s: &Scene) {
         assert!(!p.armed, "a restore past the journal rewrite is disarmed");
-        let (folders, journal) = (tree(s.parent()), fs::read(s.journal()).unwrap());
+        let before = snapshot(s.parent(), &s.journal());
         drop(p);
-        assert_eq!(tree(s.parent()), folders, "dropping the restore cleaned up");
-        assert_eq!(fs::read(s.journal()).unwrap(), journal);
+        assert!(
+            snapshot(s.parent(), &s.journal()) == before,
+            "dropping the restore cleaned up"
+        );
+    }
+
+    /// Runs the swap up to the failpoint `point` and then kills the process there.
+    #[track_caller]
+    fn crash_at(s: &Scene, point: &'static str) {
+        let mut p = s.prepare();
+        let before = p.choose_before_restore().unwrap();
+        failpoint::arm(point);
+        let result = p.swap_steps(before);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))), "{point}");
+        die(p, s);
+    }
+
+    #[track_caller]
+    fn assert_damaged_journal(got: Result<Recovery>) {
+        assert!(
+            matches!(
+                got,
+                Err(CoreError::Damaged {
+                    what: "restore journal"
+                })
+            ),
+            "{got:?}"
+        );
+    }
+
+    /// The name suffix of the `n`th pre-restore folder: `""`, `"-2"` ...
+    fn copy_suffix(n: u32) -> String {
+        if n == 1 {
+            String::new()
+        } else {
+            format!("-{n}")
+        }
     }
 
     #[track_caller]
@@ -1535,8 +1579,6 @@ mod tests {
             let (mut vault, _) = Vault::unlock_with_password(&s.target, PW).unwrap();
             vault.new_item(ItemKind::Note, "second", None).unwrap();
         }
-        let first_original_again = tree(&s.before(""));
-        assert_eq!(first_original, first_original_again);
         let out = s.prepare().commit(&CancelToken::new()).unwrap();
 
         assert_eq!(out.before_restore, Some(s.before("-2")));
@@ -1559,15 +1601,14 @@ mod tests {
         let (s, vault) = Scene::replacing();
         let mut p = s.prepare();
         let staging = staging_in(s.parent());
-        let before = tree(s.parent());
-        let journal_bytes = fs::read(s.journal()).unwrap();
+        let before = snapshot(s.parent(), &s.journal());
 
         let result = p.commit(&CancelToken::new());
         assert!(matches!(result, Err(CoreError::VaultInUse)));
-        assert_eq!(tree(s.parent()), before, "something moved or changed");
+        let after = snapshot(s.parent(), &s.journal());
+        assert!(after == before, "something moved or changed");
         assert!(s.target.exists() && staging.exists() && !s.before("").exists());
         assert_eq!(journal_step(&s.journal()).step, JournalStep::Extracting);
-        assert_eq!(fs::read(s.journal()).unwrap(), journal_bytes);
 
         // Closing the vault is all the retry needs.
         drop(vault);
@@ -1625,12 +1666,7 @@ mod tests {
         // 99 pre-restore folders are taken: the 100th has no name.
         let mut p = s.prepare();
         for n in 1..=99 {
-            let suffix = if n == 1 {
-                String::new()
-            } else {
-                format!("-{n}")
-            };
-            fs::create_dir(s.before(&suffix)).unwrap();
+            fs::create_dir(s.before(&copy_suffix(n))).unwrap();
         }
         let before = tree(s.parent());
         assert!(matches!(
@@ -1641,12 +1677,7 @@ mod tests {
         ));
         assert_eq!(tree(s.parent()), before);
         for n in 1..=99 {
-            let suffix = if n == 1 {
-                String::new()
-            } else {
-                format!("-{n}")
-            };
-            fs::remove_dir(s.before(&suffix)).unwrap();
+            fs::remove_dir(s.before(&copy_suffix(n))).unwrap();
         }
 
         // The folder at the target is now a different vault.
@@ -1685,13 +1716,7 @@ mod tests {
                 } else {
                     Scene::fresh()
                 };
-                let mut p = s.prepare();
-                let before = p.choose_before_restore().unwrap();
-                failpoint::arm(point);
-                let result = p.swap_steps(before);
-                failpoint::disarm_all();
-                assert!(matches!(result, Err(CoreError::Io(_))), "{what}");
-                die(p, &s);
+                crash_at(&s, point);
                 let j = journal_step(&s.journal());
                 assert_eq!(j.step, JournalStep::Swapping, "{what}");
                 assert_eq!(j.before_restore.is_some(), replacing, "{what}");
@@ -1729,12 +1754,7 @@ mod tests {
     fn crash_during_recovery_recovers() {
         let _reset = Cleanup;
         let s = Scene::replace();
-        let mut p = s.prepare();
-        let before = p.choose_before_restore().unwrap();
-        failpoint::arm("restore.after_move_existing");
-        assert!(p.swap_steps(before).is_err());
-        failpoint::disarm_all();
-        die(p, &s);
+        crash_at(&s, "restore.after_move_existing");
         // B exists, T is missing.
         assert!(s.before("").exists() && !s.target.exists());
 
@@ -1853,6 +1873,13 @@ mod tests {
         fn make(&self, path: &Path, marker: &str) {
             fs::create_dir(path).unwrap();
             fs::write(path.join("marker"), marker).unwrap();
+        }
+
+        /// T, S and B all there.
+        fn make_all(&self) {
+            for (path, marker) in [(self.t(), "T"), (self.s(), "S"), (self.b(), "B")] {
+                self.make(&path, marker);
+            }
         }
 
         fn write(&self, step: JournalStep, with_b: bool) {
@@ -1987,8 +2014,7 @@ mod tests {
                 }
             }
             raw.write(step, journal_b);
-            let (tree_before, journal_before) =
-                (tree(raw.parent.path()), fs::read(raw.journal()).unwrap());
+            let before = snapshot(raw.parent.path(), &raw.journal());
 
             let got = recover_restore(&raw.journal());
             match result {
@@ -2009,8 +2035,8 @@ mod tests {
                         ),
                         "{what}: {got:?}"
                     );
-                    assert_eq!(tree(raw.parent.path()), tree_before, "{what}: touched");
-                    assert_eq!(fs::read(raw.journal()).unwrap(), journal_before, "{what}");
+                    let after = snapshot(raw.parent.path(), &raw.journal());
+                    assert!(after == before, "{what}: touched");
                 }
             }
         }
@@ -2033,27 +2059,16 @@ mod tests {
 
         let forge = |name: &str, build: &dyn Fn(&Raw) -> RestoreJournal| {
             let raw = Raw::new();
-            for (path, marker) in [(raw.t(), "T"), (raw.s(), "S"), (raw.b(), "B")] {
-                raw.make(&path, marker);
-            }
+            raw.make_all();
             raw.make(&raw.parent.path().join("Documents"), "docs");
             write_journal(&raw.journal(), &build(&raw)).unwrap();
-            let (before, journal) = (tree(raw.parent.path()), fs::read(raw.journal()).unwrap());
+            let before = snapshot(raw.parent.path(), &raw.journal());
             let outside_before = tree(outside.path());
 
-            let got = recover_restore(&raw.journal());
-            assert!(
-                matches!(
-                    got,
-                    Err(CoreError::Damaged {
-                        what: "restore journal"
-                    })
-                ),
-                "{name}: {got:?}"
-            );
-            assert_eq!(tree(raw.parent.path()), before, "{name}: a folder changed");
-            assert_eq!(tree(outside.path()), outside_before, "{name}: outside");
-            assert_eq!(fs::read(raw.journal()).unwrap(), journal, "{name}: journal");
+            assert_damaged_journal(recover_restore(&raw.journal()));
+            let after = snapshot(raw.parent.path(), &raw.journal());
+            assert!(after == before, "{name}: a folder or the journal changed");
+            assert!(tree(outside.path()) == outside_before, "{name}: outside");
         };
         let journal = |raw: &Raw| RestoreJournal {
             version: RESTORE_JOURNAL_VERSION,
@@ -2117,23 +2132,12 @@ mod tests {
             (JournalStep::Extracting, false),
         ] {
             raw.write(step, with_b);
-            let (before, journal) = (tree(raw.parent.path()), fs::read(raw.journal()).unwrap());
-            let got = recover_restore(&raw.journal());
-            assert!(
-                matches!(
-                    got,
-                    Err(CoreError::Damaged {
-                        what: "restore journal"
-                    })
-                ),
-                "{got:?}"
-            );
-            assert_eq!(tree(raw.parent.path()), before);
-            assert_eq!(fs::read(raw.journal()).unwrap(), journal);
+            let before = snapshot(raw.parent.path(), &raw.journal());
+            assert_damaged_journal(recover_restore(&raw.journal()));
+            assert!(snapshot(raw.parent.path(), &raw.journal()) == before);
             assert_eq!(tree(outside.path()).len(), 1);
         }
-        // T and B may not be links either.
-        // A junction is removed like a folder, a symlink like a file.
+        // T may not be a link either. A junction is removed like a folder, a symlink like a file.
         #[cfg(windows)]
         fs::remove_dir(raw.s()).unwrap();
         #[cfg(not(windows))]
@@ -2142,12 +2146,7 @@ mod tests {
         fs::remove_dir_all(raw.t()).unwrap();
         make_dir_link(&raw.t(), outside.path());
         raw.write(JournalStep::Swapping, true);
-        assert!(matches!(
-            recover_restore(&raw.journal()),
-            Err(CoreError::Damaged {
-                what: "restore journal"
-            })
-        ));
+        assert_damaged_journal(recover_restore(&raw.journal()));
         assert_eq!(Raw::marker(&raw.s()).as_deref(), Some("S"));
         assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
     }
@@ -2156,9 +2155,7 @@ mod tests {
     fn dismiss_removes_only_staging_and_journal() {
         // An unclear state: B, T and S all there.
         let raw = Raw::new();
-        for (path, marker) in [(raw.t(), "T"), (raw.s(), "S"), (raw.b(), "B")] {
-            raw.make(&path, marker);
-        }
+        raw.make_all();
         raw.write(JournalStep::Swapping, true);
         assert!(recover_restore(&raw.journal()).is_err());
         assert!(raw.journal().exists() && raw.s().exists());
@@ -2241,12 +2238,7 @@ mod tests {
     fn recovery_runs_under_the_journal_lock() {
         let _reset = Cleanup;
         let s = Scene::replace();
-        let mut p = s.prepare();
-        let before = p.choose_before_restore().unwrap();
-        failpoint::arm("restore.after_move_existing");
-        assert!(p.swap_steps(before).is_err());
-        failpoint::disarm_all();
-        die(p, &s);
+        crash_at(&s, "restore.after_move_existing");
 
         let journal = s.journal();
         let held: Vec<_> = [

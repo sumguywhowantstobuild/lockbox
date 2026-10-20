@@ -143,10 +143,12 @@ pub(super) fn validate_journal(j: &RestoreJournal) -> Result<()> {
     Ok(())
 }
 
-/// Spec 6.8 journal validation, the part that looks at the disk: each of the journal's folders
-/// that exists must be a real folder, not a file, link, junction or other reparse point (by
-/// `symlink_metadata`). Refused as `Damaged`, with nothing touched, before any deletion or move.
-pub(super) fn validate_journal_folders(j: &RestoreJournal) -> Result<()> {
+/// The whole of spec 6.8 journal validation: [`validate_journal`], then the part that looks at
+/// the disk: each of the journal's folders that exists must be a real folder, not a file,
+/// link, junction or other reparse point (by `symlink_metadata`). Refused as `Damaged`, with
+/// nothing touched, before any deletion or move.
+pub(super) fn validate_journal_on_disk(j: &RestoreJournal) -> Result<()> {
+    validate_journal(j)?;
     let paths = [&j.staging, &j.target]
         .into_iter()
         .chain(j.before_restore.as_ref());
