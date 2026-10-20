@@ -22,7 +22,7 @@ const MAX_JOURNAL_BYTES: usize = 65_536;
 const STAGING_PREFIX: &str = ".restore-";
 /// What a pre-restore folder's name adds to the vault folder's.
 pub(super) const PRE_RESTORE: &str = ".before-restore";
-const DAMAGED: CoreError = CoreError::Damaged {
+pub(super) const DAMAGED: CoreError = CoreError::Damaged {
     what: "restore journal",
 };
 /// Something is already at the journal path: a restore, or what is left of one.
@@ -82,6 +82,21 @@ pub(super) fn plain_absolute(path: &Path) -> bool {
                 Component::Prefix(_) | Component::RootDir | Component::Normal(_)
             )
         })
+        && !has_dot_segment(path)
+}
+
+/// Whether the text of `path` has a `.` segment. `Path::components` drops those inside a path
+/// (`a/./b` has the components `a`, `b`), so this looks at the raw text, past the Windows prefix
+/// (`\\.\` device paths have one), split on `/` and, on Windows, `\`.
+fn has_dot_segment(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let prefix = match path.components().next() {
+        Some(Component::Prefix(p)) => p.as_os_str().len(),
+        _ => 0,
+    };
+    bytes[prefix..]
+        .split(|&b| b == b'/' || (cfg!(windows) && b == b'\\'))
+        .any(|segment| segment == b".")
 }
 
 /// The name of the last component of `path`, if it is valid Unicode.
@@ -145,10 +160,14 @@ pub(super) fn validate_journal(j: &RestoreJournal) -> Result<()> {
 
 /// The whole of spec 6.8 journal validation: [`validate_journal`], then the part that looks at
 /// the disk: each of the journal's folders that exists must be a real folder, not a file,
-/// link, junction or other reparse point (by `symlink_metadata`). Refused as `Damaged`, with
-/// nothing touched, before any deletion or move.
+/// link, junction or other reparse point (by `symlink_metadata`), and the staging folder must
+/// be listed in its parent under exactly the journal's name ([`check_real_name`]). Refused as
+/// `Damaged`, with nothing touched, before any deletion, move or rename.
 pub(super) fn validate_journal_on_disk(j: &RestoreJournal) -> Result<()> {
     validate_journal(j)?;
+    if journal_exists(&j.staging)? {
+        check_real_name(&j.staging)?;
+    }
     let paths = [&j.staging, &j.target]
         .into_iter()
         .chain(j.before_restore.as_ref());
@@ -218,26 +237,27 @@ pub(super) fn read_journal(path: &Path) -> Result<Option<RestoreJournal>> {
         .map_err(|_| DAMAGED)
 }
 
-/// Removes the staging folder, retrying while another program holds something in it. Refused,
-/// with nothing touched: a name that is not a staging name; a folder whose real name in its
-/// parent is not exactly that name (Windows finds a folder under any letter case, but only
-/// `.restore-` in lowercase followed by lowercase hex is a staging folder); a path that is
-/// not a real folder (a link, junction or other reparse point). A folder that is already gone
-/// counts as removed.
-pub(super) fn remove_staging(staging: &Path) -> Result<()> {
-    validate_staging_name(staging)?;
-    match fs::symlink_metadata(staging) {
-        Ok(_) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    }
-    let name = staging.file_name().ok_or(DAMAGED)?;
-    let real = fs::read_dir(parent_dir(staging))?
+/// Refused, as `Damaged`, unless the existing entry at `path` is listed in its parent under
+/// exactly this name. Windows finds a folder under any letter case, but only `.restore-` in
+/// lowercase followed by lowercase hex is a staging folder.
+fn check_real_name(path: &Path) -> Result<()> {
+    let name = path.file_name().ok_or(DAMAGED)?;
+    let real = fs::read_dir(parent_dir(path))?
         .filter_map(std::result::Result::ok)
         .any(|entry| entry.file_name() == name);
-    if !real {
-        return Err(DAMAGED);
+    if real { Ok(()) } else { Err(DAMAGED) }
+}
+
+/// Removes the staging folder, retrying while another program holds something in it. Refused,
+/// with nothing touched: a name that is not a staging name; a folder whose real name in its
+/// parent is not exactly that name ([`check_real_name`]); a path that is not a real folder (a
+/// link, junction or other reparse point). A folder that is already gone counts as removed.
+pub(super) fn remove_staging(staging: &Path) -> Result<()> {
+    validate_staging_name(staging)?;
+    if !journal_exists(staging)? {
+        return Ok(());
     }
+    check_real_name(staging)?;
     check_folder(staging)?;
     #[cfg(test)]
     crate::fsio::failpoint::check("restore.remove_staging")?;
@@ -691,8 +711,17 @@ mod tests {
             before_restore: Some(parent.join(b)),
             ..valid()
         };
+        // With no pre-restore folder, so only the target's own name can be what is refused.
         let named = |s: String| RestoreJournal {
             target: parent.join(s),
+            before_restore: None,
+            ..valid()
+        };
+        // All three folders in one directory, so only that directory's own path can be refused.
+        let under = |dir: &Path| RestoreJournal {
+            staging: dir.join(j.staging.file_name().unwrap()),
+            target: dir.join(t.file_name().unwrap()),
+            before_restore: Some(dir.join("Family-abababab.before-restore")),
             ..valid()
         };
         let hex = "cd".repeat(16);
@@ -704,13 +733,9 @@ mod tests {
                     ..valid()
                 },
             ),
-            (
-                "dot dot",
-                RestoreJournal {
-                    target: parent.join("..").join("Family-x"),
-                    ..valid()
-                },
-            ),
+            ("dot dot", under(&parent.join("sub").join(".."))),
+            ("dot", under(&parent.join("."))),
+            ("dot inside", under(&parent.join(".").join("sub"))),
             (
                 "other parent",
                 RestoreJournal {
@@ -788,6 +813,19 @@ mod tests {
             validate_journal(&with_b(good)).unwrap();
         }
         assert!(!plain_absolute(&parent.join("..")));
+        // `components()` drops an interior `.`, so the raw text has to be looked at.
+        assert!(
+            parent.join(".").join("x").components().count()
+                == parent.join("x").components().count()
+        );
+        assert!(!plain_absolute(&parent.join(".").join("x")));
+        assert!(!plain_absolute(&parent.join("x").join(".")));
+        assert!(plain_absolute(&parent.join(".x").join("..x")));
+        #[cfg(windows)]
+        {
+            assert!(!plain_absolute(Path::new(r"C:\a\.\b")));
+            assert!(plain_absolute(Path::new(r"\\.\C:\a\b")));
+        }
         assert!(plain_absolute(&parent));
         assert!(!plain_absolute(Path::new("relative")));
     }

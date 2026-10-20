@@ -9,10 +9,11 @@ use super::files::FILES_DIR;
 use super::folder_name;
 use super::items::ITEMS_DIR;
 use super::journal::{
-    IN_PROGRESS, JournalStep, PRE_RESTORE, RESTORE_JOURNAL_VERSION, RestoreJournal, create_journal,
-    is_pre_restore_name, journal_exists, lock_journal, new_staging_path, plain_absolute,
-    read_journal, remove_journal_if_owner, remove_own_journal, remove_staging,
-    remove_staging_then_journal, validate_journal, validate_journal_on_disk, write_journal,
+    DAMAGED, IN_PROGRESS, JournalLock, JournalStep, PRE_RESTORE, RESTORE_JOURNAL_VERSION,
+    RestoreJournal, create_journal, is_pre_restore_name, journal_exists, lock_journal,
+    new_staging_path, plain_absolute, read_journal, remove_journal_if_owner, remove_own_journal,
+    remove_staging, remove_staging_then_journal, validate_journal, validate_journal_on_disk,
+    write_journal,
 };
 use super::source::{
     VaultSource, attached_blobs, attached_refs, check_listed, check_opened, copy_blob,
@@ -59,6 +60,9 @@ pub struct PreparedRestore {
     armed: bool,
     /// The swap went through.
     finished: bool,
+    /// The last swap attempt got as far as writing `swapping` into the journal, so only
+    /// recovery can say what its error left behind.
+    swap_started: bool,
 }
 
 /// What a finished (or recovered) swap left on disk.
@@ -233,6 +237,7 @@ impl PreparedRestore {
             vault_id,
             armed: true,
             finished: false,
+            swap_started: false,
         };
         prepared.extract(&refs, cancel)?;
         Ok(prepared)
@@ -332,7 +337,8 @@ impl PreparedRestore {
         cancel.check()?;
         let before = self.choose_before_restore()?;
         let swapped = match self.swap_steps(before.clone()) {
-            Err(e) if self.armed => return Err(e),
+            // Still armed, or refused before the swap began: the restore is as it was.
+            Err(e) if self.armed || !self.swap_started => return Err(e),
             Err(e) => match recover_restore(&self.journal) {
                 Ok(Recovery::Finished) => Ok(self.outcome(before)),
                 Ok(_) => Err(e),
@@ -391,14 +397,42 @@ impl PreparedRestore {
         .map(Some)
     }
 
-    /// Rewrites the journal with `step` and `before`, under the journal lock and only if it is
-    /// still this restore's own.
-    fn rewrite_journal(&self, step: JournalStep, before: Option<PathBuf>) -> Result<()> {
-        let _lock = lock_journal(&self.journal)?;
+    /// The journal, read under `lock`, if it is this restore's own; else "restore in progress"
+    /// (it belongs to another operation, or is gone).
+    fn own_journal(&self, _lock: &JournalLock) -> Result<RestoreJournal> {
         match read_journal(&self.journal)? {
-            Some(j) if j.staging == self.staging => {}
-            _ => return Err(UNCLEAR),
+            Some(j) if j.staging == self.staging => Ok(j),
+            _ => Err(IN_PROGRESS),
         }
+    }
+
+    /// Before the first rename, under the held lock: the journal on disk must be this
+    /// restore's (same staging folder and target) and pass the full validation recovery uses, so
+    /// S, T and B are real folders and nothing is renamed through a link. A refusal is
+    /// `Damaged`; it disarms the restore (a drop must not delete what is not trusted) and
+    /// leaves the journal and the folders for the user to dismiss.
+    fn check_before_swap(&mut self, lock: &JournalLock) -> Result<()> {
+        let j = self.own_journal(lock)?;
+        let checked = if j.target == self.target {
+            validate_journal_on_disk(&j)
+        } else {
+            Err(DAMAGED)
+        };
+        if matches!(checked, Err(CoreError::Damaged { .. })) {
+            self.armed = false;
+        }
+        checked
+    }
+
+    /// Rewrites the journal with `step` and `before`, under the held `lock` and only if it is
+    /// still this restore's own.
+    fn rewrite_journal(
+        &self,
+        lock: &JournalLock,
+        step: JournalStep,
+        before: Option<PathBuf>,
+    ) -> Result<()> {
+        self.own_journal(lock)?;
         #[cfg(test)]
         crate::fsio::failpoint::check(match step {
             JournalStep::Swapping => "restore.swap_under_lock",
@@ -416,14 +450,23 @@ impl PreparedRestore {
 
     /// Steps 2 to 5. A test calls it directly to simulate a crash at a failpoint.
     ///
+    /// One journal lock is held from the first look at the journal to its deletion, so no one
+    /// publishes, replaces, removes or recovers it while folders are being renamed; it is
+    /// released on return, before the caller falls back to recovery, which takes it itself.
+    ///
     /// The restore stays armed (a drop cleans up) until the journal says `swapping`, and
-    /// again if the first rename is refused, because then nothing has moved. At any other
-    /// error it is disarmed, and the caller runs recovery.
+    /// again if the first rename failed with nothing moved. A refused validation disarms it
+    /// without recovery (`swap_started` stays off); any later error leaves it disarmed, and the
+    /// caller runs recovery.
     fn swap_steps(&mut self, before: Option<PathBuf>) -> Result<RestoreOutcome> {
+        self.swap_started = false;
         let parent = parent_dir(&self.target).to_owned();
+        let lock = lock_journal(&self.journal)?;
         // Step 2.
-        self.rewrite_journal(JournalStep::Swapping, before.clone())?;
+        self.check_before_swap(&lock)?;
+        self.rewrite_journal(&lock, JournalStep::Swapping, before.clone())?;
         self.armed = false;
+        self.swap_started = true;
         #[cfg(test)]
         crate::fsio::failpoint::check("restore.after_journal")?;
 
@@ -431,13 +474,32 @@ impl PreparedRestore {
         if let Some(b) = &before {
             #[cfg(test)]
             let moved = crate::fsio::failpoint::check("restore.fail_move_existing")
-                .and_then(|()| rename_dir_no_replace(&self.target, b));
+                .and_then(|()| rename_dir_no_replace(&self.target, b))
+                .and_then(|()| crate::fsio::failpoint::check("restore.fail_after_move_existing"));
             #[cfg(not(test))]
             let moved = rename_dir_no_replace(&self.target, b);
             if let Err(e) = moved {
-                // Nothing has moved: take the journal back to `extracting` and keep the restore.
-                // If that fails too, the disarmed restore goes to recovery with the original error.
-                self.armed = self.rewrite_journal(JournalStep::Extracting, None).is_ok();
+                // A rename can report an error after it moved the folder. Only T still in place
+                // and B still free prove that nothing moved (so does "destination exists",
+                // which is refused before any move: B was taken at the last moment). Then the
+                // journal goes back to `extracting` and the restore stays for a retry (if that
+                // write fails, the disarmed restore goes to recovery). Otherwise recovery moves
+                // B back.
+                let refused = matches!(
+                    e,
+                    CoreError::InvalidInput {
+                        what: "destination exists"
+                    }
+                );
+                let in_place = matches!(
+                    (journal_exists(&self.target), journal_exists(b)),
+                    (Ok(true), Ok(false))
+                );
+                if refused || in_place {
+                    self.armed = self
+                        .rewrite_journal(&lock, JournalStep::Extracting, None)
+                        .is_ok();
+                }
                 return Err(e);
             }
         }
@@ -460,7 +522,7 @@ impl PreparedRestore {
         sync_dir(&parent)?;
         #[cfg(test)]
         crate::fsio::failpoint::check("restore.before_journal_done")?;
-        remove_own_journal(&self.journal, &self.staging)?;
+        remove_journal_if_owner(&lock, &self.journal, &self.staging)?;
         Ok(self.outcome(before))
     }
 }
@@ -531,10 +593,14 @@ pub fn dismiss_restore_journal(journal: &Path) -> Result<()> {
     let _lock = lock_journal(journal)?;
     match read_journal(journal) {
         Ok(None) => return Ok(()),
-        Ok(Some(j)) if validate_journal_on_disk(&j).is_ok() => remove_staging(&j.staging)?,
-        // A journal that cannot be trusted names nothing that may be deleted.
-        Ok(Some(_))
-        | Err(
+        Ok(Some(j)) => match validate_journal_on_disk(&j) {
+            Ok(()) => remove_staging(&j.staging)?,
+            // A journal that cannot be trusted names nothing that may be deleted: its staging
+            // folder (a link, a letter-case variant ...) stays. Only a disk error keeps the journal.
+            Err(CoreError::Damaged { .. }) => {}
+            Err(e) => return Err(e),
+        },
+        Err(
             CoreError::Damaged { .. } | CoreError::TooLarge { .. } | CoreError::UnsupportedVersion,
         ) => {}
         Err(e) => return Err(e),
@@ -1503,6 +1569,19 @@ mod tests {
         );
     }
 
+    #[track_caller]
+    fn assert_damaged_commit(got: Result<RestoreOutcome>) {
+        assert!(
+            matches!(
+                got,
+                Err(CoreError::Damaged {
+                    what: "restore journal"
+                })
+            ),
+            "{got:?}"
+        );
+    }
+
     /// The name suffix of the `n`th pre-restore folder: `""`, `"-2"` ...
     fn copy_suffix(n: u32) -> String {
         if n == 1 {
@@ -2092,17 +2171,31 @@ mod tests {
             before_restore: Some(PathBuf::from("Family-abababab.before-restore")),
             ..journal(&Raw::new())
         });
-        forge("a dot dot component", &|raw| RestoreJournal {
+        // S, T and B all in one directory, so only that directory's path can be what is refused.
+        let all_under = |raw: &Raw, dir: PathBuf| RestoreJournal {
+            staging: dir.join(format!(".restore-{HEX}")),
+            target: dir.join("Family-abababab"),
+            before_restore: Some(dir.join("Family-abababab.before-restore")),
+            ..journal(raw)
+        };
+        forge("a dot dot component", &|raw| {
+            all_under(raw, raw.parent.path().join("Documents").join(".."))
+        });
+        forge("a dot component", &|raw| {
+            all_under(raw, raw.parent.path().join("."))
+        });
+        // With no B, so only T's own name can be what is refused.
+        forge("T is a case alias of S", &|raw| RestoreJournal {
+            target: raw.parent.path().join(format!(".RESTORE-{hex_upper}")),
+            before_restore: None,
+            ..journal(raw)
+        });
+        forge("T is a staging name in capitals", &|raw| RestoreJournal {
             target: raw
                 .parent
                 .path()
-                .join("Documents")
-                .join("..")
-                .join("Family-abababab"),
-            ..journal(raw)
-        });
-        forge("T is a case alias of S", &|raw| RestoreJournal {
-            target: raw.parent.path().join(format!(".RESTORE-{hex_upper}")),
+                .join(format!(".RESTORE-{}", "CD".repeat(16))),
+            before_restore: None,
             ..journal(raw)
         });
         forge("T is S in lowercase and B differs", &|raw| RestoreJournal {
@@ -2256,6 +2349,168 @@ mod tests {
             assert_eq!(count.get(), 1, "{point}");
         }
         assert!(!lock_is_held(&journal));
+    }
+
+    /// The first rename reports an error after it moved the folder. Only a T still in place
+    /// proves nothing moved, so this is not "nothing moved": recovery moves B back.
+    #[test]
+    fn error_after_the_first_rename_moved_the_folder_is_recovered() {
+        let _reset = Cleanup;
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        failpoint::arm("restore.fail_after_move_existing");
+        let result = p.commit(&CancelToken::new());
+        failpoint::disarm_all();
+
+        assert!(matches!(result, Err(CoreError::Io(_))), "{result:?}");
+        s.assert_settled();
+        s.assert_old_at(&s.target);
+        assert!(!s.before("").exists());
+        // Rolled back, so the restore is gone.
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::InvalidInput {
+                what: "restore discarded"
+            })
+        ));
+    }
+
+    /// The pre-restore name is taken between the choice and the rename: refused before any
+    /// move, so the restore stays and a retry picks the next name.
+    #[test]
+    fn a_pre_restore_name_taken_at_the_last_moment_keeps_restore() {
+        let _reset = Cleanup;
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        let taken = s.before("");
+        let intruder = taken.clone();
+        failpoint::observe(
+            "restore.after_journal",
+            Box::new(move || fs::create_dir(&intruder).unwrap()),
+        );
+        let result = p.commit(&CancelToken::new());
+        failpoint::disarm_all();
+
+        assert!(matches!(
+            result,
+            Err(CoreError::InvalidInput {
+                what: "destination exists"
+            })
+        ));
+        let j = journal_step(&s.journal());
+        assert_eq!((j.step, j.before_restore), (JournalStep::Extracting, None));
+        assert!(s.target.exists() && taken.exists());
+        let out = p.commit(&CancelToken::new()).unwrap();
+        assert_eq!(out.before_restore, Some(s.before("-2")));
+        s.assert_settled();
+        s.assert_restored_at(&s.target);
+        s.assert_old_at(&s.before("-2"));
+    }
+
+    /// One lock from the first look at the journal to its deletion: held at each rename, at
+    /// the sync after them and at the journal delete (a separate handle's `try_lock`).
+    #[test]
+    fn the_renames_run_under_the_journal_lock() {
+        let _reset = Cleanup;
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        let held: Vec<_> = [
+            "restore.swap_under_lock",
+            "restore.after_journal",
+            "restore.after_move_existing",
+            "restore.after_move_staging",
+            "restore.before_journal_done",
+            "journal.before_owner_delete",
+        ]
+        .into_iter()
+        .map(|point| (point, observe_lock_held(point, &s.journal())))
+        .collect();
+        p.commit(&CancelToken::new()).unwrap();
+        for (point, count) in held {
+            assert_eq!(count.get(), 1, "{point}");
+        }
+        assert!(!lock_is_held(&s.journal()));
+        s.assert_settled();
+    }
+
+    /// The folders are checked at the swap too: a staging folder that became a link after
+    /// `prepare` is not renamed. The restore is disarmed, so a drop deletes nothing either.
+    #[test]
+    fn a_staging_link_found_at_the_swap_is_refused() {
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        let staging = staging_in(s.parent());
+        let outside = TempDir::new();
+        fs::write(outside.path().join("keep"), b"keep").unwrap();
+        fs::remove_dir_all(&staging).unwrap();
+        make_dir_link(&staging, outside.path());
+        let before = snapshot(s.parent(), &s.journal());
+
+        assert_damaged_commit(p.commit(&CancelToken::new()));
+        assert!(
+            snapshot(s.parent(), &s.journal()) == before,
+            "something moved"
+        );
+        assert_eq!(journal_step(&s.journal()).step, JournalStep::Extracting);
+        drop(p);
+        assert!(
+            snapshot(s.parent(), &s.journal()) == before,
+            "the drop deleted"
+        );
+        assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
+    }
+
+    /// Someone else's journal at the path is "restore in progress", not "unclear" (which
+    /// would offer to dismiss it): nothing is renamed, and the drop leaves their journal.
+    #[test]
+    fn another_operations_journal_stops_the_swap() {
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        let theirs = RestoreJournal {
+            staging: new_staging_path(s.parent()),
+            ..journal_step(&s.journal())
+        };
+        write_journal(&s.journal(), &theirs).unwrap();
+        let before = snapshot(s.parent(), &s.journal());
+
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::InvalidInput {
+                what: "restore in progress"
+            })
+        ));
+        assert!(snapshot(s.parent(), &s.journal()) == before);
+        drop(p);
+        assert_eq!(journal_step(&s.journal()).staging, theirs.staging);
+        assert!(s.target.exists() && !s.before("").exists());
+    }
+
+    /// The staging folder is on disk under capitals, which Windows finds under the journal's
+    /// lowercase name too. Recovery refuses before it moves B, and dismissal removes the
+    /// journal but not that folder.
+    #[cfg(windows)]
+    #[test]
+    fn a_case_variant_staging_folder_is_refused_before_anything_moves() {
+        let raw = Raw::new();
+        let alias = raw
+            .parent
+            .path()
+            .join(format!(".RESTORE-{}", HEX.to_uppercase()));
+        raw.make(&alias, "S");
+        raw.make(&raw.b(), "B");
+        raw.write(JournalStep::Swapping, true);
+        assert!(raw.s().exists(), "Windows finds the lowercase spelling");
+        let before = snapshot(raw.parent.path(), &raw.journal());
+
+        assert_damaged_journal(recover_restore(&raw.journal()));
+        assert!(snapshot(raw.parent.path(), &raw.journal()) == before);
+        assert!(!raw.t().exists(), "B was moved to T");
+
+        dismiss_restore_journal(&raw.journal()).unwrap();
+        assert!(!raw.journal().exists());
+        assert_eq!(Raw::marker(&alias).as_deref(), Some("S"));
+        assert_eq!(Raw::marker(&raw.b()).as_deref(), Some("B"));
+        assert!(!raw.t().exists());
     }
 
     #[test]
