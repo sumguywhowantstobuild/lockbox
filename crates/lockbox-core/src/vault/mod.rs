@@ -34,7 +34,9 @@ use std::time::Duration;
 
 pub use backup::BackupReport;
 pub(crate) use naming::folder_name;
-pub use restore::PreparedRestore;
+pub use restore::{
+    PreparedRestore, Recovery, RestoreOutcome, dismiss_restore_journal, recover_restore,
+};
 pub use source::{BackupSummary, verify_backup};
 pub use unlock::{Credential, read_vault_name};
 

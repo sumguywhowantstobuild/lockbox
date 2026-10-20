@@ -21,7 +21,7 @@ pub(super) const RESTORE_JOURNAL_VERSION: u16 = 1;
 const MAX_JOURNAL_BYTES: usize = 65_536;
 const STAGING_PREFIX: &str = ".restore-";
 /// What a pre-restore folder's name adds to the vault folder's.
-const PRE_RESTORE: &str = ".before-restore";
+pub(super) const PRE_RESTORE: &str = ".before-restore";
 const DAMAGED: CoreError = CoreError::Damaged {
     what: "restore journal",
 };
@@ -143,6 +143,24 @@ pub(super) fn validate_journal(j: &RestoreJournal) -> Result<()> {
     Ok(())
 }
 
+/// Spec 6.8 journal validation, the part that looks at the disk: each of the journal's folders
+/// that exists must be a real folder, not a file, link, junction or other reparse point (by
+/// `symlink_metadata`). Refused as `Damaged`, with nothing touched, before any deletion or move.
+pub(super) fn validate_journal_folders(j: &RestoreJournal) -> Result<()> {
+    let paths = [&j.staging, &j.target]
+        .into_iter()
+        .chain(j.before_restore.as_ref());
+    for path in paths {
+        match check_folder(path) {
+            Err(CoreError::InvalidInput {
+                what: "not a plain folder",
+            }) => return Err(DAMAGED),
+            other => other?,
+        }
+    }
+    Ok(())
+}
+
 /// Whether anything at all is at `path`: a file, a folder, a link, even a dangling one.
 pub(super) fn journal_exists(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
@@ -172,8 +190,6 @@ pub(super) fn create_journal(path: &Path, j: &RestoreJournal) -> Result<()> {
 }
 
 /// Replaces the journal at `path` with a new version of the owner's own journal.
-// Used by the swap step, which moves the journal from `extracting` to `swapping`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn write_journal(path: &Path, j: &RestoreJournal) -> Result<()> {
     atomic_write(path, &journal_bytes(j)?)
 }

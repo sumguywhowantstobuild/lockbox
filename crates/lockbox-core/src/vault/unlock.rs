@@ -165,6 +165,7 @@ fn copy_error(error: &CoreError) -> CoreError {
         CoreError::TooLarge { what } => CoreError::TooLarge { what },
         CoreError::InvalidInput { what } => CoreError::InvalidInput { what },
         CoreError::VaultInUse => CoreError::VaultInUse,
+        CoreError::RestorePending => CoreError::RestorePending,
         CoreError::NotFound => CoreError::NotFound,
         CoreError::Cancelled => CoreError::Cancelled,
         CoreError::Io(e) => CoreError::Io(match e.raw_os_error() {
