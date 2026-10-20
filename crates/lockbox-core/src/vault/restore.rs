@@ -406,19 +406,31 @@ impl PreparedRestore {
         }
     }
 
-    /// Before the first rename, under the held lock: the journal on disk must be this
-    /// restore's (same staging folder and target) and pass the full validation recovery uses, so
-    /// S, T and B are real folders and nothing is renamed through a link. A refusal is
-    /// `Damaged`; it disarms the restore (a drop must not delete what is not trusted) and
-    /// leaves the journal and the folders for the user to dismiss.
+    /// Before the first rename, under the held lock: the journal on disk must be exactly this
+    /// restore's pre-swap state (`extracting`, no pre-restore folder, the same staging folder and
+    /// target) and pass the full validation recovery uses, so S, T and B are real folders and
+    /// nothing is renamed through a link. A refusal, an unreadable journal included, is `Damaged`
+    /// (or too large, or of an unknown version); it disarms the restore (a drop must not delete
+    /// what is not trusted) and leaves the journal and the folders for the user to dismiss. A
+    /// journal that is gone or another operation's is "restore in progress" and stays armed.
     fn check_before_swap(&mut self, lock: &JournalLock) -> Result<()> {
-        let j = self.own_journal(lock)?;
-        let checked = if j.target == self.target {
-            validate_journal_on_disk(&j)
-        } else {
-            Err(DAMAGED)
+        let checked = match self.own_journal(lock) {
+            Ok(j)
+                if j.target == self.target
+                    && j.step == JournalStep::Extracting
+                    && j.before_restore.is_none() =>
+            {
+                validate_journal_on_disk(&j)
+            }
+            Ok(_) => Err(DAMAGED),
+            Err(e) => Err(e),
         };
-        if matches!(checked, Err(CoreError::Damaged { .. })) {
+        if matches!(
+            checked,
+            Err(CoreError::Damaged { .. }
+                | CoreError::TooLarge { .. }
+                | CoreError::UnsupportedVersion)
+        ) {
             self.armed = false;
         }
         checked
@@ -2483,6 +2495,52 @@ mod tests {
         drop(p);
         assert_eq!(journal_step(&s.journal()).staging, theirs.staging);
         assert!(s.target.exists() && !s.before("").exists());
+    }
+
+    /// A journal that is not exactly this restore's pre-swap state is refused with nothing
+    /// renamed, and the restore is disarmed: dropping it keeps S, T and the journal as they are.
+    #[track_caller]
+    fn assert_swap_refused(s: &Scene, mut p: PreparedRestore) {
+        let before = snapshot(s.parent(), &s.journal());
+        assert_damaged_commit(p.commit(&CancelToken::new()));
+        assert!(
+            snapshot(s.parent(), &s.journal()) == before,
+            "something moved"
+        );
+        drop(p);
+        assert!(
+            snapshot(s.parent(), &s.journal()) == before,
+            "the drop deleted"
+        );
+        assert!(!s.before("").exists());
+    }
+
+    #[test]
+    fn an_unreadable_journal_at_the_swap_is_refused_and_kept() {
+        let s = Scene::replace();
+        let p = s.prepare();
+        // A field this version does not know: `read_journal` says `Damaged`.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(s.journal()).unwrap()).unwrap();
+        value["extra"] = 1.into();
+        fs::write(s.journal(), serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_swap_refused(&s, p);
+        staging_in(s.parent());
+    }
+
+    #[test]
+    fn a_journal_past_extracting_at_the_swap_is_refused_and_kept() {
+        let s = Scene::replace();
+        let p = s.prepare();
+        let swapping = RestoreJournal {
+            step: JournalStep::Swapping,
+            before_restore: Some(s.before("")),
+            ..journal_step(&s.journal())
+        };
+        write_journal(&s.journal(), &swapping).unwrap();
+        assert_swap_refused(&s, p);
+        assert_eq!(journal_step(&s.journal()).step, JournalStep::Swapping);
+        staging_in(s.parent());
     }
 
     /// The staging folder is on disk under capitals, which Windows finds under the journal's
