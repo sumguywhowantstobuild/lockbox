@@ -59,10 +59,16 @@ pub(super) fn refuse_inside(folder: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Refuses an export whose decrypted copy would not fit beside `dest`. Checked before the blob
+/// is opened.
+pub(super) fn check_export_space(fref: &FileRef, dest: &Path) -> Result<()> {
+    check_space(fref.length, fref.length, &volume_info(parent_dir(dest))?)
+}
+
 /// The verify-then-publish half of an export, shared by [`Vault`] and the read-only vault: the
 /// decrypted copy is built in a hidden temp file beside `dest`, and an existing `dest` is
 /// replaced only once every chunk has authenticated. The caller has refused a `dest` that must
-/// not be written. The temp is recorded in `journal` before it exists.
+/// not be written and has checked the space. The temp is recorded in `journal` before it exists.
 pub(super) fn export_blob(
     blob: &mut impl Read,
     blob_size: u64,
@@ -72,9 +78,7 @@ pub(super) fn export_blob(
     journal: &dyn OutputJournal,
     cancel: &CancelToken,
 ) -> Result<()> {
-    let folder = parent_dir(dest);
-    check_space(fref.length, fref.length, &volume_info(folder)?)?;
-    let temp = hidden_temp_path(folder, ".lockbox-partial");
+    let temp = hidden_temp_path(parent_dir(dest), ".lockbox-partial");
     journal.record(&temp);
     // Owned only once this succeeds; if the name is taken, the other file is not ours to delete.
     let mut out = match create_hidden_file(&temp) {
@@ -271,6 +275,7 @@ impl Vault {
             .find(|f| f.file_id == *file)
             .ok_or(CoreError::NotFound)?;
         refuse_inside(parent_dir(dest), &self.dir)?;
+        check_export_space(fref, dest)?;
         let mut blob = File::open(self.blob_path(file)).map_err(|e| match e.kind() {
             ErrorKind::NotFound => CoreError::Damaged {
                 what: "file missing",
@@ -849,6 +854,25 @@ mod tests {
         assert!(c.trashed_at.is_some() && c.purging, "collection untouched");
         assert!(vault.get_item(&member).unwrap().trashed_at.is_some());
         vault.purge_item(&collection).unwrap();
+    }
+
+    #[test]
+    fn missing_blob_and_too_little_space_is_a_space_error() {
+        let _cleanup = Cleanup;
+        let (parent, vault, id, file) = vault_with_file();
+        fs::remove_file(blob_path(&vault, &file)).unwrap();
+        let dest = parent.path().join("out.txt");
+        let cancel = CancelToken::new();
+        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel);
+        assert!(matches!(
+            result,
+            Err(CoreError::Damaged {
+                what: "file missing"
+            })
+        ));
+        set_volume_override(volume(Some(MIB), None));
+        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel);
+        assert!(matches!(result, Err(CoreError::NotEnoughSpace { .. })));
     }
 
     // D. Export never writes into the vault itself.

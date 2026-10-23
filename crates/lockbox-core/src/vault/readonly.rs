@@ -3,7 +3,7 @@
 //! lock and repairs, cleans and creates nothing, so a folder is exactly as it was afterwards.
 
 use super::Credential;
-use super::files::{export_blob, refuse_inside};
+use super::files::{check_export_space, export_blob, refuse_inside};
 use super::source::{HEADER_MAC, VaultSource, unlock_source};
 use crate::archive::BackupArchive;
 use crate::blob::{CancelToken, OutputJournal};
@@ -131,6 +131,7 @@ impl ReadOnlyVault {
             VaultSource::Archive(a) if a.is_same_file(dest)? => return Err(DESTINATION_IS_BACKUP),
             VaultSource::Archive(_) => {}
         }
+        check_export_space(fref, dest)?;
         let (mut blob, blob_size) = self.source.blob(file)?;
         let vault_id = &self.header.vault_id;
         export_blob(&mut blob, blob_size, vault_id, fref, dest, journal, cancel)
@@ -142,17 +143,18 @@ mod tests {
     use super::*;
     use crate::archive::testkit::{ManifestMode, rewrite_backup};
     use crate::blob::NoJournal;
-    use crate::fsio::failpoint;
     use crate::fsio::testutil::{flip_byte, names};
+    use crate::fsio::{VolumeInfo, failpoint, set_volume_override};
     use crate::header::{HEADER_BACKUP, HEADER_FILE, parse_header, serialize_header};
     use crate::item::ItemKind;
     use crate::recovery::RecoverySecret;
     use crate::vault::Vault;
     use crate::vault::restore::tests::tree;
     use crate::vault::source::tests::{Fixture, MIB, PW, flip_blob_second_chunk, flip_item};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use zeroize::Zeroizing;
 
     const NEW_PW: &str = "another long passphrase";
@@ -213,11 +215,12 @@ mod tests {
         }
     }
 
-    /// Always disarms, so a failing test cannot leak a failpoint into the next one on this thread.
+    /// Always disarms, so a failing test cannot leak a failpoint or volume into the next one on this thread.
     struct Disarm;
     impl Drop for Disarm {
         fn drop(&mut self) {
             failpoint::disarm_all();
+            set_volume_override(None);
         }
     }
 
@@ -383,6 +386,64 @@ mod tests {
         assert_eq!(fs::read(&beside).unwrap(), b"data");
     }
 
+    /// A second name for the same file is the backup too: the path differs, the file does not.
+    #[test]
+    fn export_over_a_hard_link_of_the_backup_refused() {
+        let mut f = Fixture::new();
+        let (item, file) = f.file_item(b"data");
+        let backup = f.backup("a.lockbox-backup");
+        let link = f.out().join("alias.lockbox-backup");
+        fs::hard_link(&backup, &link).unwrap();
+        let ro = open_backup(&backup).unwrap();
+        let before = fs::read(&backup).unwrap();
+        let journal = Recorder::default();
+        let result = ro.export_file(&item, &file, &link, &journal, &CancelToken::new());
+        assert!(matches!(
+            result,
+            Err(CoreError::InvalidInput {
+                what: "destination is the backup"
+            })
+        ));
+        assert_eq!(fs::read(&backup).unwrap(), before);
+        assert_eq!(fs::read(&link).unwrap(), before);
+        assert!(journal.recorded.borrow().is_empty(), "no temp was created");
+        assert_eq!(
+            names(&f.out()),
+            ["a.lockbox-backup", "alias.lockbox-backup"]
+        );
+    }
+
+    /// As before Task 8: the space check comes before the blob is opened, so a missing blob on
+    /// a full disk is a space error.
+    #[test]
+    fn missing_blob_and_too_little_space_is_a_space_error() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        let (item, file) = f.file_item(b"data");
+        let copy = f.parent.path().join("copy");
+        copy_folder(f.vault.dir(), &copy);
+        fs::remove_file(copy.join("files").join(format!("{}.blob", file.to_hex()))).unwrap();
+        let ro = open_folder(&copy).unwrap();
+        let dest = f.out().join("copy.bin");
+        let cancel = CancelToken::new();
+        let result = ro.export_file(&item, &file, &dest, &NoJournal, &cancel);
+        assert!(matches!(
+            result,
+            Err(CoreError::Damaged {
+                what: "file missing"
+            })
+        ));
+        set_volume_override(Some(VolumeInfo {
+            free_bytes: Some(MIB as u64),
+            max_file_bytes: None,
+        }));
+        let result = ro.export_file(&item, &file, &dest, &NoJournal, &cancel);
+        assert!(
+            matches!(result, Err(CoreError::NotEnoughSpace { .. })),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn export_into_the_viewed_folder_refused() {
         let mut f = Fixture::new();
@@ -500,24 +561,33 @@ mod tests {
         let backup = f.backup("a.lockbox-backup");
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
-        let opens = |token: &CancelToken| {
-            [
-                ReadOnlyVault::open_backup(&backup, Credential::Password(PW), token),
-                ReadOnlyVault::open_folder(&copy, Credential::Password(PW), token),
-            ]
+        let backup_open = |token: &CancelToken| {
+            ReadOnlyVault::open_backup(&backup, Credential::Password(PW), token)
+        };
+        let folder_open = |token: &CancelToken| {
+            ReadOnlyVault::open_folder(&copy, Credential::Password(PW), token)
         };
 
         let cancelled = CancelToken::new();
         cancelled.cancel();
-        for result in opens(&cancelled) {
-            assert!(matches!(result, Err(CoreError::Cancelled)));
-        }
-        // A cancel that arrives while the items are being opened.
+        assert!(matches!(backup_open(&cancelled), Err(CoreError::Cancelled)));
+        assert!(matches!(folder_open(&cancelled), Err(CoreError::Cancelled)));
+        cancel_while_opening_items(backup_open);
+        cancel_while_opening_items(folder_open);
+    }
+
+    /// A cancel that arrives at the per-item checkpoint stops `open`, which must have reached it.
+    #[track_caller]
+    fn cancel_while_opening_items(open: impl Fn(&CancelToken) -> Result<ReadOnlyVault>) {
         let token = CancelToken::new();
+        let reached = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&reached);
+        failpoint::observe("source.item", Box::new(move || seen.set(seen.get() + 1)));
         failpoint::arm_cancel("source.item", token.clone());
-        for result in opens(&token) {
-            assert!(matches!(result, Err(CoreError::Cancelled)));
-        }
+        let result = open(&token);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(reached.get(), 1, "never reached the per-item checkpoint");
     }
 
     #[test]

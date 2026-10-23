@@ -224,7 +224,9 @@ Lockbox defends.
 
 - **Swapping the export destination.** Before saving a decrypted copy, Lockbox checks that the destination is not
   inside the vault. A local attacker could swap a folder link into place between that check and the save.
-  *Accepted:* the window is tiny and the attacker already has the access to cause harm.
+  *Accepted:* the window is tiny and the attacker already has the access to cause harm. The same check, and the same
+  accepted window, apply when you save a file out of a backup or a `.before-restore` folder opened read-only: the
+  destination must not be the backup itself or inside the folder being viewed.
 - **Linked `items/` or `files/` folders.** Cleanup and deleting quarantined files refuse to work through a link or
   junction (a Windows folder link) and report it only as a failed cleanup. A purge refuses a linked `files/` or
   `files/orphaned/` before deleting any file content. Unlocking, saving items, importing and exporting still work

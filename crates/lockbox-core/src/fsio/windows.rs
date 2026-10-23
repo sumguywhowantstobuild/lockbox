@@ -8,13 +8,15 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_HIDDEN, FILE_FLAG_BACKUP_SEMANTICS, GetDiskFreeSpaceExW, GetFileAttributesW,
-    GetVolumeInformationW, GetVolumePathNameW, INVALID_FILE_ATTRIBUTES, MOVE_FILE_FLAGS,
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_HIDDEN, FILE_FLAG_BACKUP_SEMANTICS,
+    GetDiskFreeSpaceExW, GetFileAttributesW, GetFileInformationByHandle, GetVolumeInformationW,
+    GetVolumePathNameW, INVALID_FILE_ATTRIBUTES, MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
 };
 use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
@@ -145,6 +147,20 @@ pub fn open_shared_read(path: &Path) -> io::Result<File> {
 /// Reads at `offset` without depending on (or caring about) the handle's position.
 pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
     std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+}
+
+/// Names the file behind an open handle: volume serial number and file index. Two names of the
+/// same file (hard links) give the same pair.
+pub fn file_id(file: &File) -> io::Result<(u64, u64)> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle comes from a live `File` and stays open for the call; `info` is a
+    // valid, writable struct of the type the call fills in.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    Ok((u64::from(info.dwVolumeSerialNumber), index))
 }
 
 pub fn volume_info(dir: &Path) -> io::Result<VolumeInfo> {

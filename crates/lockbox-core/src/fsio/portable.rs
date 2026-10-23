@@ -66,6 +66,14 @@ pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
     std::os::unix::fs::FileExt::read_at(file, buf, offset)
 }
 
+/// Names the file behind an open handle: device and inode. Two names of the same file (hard
+/// links) give the same pair.
+pub fn file_id(file: &File) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata()?;
+    Ok((meta.dev(), meta.ino()))
+}
+
 /// Free space and file-size limits are not measured on this platform.
 pub fn volume_info(_dir: &Path) -> io::Result<VolumeInfo> {
     Ok(VolumeInfo {

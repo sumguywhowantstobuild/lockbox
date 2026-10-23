@@ -205,6 +205,17 @@ pub fn open_shared_read(path: &Path) -> Result<File> {
     Ok(retry(|| sys::open_shared_read(path))?)
 }
 
+/// Whether the file at `path` is the open `file`, whatever its name (a hard link, another
+/// spelling of the path, a link to it). Nothing at `path`, or a folder, is not.
+pub fn is_same_file(file: &File, path: &Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(sys::file_id(file)? == sys::file_id(&File::open(path)?)?),
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Reads up to `buf.len()` bytes at `offset`; 0 means end of file.
 pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> Result<usize> {
     Ok(retry(|| sys::read_at(file, buf, offset))?)

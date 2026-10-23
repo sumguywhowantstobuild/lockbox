@@ -5,7 +5,7 @@
 
 use crate::blob::{CancelToken, MAX_FILE_BYTES, SIZE_CHANGED, at_end, blob_len, fill};
 use crate::error::{CoreError, Result};
-use crate::fsio::{open_shared_read, read_at};
+use crate::fsio::{self, open_shared_read, read_at};
 use crate::header::{HEADER_FILE, MAX_HEADER_BYTES};
 use crate::ids::{FileId, ItemId};
 use crate::item::MAX_ITEM_FILE;
@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -367,7 +367,6 @@ fn check_local(file: &File, r: &mut Record, limit: u64) -> Result<()> {
 /// Windows sharing read access only, so nobody can change it meanwhile).
 pub struct BackupArchive {
     file: Arc<File>,
-    path: PathBuf,
     manifest: BackupManifest,
     entries: Vec<ArchiveEntry>,
     total_size: u64,
@@ -470,7 +469,6 @@ impl BackupArchive {
         let total_size = entries.iter().map(|e| e.size).sum();
         Ok(BackupArchive {
             file: Arc::new(file),
-            path: std::fs::canonicalize(path)?,
             manifest,
             entries,
             total_size,
@@ -516,13 +514,10 @@ impl BackupArchive {
         Ok(bytes)
     }
 
-    /// Whether `path` names this archive's file; `false` when `path` does not exist.
+    /// Whether `path` is this archive's file under any name (see [`fsio::is_same_file`]);
+    /// `false` when `path` does not exist.
     pub fn is_same_file(&self, path: &Path) -> Result<bool> {
-        match std::fs::canonicalize(path) {
-            Ok(p) => Ok(p == self.path),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(e.into()),
-        }
+        fsio::is_same_file(&self.file, path)
     }
 }
 
@@ -1411,13 +1406,17 @@ mod tests {
     }
 
     #[test]
-    fn is_same_file_compares_canonical_paths() {
+    fn is_same_file_compares_the_files_themselves() {
         let dir = TempDir::new();
         let path = dir.path().join("s.lockbox-backup");
         std::fs::write(&path, base()).unwrap();
         std::fs::write(dir.path().join("other"), b"x").unwrap();
         let archive = BackupArchive::open(&path, &CancelToken::new()).unwrap();
         assert!(archive.is_same_file(&path).unwrap());
+        let link = dir.path().join("hard-link");
+        std::fs::hard_link(&path, &link).unwrap();
+        assert!(archive.is_same_file(&link).unwrap());
+        assert!(!archive.is_same_file(dir.path()).unwrap(), "a folder");
         let roundabout = dir.path().join("sub").join("..").join("s.lockbox-backup");
         std::fs::create_dir(dir.path().join("sub")).unwrap();
         assert!(archive.is_same_file(&roundabout).unwrap());
