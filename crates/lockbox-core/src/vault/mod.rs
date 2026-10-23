@@ -7,6 +7,7 @@ mod files;
 mod items;
 mod journal;
 mod naming;
+mod readonly;
 mod restore;
 mod source;
 mod unlock;
@@ -34,6 +35,7 @@ use std::time::Duration;
 
 pub use backup::BackupReport;
 pub(crate) use naming::folder_name;
+pub use readonly::ReadOnlyVault;
 pub use restore::{
     PreparedRestore, Recovery, RestoreOutcome, dismiss_restore_journal, recover_restore,
 };

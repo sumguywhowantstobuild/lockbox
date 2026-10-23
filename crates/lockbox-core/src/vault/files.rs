@@ -16,7 +16,7 @@ use crate::fsio::{
     check_space, clear_hidden, create_hidden_file, hidden_temp_path, parent_dir, remove_file_retry,
     replace_file, volume_info,
 };
-use crate::ids::{FileId, ItemId};
+use crate::ids::{FileId, ItemId, VaultId};
 use crate::item::{FileRef, Item, ItemKind};
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
@@ -57,6 +57,50 @@ pub(super) fn refuse_inside(folder: &Path, dir: &Path) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// The verify-then-publish half of an export, shared by [`Vault`] and the read-only vault: the
+/// decrypted copy is built in a hidden temp file beside `dest`, and an existing `dest` is
+/// replaced only once every chunk has authenticated. The caller has refused a `dest` that must
+/// not be written. The temp is recorded in `journal` before it exists.
+pub(super) fn export_blob(
+    blob: &mut impl Read,
+    blob_size: u64,
+    vault_id: &VaultId,
+    fref: &FileRef,
+    dest: &Path,
+    journal: &dyn OutputJournal,
+    cancel: &CancelToken,
+) -> Result<()> {
+    let folder = parent_dir(dest);
+    check_space(fref.length, fref.length, &volume_info(folder)?)?;
+    let temp = hidden_temp_path(folder, ".lockbox-partial");
+    journal.record(&temp);
+    // Owned only once this succeeds; if the name is taken, the other file is not ours to delete.
+    let mut out = match create_hidden_file(&temp) {
+        Ok(out) => out,
+        Err(error) => {
+            journal.clear(&temp);
+            return Err(error);
+        }
+    };
+    let published = (|| {
+        decrypt_stream(blob, blob_size, &mut out, vault_id, fref, cancel)?;
+        out.sync_all()?;
+        drop(out);
+        // Windows keeps a file's attributes when it replaces another: unhide first.
+        clear_hidden(&temp)?;
+        #[cfg(test)]
+        crate::fsio::failpoint::check("export.before_publish")?;
+        // Last chance to stop: once the rename starts, publication completes.
+        cancel.check()?;
+        replace_file(&temp, dest)
+    })();
+    // Only a temp that is really gone leaves the journal; otherwise launch cleanup retries.
+    if published.is_ok() || remove_file_retry(&temp).is_ok() {
+        journal.clear(&temp);
+    }
+    published
 }
 
 /// Opens the file to import and returns it with its size. On Windows other programs may
@@ -226,9 +270,7 @@ impl Vault {
             .iter()
             .find(|f| f.file_id == *file)
             .ok_or(CoreError::NotFound)?;
-        let folder = parent_dir(dest);
-        refuse_inside(folder, &self.dir)?;
-        check_space(fref.length, fref.length, &volume_info(folder)?)?;
+        refuse_inside(parent_dir(dest), &self.dir)?;
         let mut blob = File::open(self.blob_path(file)).map_err(|e| match e.kind() {
             ErrorKind::NotFound => CoreError::Damaged {
                 what: "file missing",
@@ -236,35 +278,15 @@ impl Vault {
             _ => e.into(),
         })?;
         let blob_size = blob.metadata()?.len();
-
-        let temp = hidden_temp_path(folder, ".lockbox-partial");
-        journal.record(&temp);
-        // Owned only once this succeeds; if the name is taken, the other file is not ours to delete.
-        let mut out = match create_hidden_file(&temp) {
-            Ok(out) => out,
-            Err(error) => {
-                journal.clear(&temp);
-                return Err(error);
-            }
-        };
-        let published = (|| {
-            let vault_id = &self.header.vault_id;
-            decrypt_stream(&mut blob, blob_size, &mut out, vault_id, fref, cancel)?;
-            out.sync_all()?;
-            drop(out);
-            // Windows keeps a file's attributes when it replaces another: unhide first.
-            clear_hidden(&temp)?;
-            #[cfg(test)]
-            crate::fsio::failpoint::check("export.before_publish")?;
-            // Last chance to stop: once the rename starts, publication completes.
-            cancel.check()?;
-            replace_file(&temp, dest)
-        })();
-        // Only a temp that is really gone leaves the journal; otherwise launch cleanup retries.
-        if published.is_ok() || remove_file_retry(&temp).is_ok() {
-            journal.clear(&temp);
-        }
-        published
+        export_blob(
+            &mut blob,
+            blob_size,
+            &self.header.vault_id,
+            fref,
+            dest,
+            journal,
+            cancel,
+        )
     }
 
     /// Permanently deletes a trashed item and its blobs, except a blob another item still

@@ -631,7 +631,8 @@ impl Drop for PreparedRestore {
 }
 
 #[cfg(test)]
-mod tests {
+// `pub(super)`: the read-only vault's tests compare folder trees with the same helper.
+pub(super) mod tests {
     use super::*;
     use crate::archive::testkit::{
         ManifestMode, central_offset, patch, resize_entry, rewrite_backup,
@@ -1389,11 +1390,11 @@ mod tests {
     }
 
     /// A folder's contents, see [`tree`].
-    type Tree = Vec<(String, Option<Vec<u8>>)>;
+    pub(in crate::vault) type Tree = Vec<(String, Option<Vec<u8>>)>;
 
     /// Every file and folder under `dir` with the bytes of the files, links recorded as links
     /// and never followed. A `.lock` file is left out: a held one cannot be read on Windows.
-    fn tree(dir: &Path) -> Tree {
+    pub(in crate::vault) fn tree(dir: &Path) -> Tree {
         fn walk(root: &Path, dir: &Path, out: &mut Tree) {
             let mut paths: Vec<PathBuf> = fs::read_dir(dir)
                 .unwrap()

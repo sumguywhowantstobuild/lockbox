@@ -31,7 +31,7 @@ const WRONG_VAULT: CoreError = CoreError::Damaged {
 pub(super) const ENTRY_HASH: CoreError = CoreError::Damaged {
     what: "backup: entry hash",
 };
-const HEADER_MAC: CoreError = CoreError::Damaged {
+pub(super) const HEADER_MAC: CoreError = CoreError::Damaged {
     what: "backup: header mac",
 };
 const DAMAGED_ITEM: CoreError = CoreError::Damaged {
@@ -51,8 +51,6 @@ const FILE_MISSING: CoreError = CoreError::Damaged {
 };
 
 /// Where a vault's files are read from.
-// `Folder` is built by the tests now and by later tasks (restore) in production code.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) enum VaultSource {
     Folder(PathBuf),
     Archive(BackupArchive),
