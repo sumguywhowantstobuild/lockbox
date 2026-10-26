@@ -884,6 +884,18 @@ pub(super) mod tests {
             recovery: String,
             /// Lowercase: the vault ID, the item and file IDs, the names.
             secrets: Vec<String>,
+            /// The vault key, so a changed entry can be listed in the manifest under a valid MAC.
+            key: [u8; 32],
+            /// Each entry of the backup, manifest excluded: its name and bytes.
+            entries: Vec<(String, Vec<u8>)>,
+        }
+
+        /// One test case: a change anywhere in the backup file, or a change inside one entry
+        /// whose new bytes are then listed in the manifest, correctly signed.
+        #[derive(Debug)]
+        enum Case {
+            File(Vec<u8>),
+            Entry(usize, Vec<u8>),
         }
 
         /// A vault of a note and a file item, backed up once for all cases.
@@ -908,12 +920,37 @@ pub(super) mod tests {
                 ITEM_TITLE.to_owned(),
                 FILE_NAME.to_owned(),
             ];
+            let archive = BackupArchive::open(&dest, &cancel).unwrap();
+            let entries = archive
+                .entries()
+                .iter()
+                .filter(|e| e.kind != EntryKind::Manifest)
+                .map(|e| {
+                    let mut bytes = Vec::new();
+                    archive.reader(e).read_to_end(&mut bytes).unwrap();
+                    (e.name.clone(), bytes)
+                })
+                .collect();
+            drop(archive);
             Tiny {
                 backup: fs::read(&dest).unwrap(),
                 recovery: created.recovery.to_display().to_string(),
                 secrets: secrets.map(|s| s.to_lowercase()).to_vec(),
+                key: *vault.vault_key.as_bytes(),
+                entries,
             }
         });
+
+        /// Half the cases change the backup file anywhere, which the hash and structure checks
+        /// stop. Half change one entry (the header, an item or the blob) and re-sign the
+        /// manifest, so the changed bytes get past the hash check into the header MAC, the
+        /// item decryption and the blob authentication.
+        fn cases() -> impl Strategy<Value = Case> {
+            let in_entry = (0..TINY.entries.len()).prop_flat_map(|i| {
+                mutated(&TINY.entries[i].1, 3).prop_map(move |bytes| Case::Entry(i, bytes))
+            });
+            prop_oneof![mutated(&TINY.backup, 1).prop_map(Case::File), in_entry]
+        }
 
         /// The 8-byte rule, counting only pieces the change brought in (the plain rule fails
         /// on `manifest`, which the valid backup and the error text share), and a check that
@@ -944,10 +981,25 @@ pub(super) mod tests {
             #![proptest_config(ProptestConfig::with_cases(256))]
 
             #[test]
-            fn mutated_backup_never_panics(bytes in mutated(&TINY.backup, 1)) {
+            fn mutated_backup_never_panics(case in cases()) {
                 let dir = TempDir::new();
                 let path = dir.path().join("m.lockbox-backup");
-                fs::write(&path, &bytes).unwrap();
+                let bytes = match case {
+                    Case::File(bytes) => {
+                        fs::write(&path, &bytes).unwrap();
+                        bytes
+                    }
+                    Case::Entry(i, bytes) => {
+                        fs::write(&path, &TINY.backup).unwrap();
+                        let key = Key32::from_bytes(TINY.key);
+                        let (name, edited) = (&TINY.entries[i].0, bytes.clone());
+                        let edit = |m: &mut BTreeMap<String, Vec<u8>>| {
+                            m.insert(name.clone(), edited);
+                        };
+                        rewrite_backup(&path, edit, ManifestMode::Rehash { key: Some(&key) });
+                        bytes
+                    }
+                };
                 let cancel = CancelToken::new();
                 if let Err(error) = BackupArchive::open(&path, &cancel) {
                     check_text(&error, &bytes)?;

@@ -828,16 +828,19 @@ pub(crate) mod testkit {
     /// of it. Inputs under 8 bytes are skipped; they could match the fixed words by chance.
     ///
     /// `valid` is the well-formed file the input was made from (empty for random bytes). Its own
-    /// 8-byte pieces may appear in an error, because a valid file holds fixed words such as
-    /// `manifest` that error text also uses; only a piece that the change itself brought in
-    /// counts as leaked input.
+    /// pieces may appear in an error, because a valid file holds fixed words such as `manifest`
+    /// that error text also uses; only a piece that the change itself brought in counts as
+    /// leaked input. A single changed byte can also turn valid text into a fixed error word by
+    /// chance (`before_restore` becomes `before restore`, which shares the 8 bytes ` restore`
+    /// with "restore journal"), so with a `valid` file a leak means 16 shared bytes, not 8.
     pub(crate) fn assert_text_is_fixed(
         error: &CoreError,
         input: &[u8],
         valid: &[u8],
     ) -> std::result::Result<(), proptest::test_runner::TestCaseError> {
         use proptest::prelude::prop_assert;
-        if input.len() < 8 {
+        let size = if valid.is_empty() { 8 } else { 16 };
+        if input.len() < size {
             return Ok(());
         }
         let message = error.to_string();
@@ -845,10 +848,13 @@ pub(crate) mod testkit {
             !message.contains(&*String::from_utf8_lossy(input)),
             "message {message:?} contains the input"
         );
-        for window in message.as_bytes().windows(8) {
-            let is_new = input.windows(8).any(|part| part == window)
-                && !valid.windows(8).any(|part| part == window);
-            prop_assert!(!is_new, "message {message:?} repeats 8 bytes of the input");
+        for window in message.as_bytes().windows(size) {
+            let is_new = input.windows(size).any(|part| part == window)
+                && !valid.windows(size).any(|part| part == window);
+            prop_assert!(
+                !is_new,
+                "message {message:?} repeats {size} bytes of the input"
+            );
         }
         Ok(())
     }
@@ -1659,8 +1665,12 @@ mod tests {
 
         /// Half the cases are random bytes, which stop at the first structure check; half are a
         /// valid archive with up to three bytes changed, which get past it.
-        fn archive_bytes() -> impl Strategy<Value = Vec<u8>> {
-            prop_oneof![vec(any::<u8>(), 0..2048), mutated(&VALID, 3)]
+        /// The flag says the bytes were made from `VALID`.
+        fn archive_bytes() -> impl Strategy<Value = (bool, Vec<u8>)> {
+            prop_oneof![
+                vec(any::<u8>(), 0..2048).prop_map(|b| (false, b)),
+                mutated(&VALID, 3).prop_map(|b| (true, b)),
+            ]
         }
 
         #[test]
@@ -1676,12 +1686,12 @@ mod tests {
             #![proptest_config(ProptestConfig::with_cases(256))]
 
             #[test]
-            fn archive_open_never_panics(bytes in archive_bytes()) {
+            fn archive_open_never_panics((from_valid, bytes) in archive_bytes()) {
                 let dir = TempDir::new();
                 let path = dir.path().join("a.lockbox-backup");
                 std::fs::write(&path, &bytes).unwrap();
                 if let Err(error) = BackupArchive::open(&path, &CancelToken::new()) {
-                    assert_text_is_fixed(&error, &bytes, &VALID)?;
+                    assert_text_is_fixed(&error, &bytes, if from_valid { &VALID } else { &[] })?;
                 }
             }
         }
