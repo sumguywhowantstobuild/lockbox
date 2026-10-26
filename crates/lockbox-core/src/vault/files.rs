@@ -4,7 +4,9 @@
 //! The item file is the commit point. A blob is written and published first, then the item
 //! that points to it; a crash or error in between leaves an unreferenced blob, which the
 //! cleanup at unlock sets aside. Nothing is ever deleted inline except by `purge_item`,
-//! which first records its intent in the item.
+//! which first records its intent in the item, and by a failed item copy
+//! (`copy_item_from`), which removes the blobs it published itself, none of which any item
+//! has ever referenced, and only when its new item is certainly not in the vault.
 
 use super::Vault;
 use super::items::{BEING_DELETED, blank_item, edited};
@@ -163,7 +165,7 @@ impl Vault {
 
     /// The blob side of an import (spec 6.4): `files/<id>.blob.partial`, flushed, then renamed
     /// to `files/<id>.blob`. Space and size limits are checked before anything is written.
-    fn import_stream(
+    pub(super) fn import_stream(
         &self,
         src: &mut impl Read,
         declared_len: u64,

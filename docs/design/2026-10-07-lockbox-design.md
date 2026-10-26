@@ -415,6 +415,8 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
     never as plaintext on disk.
   - Its collection is kept only if the live vault has that collection and it is not in the trash. Collections
     themselves are not copied, and the copy is never trashed.
+  - A copy that fails deletes the blobs it published itself (none was ever referenced), unless its new item may already
+    be on disk; a blob it cannot delete is left for the cleanup at unlock to set aside (6.4).
 
 ### 6.10 Locations, locking and filesystems
 - **Default vault location:** `%USERPROFILE%\Lockbox Vaults\`. Never inside Tauri's app-data folders
