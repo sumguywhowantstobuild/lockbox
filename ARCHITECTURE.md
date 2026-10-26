@@ -1,7 +1,7 @@
 # Architecture
 
-This describes what is built today: the Rust core, `crates/lockbox-core` (Plan 1). The desktop shell, the UI, backup
-and restore, and read-only vaults come in later plans and are not here yet. The target design and the reasons behind it
+This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
+restore and read-only vaults). The desktop shell and the UI come in later plans and are not here yet. The target design and the reasons behind it
 are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as "spec
 5.2" and so on.
 
@@ -32,7 +32,9 @@ so the tests can build on them. A "blob" is one stored file, encrypted.
 | `slots.rs` | Key slots: wrap and unwrap the vault key under the password key or the recovery key |
 | `header.rs` | `vault.json` and its `.bak`: strict parse, header MAC (a tamper-evident stamp), writing both copies in order |
 | `item.rs` | The item model (login, note, file, collection) and its sealed file format, padded to 512 bytes |
-| `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); cancel token; output-journal hook |
+| `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); `authenticate_copy` (copies a blob unchanged while checking every chunk); cancel token; output-journal hook |
+| `manifest.rs` | `backup-manifest.json`: the list of everything in a backup (path, size, SHA-256) with a MAC, and its strict parser |
+| `archive.rs` | The backup file (one stored ZIP64 archive): our own strict reader for the few shapes we write, and the writer |
 | `lockfile.rs` | The `.lock` file with an OS exclusive lock: one process per vault |
 | `fsio/mod.rs` | Safe file operations: `atomic_write` (all or nothing), `replace_file`, `rename_dir_no_replace`, retries, hidden temps, space checks |
 | `fsio/windows.rs` | The Win32 calls. The only place `unsafe` is allowed |
@@ -43,12 +45,19 @@ so the tests can build on them. A "blob" is one stored file, encrypted.
 | `vault/files.rs` | Files in an open vault: import, replace, save a decrypted copy, purge |
 | `vault/cleanup.rs` | The cleanup that runs at unlock; listing and deleting quarantined files |
 | `vault/naming.rs` | Vault names, folder names and timestamps |
+| `vault/backup.rs` | Making a backup of an open vault: built hidden, re-read and checked, then published |
+| `vault/source.rs` | One way to unlock and check a vault, whether it sits in a folder or inside a backup; also "test a backup" |
+| `vault/restore.rs` | Restore: check and extract into a hidden staging folder, the journaled swap into place, and recovery after a crash |
+| `vault/journal.rs` | The restore journal: its strict reader and validation, and the lock around it |
+| `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out |
 | `search.rs` | The in-memory search index (returns item IDs only) |
 | `generator.rs` | Password and passphrase generator (EFF word list in `wordlists/`) |
 
 Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault_lifecycle.rs`, `files.rs`,
-`properties.rs` (random and corrupted input), and two checks run on purpose, `search.rs` (5 000 items) and
-`large_file.rs` (4 GiB).
+`properties.rs` (random and corrupted input), and three checks run on purpose, `search.rs` (5 000 items),
+`large_file.rs` (4 GiB) and `backup_large.rs` (a 4 GiB file through backup, test, restore and export). The parsers for
+backup input (the archive, the manifest, the restore journal) have property tests beside their code, because they are
+crate-private: random and damaged bytes must give an error with fixed wording, never a panic.
 
 ## How data flows
 
@@ -156,6 +165,23 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
     header writes. While a key slot is unverified, any failed header write blocks them until the vault is reopened.
 11. **Persistent formats are pinned by tests.** Associated-data bytes, key slots, the header MAC, item plaintext and
     the recovery-key display each have fixed expected values, so a refactor cannot silently change them.
+12. **A backup is read only by our own strict parser.** The `zip` crate only writes archives. Reading never goes
+    through it: `archive.rs` accepts exactly the shapes we write (stored entries, fixed names, entries that fill the file
+    with no gap or overlap) and refuses anything else, naming the check that failed. Spec 6.7.
+13. **Every blob that moves is authenticated as it moves.** Into a backup, out of a backup into a restored vault, and
+    out of a vault or backup into another vault, a blob goes through `authenticate_copy` (or the same chunk-by-chunk
+    decryption), so a damaged blob is caught while it is copied, not later, and the partial copy is thrown away.
+    Spec 6.7, 6.8, 6.9.
+14. **A restore changes nothing in the vaults folder until every check has passed.** Before that it writes only the
+    restore journal (with its lock file) and a hidden staging folder (`.restore-<random>`) beside the destination. The existing vault is
+    moved aside to `<folder>.before-restore` (never overwriting an earlier one) only at the final swap. Spec 6.8.
+15. **The journal is checked before it is acted on, and the staging folder goes before the journal.** A journal whose
+    paths are not what a restore would write (not absolute, not siblings, wrong names) is refused and touches nothing.
+    Cleaning up removes the staging folder first and the journal last, so a crash in between leaves a journal that
+    points at nothing (recovery clears it), never a staging folder with no journal. Spec 6.8.
+16. **Read-only is a separate type.** `ReadOnlyVault` has no method that writes: opening a backup or a
+    `.before-restore` folder takes no lock and repairs, cleans and creates nothing. A function that must not write
+    cannot be handed a vault that can. Spec 6.9.
 
 ## Where the "why" lives
 

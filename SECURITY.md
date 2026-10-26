@@ -39,7 +39,13 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 - **Old copies of the vault.** Changing the password or regenerating the recovery key does **not** change the vault
   key. Anyone holding an earlier copy of the vault folder (an old backup, an old header) plus the old password or old
   recovery key can recover the vault key, and that key opens current and future data if they also get copies of the
-  newer files. Full revocation needs "Rotate vault key", planned for v1.1 (spec 5.3).
+  newer files. Full revocation needs "Rotate vault key", planned for v1.1 (spec 5.3). A backup is such a copy: it
+  holds the header as it was when the backup was made, so an old password or old recovery key keeps opening that
+  backup after you change them, and restoring it brings that old password back. Delete backups you no longer want
+  reachable.
+- **Old data a restore leaves behind.** When a restore replaces a vault, the vault it replaced is kept next to it as
+  `<folder>.before-restore` (then `-2`, `-3` and so on), so a bad restore can be undone. That folder is a full copy of
+  the old vault, readable with the old password, and Lockbox never deletes it for you; it stays until you delete it.
 - **Rollback and deleted item files.** An attacker who can write to the folder can put back an older valid copy of an
   item, or delete an item file, and Lockbox will not notice (R7, spec 6.6). Files that lose their item are set aside,
   not deleted. An authenticated manifest (a tamper-proof list of every file) is left for the future sync design.
@@ -53,14 +59,15 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 ## Where each requirement stands today
 
-Only the Rust core exists (Plan 1). Requirements that need the desktop app are not met yet.
+Only the Rust core exists (Plans 1 and 2: the vault engine, then backup, restore and read-only opening). Requirements
+that need the desktop app are not met yet.
 
 | Requirement | State |
 |---|---|
 | R1 Confidentiality at rest | Built into the core's file formats |
-| R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp) |
+| R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | In the core, plaintext is written only when you save a decrypted copy to a place you choose. A crash during that save can leave a hidden partial copy behind (see "Honest limits"). The app's "Open" and recovery-key printing do not exist yet |
+| R4 No plaintext written except on request | In the core, plaintext is written only when you save a decrypted copy to a place you choose. A crash during that save can leave a hidden partial copy behind (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The app's "Open" and recovery-key printing do not exist yet |
 | R5 No secrets in logs and errors | Built in the core (there is no logging yet) |
 | R6 Locking stops access | **Not built.** Locking lives in the desktop app (Plan 3). The core only offers a cancel switch for long operations |
 | R7 Documented limits | This file |
@@ -222,6 +229,15 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 These need a local attacker with write access to the vault folder or to the place you export to, which is outside what
 Lockbox defends.
 
+- **The restore journal can be edited by code running as you.** A restore keeps a small file, the restore journal,
+  in your own profile folder (the app picks the place; the design uses `%LOCALAPPDATA%\Lockbox`). It records the hidden
+  staging folder and the folders being swapped, so that a crash in the middle can be finished or undone at the next
+  start. Before acting on it Lockbox checks it hard: the paths must be absolute and in the same folder, the names must
+  have the exact shapes a restore writes, and each folder it names must be a real folder and not a link. Those checks
+  guard against damage and mistakes. They do not guard against a program already running as you that writes a
+  journal on purpose: it could point recovery at a staging-shaped folder it chose. *Accepted:* such a program can
+  already read and delete your files, and the checks still mean recovery deletes only a folder named `.restore-` plus
+  32 hex characters.
 - **Swapping the export destination.** Before saving a decrypted copy, Lockbox checks that the destination is not
   inside the vault. A local attacker could swap a folder link into place between that check and the save.
   *Accepted:* the window is tiny and the attacker already has the access to cause harm. The same check, and the same
@@ -250,6 +266,11 @@ Lockbox defends.
 
 ### Smaller shortcuts
 
+- A backup leaves out damaged files, and says so. If an item file fails to open, or an attached file is missing from the
+  vault folder or fails its checks, the backup is still made without it, and its report counts what was left out
+  (damaged items, damaged files, missing files). It is never silently complete. *Accepted:* refusing to back up at
+  all would leave you with no backup of the healthy part; check the report, and keep an older backup until a clean
+  one has been made.
 - Every stored file is labelled `application/octet-stream`; there is no file-type table yet. *Accepted:* the label is
   only display information and the file's bytes are unaffected; how files are opened is decided with the interface.
 - A stored file's name is kept as text; a name that is not valid Unicode (very rare on Windows) is stored with
@@ -275,13 +296,15 @@ Lockbox defends.
 
 These are described in the spec but do not exist, so nothing here should be relied on yet: the desktop shell (locking,
 idle timer, clipboard clearing, dialogs, the "Open" folder, the output journal that cleans up leftover decrypted files
-after a crash), backup and restore, opening a backup read-only, the vault registry, the checks on where a vault may live
-(refusing removable, FAT32 and network drives; warning about OneDrive, Google Drive and Dropbox folders, spec 6.10) and
-the UI. Until read-only opening exists, unlocking a vault can write to it (header repair and cleanup).
+after a crash), the vault registry, the checks on where a vault may live (refusing removable, FAT32 and network
+drives; warning about OneDrive, Google Drive and Dropbox folders, spec 6.10) and the UI. The core has backup, restore
+and read-only opening (Plan 2), but no screen uses them yet; choosing the restore journal's place in your profile and
+running recovery at every launch are jobs of the desktop shell. Unlocking a vault can still write to it (header repair
+and cleanup); to look at a vault or a backup without writing, open it read-only.
 
 ## How this is checked
 
-Every push runs formatting, lint, the test suite (Windows and Linux; the two slow checks that are run on purpose are
+Every push runs formatting, lint, the test suite (Windows and Linux; the three slow checks that are run on purpose are
 left out) and a security scan (gitleaks for secrets, semgrep for risky code, osv-scanner for vulnerable
 dependencies). Per the spec, a release only counts as "reviewed" when a written walk-through of this file against the
 code is signed off first; none has been done because there is no release.

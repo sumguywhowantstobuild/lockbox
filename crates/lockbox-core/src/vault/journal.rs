@@ -874,4 +874,58 @@ mod tests {
         assert!(remove_staging_then_journal(&file, &journal).is_err());
         assert!(file.exists() && journal.exists());
     }
+
+    /// Property tests (spec 5.4): the journal is read back from the user's profile, where it
+    /// may be cut short or damaged, so any bytes are an error or a journal, never a panic, and
+    /// the error text never repeats the input.
+    mod never_panics {
+        use super::*;
+        use crate::archive::testkit::{assert_text_is_fixed, mutated};
+        use proptest::collection::vec;
+        use proptest::prelude::*;
+        use std::sync::LazyLock;
+
+        /// A journal as `write_journal` writes it, serialized once. Forward slashes keep the
+        /// JSON free of escapes.
+        static VALID: LazyLock<Vec<u8>> = LazyLock::new(|| {
+            let j = RestoreJournal {
+                version: RESTORE_JOURNAL_VERSION,
+                step: JournalStep::Swapping,
+                staging: PathBuf::from(format!("C:/Vaults/{STAGING_PREFIX}{}", "ab".repeat(16))),
+                target: PathBuf::from("C:/Vaults/Family-abababab"),
+                before_restore: Some(PathBuf::from("C:/Vaults/Family-abababab.before-restore")),
+            };
+            journal_bytes(&j).unwrap()
+        });
+
+        /// Half the cases are random bytes, which stop at the size or JSON check; half are a
+        /// valid journal with up to three bytes changed, which reach the version peek and the
+        /// strict parse.
+        fn journal_file_bytes() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![vec(any::<u8>(), 0..1024), mutated(&VALID, 3)]
+        }
+
+        #[test]
+        fn the_valid_journal_reads() {
+            let dir = TempDir::new();
+            let path = dir.path().join("j.json");
+            fs::write(&path, &*VALID).unwrap();
+            let j = read_journal(&path).unwrap().unwrap();
+            assert_eq!(j.step, JournalStep::Swapping);
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn read_journal_never_panics(bytes in journal_file_bytes()) {
+                let dir = TempDir::new();
+                let path = dir.path().join("j.json");
+                fs::write(&path, &bytes).unwrap();
+                if let Err(error) = read_journal(&path) {
+                    assert_text_is_fixed(&error, &bytes, &VALID)?;
+                }
+            }
+        }
+    }
 }

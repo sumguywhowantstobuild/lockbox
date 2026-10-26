@@ -862,4 +862,102 @@ pub(super) mod tests {
             }
         }
     }
+
+    /// Property test (spec 5.4): a real backup with one byte changed is read by the whole chain
+    /// (the archive parser, the manifest MAC, every hash, the item and header checks). Each
+    /// outcome is `Ok` or a fixed-text error, never a panic.
+    mod never_panics {
+        use super::*;
+        use crate::archive::testkit::{assert_text_is_fixed, mutated};
+        use proptest::prelude::*;
+        use std::sync::LazyLock;
+
+        /// Words that exist only in the fixture's vault, with the IDs as lowercase hex.
+        const VAULT_NAME: &str = "Quokka Meadow";
+        const ITEM_TITLE: &str = "Marmoset Ledger";
+        const FILE_NAME: &str = "wallaby-notes.bin";
+
+        struct Tiny {
+            /// The backup file.
+            backup: Vec<u8>,
+            /// The recovery key as typed; it is not `Sync`, so it is parsed per case.
+            recovery: String,
+            /// Lowercase: the vault ID, the item and file IDs, the names.
+            secrets: Vec<String>,
+        }
+
+        /// A vault of a note and a file item, backed up once for all cases.
+        static TINY: LazyLock<Tiny> = LazyLock::new(|| {
+            let parent = TempDir::new();
+            let created = Vault::create(parent.path(), VAULT_NAME, PW).unwrap();
+            let mut vault = created.vault;
+            let note = vault.new_item(ItemKind::Note, ITEM_TITLE, None).unwrap();
+            let src = parent.path().join(FILE_NAME);
+            fs::write(&src, b"a few bytes of file").unwrap();
+            let cancel = CancelToken::new();
+            let file_item = vault.new_file_item(None, &src, &cancel).unwrap();
+            let file = vault.get_item(&file_item).unwrap().attachments[0].file_id;
+            let dest = parent.path().join("tiny.lockbox-backup");
+            vault.backup(&dest, &NoJournal, &cancel).unwrap();
+            let secrets = [
+                vault.id().to_hex(),
+                note.to_hex(),
+                file_item.to_hex(),
+                file.to_hex(),
+                VAULT_NAME.to_owned(),
+                ITEM_TITLE.to_owned(),
+                FILE_NAME.to_owned(),
+            ];
+            Tiny {
+                backup: fs::read(&dest).unwrap(),
+                recovery: created.recovery.to_display().to_string(),
+                secrets: secrets.map(|s| s.to_lowercase()).to_vec(),
+            }
+        });
+
+        /// The 8-byte rule, counting only pieces the change brought in (the plain rule fails
+        /// on `manifest`, which the valid backup and the error text share), and a check that
+        /// nothing of the vault itself is named.
+        fn check_text(error: &CoreError, input: &[u8]) -> std::result::Result<(), TestCaseError> {
+            assert_text_is_fixed(error, input, &TINY.backup)?;
+            let message = error.to_string().to_lowercase();
+            for secret in &TINY.secrets {
+                prop_assert!(
+                    !message.contains(secret.as_str()),
+                    "message {message:?} names something of the vault"
+                );
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn the_tiny_backup_verifies() {
+            let dir = TempDir::new();
+            let path = dir.path().join("t.lockbox-backup");
+            fs::write(&path, &TINY.backup).unwrap();
+            let recovery = RecoverySecret::parse(&TINY.recovery).unwrap();
+            let summary = verify(&path, Credential::Recovery(&recovery)).unwrap();
+            assert_eq!((summary.items, summary.files), (2, 1));
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn mutated_backup_never_panics(bytes in mutated(&TINY.backup, 1)) {
+                let dir = TempDir::new();
+                let path = dir.path().join("m.lockbox-backup");
+                fs::write(&path, &bytes).unwrap();
+                let cancel = CancelToken::new();
+                if let Err(error) = BackupArchive::open(&path, &cancel) {
+                    check_text(&error, &bytes)?;
+                }
+                // The recovery key (HKDF), not the password (Argon2id at 64 MiB per case).
+                let recovery = RecoverySecret::parse(&TINY.recovery).unwrap();
+                if let Err(error) = verify_backup(&path, Credential::Recovery(&recovery), &cancel) {
+                    check_text(&error, &bytes)?;
+                }
+            }
+        }
+    }
 }

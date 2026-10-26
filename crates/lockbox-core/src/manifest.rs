@@ -400,4 +400,46 @@ mod tests {
         let err = parse_manifest(&serde_json::to_vec(&v).unwrap()).unwrap_err();
         assert!(!format!("{err} {err:?}").contains("SECRET-MARKER"));
     }
+
+    /// Property tests (spec 5.4): the manifest comes out of an untrusted backup, so any bytes
+    /// are an error or a manifest, never a panic, and the error text never repeats the input.
+    mod never_panics {
+        use super::*;
+        use crate::archive::testkit::{assert_text_is_fixed, manifest_for, mutated};
+        use proptest::collection::vec;
+        use proptest::prelude::*;
+        use std::sync::LazyLock;
+
+        /// A signed manifest of three entries, serialized once.
+        static VALID: LazyLock<Vec<u8>> = LazyLock::new(|| {
+            let item = format!("items/{}.item", "cd".repeat(16));
+            let blob = format!("files/{}.blob", "ef".repeat(16));
+            let entries: [(&str, &[u8]); 3] =
+                [("vault.json", &[1; 9]), (&item, &[2; 33]), (&blob, &[3; 5])];
+            serialize_manifest(&manifest_for(&entries, Some(&key())))
+        });
+
+        /// Half the cases are random bytes, which stop at the size or JSON check; half are a
+        /// valid manifest with up to three bytes changed, which reach the version peek and the
+        /// strict parse.
+        fn manifest_bytes() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![vec(any::<u8>(), 0..1024), mutated(&VALID, 3)]
+        }
+
+        #[test]
+        fn the_valid_manifest_parses() {
+            assert_eq!(parse_manifest(&VALID).unwrap().entries.len(), 3);
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn parse_manifest_never_panics(bytes in manifest_bytes()) {
+                if let Err(error) = parse_manifest(&bytes) {
+                    assert_text_is_fixed(&error, &bytes, &VALID)?;
+                }
+            }
+        }
+    }
 }

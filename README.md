@@ -12,13 +12,13 @@ documented and honest about its limits.
 
 ## What exists today
 
-Only the first of five planned stages is built, and there is nothing to run yet. Together the five plans make up Phase
+Only the first two of five planned stages are built, and there is nothing to run yet. Together the five plans make up Phase
 1, the Windows app (see the [phases](docs/PRD.md#phases)).
 
 | Plan | What it delivers | State |
 |---|---|---|
 | 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
-| 2 | Backup, restore, and opening a backup read-only | Not started |
+| 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built (not yet reviewed in a pull request) |
 | 3 | Desktop shell (built with Tauri, a toolkit for desktop apps): sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Not started |
 | 4 | The user interface (clickable design mockups first) | Not started |
 | 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
@@ -26,7 +26,11 @@ Only the first of five planned stages is built, and there is nothing to run yet.
 The core can already create and unlock vaults (with the password, or with the recovery key: a long code shown once that
 opens the vault if you forget the password), change the password, make a new recovery key, keep logins, notes, files and
 collections as encrypted items, store files in encrypted chunks (the limit is 256 GiB; the largest file tested is just
-over 4 GiB), tidy up after a crash, search items in memory and generate passwords and passphrases. It has no screens.
+over 4 GiB), tidy up after a crash, search items in memory and generate passwords and passphrases. It can also write
+an encrypted backup of a vault (one file, with a list of its contents that is checked on the way back), test a backup
+without restoring it, restore one (into a hidden folder first, with a record that lets a crash be finished or undone;
+the vault it replaces is kept as a `.before-restore` folder), open a backup or a `.before-restore` folder read-only,
+and copy single items out of it. It has no screens.
 
 ## Build and test
 
@@ -50,17 +54,20 @@ node --test "scripts/*.test.mjs"   # the scanner's own tests (needs Node.js)
 node scripts/scan.mjs        # security scan; needs gitleaks, semgrep and osv-scanner, see docs/SETUP.md
 ```
 
-Two checks are slow, so they only run when asked (always in release mode, the fast optimised build):
+Three checks are slow, so they only run when asked (always in release mode, the fast optimised build):
 
 ```
 # 5 000 items: unlock and search must stay fast
 cargo test --release --locked -p lockbox-core --test search -- --ignored --nocapture
 # a file of 4 GiB + 1 byte goes in and out unchanged while memory stays flat
 cargo test --release --locked -p lockbox-core --test large_file -- --ignored --nocapture
+# the same file goes through backup, test, restore and export, and comes out unchanged
+cargo test --release --locked -p lockbox-core --test backup_large -- --ignored --nocapture
 ```
 
-The large-file check writes about 12 GiB of temporary files and can take minutes. Its memory limit is only checked on
-Windows.
+The large-file check writes about 12 GiB of temporary files and can take minutes. The backup check needs about 9 GiB
+of free disk space at its peak (it deletes what it no longer needs as it goes) and took about a minute on a fast SSD.
+Their memory limits are only checked on Windows.
 
 ## Before you trust it
 

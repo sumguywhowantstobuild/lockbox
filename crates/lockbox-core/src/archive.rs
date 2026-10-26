@@ -823,6 +823,67 @@ pub(crate) mod testkit {
         let bytes = write_archive(&[], &entries, Some(&serialize_manifest(&manifest)));
         std::fs::write(path, bytes).unwrap();
     }
+
+    /// Error text is fixed (rule R5): it must not contain the input, as text or as any 8 bytes
+    /// of it. Inputs under 8 bytes are skipped; they could match the fixed words by chance.
+    ///
+    /// `valid` is the well-formed file the input was made from (empty for random bytes). Its own
+    /// 8-byte pieces may appear in an error, because a valid file holds fixed words such as
+    /// `manifest` that error text also uses; only a piece that the change itself brought in
+    /// counts as leaked input.
+    pub(crate) fn assert_text_is_fixed(
+        error: &CoreError,
+        input: &[u8],
+        valid: &[u8],
+    ) -> std::result::Result<(), proptest::test_runner::TestCaseError> {
+        use proptest::prelude::prop_assert;
+        if input.len() < 8 {
+            return Ok(());
+        }
+        let message = error.to_string();
+        prop_assert!(
+            !message.contains(&*String::from_utf8_lossy(input)),
+            "message {message:?} contains the input"
+        );
+        for window in message.as_bytes().windows(8) {
+            let is_new = input.windows(8).any(|part| part == window)
+                && !valid.windows(8).any(|part| part == window);
+            prop_assert!(!is_new, "message {message:?} repeats 8 bytes of the input");
+        }
+        Ok(())
+    }
+
+    /// `valid` with 1 to `max_edits` single-byte edits: a byte replaced (mostly by printable
+    /// ASCII, so JSON stays JSON and reaches the deeper checks), inserted, or deleted.
+    pub(crate) fn mutated(
+        valid: &[u8],
+        max_edits: usize,
+    ) -> impl proptest::strategy::Strategy<Value = Vec<u8>> + use<> {
+        use proptest::prelude::*;
+        let valid = valid.to_vec();
+        let byte = prop_oneof![3 => 0x20u8..0x7f, 1 => any::<u8>()];
+        let edit = (0u8..3, any::<proptest::sample::Index>(), byte);
+        proptest::collection::vec(edit, 1..=max_edits).prop_map(move |edits| {
+            let mut bytes = valid.clone();
+            for (op, at, byte) in edits {
+                match op {
+                    0 if !bytes.is_empty() => {
+                        let i = at.index(bytes.len());
+                        bytes[i] = byte;
+                    }
+                    1 => {
+                        let i = at.index(bytes.len() + 1);
+                        bytes.insert(i, byte);
+                    }
+                    2 if !bytes.is_empty() => {
+                        bytes.remove(at.index(bytes.len()));
+                    }
+                    _ => {}
+                }
+            }
+            bytes
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1578,5 +1639,51 @@ mod tests {
                 what: "backup: manifest mismatch"
             })
         ));
+    }
+
+    /// Property tests (spec 5.4): the archive parser reads untrusted bytes, so any input is an
+    /// error or an archive, never a panic, and the error text never repeats the input.
+    mod never_panics {
+        use super::super::testkit::{assert_text_is_fixed, build_backup, mutated};
+        use super::super::*;
+        use crate::fsio::testutil::TempDir;
+        use proptest::collection::vec;
+        use proptest::prelude::*;
+        use std::sync::LazyLock;
+
+        /// A valid archive with a few entries, built once.
+        static VALID: LazyLock<Vec<u8>> = LazyLock::new(|| {
+            let (a, b) = (format!("items/{}.item", "ab".repeat(16)), "vault.json");
+            build_backup(&[(b, &[1; 40]), (&a, &[2; 70])], None)
+        });
+
+        /// Half the cases are random bytes, which stop at the first structure check; half are a
+        /// valid archive with up to three bytes changed, which get past it.
+        fn archive_bytes() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![vec(any::<u8>(), 0..2048), mutated(&VALID, 3)]
+        }
+
+        #[test]
+        fn the_valid_archive_opens() {
+            let dir = TempDir::new();
+            let path = dir.path().join("a.lockbox-backup");
+            std::fs::write(&path, &*VALID).unwrap();
+            let archive = BackupArchive::open(&path, &CancelToken::new()).unwrap();
+            assert_eq!(archive.entries().len(), 2);
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            #[test]
+            fn archive_open_never_panics(bytes in archive_bytes()) {
+                let dir = TempDir::new();
+                let path = dir.path().join("a.lockbox-backup");
+                std::fs::write(&path, &bytes).unwrap();
+                if let Err(error) = BackupArchive::open(&path, &CancelToken::new()) {
+                    assert_text_is_fixed(&error, &bytes, &VALID)?;
+                }
+            }
+        }
     }
 }
