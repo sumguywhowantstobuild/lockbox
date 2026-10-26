@@ -190,7 +190,7 @@ impl Vault {
         if !may_exist {
             for blob in &published {
                 // Best effort: whatever stays is unreferenced, and unlock cleanup sets it aside.
-                let _ = self.delete_blob_everywhere(blob);
+                let _ = self.delete_published_blob(blob);
             }
         }
         Err(error)
@@ -267,11 +267,9 @@ impl Vault {
                 let mut reader = MidStream::new(reader);
                 #[cfg(not(test))]
                 let mut reader = reader;
-                self.import_stream(&mut reader, old.length, old.name.clone(), cancel)
+                let (len, name) = (old.length, old.name.clone());
+                self.import_stream_tracked(&mut reader, len, name, cancel, published)
             };
-            if let Ok(fref) = &imported {
-                published.push(fref.file_id);
-            }
             // A panic is reported as it is, ahead of the import's error: the import only saw the
             // stream end early because of it.
             let decrypted = worker
@@ -1128,6 +1126,76 @@ mod tests {
         // Still works afterwards.
         live.copy_item_from(&good, &item, &cancel).unwrap();
         assert_eq!(live.items().count(), 2);
+    }
+
+    /// A new blob can share its ID with an older one in the quarantine (the import only looks in
+    /// `files/`); rolling back the copy must leave the older blob alone.
+    #[test]
+    fn failed_copy_spares_a_quarantined_blob_with_the_same_id() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        let (item, _) = f.file_item(b"copied file");
+        let backup = f.backup("a.lockbox-backup");
+        let ro = open_backup(&backup).unwrap();
+        let (_parent, mut live) = live_vault();
+        let old_file = f.out().join("old.bin");
+        fs::write(&old_file, b"older file, quarantined").unwrap();
+        let cancel = CancelToken::new();
+        let old = live.new_file_item(None, &old_file, &cancel).unwrap();
+        let quarantined_id = live.get_item(&old).unwrap().attachments[0].file_id;
+        // Its item file goes missing, so the next unlock quarantines the blob.
+        let dir = live.dir().to_path_buf();
+        drop(live);
+        fs::remove_file(dir.join("items").join(format!("{}.item", old.to_hex()))).unwrap();
+        let (mut live, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        let blob = format!("{}.blob", quarantined_id.to_hex());
+        let (quarantined, primary) = (
+            dir.join("files").join("orphaned").join(&blob),
+            dir.join("files").join(&blob),
+        );
+        assert!(quarantined.exists() && !primary.exists());
+        let before = fs::read(&quarantined).unwrap();
+
+        crate::blob::force_next_file_id(quarantined_id);
+        let published = Rc::new(Cell::new(false));
+        let (seen, path) = (Rc::clone(&published), primary.clone());
+        let look = move || seen.set(path.exists());
+        failpoint::observe("copy.before_commit", Box::new(look));
+        let token = CancelToken::new();
+        failpoint::arm_cancel("copy.before_commit", token.clone());
+        let result = live.copy_item_from(&ro, &item, &token);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert!(published.get(), "the new blob took the quarantined ID");
+        assert!(!primary.exists(), "the copy's own blob is gone");
+        assert_eq!(fs::read(&quarantined).unwrap(), before);
+        assert_eq!(live.items().count(), 0);
+    }
+
+    /// A rename that succeeds followed by an error in publication has still published the blob.
+    #[test]
+    fn blob_published_then_failed_is_rolled_back() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        let (item, _, _) = two_file_login(&mut f);
+        let backup = f.backup("a.lockbox-backup");
+        let ro = open_backup(&backup).unwrap();
+        let (_parent, mut live) = live_vault();
+        let before = files_listing(&live);
+        let published = Rc::new(Cell::new(0));
+        let (seen, dir) = (Rc::clone(&published), live.dir().join("files"));
+        let count = move || {
+            let blobs = names(&dir).into_iter().filter(|n| n.ends_with(".blob"));
+            seen.set(blobs.count());
+        };
+        failpoint::observe("import.after_publish", Box::new(count));
+        failpoint::arm("import.after_publish");
+        let result = live.copy_item_from(&ro, &item, &CancelToken::new());
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))), "{result:?}");
+        assert_eq!(published.get(), 1, "the blob was in place when it failed");
+        assert_eq!(files_listing(&live), before);
+        assert_eq!(live.items().count(), 0);
     }
 
     /// A commit that reports an error after the item file is in place has made the copy, so

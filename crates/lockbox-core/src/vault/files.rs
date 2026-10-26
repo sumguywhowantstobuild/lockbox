@@ -5,8 +5,9 @@
 //! that points to it; a crash or error in between leaves an unreferenced blob, which the
 //! cleanup at unlock sets aside. Nothing is ever deleted inline except by `purge_item`,
 //! which first records its intent in the item, and by a failed item copy
-//! (`copy_item_from`), which removes the blobs it published itself, none of which any item
-//! has ever referenced, and only when its new item is certainly not in the vault.
+//! (`copy_item_from`), which removes from `files/` (never the quarantine) the blobs it
+//! published itself, none of which any item has ever referenced, and only when its new item
+//! is certainly not in the vault.
 
 use super::Vault;
 use super::items::{BEING_DELETED, blank_item, edited};
@@ -165,12 +166,28 @@ impl Vault {
 
     /// The blob side of an import (spec 6.4): `files/<id>.blob.partial`, flushed, then renamed
     /// to `files/<id>.blob`. Space and size limits are checked before anything is written.
-    pub(super) fn import_stream(
+    fn import_stream(
         &self,
         src: &mut impl Read,
         declared_len: u64,
         name: String,
         cancel: &CancelToken,
+    ) -> Result<FileRef> {
+        self.import_stream_tracked(src, declared_len, name, cancel, &mut Vec::new())
+    }
+
+    /// [`import_stream`](Self::import_stream) for a caller that must know which blob it may have
+    /// published even when this returns an error (a rename can succeed and a later step of the
+    /// publication fail). The new blob's ID is pushed to `published` just before the rename, so
+    /// it is there on every outcome that may have left the blob in `files/`; a blob that was
+    /// never renamed is not there to delete, which is a no-op for the caller.
+    pub(super) fn import_stream_tracked(
+        &self,
+        src: &mut impl Read,
+        declared_len: u64,
+        name: String,
+        cancel: &CancelToken,
+        published: &mut Vec<FileId>,
     ) -> Result<FileRef> {
         check_length(declared_len)?;
         let dir = self.dir.join(FILES_DIR);
@@ -196,7 +213,11 @@ impl Vault {
             crate::fsio::failpoint::check("import.before_publish")?;
             // Last chance to stop: once the rename starts, publication completes.
             cancel.check()?;
-            replace_file(&partial, &self.blob_path(&fref.file_id))
+            published.push(fref.file_id);
+            replace_file(&partial, &self.blob_path(&fref.file_id))?;
+            #[cfg(test)]
+            crate::fsio::failpoint::check("import.after_publish")?;
+            Ok(())
         })();
         if let Err(error) = written {
             let _ = remove_file_retry(&partial);

@@ -149,6 +149,14 @@ impl Vault {
         remove_file_retry(&blob_in(&orphaned, id))
     }
 
+    /// Deletes only `files/<id>.blob`, for a blob a failed item copy published itself: the
+    /// quarantine is not touched, since a blob there with the same ID is an older one that
+    /// this call never created. Nothing is deleted through a linked `files/`.
+    pub(super) fn delete_published_blob(&self, id: &FileId) -> Result<()> {
+        check_folder(&self.files_dir())?;
+        delete_blob(&self.files_dir(), id)
+    }
+
     /// Blobs that some loaded item (trashed ones included) lists as an attachment, not
     /// counting the item `except`.
     pub(super) fn attached_blobs(&self, except: Option<&ItemId>) -> HashSet<FileId> {
