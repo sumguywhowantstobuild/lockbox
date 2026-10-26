@@ -26,12 +26,12 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
   accepted range is refused before any work starts.
 - **No secrets in error messages or logs (R5).** Error messages are written by us and never include what was typed or
   stored; secret types print `<redacted>`. The property tests feed random and damaged input and check, for inputs of 8
-  bytes or more, that no error message contains the input or any 8-byte stretch of it. For the backup parsers (the
-  archive, its manifest, the restore journal) the same check also covers the error's debug text (the form a developer
-  sees), and allows one kind of shared stretch: one that lies inside a word of our own fixed error text that a valid
-  file also holds, such as `manifest`, where that word stands in the message. A shorter piece, such as a name of under
-  8 bytes, is not caught; the test that damages a whole backup also checks that no error names the vault, its IDs, an
-  item title or a file name.
+  bytes or more, that neither an error's message nor its debug text (the form a developer sees) contains the input or
+  any 8-byte stretch of it. For the backup parsers (the archive, its manifest, the restore journal) one kind of shared
+  stretch is allowed: one that lies inside a word of our own fixed error text that a valid file also holds, such as
+  `manifest`, where that word stands in the message. A shorter piece, such as a name of under 8 bytes, is not caught;
+  the test that damages a whole backup also checks that no error names the vault, its IDs, an item title or a file
+  name.
 
 ## What Lockbox does not protect against
 

@@ -238,22 +238,27 @@ static VALID_HEADER: LazyLock<Vec<u8>> = LazyLock::new(|| {
 static VALID_RECOVERY: LazyLock<String> =
     LazyLock::new(|| RecoverySecret::generate().to_display().to_string());
 
-/// Error text is fixed (rule R5): it must not contain the input, as text or as any 8 bytes
-/// of it. Inputs under 8 bytes are skipped; they could match the fixed words by chance.
+/// Error text is fixed (rule R5): neither `Display` nor `Debug` of the error may contain the
+/// input, as text or as any 8 bytes of it. Inputs under 8 bytes are skipped; they could match
+/// the fixed words by chance.
 fn assert_text_is_fixed(error: &CoreError, input: &[u8]) -> Result<(), TestCaseError> {
     if input.len() < 8 {
         return Ok(());
     }
-    let message = error.to_string();
-    prop_assert!(
-        !message.contains(&*String::from_utf8_lossy(input)),
-        "message {message:?} contains the input"
-    );
-    for window in message.as_bytes().windows(8) {
+    for (kind, message) in [
+        ("Display", error.to_string()),
+        ("Debug", format!("{error:?}")),
+    ] {
         prop_assert!(
-            !input.windows(8).any(|part| part == window),
-            "message {message:?} repeats 8 bytes of the input"
+            !message.contains(&*String::from_utf8_lossy(input)),
+            "{kind} text {message:?} contains the input"
         );
+        for window in message.as_bytes().windows(8) {
+            prop_assert!(
+                !input.windows(8).any(|part| part == window),
+                "{kind} text {message:?} repeats 8 bytes of the input"
+            );
+        }
     }
     Ok(())
 }

@@ -1,5 +1,6 @@
 //! Read-only vaults (spec 6.9): a backup archive or a `.before-restore` folder opened to look
-//! at its items and copy files out of it. The type has no method that writes. Opening takes no
+//! at its items and copy files out of it. No method changes the source (the folder or the
+//! backup): exports write only a decrypted copy, to a place the caller picks. Opening takes no
 //! lock and repairs, cleans and creates nothing, so a folder is exactly as it was afterwards.
 
 use super::files::{check_export_space, export_blob, refuse_inside};
