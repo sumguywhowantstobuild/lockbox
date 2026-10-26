@@ -952,12 +952,13 @@ pub(super) mod tests {
             prop_oneof![mutated(&TINY.backup, 1).prop_map(Case::File), in_entry]
         }
 
-        /// The 8-byte rule, counting only pieces the change brought in (the plain rule fails
-        /// on `manifest`, which the valid backup and the error text share), and a check that
-        /// nothing of the vault itself is named.
+        /// The 8-byte rule of `assert_text_is_fixed` against the whole backup file (with its
+        /// allowlist of fixed words), and a check that nothing of the vault itself is named: its
+        /// ID, the item and file IDs, its name, an item title or a file name, in `Display` or
+        /// `Debug` text, in any letter case.
         fn check_text(error: &CoreError, input: &[u8]) -> std::result::Result<(), TestCaseError> {
-            assert_text_is_fixed(error, input, &TINY.backup)?;
-            let message = error.to_string().to_lowercase();
+            assert_text_is_fixed(error, input)?;
+            let message = format!("{error} {error:?}").to_lowercase();
             for secret in &TINY.secrets {
                 prop_assert!(
                     !message.contains(secret.as_str()),
@@ -984,30 +985,29 @@ pub(super) mod tests {
             fn mutated_backup_never_panics(case in cases()) {
                 let dir = TempDir::new();
                 let path = dir.path().join("m.lockbox-backup");
-                let bytes = match case {
-                    Case::File(bytes) => {
-                        fs::write(&path, &bytes).unwrap();
-                        bytes
-                    }
+                match case {
+                    Case::File(bytes) => fs::write(&path, bytes).unwrap(),
                     Case::Entry(i, bytes) => {
                         fs::write(&path, &TINY.backup).unwrap();
                         let key = Key32::from_bytes(TINY.key);
-                        let (name, edited) = (&TINY.entries[i].0, bytes.clone());
+                        let name = &TINY.entries[i].0;
                         let edit = |m: &mut BTreeMap<String, Vec<u8>>| {
-                            m.insert(name.clone(), edited);
+                            m.insert(name.clone(), bytes);
                         };
                         rewrite_backup(&path, edit, ManifestMode::Rehash { key: Some(&key) });
-                        bytes
                     }
-                };
+                }
+                // The input is the whole file the parsers read, so the entries a case leaves
+                // unchanged and the re-signed manifest count as input too.
+                let input = fs::read(&path).unwrap();
                 let cancel = CancelToken::new();
                 if let Err(error) = BackupArchive::open(&path, &cancel) {
-                    check_text(&error, &bytes)?;
+                    check_text(&error, &input)?;
                 }
                 // The recovery key (HKDF), not the password (Argon2id at 64 MiB per case).
                 let recovery = RecoverySecret::parse(&TINY.recovery).unwrap();
                 if let Err(error) = verify_backup(&path, Credential::Recovery(&recovery), &cancel) {
-                    check_text(&error, &bytes)?;
+                    check_text(&error, &input)?;
                 }
             }
         }

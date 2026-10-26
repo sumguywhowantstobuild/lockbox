@@ -172,16 +172,21 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
     out of a vault or backup into another vault, a blob goes through `authenticate_copy` (or the same chunk-by-chunk
     decryption), so a damaged blob is caught while it is copied, not later, and the partial copy is thrown away.
     Spec 6.7, 6.8, 6.9.
-14. **A restore changes nothing in the vaults folder until every check has passed.** Before that it writes only the
-    restore journal (with its lock file) and a hidden staging folder (`.restore-<random>`) beside the destination. The existing vault is
-    moved aside to `<folder>.before-restore` (never overwriting an earlier one) only at the final swap. Spec 6.8.
+14. **A restore changes nothing in the vaults folder outside a hidden staging folder until every check has passed.**
+    The staging folder (`.restore-<random>`, beside the destination) is where the backup is extracted while the last
+    checks run: every blob is authenticated as it is written, and every entry is hashed again as it is read back. The
+    only other writes before then are the restore journal and its lock file (`<journal>.lock`), at the path the caller
+    gives (the design keeps them in the user's profile, not in the vaults folder). The existing vault is moved aside to
+    `<folder>.before-restore` (never overwriting an earlier one) only at the final swap. Spec 6.8.
 15. **The journal is checked before it is acted on, and the staging folder goes before the journal.** A journal whose
     paths are not what a restore would write (not absolute, not siblings, wrong names) is refused and touches nothing.
     Cleaning up removes the staging folder first and the journal last, so a crash in between leaves a journal that
     points at nothing (recovery clears it), never a staging folder with no journal. Spec 6.8.
-16. **Read-only is a separate type.** `ReadOnlyVault` has no method that writes: opening a backup or a
-    `.before-restore` folder takes no lock and repairs, cleans and creates nothing. A function that must not write
-    cannot be handed a vault that can. Spec 6.9.
+16. **Read-only is a separate type.** `ReadOnlyVault` has no method that changes its source, the folder or the backup
+    it was opened from: opening a backup or a `.before-restore` folder takes no lock and repairs, cleans and creates
+    nothing. Its exports (`export_file`) write only a decrypted copy of a file, to a place the user picked, and only
+    when asked; that place may not be the backup itself or inside the folder being viewed. A function that must not
+    change a vault cannot be handed one that can. Spec 6.9.
 
 ## Where the "why" lives
 

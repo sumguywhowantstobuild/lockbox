@@ -824,37 +824,58 @@ pub(crate) mod testkit {
         std::fs::write(path, bytes).unwrap();
     }
 
-    /// Error text is fixed (rule R5): it must not contain the input, as text or as any 8 bytes
-    /// of it. Inputs under 8 bytes are skipped; they could match the fixed words by chance.
-    ///
-    /// `valid` is the well-formed file the input was made from (empty for random bytes). Its own
-    /// pieces may appear in an error, because a valid file holds fixed words such as `manifest`
-    /// that error text also uses; only a piece that the change itself brought in counts as
-    /// leaked input. A single changed byte can also turn valid text into a fixed error word by
-    /// chance (`before_restore` becomes `before restore`, which shares the 8 bytes ` restore`
-    /// with "restore journal"), so with a `valid` file a leak means 16 shared bytes, not 8.
+    /// Words of the crate's own fixed error text that a valid input also holds, so an error can
+    /// share 8 bytes with its input by chance. Such a shared piece is allowed only where it lies
+    /// inside one of these words, at a place the word stands in the message. Each entry is here
+    /// because a test run hit it; nothing is added in advance.
+    const FIXED_WORDS: &[&str] = &[
+        // "damaged data: backup: manifest" (and "... manifest mac", "... manifest mismatch"):
+        // every manifest holds the key `manifest_version`, and every backup also the entry name
+        // `backup-manifest.json`. With the space before it, because one changed byte can put a
+        // space before that key too.
+        " manifest",
+        // "wrong password", which any key slot that will not open gives (the recovery slot too):
+        // a backup's `vault.json` holds the slot type `"password"`.
+        "password",
+        // "damaged data: restore journal", with the space before it: one changed byte turns the
+        // journal's `before_restore` into `before restore` or `before_restore `.
+        " restore journal",
+    ];
+
+    /// Error text is fixed (rule R5): neither `Display` nor `Debug` of the error may contain
+    /// the input as text, or any 8 bytes of it, except 8 bytes that lie inside a word of
+    /// [`FIXED_WORDS`] where that word stands in the text. One rule for every input, random or
+    /// made from a valid file. Inputs under 8 bytes are skipped (fixed text matches them by
+    /// chance), and a leak shorter than 8 bytes (a name of 5 characters, say) is not seen.
+    /// `CoreError` holds only fixed text and numbers today; this guards against a change.
     pub(crate) fn assert_text_is_fixed(
         error: &CoreError,
         input: &[u8],
-        valid: &[u8],
     ) -> std::result::Result<(), proptest::test_runner::TestCaseError> {
         use proptest::prelude::prop_assert;
-        let size = if valid.is_empty() { 8 } else { 16 };
-        if input.len() < size {
+        if input.len() < 8 {
             return Ok(());
         }
-        let message = error.to_string();
-        prop_assert!(
-            !message.contains(&*String::from_utf8_lossy(input)),
-            "message {message:?} contains the input"
-        );
-        for window in message.as_bytes().windows(size) {
-            let is_new = input.windows(size).any(|part| part == window)
-                && !valid.windows(size).any(|part| part == window);
+        for (kind, message) in [
+            ("Display", error.to_string()),
+            ("Debug", format!("{error:?}")),
+        ] {
             prop_assert!(
-                !is_new,
-                "message {message:?} repeats {size} bytes of the input"
+                !message.contains(&*String::from_utf8_lossy(input)),
+                "{kind} text {message:?} contains the input"
             );
+            let allowed: Vec<std::ops::Range<usize>> = FIXED_WORDS
+                .iter()
+                .flat_map(|word| message.match_indices(word))
+                .map(|(at, word)| at..at + word.len())
+                .collect();
+            for (at, window) in message.as_bytes().windows(8).enumerate() {
+                let fixed = allowed.iter().any(|r| r.start <= at && at + 8 <= r.end);
+                prop_assert!(
+                    fixed || !input.windows(8).any(|part| part == window),
+                    "{kind} text {message:?} repeats 8 bytes of the input"
+                );
+            }
         }
         Ok(())
     }
@@ -1665,12 +1686,8 @@ mod tests {
 
         /// Half the cases are random bytes, which stop at the first structure check; half are a
         /// valid archive with up to three bytes changed, which get past it.
-        /// The flag says the bytes were made from `VALID`.
-        fn archive_bytes() -> impl Strategy<Value = (bool, Vec<u8>)> {
-            prop_oneof![
-                vec(any::<u8>(), 0..2048).prop_map(|b| (false, b)),
-                mutated(&VALID, 3).prop_map(|b| (true, b)),
-            ]
+        fn archive_bytes() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![vec(any::<u8>(), 0..2048), mutated(&VALID, 3)]
         }
 
         #[test]
@@ -1686,12 +1703,12 @@ mod tests {
             #![proptest_config(ProptestConfig::with_cases(256))]
 
             #[test]
-            fn archive_open_never_panics((from_valid, bytes) in archive_bytes()) {
+            fn archive_open_never_panics(bytes in archive_bytes()) {
                 let dir = TempDir::new();
                 let path = dir.path().join("a.lockbox-backup");
                 std::fs::write(&path, &bytes).unwrap();
                 if let Err(error) = BackupArchive::open(&path, &CancelToken::new()) {
-                    assert_text_is_fixed(&error, &bytes, if from_valid { &VALID } else { &[] })?;
+                    assert_text_is_fixed(&error, &bytes)?;
                 }
             }
         }

@@ -26,7 +26,12 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
   accepted range is refused before any work starts.
 - **No secrets in error messages or logs (R5).** Error messages are written by us and never include what was typed or
   stored; secret types print `<redacted>`. The property tests feed random and damaged input and check, for inputs of 8
-  bytes or more, that no error contains the input or any 8-byte stretch of it.
+  bytes or more, that no error message contains the input or any 8-byte stretch of it. For the backup parsers (the
+  archive, its manifest, the restore journal) the same check also covers the error's debug text (the form a developer
+  sees), and allows one kind of shared stretch: one that lies inside a word of our own fixed error text that a valid
+  file also holds, such as `manifest`, where that word stands in the message. A shorter piece, such as a name of under
+  8 bytes, is not caught; the test that damages a whole backup also checks that no error names the vault, its IDs, an
+  item title or a file name.
 
 ## What Lockbox does not protect against
 
@@ -39,13 +44,10 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 - **Old copies of the vault.** Changing the password or regenerating the recovery key does **not** change the vault
   key. Anyone holding an earlier copy of the vault folder (an old backup, an old header) plus the old password or old
   recovery key can recover the vault key, and that key opens current and future data if they also get copies of the
-  newer files. Full revocation needs "Rotate vault key", planned for v1.1 (spec 5.3). A backup is such a copy: it
-  holds the header as it was when the backup was made, so an old password or old recovery key keeps opening that
-  backup after you change them, and restoring it brings that old password back. Delete backups you no longer want
-  reachable.
-- **Old data a restore leaves behind.** When a restore replaces a vault, the vault it replaced is kept next to it as
-  `<folder>.before-restore` (then `-2`, `-3` and so on), so a bad restore can be undone. That folder is a full copy of
-  the old vault, readable with the old password, and Lockbox never deletes it for you; it stays until you delete it.
+  newer files. Full revocation needs "Rotate vault key", planned for v1.1 (spec 5.3). A backup is such a copy (see
+  "Old backups keep old passwords working" under "Honest limits").
+- **Old data a restore leaves behind.** The vault a restore replaces stays beside it until you delete it (see "A
+  restore keeps the vault it replaced" under "Honest limits").
 - **Rollback and deleted item files.** An attacker who can write to the folder can put back an older valid copy of an
   item, or delete an item file, and Lockbox will not notice (R7, spec 6.6). Files that lose their item are set aside,
   not deleted. An authenticated manifest (a tamper-proof list of every file) is left for the future sync design.
@@ -258,6 +260,11 @@ Lockbox defends.
 
 - **No rollback protection (spec 6.6).** Described under "What Lockbox does not protect against". *Accepted:* it needs
   the authenticated manifest of the sync design.
+- **Old backups keep old passwords working.** A backup holds the vault's header as it was when the backup was made, so
+  a password or recovery key you have changed since keeps opening that backup, and restoring it brings the old
+  password back (spec 5.3). *Accepted:* a backup has to open with the credentials it was made with, and changing them
+  does not change the vault key; full revocation needs "Rotate vault key" (v1.1). Delete backups you no longer want
+  reachable.
 - **Some recovery-key typos are not caught.** The 4-bit check catches a mistyped symbol about 15 times in 16 (the test
   requires at least 14 in 16); the rest simply fail to unlock. *Accepted:* a short check keeps the key easy to type.
 - **Guess cost can end up below the 1-second target.** Calibration times each size once, so a noisy PC can pick
@@ -271,6 +278,11 @@ Lockbox defends.
   (damaged items, damaged files, missing files). It is never silently complete. *Accepted:* refusing to back up at
   all would leave you with no backup of the healthy part; check the report, and keep an older backup until a clean
   one has been made.
+- A restore keeps the vault it replaced until you delete it. When a restore replaces a vault, the old one is kept next
+  to it as `<folder>.before-restore` (then `-2`, `-3` and so on up to `-99`; past that, a restore over that vault is
+  refused until one is deleted), so a bad restore can be undone. That folder is a full copy of the old vault, readable with the
+  old password, and Lockbox never deletes it for you. *Accepted:* deleting it automatically could throw away the only
+  good copy; the planned interface lists these folders, to open read-only or delete.
 - Every stored file is labelled `application/octet-stream`; there is no file-type table yet. *Accepted:* the label is
   only display information and the file's bytes are unaffected; how files are opened is decided with the interface.
 - A stored file's name is kept as text; a name that is not valid Unicode (very rare on Windows) is stored with

@@ -422,12 +422,8 @@ mod tests {
         /// Half the cases are random bytes, which stop at the size or JSON check; half are a
         /// valid manifest with up to three bytes changed, which reach the version peek and the
         /// strict parse.
-        /// The flag says the bytes were made from `VALID`.
-        fn manifest_bytes() -> impl Strategy<Value = (bool, Vec<u8>)> {
-            prop_oneof![
-                vec(any::<u8>(), 0..1024).prop_map(|b| (false, b)),
-                mutated(&VALID, 3).prop_map(|b| (true, b)),
-            ]
+        fn manifest_bytes() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![vec(any::<u8>(), 0..1024), mutated(&VALID, 3)]
         }
 
         #[test]
@@ -439,9 +435,9 @@ mod tests {
             #![proptest_config(ProptestConfig::with_cases(256))]
 
             #[test]
-            fn parse_manifest_never_panics((from_valid, bytes) in manifest_bytes()) {
+            fn parse_manifest_never_panics(bytes in manifest_bytes()) {
                 if let Err(error) = parse_manifest(&bytes) {
-                    assert_text_is_fixed(&error, &bytes, if from_valid { &VALID } else { &[] })?;
+                    assert_text_is_fixed(&error, &bytes)?;
                 }
             }
         }

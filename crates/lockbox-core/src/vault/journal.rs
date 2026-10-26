@@ -901,12 +901,8 @@ mod tests {
         /// Half the cases are random bytes, which stop at the size or JSON check; half are a
         /// valid journal with up to three bytes changed, which reach the version peek and the
         /// strict parse.
-        /// The flag says the bytes were made from `VALID`.
-        fn journal_file_bytes() -> impl Strategy<Value = (bool, Vec<u8>)> {
-            prop_oneof![
-                vec(any::<u8>(), 0..1024).prop_map(|b| (false, b)),
-                mutated(&VALID, 3).prop_map(|b| (true, b)),
-            ]
+        fn journal_file_bytes() -> impl Strategy<Value = Vec<u8>> {
+            prop_oneof![vec(any::<u8>(), 0..1024), mutated(&VALID, 3)]
         }
 
         #[test]
@@ -922,12 +918,12 @@ mod tests {
             #![proptest_config(ProptestConfig::with_cases(256))]
 
             #[test]
-            fn read_journal_never_panics((from_valid, bytes) in journal_file_bytes()) {
+            fn read_journal_never_panics(bytes in journal_file_bytes()) {
                 let dir = TempDir::new();
                 let path = dir.path().join("j.json");
                 fs::write(&path, &bytes).unwrap();
                 if let Err(error) = read_journal(&path) {
-                    assert_text_is_fixed(&error, &bytes, if from_valid { &VALID } else { &[] })?;
+                    assert_text_is_fixed(&error, &bytes)?;
                 }
             }
         }
