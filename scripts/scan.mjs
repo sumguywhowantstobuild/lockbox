@@ -3,7 +3,7 @@
 // Exit 0 = CLEAN, 1 = FINDINGS, 2 = INCOMPLETE (a tool is missing or failed, so "clean" can't be claimed).
 // Usage: node scripts/scan.mjs [--json]
 // Env LOCKBOX_GITLEAKS / LOCKBOX_SEMGREP / LOCKBOX_OSV point at a tool; a .mjs path is run with this Node (tests use that).
-// LOCKBOX_CARGO_LOCK overrides where the required Cargo.lock is looked for (tests only).
+// LOCKBOX_CARGO_LOCK / LOCKBOX_UI_LOCK override where the lockfiles are looked for (tests only).
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
@@ -11,8 +11,17 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = join(root, ".scan");
+// Lockfiles osv-scanner reads, relative to the repo root. Cargo.lock is always required; the UI's lockfile is
+// required once the UI exists, so its npm dependencies can never go unchecked.
+const lockfiles = [
+  { name: "Cargo.lock", path: process.env.LOCKBOX_CARGO_LOCK ?? "Cargo.lock", required: true },
+  {
+    name: "ui/package-lock.json",
+    path: process.env.LOCKBOX_UI_LOCK ?? "ui/package-lock.json",
+    required: existsSync(join(root, "ui", "package.json")),
+  },
+];
 // pip installs semgrep here (not on PATH); see docs/SETUP.md troubleshooting.
-const cargoLock = process.env.LOCKBOX_CARGO_LOCK ?? join(root, "Cargo.lock");
 const semgrepDir = process.env.APPDATA && join(process.env.APPDATA, "Python", "Python311", "Scripts");
 
 // gitleaks exit 1 means "leaks found" but is also its fatal-error code, hence findingsExit below.
@@ -67,15 +76,13 @@ const tools = [
     env: "LOCKBOX_OSV",
     bin: "osv-scanner",
     okExit: [0, 1, 128],
-    emptyExit: 128, // no packages found: never expected, this is a Rust workspace
+    emptyExit: 128, // no packages found: never expected, Cargo.lock is always there
     findingsExit: 1,
     args: (out) => {
-      if (!existsSync(cargoLock)) throw new Error("needs Cargo.lock, which is missing");
-      return [
-        "scan", "source",
-        ...["Cargo.lock", "package-lock.json"].filter((f) => existsSync(join(root, f))).flatMap((f) => ["-L", f]),
-        "--format", "json", "--output-file", out,
-      ];
+      const present = lockfiles.filter((l) => existsSync(resolve(root, l.path)));
+      const missing = lockfiles.find((l) => l.required && !present.includes(l));
+      if (missing) throw new Error(`needs ${missing.name}, which is missing`);
+      return ["scan", "source", ...present.flatMap((l) => ["-L", l.path]), "--format", "json", "--output-file", out];
     },
     findings: (r) =>
       r.results.flatMap((res) =>

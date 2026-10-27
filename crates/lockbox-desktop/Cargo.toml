@@ -1,0 +1,25 @@
+[package]
+name = "lockbox-desktop"
+description = "Lockbox desktop app: the Tauri shell between the screens and the vault engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = "2.12.5"
+tauri-plugin-single-instance = "2.5.4"
+
+[build-dependencies]
+tauri-build = "2.7.4"
+
+[dev-dependencies]
+tauri = { version = "2.12.5", features = ["test"] }
+
+[features]
+# Release builds: embed the built UI (`ui/dist`) and serve it from the app's own origin. Without it the window loads
+# the Vite dev server (`cargo tauri dev`).
+custom-protocol = ["tauri/custom-protocol"]

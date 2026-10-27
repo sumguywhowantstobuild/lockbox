@@ -1,0 +1,6 @@
+{
+  "identifier": "main",
+  "description": "The main window may call Lockbox's own commands and listen to its events; nothing else.",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-app-info"]
+}
