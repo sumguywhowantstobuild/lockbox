@@ -298,6 +298,12 @@ Lockbox defends.
   refused until one is deleted), so a bad restore can be undone. That folder is a full copy of the old vault, readable
   with the old password, and Lockbox never deletes it for you. *Accepted:* deleting it automatically could throw away
   the only good copy; the planned interface lists these folders, to open read-only or delete.
+- Dismissing a stuck restore (one that recovery cannot finish) while its drive is not connected removes only the
+  restore journal. The hidden staging folder (`.restore-` plus 32 hex characters) stays on that drive, and nothing
+  removes it later. It is an encrypted copy of the vault in the backup (complete if the restore had finished copying
+  it), and it still opens with the backup's password. When the drive is back, delete that folder by hand; Plan 3's
+  dialog will say so. *Accepted:* dismissing is your confirmed way out of a restore that cannot finish, so it has to
+  work without the drive, and the folder holds nothing the backup itself does not.
 - A vault whose two header files are both unreadable cannot be restored in place. Restore cannot tell that its folder
   is that vault, so it makes a new folder; while the damaged one still has the name Lockbox gave it, that name is
   taken, and the restore stops ("destination exists"). Restore into another folder instead. *Parked for Plan 3,*
