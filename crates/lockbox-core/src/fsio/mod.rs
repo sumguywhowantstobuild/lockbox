@@ -111,25 +111,41 @@ pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
     Ok(retry(|| sys::replace_file(from, to))?)
 }
 
+/// A destination that is already taken.
+pub(crate) const DESTINATION_EXISTS: CoreError = CoreError::InvalidInput {
+    what: "destination exists",
+};
+
 /// Moves the file or folder `from` to `to`, which must not exist (`InvalidInput` if it does).
 pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
-    let exists = || CoreError::InvalidInput {
-        what: "destination exists",
-    };
     if to.try_exists()? {
-        return Err(exists());
+        return Err(DESTINATION_EXISTS);
     }
-    retry(|| sys::rename_no_replace(from, to)).map_err(|e| {
-        // AlreadyExists on Windows; Linux reports a non-empty target as DirectoryNotEmpty.
-        if matches!(
-            e.kind(),
-            io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
-        ) {
-            exists()
-        } else {
-            e.into()
-        }
-    })
+    retry(|| sys::rename_no_replace(from, to)).map_err(taken_or_io)
+}
+
+/// Moves the file `from` to `to`, which must not exist at all: not a file, a folder or a
+/// (dangling) link; `InvalidInput` if anything is there. Unlike [`rename_dir_no_replace`] the
+/// check and the move are one step, so a competing writer cannot slip in between.
+pub fn rename_file_no_replace(from: &Path, to: &Path) -> Result<()> {
+    retry(|| sys::rename_file_no_replace(from, to)).map_err(taken_or_io)?;
+    // An error here is one reported after the file landed, as the portable version can (it
+    // links first, then removes the source and syncs the folder).
+    #[cfg(test)]
+    failpoint::check("publish.after_link")?;
+    Ok(())
+}
+
+fn taken_or_io(e: io::Error) -> CoreError {
+    // AlreadyExists on Windows; Linux reports a non-empty target as DirectoryNotEmpty.
+    if matches!(
+        e.kind(),
+        io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+    ) {
+        DESTINATION_EXISTS
+    } else {
+        e.into()
+    }
 }
 
 /// Clears the hidden attribute (other attributes stay). Windows keeps a file's
@@ -161,6 +177,16 @@ pub fn remove_file_retry(path: &Path) -> Result<()> {
     }
 }
 
+/// Deletes the folder `path` and everything in it, retrying like the other operations while
+/// another program briefly holds something inside. A missing folder counts as success. The
+/// caller decides whether `path` is a folder it may delete.
+pub fn remove_dir_all_retry(path: &Path) -> Result<()> {
+    match retry(|| fs::remove_dir_all(path)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 /// Reads `path`, retrying like the other operations while another program holds it. Reads
 /// at most `max + 1` bytes, so a file over `max` is noticed without loading all of it.
 pub(crate) fn read_retry(path: &Path, max: usize) -> Result<Vec<u8>> {
@@ -171,6 +197,28 @@ pub(crate) fn read_retry(path: &Path, max: usize) -> Result<Vec<u8>> {
             .read_to_end(&mut bytes)?;
         Ok(bytes)
     })?)
+}
+
+/// Opens `path` for reading. On Windows the handle shares read access only, so nobody can
+/// change, replace or delete the file while it is held. Elsewhere a plain open.
+pub fn open_shared_read(path: &Path) -> Result<File> {
+    Ok(retry(|| sys::open_shared_read(path))?)
+}
+
+/// Whether the file at `path` is the open `file`, whatever its name (a hard link, another
+/// spelling of the path, a link to it). Nothing at `path`, or a folder, is not.
+pub fn is_same_file(file: &File, path: &Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(sys::file_id(file)? == sys::file_id(&File::open(path)?)?),
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Reads up to `buf.len()` bytes at `offset`; 0 means end of file.
+pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> Result<usize> {
+    Ok(retry(|| sys::read_at(file, buf, offset))?)
 }
 
 /// A fresh name `.<16 random hex chars><suffix>` in `dir` for a hidden temp file; nothing is created.
@@ -223,6 +271,21 @@ pub fn peak_memory_bytes() -> Option<u64> {
 /// content, never a mix: temp file in the same folder, flushed to disk, then swapped in.
 /// The temp file is removed if anything fails.
 pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<()> {
+    write_then_publish(target, bytes, replace_file)
+}
+
+/// [`atomic_write`] for a `target` that must not exist at all (`InvalidInput` "destination
+/// exists" if anything is there, a dangling link included): the first writer wins and nobody
+/// else's file is replaced.
+pub fn atomic_create(target: &Path, bytes: &[u8]) -> Result<()> {
+    write_then_publish(target, bytes, rename_file_no_replace)
+}
+
+fn write_then_publish(
+    target: &Path,
+    bytes: &[u8],
+    publish: impl FnOnce(&Path, &Path) -> Result<()>,
+) -> Result<()> {
     let (mut file, tmp) = create_hidden_temp(parent_dir(target), ".tmp")?;
     let result = (|| {
         file.write_all(bytes)?;
@@ -231,7 +294,7 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<()> {
         drop(file); // Windows cannot replace a file that is still open without delete sharing.
         #[cfg(test)]
         failpoint::check("atomic_write.before_replace")?;
-        replace_file(&tmp, target)
+        publish(&tmp, target)
     })();
     if result.is_err() {
         let _ = remove_file_retry(&tmp);
@@ -247,9 +310,18 @@ pub(crate) mod failpoint {
     use crate::blob::CancelToken;
     use std::cell::RefCell;
 
+    type Observer = (&'static str, Box<dyn FnMut()>);
+
     thread_local! {
         static ARMED: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
         static CANCELS: RefCell<Vec<(&'static str, CancelToken)>> = const { RefCell::new(Vec::new()) };
+        static OBSERVERS: RefCell<Vec<Observer>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Runs `f` each time the step `name` is reached, before its usual behaviour, so a test
+    /// can look at the disk at exactly that point.
+    pub fn observe(name: &'static str, f: Box<dyn FnMut()>) {
+        OBSERVERS.with(|o| o.borrow_mut().push((name, f)));
     }
 
     /// Cancels `token` when the step `name` is reached (the step itself succeeds), to test
@@ -265,10 +337,22 @@ pub(crate) mod failpoint {
     pub fn disarm_all() {
         ARMED.with(|a| a.borrow_mut().clear());
         CANCELS.with(|c| c.borrow_mut().clear());
+        OBSERVERS.with(|o| o.borrow_mut().clear());
     }
 
     /// Fails with an `Io` error while `name` is armed.
     pub fn check(name: &'static str) -> Result<()> {
+        // Taken out while they run, so an observer may itself reach a failpoint.
+        let mut observers = OBSERVERS.take();
+        for (watched, f) in observers.iter_mut() {
+            if *watched == name {
+                f();
+            }
+        }
+        OBSERVERS.with(|o| {
+            let added = std::mem::replace(&mut *o.borrow_mut(), observers);
+            o.borrow_mut().extend(added);
+        });
         CANCELS.with(|c| {
             for (armed, token) in c.borrow().iter() {
                 if *armed == name {
@@ -311,6 +395,50 @@ pub(crate) mod testutil {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+
+    /// The names directly inside `dir`, sorted.
+    pub fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Flips the lowest bit of the byte at offset `at` of the file `path`: one data byte of damage.
+    pub fn flip_byte(path: &Path, at: u64) -> std::io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let mut byte = [0u8];
+        file.seek(SeekFrom::Start(at))?;
+        file.read_exact(&mut byte)?;
+        byte[0] ^= 1;
+        file.seek(SeekFrom::Start(at))?;
+        file.write_all(&byte)
+    }
+
+    /// Makes `link` a folder link to `target`: a junction on Windows (needs no special rights),
+    /// a symlink elsewhere. Panics when it cannot, so a link test never passes by skipping.
+    pub fn make_dir_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            assert!(made, "cannot create a junction on Windows");
+        }
+        #[cfg(not(windows))]
+        std::os::unix::fs::symlink(target, link).expect("cannot create a symlink");
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +474,76 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"new content");
     }
 
+    /// `atomic_create` publishes only to a name that is free, whatever else is there.
+    #[test]
+    fn atomic_create_never_replaces_anything() {
+        use super::testutil::make_dir_link;
+        let dir = TempDir::new();
+        let target = dir.path().join("journal.json");
+        atomic_create(&target, b"first").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+        let exists = |r: Result<()>| {
+            assert!(matches!(
+                r,
+                Err(CoreError::InvalidInput {
+                    what: "destination exists"
+                })
+            ));
+        };
+        exists(atomic_create(&target, b"second"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        exists(atomic_create(&folder, b"x"));
+        let gone = TempDir::new();
+        let link = dir.path().join("link");
+        make_dir_link(&link, gone.path());
+        drop(gone);
+        exists(atomic_create(&link, b"x"));
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+        assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn remove_dir_all_retry_removes_a_tree_and_forgives_a_missing_one() {
+        let dir = TempDir::new();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("a").join("b")).unwrap();
+        std::fs::write(tree.join("a").join("b").join("f"), b"x").unwrap();
+        remove_dir_all_retry(&tree).unwrap();
+        assert!(!tree.exists());
+        remove_dir_all_retry(&tree).unwrap();
+    }
+
+    /// A program holding a file in the tree for a moment (antivirus) does not stop the removal.
+    #[cfg(windows)]
+    #[test]
+    fn remove_dir_all_retry_waits_out_a_brief_hold() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = TempDir::new();
+        let tree = dir.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        let held = tree.join("held");
+        std::fs::write(&held, b"x").unwrap();
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // Share read + write but not delete, so deleting the file fails while it is open.
+            let _held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1 | 2)
+                .open(held)
+                .unwrap();
+            opened_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+        });
+        opened_rx.recv().unwrap();
+        assert!(std::fs::remove_dir_all(&tree).is_err(), "the hold works");
+        remove_dir_all_retry(&tree).unwrap();
+        holder.join().unwrap();
+        assert!(!tree.exists());
+    }
+
     #[test]
     fn atomic_write_leaves_no_tmp_on_success() {
         let dir = TempDir::new();
@@ -364,6 +562,20 @@ mod tests {
         assert!(matches!(result, Err(CoreError::Io(_))));
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
         assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn failpoint_observer_runs_before_the_step() {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = seen.clone();
+        failpoint::observe("x.step", Box::new(move || counter.set(counter.get() + 1)));
+        failpoint::arm("x.step");
+        assert!(failpoint::check("x.step").is_err());
+        failpoint::check("x.other").unwrap();
+        assert_eq!(seen.get(), 1);
+        failpoint::disarm_all();
+        failpoint::check("x.step").unwrap();
+        assert_eq!(seen.get(), 1);
     }
 
     #[test]

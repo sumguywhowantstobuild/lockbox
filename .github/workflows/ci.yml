@@ -14,12 +14,18 @@ concurrency:
 
 jobs:
   rust:
-    name: "Rust: format, lint, test (${{ matrix.os }})"
+    name: "Rust: format, lint, test (${{ matrix.label }})"
     # Windows is the shipped target; Linux compiles and tests the portable file code too.
+    # Images are pinned so CI changes only when we bump them; the label keeps the check name
+    # (required by branch protection) the same across bumps.
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - label: windows
+            os: windows-2025-vs2026
+          - label: linux
+            os: ubuntu-24.04
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -40,7 +46,7 @@ jobs:
 
   scan:
     name: Security scan
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

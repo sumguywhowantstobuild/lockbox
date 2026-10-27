@@ -28,6 +28,15 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     sync_dir(parent_dir(to))
 }
 
+/// Moves the file `from` to `to`; fails (`AlreadyExists`) if anything is at `to`, a dangling
+/// link included. A hard link is created first because `link(2)` refuses an existing name where
+/// `rename(2)` would replace it.
+pub fn rename_file_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    fs::hard_link(from, to)?;
+    fs::remove_file(from)?;
+    sync_dir(parent_dir(to))
+}
+
 /// Hiding is just a leading dot here, so there is nothing to clear.
 pub fn clear_hidden(_path: &Path) -> io::Result<()> {
     Ok(())
@@ -46,6 +55,23 @@ pub fn clear_readonly(_path: &Path) -> io::Result<()> {
 /// A leading dot already hides the file here.
 pub fn create_hidden(path: &Path) -> io::Result<File> {
     OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+/// There are no share modes here; callers that need the file unchanged must not rely on it.
+pub fn open_shared_read(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(file, buf, offset)
+}
+
+/// Names the file behind an open handle: device and inode. Two names of the same file (hard
+/// links) give the same pair.
+pub fn file_id(file: &File) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata()?;
+    Ok((meta.dev(), meta.ino()))
 }
 
 /// Free space and file-size limits are not measured on this platform.

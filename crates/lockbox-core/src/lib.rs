@@ -5,6 +5,7 @@
 
 pub mod ad;
 pub(crate) mod aead;
+pub mod archive;
 pub mod blob;
 pub mod error;
 pub mod fsio;
@@ -15,6 +16,7 @@ pub mod item;
 pub mod kdf;
 pub mod limits;
 pub mod lockfile;
+pub mod manifest;
 pub mod recovery;
 pub mod search;
 pub mod secret;
@@ -23,7 +25,11 @@ pub mod slots;
 pub mod vault;
 
 pub use error::{CoreError, Result};
-pub use vault::{CleanupReport, CreatedVault, UnlockReport, Vault, read_vault_name};
+pub use vault::{
+    BackupReport, BackupSummary, CleanupReport, CreatedVault, Credential, PreparedRestore,
+    ReadOnlyVault, Recovery, RestoreOutcome, UnlockReport, Vault, dismiss_restore_journal,
+    read_vault_name, recover_restore, verify_backup,
+};
 
 /// The version of this crate, as set in `Cargo.toml`.
 pub fn version() -> &'static str {

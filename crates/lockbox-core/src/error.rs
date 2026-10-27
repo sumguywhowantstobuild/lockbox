@@ -29,6 +29,8 @@ pub enum CoreError {
     InvalidInput { what: &'static str },
     #[error("vault is in use by another process")]
     VaultInUse,
+    #[error("restore not finished; it will be completed at the next start")]
+    RestorePending,
     #[error("not found")]
     NotFound,
     #[error("cancelled")]

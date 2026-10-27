@@ -54,6 +54,7 @@ path.
 - **Recovery key** per vault, shown once at creation; **Regenerate recovery key**.
 - **Change password** (with the warning in spec 5.3).
 - **Encrypted backup and restore** of a vault.
+- **Test a backup** without restoring it.
 - **Open a backup (or a pre-restore copy) read-only**, to browse it or copy single items out.
 - **Add existing vault folder** (e.g. after moving a vault).
 
@@ -102,11 +103,11 @@ engine (Plan 1), not in the spec. Plans 3 and 4 are the desktop shell and the UI
 | Measure | Target | Where it comes from | How it is checked |
 |---|---|---|---|
 | Opening a big vault | 5 000 items: unlock under 3 s (not counting the roughly 1 s password check), search under 50 ms, release build | Plan 1 | `five_thousand_items_fast` (run on purpose, see the [README](../README.md#build-and-test)) |
-| Big files | A file of 4 GiB + 1 byte goes in and comes out with the same SHA-256 (a fingerprint of its contents), and memory stays flat (peak under 200 MB) | [Scope](#scope) (256 GiB limit) and spec 9 (a multi-GB local test before release); the 4 GiB size and 200 MB limit are from Plan 1 | `large_file_round_trip_4_gib` (run on purpose) |
+| Big files | A file of 4 GiB + 1 byte goes in and comes out with the same SHA-256 (a fingerprint of its contents), and memory stays flat (peak under 200 MB) | [Scope](#scope) (256 GiB limit) and spec 9 (a multi-GB local test before release); the 4 GiB size and 200 MB limit are from Plan 1 | `large_file_round_trip_4_gib` and `backup_restore_over_4_gib` (both run on purpose) |
 | Cost of guessing a password | Each guess costs one Argon2id run (a deliberately slow password-to-key step) of at least 64 MiB, 3 iterations, parallelism 4, calibrated to about 1 s | Spec R3 and 5.2 | Unit tests on the settings and their bounds |
 | Typos in the recovery key | A mistyped recovery key is caught about 15 times in 16, before any unlock attempt | Spec 5.2 | Test in the core's recovery module (it requires at least 14 in 16) |
 | Auto-lock and clipboard defaults | Lock after 5 minutes idle; clear the clipboard after 30 seconds | [Screens](#screens) (Settings) | Desktop app tests (Plan 3) |
-| Backups of any size | An archive over 4 GiB backs up and restores (ZIP64 is the zip format for archives that big) | Spec 9 | Backup and restore tests (Plan 2) |
+| Backups of any size | An archive over 4 GiB backs up and restores (ZIP64 is the zip format for archives that big) | Spec 9 | `backup_restore_over_4_gib` (run on purpose): a 4 GiB + 1 byte file through backup, test, restore and export; the other backup and restore tests are in the core (Plan 2) |
 | "Reviewed" release | All five review conditions hold, and each of R1–R7 is walked through against `SECURITY.md` before a release | [Spec 1](design/2026-10-07-lockbox-design.md#what-reviewed-means-for-lockbox) | Written sign-off by Ariel before each release |
 | v1 done | Every v1 feature works on Windows and the five review conditions hold | Spec 1 | All of the above |
 

@@ -1,7 +1,7 @@
 # Architecture
 
-This describes what is built today: the Rust core, `crates/lockbox-core` (Plan 1). The desktop shell, the UI, backup
-and restore, and read-only vaults come in later plans and are not here yet. The target design and the reasons behind it
+This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
+restore and read-only vaults). The desktop shell and the UI come in later plans and are not here yet. The target design and the reasons behind it
 are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as "spec
 5.2" and so on.
 
@@ -32,7 +32,9 @@ so the tests can build on them. A "blob" is one stored file, encrypted.
 | `slots.rs` | Key slots: wrap and unwrap the vault key under the password key or the recovery key |
 | `header.rs` | `vault.json` and its `.bak`: strict parse, header MAC (a tamper-evident stamp), writing both copies in order |
 | `item.rs` | The item model (login, note, file, collection) and its sealed file format, padded to 512 bytes |
-| `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); cancel token; output-journal hook |
+| `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); `authenticate_copy` (copies a blob unchanged while checking every chunk); cancel token; output-journal hook |
+| `manifest.rs` | `backup-manifest.json`: the list of everything in a backup (path, size, SHA-256) with a MAC, and its strict parser |
+| `archive.rs` | The backup file (one stored ZIP64 archive): our own strict reader for the few shapes we write, and the writer |
 | `lockfile.rs` | The `.lock` file with an OS exclusive lock: one process per vault |
 | `fsio/mod.rs` | Safe file operations: `atomic_write` (all or nothing), `replace_file`, `rename_dir_no_replace`, retries, hidden temps, space checks |
 | `fsio/windows.rs` | The Win32 calls. The only place `unsafe` is allowed |
@@ -43,12 +45,19 @@ so the tests can build on them. A "blob" is one stored file, encrypted.
 | `vault/files.rs` | Files in an open vault: import, replace, save a decrypted copy, purge |
 | `vault/cleanup.rs` | The cleanup that runs at unlock; listing and deleting quarantined files |
 | `vault/naming.rs` | Vault names, folder names and timestamps |
+| `vault/backup.rs` | Making a backup of an open vault: built hidden, re-read and checked, then published |
+| `vault/source.rs` | One way to unlock and check a vault, whether it sits in a folder or inside a backup; also "test a backup" |
+| `vault/restore.rs` | Restore: check and extract into a hidden staging folder, the journaled swap into place, and recovery after a crash |
+| `vault/journal.rs` | The restore journal: its strict reader and validation, and the lock around it |
+| `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out |
 | `search.rs` | The in-memory search index (returns item IDs only) |
 | `generator.rs` | Password and passphrase generator (EFF word list in `wordlists/`) |
 
 Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault_lifecycle.rs`, `files.rs`,
-`properties.rs` (random and corrupted input), and two checks run on purpose, `search.rs` (5 000 items) and
-`large_file.rs` (4 GiB).
+`properties.rs` (random and corrupted input), and three checks run on purpose, `search.rs` (5 000 items),
+`large_file.rs` (4 GiB) and `backup_large.rs` (a 4 GiB file through backup, test, restore and export). The parsers for
+backup input (the archive, the manifest, the restore journal) have property tests beside their code, because they are
+crate-private: random and damaged bytes must give an error with fixed wording, never a panic.
 
 ## How data flows
 
@@ -125,7 +134,11 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
    `replace_file`), and the vault folder itself only by `rename_dir_no_replace`. (The folders inside it, `items/`,
    `files/` and `files/orphaned/`, are empty working folders created in place with `create_dir_all`.) That same
    no-replace rename also moves blobs into and out of `files/orphaned/` during cleanup; it is a rename, not a write.
-   (The empty `.lock` marker holds no data and is the one exception.) Spec 6.2.
+   Restore is the exception in two places: it writes each entry in place inside its hidden staging folder (a new
+   file, synced, closed and read back before the next), which holds no vault until it is renamed into place and is
+   removed whole by the clean-up, recovery or a dismissal (rule 15); and it publishes the restore journal's first
+   version with `atomic_create`, the same temp-file write renamed only to a name that is still free. The empty lock
+   files, a vault's `.lock` and the journal's `<journal>.lock`, hold no data and are created in place too. Spec 6.2.
 2. **`unsafe` only in `fsio::windows`.** (`unsafe` marks Rust code the compiler cannot check.) The crate root has
    `#![deny(unsafe_code)]`; that one module opts out, and each block carries a comment saying why it is sound.
 3. **Repair only what was verified.** The other header copy is overwritten only when the header that unlocked passed its
@@ -134,8 +147,11 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
    files stay as they are. Spec 6.3.
 4. **Nothing referenced is deleted automatically.** Deletion needs an intent written into an authenticated item
    (`purging`, `retired_blobs`). Unreferenced blobs are moved to `files/orphaned/`, never deleted, and not even moved
-   if any item is damaged. Damaged items are never deleted. Cleanup refuses to work through a linked `items/` or
-   `files/` folder. Spec 6.4.
+   if any item is damaged. The one exception: a failed item copy (`copy_item_from`) deletes from `files/` the blobs it
+   published itself, when no item can reference them (its new item cannot be on disk). Damaged items are never
+   deleted. Cleanup refuses to work through an `items/` or `files/` folder that is a link, a junction or another
+   reparse point that redirects the path (what Windows calls a "name surrogate"); a cloud-sync placeholder, such as
+   OneDrive's, does not redirect and is a real folder. Spec 6.4.
 5. **Secrets live in `Zeroizing` buffers (memory wiped when released) or types that wipe themselves.** `Key32` cannot be
    copied, printed or saved by accident (no `Clone`, `Display` or serde). Sealing and opening items happens inside one
    pre-sized wiped buffer.
@@ -156,6 +172,34 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
     header writes. While a key slot is unverified, any failed header write blocks them until the vault is reopened.
 11. **Persistent formats are pinned by tests.** Associated-data bytes, key slots, the header MAC, item plaintext and
     the recovery-key display each have fixed expected values, so a refactor cannot silently change them.
+12. **A backup is read only by our own strict parser.** The `zip` crate only writes archives. Reading never goes
+    through it: `archive.rs` accepts exactly the shapes we write (stored entries, fixed names, entries that fill the file
+    with no gap or overlap) and refuses anything else, naming the check that failed. Spec 6.7.
+13. **Every blob that moves is authenticated as it moves.** Into a backup, out of a backup into a restored vault, and
+    out of a vault or backup into another vault, a blob goes through `authenticate_copy` (or the same chunk-by-chunk
+    decryption), so a damaged blob is caught while it is copied, not later, and the partial copy is thrown away.
+    Spec 6.7, 6.8, 6.9.
+14. **A restore changes nothing in the vaults folder outside a hidden staging folder until every check has passed.**
+    The staging folder (`.restore-<random>`, beside the destination) is where the backup is extracted while the last
+    checks run: every blob is authenticated as it is written, and every entry is hashed again as it is read back. The
+    only other writes before then are the restore journal and its lock file (`<journal>.lock`), at the path the caller
+    gives (the design keeps them in the user's profile, not in the vaults folder), and the existing vault's lock:
+    commit takes it before its final re-checks, which can create an empty `.lock` inside that vault. The existing vault
+    is moved aside to `<folder>.before-restore` (never overwriting an earlier one) only at the final swap. Spec 6.8.
+15. **The journal is checked before it is acted on, and the staging folder goes before the journal.** A journal whose
+    paths are not what a restore would write (not absolute, not siblings, wrong names) is refused and touches nothing.
+    Cleaning up removes the staging folder first and the journal last, so a crash in between leaves a journal that
+    points at nothing (recovery clears it), never a staging folder with no journal, though a dismissal while the
+    staging folder's drive is not plugged in can leave one (below). While the folder that holds the staging folder is
+    missing (its drive is not plugged in, say), recovery and the clean-up after a failed restore decide nothing and
+    keep the journal: a staging folder that cannot be seen is not a staging folder that is gone. Dismissal, the user's
+    confirmed way out, still removes the journal then, and touches nothing on the missing path. Spec 6.8.
+16. **Read-only is a separate type.** `ReadOnlyVault` has no method that changes its source, the folder or the backup
+    it was opened from: opening a backup or a `.before-restore` folder takes no lock and repairs, cleans and creates
+    nothing. Its exports (`export_file`) write only a decrypted copy of a file, to a place the user picked, and only
+    when asked; that place may not be the backup itself, inside the folder being viewed, or inside any vault folder (a
+    folder that holds `vault.json` or `vault.json.bak`, or any folder under one). A function that must not change a
+    vault cannot be handed one that can. Spec 6.9.
 
 ## Where the "why" lives
 

@@ -1,10 +1,15 @@
 //! The vault's life cycle (spec 5.3, 6.3): create, unlock, change password, regenerate
 //! the recovery key. Items and files are added on top of [`Vault`] by later modules.
 
+mod backup;
 mod cleanup;
 mod files;
 mod items;
+mod journal;
 mod naming;
+mod readonly;
+mod restore;
+mod source;
 mod unlock;
 
 use crate::fsio;
@@ -27,10 +32,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use unlock::Credential;
 
+pub use backup::BackupReport;
 pub(crate) use naming::folder_name;
-pub use unlock::read_vault_name;
+pub use readonly::ReadOnlyVault;
+pub use restore::{
+    PreparedRestore, Recovery, RestoreOutcome, dismiss_restore_journal, recover_restore,
+};
+pub use source::{BackupSummary, verify_backup};
+pub use unlock::{Credential, read_vault_name};
 
 /// How long one password check should take on this machine.
 const KDF_TARGET: Duration = Duration::from_secs(1);

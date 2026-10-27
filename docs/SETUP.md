@@ -43,9 +43,10 @@ terminals opened before the install need restarting to see `cargo`.
 ### Windows file code and the Linux CI run
 - `crates/lockbox-core` depends on `windows-sys` 0.61 (Windows only) for safe file moves, disk-space and file-system
   checks. Its `unsafe` is confined to `src/fsio/windows.rs`; the rest of the crate denies `unsafe`.
-- The CI Rust job is a matrix (`windows-latest`, `ubuntu-latest`), so the non-Windows file code in
-  `src/fsio/portable.rs` is compiled and tested too. Job names are `Rust: format, lint, test (<os>)`;
-  required-status-check rules on GitHub must match them.
+- The CI Rust job is a matrix on pinned images (`windows-2025-vs2026`, `ubuntu-24.04`), so the non-Windows file
+  code in `src/fsio/portable.rs` is compiled and tested too. Job names are `Rust: format, lint, test (windows)` and
+  `Rust: format, lint, test (linux)`, fixed across image bumps; required-status-check rules on GitHub must match them.
+  Bump an image by changing only its `os:` value in `.github/workflows/ci.yml`.
 
 ## Commit identity
 Commits use GitHub's noreply address so no personal email is published:

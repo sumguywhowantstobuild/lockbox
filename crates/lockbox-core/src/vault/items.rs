@@ -45,7 +45,7 @@ fn random_item_id() -> ItemId {
 }
 
 /// The ID in an item file name: exactly 32 lowercase hex characters plus `.item`.
-fn item_id_from_file_name(name: &str) -> Option<ItemId> {
+pub(super) fn item_id_from_file_name(name: &str) -> Option<ItemId> {
     name.strip_suffix(ITEM_EXT)
         .and_then(|hex| ItemId::from_hex(hex).ok())
 }
@@ -124,11 +124,15 @@ pub(super) fn edited(stored: &Item) -> Result<Item> {
     Ok(next)
 }
 
+/// Where the item file for `id` lives in the vault folder `dir`.
+pub(super) fn item_file_in(dir: &Path, id: &ItemId) -> PathBuf {
+    dir.join(ITEMS_DIR)
+        .join(format!("{}{ITEM_EXT}", id.to_hex()))
+}
+
 impl Vault {
     pub(super) fn item_path(&self, id: &ItemId) -> PathBuf {
-        self.dir
-            .join(ITEMS_DIR)
-            .join(format!("{}{ITEM_EXT}", id.to_hex()))
+        item_file_in(&self.dir, id)
     }
 
     /// An ID no loaded, damaged or existing file uses. Random IDs never collide in practice;

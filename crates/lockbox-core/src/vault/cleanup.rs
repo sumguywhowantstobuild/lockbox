@@ -17,7 +17,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-const ORPHANED_DIR: &str = "orphaned";
+pub(super) const ORPHANED_DIR: &str = "orphaned";
 
 /// Deletes the regular files directly inside `dir` whose names end in `.partial` or `.tmp`
 /// (folders and links are never touched), counting them in `report`.
@@ -49,7 +49,7 @@ pub(super) fn remove_scraps(dir: &Path, report: &mut CleanupReport) {
 
 /// The canonical blobs directly inside `folder` (regular files named `<32 lowercase hex>.blob`)
 /// with their sizes, sorted by ID. A missing folder holds none; a link is an error.
-fn list_blobs(folder: &Path) -> Result<Vec<(FileId, u64)>> {
+pub(super) fn list_blobs(folder: &Path) -> Result<Vec<(FileId, u64)>> {
     check_folder(folder)?;
     let entries = match fs::read_dir(folder) {
         Ok(entries) => entries,
@@ -83,11 +83,35 @@ fn move_blobs(ids: &[FileId], from: &Path, to: &Path) -> usize {
     ids.iter().filter(|id| moved(*id)).count()
 }
 
-/// Fails unless `folder` is a real folder or is missing. A link or junction (std reports both as
-/// links) could lead outside the vault, so cleanup never works through one.
-fn check_folder(folder: &Path) -> Result<()> {
+/// The Windows file attributes of `meta`; 0 where there are none.
+fn attributes(meta: &fs::Metadata) -> u32 {
+    #[cfg(windows)]
+    return std::os::windows::fs::MetadataExt::file_attributes(meta);
+    #[cfg(not(windows))]
+    return {
+        let _ = meta;
+        0
+    };
+}
+
+/// The folder rule, which is std's, on what `symlink_metadata` says about an entry: `is_dir`,
+/// and the Windows file attributes (0 elsewhere). std's `is_dir` is false for a link, a junction
+/// and every other reparse point that redirects a path (what Windows calls a "name surrogate"),
+/// so those are refused. The attributes refuse nothing: a folder that std reports as a directory
+/// although it carries `FILE_ATTRIBUTE_REPARSE_POINT` has a reparse point that does not
+/// redirect, such as a cloud-sync placeholder (OneDrive's), and is a real folder. They are
+/// passed in all the same, so that this stays the one place that decides and a test can pin
+/// that they refuse nothing.
+fn is_real_folder(is_dir: bool, _attributes: u32) -> bool {
+    is_dir
+}
+
+/// Fails unless `folder` is a real folder ([`is_real_folder`]) or is missing. A link, a junction
+/// or another reparse point that redirects could lead outside the vault, so cleanup never works
+/// through one.
+pub(super) fn check_folder(folder: &Path) -> Result<()> {
     match fs::symlink_metadata(folder) {
-        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(meta) if is_real_folder(meta.is_dir(), attributes(&meta)) => Ok(()),
         Ok(_) => Err(CoreError::InvalidInput {
             what: "not a plain folder",
         }),
@@ -126,6 +150,14 @@ impl Vault {
         check_folder(&orphaned)?;
         delete_blob(&self.files_dir(), id)?;
         remove_file_retry(&blob_in(&orphaned, id))
+    }
+
+    /// Deletes only `files/<id>.blob`, for a blob a failed item copy published itself: the
+    /// quarantine is not touched, since a blob there with the same ID is an older one that
+    /// this call never created. Nothing is deleted through a linked `files/`.
+    pub(super) fn delete_published_blob(&self, id: &FileId) -> Result<()> {
+        check_folder(&self.files_dir())?;
+        delete_blob(&self.files_dir(), id)
     }
 
     /// Blobs that some loaded item (trashed ones included) lists as an attachment, not
@@ -285,7 +317,8 @@ impl Vault {
 mod tests {
     use super::*;
     use crate::blob::{CancelToken, NoJournal};
-    use crate::fsio::{failpoint, testutil::TempDir};
+    use crate::fsio::failpoint;
+    use crate::fsio::testutil::{TempDir, make_dir_link};
     use crate::ids::ItemId;
     use crate::item::ItemKind;
     use crate::vault::items::edited;
@@ -293,6 +326,60 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     const PW: &str = "correct horse battery";
+
+    /// The folder rule is std's: what std reports as a directory is a real folder whatever its
+    /// attributes, `FILE_ATTRIBUTE_REPARSE_POINT` among them, and nothing else is. A cloud-sync
+    /// placeholder (OneDrive's) is such a folder: its reparse point does not redirect, so std
+    /// reports it as a directory. One cannot be made in a test without registering a sync
+    /// provider, so the rule is given its attributes; a real junction goes through the rule with
+    /// the attributes it has on disk, and through `check_folder`.
+    #[test]
+    fn the_folder_rule_is_std_is_dir_whatever_the_attributes() {
+        const DIRECTORY: u32 = 0x10;
+        const REPARSE_POINT: u32 = 0x400;
+        const HIDDEN_READ_ONLY_ARCHIVE: u32 = 0x2 | 0x1 | 0x20;
+        for (is_dir, attributes, real) in [
+            (true, DIRECTORY, true),
+            (true, DIRECTORY | HIDDEN_READ_ONLY_ARCHIVE, true),
+            // A cloud-sync placeholder.
+            (true, DIRECTORY | REPARSE_POINT, true),
+            (true, DIRECTORY | 0x2 | REPARSE_POINT, true),
+            // A junction or a folder link: std does not report it as a directory.
+            (false, DIRECTORY | REPARSE_POINT, false),
+            // A file link, and a file.
+            (false, REPARSE_POINT, false),
+            (false, 0x20, false),
+        ] {
+            let got = is_real_folder(is_dir, attributes);
+            assert_eq!(got, real, "is_dir {is_dir}, attributes {attributes:#x}");
+        }
+
+        let (outside, inside) = (TempDir::new(), TempDir::new());
+        let junction = inside.path().join("link");
+        make_dir_link(&junction, outside.path());
+        let meta = fs::symlink_metadata(&junction).unwrap();
+        // On Windows a junction carries the reparse-point attribute, and std's `is_dir` says no.
+        assert_eq!(attributes(&meta) & REPARSE_POINT != 0, cfg!(windows));
+        assert!(!meta.is_dir());
+        assert!(!is_real_folder(meta.is_dir(), attributes(&meta)));
+        assert!(check_folder(&junction).is_err());
+        let meta = fs::symlink_metadata(outside.path()).unwrap();
+        assert!(is_real_folder(meta.is_dir(), attributes(&meta)));
+        check_folder(outside.path()).unwrap();
+    }
+
+    #[test]
+    fn check_folder_accepts_plain_and_missing_folders_only() {
+        let dir = TempDir::new();
+        check_folder(dir.path()).unwrap();
+        check_folder(&dir.path().join("missing")).unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, b"x").unwrap();
+        assert!(check_folder(&file).is_err());
+        let link = dir.path().join("link");
+        make_dir_link(&link, dir.path());
+        assert!(check_folder(&link).is_err());
+    }
 
     /// Always disarms, so a failing test cannot leak a failpoint into the next one on this thread.
     struct Disarm;
@@ -481,9 +568,7 @@ mod tests {
             blob_in(outside.path(), &old),
         )
         .unwrap();
-        if !link_folder(&vault.orphaned_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.orphaned_dir(), outside.path());
         let (vault, report) = reopen(vault);
 
         assert!(report.failed >= 1);
@@ -729,47 +814,22 @@ mod tests {
         assert_eq!(vault.delete_orphans().unwrap(), 0);
     }
 
-    /// Makes `link` a folder link (a junction on Windows, which needs no special rights; a
-    /// symlink elsewhere) to `target`. On Windows a refusal fails the test; elsewhere it
-    /// returns `false` with a note (symlinks can be forbidden there).
-    fn make_dir_link(link: &Path, target: &Path) -> bool {
-        #[cfg(windows)]
-        let made = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(link)
-            .arg(target)
-            .output()
-            .is_ok_and(|o| o.status.success());
-        #[cfg(not(windows))]
-        let made = std::os::unix::fs::symlink(target, link).is_ok();
-        #[cfg(windows)]
-        assert!(made, "cannot create a junction on Windows");
-        #[cfg(not(windows))]
-        if !made {
-            eprintln!("note: cannot create a folder link here; test skipped");
-        }
-        made
-    }
-
     /// Replaces the folder `path` with a link to a folder outside the vault.
-    fn link_folder(path: &Path, outside: &Path) -> bool {
+    fn link_folder(path: &Path, outside: &Path) {
         fs::remove_dir_all(path).unwrap();
-        make_dir_link(path, outside)
+        make_dir_link(path, outside);
     }
 
     #[test]
     fn std_reports_a_folder_link_as_a_link() {
         let (outside, inside) = (TempDir::new(), TempDir::new());
         let link = inside.path().join("link");
-        if make_dir_link(&link, outside.path()) {
-            let meta = fs::symlink_metadata(&link).unwrap();
-            assert!(meta.file_type().is_symlink() && !meta.is_dir());
-            assert!(check_folder(&link).is_err());
-            assert!(check_folder(outside.path()).is_ok());
-            assert!(check_folder(&inside.path().join("missing")).is_ok());
-        }
+        make_dir_link(&link, outside.path());
+        let meta = fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink() && !meta.is_dir());
+        assert!(check_folder(&link).is_err());
+        assert!(check_folder(outside.path()).is_ok());
+        assert!(check_folder(&inside.path().join("missing")).is_ok());
     }
 
     #[test]
@@ -785,9 +845,7 @@ mod tests {
             for scrap in &scraps {
                 fs::write(scrap, b"x").unwrap();
             }
-            if !link_folder(&vault.dir().join(name), outside.path()) {
-                return;
-            }
+            link_folder(&vault.dir().join(name), outside.path());
             let (vault, report) = reopen(vault);
 
             assert!(report.failed >= 1, "{name}: {report:?}");
@@ -820,9 +878,7 @@ mod tests {
             blob_in(outside.path(), &file),
         )
         .unwrap();
-        if !link_folder(&vault.orphaned_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.orphaned_dir(), outside.path());
         let (mut vault, report) = reopen(vault);
 
         assert!(report.failed >= 1);
@@ -894,9 +950,7 @@ mod tests {
         )
         .unwrap();
         fs::copy(blob_in(outside.path(), &file), blob_in(&quarantine, &file)).unwrap();
-        if !link_folder(&vault.files_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.files_dir(), outside.path());
 
         assert!(vault.purge_item(&id).is_err());
         assert!(blob_in(outside.path(), &file).exists());
@@ -910,9 +964,7 @@ mod tests {
         let (id, file) = trashed_file_item(&parent, &mut vault);
         let outside = TempDir::new();
         let theirs = plant_blob(outside.path(), b"theirs");
-        if !link_folder(&vault.orphaned_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.orphaned_dir(), outside.path());
 
         assert!(vault.purge_item(&id).is_err());
         assert!(blob_in(outside.path(), &theirs).exists());
@@ -927,9 +979,7 @@ mod tests {
         let quarantine = outside.path().join("orphaned");
         fs::create_dir(&quarantine).unwrap();
         let theirs = plant_blob(&quarantine, b"not ours");
-        if !link_folder(&vault.files_dir(), outside.path()) {
-            return;
-        }
+        link_folder(&vault.files_dir(), outside.path());
         // Not through `reopen`: cleanup would already refuse; this is the later calls.
         assert!(vault.orphans().is_err());
         assert!(vault.delete_orphans().is_err());

@@ -4,7 +4,10 @@
 //! The item file is the commit point. A blob is written and published first, then the item
 //! that points to it; a crash or error in between leaves an unreferenced blob, which the
 //! cleanup at unlock sets aside. Nothing is ever deleted inline except by `purge_item`,
-//! which first records its intent in the item.
+//! which first records its intent in the item, and by a failed item copy
+//! (`copy_item_from`), which removes from `files/` (never the quarantine) the blobs it
+//! published itself, none of which any item has ever referenced, and only when its new item
+//! is certainly not in the vault.
 
 use super::Vault;
 use super::items::{BEING_DELETED, blank_item, edited};
@@ -16,9 +19,10 @@ use crate::fsio::{
     check_space, clear_hidden, create_hidden_file, hidden_temp_path, parent_dir, remove_file_retry,
     replace_file, volume_info,
 };
-use crate::ids::{FileId, ItemId};
+use crate::ids::{FileId, ItemId, VaultId};
 use crate::item::{FileRef, Item, ItemKind};
 use crate::{CoreError, Result};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -35,6 +39,75 @@ const NOT_FILE_HOLDER: CoreError = CoreError::InvalidInput {
 /// Where the blob `id` lives (or would live) inside the folder `folder`.
 pub(super) fn blob_in(folder: &Path, id: &FileId) -> PathBuf {
     folder.join(format!("{}{BLOB_EXT}", id.to_hex()))
+}
+
+/// Every attachment of `items`, once each, sorted by ID.
+pub(super) fn attachments<'a>(
+    items: impl Iterator<Item = &'a Item>,
+) -> BTreeMap<FileId, &'a FileRef> {
+    items
+        .flat_map(|i| &i.attachments)
+        .map(|f| (f.file_id, f))
+        .collect()
+}
+
+/// Refuses an output folder that is the vault folder `dir` or inside it. Both paths are
+/// resolved first (links, junctions, `..`, short names), so an alias cannot get past the check.
+pub(super) fn refuse_inside(folder: &Path, dir: &Path) -> Result<()> {
+    if fs::canonicalize(folder)?.starts_with(fs::canonicalize(dir)?) {
+        return Err(CoreError::InvalidInput {
+            what: "destination inside vault",
+        });
+    }
+    Ok(())
+}
+
+/// Refuses an export whose decrypted copy would not fit beside `dest`. Checked before the blob
+/// is opened.
+pub(super) fn check_export_space(fref: &FileRef, dest: &Path) -> Result<()> {
+    check_space(fref.length, fref.length, &volume_info(parent_dir(dest))?)
+}
+
+/// The verify-then-publish half of an export, shared by [`Vault`] and the read-only vault: the
+/// decrypted copy is built in a hidden temp file beside `dest`, and an existing `dest` is
+/// replaced only once every chunk has authenticated. The caller has refused a `dest` that must
+/// not be written and has checked the space. The temp is recorded in `journal` before it exists.
+pub(super) fn export_blob(
+    blob: &mut impl Read,
+    blob_size: u64,
+    vault_id: &VaultId,
+    fref: &FileRef,
+    dest: &Path,
+    journal: &dyn OutputJournal,
+    cancel: &CancelToken,
+) -> Result<()> {
+    let temp = hidden_temp_path(parent_dir(dest), ".lockbox-partial");
+    journal.record(&temp);
+    // Owned only once this succeeds; if the name is taken, the other file is not ours to delete.
+    let mut out = match create_hidden_file(&temp) {
+        Ok(out) => out,
+        Err(error) => {
+            journal.clear(&temp);
+            return Err(error);
+        }
+    };
+    let published = (|| {
+        decrypt_stream(blob, blob_size, &mut out, vault_id, fref, cancel)?;
+        out.sync_all()?;
+        drop(out);
+        // Windows keeps a file's attributes when it replaces another: unhide first.
+        clear_hidden(&temp)?;
+        #[cfg(test)]
+        crate::fsio::failpoint::check("export.before_publish")?;
+        // Last chance to stop: once the rename starts, publication completes.
+        cancel.check()?;
+        replace_file(&temp, dest)
+    })();
+    // Only a temp that is really gone leaves the journal; otherwise launch cleanup retries.
+    if published.is_ok() || remove_file_retry(&temp).is_ok() {
+        journal.clear(&temp);
+    }
+    published
 }
 
 /// Opens the file to import and returns it with its size. On Windows other programs may
@@ -74,17 +147,6 @@ impl Vault {
         Ok(item)
     }
 
-    /// Refuses an export folder that is the vault folder or inside it. Both paths are resolved
-    /// first (links, junctions, `..`, short names), so an alias cannot get past the check.
-    fn refuse_inside_vault(&self, folder: &Path) -> Result<()> {
-        if fs::canonicalize(folder)?.starts_with(fs::canonicalize(&self.dir)?) {
-            return Err(CoreError::InvalidInput {
-                what: "destination inside vault",
-            });
-        }
-        Ok(())
-    }
-
     /// Encrypts the file at `src` into a published blob and returns its record. The blob is
     /// not referenced by any item yet.
     fn import_file(&self, src: &Path, cancel: &CancelToken) -> Result<FileRef> {
@@ -111,6 +173,22 @@ impl Vault {
         name: String,
         cancel: &CancelToken,
     ) -> Result<FileRef> {
+        self.import_stream_tracked(src, declared_len, name, cancel, &mut Vec::new())
+    }
+
+    /// [`import_stream`](Self::import_stream) for a caller that must know which blob it may have
+    /// published even when this returns an error (a rename can succeed and a later step of the
+    /// publication fail). The new blob's ID is pushed to `published` just before the rename, so
+    /// it is there on every outcome that may have left the blob in `files/`; a blob that was
+    /// never renamed is not there to delete, which is a no-op for the caller.
+    pub(super) fn import_stream_tracked(
+        &self,
+        src: &mut impl Read,
+        declared_len: u64,
+        name: String,
+        cancel: &CancelToken,
+        published: &mut Vec<FileId>,
+    ) -> Result<FileRef> {
         check_length(declared_len)?;
         let dir = self.dir.join(FILES_DIR);
         fs::create_dir_all(&dir)?;
@@ -135,7 +213,11 @@ impl Vault {
             crate::fsio::failpoint::check("import.before_publish")?;
             // Last chance to stop: once the rename starts, publication completes.
             cancel.check()?;
-            replace_file(&partial, &self.blob_path(&fref.file_id))
+            published.push(fref.file_id);
+            replace_file(&partial, &self.blob_path(&fref.file_id))?;
+            #[cfg(test)]
+            crate::fsio::failpoint::check("import.after_publish")?;
+            Ok(())
         })();
         if let Err(error) = written {
             let _ = remove_file_retry(&partial);
@@ -215,9 +297,8 @@ impl Vault {
             .iter()
             .find(|f| f.file_id == *file)
             .ok_or(CoreError::NotFound)?;
-        let folder = parent_dir(dest);
-        self.refuse_inside_vault(folder)?;
-        check_space(fref.length, fref.length, &volume_info(folder)?)?;
+        refuse_inside(parent_dir(dest), &self.dir)?;
+        check_export_space(fref, dest)?;
         let mut blob = File::open(self.blob_path(file)).map_err(|e| match e.kind() {
             ErrorKind::NotFound => CoreError::Damaged {
                 what: "file missing",
@@ -225,35 +306,15 @@ impl Vault {
             _ => e.into(),
         })?;
         let blob_size = blob.metadata()?.len();
-
-        let temp = hidden_temp_path(folder, ".lockbox-partial");
-        journal.record(&temp);
-        // Owned only once this succeeds; if the name is taken, the other file is not ours to delete.
-        let mut out = match create_hidden_file(&temp) {
-            Ok(out) => out,
-            Err(error) => {
-                journal.clear(&temp);
-                return Err(error);
-            }
-        };
-        let published = (|| {
-            let vault_id = &self.header.vault_id;
-            decrypt_stream(&mut blob, blob_size, &mut out, vault_id, fref, cancel)?;
-            out.sync_all()?;
-            drop(out);
-            // Windows keeps a file's attributes when it replaces another: unhide first.
-            clear_hidden(&temp)?;
-            #[cfg(test)]
-            crate::fsio::failpoint::check("export.before_publish")?;
-            // Last chance to stop: once the rename starts, publication completes.
-            cancel.check()?;
-            replace_file(&temp, dest)
-        })();
-        // Only a temp that is really gone leaves the journal; otherwise launch cleanup retries.
-        if published.is_ok() || remove_file_retry(&temp).is_ok() {
-            journal.clear(&temp);
-        }
-        published
+        export_blob(
+            &mut blob,
+            blob_size,
+            &self.header.vault_id,
+            fref,
+            dest,
+            journal,
+            cancel,
+        )
     }
 
     /// Permanently deletes a trashed item and its blobs, except a blob another item still
@@ -816,6 +877,25 @@ mod tests {
         assert!(c.trashed_at.is_some() && c.purging, "collection untouched");
         assert!(vault.get_item(&member).unwrap().trashed_at.is_some());
         vault.purge_item(&collection).unwrap();
+    }
+
+    #[test]
+    fn missing_blob_and_too_little_space_is_a_space_error() {
+        let _cleanup = Cleanup;
+        let (parent, vault, id, file) = vault_with_file();
+        fs::remove_file(blob_path(&vault, &file)).unwrap();
+        let dest = parent.path().join("out.txt");
+        let cancel = CancelToken::new();
+        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel);
+        assert!(matches!(
+            result,
+            Err(CoreError::Damaged {
+                what: "file missing"
+            })
+        ));
+        set_volume_override(volume(Some(MIB), None));
+        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel);
+        assert!(matches!(result, Err(CoreError::NotEnoughSpace { .. })));
     }
 
     // D. Export never writes into the vault itself.
