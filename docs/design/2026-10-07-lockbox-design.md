@@ -483,7 +483,8 @@ authenticated.
   `.<16 hex>.lockbox-backup-partial`) and folders directly inside `open\` are deleted, and only when the recorded path
   has no link anywhere along it; any other entry is dropped from the journal and left on disk, and an entry on a drive
   that is not connected is kept for later. A damaged journal blocks new decrypted output until the user lets Lockbox set
-  it aside. No decrypted copy or backup is written into Lockbox's own state folder.
+  it aside. Save a copy output, backups and vaults are never placed in Lockbox's own state folder
+  (`%LOCALAPPDATA%\Lockbox\`); the only decrypted files there are "Open" files, in its `open\` folder (described below).
 - **Save a copy:** Rust opens the native save dialog (overwrite needs its confirmation). Lockbox decrypts into a hidden
   temp sibling `.<random>.lockbox-partial` (created with the hidden attribute), verifies the entire stream, then renames
   it over the destination (6.2). On failure or cancellation only the temp file is deleted; **an existing destination is
@@ -523,7 +524,8 @@ copy has its own timer. Locking a vault clears a copy made from that vault; lock
   - **Access is denied immediately.** From the moment of locking, no new command runs and no response carrying vault
     data is accepted by the UI.
   - **Operations stop eventually.** Running operations stop at their next cancellation check; the last one to finish
-    releases the vault key. One chunk bounds the *work* done after a lock (≤ 1 MiB), not the elapsed time.
+    releases the vault key. For operations that stream data, one chunk bounds the *work* done after a lock (≤ 1 MiB),
+    not the elapsed time. Unlocking is the exception (see **Unlocking** below).
 - **Locking:** (1) marks the session locked and bumps its **generation number**; (2) signals cancellation; (3) drops the
   session's reference to the vault key; (4) tells the UI to clear item state, revealed values and search results, and
   show the lock screen; (5) clears a Lockbox clipboard copy made from this vault (locking all vaults clears any, 7.3).
@@ -540,7 +542,9 @@ copy has its own timer. Locking a vault clears a copy made from that vault; lock
   of the destination vault; locking or closing the destination vault cancels a restore only before its swap starts (6.8).
   A credential change or a new vault that a lock interrupts after it was written says so ("changed, but locked before it
   could be shown") instead of plain "locked".
-- **Unlocking** is not cancellable inside the engine: a lock during it discards the result when the unlock returns.
+- **Unlocking** is not cancellable inside the engine: a lock during it discards the result when the unlock returns. The
+  password derivation runs until it returns, so the chunk bound above does not apply to it; the vault it returns is
+  discarded, and its key released, when it returns.
 - **Settings:** idle time 1–60 minutes (default 5), clipboard clear delay 10–300 seconds (default 30).
 
 ## 8. Error handling
