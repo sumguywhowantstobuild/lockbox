@@ -1,6 +1,6 @@
 # Lockbox — Design Spec
 
-**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 5 (2026-10-17, Plan 2 decisions)
+**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 6 (2026-10-27, Plan 3 decisions)
 
 ## 1. Purpose
 
@@ -75,23 +75,28 @@ Moved to [docs/PRD.md](../PRD.md#scope).
 
 **The search index lives in Rust.** The UI sends a query and receives only the matching results to display.
 
-**Places copies of secrets may exist:** the webview's memory (typed and displayed values), the OS clipboard (after a
-copy, until cleared), the Windows pagefile and hibernation file, crash dumps, the print spooler, and the user's chosen
-"Save a copy"/"Open" locations. The UI clears its state on lock (7.4), but webview memory can't be wiped as reliably as
-Rust's.
+**Places copies of secrets may exist:** the webview's memory (typed and displayed values), the IPC message buffers
+(typed passwords arrive and revealed values leave as JSON text that is not wiped), the OS clipboard (after a copy, until
+cleared), the Windows pagefile and hibernation file, crash dumps, the print spooler, and the user's chosen "Save a
+copy"/"Open" locations. The UI clears its state on lock (7.4), but webview memory can't be wiped as reliably as Rust's.
+WebView2 autofill is off and the webview runs without a persistent profile, so typed values are not stored by it.
 
 ### 4.2 Tauri command security
 - Every Lockbox command is declared in an **application manifest** (`tauri_build` `AppManifest::commands`) so it
   requires an explicit permission; only the main window's capability grants them. No generic filesystem, shell, HTTP,
-  opener or dialog permissions are granted to the webview.
+  opener or dialog permissions are granted to the webview. The webview's only non-Lockbox permissions are listening to
+  and un-listening from events.
 - **Dialogs are opened from Rust** inside the command (e.g. a blocking save/open dialog); the chosen path never passes
   through the UI.
 - **Stored URLs are opened from Rust**, only for `http` and `https` schemes. Navigation inside the webview to anything
   other than the app's own content is blocked.
 - Strict Content-Security-Policy; no remote content is ever loaded.
+- The window refuses navigation outside the app, every new-window request and every download. Tauri's drag-and-drop
+  handler is off and the page cancels drops, so dropped files reach neither the page nor Rust.
 - **The backend validates every command**, never trusting the UI: the session exists and is unlocked; the request's
   session generation is current (7.4); every referenced item, collection or file belongs to that session's vault;
-  read-only sessions reject writes; sizes are within limits.
+  read-only sessions reject writes; sizes are within limits. A malformed request gets a fixed error, never the parser's
+  text.
 
 ## 5. Cryptography
 
@@ -300,6 +305,7 @@ design.
     64 MiB (67 108 864 bytes), checked against the archive's declared entry size before any of it is read into memory
     (not only before parsing); JSON nesting depth ≤ 32; at most 250 000 payload entries, so the
     manifest lists at most 250 001 entries and the archive holds at most 250 002 records.
+- The size the UI shows for a backup is the backup file's size on disk.
 - **Verify, then publish:** the backup is written to a hidden temp file beside the destination, recorded in the output
   journal (7.2), re-read and checked against the manifest, then renamed into place. A failed or cancelled backup never
   replaces an existing backup file.
@@ -342,7 +348,11 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
 3. **Choose the destination** in the chosen parent folder:
    - The folder of the vault with the same ID: replace it (**several such folders → refuse**). The user may instead open
      the backup read-only (6.9).
-   - Otherwise a new folder `<name>-<short-id>`. **If that name is taken by anything, refuse before writing.**
+   - Otherwise a new folder `<name>-<short-id>`, or a new folder the user names, beside the others, when no readable
+     copy of this vault is in that parent. **If that name is taken by anything, refuse before writing.** A new folder
+     never replaces anything: a taken name is refused before writing. When a vault folder's two header copies are both
+     unreadable, restore cannot tell it is the same vault; the UI then offers a new folder beside it (e.g.
+     `Clients-1a2b3c4d (restored)`) and leaves the damaged folder untouched.
    - Restore never merges into, or replaces, a folder that is not the same vault.
 4. **Journal `extracting`, then extract** into a staging folder `.restore-<32 lowercase hex>` **in the destination's
    parent folder** (same drive, so the final step is a rename). The journal is
@@ -362,7 +372,8 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
      succeeds. The restore holds its own key from unlocking the backup (step 2), independent of any session of the
      destination vault (7.4).
    - Deleting the journal marks the restore done. The `.before-restore` folder is kept and listed in the UI (open
-     read-only, or delete).
+     read-only, or delete). Pre-restore folders are found again at any time by looking beside each known vault; delete
+     works only on a real folder with that vault's ID that no session has open.
 6. **Recovery at startup:** a journal found at launch is acted on by what is on disk, using the table below. Terms: S =
    staging folder, T = target folder, B = the `.before-restore` folder (`before_restore`).
    - **Journal validation** comes first. A failure gives `Damaged { what: "restore journal" }` and touches nothing:
@@ -406,6 +417,8 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
    table handles on the next run.
    - A journal that cannot be acted on can be dismissed by the user. Dismissing deletes only a validated staging folder,
      never the vault or a pre-restore copy.
+   - The shell can read a journal without acting on it (its step, paths, and whether their parent folder is there), so
+     it can tell a disconnected drive from an unclear state.
 
 A validation failure in the archive or during extraction deletes only this operation's own staging folder (the journal
 is kept until that cleanup has worked); the existing vault is untouched. A journal-validation failure touches nothing.
@@ -430,6 +443,9 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
     never as plaintext on disk.
   - Its collection is kept only if the live vault has that collection and it is not in the trash. Collections
     themselves are not copied, and the copy is never trashed.
+  - If the backup lacks some of the item's files, the copy stops and names them. The user may copy without them; the
+    result lists what was left off. A file that is present but fails authentication is never skipped. Locking either
+    vault stops the copy.
   - A copy that fails deletes the blobs it published itself (none was ever referenced), unless its new item may already
     be on disk; a blob it cannot delete is left for the cleanup at unlock to set aside (6.4).
 
@@ -443,6 +459,10 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
   held lock (after a crash) is ignored and re-locked.
 - **Supported:** local, fixed NTFS drives. **Refused in v1:** removable drives, FAT32, network drives. **Warned:**
   folders inside OneDrive, Google Drive or Dropbox (not supported in v1).
+- Supported means `GetDriveTypeW` reports a fixed drive and the file system is NTFS; CD and DVD drives, RAM disks and
+  unknown types are refused too. A USB hard drive that reports as fixed is accepted; unplugging it locks its vault
+  (below). The checks run when a vault is created, added, restored to and unlocked. Cloud folders are found by asking
+  Windows whether the path is under a cloud sync root, then by each provider's known location.
 - If the drive holding an unlocked vault disappears, that vault is locked and shown as "unavailable", never treated as
   deleted.
 
@@ -457,7 +477,12 @@ Moved to [docs/PRD.md](../PRD.md#screens).
 authenticated.
 - **Output journal:** every temporary plaintext file Lockbox creates is recorded (by its random temp path, never the
   original name) in `%LOCALAPPDATA%\Lockbox\pending-outputs.json` before writing, and removed from it when published or
-  deleted. At launch, any listed leftovers (after a crash or power cut) are deleted.
+  deleted. Recording comes first: if the journal cannot be written, nothing is created. At launch, leftovers listed
+  after a crash or power cut are cleaned up by these rules: only Lockbox's own temp names (`.<16 hex>.lockbox-partial`,
+  `.<16 hex>.lockbox-backup-partial`) and folders directly inside `open\` are deleted, and only when the recorded path
+  has no link anywhere along it; any other entry is dropped from the journal and left on disk, and an entry on a drive
+  that is not connected is kept for later. A damaged journal blocks new decrypted output until the user lets Lockbox set
+  it aside. No decrypted copy or backup is written into Lockbox's own state folder.
 - **Save a copy:** Rust opens the native save dialog (overwrite needs its confirmation). Lockbox decrypts into a hidden
   temp sibling `.<random>.lockbox-partial` (created with the hidden attribute), verifies the entire stream, then renames
   it over the destination (6.2). On failure or cancellation only the temp file is deleted; **an existing destination is
@@ -468,7 +493,8 @@ authenticated.
   - **File name:** built from an allowlist (letters, digits, space, `-`, `_`, `.`, `(`, `)`), with trailing dots and
     spaces removed, reserved Windows names (CON, NUL, …) avoided, and length capped.
   - **Executable types** (`.exe`, `.bat`, `.cmd`, `.ps1`, `.vbs`, `.js`, `.hta`, `.lnk`, `.url`, `.msi`, `.scr` and
-    similar) require an explicit confirmation before launch.
+    similar) require an explicit confirmation before launch. "Executable types" are judged on the sanitised name (so
+    `setup.exe.` counts), and also when Windows rates the type as dangerous.
   - The copy is marked **read-only. Edits are not saved back**; to update a stored file, use "Replace file".
   - **Deletion is attempted** when the vault locks, when the app closes, and on the next launch; cleanup clears the
     read-only attribute first. Files held open by another app can't be deleted on Windows: Lockbox retries, shows
@@ -480,13 +506,18 @@ authenticated.
 Copied secrets are marked so **Windows clipboard history (Win+V) and cloud clipboard don't store them** (the Windows
 "exclude from clipboard history / monitoring" formats). After the delay, and when the vault locks, the clipboard is
 cleared **only if it still holds what Lockbox put there.** Clipboard access uses a short timeout, since another app can
-hold the clipboard open.
+hold the clipboard open. "Still holds what Lockbox put there" means the Windows clipboard sequence number is unchanged
+since Lockbox's write; the write and the reading of that number happen in one clipboard opening, and so do the check
+and the clear. If any of the three exclusion formats cannot be set, the clipboard is emptied and the copy fails. Each
+copy has its own timer. Locking a vault clears a copy made from that vault; locking all vaults clears any.
 
 ### 7.4 Locking (concurrency contract)
 - **Idle** means no keyboard or mouse input anywhere in Windows for the configured minutes. **While a long operation the
   user started is running** (import, Save a copy, Open, backup, restore), the idle timer is paused, the UI shows why, and
-  Lockbox asks Windows to stay awake (`SetThreadExecutionState`). **Windows lock, sleep and hibernate always lock all
-  vaults immediately**, cancelling such operations.
+  Lockbox asks Windows to stay awake (`SetThreadExecutionState`). Paused means time spent in a long operation does not
+  count: after it ends, idle time counts from its end. **Windows lock, sleep and hibernate always lock all vaults
+  immediately**, cancelling such operations. Signing out, switching user and a remote-desktop disconnect count as
+  Windows lock. Closing the app locks all vaults.
 - **Two guarantees, kept separate:**
   - **Access is denied immediately.** From the moment of locking, no new command runs and no response carrying vault
     data is accepted by the UI.
@@ -499,11 +530,17 @@ hold the clipboard open.
 - **UI-side check:** every response is **tagged with its session generation**; the UI discards any response whose tag
   doesn't match the vault's current generation.
 - **Side effects:** clipboard writes and file publication (renames) re-check the generation **under the session lock**,
-  doing only that fast step there (clipboard with a timeout). **Launching an opened file happens after the lock is
-  released**, so a blocking "How do you want to open this file?" dialog can never delay locking.
+  doing only that fast step there (clipboard with a timeout). File publication and clipboard writes take a per-session
+  guard for one attempt at a time, so a lock waits for at most one rename attempt, never for its retries. **Launching an
+  opened file happens after the lock is released**, so a blocking "How do you want to open this file?" dialog can never
+  delay locking.
 - **Long operations** check for cancellation between chunks, delete their partial output (via 6.4 / 7.2 rules) and
   report "Cancelled: vault locked." A restore holds its own key from unlocking the backup, independent of any session
   of the destination vault; locking or closing the destination vault cancels a restore only before its swap starts (6.8).
+  A credential change or a new vault that a lock interrupts after it was written says so ("changed, but locked before it
+  could be shown") instead of plain "locked".
+- **Unlocking** is not cancellable inside the engine: a lock during it discards the result when the unlock returns.
+- **Settings:** idle time 1–60 minutes (default 5), clipboard clear delay 10–300 seconds (default 30).
 
 ## 8. Error handling
 
@@ -613,6 +650,11 @@ hold the clipboard open.
 - Strict own archive reader (the `zip` crate only writes) · blobs authenticated as they are copied · unlock before
   extract · numbered `.before-restore` (an earlier pre-restore copy is never replaced) · an unrelated folder at the
   destination is refused · journaled recovery decided by disk state · test a backup · read-only folders write nothing.
+
+**Decided in Plan 3 (2026-10-27):**
+- Restore into a new folder when the headers are unreadable · copy without missing files on request · journal query ·
+  file pickers through `rfd` from Rust · the clipboard through `clipboard-win` in one opening per step · OS signals on
+  a hidden window · a per-attempt publish gate · item types without public serde.
 
 **Deferred, with a known home:**
 - Rotate vault key: v1.1.
