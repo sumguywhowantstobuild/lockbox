@@ -10,16 +10,26 @@ publish = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = "2.12.5"
+tauri = { version = "2.12.5", features = [] }
 tauri-plugin-single-instance = "2.5.4"
 
 # WebView2's own controller, to turn off external file drops (`os::win`). The versions wry 0.57 already uses.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39.1"
 windows-core = { version = "0.62", default-features = false }
+# The hidden window that hears Windows lock, sleep, sign-out, shutdown and drive removal (`os::win`): the engine's
+# version. `Win32_Graphics_Gdi` only because windows-sys gates `WNDCLASSW` and `RegisterClassW` behind it.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
-tauri-build = "2.7.4"
+tauri-build = { version = "2.7.4", features = [] }
 
 [dev-dependencies]
 tauri = { version = "2.12.5", features = ["test"] }

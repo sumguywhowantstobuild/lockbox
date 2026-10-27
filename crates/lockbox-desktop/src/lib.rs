@@ -1,7 +1,8 @@
 //! Lockbox's desktop shell (spec §4): the Tauri app between the screens and the vault engine.
 #![deny(unsafe_code)]
 
-// The window's file-drop protection is WebView2's (`os::win`); there is no equivalent on other platforms.
+// The window's file-drop protection is WebView2's and the lock signals are Windows' own (`os::win`); there is no
+// equivalent on other platforms.
 #[cfg(not(windows))]
 compile_error!("lockbox-desktop is Windows-only");
 
@@ -15,7 +16,9 @@ pub mod window;
 
 pub use commands::handler;
 
-use tauri::RunEvent;
+use std::sync::mpsc;
+
+use tauri::{Manager, RunEvent};
 
 /// Starts the app and runs it until it exits.
 pub fn run() {
@@ -27,9 +30,25 @@ pub fn run() {
         }))
         .invoke_handler(handler())
         .setup(|app| {
+            // Fail closed: never run without Windows' lock, sleep and drive notices (spec §7.4). Tauri ends the
+            // process on a setup error (it panics with this message), before the event loop goes on to load and run
+            // the app page. The app's state keeps the signal thread for as long as the app runs: dropping it would
+            // stop the notices.
+            let (sink, signals) = mpsc::channel();
+            let Ok(signal_thread) = os::win::spawn(sink) else {
+                return Err(
+                    "Lockbox will not run: it could not listen for Windows lock and sleep".into(),
+                );
+            };
+            app.manage(signal_thread);
+            // Until Task 11 locks the vaults on them, debug builds print each signal and release builds ignore them.
+            #[cfg(debug_assertions)]
+            print_signals(signals)?;
+            #[cfg(not(debug_assertions))]
+            drop(signals);
+
             window::main_window(app.handle())?;
-            // Fail closed: never run with files droppable into the page. Tauri ends the process on a setup error
-            // (it panics with this message), before the event loop goes on to load and run the app page.
+            // Fail closed as well: never run with files droppable into the page.
             if !window::external_drop_is_off() {
                 return Err(
                     "Lockbox will not run: its window could not turn off file drops".into(),
@@ -45,4 +64,19 @@ pub fn run() {
             // Task 11: lock every vault here (`Shell::shutdown`) before the process ends.
         }
     });
+}
+
+/// Debug builds only: prints each Windows signal on standard error, one line each, for the hands-on check. A line
+/// holds the signal's name and, for a drive, its drive-letter mask; nothing else.
+#[cfg(debug_assertions)]
+fn print_signals(signals: mpsc::Receiver<os::OsSignal>) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("lockbox-signal-print".into())
+        .spawn(move || {
+            for signal in signals {
+                eprintln!("Lockbox debug: Windows signal {signal:?}");
+            }
+            eprintln!("Lockbox debug: Windows signals stopped");
+        })?;
+    Ok(())
 }
