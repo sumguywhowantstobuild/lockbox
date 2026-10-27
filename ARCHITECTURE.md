@@ -136,9 +136,9 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
    no-replace rename also moves blobs into and out of `files/orphaned/` during cleanup; it is a rename, not a write.
    Restore is the exception in two places: it writes each entry in place inside its hidden staging folder (a new
    file, synced, closed and read back before the next), which holds no vault until it is renamed into place and is
-   deleted whole on any failure; and it publishes the restore journal's first version with `atomic_create`, the same
-   temp-file write renamed only to a name that is still free. The empty lock files, a vault's `.lock` and the
-   journal's `<journal>.lock`, hold no data and are created in place too. Spec 6.2.
+   removed whole by the clean-up, recovery or a dismissal (rule 15); and it publishes the restore journal's first
+   version with `atomic_create`, the same temp-file write renamed only to a name that is still free. The empty lock
+   files, a vault's `.lock` and the journal's `<journal>.lock`, hold no data and are created in place too. Spec 6.2.
 2. **`unsafe` only in `fsio::windows`.** (`unsafe` marks Rust code the compiler cannot check.) The crate root has
    `#![deny(unsafe_code)]`; that one module opts out, and each block carries a comment saying why it is sound.
 3. **Repair only what was verified.** The other header copy is overwritten only when the header that unlocked passed its
@@ -189,11 +189,11 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
 15. **The journal is checked before it is acted on, and the staging folder goes before the journal.** A journal whose
     paths are not what a restore would write (not absolute, not siblings, wrong names) is refused and touches nothing.
     Cleaning up removes the staging folder first and the journal last, so a crash in between leaves a journal that
-    points at nothing (recovery clears it), never a staging folder with no journal. While the folder that holds the
-    staging folder is missing (its drive is not plugged in, say), recovery and the clean-up after a failed restore
-    decide nothing and keep the journal: a staging folder that cannot be seen is not a staging folder that is gone.
-    Dismissal, the user's confirmed way out, still removes the journal then, and touches nothing on the missing path.
-    Spec 6.8.
+    points at nothing (recovery clears it), never a staging folder with no journal, though a dismissal while the
+    staging folder's drive is not plugged in can leave one (below). While the folder that holds the staging folder is
+    missing (its drive is not plugged in, say), recovery and the clean-up after a failed restore decide nothing and
+    keep the journal: a staging folder that cannot be seen is not a staging folder that is gone. Dismissal, the user's
+    confirmed way out, still removes the journal then, and touches nothing on the missing path. Spec 6.8.
 16. **Read-only is a separate type.** `ReadOnlyVault` has no method that changes its source, the folder or the backup
     it was opened from: opening a backup or a `.before-restore` folder takes no lock and repairs, cleans and creates
     nothing. Its exports (`export_file`) write only a decrypted copy of a file, to a place the user picked, and only

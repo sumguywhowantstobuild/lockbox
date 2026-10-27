@@ -142,9 +142,10 @@ impl PreparedRestore {
     /// and the destination. Only then is the journal written (before the staging folder
     /// exists) and the backup extracted into `parent/.restore-<hex>`, each entry hashed
     /// against the manifest as it is written and again as it is read back from disk, each blob
-    /// authenticated as it is written. Any error after the journal removes the staging folder
-    /// and then the journal; while the parent folder is missing (its drive is not plugged in),
-    /// both stay, for startup recovery or the user's dismissal to settle.
+    /// authenticated as it is written. Any error after the journal removes the staging folder,
+    /// once it exists, and then the journal; from then on, while the parent folder is missing
+    /// (its drive is not plugged in), both stay, for startup recovery or the user's dismissal to
+    /// settle. A failed `create_dir` made no staging folder, so only the journal goes.
     pub fn prepare(
         archive: &Path,
         parent: &Path,

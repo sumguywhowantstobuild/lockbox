@@ -252,8 +252,8 @@ Lockbox defends.
   *Accepted:* the window is tiny and the attacker already has the access to cause harm. The same check, and the same
   accepted window, apply when you save a file out of a backup or a `.before-restore` folder opened read-only: the
   destination must not be the backup itself, inside the folder being viewed, or inside any vault folder (a folder
-  that holds `vault.json` or `vault.json.bak`, or any folder under one), so a saved copy can never replace a vault's
-  own files.
+  that holds `vault.json` or `vault.json.bak`, or any folder under one), so, outside that window, a saved copy cannot
+  replace a vault's own files.
 - **Linked `items/` or `files/` folders.** Cleanup and deleting quarantined files refuse to work through a link, a
   junction or another reparse point that redirects the path (what Windows calls a "name surrogate"), and report it
   only as a failed cleanup. Cloud-sync placeholders, such as OneDrive's, are accepted, because they do not redirect. A
@@ -301,9 +301,17 @@ Lockbox defends.
 - Dismissing a stuck restore (one that recovery cannot finish) while its drive is not connected removes only the
   restore journal. The hidden staging folder (`.restore-` plus 32 hex characters) stays on that drive, and nothing
   removes it later. It is an encrypted copy of the vault in the backup (complete if the restore had finished copying
-  it), and it still opens with the backup's password. When the drive is back, delete that folder by hand; Plan 3's
-  dialog will say so. *Accepted:* dismissing is your confirmed way out of a restore that cannot finish, so it has to
-  work without the drive, and the folder holds nothing the backup itself does not.
+  it), and it still opens with the backup's password. When the drive is back, delete that folder by hand (Plan 3's
+  dialog will say so), unless the swap was left half done. A swap that replaces a vault moves the old one aside to
+  `<folder>.before-restore` (or `-2` and so on), then moves the restored copy into its place; if it stopped between
+  the two (the drive went away, say), recovery would move the old vault back, but a dismissal does not. So once the
+  drive is back, the vault's own folder is missing, the old vault is in that `.before-restore` folder and the
+  restored copy is in the staging folder. No data is lost. To keep the old vault, rename that `.before-restore`
+  folder back to the vault folder's name; to take the restored one, un-hide the staging folder and rename it to that
+  name. Then delete the other when you no longer need it. Reconnecting the drive and letting recovery run, instead
+  of dismissing, is the better way out: it moves the old vault back and removes the staging folder itself. Plan 3's
+  dialog should offer it first. *Accepted:* dismissing is your confirmed way out of a restore that cannot finish, so
+  it has to work without the drive, and the folder holds nothing the backup itself does not.
 - A vault whose two header files are both unreadable cannot be restored in place. Restore cannot tell that its folder
   is that vault, so it makes a new folder; while the damaged one still has the name Lockbox gave it, that name is
   taken, and the restore stops ("destination exists"). Restore into another folder instead. *Parked for Plan 3,*
