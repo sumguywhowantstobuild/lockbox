@@ -349,10 +349,10 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
    - The folder of the vault with the same ID: replace it (**several such folders → refuse**). The user may instead open
      the backup read-only (6.9).
    - Otherwise a new folder `<name>-<short-id>`, or a new folder the user names, beside the others, when no readable
-     copy of this vault is in that parent. **If that name is taken by anything, refuse before writing.** A new folder
-     never replaces anything: a taken name is refused before writing. When a vault folder's two header copies are both
-     unreadable, restore cannot tell it is the same vault; the UI then offers a new folder beside it (e.g.
-     `Clients-1a2b3c4d (restored)`) and leaves the damaged folder untouched.
+     copy of this vault is in that parent. A new folder never replaces anything: **if its name (the default
+     `<name>-<short-id>` or one the user names) is taken by anything, refuse before writing.** When a vault folder's two
+     header copies are both unreadable, restore cannot tell it is the same vault; the UI then offers a new folder beside
+     it (e.g. `Clients-1a2b3c4d (restored)`) and leaves the damaged folder untouched.
    - Restore never merges into, or replaces, a folder that is not the same vault.
 4. **Journal `extracting`, then extract** into a staging folder `.restore-<32 lowercase hex>` **in the destination's
    parent folder** (same drive, so the final step is a rename). The journal is
@@ -457,8 +457,9 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
   only, no secrets). "Add existing vault folder" adds one.
 - For writable sessions, `.lock` is held with an **OS exclusive file lock** (`LockFileEx`) while the vault is open. A stale `.lock` without a
   held lock (after a crash) is ignored and re-locked.
-- **Supported:** local, fixed NTFS drives. **Refused in v1:** removable drives, FAT32, network drives. **Warned:**
-  folders inside OneDrive, Google Drive or Dropbox (not supported in v1).
+- **Supported:** local, fixed NTFS drives. **Refused in v1:** removable drives (drives Windows reports as removable,
+  such as USB sticks and SD cards), FAT32, network drives. **Warned:** folders inside OneDrive, Google Drive or Dropbox
+  (not supported in v1).
 - Supported means `GetDriveTypeW` reports a fixed drive and the file system is NTFS; CD and DVD drives, RAM disks and
   unknown types are refused too. A USB hard drive that reports as fixed is accepted; unplugging it locks its vault
   (below). The checks run when a vault is created, added, restored to and unlocked. Cloud folders are found by asking
@@ -525,7 +526,7 @@ copy has its own timer. Locking a vault clears a copy made from that vault; lock
     releases the vault key. One chunk bounds the *work* done after a lock (≤ 1 MiB), not the elapsed time.
 - **Locking:** (1) marks the session locked and bumps its **generation number**; (2) signals cancellation; (3) drops the
   session's reference to the vault key; (4) tells the UI to clear item state, revealed values and search results, and
-  show the lock screen; (5) clears Lockbox-owned clipboard content.
+  show the lock screen; (5) clears a Lockbox clipboard copy made from this vault (locking all vaults clears any, 7.3).
 - **Backend checks:** every command checks the generation when it starts and again before it returns.
 - **UI-side check:** every response is **tagged with its session generation**; the UI discards any response whose tag
   doesn't match the vault's current generation.
@@ -606,7 +607,9 @@ copy has its own timer. Locking a vault clears a copy made from that vault; lock
   blocked file launch; idle timer pauses during long operations; Windows lock still cancels them; a restore is cancelled only before its swap
   starts, and a lock or close of the destination vault during the swap leaves it to finish or roll back by the journal.
 - **Decrypted output:** a tampered blob or a cancellation never alters an existing destination file; leftovers listed in
-  the output journal are deleted at the next launch; file-name sanitisation; executable types require confirmation.
+  the output journal are cleaned up at the next launch by the 7.2 rules (only Lockbox's own temp names and `open\`
+  folders, never through a link; any other entry is left on disk); file-name sanitisation; executable types require
+  confirmation.
 - **"Open" cleanup:** read-only copies are removed (attribute cleared first); a file held open by another process →
   retry message, removed on a later launch.
 - **Locations:** default location is `%USERPROFILE%\Lockbox Vaults`; vault paths are never inside the app-data or
