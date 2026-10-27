@@ -40,7 +40,13 @@ pub fn run() {
                     "Lockbox will not run: it could not listen for Windows lock and sleep".into(),
                 );
             };
-            app.manage(signal_thread);
+            // `manage` refuses (and drops, which closes the window) a second value of the same type.
+            if !app.manage(signal_thread) {
+                return Err(
+                    "Lockbox will not run: its Windows lock and sleep listener could not be kept"
+                        .into(),
+                );
+            }
             // Until Task 11 locks the vaults on them, debug builds print each signal and release builds ignore them.
             #[cfg(debug_assertions)]
             print_signals(signals)?;
