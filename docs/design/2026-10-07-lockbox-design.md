@@ -100,7 +100,7 @@ WebView2 autofill is off and the webview runs without a persistent profile, so t
   error, never the parser's text. Tauri's own event commands and its message transport may answer with error text
   built from what the page sent, so it can quote back any value the page put in the request; that text goes back
   only to the page, and Tauri adds no vault data to it, so screens never pass a secret to Tauri's own commands. In
-  debug builds a refusal also names the window, the webview and the permissions linked to the command. A wrong
+  debug builds a refusal may also name the window, the webview and the permissions linked to the command. A wrong
   invoke key gets no answer, and Tauri prints it with the expected key to standard error, which a release build has
   no console for.
 
