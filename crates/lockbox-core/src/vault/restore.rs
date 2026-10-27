@@ -10,10 +10,10 @@ use super::folder_name;
 use super::items::ITEMS_DIR;
 use super::journal::{
     DAMAGED, IN_PROGRESS, JournalLock, JournalStep, PRE_RESTORE, RESTORE_JOURNAL_VERSION,
-    RestoreJournal, create_journal, is_pre_restore_name, journal_exists, lock_journal,
-    new_staging_path, plain_absolute, read_journal, remove_journal_if_owner, remove_own_journal,
-    remove_staging, remove_staging_then_journal, validate_journal, validate_journal_on_disk,
-    write_journal,
+    RestoreJournal, check_staging_parent, create_journal, is_pre_restore_name, journal_exists,
+    lock_journal, new_staging_path, plain_absolute, read_journal, remove_journal_if_owner,
+    remove_own_journal, remove_staging, remove_staging_then_journal, validate_journal,
+    validate_journal_on_disk, write_journal,
 };
 use super::source::{
     VaultSource, attached_blobs, attached_refs, check_listed, check_opened, copy_blob,
@@ -143,7 +143,8 @@ impl PreparedRestore {
     /// exists) and the backup extracted into `parent/.restore-<hex>`, each entry hashed
     /// against the manifest as it is written and again as it is read back from disk, each blob
     /// authenticated as it is written. Any error after the journal removes the staging folder
-    /// and then the journal.
+    /// and then the journal; while the parent folder is missing (its drive is not plugged in),
+    /// both stay, for startup recovery or the user's dismissal to settle.
     pub fn prepare(
         archive: &Path,
         parent: &Path,
@@ -567,7 +568,7 @@ pub fn recover_restore(journal: &Path) -> Result<Recovery> {
     validate_journal_on_disk(&j)?;
     #[cfg(test)]
     crate::fsio::failpoint::check("recover.under_lock")?;
-    check_vaults_folder(&j)?;
+    check_staging_parent(&j.staging)?;
 
     let (staging, target) = (&j.staging, &j.target);
     let (t, s) = (journal_exists(target)?, journal_exists(staging)?);
@@ -598,32 +599,19 @@ pub fn recover_restore(journal: &Path) -> Result<Recovery> {
     Ok(recovery)
 }
 
-/// Recovery and dismissal decide nothing while the folder that holds S, T and B (the vaults
-/// folder) is not an existing folder, as when its drive is not plugged in: S and T then both
-/// read as missing, which says nothing about them. `RestorePending`, and the journal stays.
-fn check_vaults_folder(j: &RestoreJournal) -> Result<()> {
-    if parent_dir(&j.staging).is_dir() {
-        Ok(())
-    } else {
-        Err(CoreError::RestorePending)
-    }
-}
-
 /// For the UI, after the user has confirmed a journal that recovery refused: removes the
 /// staging folder if the journal is valid and names a real one, then the journal itself, even
 /// an unreadable or invalid one. It never touches the target or the pre-restore folder. A
-/// staging folder that cannot be removed leaves the journal in place, and so does a valid
-/// journal while the folder that holds the staging folder is missing (`RestorePending`, as in
-/// recovery): the staging folder may still be on a drive that is not plugged in.
+/// staging folder that cannot be removed leaves the journal in place. While the folder that
+/// holds the staging folder is missing (its drive is not plugged in), there is nothing there
+/// to remove: the journal goes and nothing on the missing path is touched, since this is the
+/// user's confirmed way out (the interface says the drive is not connected).
 pub fn dismiss_restore_journal(journal: &Path) -> Result<()> {
     let _lock = lock_journal(journal)?;
     match read_journal(journal) {
         Ok(None) => return Ok(()),
         Ok(Some(j)) => match validate_journal_on_disk(&j) {
-            Ok(()) => {
-                check_vaults_folder(&j)?;
-                remove_staging(&j.staging)?;
-            }
+            Ok(()) => remove_staging(&j.staging)?,
             // A journal that cannot be trusted names nothing that may be deleted: its staging
             // folder (a link, a letter-case variant ...) stays. Only a disk error keeps the journal.
             Err(CoreError::Damaged { .. }) => {}
@@ -2373,8 +2361,8 @@ pub(super) mod tests {
     }
 
     impl Unplugged {
-        fn new(raw: &Raw) -> Unplugged {
-            let folder = raw.parent.path().to_owned();
+        fn new(folder: &Path) -> Unplugged {
+            let folder = folder.to_owned();
             let mut aside = folder.clone().into_os_string();
             aside.push("-unplugged");
             let aside = PathBuf::from(aside);
@@ -2406,7 +2394,7 @@ pub(super) mod tests {
             raw.make(&raw.s(), "S");
             raw.write(step, with_b);
             let journal = fs::read(raw.journal()).unwrap();
-            let unplugged = Unplugged::new(&raw);
+            let unplugged = Unplugged::new(raw.parent.path());
             let before = tree(&unplugged.aside);
 
             let got = recover_restore(&raw.journal());
@@ -2431,38 +2419,72 @@ pub(super) mod tests {
         }
     }
 
-    /// Dismissal follows the same rule: while the folder that holds S is gone, S may still be on
-    /// the drive that is away, so a valid journal stays (`RestorePending`) and nothing is
-    /// touched. A journal that cannot be read names nothing to delete, and it still goes.
+    /// Dismissal is the user's confirmed way out, so it still works while the folder that holds
+    /// S, T and B is missing (the interface says the drive is not connected): the journal goes,
+    /// and nothing on the missing path is touched or created.
     #[test]
-    fn dismissal_keeps_a_valid_journal_while_the_vaults_folder_is_missing() {
+    fn dismissal_works_while_the_vaults_folder_is_missing() {
         let raw = Raw::new();
         raw.make_all();
         raw.write(JournalStep::Swapping, true);
-        let journal = fs::read(raw.journal()).unwrap();
-        let unplugged = Unplugged::new(&raw);
+        let unplugged = Unplugged::new(raw.parent.path());
         let before = tree(&unplugged.aside);
 
-        let got = dismiss_restore_journal(&raw.journal());
-        assert!(matches!(got, Err(CoreError::RestorePending)), "{got:?}");
-        assert_eq!(fs::read(raw.journal()).unwrap(), journal);
-        assert!(!raw.parent.path().exists(), "the folder came back");
+        dismiss_restore_journal(&raw.journal()).unwrap();
+        assert!(!raw.journal().exists(), "the journal stayed");
+        assert!(!raw.parent.path().exists(), "the folder was created");
+        assert_eq!(names(raw.journal_dir.path()), ["restore-journal.json.lock"]);
         assert!(tree(&unplugged.aside) == before, "a folder changed");
-
-        // Plugged in again, dismissal removes S and the journal, and leaves T and B.
+        // Plugged in again: S, T and B are as they were.
         drop(unplugged);
-        dismiss_restore_journal(&raw.journal()).unwrap();
-        assert!(!raw.s().exists() && !raw.journal().exists());
-        assert_eq!(Raw::marker(&raw.t()).as_deref(), Some("T"));
-        assert_eq!(Raw::marker(&raw.b()).as_deref(), Some("B"));
+        for (path, marker) in [(raw.s(), "S"), (raw.t(), "T"), (raw.b(), "B")] {
+            assert_eq!(Raw::marker(&path).as_deref(), Some(marker));
+        }
+    }
 
-        // A journal that cannot be read still goes while the folder is away.
-        let raw = Raw::new();
-        fs::write(raw.journal(), b"not json").unwrap();
-        let unplugged = Unplugged::new(&raw);
-        dismiss_restore_journal(&raw.journal()).unwrap();
-        assert!(!raw.journal().exists());
+    /// The vaults folder goes away (its drive is unplugged, say) while a prepare extracts, and
+    /// the prepare then fails. Its clean-up cannot see the staging folder, and the staging
+    /// folder always goes before the journal, so the journal stays byte for byte. Plugged in
+    /// again, startup recovery removes the staging folder and then the journal.
+    #[test]
+    fn a_failed_prepare_keeps_the_journal_while_the_vaults_folder_is_missing() {
+        let _reset = Cleanup;
+        let (_f, backup) = backed_up();
+        let d = Dest::new();
+        let (folder, journal) = (d.parent().to_owned(), d.journal());
+        let away: Rc<RefCell<Option<Unplugged>>> = Rc::default();
+        let written: Rc<RefCell<Vec<u8>>> = Rc::default();
+        let (slot, bytes) = (away.clone(), written.clone());
+        // After the first entry is written and read back; the step then fails.
+        failpoint::observe(
+            "restore.after_entry",
+            Box::new(move || {
+                if slot.borrow().is_none() {
+                    *bytes.borrow_mut() = fs::read(&journal).unwrap();
+                    *slot.borrow_mut() = Some(Unplugged::new(&folder));
+                }
+            }),
+        );
+        failpoint::arm("restore.after_entry");
+        let result = d.prepare(&backup, Credential::Password(PW));
+        failpoint::disarm_all();
+        assert!(matches!(error(result), CoreError::Io(_)));
+
+        let unplugged = away.borrow_mut().take().unwrap();
+        assert_eq!(
+            fs::read(d.journal()).unwrap(),
+            *written.borrow(),
+            "the journal changed"
+        );
+        assert!(!d.parent().exists(), "the folder was created");
         drop(unplugged);
+        let staging = staging_in(d.parent());
+        assert_eq!(
+            recover_restore(&d.journal()).unwrap(),
+            Recovery::StagingRemoved
+        );
+        assert!(!staging.exists());
+        d.assert_untouched();
     }
 
     /// The swap rewrites the journal, recovery acts and dismissal deletes only while holding

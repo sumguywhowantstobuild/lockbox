@@ -190,8 +190,10 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
     paths are not what a restore would write (not absolute, not siblings, wrong names) is refused and touches nothing.
     Cleaning up removes the staging folder first and the journal last, so a crash in between leaves a journal that
     points at nothing (recovery clears it), never a staging folder with no journal. While the folder that holds the
-    staging folder is missing (its drive is not plugged in, say), recovery and dismissal decide nothing and keep the
-    journal: a staging folder that cannot be seen is not a staging folder that is gone. Spec 6.8.
+    staging folder is missing (its drive is not plugged in, say), recovery and the clean-up after a failed restore
+    decide nothing and keep the journal: a staging folder that cannot be seen is not a staging folder that is gone.
+    Dismissal, the user's confirmed way out, still removes the journal then, and touches nothing on the missing path.
+    Spec 6.8.
 16. **Read-only is a separate type.** `ReadOnlyVault` has no method that changes its source, the folder or the backup
     it was opened from: opening a backup or a `.before-restore` folder takes no lock and repairs, cleans and creates
     nothing. Its exports (`export_file`) write only a decrypted copy of a file, to a place the user picked, and only

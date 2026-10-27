@@ -378,7 +378,9 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
        placeholder, such as OneDrive's, does not redirect and counts as a folder.
    - **The vaults folder must be there.** If the folder that holds S, T and B is missing (its drive is not plugged in),
      S and T would both read as missing, which says nothing about them: nothing is decided, the result is
-     `Err(RestorePending)`, and the journal is kept. Dismissal keeps a valid journal then too.
+     `Err(RestorePending)`, and the journal is kept. The clean-up after a failed prepare or extraction keeps the
+     journal then too, since S always goes before the journal. Dismissal still works: it removes the journal and
+     touches nothing on the missing path (the UI says the drive is not connected).
 
    | Journal | Disk state | Action | Result |
    |---|---|---|---|

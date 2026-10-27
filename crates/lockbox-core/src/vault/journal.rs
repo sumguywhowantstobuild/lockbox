@@ -363,10 +363,25 @@ pub(super) fn remove_own_journal(journal: &Path, staging: &Path) -> Result<()> {
     remove_journal_if_owner(&lock_journal(journal)?, journal, staging)
 }
 
+/// Fails with `RestorePending` unless the folder that holds `staging` (the vaults folder) is an
+/// existing folder. Without it, as when its drive is not plugged in, the staging folder and the
+/// target both read as missing, which says nothing about them: recovery and the clean-up after
+/// a failed restore then decide nothing, and the journal stays for a later recovery or for the
+/// user's dismissal.
+pub(super) fn check_staging_parent(staging: &Path) -> Result<()> {
+    if parent_dir(staging).is_dir() {
+        Ok(())
+    } else {
+        Err(CoreError::RestorePending)
+    }
+}
+
 /// Removes the staging folder, then the journal, and only if the first worked (the journal is
 /// what lets the next launch finish the job) and only if it still names this staging folder.
-/// See [`remove_staging`] for what is refused.
+/// While the folder that holds the staging folder is missing, neither goes
+/// ([`check_staging_parent`]). See [`remove_staging`] for what is refused.
 pub(super) fn remove_staging_then_journal(staging: &Path, journal: &Path) -> Result<()> {
+    check_staging_parent(staging)?;
     remove_staging(staging)?;
     remove_own_journal(journal, staging)
 }
