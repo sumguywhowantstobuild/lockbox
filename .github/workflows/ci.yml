@@ -7,9 +7,11 @@ on:
 permissions:
   contents: read
 
-# One run per branch: a pull request's push and pull_request events share a group, so the older run is cancelled.
+# One run per branch and event: a newer push cancels the older push run, and a newer pull_request run the older
+# one. Push and pull_request runs never cancel each other: a cancelled required check on the head commit counts as a
+# failure and blocks the merge.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
