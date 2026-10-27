@@ -159,10 +159,11 @@ pub(super) fn validate_journal(j: &RestoreJournal) -> Result<()> {
 }
 
 /// The whole of spec 6.8 journal validation: [`validate_journal`], then the part that looks at
-/// the disk: each of the journal's folders that exists must be a real folder, not a file,
-/// link, junction or other reparse point (by `symlink_metadata`), and the staging folder must
-/// be listed in its parent under exactly the journal's name ([`check_real_name`]). Refused as
-/// `Damaged`, with nothing touched, before any deletion, move or rename.
+/// the disk: each of the journal's folders that exists must be a real folder (`check_folder`,
+/// by `symlink_metadata`), not a file, a link, a junction or another reparse point that
+/// redirects (a Windows "name surrogate"), and the staging folder must be listed in its parent
+/// under exactly the journal's name ([`check_real_name`]). Refused as `Damaged`, with nothing
+/// touched, before any deletion, move or rename.
 pub(super) fn validate_journal_on_disk(j: &RestoreJournal) -> Result<()> {
     validate_journal(j)?;
     if journal_exists(&j.staging)? {
@@ -251,7 +252,8 @@ fn check_real_name(path: &Path) -> Result<()> {
 /// Removes the staging folder, retrying while another program holds something in it. Refused,
 /// with nothing touched: a name that is not a staging name; a folder whose real name in its
 /// parent is not exactly that name ([`check_real_name`]); a path that is not a real folder (a
-/// link, junction or other reparse point). A folder that is already gone counts as removed.
+/// link, a junction or another reparse point that redirects: a Windows "name surrogate"). A
+/// folder that is already gone counts as removed.
 pub(super) fn remove_staging(staging: &Path) -> Result<()> {
     validate_staging_name(staging)?;
     if !journal_exists(staging)? {

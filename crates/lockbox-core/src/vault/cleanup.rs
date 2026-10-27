@@ -83,32 +83,35 @@ fn move_blobs(ids: &[FileId], from: &Path, to: &Path) -> usize {
     ids.iter().filter(|id| moved(*id)).count()
 }
 
-/// `FILE_ATTRIBUTE_REPARSE_POINT`. std's `is_dir` is false for a symlink or junction, but a
-/// directory with any other kind of reparse point still reports as a directory.
-const REPARSE_POINT: u32 = 0x400;
-
-/// Whether the Windows file attributes mark a reparse point of any kind.
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
-fn is_reparse_point(attributes: u32) -> bool {
-    attributes & REPARSE_POINT != 0
-}
-
-/// Whether `meta` is a reparse point (always false where there are none).
-fn reparse_point(meta: &fs::Metadata) -> bool {
+/// The Windows file attributes of `meta`; 0 where there are none.
+fn attributes(meta: &fs::Metadata) -> u32 {
     #[cfg(windows)]
-    return is_reparse_point(std::os::windows::fs::MetadataExt::file_attributes(meta));
+    return std::os::windows::fs::MetadataExt::file_attributes(meta);
     #[cfg(not(windows))]
     return {
         let _ = meta;
-        false
+        0
     };
 }
 
-/// Fails unless `folder` is a real folder or is missing. A link, junction or any other reparse
-/// point could lead outside the vault, so cleanup never works through one.
+/// The folder rule, which is std's, on what `symlink_metadata` says about an entry: `is_dir`,
+/// and the Windows file attributes (0 elsewhere). std's `is_dir` is false for a link, a junction
+/// and every other reparse point that redirects a path (what Windows calls a "name surrogate"),
+/// so those are refused. The attributes refuse nothing: a folder that std reports as a directory
+/// although it carries `FILE_ATTRIBUTE_REPARSE_POINT` has a reparse point that does not
+/// redirect, such as a cloud-sync placeholder (OneDrive's), and is a real folder. They are
+/// passed in all the same, so that this stays the one place that decides and a test can pin
+/// that they refuse nothing.
+fn is_real_folder(is_dir: bool, _attributes: u32) -> bool {
+    is_dir
+}
+
+/// Fails unless `folder` is a real folder ([`is_real_folder`]) or is missing. A link, a junction
+/// or another reparse point that redirects could lead outside the vault, so cleanup never works
+/// through one.
 pub(super) fn check_folder(folder: &Path) -> Result<()> {
     match fs::symlink_metadata(folder) {
-        Ok(meta) if meta.is_dir() && !reparse_point(&meta) => Ok(()),
+        Ok(meta) if is_real_folder(meta.is_dir(), attributes(&meta)) => Ok(()),
         Ok(_) => Err(CoreError::InvalidInput {
             what: "not a plain folder",
         }),
@@ -324,22 +327,45 @@ mod tests {
 
     const PW: &str = "correct horse battery";
 
-    /// Any reparse point is refused, whatever its tag; a plain folder or a folder with other
-    /// attributes (hidden, read-only, archive) is not. A reparse point that is not a link
-    /// (a cloud placeholder, say) cannot be made without privileges, so this tests the check
-    /// on attribute values, and `check_folder` on a real junction (`linked_*` tests).
+    /// The folder rule is std's: what std reports as a directory is a real folder whatever its
+    /// attributes, `FILE_ATTRIBUTE_REPARSE_POINT` among them, and nothing else is. A cloud-sync
+    /// placeholder (OneDrive's) is such a folder: its reparse point does not redirect, so std
+    /// reports it as a directory. One cannot be made in a test without registering a sync
+    /// provider, so the rule is given its attributes; a real junction goes through the rule with
+    /// the attributes it has on disk, and through `check_folder`.
     #[test]
-    fn reparse_point_attribute_is_recognised() {
+    fn the_folder_rule_is_std_is_dir_whatever_the_attributes() {
         const DIRECTORY: u32 = 0x10;
-        for (attributes, reparse) in [
-            (DIRECTORY, false),
-            (DIRECTORY | 0x2 | 0x1 | 0x20, false),
-            (DIRECTORY | 0x400, true),
-            (0x400, true),
-            (DIRECTORY | 0x2 | 0x400, true),
+        const REPARSE_POINT: u32 = 0x400;
+        const HIDDEN_READ_ONLY_ARCHIVE: u32 = 0x2 | 0x1 | 0x20;
+        for (is_dir, attributes, real) in [
+            (true, DIRECTORY, true),
+            (true, DIRECTORY | HIDDEN_READ_ONLY_ARCHIVE, true),
+            // A cloud-sync placeholder.
+            (true, DIRECTORY | REPARSE_POINT, true),
+            (true, DIRECTORY | 0x2 | REPARSE_POINT, true),
+            // A junction or a folder link: std does not report it as a directory.
+            (false, DIRECTORY | REPARSE_POINT, false),
+            // A file link, and a file.
+            (false, REPARSE_POINT, false),
+            (false, 0x20, false),
         ] {
-            assert_eq!(is_reparse_point(attributes), reparse, "{attributes:#x}");
+            let got = is_real_folder(is_dir, attributes);
+            assert_eq!(got, real, "is_dir {is_dir}, attributes {attributes:#x}");
         }
+
+        let (outside, inside) = (TempDir::new(), TempDir::new());
+        let junction = inside.path().join("link");
+        make_dir_link(&junction, outside.path());
+        let meta = fs::symlink_metadata(&junction).unwrap();
+        // On Windows a junction carries the reparse-point attribute, and std's `is_dir` says no.
+        assert_eq!(attributes(&meta) & REPARSE_POINT != 0, cfg!(windows));
+        assert!(!meta.is_dir());
+        assert!(!is_real_folder(meta.is_dir(), attributes(&meta)));
+        assert!(check_folder(&junction).is_err());
+        let meta = fs::symlink_metadata(outside.path()).unwrap();
+        assert!(is_real_folder(meta.is_dir(), attributes(&meta)));
+        check_folder(outside.path()).unwrap();
     }
 
     #[test]

@@ -50,7 +50,9 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
   restore keeps the vault it replaced" under "Honest limits").
 - **Rollback and deleted item files.** An attacker who can write to the folder can put back an older valid copy of an
   item, or delete an item file, and Lockbox will not notice (R7, spec 6.6). Files that lose their item are set aside,
-  not deleted. An authenticated manifest (a tamper-proof list of every file) is left for the future sync design.
+  not deleted. An authenticated manifest (a tamper-proof list of every file) for the live vault is left for the future
+  sync design. A backup already has one: restore and "test a backup" check every entry against it, so no entry of a
+  backup can be swapped for an older one (an older backup as a whole still opens).
 - **Copies the operating system makes.** Windows may write secrets to the pagefile (memory it parks on disk), the
   hibernation file (memory saved when the PC hibernates), crash dumps (memory saved when a program crashes) or the print
   spooler (the queue of print jobs), and Lockbox cannot control that. Use full-disk encryption (BitLocker on Windows Pro
@@ -209,6 +211,11 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   cannot be kept in step with a half-written pair; reopening re-reads both files. The original error is still
   reported. *Accepted:* the user must reopen the vault after such a failure; that includes a failed accept when the
   vault was opened from `.bak` and `vault.json` was not yet touched.
+- **No backup while a header question waits for you.** A backup is refused while a header change made outside
+  Lockbox waits to be accepted ("accept the header change first"), while the two header copies disagree on a key slot
+  ("header copies disagree; replace the unchecked credential first"), and while the header state is unknown after a
+  failed header write ("header state unknown; reopen the vault"). *Accepted:* a backup made then would keep a header
+  nobody has checked; accepting the change, replacing the unchecked credential or reopening the vault ends it.
 - **The Rust API still exposes internal helpers.** The core's public functions include raw keys, header writes and
   file-system helpers that skip the vault's checks. Nothing reaches a UI today (there is none), but the API does not yet
   enforce the boundary. Narrowing it to key-free views is the first job of Plan 3.
@@ -235,22 +242,27 @@ Lockbox defends.
   in your own profile folder (the app picks the place; the design uses `%LOCALAPPDATA%\Lockbox`). It records the hidden
   staging folder and the folders being swapped, so that a crash in the middle can be finished or undone at the next
   start. Before acting on it Lockbox checks it hard: the paths must be absolute and in the same folder, the names must
-  have the exact shapes a restore writes, and each folder it names must be a real folder and not a link. Those checks
-  guard against damage and mistakes. They do not guard against a program already running as you that writes a
-  journal on purpose: it could point recovery at a staging-shaped folder it chose. *Accepted:* such a program can
-  already read and delete your files, and the checks still mean recovery deletes only a folder named `.restore-` plus
-  32 hex characters.
+  have the exact shapes a restore writes, and each folder it names must be a real folder, not a link, a junction or
+  another reparse point that redirects the path. Those checks guard against damage and mistakes. They do not guard
+  against a program already running as you that writes a journal on purpose: it could point recovery at a
+  staging-shaped folder it chose. *Accepted:* such a program can already read and delete your files, and the checks
+  still mean recovery deletes only a folder named `.restore-` plus 32 hex characters.
 - **Swapping the export destination.** Before saving a decrypted copy, Lockbox checks that the destination is not
   inside the vault. A local attacker could swap a folder link into place between that check and the save.
   *Accepted:* the window is tiny and the attacker already has the access to cause harm. The same check, and the same
   accepted window, apply when you save a file out of a backup or a `.before-restore` folder opened read-only: the
-  destination must not be the backup itself or inside the folder being viewed.
-- **Linked `items/` or `files/` folders.** Cleanup and deleting quarantined files refuse to work through a link or
-  junction (a Windows folder link) and report it only as a failed cleanup. A purge refuses a linked `files/` or
-  `files/orphaned/` before deleting any file content. Unlocking, saving items, importing and exporting still work
-  through one, and a purge's last step, deleting the item's own `items/<id>.item` file, does not yet check `items/`
-  (a follow-up adds that check). *Accepted:* reaching it needs write access inside the vault folder already, and the
-  steps that delete file content are guarded.
+  destination must not be the backup itself, inside the folder being viewed, or inside any vault folder (a folder
+  that holds `vault.json` or `vault.json.bak`, or any folder under one), so a saved copy can never replace a vault's
+  own files.
+- **Linked `items/` or `files/` folders.** Cleanup and deleting quarantined files refuse to work through a link, a
+  junction or another reparse point that redirects the path (what Windows calls a "name surrogate"), and report it
+  only as a failed cleanup. Cloud-sync placeholders, such as OneDrive's, are accepted, because they do not redirect. A
+  purge refuses a linked `files/` or `files/orphaned/` before deleting any file content. Unlocking, saving items,
+  importing and exporting still work through one, and a purge's last step, deleting the item's own `items/<id>.item`
+  file, does not yet check `items/` (a follow-up adds that check). Opening a folder read-only is stricter than
+  unlocking it: it refuses a vault folder that is itself a link, and a linked `items/`, though a writable unlock opens
+  both; a linked `files/` does not stop it, and each file read through one is still authenticated. *Accepted:*
+  reaching it needs write access inside the vault folder already, and the steps that delete file content are guarded.
 - **Non-Windows rename race (Android only).** On non-Windows systems "rename without replacing" is a check followed by a
   rename, so a racing outside process could cause a quarantined file to be replaced. Replacing a file there can also
   report failure after the new file is already in place. *Accepted:* the non-Windows code only ships with the Android
@@ -258,8 +270,8 @@ Lockbox defends.
 
 ### Things the format cannot detect
 
-- **No rollback protection (spec 6.6).** Described under "What Lockbox does not protect against". *Accepted:* it needs
-  the authenticated manifest of the sync design.
+- **No rollback protection for the live vault (spec 6.6).** Described under "What Lockbox does not protect against".
+  *Accepted:* it needs the authenticated manifest of the sync design.
 - **Old backups keep old passwords working.** A backup holds the vault's header as it was when the backup was made, so
   a password or recovery key you have changed since keeps opening that backup, and restoring it brings the old
   password back (spec 5.3). *Accepted:* a backup has to open with the credentials it was made with, and changing them
@@ -278,11 +290,22 @@ Lockbox defends.
   (damaged items, damaged files, missing files). It is never silently complete. *Accepted:* refusing to back up at
   all would leave you with no backup of the healthy part; check the report, and keep an older backup until a clean
   one has been made.
+- A backup holds at most 250 000 entries (items and stored files together); a vault with more is refused ("too large:
+  backup entries"). *Accepted:* the limit bounds the lists a backup's reader has to take in, and it is far above what
+  a personal vault holds.
 - A restore keeps the vault it replaced until you delete it. When a restore replaces a vault, the old one is kept next
   to it as `<folder>.before-restore` (then `-2`, `-3` and so on up to `-99`; past that, a restore over that vault is
-  refused until one is deleted), so a bad restore can be undone. That folder is a full copy of the old vault, readable with the
-  old password, and Lockbox never deletes it for you. *Accepted:* deleting it automatically could throw away the only
-  good copy; the planned interface lists these folders, to open read-only or delete.
+  refused until one is deleted), so a bad restore can be undone. That folder is a full copy of the old vault, readable
+  with the old password, and Lockbox never deletes it for you. *Accepted:* deleting it automatically could throw away
+  the only good copy; the planned interface lists these folders, to open read-only or delete.
+- A vault whose two header files are both unreadable cannot be restored in place. Restore cannot tell that its folder
+  is that vault, so it makes a new folder; while the damaged one still has the name Lockbox gave it, that name is
+  taken, and the restore stops ("destination exists"). Restore into another folder instead. *Parked for Plan 3,*
+  which decides what the restore dialog offers here.
+- An item whose attached file the backup left out (missing or damaged when the backup was made) cannot be copied out
+  of that backup into another vault: the copy stops at that file ("file missing"). Restore the backup instead; the
+  item comes back without that one file ("test a backup" counts such files). *Parked for Plan 3,* which decides
+  whether such a copy should go ahead without the file.
 - Every stored file is labelled `application/octet-stream`; there is no file-type table yet. *Accepted:* the label is
   only display information and the file's bytes are unaffected; how files are opened is decided with the interface.
 - A stored file's name is kept as text; a name that is not valid Unicode (very rare on Windows) is stored with

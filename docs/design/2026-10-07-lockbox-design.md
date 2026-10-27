@@ -373,8 +373,12 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
      - The three names differ pairwise under case-insensitive comparison (`to_lowercase`), because Windows names are
        case-insensitive.
      - `extracting` has `before_restore == None`.
-     - Before deleting or renaming, each path that exists must be a real folder by `symlink_metadata`: not a link,
-       junction or reparse point.
+     - Before deleting or renaming, each path that exists must be a real folder by `symlink_metadata`: not a link, a
+       junction or another reparse point that redirects the path (a Windows "name surrogate"). A cloud-sync
+       placeholder, such as OneDrive's, does not redirect and counts as a folder.
+   - **The vaults folder must be there.** If the folder that holds S, T and B is missing (its drive is not plugged in),
+     S and T would both read as missing, which says nothing about them: nothing is decided, the result is
+     `Err(RestorePending)`, and the journal is kept. Dismissal keeps a valid journal then too.
 
    | Journal | Disk state | Action | Result |
    |---|---|---|---|
@@ -409,7 +413,9 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
 - **A backup opened read-only unlocks and verifies both MACs, as in restore step 2, before any item is shown.** It then
   checks every item against the manifest at open. Blobs are authenticated when exported or copied: file IDs are never
   reused, so the AEAD binds them.
-- **An export is refused** when its destination is the backup itself, or inside the folder being viewed.
+- **An export is refused** when its destination is the backup itself, inside the folder being viewed, or inside any
+  vault folder: a folder that holds `vault.json` or `vault.json.bak` (a link of that name counts), or any folder
+  under one. A decrypted copy never replaces a vault's own file.
 - **Copying an item** from a read-only vault into the live one:
   - The copy gets a new item ID, and each attachment a new file ID and key. Attachments are re-encrypted in memory,
     never as plaintext on disk.

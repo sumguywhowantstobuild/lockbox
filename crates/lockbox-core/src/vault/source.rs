@@ -186,7 +186,7 @@ pub(super) struct Opened {
     pub header: VaultHeader,
     pub key: Key32,
     pub items: BTreeMap<ItemId, Item>,
-    /// Item files that did not open.
+    /// Item files that did not open, or (a folder only) could not be read.
     pub damaged: Vec<ItemId>,
 }
 
@@ -219,7 +219,8 @@ pub(super) fn check_listed(
 /// Unlocks `src` and opens every item, checking `cancel` per item. For an archive, once the key
 /// is known and before any content is trusted: the manifest MAC, its vault ID, then each
 /// header and item hash against the manifest. Header MAC and damaged items are left to
-/// [`check_opened`].
+/// [`check_opened`]. An item that does not open is damaged; so is a folder's item file that
+/// cannot be read, while a read that fails inside an archive fails the whole open.
 pub(super) fn unlock_source(
     src: &VaultSource,
     credential: &Credential,
@@ -258,7 +259,16 @@ pub(super) fn unlock_source(
         #[cfg(test)]
         crate::fsio::failpoint::check("source.item")?;
         cancel.check()?;
-        let bytes = src.item_bytes(&id)?;
+        let bytes = match src.item_bytes(&id) {
+            Ok(bytes) => bytes,
+            // A folder's item file that cannot be read is one damaged item, as at unlock
+            // (`items::load_all`). In an archive a failed read is the archive's, not the item's.
+            Err(_) if matches!(src, VaultSource::Folder(_)) => {
+                damaged.push(id);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         check_listed(&listed, &item_name(&id), Sha256::digest(&bytes).into())?;
         match open_item(&bytes, &id, &vault_id, &key) {
             Ok(item) => {
@@ -863,9 +873,11 @@ pub(super) mod tests {
         }
     }
 
-    /// Property test (spec 5.4): a real backup with one byte changed is read by the whole chain
-    /// (the archive parser, the manifest MAC, every hash, the item and header checks). Each
-    /// outcome is `Ok` or a fixed-text error, never a panic.
+    /// Property test (spec 5.4): a real backup with one edit anywhere in the file (a byte
+    /// replaced, added or removed), or with up to three edits inside one entry that is then
+    /// listed again in a correctly signed manifest, is read by the whole chain (the archive
+    /// parser, the manifest MAC, every hash, the item and header checks). Each outcome is `Ok`
+    /// or a fixed-text error, never a panic.
     mod never_panics {
         use super::*;
         use crate::archive::testkit::{assert_text_is_fixed, mutated};

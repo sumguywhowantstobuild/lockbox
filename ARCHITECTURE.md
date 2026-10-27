@@ -134,7 +134,11 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
    `replace_file`), and the vault folder itself only by `rename_dir_no_replace`. (The folders inside it, `items/`,
    `files/` and `files/orphaned/`, are empty working folders created in place with `create_dir_all`.) That same
    no-replace rename also moves blobs into and out of `files/orphaned/` during cleanup; it is a rename, not a write.
-   (The empty `.lock` marker holds no data and is the one exception.) Spec 6.2.
+   Restore is the exception in two places: it writes each entry in place inside its hidden staging folder (a new
+   file, synced, closed and read back before the next), which holds no vault until it is renamed into place and is
+   deleted whole on any failure; and it publishes the restore journal's first version with `atomic_create`, the same
+   temp-file write renamed only to a name that is still free. The empty lock files, a vault's `.lock` and the
+   journal's `<journal>.lock`, hold no data and are created in place too. Spec 6.2.
 2. **`unsafe` only in `fsio::windows`.** (`unsafe` marks Rust code the compiler cannot check.) The crate root has
    `#![deny(unsafe_code)]`; that one module opts out, and each block carries a comment saying why it is sound.
 3. **Repair only what was verified.** The other header copy is overwritten only when the header that unlocked passed its
@@ -143,8 +147,11 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
    files stay as they are. Spec 6.3.
 4. **Nothing referenced is deleted automatically.** Deletion needs an intent written into an authenticated item
    (`purging`, `retired_blobs`). Unreferenced blobs are moved to `files/orphaned/`, never deleted, and not even moved
-   if any item is damaged. Damaged items are never deleted. Cleanup refuses to work through a linked `items/` or
-   `files/` folder. Spec 6.4.
+   if any item is damaged. The one exception: a failed item copy (`copy_item_from`) deletes from `files/` the blobs it
+   published itself, when no item can reference them (its new item cannot be on disk). Damaged items are never
+   deleted. Cleanup refuses to work through an `items/` or `files/` folder that is a link, a junction or another
+   reparse point that redirects the path (what Windows calls a "name surrogate"); a cloud-sync placeholder, such as
+   OneDrive's, does not redirect and is a real folder. Spec 6.4.
 5. **Secrets live in `Zeroizing` buffers (memory wiped when released) or types that wipe themselves.** `Key32` cannot be
    copied, printed or saved by accident (no `Clone`, `Display` or serde). Sealing and opening items happens inside one
    pre-sized wiped buffer.
@@ -176,17 +183,21 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
     The staging folder (`.restore-<random>`, beside the destination) is where the backup is extracted while the last
     checks run: every blob is authenticated as it is written, and every entry is hashed again as it is read back. The
     only other writes before then are the restore journal and its lock file (`<journal>.lock`), at the path the caller
-    gives (the design keeps them in the user's profile, not in the vaults folder). The existing vault is moved aside to
-    `<folder>.before-restore` (never overwriting an earlier one) only at the final swap. Spec 6.8.
+    gives (the design keeps them in the user's profile, not in the vaults folder), and the existing vault's lock:
+    commit takes it before its final re-checks, which can create an empty `.lock` inside that vault. The existing vault
+    is moved aside to `<folder>.before-restore` (never overwriting an earlier one) only at the final swap. Spec 6.8.
 15. **The journal is checked before it is acted on, and the staging folder goes before the journal.** A journal whose
     paths are not what a restore would write (not absolute, not siblings, wrong names) is refused and touches nothing.
     Cleaning up removes the staging folder first and the journal last, so a crash in between leaves a journal that
-    points at nothing (recovery clears it), never a staging folder with no journal. Spec 6.8.
+    points at nothing (recovery clears it), never a staging folder with no journal. While the folder that holds the
+    staging folder is missing (its drive is not plugged in, say), recovery and dismissal decide nothing and keep the
+    journal: a staging folder that cannot be seen is not a staging folder that is gone. Spec 6.8.
 16. **Read-only is a separate type.** `ReadOnlyVault` has no method that changes its source, the folder or the backup
     it was opened from: opening a backup or a `.before-restore` folder takes no lock and repairs, cleans and creates
     nothing. Its exports (`export_file`) write only a decrypted copy of a file, to a place the user picked, and only
-    when asked; that place may not be the backup itself or inside the folder being viewed. A function that must not
-    change a vault cannot be handed one that can. Spec 6.9.
+    when asked; that place may not be the backup itself, inside the folder being viewed, or inside any vault folder (a
+    folder that holds `vault.json` or `vault.json.bak`, or any folder under one). A function that must not change a
+    vault cannot be handed one that can. Spec 6.9.
 
 ## Where the "why" lives
 

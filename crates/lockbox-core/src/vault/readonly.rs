@@ -11,20 +11,43 @@ use super::{Credential, Vault};
 use crate::archive::BackupArchive;
 use crate::blob::{CancelToken, OutputJournal, decrypt_stream};
 use crate::fsio::parent_dir;
-use crate::header::{VaultHeader, verify_header_mac};
+use crate::header::{HEADER_BACKUP, HEADER_FILE, VaultHeader, verify_header_mac};
 use crate::ids::{FileId, ItemId, VaultId};
 use crate::item::{FileRef, Item, ItemKind};
 use crate::search::SearchIndex;
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
-use std::io;
+use std::fs;
 #[cfg(test)]
 use std::io::Read;
+use std::io::{self, ErrorKind};
 use std::path::Path;
 
 const DESTINATION_IS_BACKUP: CoreError = CoreError::InvalidInput {
     what: "destination is the backup",
 };
+const DESTINATION_IN_VAULT: CoreError = CoreError::InvalidInput {
+    what: "destination in a vault folder",
+};
+
+/// Refuses `dest` when its folder, or any folder above it, holds `vault.json` or
+/// `vault.json.bak`: that is a vault folder (a live vault, a pre-restore copy, a staging folder)
+/// or a folder inside one, where the decrypted copy could replace one of that vault's files.
+/// The folder is resolved first (links, junctions, `..`, short names), and each name is looked
+/// up with `symlink_metadata`, so a link named `vault.json` counts too.
+fn refuse_vault_folder(dest: &Path) -> Result<()> {
+    let folder = fs::canonicalize(parent_dir(dest))?;
+    for dir in folder.ancestors() {
+        for name in [HEADER_FILE, HEADER_BACKUP] {
+            match fs::symlink_metadata(dir.join(name)) {
+                Ok(_) => return Err(DESTINATION_IN_VAULT),
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(())
+}
 
 /// A vault that can only be read: its items, a search over them, and decrypted copies of its
 /// files. Damaged item files are listed, not hidden and not fatal.
@@ -114,8 +137,9 @@ impl ReadOnlyVault {
     }
 
     /// Saves a decrypted copy of an attachment at `dest`, as [`Vault::export_file`] does. A
-    /// `dest` that is the backup itself, or inside the folder being viewed, is refused before
-    /// anything is created.
+    /// `dest` that is the backup itself, or inside the folder being viewed, or in any vault
+    /// folder (one whose folder, or a folder above it, holds `vault.json` or `vault.json.bak`: a
+    /// live vault, a pre-restore copy, a staging folder) is refused before anything is created.
     ///
     /// [`Vault::export_file`]: super::Vault::export_file
     pub fn export_file(
@@ -137,6 +161,7 @@ impl ReadOnlyVault {
             VaultSource::Archive(a) if a.is_same_file(dest)? => return Err(DESTINATION_IS_BACKUP),
             VaultSource::Archive(_) => {}
         }
+        refuse_vault_folder(dest)?;
         check_export_space(fref, dest)?;
         let (mut blob, blob_size) = self.source.blob(file)?;
         let vault_id = &self.header.vault_id;
@@ -333,7 +358,7 @@ mod tests {
     use super::*;
     use crate::archive::testkit::{ManifestMode, rewrite_backup};
     use crate::blob::NoJournal;
-    use crate::fsio::testutil::{TempDir, flip_byte, names};
+    use crate::fsio::testutil::{TempDir, flip_byte, make_dir_link, names};
     use crate::fsio::{VolumeInfo, failpoint, set_volume_override};
     use crate::header::{HEADER_BACKUP, HEADER_FILE, parse_header, serialize_header};
     use crate::item::ItemKind;
@@ -669,6 +694,80 @@ mod tests {
         );
     }
 
+    #[track_caller]
+    fn assert_in_vault_folder(result: Result<()>, what: &str) {
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::InvalidInput {
+                    what: "destination in a vault folder"
+                })
+            ),
+            "{what}: {result:?}"
+        );
+    }
+
+    /// Saving out of a read-only vault never lands in a vault folder, where the decrypted copy
+    /// could replace an item file, a blob or a header: not in the live vault, from a backup or
+    /// from a folder view, and not under any folder that holds `vault.json` or `vault.json.bak`,
+    /// a link of that name included. Beside a vault is fine.
+    #[test]
+    fn export_into_a_vault_folder_refused() {
+        let mut f = Fixture::new();
+        let (item, file) = f.file_item(b"plaintext");
+        let backup = f.backup("a.lockbox-backup");
+        let copy = f.parent.path().join("copy");
+        copy_folder(f.vault.dir(), &copy);
+        let live = f.vault.dir().to_path_buf();
+        let views = [open_backup(&backup).unwrap(), open_folder(&copy).unwrap()];
+        let in_live = [
+            live.join("items").join(format!("{}.item", item.to_hex())),
+            f.blob_file(&file),
+            live.join("vault.json"),
+            live.join("files").join("orphaned").join("new.bin"),
+        ];
+        let before = tree(&live);
+        for (n, ro) in views.iter().enumerate() {
+            let journal = Recorder::default();
+            for dest in &in_live {
+                let result = ro.export_file(&item, &file, dest, &journal, &CancelToken::new());
+                assert_in_vault_folder(result, &format!("view {n}, {dest:?}"));
+            }
+            let recorded = journal.recorded.borrow();
+            assert!(recorded.is_empty(), "view {n}: refused before any output");
+        }
+        assert!(tree(&live) == before, "the live vault changed");
+
+        // A folder with only `vault.json.bak`, or with a link named `vault.json` (a dangling
+        // one), is a vault folder too, and so is every folder under one.
+        let bak_only = f.parent.path().join("bak-only");
+        fs::create_dir_all(bak_only.join("deeper")).unwrap();
+        fs::write(bak_only.join("vault.json.bak"), b"x").unwrap();
+        let linked = f.parent.path().join("linked");
+        fs::create_dir(&linked).unwrap();
+        let gone = TempDir::new();
+        make_dir_link(&linked.join("vault.json"), gone.path());
+        drop(gone);
+        for dest in [bak_only.join("deeper").join("a.bin"), linked.join("a.bin")] {
+            for (n, ro) in views.iter().enumerate() {
+                let result = ro.export_file(&item, &file, &dest, &NoJournal, &CancelToken::new());
+                assert_in_vault_folder(result, &format!("view {n}, {dest:?}"));
+            }
+            assert!(!dest.exists());
+        }
+        assert_eq!(names(&bak_only.join("deeper")), Vec::<String>::new());
+        assert_eq!(names(&linked), ["vault.json"]);
+
+        // In the folder that holds the vault, beside it, is fine.
+        let beside = f.parent.path().join("beside.bin");
+        for ro in &views {
+            fs::write(&beside, b"OLD").unwrap();
+            ro.export_file(&item, &file, &beside, &NoJournal, &CancelToken::new())
+                .unwrap();
+            assert_eq!(fs::read(&beside).unwrap(), b"plaintext");
+        }
+    }
+
     #[test]
     fn tampered_blob_export_refused() {
         let mut f = Fixture::new();
@@ -836,6 +935,37 @@ mod tests {
             assert_eq!(ro.items().count(), 1);
             assert!(ro.items().all(|i| !ro.damaged_items().contains(&i.id)));
         }
+    }
+
+    /// An item file of a folder that cannot be read is one damaged item, as at unlock: the rest
+    /// of the folder still opens, and nothing is written. Here the file goes between the listing
+    /// and the read (the per-item checkpoint comes first), which fails the read on every system.
+    #[test]
+    fn an_unreadable_item_file_is_listed_and_the_rest_opens() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        let kept = f.vault.new_item(ItemKind::Note, "kept", None).unwrap();
+        let lost = f.vault.new_item(ItemKind::Note, "lost", None).unwrap();
+        let copy = f.parent.path().join("copy");
+        copy_folder(f.vault.dir(), &copy);
+        let lost_name = format!("items/{}.item", lost.to_hex());
+        let expected: Vec<_> = tree(&copy)
+            .into_iter()
+            .filter(|(path, _)| *path != lost_name)
+            .collect();
+        // Retried like the code's own deletes; a file that is already gone counts as deleted.
+        let gone = copy.join(&lost_name);
+        let vanish = move || crate::fsio::remove_file_retry(&gone).unwrap();
+        failpoint::observe("source.item", Box::new(vanish));
+
+        let ro = open_folder(&copy).unwrap();
+        failpoint::disarm_all();
+        assert_eq!(ro.damaged_items(), [lost]);
+        assert_eq!(ro.items().count(), 1);
+        assert_eq!(ro.get_item(&kept).unwrap().title, "kept");
+        assert!(matches!(ro.get_item(&lost), Err(CoreError::NotFound)));
+        assert!(tree(&copy) == expected, "opening changed the folder");
+        assert!(!copy.join(".lock").exists());
     }
 
     // ---- Copying an item into the live vault (spec 6.9) ----
