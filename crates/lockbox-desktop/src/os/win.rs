@@ -30,7 +30,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME,
     DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
-    SendMessageTimeoutW, UnregisterClassW, WM_APP, WM_CLOSE, WM_DESTROY, WNDCLASSW, WS_OVERLAPPED,
+    SendMessageTimeoutW, UnregisterClassW, WM_APP, WM_CLOSE, WM_DESTROY, WM_NULL, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 
 use super::OsSignal;
@@ -83,7 +84,13 @@ struct Shared {
     /// window. So nothing the owner sends can reach the handle once the window is gone, when it may already name
     /// another program's window.
     window: Mutex<usize>,
-    /// Set by `Drop` alone. Until then the window ignores every `WM_CLOSE`, whoever sends it.
+    /// Set by `Drop` alone, just before it sends `WM_CLOSE`. Until then the window ignores every `WM_CLOSE`, whoever
+    /// sends it.
+    close_asked: AtomicBool,
+    /// Ends the message loop after the next message `GetMessageW` returns for. Set by the window when it takes the
+    /// close request, and by `Drop` once its send has returned, whether the request ran or not (Windows cancels a
+    /// send that times out). `Drop` never sets it before that send, so its own request cannot leave the window's
+    /// thread out of the loop and waiting for the slot lock that `Drop` holds while it sends.
     stopping: AtomicBool,
 }
 
@@ -96,10 +103,10 @@ struct Context {
 thread_local! {
     /// Set once, at the start of the window's thread, the only thread the window procedure runs on.
     static CONTEXT: OnceCell<Context> = const { OnceCell::new() };
-    /// The window's suspend-and-resume registration, undone when the window is destroyed (0: none).
+    /// Whether the window is registered for session notices, undone just before it is destroyed.
+    static SESSION_NOTICE: Cell<bool> = const { Cell::new(false) };
+    /// The window's suspend-and-resume registration (0: none), undone just before it is destroyed.
     static POWER_NOTICE: Cell<HPOWERNOTIFY> = const { Cell::new(0) };
-    /// Set once the window has taken its owner's close request: the message loop then ends at the next `WM_QUIT`.
-    static CLOSING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Locks `mutex`, also after a panic elsewhere left it poisoned: what each lock here guards is never left
@@ -108,8 +115,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The thread that owns Lockbox's hidden signal window ([`spawn`]). Only dropping it closes the window; no other
-/// program can. The signals stop then, so the app keeps it for as long as it runs.
+/// The thread that owns Lockbox's hidden signal window ([`spawn`]). Only dropping it closes the window or undoes its
+/// notices; no message from another program can. The signals stop then, so the app keeps it for as long as it runs.
 pub struct SignalThread {
     shared: Arc<Shared>,
     /// Disconnects once the window's thread has done its last step (unregistering the class). In a `Mutex` only so
@@ -126,8 +133,8 @@ pub struct SignalThread {
 /// The window is top-level (`WS_OVERLAPPED`) and never shown, not message-only: Windows sends broadcasts such as
 /// `WM_POWERBROADCAST` and the volume notices of `WM_DEVICECHANGE` to top-level windows only. Its session
 /// registration brings `WM_WTSSESSION_CHANGE`, and its suspend-and-resume registration asks for the suspend notice
-/// on PCs with Modern Standby as well. Only [`SignalThread`]'s `Drop` closes it: a `WM_CLOSE` or `WM_QUIT` from
-/// anywhere else changes nothing.
+/// on PCs with Modern Standby as well. Only [`SignalThread`]'s `Drop` closes it: a `WM_CLOSE`, `WM_QUIT` or
+/// `WM_DESTROY` from anywhere else changes nothing.
 pub fn spawn(sink: Sender<OsSignal>) -> io::Result<SignalThread> {
     let number = NEXT_CLASS.fetch_add(1, Ordering::Relaxed);
     let class: Vec<u16> = format!("Lockbox signal window {number}")
@@ -136,6 +143,7 @@ pub fn spawn(sink: Sender<OsSignal>) -> io::Result<SignalThread> {
         .collect();
     let shared = Arc::new(Shared {
         window: Mutex::new(0),
+        close_asked: AtomicBool::new(false),
         stopping: AtomicBool::new(false),
     });
     let context = Context {
@@ -173,7 +181,7 @@ pub fn spawn(sink: Sender<OsSignal>) -> io::Result<SignalThread> {
 
 impl SignalThread {
     /// Asks Windows to keep the PC awake (`true`: `ES_CONTINUOUS | ES_SYSTEM_REQUIRED`) until called with `false`
-    /// (`ES_CONTINUOUS` alone) or until the window closes, whose `WM_DESTROY` withdraws the request. The request
+    /// (`ES_CONTINUOUS` alone) or until the window closes, which withdraws the request. The request
     /// belongs to the thread that makes it, so it is posted to the window and made on the window's own thread. If the
     /// post fails (the window's queue is full), the request is not changed.
     #[cfg_attr(
@@ -195,33 +203,43 @@ impl SignalThread {
 
 impl Drop for SignalThread {
     /// Asks the window to close, then waits for its thread to end, at most [`STOP_WAIT`] for each. The request is a
-    /// sent `WM_CLOSE`, which the posted-message limit (10,000 per queue) cannot hold up. Once the thread has ended,
-    /// the window, its notices, its keep-awake request and its class are all gone, and the thread is joined. A thread
-    /// that does not end in time is let go rather than waited for forever.
+    /// sent `WM_CLOSE`, which the posted-message limit (10,000 per queue) cannot hold up. Whether or not it ran (a
+    /// send that times out is cancelled), `stopping` is set afterwards, so the loop ends at its next message. Once
+    /// the thread has ended, the window, its notices, its keep-awake request and its class are all gone, and the
+    /// thread is joined. A thread that does not end in time is let go rather than waited for forever.
     fn drop(&mut self) {
-        self.shared.stopping.store(true, Ordering::SeqCst);
-        {
-            let window = lock(&self.shared.window);
-            if *window != 0 {
-                let mut answer = 0;
-                // SAFETY: the message carries no pointers, and `answer` is writable. The handle is live for the whole
-                // call: the window's thread clears the slot, under the lock held here, before it destroys the window.
-                // Holding the lock cannot deadlock: the window takes the request without it. In the one case where
-                // its thread already waits for the lock (another program's WM_CLOSE reached it after `stopping` was
-                // set), this call times out after STOP_WAIT and the thread then goes on.
-                unsafe {
-                    SendMessageTimeoutW(
-                        *window as HWND,
-                        WM_CLOSE,
-                        0,
-                        0,
-                        SMTO_BLOCK | SMTO_ABORTIFHUNG,
-                        STOP_WAIT_MS,
-                        &mut answer,
-                    )
-                };
+        self.shared.close_asked.store(true, Ordering::SeqCst);
+        let window = lock(&self.shared.window);
+        if *window != 0 {
+            let handle = *window as HWND;
+            let mut answer = 0;
+            // SAFETY: the message carries no pointers, and `answer` is writable. The handle is live for the whole
+            // call: the window's thread clears the slot, under the lock held here, before it destroys the window.
+            // Holding the lock cannot deadlock: `stopping` is still clear, so the loop goes on handling messages, and
+            // the window takes the request without the lock. In the one case where its thread already waits for the
+            // lock (another program's WM_CLOSE reached it after `close_asked` was set), this call times out after
+            // STOP_WAIT, and the thread goes on once the lock is released below.
+            let taken = unsafe {
+                SendMessageTimeoutW(
+                    handle,
+                    WM_CLOSE,
+                    0,
+                    0,
+                    SMTO_BLOCK | SMTO_ABORTIFHUNG,
+                    STOP_WAIT_MS,
+                    &mut answer,
+                )
+            } != 0;
+            self.shared.stopping.store(true, Ordering::SeqCst);
+            if !taken {
+                // The loop checks `stopping` each time GetMessageW returns, which it does for posted messages only
+                // (it handles sent ones inside the call). If this post fails, the queue is full, and the messages
+                // already in it wake the loop instead.
+                // SAFETY: the message carries no pointers; the handle is live as above, the lock still held.
+                unsafe { PostMessageW(handle, WM_NULL, 0, 0) };
             }
         }
+        drop(window);
         let ended = matches!(
             lock(&self.ended).recv_timeout(STOP_WAIT),
             Err(RecvTimeoutError::Disconnected)
@@ -261,12 +279,10 @@ fn window_thread(class: &[u16], context: Context, ready: Sender<io::Result<()>>)
         Ok(window) => {
             *lock(&shared.window) = window as usize;
             let _ = ready.send(Ok(()));
-            run_messages();
+            run_messages(&shared);
             // From here on the owner finds no handle, so nothing more can be sent or posted to the window.
             *lock(&shared.window) = 0;
-            // SAFETY: `window` is this thread's live window; its WM_DESTROY undoes its notices and its keep-awake
-            // request.
-            unsafe { DestroyWindow(window) };
+            destroy_window(window);
         }
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -314,9 +330,8 @@ fn open_window(class: &[u16], instance: HINSTANCE) -> io::Result<HWND> {
             Ok(window)
         }
         Err(error) => {
-            // SAFETY: `window` is live and belongs to this thread, and no owner holds its handle yet; its WM_DESTROY
-            // undoes any registration that succeeded.
-            unsafe { DestroyWindow(window) };
+            // No owner holds the handle yet.
+            destroy_window(window);
             Err(error)
         }
     }
@@ -332,6 +347,8 @@ fn register_session(window: HWND) -> io::Result<()> {
     if unsafe { WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION) } == 0 {
         return Err(io::Error::last_os_error());
     }
+    SESSION_NOTICE.set(true);
+    note(Note::SessionRegistered, true);
     Ok(())
 }
 
@@ -345,22 +362,26 @@ fn register_suspend(window: HWND) -> io::Result<HPOWERNOTIFY> {
     // recipient is a window handle.
     match unsafe { RegisterSuspendResumeNotification(window, DEVICE_NOTIFY_WINDOW_HANDLE) } {
         0 => Err(io::Error::last_os_error()),
-        notice => Ok(notice),
+        notice => {
+            note(Note::SuspendRegistered, true);
+            Ok(notice)
+        }
     }
 }
 
-/// The message loop. It ends only once the window has taken its owner's close request and the `WM_QUIT` that the
-/// request posts arrives; a `WM_QUIT` from anywhere else (another program can post one to the window or to this
-/// thread) is skipped.
-fn run_messages() {
+/// The message loop. It ends once `stopping` is set, which happens only after `Drop` has asked to close (the window
+/// sets it on taking the request, `Drop` after its send). It checks after every message, never waiting for a
+/// `WM_QUIT`: Windows makes one only when the posted queue is empty, which another program posting without pause
+/// could put off forever. A `WM_QUIT` from anywhere (another program can post one to the window or to this thread)
+/// only wakes it.
+fn run_messages(shared: &Shared) {
     let mut message = MSG::default();
-    loop {
+    while !shared.stopping.load(Ordering::SeqCst) {
         // SAFETY: `message` is a valid, writable MSG; a null window asks for every message of this thread.
         match unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) } {
             // GetMessageW fails only for invalid arguments, which this loop never passes. If it ever did, the window
             // could hear nothing more: end, and the listener sees the signals end.
             -1 => return,
-            0 if CLOSING.get() => return,
             0 => {}
             // SAFETY: `message` was just filled in by GetMessageW.
             _ => unsafe {
@@ -390,12 +411,9 @@ unsafe extern "system" fn window_procedure(
             take_close_request();
             return 0;
         }
-        WM_DESTROY => {
-            stop_notices(window);
-            // The keep-awake request ends with the window.
-            set_keep_awake(false);
-            return 0;
-        }
+        // Sent by `DestroyWindow`, after `destroy_window` has already undone the notices and the keep-awake
+        // request; another program's WM_DESTROY destroys nothing, so it must change nothing either.
+        WM_DESTROY => return 0,
         #[cfg(test)]
         TEST_BLOCK => {
             wait_at_test_gate();
@@ -422,20 +440,27 @@ unsafe extern "system" fn window_procedure(
     unsafe { DefWindowProcW(window, msg, wparam, lparam) }
 }
 
-/// `WM_CLOSE`: taken only once the owner's `Drop` has asked (it sets `stopping` first), so no other program can end
-/// the signals; any other is ignored. Taking it ends the message loop at the next `WM_QUIT`, and the window is
+/// `WM_CLOSE`: taken only once the owner's `Drop` has asked (`close_asked`), so no other program can end the signals;
+/// any other is ignored. Taking it sets `stopping`, so the loop ends after its next message, and the window is
 /// destroyed after the loop, once its handle is out of the owner's reach.
 fn take_close_request() {
-    let asked = CONTEXT
+    let taken = CONTEXT
         .try_with(|context| {
-            context
-                .get()
-                .is_some_and(|context| context.shared.stopping.load(Ordering::SeqCst))
+            let Some(context) = context.get() else {
+                return false;
+            };
+            let asked = context.shared.close_asked.load(Ordering::SeqCst);
+            if asked {
+                context.shared.stopping.store(true, Ordering::SeqCst);
+            }
+            asked
         })
         .unwrap_or(false);
-    if asked && CLOSING.try_with(|closing| closing.set(true)).is_ok() {
-        // SAFETY: takes no pointers; it asks this thread's message loop to end. It sets a flag rather than queueing
-        // a message, so the posted-message limit cannot hold it up.
+    if taken {
+        // GetMessageW does not return for this sent WM_CLOSE: wake it. The quit comes once the posted queue is empty,
+        // and any posted message wakes the loop sooner.
+        // SAFETY: takes no pointers; it sets this thread's quit flag rather than queueing a message, so the
+        // posted-message limit cannot hold it up.
         unsafe { PostQuitMessage(0) };
     }
 }
@@ -453,17 +478,80 @@ fn set_keep_awake(on: bool) -> LRESULT {
     previous as LRESULT
 }
 
-/// Undoes the window's session and suspend registrations; runs on `WM_DESTROY`.
+/// Destroys this thread's window, after undoing its notices and its keep-awake request. Only the window's own thread
+/// can destroy it, and only here, so this is also the only place its notices are undone.
+fn destroy_window(window: HWND) {
+    stop_notices(window);
+    note(Note::KeepAwakeWithdrawn, set_keep_awake(false) != 0);
+    #[cfg(test)]
+    check_nothing_left(window);
+    // SAFETY: `window` is this thread's live window, and no owner can reach its handle: the slot was cleared under
+    // its lock first, or (in `open_window`) never set.
+    unsafe { DestroyWindow(window) };
+}
+
+/// Undoes whichever of the window's session and suspend registrations were made.
 fn stop_notices(window: HWND) {
-    // SAFETY: `window` is the live window being destroyed; for a window that never registered, the call only fails.
-    unsafe { WTSUnRegisterSessionNotification(window) };
-    let notice = POWER_NOTICE
-        .try_with(|notice| notice.replace(0))
-        .unwrap_or(0);
+    if SESSION_NOTICE.replace(false) {
+        // SAFETY: `window` is the live window that registered, on its own thread.
+        let undone = unsafe { WTSUnRegisterSessionNotification(window) } != 0;
+        note(Note::SessionUnregistered, undone);
+    }
+    let notice = POWER_NOTICE.replace(0);
     if notice != 0 {
         // SAFETY: `notice` is this thread's registration for this window, undone once (it was replaced by 0).
-        unsafe { UnregisterSuspendResumeNotification(notice) };
+        let undone = unsafe { UnregisterSuspendResumeNotification(notice) } != 0;
+        note(Note::SuspendUnregistered, undone);
     }
+}
+
+/// What a real Windows call did, as [`note`] records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Note {
+    SessionRegistered,
+    SuspendRegistered,
+    SessionUnregistered,
+    SuspendUnregistered,
+    KeepAwakeWithdrawn,
+    /// Test-only check after the clean-up: the window was still registered for session notices.
+    #[cfg(test)]
+    SessionLeft,
+    /// Test-only check after the clean-up: the thread still asked Windows to keep the PC awake.
+    #[cfg(test)]
+    KeepAwakeLeft,
+}
+
+/// Test-only: checks with Windows itself that the clean-up left nothing, and notes what it left. A second
+/// unregistration succeeds only if the window was still registered (tried before the window goes, on its own handle,
+/// so no other test's window is touched). And right after a real withdrawal, the thread's previous state is exactly
+/// `ES_CONTINUOUS`.
+#[cfg(test)]
+fn check_nothing_left(window: HWND) {
+    // SAFETY: `window` is this thread's live window; for a window that is not registered, the call only fails.
+    let session_left = unsafe { WTSUnRegisterSessionNotification(window) } != 0;
+    note(Note::SessionLeft, session_left);
+    // SAFETY: takes only flags; it sets the state the withdrawal should already have set.
+    let previous = unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+    note(Note::KeepAwakeLeft, previous != ES_CONTINUOUS);
+}
+
+/// Records that a real Windows call succeeded (`ok`), for the tests; outside tests it does nothing.
+#[cfg(not(test))]
+fn note(_what: Note, _ok: bool) {}
+
+/// Test-only: records a real Windows call that succeeded (`ok`) in this window's hook, in order.
+#[cfg(test)]
+fn note(what: Note, ok: bool) {
+    if !ok {
+        return;
+    }
+    let _ = TEST_HOOK.try_with(|hook| {
+        if let Ok(hook) = hook.try_borrow()
+            && let Some(hook) = hook.as_ref()
+        {
+            lock(&hook.seen.notes).push(what);
+        }
+    });
 }
 
 /// Copies the device kind, and for a volume its drive mask, out of a `WM_DEVICECHANGE` event's `lparam`. Returns
@@ -524,6 +612,8 @@ struct Seen {
     class: Mutex<Vec<u16>>,
     /// The window's handle once it was created (0 before).
     window: AtomicUsize,
+    /// The real registrations, unregistrations and keep-awake withdrawal that succeeded, in order ([`note`]).
+    notes: Mutex<Vec<Note>>,
 }
 
 /// Test-only changes to one `spawn` made on the test's own thread, so tests running side by side never meet each
@@ -534,6 +624,8 @@ struct TestHook {
     refuse: Option<Registration>,
     /// Where [`TEST_BLOCK`] holds the window's thread until the test sends `()` (or 5 s pass).
     gate: Option<Receiver<()>>,
+    /// Told when the window's thread reaches the gate.
+    at_gate: Option<Sender<()>>,
     seen: Arc<Seen>,
 }
 
@@ -571,8 +663,12 @@ fn test_refuses(registration: Registration) -> bool {
 fn wait_at_test_gate() {
     let _ = TEST_HOOK.try_with(|hook| {
         if let Ok(hook) = hook.try_borrow()
-            && let Some(gate) = hook.as_ref().and_then(|hook| hook.gate.as_ref())
+            && let Some(hook) = hook.as_ref()
+            && let Some(gate) = hook.gate.as_ref()
         {
+            if let Some(at_gate) = hook.at_gate.as_ref() {
+                let _ = at_gate.send(());
+            }
             let _ = gate.recv_timeout(Duration::from_secs(5));
         }
     });
@@ -589,8 +685,8 @@ mod tests {
         DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_PORT, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR,
         DEV_BROADCAST_VOLUME, GA_PARENT, GetAncestor, GetClassInfoW, GetDesktopWindow,
         GetWindowThreadProcessId, IsWindow, IsWindowVisible, PBT_APMSUSPEND, PostMessageW,
-        PostThreadMessageW, SendMessageW, WM_CLOSE, WM_DEVICECHANGE, WM_NULL, WM_POWERBROADCAST,
-        WM_QUIT, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK,
+        PostThreadMessageW, SendMessageW, WM_CLOSE, WM_DESTROY, WM_DEVICECHANGE, WM_NULL,
+        WM_POWERBROADCAST, WM_QUIT, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK,
     };
 
     use super::*;
@@ -604,15 +700,60 @@ mod tests {
     }
 
     /// Installs a hook for the next `spawn` on this thread, and returns what it will record.
-    fn hook(refuse: Option<Registration>, gate: Option<Receiver<()>>) -> Arc<Seen> {
+    fn hook(refuse: Option<Registration>) -> Arc<Seen> {
         let seen = Arc::new(Seen::default());
         TEST_HOOK.set(Some(TestHook {
             refuse,
-            gate,
             seen: Arc::clone(&seen),
+            ..TestHook::default()
         }));
         seen
     }
+
+    /// The window's gate ([`TEST_BLOCK`]): `open` lets its thread go on, `reached` says it is waiting there.
+    struct Gate {
+        open: Sender<()>,
+        reached: Receiver<()>,
+    }
+
+    impl Gate {
+        /// Posts [`TEST_BLOCK`] and waits until the window's thread is held at the gate.
+        fn hold(&self, window: usize) {
+            post(window, TEST_BLOCK, 0);
+            self.reached
+                .recv_timeout(WAIT)
+                .expect("the window's thread reaches the gate");
+        }
+    }
+
+    /// Like [`hook`], with a gate for the window's thread.
+    fn gated() -> (Arc<Seen>, Gate) {
+        let seen = Arc::new(Seen::default());
+        let (open, gate) = mpsc::channel();
+        let (at_gate, reached) = mpsc::channel();
+        TEST_HOOK.set(Some(TestHook {
+            refuse: None,
+            gate: Some(gate),
+            at_gate: Some(at_gate),
+            seen: Arc::clone(&seen),
+        }));
+        (seen, Gate { open, reached })
+    }
+
+    fn notes(seen: &Seen) -> Vec<Note> {
+        lock(&seen.notes).clone()
+    }
+
+    /// The notes of a window that registered both notices.
+    const REGISTERED: [Note; 2] = [Note::SessionRegistered, Note::SuspendRegistered];
+    /// The notes of a window that registered both notices and was then closed by `Drop`.
+    const CLOSED: [Note; 5] = [
+        Note::SessionRegistered,
+        Note::SuspendRegistered,
+        Note::SessionUnregistered,
+        Note::SuspendUnregistered,
+        Note::KeepAwakeWithdrawn,
+    ];
 
     fn window_of(signal_thread: &SignalThread) -> usize {
         *lock(&signal_thread.shared.window)
@@ -640,9 +781,9 @@ mod tests {
             let lparam = payload
                 .as_ref()
                 .map_or(0, |payload| (&raw const *payload) as LPARAM);
-            // SAFETY: `window` is a handle from a signal thread the test still holds (if the test has failed and
-            // dropped it, the call fails). `lparam` is 0 or points to `payload`, which this thread owns until the
-            // call has returned.
+            // SAFETY: the test holds the signal thread while it waits for this answer, so the handle is live; only
+            // after the test has given up and dropped it can the handle be stale (and then name another window).
+            // `lparam` is 0 or points to `payload`, which this thread owns until the call has returned.
             let result = unsafe { SendMessageW(window as HWND, msg, wparam, lparam) };
             let _ = answered.send(result);
             drop(payload);
@@ -652,8 +793,9 @@ mod tests {
             .expect("the window answers within the deadline")
     }
 
+    /// Posts to a window whose signal thread the caller holds.
     fn post(window: usize, msg: u32, wparam: WPARAM) {
-        // SAFETY: the message carries no pointers; the window lives while its signal thread does.
+        // SAFETY: the message carries no pointers, and the caller holds the signal thread, so the handle is live.
         let posted = unsafe { PostMessageW(window as HWND, msg, wparam, 0) };
         assert_ne!(posted, 0, "post message {msg:#x}");
     }
@@ -812,7 +954,7 @@ mod tests {
 
     #[test]
     fn drop_stops_the_thread() {
-        let seen = hook(None, None);
+        let seen = hook(None);
         let (signal_thread, signals) = started();
         let window = window_of(&signal_thread);
         let class = class_of(&seen);
@@ -839,11 +981,26 @@ mod tests {
         assert_eq!(signals.try_recv(), Ok(OsSignal::SessionLocked));
     }
 
+    /// The real calls succeed: both notices are registered when the window opens, and both are undone, with the
+    /// keep-awake request, when `Drop` closes it.
+    #[test]
+    fn notices_are_registered_and_undone() {
+        let seen = hook(None);
+        let (signal_thread, signals) = started();
+        let window = window_of(&signal_thread);
+        assert_eq!(notes(&seen), REGISTERED, "registered on creation");
+
+        signal_thread.keep_awake(true);
+        flush(window, &signals);
+        drop_within(signal_thread, WAIT);
+        assert_eq!(notes(&seen), CLOSED, "undone when Lockbox closes it");
+    }
+
     /// Only Lockbox closes the window: another program's `WM_CLOSE` (posted or sent) and `WM_QUIT` (to the window or
     /// to its thread) change nothing.
     #[test]
     fn outside_close_and_quit_do_not_stop_the_signals() {
-        let seen = hook(None, None);
+        let seen = hook(None);
         let (signal_thread, signals) = started();
         let window = window_of(&signal_thread);
         // SAFETY: a plain query on a live window handle; no process ID is asked for.
@@ -861,6 +1018,7 @@ mod tests {
         assert!(is_window(window), "window still there");
         send(window, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK as usize);
         assert_eq!(signals.try_recv(), Ok(OsSignal::SessionLocked));
+        assert_eq!(notes(&seen), REGISTERED, "notices still registered");
 
         let class = class_of(&seen);
         drop_within(signal_thread, WAIT);
@@ -868,20 +1026,47 @@ mod tests {
         assert!(!class_exists(&class), "class unregistered by drop");
     }
 
+    /// Another program's `WM_DESTROY` (sent or posted) destroys nothing, so it must change nothing: the notices stay
+    /// registered, the keep-awake request stays, and a lock still reaches the sink.
+    #[test]
+    fn outside_destroy_changes_nothing() {
+        let seen = hook(None);
+        let (signal_thread, signals) = started();
+        let window = window_of(&signal_thread);
+        signal_thread.keep_awake(true);
+        flush(window, &signals);
+
+        send(window, WM_DESTROY, 0);
+        post(window, WM_DESTROY, 0);
+        flush(window, &signals);
+
+        assert!(is_window(window), "window still there");
+        assert_eq!(notes(&seen), REGISTERED, "notices still registered");
+        send(window, WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK as usize);
+        assert_eq!(signals.try_recv(), Ok(OsSignal::SessionLocked));
+        assert_eq!(
+            send(window, KEEP_AWAKE, 1) as u32,
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED,
+            "keep-awake request still there"
+        );
+
+        drop_within(signal_thread, WAIT);
+        assert_eq!(notes(&seen), CLOSED, "undone once, when Lockbox closes it");
+    }
+
     /// `Drop` does not need room in the window's posted-message queue (Windows allows 10,000 messages): with the
     /// queue full it still closes the window and waits for its thread, so the class is gone when it returns.
     #[test]
     fn drop_does_not_need_room_in_the_queue() {
-        let (open_gate, gate) = mpsc::channel();
-        let seen = hook(None, Some(gate));
+        let (seen, gate) = gated();
         let (signal_thread, _signals) = started();
         let window = window_of(&signal_thread);
         let class = class_of(&seen);
 
         // Hold the window's thread at the gate, then fill its queue until Windows refuses more.
-        post(window, TEST_BLOCK, 0);
+        gate.hold(window);
         let mut posted = 0;
-        // SAFETY: the message carries no pointers; the window lives while its signal thread does.
+        // SAFETY: the message carries no pointers, and the test holds the signal thread, so the handle is live.
         while unsafe { PostMessageW(window as HWND, WM_NULL, 0, 0) } != 0 {
             posted += 1;
             assert!(posted < 100_000, "the queue never filled");
@@ -894,7 +1079,7 @@ mod tests {
         });
         // Let the drop start while the queue is still full, then let the window's thread go on.
         thread::sleep(Duration::from_millis(200));
-        let _ = open_gate.send(());
+        let _ = gate.open.send(());
         done.recv_timeout(WAIT)
             .expect("drop returns within the deadline");
         assert!(!is_window(window), "window destroyed");
@@ -902,13 +1087,91 @@ mod tests {
             !class_exists(&class),
             "class unregistered before drop returned"
         );
+        assert_eq!(notes(&seen), CLOSED);
     }
 
-    /// A registration Windows refuses makes `spawn` fail, and leaves no window and no class behind.
+    /// Windows cancels a `WM_CLOSE` whose send times out. Holding the window's thread past `Drop`'s timeout loses the
+    /// close request, and the thread must still stop once it runs again.
+    #[test]
+    fn a_timed_out_close_still_stops_the_thread() {
+        let (seen, gate) = gated();
+        let (signal_thread, _signals) = started();
+        let window = window_of(&signal_thread);
+        let class = class_of(&seen);
+        gate.hold(window);
+
+        let (dropped, done) = mpsc::channel();
+        thread::spawn(move || {
+            drop(signal_thread);
+            let _ = dropped.send(());
+        });
+        // Past the send's timeout, but before `Drop` stops waiting for the thread.
+        thread::sleep(STOP_WAIT + Duration::from_millis(500));
+        let _ = gate.open.send(());
+        done.recv_timeout(WAIT)
+            .expect("drop returns within the deadline");
+        assert!(!is_window(window), "window destroyed");
+        assert!(!class_exists(&class), "class unregistered");
+        assert_eq!(notes(&seen), CLOSED);
+    }
+
+    /// The loop must not wait for an empty queue to stop: another program posting to the window without pause keeps
+    /// the queue from ever emptying.
+    #[test]
+    fn drop_stops_the_thread_under_steady_posting() {
+        /// Stops the posters when the test ends, whether it passes or fails.
+        struct StopPosting(Arc<AtomicBool>);
+        impl Drop for StopPosting {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+
+        let (seen, gate) = gated();
+        let (signal_thread, _signals) = started();
+        let window = window_of(&signal_thread);
+        let class = class_of(&seen);
+        let posting = Arc::new(AtomicBool::new(true));
+        let _stop = StopPosting(Arc::clone(&posting));
+        // Fill the queue while the window's thread is held, and keep it full with more posters than it can keep up
+        // with, so it never empties while the thread drains it.
+        gate.hold(window);
+        for _ in 0..4 {
+            let posting = Arc::clone(&posting);
+            thread::spawn(move || {
+                while posting.load(Ordering::SeqCst) {
+                    // SAFETY: `WM_NULL` carries no pointers and does nothing. Once the window is gone the handle may
+                    // be stale, and then this posts that harmless message to another window, or fails.
+                    unsafe { PostMessageW(window as HWND, WM_NULL, 0, 0) };
+                }
+            });
+        }
+        thread::sleep(Duration::from_millis(100));
+        let _ = gate.open.send(());
+
+        drop_within(signal_thread, WAIT);
+        assert!(!is_window(window), "window destroyed");
+        assert!(!class_exists(&class), "class unregistered");
+        assert_eq!(notes(&seen), CLOSED);
+    }
+
+    /// A registration Windows refuses makes `spawn` fail, and leaves no window, no class and no registration behind.
     #[test]
     fn refused_registration_leaves_nothing_behind() {
-        for refused in [Registration::Session, Registration::Suspend] {
-            let seen = hook(Some(refused), None);
+        for (refused, left) in [
+            // Nothing was registered; only the keep-awake request is withdrawn, as on every close.
+            (Registration::Session, vec![Note::KeepAwakeWithdrawn]),
+            // The session notices were registered for real, and are undone.
+            (
+                Registration::Suspend,
+                vec![
+                    Note::SessionRegistered,
+                    Note::SessionUnregistered,
+                    Note::KeepAwakeWithdrawn,
+                ],
+            ),
+        ] {
+            let seen = hook(Some(refused));
             let (sink, _signals) = mpsc::channel();
             assert!(spawn(sink).is_err(), "{refused:?} refused: spawn fails");
             let window = seen.window.load(Ordering::SeqCst);
@@ -918,6 +1181,7 @@ mod tests {
                 !class_exists(&class_of(&seen)),
                 "{refused:?} refused: class unregistered"
             );
+            assert_eq!(notes(&seen), left, "{refused:?} refused");
         }
     }
 
