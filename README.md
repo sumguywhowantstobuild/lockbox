@@ -40,7 +40,7 @@ Rust also needs Microsoft's C++ linker: Visual Studio 2022 Build Tools with "Des
 details and troubleshooting are in [docs/SETUP.md](docs/SETUP.md).
 
 ```
-rustup toolchain install     # installs the Rust version this project pins (1.99.0), from rust-toolchain.toml
+rustup toolchain install     # installs the Rust version this project pins (1.99.1), from rust-toolchain.toml
 cargo test --locked          # the whole test suite; it runs real password hashing, so allow a minute or two
 ```
 

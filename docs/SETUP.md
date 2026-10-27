@@ -26,13 +26,13 @@ Never passwords or keys here, only where they're kept.
 |---|---|---|---|
 | Visual Studio 2022 Build Tools, "Desktop development with C++" | 17.14 · Windows SDK 10.0.26100 | `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` (accept the licence) | Rust on Windows needs Microsoft's C++ linker |
 | rustup | 1.29.1 | `winget install --id Rustlang.Rustup` | Installs and switches Rust versions |
-| Rust | 1.99.0 + rustfmt, clippy | `rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy` | The language of the Lockbox core; pinned so every machine builds the same |
+| Rust | 1.99.1 + rustfmt, clippy | `rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy` | The language of the Lockbox core; pinned so every machine builds the same |
 
 Check: a test program builds and runs (`cargo new hello && cargo run`). `~/.cargo/bin` must be on the user PATH;
 terminals opened before the install need restarting to see `cargo`.
 
 ## Workspace and CI
-- `rust-toolchain.toml` pins Rust 1.99.0 (minimal profile, plus rustfmt and clippy); `cargo` in the repo picks it up
+- `rust-toolchain.toml` pins Rust 1.99.1 (minimal profile, plus rustfmt and clippy); `cargo` in the repo picks it up
   automatically.
 - Checks to run before every commit: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
   `cargo test --locked`. `Cargo.lock` is committed so builds are repeatable.
