@@ -22,7 +22,7 @@ test("hands_on_probes_are_listed", async () => {
   await screen.findByText("Lockbox 9.8.7");
   expect(screen.getByRole("button", { name: "Navigate away" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Open a popup" })).toBeTruthy();
-  expect(screen.getByRole("link", { name: "Download a file" }).getAttribute("download")).toBe("x.txt");
+  expect(screen.getByRole("button", { name: "Download a file" })).toBeTruthy();
   expect(screen.getByTestId("drop-zone").textContent).toBe("Drop a file here");
   expect(screen.queryByText("A dropped file reached the page")).toBeNull();
 });

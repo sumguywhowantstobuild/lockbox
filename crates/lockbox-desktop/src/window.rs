@@ -31,10 +31,11 @@ static EXTERNAL_DROP_OFF: AtomicBool = AtomicBool::new(false);
 /// accepts no dropped files: Tauri's drag-and-drop handler is off (it would send dropped files' full paths to the
 /// page), and so is WebView2's own external drop (it would hand the files to the page).
 ///
-/// Called from the setup hook, which Tauri runs on the main thread while handling the event loop's first event. There
-/// Tauri creates the window and runs the `with_webview` callback before returning, so drops are off before the event
-/// loop can deliver any input to the new window. The caller checks [`external_drop_is_off`] and refuses to run
-/// otherwise. (The test runtime never runs the callback.)
+/// External drop is turned off only after the window exists: the `with_webview` callback runs on the main thread
+/// right after `build()` returns (inside the setup hook). Input can reach the window before that, since WebView2's
+/// creation pumps window messages, but the app page has not loaded yet, so there is no page for a dropped file to
+/// reach. The caller checks [`external_drop_is_off`] and refuses to run otherwise. (The test runtime never runs the
+/// callback.)
 pub fn main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
     let window = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
         .title("Lockbox")

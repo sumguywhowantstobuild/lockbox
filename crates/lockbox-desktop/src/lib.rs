@@ -29,7 +29,7 @@ pub fn run() {
         .setup(|app| {
             window::main_window(app.handle())?;
             // Fail closed: never run with files droppable into the page. Tauri ends the process on a setup error
-            // (it panics with this message) before the new window handles any input.
+            // (it panics with this message), before the event loop goes on to load and run the app page.
             if !window::external_drop_is_off() {
                 return Err(
                     "Lockbox will not run: its window could not turn off file drops".into(),

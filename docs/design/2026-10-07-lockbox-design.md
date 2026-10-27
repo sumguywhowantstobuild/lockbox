@@ -98,8 +98,11 @@ WebView2 autofill is off and the webview runs without a persistent profile, so t
   session generation is current (7.4); every referenced item, collection or file belongs to that session's vault;
   read-only sessions reject writes; sizes are within limits. A malformed request to a Lockbox command gets a fixed
   error, never the parser's text. Tauri's own event commands and its message transport may answer with their own
-  error text; it holds only what the page itself sent and goes back only to that page (a wrong invoke key is also
-  printed to standard error, which a release build has no console for).
+  error text, built from what the page sent (such as the command name, or a value its parser quotes), and only to
+  the page that sent the request. In debug builds a refused command's error text also lists the app's configured
+  capabilities and permissions. A request with a wrong invoke key gets no answer; Tauri prints that key together
+  with the expected key to standard error, which a release build has no console for. None of this text includes
+  vault data.
 
 ## 5. Cryptography
 

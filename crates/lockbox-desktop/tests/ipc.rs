@@ -1,8 +1,10 @@
 //! The IPC bridge: which commands the page may call, from which window and origin, and what a bad request gets back.
 //! The app is built from the real `tauri.conf.json` and `capabilities/main.json`, so the real ACL applies.
 //!
-//! The test runtime (`MockRuntime`) ignores the window's webview settings (navigation, new windows, downloads,
-//! autofill, profile, drops); those are proven by the hands-on probes on the test page.
+//! The test runtime (`MockRuntime`) ignores the window's webview settings. Navigation, downloads and dropped files
+//! are checked by the hands-on probes on the test page. The popup probe checks only the outcome: wry refuses new
+//! windows even without Tauri's handler. Autofill and the in-private profile cannot be observed from the page; they
+//! are covered only by review of `window::main_window`.
 
 use std::collections::BTreeSet;
 use std::path::Path;

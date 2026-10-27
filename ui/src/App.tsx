@@ -8,6 +8,19 @@ interface AppInfo {
 
 const OUTSIDE = "https://example.com";
 
+// A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
+// `data:` link does not reliably start a download, so it could not show the rule failing).
+function downloadProbeFile(): void {
+  const url = URL.createObjectURL(new Blob(["x"], { type: "text/plain" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "lockbox-probe.txt";
+  link.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 10_000);
+}
+
 // A bare test page: the real screens come in Plan 4. Each hands-on check gets a probe here, with what "passes" means.
 export default function App() {
   const [version, setVersion] = useState<string>();
@@ -49,13 +62,14 @@ export default function App() {
           >
             Open a popup
           </button>{" "}
-          Passes when no window opens.
+          Passes when no window opens. (Checks the outcome only: wry refuses new windows even without the app&apos;s
+          rule.)
         </li>
         <li>
-          <a href="data:text/plain,x" download="x.txt">
+          <button type="button" onClick={downloadProbeFile}>
             Download a file
-          </a>{" "}
-          Passes when nothing lands in Downloads.
+          </button>{" "}
+          Passes when no lockbox-probe.txt lands in Downloads.
         </li>
         <li>
           <div data-testid="drop-zone">Drop a file here</div>
