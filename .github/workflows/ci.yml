@@ -46,7 +46,7 @@ jobs:
       - name: Install UI dependencies
         if: matrix.label == 'windows'
         working-directory: ui
-        run: npm ci
+        run: npm ci --ignore-scripts
       - name: Build UI
         if: matrix.label == 'windows'
         working-directory: ui
@@ -85,7 +85,7 @@ jobs:
         with:
           node-version-file: ui/.node-version
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
       - name: Lint
         run: npm run lint
       - name: Test

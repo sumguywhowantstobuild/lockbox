@@ -1,11 +1,12 @@
-// Tauri's own drag-and-drop handler is off (it would send dropped files' full paths to the page), so a file
-// dropped on the window would reach WebView2, which opens it in place of the app. Cancelling every `dragover`
-// and `drop` on the document keeps dropped files away from both the page and Rust (spec §4.2).
+// Defence in depth. The window itself refuses files dropped from outside the app (WebView2's external drop is off,
+// spec §4.2), so normally no drop event with files reaches the page. If one ever does, cancelling `dragover` and
+// `drop` stops WebView2 from opening the file in place of the app. The listeners sit on `window` in the capture
+// phase, so they run before any element's own listener and a `stopPropagation()` cannot skip them.
 function cancel(event: Event): void {
   event.preventDefault();
 }
 
 export function installDropGuard(): void {
-  document.addEventListener("dragover", cancel);
-  document.addEventListener("drop", cancel);
+  window.addEventListener("dragover", cancel, { capture: true });
+  window.addEventListener("drop", cancel, { capture: true });
 }

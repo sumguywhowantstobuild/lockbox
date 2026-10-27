@@ -2,8 +2,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { installDropGuard } from "./dropGuard";
+import { installDropProbe } from "./dropProbe";
 
-// Before anything renders, so no drop can land on the page first.
+// The probe first, so it sees a drop before the guard cancels it; both before anything renders.
+installDropProbe();
 installDropGuard();
 
 const root = document.getElementById("root");

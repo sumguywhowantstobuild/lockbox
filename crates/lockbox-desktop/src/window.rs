@@ -1,6 +1,8 @@
 //! The one app window. Every rule about what the webview may load, open, download or receive is set here, in
 //! [`main_window`] (spec §4.2).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -21,11 +23,20 @@ pub fn allowed_navigation(url: &Url) -> bool {
         .any(|allowed| Url::parse(allowed).is_ok_and(|allowed| allowed.origin() == url.origin()))
 }
 
+/// Set once WebView2 has confirmed that the main window refuses files dropped from outside the app.
+static EXTERNAL_DROP_OFF: AtomicBool = AtomicBool::new(false);
+
 /// Builds the main window. It navigates only within the app, opens no other windows, downloads nothing, keeps no
-/// autofill or profile data on disk (WebView2 would otherwise store typed titles, usernames and searches), and has
-/// Tauri's drag-and-drop handler off, which would send dropped files' full paths to the page.
+/// autofill or profile data on disk (WebView2 would otherwise store typed titles, usernames and searches), and
+/// accepts no dropped files: Tauri's drag-and-drop handler is off (it would send dropped files' full paths to the
+/// page), and so is WebView2's own external drop (it would hand the files to the page).
+///
+/// Called from the setup hook, which Tauri runs on the main thread while handling the event loop's first event. There
+/// Tauri creates the window and runs the `with_webview` callback before returning, so drops are off before the event
+/// loop can deliver any input to the new window. The caller checks [`external_drop_is_off`] and refuses to run
+/// otherwise. (The test runtime never runs the callback.)
 pub fn main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
-    WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
+    let window = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
         .title("Lockbox")
         .on_navigation(allowed_navigation)
         .on_new_window(|_url, _features| NewWindowResponse::Deny)
@@ -33,7 +44,17 @@ pub fn main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindo
         .general_autofill_enabled(false)
         .incognito(true)
         .disable_drag_drop_handler()
-        .build()
+        .build()?;
+    window.with_webview(|webview| {
+        let off = crate::os::win::turn_off_external_drop(&webview.controller());
+        EXTERNAL_DROP_OFF.store(off, Ordering::SeqCst);
+    })?;
+    Ok(window)
+}
+
+/// Whether WebView2 confirmed that the main window refuses external file drops.
+pub fn external_drop_is_off() -> bool {
+    EXTERNAL_DROP_OFF.load(Ordering::SeqCst)
 }
 
 /// Brings the main window to the front (a second copy of the app was started).

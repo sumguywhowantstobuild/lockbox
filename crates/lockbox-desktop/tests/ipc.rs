@@ -1,5 +1,8 @@
-//! The IPC bridge: which commands the page may call, from which window, and what a bad request gets back.
+//! The IPC bridge: which commands the page may call, from which window and origin, and what a bad request gets back.
 //! The app is built from the real `tauri.conf.json` and `capabilities/main.json`, so the real ACL applies.
+//!
+//! The test runtime (`MockRuntime`) ignores the window's webview settings (navigation, new windows, downloads,
+//! autofill, profile, drops); those are proven by the hands-on probes on the test page.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -10,12 +13,16 @@ use lockbox_desktop::window::{allowed_navigation, main_window};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder};
+use tauri::utils::config::{Csp, FrontendDist};
 use tauri::webview::InvokeRequest;
 use tauri::{App, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
                    font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; \
                    base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// The app's own origin on Windows: where every request from the real page comes from.
+const APP_ORIGIN: &str = "http://tauri.localhost";
 
 fn app() -> App<MockRuntime> {
     mock_builder()
@@ -24,12 +31,14 @@ fn app() -> App<MockRuntime> {
         .expect("the app builds")
 }
 
-fn main(app: &App<MockRuntime>) -> WebviewWindow<MockRuntime> {
+fn main_webview(app: &App<MockRuntime>) -> WebviewWindow<MockRuntime> {
     main_window(app.handle()).expect("the main window builds")
 }
 
+/// Sends `cmd` with `body` from `window`, as a page loaded from `origin` would.
 fn invoke(
     window: &WebviewWindow<MockRuntime>,
+    origin: &str,
     cmd: &str,
     body: InvokeBody,
 ) -> Result<Value, Value> {
@@ -37,7 +46,7 @@ fn invoke(
         cmd: cmd.into(),
         callback: CallbackFn(0),
         error: CallbackFn(1),
-        url: "http://tauri.localhost".parse().unwrap(),
+        url: origin.parse().unwrap(),
         body,
         headers: Default::default(),
         invoke_key: INVOKE_KEY.into(),
@@ -62,7 +71,12 @@ fn read_json(file: &str) -> Value {
 #[test]
 fn granted_command_runs_in_main_window() {
     let app = app();
-    let answer = invoke(&main(&app), "app_info", InvokeBody::Json(json!({})));
+    let answer = invoke(
+        &main_webview(&app),
+        APP_ORIGIN,
+        "app_info",
+        InvokeBody::Json(json!({})),
+    );
     assert_eq!(answer, Ok(json!({ "version": env!("CARGO_PKG_VERSION") })));
 }
 
@@ -74,14 +88,26 @@ fn other_window_is_refused() {
         .expect("the probe window builds");
     assert_refused_by_acl(
         "app_info",
-        invoke(&probe, "app_info", InvokeBody::Json(json!({}))),
+        invoke(&probe, APP_ORIGIN, "app_info", InvokeBody::Json(json!({}))),
     );
+}
+
+#[test]
+fn remote_origin_is_refused() {
+    let app = app();
+    let answer = invoke(
+        &main_webview(&app),
+        "https://example.com",
+        "app_info",
+        InvokeBody::Json(json!({})),
+    );
+    assert_refused_by_acl("app_info from https://example.com", answer);
 }
 
 #[test]
 fn plugin_commands_are_refused() {
     let app = app();
-    let main = main(&app);
+    let main = main_webview(&app);
     for cmd in [
         "plugin:dialog|open",
         "plugin:fs|read_file",
@@ -93,20 +119,24 @@ fn plugin_commands_are_refused() {
         "plugin:window|set_title",
         "plugin:path|resolve_directory",
     ] {
-        assert_refused_by_acl(cmd, invoke(&main, cmd, InvokeBody::Json(json!({}))));
+        assert_refused_by_acl(
+            cmd,
+            invoke(&main, APP_ORIGIN, cmd, InvokeBody::Json(json!({}))),
+        );
     }
 }
 
 #[test]
 fn malformed_request_answers_fixed_error() {
     let app = app();
-    let main = main(&app);
+    let main = main_webview(&app);
     for body in [
         InvokeBody::Json(json!({ "SENTINEL-7f3a": 1 })), // unknown field
         InvokeBody::Json(json!("SENTINEL-7f3a")),        // wrong type: a string, not an object
         InvokeBody::Raw(b"SENTINEL-7f3a".to_vec()),      // not JSON at all
     ] {
-        let error = invoke(&main, "app_info", body).expect_err("a malformed request is refused");
+        let error = invoke(&main, APP_ORIGIN, "app_info", body)
+            .expect_err("a malformed request is refused");
         assert_eq!(error, json!({ "code": "invalid_input", "what": "request" }));
         assert!(!error.to_string().contains("SENTINEL"));
     }
@@ -157,6 +187,7 @@ fn capability_grants_exactly_the_expected_set() {
 
 #[test]
 fn security_config_is_pinned() {
+    // The file as written...
     let config = read_json("tauri.conf.json");
     assert_eq!(
         config["identifier"],
@@ -174,6 +205,19 @@ fn security_config_is_pinned() {
     assert_eq!(config["build"]["devUrl"], "http://localhost:5173");
     assert!(config.get("plugins").is_none(), "no plugin configuration");
     assert!(!config.to_string().contains("remote"), "no remote access");
+
+    // ...and as compiled into the app.
+    let app = app();
+    let compiled = app.config();
+    assert_eq!(compiled.app.security.csp, Some(Csp::Policy(CSP.into())));
+    assert!(!compiled.app.with_global_tauri);
+    assert!(compiled.app.security.freeze_prototype);
+    assert!(compiled.app.windows.is_empty());
+    assert!(compiled.app.security.capabilities.is_empty());
+    assert_eq!(
+        compiled.build.frontend_dist,
+        Some(FrontendDist::Directory("../../ui/dist".into()))
+    );
 }
 
 #[test]

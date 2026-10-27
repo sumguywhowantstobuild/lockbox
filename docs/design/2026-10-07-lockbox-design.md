@@ -92,11 +92,14 @@ WebView2 autofill is off and the webview runs without a persistent profile, so t
   other than the app's own content is blocked.
 - Strict Content-Security-Policy; no remote content is ever loaded.
 - The window refuses navigation outside the app, every new-window request and every download. Tauri's drag-and-drop
-  handler is off and the page cancels drops, so dropped files reach neither the page nor Rust.
+  handler and WebView2's external drop are off (the app does not start if WebView2 cannot confirm it), and the page
+  cancels drops as well, so dropped files reach neither the page nor Rust.
 - **The backend validates every command**, never trusting the UI: the session exists and is unlocked; the request's
   session generation is current (7.4); every referenced item, collection or file belongs to that session's vault;
-  read-only sessions reject writes; sizes are within limits. A malformed request gets a fixed error, never the parser's
-  text.
+  read-only sessions reject writes; sizes are within limits. A malformed request to a Lockbox command gets a fixed
+  error, never the parser's text. Tauri's own event commands and its message transport may answer with their own
+  error text; it holds only what the page itself sent and goes back only to that page (a wrong invoke key is also
+  printed to standard error, which a release build has no console for).
 
 ## 5. Cryptography
 
