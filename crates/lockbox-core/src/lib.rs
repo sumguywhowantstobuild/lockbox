@@ -13,8 +13,8 @@ pub mod generator;
 pub mod ids;
 
 // Private. `error` and `vault` are re-exported at the root below. The low-level modules keep their
-// items `pub` so `internals` can re-export them; a module with items that only tests use allows
-// dead code in a build without them.
+// items `pub` so `internals` can re-export them; each item that only tests use allows dead code
+// in a build without them (on the item, so other dead code is still reported).
 pub(crate) mod aead;
 mod error;
 pub(crate) mod serde_b64;
@@ -25,10 +25,8 @@ mod archive;
 mod header;
 mod limits;
 mod lockfile;
-#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 mod manifest;
 mod search;
-#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 mod secret;
 mod slots;
 
@@ -37,7 +35,6 @@ mod slots;
 // under its usual path.
 #[path = "blob.rs"]
 mod blob_impl;
-#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 #[path = "fsio/mod.rs"]
 mod fsio_impl;
 #[path = "item.rs"]
@@ -156,6 +153,11 @@ pub mod internals {
     }
     pub mod recovery {
         pub use crate::recovery_impl::derive_recovery_key;
+
+        /// A fresh random recovery secret, for a test that builds a vault's slots by hand.
+        pub fn generate() -> crate::recovery_impl::RecoverySecret {
+            crate::recovery_impl::RecoverySecret::generate()
+        }
     }
     pub mod search {
         pub use crate::search::*;
@@ -205,6 +207,30 @@ mod surface {
     /// fn g(i: lockbox_core::item::Item) { f(i) }
     /// ```
     pub fn item_is_not_serialize() {}
+
+    /// Nor can a login's kind (it holds the password).
+    ///
+    /// ```compile_fail
+    /// fn f(_: impl serde::Serialize) {}
+    /// fn g(k: lockbox_core::item::ItemKind) { f(k) }
+    /// ```
+    pub fn item_kind_is_not_serialize() {}
+
+    /// Nor a file record (it holds the file key).
+    ///
+    /// ```compile_fail
+    /// fn f(_: impl serde::Serialize) {}
+    /// fn g(r: lockbox_core::item::FileRef) { f(r) }
+    /// ```
+    pub fn file_ref_is_not_serialize() {}
+
+    /// And no code outside the engine can build an `Item` from JSON.
+    ///
+    /// ```compile_fail
+    /// fn f<T: serde::de::DeserializeOwned>() {}
+    /// fn g() { f::<lockbox_core::item::Item>() }
+    /// ```
+    pub fn item_is_not_deserialize() {}
 }
 
 #[cfg(test)]

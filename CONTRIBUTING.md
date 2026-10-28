@@ -31,7 +31,9 @@ Run the same checks CI runs:
 ```
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
 cargo test --locked
+cargo test -p lockbox-core --locked --features test-internals
 npm --prefix ui run lint
 npm --prefix ui test
 npm --prefix ui run build

@@ -54,9 +54,11 @@ terminals opened before the install need restarting to see `cargo`.
 - `rust-toolchain.toml` pins Rust 1.99.1 (minimal profile, plus rustfmt and clippy); `cargo` in the repo picks it up
   automatically.
 - Checks to run before every commit: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
-  `cargo test --locked`, and for the UI `npm --prefix ui run lint`, `npm --prefix ui test`, `npm --prefix ui run
-  build`, then the release-configuration bridge tests above. `Cargo.lock` and `ui/package-lock.json` are committed so
-  builds are repeatable.
+  `cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings`,
+  `cargo test --locked`, `cargo test -p lockbox-core --locked --features test-internals` (the engine's internal
+  modules and the integration tests that build on them), and for the UI `npm --prefix ui run lint`,
+  `npm --prefix ui test`, `npm --prefix ui run build`, then the release-configuration bridge tests above.
+  `Cargo.lock` and `ui/package-lock.json` are committed so builds are repeatable.
 - `.github/workflows/ci.yml` runs the same checks. It installs the pinned toolchain with
   `rustup toolchain install` (newer rustup no longer installs one on `rustup show`), and every GitHub Action is pinned
   to a commit SHA so a moved tag can't change what runs. Node comes from `ui/.node-version` (`actions/setup-node`).

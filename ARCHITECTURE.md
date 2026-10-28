@@ -71,10 +71,11 @@ Everything below is in `crates/lockbox-core/src/`. App code goes through `Vault`
 
 Tests: unit tests sit beside the code. `tests/` uses the public API, and `internals` where it must build or read what
 the API keeps private (those tests need `--features test-internals`): `vault_lifecycle.rs`, `files.rs`,
-`properties.rs` (random and corrupted input), and three checks run on purpose, `search.rs` (5 000 items),
-`large_file.rs` (4 GiB) and `backup_large.rs` (a 4 GiB file through backup, test, restore and export). The parsers for
-backup input (the archive, the manifest, the restore journal) have property tests beside their code, because they are
-crate-private: random and damaged bytes must give an error with fixed wording, never a panic.
+`properties.rs` (random and corrupted input), and two checks run on purpose, `large_file.rs` (4 GiB) and
+`backup_large.rs` (a 4 GiB file through backup, test, restore and export). A third check run on purpose,
+`search.rs` (5 000 items), uses the public API only. The parsers for backup input (the archive, the manifest, the
+restore journal) have property tests beside their code, because they are crate-private: random and damaged bytes
+must give an error with fixed wording, never a panic.
 
 ## How data flows
 

@@ -49,6 +49,7 @@ pub struct BackupManifest {
 }
 
 impl BackupManifest {
+    #[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
     pub fn entry(&self, path: &str) -> Option<&ManifestEntry> {
         self.entries.iter().find(|e| e.path == path)
     }
@@ -91,6 +92,7 @@ fn manifest_hmac(
 }
 
 /// HMAC-SHA256 over [`mac_message`].
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn manifest_mac(m: &BackupManifest, vault_key: &Key32) -> [u8; 32] {
     // A token nobody holds is never cancelled, so this is the same signing without a way out.
     manifest_mac_cancellable(m, vault_key, &CancelToken::new())
@@ -110,6 +112,7 @@ pub(crate) fn manifest_mac_cancellable(
 }
 
 /// False if the manifest has no MAC or it does not match. The comparison is constant-time.
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn verify_manifest_mac(m: &BackupManifest, vault_key: &Key32) -> bool {
     verify_manifest_mac_cancellable(m, vault_key, &CancelToken::new()).unwrap_or(false)
 }

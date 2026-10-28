@@ -60,7 +60,7 @@ fn symbol_value(c: char) -> Option<u8> {
 }
 
 impl RecoverySecret {
-    pub fn generate() -> Self {
+    pub(crate) fn generate() -> Self {
         let mut bytes = Zeroizing::new([0u8; 32]);
         fill_random(&mut *bytes);
         Self(bytes)

@@ -52,6 +52,7 @@ impl Key32 {
     }
 
     /// Takes ownership of key bytes. The caller's own copy of `bytes` is not wiped here.
+    #[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(Zeroizing::new(bytes))
     }

@@ -83,6 +83,7 @@ pub fn volume_info(_dir: &Path) -> io::Result<VolumeInfo> {
 }
 
 /// Not measured on this platform.
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn peak_memory_bytes() -> Option<u64> {
     None
 }

@@ -41,7 +41,8 @@ details and troubleshooting are in [docs/SETUP.md](docs/SETUP.md).
 
 ```
 rustup toolchain install     # installs the Rust version this project pins (1.99.1), from rust-toolchain.toml
-cargo test --locked          # the whole test suite; it runs real password hashing, so allow a minute or two
+cargo test --locked          # most tests; it runs real password hashing, so allow a minute or two
+cargo test -p lockbox-core --locked --features test-internals   # every engine test, the internal ones too
 ```
 
 The same checks that CI runs on every push:
@@ -49,7 +50,9 @@ The same checks that CI runs on every push:
 ```
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
 cargo test --locked
+cargo test -p lockbox-core --locked --features test-internals
 node --test "scripts/*.test.mjs"   # the scanner's own tests (needs Node.js)
 node scripts/scan.mjs        # security scan; needs gitleaks, semgrep and osv-scanner, see docs/SETUP.md
 ```
@@ -60,9 +63,9 @@ Three checks are slow, so they only run when asked (always in release mode, the 
 # 5 000 items: unlock and search must stay fast
 cargo test --release --locked -p lockbox-core --test search -- --ignored --nocapture
 # a file of 4 GiB + 1 byte goes in and out unchanged while memory stays flat
-cargo test --release --locked -p lockbox-core --test large_file -- --ignored --nocapture
+cargo test --release --locked -p lockbox-core --features test-internals --test large_file -- --ignored --nocapture
 # the same file goes through backup, test, restore and export, and comes out unchanged
-cargo test --release --locked -p lockbox-core --test backup_large -- --ignored --nocapture
+cargo test --release --locked -p lockbox-core --features test-internals --test backup_large -- --ignored --nocapture
 ```
 
 The large-file check writes about 12 GiB of temporary files and can take minutes. The backup check needs about 9 GiB

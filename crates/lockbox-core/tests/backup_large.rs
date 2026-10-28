@@ -2,18 +2,16 @@
 //! is backed up, the backup is verified and restored into another folder, and the file is
 //! exported from the restored vault, byte for byte, while memory stays flat. It writes about
 //! 8 GiB at its peak and takes minutes, so it only runs when asked for:
-//! `cargo test --release --locked -p lockbox-core --features test-internals --test backup_large --
-//! --ignored --nocapture`
+//! `cargo test --release --locked -p lockbox-core --features test-internals --test backup_large -- --ignored --nocapture`
 
 use lockbox_core::blob::{CancelToken, NoJournal};
 use lockbox_core::ids::VaultId;
 use lockbox_core::internals::fsio::peak_memory_bytes;
 use lockbox_core::internals::header::{CONTAINER_VERSION, VaultHeader, header_mac, write_headers};
 use lockbox_core::internals::kdf::{Argon2Params, derive_password_key};
-use lockbox_core::internals::recovery::derive_recovery_key;
+use lockbox_core::internals::recovery::{self, derive_recovery_key};
 use lockbox_core::internals::secret::{Key32, random_bytes};
 use lockbox_core::internals::slots::{SlotType, wrap_slot};
-use lockbox_core::recovery::RecoverySecret;
 use lockbox_core::{Credential, PreparedRestore, Vault, verify_backup};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -85,7 +83,7 @@ fn open_light_vault(dir: &Path) -> Vault {
     };
     let (password_salt, recovery_salt) = (random_bytes::<16>(), random_bytes::<16>());
     let password_key = derive_password_key(PASSWORD, &password_salt, &params).unwrap();
-    let recovery_key = derive_recovery_key(&RecoverySecret::generate(), &recovery_salt);
+    let recovery_key = derive_recovery_key(&recovery::generate(), &recovery_salt);
     let mut header = VaultHeader {
         container_version: CONTAINER_VERSION,
         vault_id: id,

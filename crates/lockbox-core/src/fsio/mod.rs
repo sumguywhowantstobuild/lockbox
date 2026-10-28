@@ -263,6 +263,7 @@ pub fn create_hidden_temp(dir: &Path, suffix: &str) -> Result<(File, PathBuf)> {
 /// measured (everywhere but Windows), and on Windows if the system call fails. Only for the
 /// large-file test; not a stable API.
 #[doc(hidden)]
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn peak_memory_bytes() -> Option<u64> {
     sys::peak_memory_bytes()
 }

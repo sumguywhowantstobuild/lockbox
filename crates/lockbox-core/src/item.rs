@@ -911,4 +911,38 @@ mod tests {
         let plain = padded_plaintext(&login()).unwrap();
         assert_eq!(plain.as_slice(), expected.as_slice());
     }
+
+    #[test]
+    fn plaintext_golden_bytes_with_attachment() {
+        let mut item = login();
+        item.attachments = vec![file_ref()];
+        let expected_json = format!(
+            concat!(
+                r#"{{"id":"{}","kind":{{"login":{{"username":"ariel","password":"hunter2","urls":["https://example.com"]}}}},"#,
+                r#""title":"Example","notes":"n","collection":null,"#,
+                r#""attachments":[{{"file_id":"{}","blob_version":1,"chunk_size":1048576,"#,
+                r#""file_key":"QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=","#,
+                r#""nonce_prefix":"BwcHBwcHBwcHBwcHBwcHBwcHBw==","#,
+                r#""length":5000000,"chunk_count":5,"#,
+                r#""name":"tax.pdf","media_type":"application/pdf"}}],"#,
+                r#""revision":3,"created_at":"2026-10-09T00:00:00Z","modified_at":"2026-10-09T00:00:01Z","#,
+                r#""trashed_at":null,"purging":false,"retired_blobs":[]}}"#
+            ),
+            "aa".repeat(16),
+            "33".repeat(16)
+        );
+        let mut expected = expected_json.into_bytes();
+        expected.push(0x80);
+        expected.resize(1024, 0);
+        let plain = padded_plaintext(&item).unwrap();
+        assert_eq!(plain.as_slice(), expected.as_slice());
+
+        let (v, k) = vault();
+        let back = open_item(&seal_item(&item, &v, &k).unwrap(), &item.id, &v, &k).unwrap();
+        assert_eq!(
+            padded_plaintext(&back).unwrap().as_slice(),
+            expected.as_slice()
+        );
+        assert_eq!(json(&back), json(&item));
+    }
 }

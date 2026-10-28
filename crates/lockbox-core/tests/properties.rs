@@ -11,6 +11,7 @@ use lockbox_core::internals::blob::{
 };
 use lockbox_core::internals::header::{HEADER_FILE, parse_header};
 use lockbox_core::internals::item::{FileRefParts, open_item, same_item, seal_item};
+use lockbox_core::internals::recovery;
 use lockbox_core::internals::secret::{Key32, random_bytes};
 use lockbox_core::item::{FileRef, Item, ItemKind};
 use lockbox_core::recovery::RecoverySecret;
@@ -233,7 +234,7 @@ static VALID_HEADER: LazyLock<Vec<u8>> = LazyLock::new(|| {
 });
 
 static VALID_RECOVERY: LazyLock<String> =
-    LazyLock::new(|| RecoverySecret::generate().to_display().to_string());
+    LazyLock::new(|| recovery::generate().to_display().to_string());
 
 /// Error text is fixed (rule R5): neither `Display` nor `Debug` of the error may contain the
 /// input, as text or as any 8 bytes of it. Inputs under 8 bytes are skipped; they could match

@@ -214,6 +214,7 @@ pub fn volume_info(dir: &Path) -> io::Result<VolumeInfo> {
 }
 
 /// The most memory this process has had in RAM at once (peak working set), in bytes.
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn peak_memory_bytes() -> Option<u64> {
     let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
     let mut counters = PROCESS_MEMORY_COUNTERS {
