@@ -326,9 +326,10 @@ Lockbox defends.
 - An item whose attached file the backup left out (missing or damaged when the backup was made), or whose file is
   gone from a `.before-restore` folder, is not copied out of it by default: the copy stops ("file missing") before
   anything is written. On request, the copy goes ahead without those files and reports which ones it left out; the
-  item's other files are copied in full. A file that is there but damaged still stops the whole copy, and the files
-  it had already copied are removed. *Accepted:* a missing file cannot be brought back from that source, and the copy
-  never leaves one out unless you ask.
+  item's other files are copied in full. A file that is there but damaged, or that disappears while the copy runs,
+  still stops the whole copy. The files it had already copied are then removed; one that cannot be removed stays
+  unused, and the next unlock sets it aside. *Accepted:* a missing file cannot be brought back from that source, and
+  the copy never leaves one out unless you ask.
 - Every stored file is labelled `application/octet-stream`; there is no file-type table yet. *Accepted:* the label is
   only display information and the file's bytes are unaffected; how files are opened is decided with the interface.
 - A stored file's name is kept as text; a name that is not valid Unicode (very rare on Windows) is stored with

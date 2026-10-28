@@ -11,6 +11,7 @@
 
 use super::Vault;
 use super::items::{BEING_DELETED, blank_item, edited};
+use super::source::FILE_MISSING;
 use crate::blob::{
     CancelToken, OutputJournal, blob_len, check_length, decrypt_stream, encrypt_stream,
     new_file_ref,
@@ -300,9 +301,7 @@ impl Vault {
         refuse_inside(parent_dir(dest), &self.dir)?;
         check_export_space(fref, dest)?;
         let mut blob = File::open(self.blob_path(file)).map_err(|e| match e.kind() {
-            ErrorKind::NotFound => CoreError::Damaged {
-                what: "file missing",
-            },
+            ErrorKind::NotFound => FILE_MISSING,
             _ => e.into(),
         })?;
         let blob_size = blob.metadata()?.len();

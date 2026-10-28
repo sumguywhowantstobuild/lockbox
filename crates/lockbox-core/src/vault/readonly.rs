@@ -196,8 +196,10 @@ impl Vault {
     /// An attachment whose file the source does not hold (see
     /// [`ReadOnlyVault::missing_attachments`]) stops the copy with `Damaged { "file missing" }`
     /// before anything is written, unless `skip_missing` is set: the copy then goes without
-    /// those attachments and lists them in [`CopiedItem::left_out`]. A file that is there but
-    /// fails authentication, or goes missing while the copy runs, still fails the whole copy.
+    /// those attachments and lists them in [`CopiedItem::left_out`]. The copy may then have no
+    /// attachments at all, even a `File` item (whose only file was missing): it keeps its kind
+    /// and title. A file that is there but fails authentication, or goes missing while the copy
+    /// runs, still fails the whole copy.
     ///
     /// A failed copy deletes the blobs it published, unless its item may have reached the disk.
     /// A blob that could not be deleted stays unreferenced, and the cleanup at unlock sets it aside.
@@ -1567,10 +1569,12 @@ mod tests {
         (item, all.map(|bytes| f.attach(&item, bytes)))
     }
 
-    /// Loses `gone`'s blob from the source vault, then makes the two read-only sources of it: a
-    /// backup (which leaves the file out) and a `.before-restore` folder (without the file).
-    fn lose(f: &Fixture, gone: &FileId) -> (PathBuf, PathBuf) {
-        fs::remove_file(f.blob_file(gone)).unwrap();
+    /// Loses the blobs of `gone` from the source vault, then makes the two read-only sources of
+    /// it: a backup (which leaves the files out) and a `.before-restore` folder (without them).
+    fn lose(f: &Fixture, gone: &[FileId]) -> (PathBuf, PathBuf) {
+        for id in gone {
+            fs::remove_file(f.blob_file(id)).unwrap();
+        }
         let backup = f.backup("lost.lockbox-backup");
         let folder = f.parent.path().join("Family.before-restore");
         copy_folder(f.vault.dir(), &folder);
@@ -1595,7 +1599,7 @@ mod tests {
         let (item, [_, gone, _]) = three_file_login(&mut f);
         let note = f.vault.new_item(ItemKind::Note, "no files", None).unwrap();
         let whole = f.backup("whole.lockbox-backup");
-        let (backup, folder) = lose(&f, &gone);
+        let (backup, folder) = lose(&f, &[gone]);
 
         // Nothing is missing from a backup made before the file was lost.
         let all_there = open_backup(&whole).unwrap();
@@ -1608,7 +1612,8 @@ mod tests {
             assert!(matches!(unknown, Err(CoreError::NotFound)), "{unknown:?}");
         }
 
-        // A link named like the blob is not the blob: it counts as missing and is not followed.
+        // Something that is not a regular file, named like the blob (here a folder link), is
+        // not the blob: it counts as missing. (A link to a file: `blob_named_file_link_...`.)
         let linked = f.parent.path().join("linked.before-restore");
         copy_folder(&folder, &linked);
         let target = TempDir::new();
@@ -1618,12 +1623,187 @@ mod tests {
         assert_eq!(ro.missing_attachments(&item).unwrap(), [gone]);
     }
 
+    /// Makes `link` a file symlink to `target`. Returns false, with a message, when this process
+    /// may not make one (on Windows that needs Developer Mode or the symlink privilege).
+    fn make_file_link(link: &Path, target: &Path) -> bool {
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(target, link);
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(target, link);
+        match made {
+            Ok(()) => true,
+            // ERROR_PRIVILEGE_NOT_HELD
+            Err(e) if cfg!(windows) && e.raw_os_error() == Some(1314) => {
+                eprintln!("skipped: this process may not create a file symlink");
+                false
+            }
+            Err(e) => panic!("cannot create a file symlink: {e}"),
+        }
+    }
+
+    /// A file link named like the blob and leading to the real blob outside `files/` is not
+    /// the blob: it counts as missing, and the copy never reads through it.
+    #[test]
+    fn blob_named_file_link_is_missing_and_not_read() {
+        let mut f = Fixture::new();
+        let (item, [_, gone, _]) = three_file_login(&mut f);
+        let outside = f.parent.path().join("outside.blob");
+        fs::copy(f.blob_file(&gone), &outside).unwrap();
+        let (_, folder) = lose(&f, &[gone]);
+        let link = folder.join("files").join(format!("{}.blob", gone.to_hex()));
+        if !make_file_link(&link, &outside) {
+            return;
+        }
+        // Read through the link, the bytes are the real blob's.
+        assert_eq!(fs::read(&link).unwrap(), fs::read(&outside).unwrap());
+
+        let ro = open_folder(&folder).unwrap();
+        assert_eq!(ro.missing_attachments(&item).unwrap(), [gone]);
+        let (_parent, mut live) = live_vault();
+        let cancel = CancelToken::new();
+        let refused = live.copy_item_from(&ro, &item, false, &cancel);
+        assert!(
+            matches!(
+                refused,
+                Err(CoreError::Damaged {
+                    what: "file missing"
+                })
+            ),
+            "{refused:?}"
+        );
+        let copied = live.copy_item_from(&ro, &item, true, &cancel).unwrap();
+        assert_eq!(copied.left_out, [gone]);
+        assert_eq!(live.get_item(&copied.id).unwrap().attachments.len(), 2);
+        assert_eq!(blob_count(&live), 2, "the linked blob was copied");
+    }
+
+    /// A folder whose `files` folder is a link (to a folder holding the real blobs) is refused
+    /// for an item with files, by the check and by the copy, before anything is written.
+    #[test]
+    fn linked_files_folder_refused() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        let (item, _) = three_file_login(&mut f);
+        let folder = f.parent.path().join("Family.before-restore");
+        copy_folder(f.vault.dir(), &folder);
+        let real = f.parent.path().join("real-files");
+        fs::rename(folder.join("files"), &real).unwrap();
+        make_dir_link(&folder.join("files"), &real);
+        let ro = open_folder(&folder).unwrap();
+        let (_parent, mut live) = live_vault();
+        let listing = |vault: &Vault| (names(&vault.dir().join("items")), files_listing(vault));
+        let before = listing(&live);
+
+        not_plain(ro.missing_attachments(&item));
+        let imports = count_imports();
+        for skip_missing in [false, true] {
+            let result = live.copy_item_from(&ro, &item, skip_missing, &CancelToken::new());
+            not_plain(result);
+        }
+        assert_eq!(imports.get(), 0, "a file was written");
+        assert_eq!(listing(&live), before);
+        assert_eq!(live.items().count(), 0);
+    }
+
+    #[track_caller]
+    fn not_plain<T: std::fmt::Debug>(result: Result<T>) {
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::InvalidInput {
+                    what: "not a plain folder"
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    /// `left_out` follows the item's attachment order, not the order of the file IDs.
+    #[test]
+    fn left_out_keeps_the_item_order() {
+        let mut f = Fixture::new();
+        let kind = ItemKind::Login {
+            username: "ariel".to_owned(),
+            password: Zeroizing::new("hunter22".to_owned()),
+            urls: Vec::new(),
+        };
+        let item = f.vault.new_item(kind, "Four files", None).unwrap();
+        // IDs that fall as the attachments go on: ff.., ee.., dd.., cc..
+        let ids = [0xff, 0xee, 0xdd, 0xcc].map(|b| FileId([b; 16]));
+        for (n, id) in ids.iter().enumerate() {
+            crate::blob::force_next_file_id(*id);
+            assert_eq!(f.attach(&item, format!("file {n}").as_bytes()), *id);
+        }
+        let (backup, folder) = lose(&f, &[ids[3], ids[1]]);
+        let cancel = CancelToken::new();
+        for ro in [open_backup(&backup).unwrap(), open_folder(&folder).unwrap()] {
+            assert_eq!(ro.missing_attachments(&item).unwrap(), [ids[1], ids[3]]);
+            let (_parent, mut live) = live_vault();
+            let copied = live.copy_item_from(&ro, &item, true, &cancel).unwrap();
+            assert_eq!(copied.left_out, [ids[1], ids[3]]);
+            let copy = live.get_item(&copied.id).unwrap();
+            let lengths: Vec<_> = copy.attachments.iter().map(|a| a.length).collect();
+            assert_eq!(lengths, [6, 6]);
+            let from = ro.get_item(&item).unwrap();
+            let kept = [&from.attachments[0], &from.attachments[2]];
+            for (new_ref, old_ref) in copy.attachments.iter().zip(kept) {
+                let bytes = saved(&live, &f.out(), &copied.id, &new_ref.file_id);
+                let n = if old_ref.file_id == ids[0] { 0 } else { 2 };
+                assert_eq!(bytes, format!("file {n}").as_bytes());
+            }
+        }
+    }
+
+    /// A file that is there when the copy starts but gone when its turn comes still fails the
+    /// whole copy: only what was missing at the start is skipped.
+    #[test]
+    fn file_gone_during_copy_fails_it() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        let (item, [_, _, third]) = three_file_login(&mut f);
+        let folder = f.parent.path().join("Family.before-restore");
+        copy_folder(f.vault.dir(), &folder);
+        let ro = open_folder(&folder).unwrap();
+        assert!(ro.missing_attachments(&item).unwrap().is_empty());
+        let (_parent, mut live) = live_vault();
+        let listing = |vault: &Vault| (names(&vault.dir().join("items")), files_listing(vault));
+        let before = listing(&live);
+
+        // When the first file's copy is written, the third file leaves the source.
+        let third_blob = folder
+            .join("files")
+            .join(format!("{}.blob", third.to_hex()));
+        let imports = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&imports);
+        let vanish = move || {
+            seen.set(seen.get() + 1);
+            if seen.get() == 1 {
+                crate::fsio::remove_file_retry(&third_blob).unwrap();
+            }
+        };
+        failpoint::observe("import.before_publish", Box::new(vanish));
+        let result = live.copy_item_from(&ro, &item, true, &CancelToken::new());
+        failpoint::disarm_all();
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::Damaged {
+                    what: "file missing"
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(imports.get(), 2, "the first two files were copied");
+        assert_eq!(listing(&live), before);
+        assert_eq!(live.items().count(), 0);
+    }
+
     #[test]
     fn missing_attachment_stops_copy_before_writing() {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, [_, gone, _]) = three_file_login(&mut f);
-        let (backup, folder) = lose(&f, &gone);
+        let (backup, folder) = lose(&f, &[gone]);
         let (_parent, mut live) = live_vault();
         live.new_item(ItemKind::Note, "already here", None).unwrap();
         let listing = |vault: &Vault| (names(&vault.dir().join("items")), files_listing(vault));
@@ -1651,7 +1831,8 @@ mod tests {
     fn skip_missing_copies_rest_and_lists_left_out() {
         let mut f = Fixture::new();
         let (item, [_, gone, _]) = three_file_login(&mut f);
-        let (backup, folder) = lose(&f, &gone);
+        let (file_item, only) = f.file_item(b"the only file");
+        let (backup, folder) = lose(&f, &[gone, only]);
         let cancel = CancelToken::new();
 
         for (n, ro) in [open_backup(&backup).unwrap(), open_folder(&folder).unwrap()]
@@ -1659,6 +1840,15 @@ mod tests {
             .enumerate()
         {
             let (_parent, mut live) = live_vault();
+            // A file item whose only file is missing: a file item with no file at all.
+            let copied = live.copy_item_from(&ro, &file_item, true, &cancel).unwrap();
+            assert_eq!(copied.left_out, [only]);
+            let copy = live.get_item(&copied.id).unwrap();
+            assert!(matches!(copy.kind, ItemKind::File), "{:?}", copy.kind);
+            assert_eq!(copy.title, ro.get_item(&file_item).unwrap().title);
+            assert!(copy.attachments.is_empty());
+            assert_eq!(blob_count(&live), 0);
+
             let copied = live.copy_item_from(&ro, &item, true, &cancel).unwrap();
             assert_eq!(copied.left_out, [gone]);
             let from = ro.get_item(&item).unwrap();
@@ -1706,7 +1896,7 @@ mod tests {
         let _disarm = Disarm;
         let mut f = Fixture::new();
         let (item, [_, gone, big]) = three_file_login(&mut f);
-        let (backup, folder) = lose(&f, &gone);
+        let (backup, folder) = lose(&f, &[gone]);
         // One flipped byte in the big file's second chunk, in both sources.
         let flip = |m: &mut BTreeMap<String, Vec<u8>>| {
             m.get_mut(&blob_name(&big)).unwrap()[MIB + 100] ^= 1;
