@@ -20,6 +20,14 @@ const RESERVED_DEVICE_NAMES: &[&str] = &[
     "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3",
     "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
 ];
+/// Longest path Lockbox's own Win32 calls take (`MoveFileExW` and the others in `fsio::windows`
+/// get no `\\?\` prefix, and the app declares no long-path support): `MAX_PATH`, 260 UTF-16
+/// units, less the terminating NUL.
+pub(crate) const MAX_PATH_UNITS: usize = 259;
+/// How far below a vault folder Lockbox later writes at most: `\files\orphaned\<32 hex>.blob`,
+/// a blob moved aside by cleanup (1 + 5 + 1 + 8 + 1 + 32 + 5 units). Every other path inside a
+/// vault is shorter (`\items\<32 hex>.item` is 44, a hidden temp `\items\.<16 hex>.tmp` is 28).
+pub(crate) const DEEPEST_IN_VAULT_UNITS: usize = 53;
 const BAD_FOLDER_NAME: CoreError = CoreError::InvalidInput {
     what: "folder name",
 };
@@ -51,14 +59,17 @@ pub(crate) fn folder_name(name: &str, id: &VaultId) -> String {
     format!("{}{suffix}", if base.is_empty() { "Vault" } else { base })
 }
 
-/// Whether `stem`, a name's part before its first `.`, is a Windows device name (`CON`, `PRN`,
-/// `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM0`–`COM9`, `LPT0`–`LPT9`, and `COM¹`–`COM³`,
-/// `LPT¹`–`LPT³`), in any letter case. Spaces after it are dropped before the match, so
-/// `NUL .txt` counts too: refusing a name too many costs nothing. The one copy of the list:
-/// the folder-name check here and the shell's file names use it.
+/// Whether the name `stem` stands for a Windows device (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`,
+/// `CONOUT$`, `COM0`–`COM9`, `LPT0`–`LPT9`, and `COM¹`–`COM³`, `LPT¹`–`LPT³`), in any letter
+/// case. Only the part before the first `.` is matched, so a whole file name may be passed
+/// (`nul.txt` and `NUL.tar.gz` are `NUL`; for a stem this changes nothing). Spaces at the end of
+/// that part are dropped before the match, so `NUL .txt` counts too: refusing a name too many
+/// costs nothing. The one copy of the list: the folder-name check here and the shell's file
+/// names use it.
 pub fn is_reserved_device_name(stem: &str) -> bool {
-    let stem = stem.trim_end_matches(' ').to_uppercase();
-    RESERVED_DEVICE_NAMES.contains(&stem.as_str())
+    let before_dot = stem.split('.').next().unwrap_or(stem);
+    let upper = before_dot.trim_end_matches(' ').to_uppercase();
+    RESERVED_DEVICE_NAMES.contains(&upper.as_str())
 }
 
 /// A folder name the user chose for a restore (spec 6.8 step 3), refused as "folder name"
@@ -72,7 +83,6 @@ pub(crate) fn check_folder_name(name: &str) -> Result<()> {
         Path::new(name).components().collect::<Vec<_>>()[..],
         [Component::Normal(n)] if n == name
     );
-    let stem = name.split('.').next().unwrap_or(name);
     let ok = one_component
         && name.encode_utf16().count() <= MAX_CHOSEN_FOLDER_UNITS
         && !name.starts_with('.')
@@ -80,9 +90,22 @@ pub(crate) fn check_folder_name(name: &str) -> Result<()> {
             .chars()
             .any(|c| c.is_control() || FORBIDDEN_IN_NAME.contains(&c))
         && !name.ends_with(['.', ' '])
-        && !is_reserved_device_name(stem)
+        && !is_reserved_device_name(name)
         && !is_pre_restore_name(name);
     if ok { Ok(()) } else { Err(BAD_FOLDER_NAME) }
+}
+
+/// Refused as "folder name" unless every path a restore into `target` builds stays within
+/// [`MAX_PATH_UNITS`]: the restored vault's deepest file, [`DEEPEST_IN_VAULT_UNITS`] below
+/// `target`, and the same file below `staging`, where the vault is extracted first (a staging
+/// name is 41 characters, longer than a short folder name). Counted in UTF-16 units, as Windows
+/// counts.
+pub(crate) fn check_path_room(target: &Path, staging: &Path) -> Result<()> {
+    let units = |p: &Path| p.as_os_str().to_string_lossy().encode_utf16().count();
+    if units(target).max(units(staging)) + DEEPEST_IN_VAULT_UNITS > MAX_PATH_UNITS {
+        return Err(BAD_FOLDER_NAME);
+    }
+    Ok(())
 }
 
 /// Seconds since the Unix epoch.

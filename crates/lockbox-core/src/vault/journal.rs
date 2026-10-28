@@ -1048,6 +1048,94 @@ mod tests {
         );
     }
 
+    /// Inspecting and recovering the same journal agree. Recovery's error is inspect's error,
+    /// except `RestorePending` (the folder that holds S, T and B is not there), where inspect
+    /// gives a view with `parent_present == false`; when recovery goes ahead, inspect gives a
+    /// view with `parent_present == true`. Returns the view, if any.
+    #[track_caller]
+    fn assert_agree(
+        inspected: Result<Option<JournalView>>,
+        recovered: Result<Recovery>,
+    ) -> Option<JournalView> {
+        match recovered {
+            Err(CoreError::RestorePending) => {
+                let view = inspected.unwrap().unwrap();
+                assert!(
+                    !view.parent_present,
+                    "recovery found no folder; inspect did"
+                );
+                Some(view)
+            }
+            Err(_) => {
+                assert_same_error(inspected, recovered);
+                None
+            }
+            Ok(_) => {
+                let view = inspected.unwrap().unwrap();
+                assert!(
+                    view.parent_present,
+                    "recovery went ahead; inspect found no folder"
+                );
+                Some(view)
+            }
+        }
+    }
+
+    /// The journal's folders lie in a "folder" that is a plain file. Each setup is made twice:
+    /// one is inspected, the other recovered.
+    #[test]
+    fn inspect_agrees_with_recovery_when_the_parent_is_a_file() {
+        let setup = || {
+            let dir = TempDir::new();
+            let file = dir.path().join("Vaults");
+            fs::write(&file, b"a file, not a folder").unwrap();
+            let (journal_dir, path) = journal_place();
+            write_journal(&path, &journal(&file)).unwrap();
+            (dir, journal_dir, path, file)
+        };
+        let (_a, _ja, inspected, file) = setup();
+        let (_b, _jb, recovered, _) = setup();
+        let bytes = fs::read(&inspected).unwrap();
+        let view = assert_agree(
+            inspect_restore_journal(&inspected),
+            recover_restore(&recovered),
+        );
+        // On Windows a path below a file reads as not found, so both say the folder is not
+        // there; elsewhere `lstat` fails with ENOTDIR, so both fail with that I/O error.
+        assert_eq!(view.is_some(), cfg!(windows));
+        assert_eq!(fs::read(&inspected).unwrap(), bytes);
+        assert_eq!(fs::read(&file).unwrap(), b"a file, not a folder");
+    }
+
+    /// The journal's folders lie in a link (a junction on Windows) to a real folder: the link
+    /// is followed, as recovery follows it, so the folder is there and recovery goes ahead.
+    #[test]
+    fn inspect_agrees_with_recovery_when_the_parent_is_a_link() {
+        let setup = || {
+            let (real, links) = (TempDir::new(), TempDir::new());
+            let link = links.path().join("Vaults");
+            make_dir_link(&link, real.path());
+            let j = journal(&link);
+            for dir in [&j.staging, j.before_restore.as_ref().unwrap()] {
+                fs::create_dir(dir).unwrap();
+            }
+            let (journal_dir, path) = journal_place();
+            write_journal(&path, &j).unwrap();
+            (real, links, journal_dir, path, j)
+        };
+        let (real, _la, _ja, inspected, j) = setup();
+        let (_rb, _lb, _jb, recovered, _) = setup();
+        let before = tree(real.path());
+        let recovery = recover_restore(&recovered);
+        assert!(matches!(recovery, Ok(Recovery::RolledBack)), "{recovery:?}");
+        let view = assert_agree(inspect_restore_journal(&inspected), recovery).unwrap();
+        assert_eq!(
+            (view.step, view.staging, view.target, view.before_restore),
+            (j.step, j.staging, j.target, j.before_restore)
+        );
+        assert!(tree(real.path()) == before, "inspect changed a folder");
+    }
+
     #[test]
     fn inspect_no_journal_is_none() {
         let (journal_dir, path) = journal_place();

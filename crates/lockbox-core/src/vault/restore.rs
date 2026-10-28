@@ -15,7 +15,8 @@ use super::journal::{
     remove_journal_if_owner, remove_own_journal, remove_staging, remove_staging_then_journal,
     validate_journal, validate_journal_on_disk, write_journal,
 };
-use super::naming::check_folder_name;
+use super::naming::{check_folder_name, check_path_room};
+use super::readonly::refuse_vault_folder;
 use super::source::{
     VaultSource, attached_blobs, attached_refs, check_listed, check_opened, copy_blob,
     manifest_hashes, unlock_source,
@@ -168,9 +169,10 @@ impl PreparedRestore {
     /// Spec 6.8 steps 1 to 4. Everything that can refuse does so before anything is written:
     /// no journal yet, the archive structure, the credential, the manifest MAC and every
     /// header and item hash, the header MAC, no damaged item, no unattached blob, free space,
-    /// and the destination ([`RestoreDestination`]: a new folder is refused while a readable
-    /// copy of the vault is in `parent`, for a bad name, and when anything at all is at that
-    /// name). Only then is the journal written (before the staging folder
+    /// and the destination ([`RestoreDestination`]: a new folder is refused for a bad name,
+    /// checked first of all, for a path too long for Windows, inside a vault folder, while a
+    /// readable copy of the vault is in `parent`, and when anything at all is at that name).
+    /// Only then is the journal written (before the staging folder
     /// exists) and the backup extracted into `parent/.restore-<hex>`, each entry hashed
     /// against the manifest as it is written and again as it is read back from disk, each blob
     /// authenticated as it is written. Any error after the journal removes the staging folder,
@@ -185,6 +187,10 @@ impl PreparedRestore {
         journal: &Path,
         cancel: &CancelToken,
     ) -> Result<PreparedRestore> {
+        // A bad name is refused before the archive is even opened (unlocking takes a second).
+        if let RestoreDestination::NewFolder(chosen) = &destination {
+            check_folder_name(chosen)?;
+        }
         // Anything at the journal path counts, a damaged or newer journal too: only recovery
         // reads it.
         if journal_exists(journal)? {
@@ -194,6 +200,13 @@ impl PreparedRestore {
         let parent = std::path::absolute(parent)?;
         if !plain_absolute(&parent) {
             return Err(BAD_PATH);
+        }
+        if let RestoreDestination::NewFolder(chosen) = &destination {
+            let target = parent.join(chosen);
+            // Every path the restored vault needs must fit Windows' limit, and a vault never
+            // goes inside another vault's folder (the damaged one's included).
+            check_path_room(&target, &new_staging_path(&parent))?;
+            refuse_vault_folder(&target)?;
         }
         let src = VaultSource::Archive(BackupArchive::open(archive, cancel)?);
         let opened = unlock_source(&src, &credential, cancel)?;
@@ -2984,6 +2997,14 @@ pub(super) mod tests {
             "COM¹",
             "conin$",
             "a:b",
+            "ab:c",
+            "a*b",
+            "a?b",
+            "a\"b",
+            "a<b",
+            "a>b",
+            "a|b",
+            "nul.tar.gz",
             "v.before-restore",
             "v.BEFORE-RESTORE-2",
             "\u{1}",
@@ -3000,19 +3021,170 @@ pub(super) mod tests {
                 "{bad:?}"
             );
         }
-        // The one copy of the reserved list: any case, the superscript forms, and a stem with
-        // spaces after it (dropped before the match, so `NUL .txt` is refused too).
+        // The one copy of the reserved list: any case, the superscript forms, a whole name (only
+        // the part before the first `.` counts) and a stem with spaces after it (dropped before
+        // the match, so `NUL .txt` is refused too).
         for reserved in [
-            "CON", "prn", "Aux", "nul", "CONIN$", "Conout$", "COM0", "com9", "LPT0", "lpt9",
-            "COM²", "LPT³", "lpt¹", "NUL ",
+            "CON",
+            "prn",
+            "Aux",
+            "nul",
+            "CONIN$",
+            "Conout$",
+            "COM0",
+            "com9",
+            "LPT0",
+            "lpt9",
+            "COM²",
+            "LPT³",
+            "lpt¹",
+            "NUL ",
+            "nul.txt",
+            "NUL.tar.gz",
+            "nul .txt",
         ] {
             assert!(is_reserved_device_name(reserved), "{reserved:?}");
         }
         for not_reserved in [
-            "", "CONSOLE", "COM", "COM10", "LPT⁴", "NUL1", " NUL", "CON$",
+            "", "CONSOLE", "COM", "COM10", "LPT⁴", "NUL1", " NUL", "CON$", "a.nul", ".nul",
         ] {
             assert!(!is_reserved_device_name(not_reserved), "{not_reserved:?}");
         }
         assert!(check_folder_name("NUL .txt").is_err());
+    }
+
+    #[track_caller]
+    fn assert_folder_name_refused(result: Result<PreparedRestore>, what: &str) {
+        let error = error(result);
+        assert!(
+            matches!(
+                error,
+                CoreError::InvalidInput {
+                    what: "folder name"
+                }
+            ),
+            "{what}: {error:?}"
+        );
+    }
+
+    /// `prepare` applies the name rule, first of all: each bad name is refused with nothing
+    /// written, and even before the archive is opened (a missing archive is not reached).
+    #[test]
+    fn prepare_refuses_bad_folder_names_before_anything() {
+        let _reset = Cleanup;
+        let (_f, backup) = backed_up();
+        let long = "x".repeat(201);
+        for bad in [
+            "CON",
+            "nul.tar.gz",
+            "x.",
+            "x ",
+            ".hidden",
+            "v.before-restore",
+            "ab:c",
+            "D:x",
+            "a\\b",
+            &long,
+        ] {
+            let d = Dest::new();
+            let before = listing(d.parent(), &d.journal());
+            let destination = RestoreDestination::NewFolder(bad.into());
+            assert_folder_name_refused(d.prepare_to(&backup, d.parent(), destination), bad);
+            assert_eq!(listing(d.parent(), &d.journal()), before, "{bad:?}");
+            assert_eq!(
+                d.reached_journal.get(),
+                0,
+                "{bad:?}: the journal write was reached"
+            );
+            failpoint::disarm_all();
+        }
+        let d = Dest::new();
+        let missing = d.parent().join("no such backup.lockbox-backup");
+        let destination = RestoreDestination::NewFolder("CON".into());
+        assert_folder_name_refused(d.prepare_to(&missing, d.parent(), destination), "first");
+    }
+
+    /// A parent `units` UTF-16 units long, made of folders under `base`.
+    fn deep_parent(base: &Path, units: usize) -> PathBuf {
+        let len = |p: &Path| p.as_os_str().to_string_lossy().encode_utf16().count();
+        let mut dir = base.to_owned();
+        while len(&dir) < units {
+            // One separator and at most 60 characters, never leaving exactly one unit to fill.
+            let left = units - len(&dir);
+            let mut name = (left - 1).min(60);
+            if left - (name + 1) == 1 {
+                name -= 1;
+            }
+            dir.push("d".repeat(name));
+        }
+        assert_eq!(len(&dir), units, "cannot build the parent at that length");
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Every path the restored vault needs must fit Windows' 259 units: in a parent where a
+    /// name of `n` characters just fits, `n + 1` is refused with nothing written, and `n` is
+    /// restored and opens.
+    #[test]
+    fn new_folder_path_too_long_refused_before_writing() {
+        use crate::vault::naming::{DEEPEST_IN_VAULT_UNITS, MAX_PATH_UNITS};
+        let (f, backup) = backed_up();
+        let backup_titles = sorted_titles(&f.vault);
+        let d = Dest::new();
+        let fits = 45;
+        // parent + `\` + name + the deepest file = the limit exactly.
+        let parent = deep_parent(
+            d.parent(),
+            MAX_PATH_UNITS - DEEPEST_IN_VAULT_UNITS - 1 - fits,
+        );
+        let before = listing(&parent, &d.journal());
+        let too_long = RestoreDestination::NewFolder("n".repeat(fits + 1));
+        assert_folder_name_refused(d.prepare_to(&backup, &parent, too_long), "too long");
+        assert_eq!(listing(&parent, &d.journal()), before);
+        assert_eq!(d.reached_journal.get(), 0, "the journal write was reached");
+
+        let name = "n".repeat(fits);
+        let destination = RestoreDestination::NewFolder(name.clone());
+        let mut p = d.prepare_to(&backup, &parent, destination).unwrap();
+        let out = p.commit(&CancelToken::new()).unwrap();
+        drop(p);
+        assert_eq!(out.dir, parent.join(&name));
+        assert_eq!(titles(&out.dir), backup_titles);
+    }
+
+    /// A vault never goes inside a vault folder: not the damaged one it is restored beside, not
+    /// a live one. Refused with nothing written.
+    #[test]
+    fn new_folder_inside_a_vault_folder_refused() {
+        let _reset = Cleanup;
+        let (f, backup) = backed_up();
+        let live = f.vault.dir().to_owned();
+        let elsewhere = TempDir::new();
+        let damaged = plant_vault(&f, elsewhere.path(), "Family-damaged");
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            fs::write(damaged.join(file), b"damaged in place").unwrap();
+        }
+        for (what, inside) in [("damaged vault", &damaged), ("live vault", &live)] {
+            let d = Dest::new();
+            let before = (listing(inside, &d.journal()), tree(inside));
+            let result = d.prepare_to(&backup, inside, new_folder());
+            assert!(
+                matches!(
+                    result,
+                    Err(CoreError::InvalidInput {
+                        what: "destination in a vault folder"
+                    })
+                ),
+                "{what}"
+            );
+            let after = (listing(inside, &d.journal()), tree(inside));
+            assert!(after == before, "{what}: something was written");
+            assert_eq!(
+                d.reached_journal.get(),
+                0,
+                "{what}: the journal write was reached"
+            );
+            failpoint::disarm_all();
+        }
     }
 }
