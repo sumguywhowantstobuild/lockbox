@@ -192,7 +192,10 @@ impl<'j> OutputTemp<'j> {
     fn clear_record(&self) {
         if std::thread::panicking() {
             let clear = || self.journal.clear(&self.path);
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(clear));
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(clear)) {
+                // Forgotten, not dropped: a payload whose `Drop` panics would abort us here.
+                std::mem::forget(payload);
+            }
         } else {
             self.journal.clear(&self.path);
         }
@@ -1104,6 +1107,16 @@ pub(super) mod tests {
         pub(in crate::vault) panic_in_publish: bool,
         pub(in crate::vault) squat_after_attempt: bool,
         pub(in crate::vault) panic_in_clear: bool,
+        pub(in crate::vault) panic_in_clear_with_bomb: bool,
+    }
+
+    /// A panic payload whose own `Drop` panics: dropping it while a panic unwinds aborts.
+    struct PayloadBomb;
+
+    impl Drop for PayloadBomb {
+        fn drop(&mut self) {
+            panic!("the payload's drop panicked");
+        }
     }
 
     /// What a squatting `GateJournal` writes at the old temp path.
@@ -1127,6 +1140,9 @@ pub(super) mod tests {
             self.cleared.borrow_mut().push(temp.to_path_buf());
             if self.panic_in_clear {
                 panic!("clear panicked");
+            }
+            if self.panic_in_clear_with_bomb {
+                std::panic::panic_any(PayloadBomb);
             }
         }
         fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
@@ -1406,6 +1422,64 @@ pub(super) mod tests {
         assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
         let once = ["record", "publish", "clear"];
         assert_eq!(*journal.calls.borrow(), [once, once].concat());
+    }
+
+    /// Set in the child process of `clear_panic_payload_is_never_dropped_while_unwinding`.
+    const BOMB_CHILD: &str = "LOCKBOX_TEST_CLEAR_PAYLOAD_BOMB_CHILD";
+
+    /// `publish` panics, and the journal's `clear` then panics with a payload whose own `Drop`
+    /// panics: the guard must not drop that payload while the first panic unwinds (that aborts).
+    /// An abort cannot be caught in-process, so the panicking part runs in a child process (this
+    /// test binary, filtered to this one test); the parent asserts the child ended normally, with
+    /// the original panic reaching its caller, rather than aborting.
+    #[test]
+    fn clear_panic_payload_is_never_dropped_while_unwinding() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        if std::env::var_os(BOMB_CHILD).is_none() {
+            let name = "vault::files::tests::clear_panic_payload_is_never_dropped_while_unwinding";
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([name, "--exact", "--nocapture", "--test-threads=1"])
+                .env(BOMB_CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success(),
+                "the child did not end normally: {:?}\n{stdout}\n{stderr}",
+                output.status
+            );
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            assert!(
+                stdout.contains("original panic reached the caller"),
+                "{stdout}"
+            );
+            return;
+        }
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        fs::write(&copy, b"OLD COPY").unwrap();
+        fs::write(&backup, b"OLD BACKUP").unwrap();
+        let cancel = CancelToken::new();
+        let journal = GateJournal {
+            panic_in_publish: true,
+            panic_in_clear_with_bomb: true,
+            ..GateJournal::default()
+        };
+        let export = catch_unwind(AssertUnwindSafe(|| {
+            vault.export_file(&id, &file, &copy, &journal, &cancel)
+        }));
+        assert_eq!(panic_text(&*export.unwrap_err()), "publish panicked");
+        let made = catch_unwind(AssertUnwindSafe(|| {
+            vault.backup(&backup, &journal, &cancel)
+        }));
+        assert_eq!(panic_text(&*made.unwrap_err()), "publish panicked");
+        assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
+        assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
+        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        println!("original panic reached the caller");
     }
 
     /// The rename succeeds, then `publish` puts another writer's file at the old temp path and

@@ -132,8 +132,10 @@ fn corrupt_if_armed(temp: &Path) -> Result<()> {
 impl Vault {
     /// Writes a backup of the open vault to `dest` (spec 6.7): built in a hidden temp beside
     /// it (recorded in `journal` before it exists), re-read and checked, then renamed over
-    /// `dest`, each attempt of the rename passing the journal's gate. A failed, cancelled or
-    /// gate-refused backup never touches an existing `dest`.
+    /// `dest`, each attempt of the rename passing the journal's gate. A backup that fails, is
+    /// cancelled or is refused before the rename never touches an existing `dest`. Once the
+    /// rename has happened `dest` holds the new backup; if making that durable then fails, the
+    /// error is returned as published, durability not confirmed.
     ///
     /// `&self` is deliberate: no vault write can run while a backup borrows the vault, so the
     /// snapshot is consistent. Refused while a header change awaits the user's OK, while the
