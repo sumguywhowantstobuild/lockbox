@@ -298,7 +298,7 @@ struct Tee<'a, R, W> {
     src: &'a mut R,
     dst: &'a mut W,
     hash: Sha256,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     read: u64,
 }
 
@@ -307,7 +307,7 @@ impl<R: Read, W: Write> Read for Tee<'_, R, W> {
         let n = self.src.read(buf)?;
         self.dst.write_all(&buf[..n])?;
         self.hash.update(&buf[..n]);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         {
             const STEP: u64 = CHUNK + TAG_LEN;
             let before = self.read;
@@ -335,7 +335,7 @@ pub fn authenticate_copy(
         src,
         dst,
         hash: Sha256::new(),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         read: 0,
     };
     decrypt_stream(

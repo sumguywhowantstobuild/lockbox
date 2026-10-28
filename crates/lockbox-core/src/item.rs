@@ -17,7 +17,7 @@ use crate::error::{CoreError, Result};
 use crate::ids::{FileId, ItemId, VaultId};
 use crate::limits::{MAX_JSON_DEPTH, check_json};
 use crate::secret::{Key32, random_bytes};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, io};
 use zeroize::Zeroizing;
 
@@ -34,12 +34,8 @@ const TAG_LEN: usize = 16;
 const BUCKET: usize = 512;
 const DAMAGED: CoreError = CoreError::Damaged { what: "item" };
 
-/// What an item is. Externally tagged, so a login reads straight into its wiped fields:
-/// `"note"` / `"file"` / `"collection"`, or `{"login": {"username": .., "password": .., "urls": [..]}}`.
-/// (An internally tagged enum would buffer every field, password included, in serde's
-/// unwiped private `Content` type first.)
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
+/// What an item is. Its JSON is `KindWire`'s.
+#[derive(Clone)]
 pub enum ItemKind {
     Login {
         username: String,
@@ -69,17 +65,14 @@ impl fmt::Debug for ItemKind {
     }
 }
 
-/// Where an attached file's encrypted blob is and how to open it. The key is secret.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Where an attached file's encrypted blob is and how to open it. The key is secret, and it and
+/// the other fields that open the blob stay inside the engine. Its JSON is `FileRefWire`'s.
 pub struct FileRef {
     pub file_id: FileId,
-    pub blob_version: u16,
-    pub chunk_size: u32,
-    #[serde(with = "file_key_b64")]
-    pub file_key: Key32,
-    #[serde(with = "crate::serde_b64")]
-    pub nonce_prefix: [u8; 19],
+    pub(crate) blob_version: u16,
+    pub(crate) chunk_size: u32,
+    pub(crate) file_key: Key32,
+    pub(crate) nonce_prefix: [u8; 19],
     pub length: u64,
     pub chunk_count: u64,
     pub name: String,
@@ -154,9 +147,8 @@ mod file_key_b64 {
     }
 }
 
-/// One saved entry. `Debug` shows only the id, kind name and revision.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One saved entry. `Debug` shows only the id, kind name and revision. Its JSON is `ItemWire`'s.
+#[derive(Clone)]
 pub struct Item {
     pub id: ItemId,
     pub kind: ItemKind,
@@ -179,6 +171,139 @@ impl fmt::Debug for Item {
             .field("kind", &self.kind)
             .field("revision", &self.revision)
             .finish_non_exhaustive()
+    }
+}
+
+// The JSON of an item file. `Item`, `ItemKind` and `FileRef` have no serde of their own, so no
+// code outside the engine can serialise one (a password or file key on its way to the screen).
+// These crate-private mirrors (serde's remote derive) read and write the real types directly, with
+// no copy in between; their names, order and attributes are the item format
+// (`plaintext_golden_bytes`, `file_ref_json_is_pinned`).
+
+/// An `Item`'s JSON.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Item", deny_unknown_fields)]
+struct ItemWire {
+    id: ItemId,
+    #[serde(with = "KindWire")]
+    kind: ItemKind,
+    title: String,
+    notes: Zeroizing<String>,
+    collection: Option<ItemId>,
+    #[serde(with = "file_refs")]
+    attachments: Vec<FileRef>,
+    revision: u64,
+    created_at: String,
+    modified_at: String,
+    trashed_at: Option<String>,
+    purging: bool,
+    retired_blobs: Vec<FileId>,
+}
+
+/// An `ItemKind`'s JSON. Externally tagged, so a login reads straight into its wiped fields:
+/// `"note"` / `"file"` / `"collection"`, or `{"login": {"username": .., "password": .., "urls": [..]}}`.
+/// (An internally tagged enum would buffer every field, password included, in serde's
+/// unwiped private `Content` type first.)
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ItemKind", rename_all = "lowercase", deny_unknown_fields)]
+enum KindWire {
+    Login {
+        username: String,
+        password: Zeroizing<String>,
+        urls: Vec<String>,
+    },
+    Note,
+    File,
+    Collection,
+}
+
+/// A `FileRef`'s JSON.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "FileRef", deny_unknown_fields)]
+struct FileRefWire {
+    file_id: FileId,
+    blob_version: u16,
+    chunk_size: u32,
+    #[serde(with = "file_key_b64")]
+    file_key: Key32,
+    #[serde(with = "crate::serde_b64")]
+    nonce_prefix: [u8; 19],
+    length: u64,
+    chunk_count: u64,
+    name: String,
+    media_type: String,
+}
+
+/// Serialises an `Item` through [`ItemWire`].
+struct ItemOut<'a>(&'a Item);
+
+impl Serialize for ItemOut<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        ItemWire::serialize(self.0, s)
+    }
+}
+
+/// Reads an `Item` through [`ItemWire`].
+struct ItemIn(Item);
+
+impl<'de> Deserialize<'de> for ItemIn {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        ItemWire::deserialize(d).map(ItemIn)
+    }
+}
+
+/// Serialises a `FileRef` through [`FileRefWire`].
+struct FileRefOut<'a>(&'a FileRef);
+
+impl Serialize for FileRefOut<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        FileRefWire::serialize(self.0, s)
+    }
+}
+
+/// Reads a `FileRef` through [`FileRefWire`].
+struct FileRefIn(FileRef);
+
+impl<'de> Deserialize<'de> for FileRefIn {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        FileRefWire::deserialize(d).map(FileRefIn)
+    }
+}
+
+/// `attachments` as a JSON array of [`FileRefWire`], built element by element like serde's own
+/// `Vec` (no second vector, so no extra copy of a file key).
+mod file_refs {
+    use super::{FileRef, FileRefIn, FileRefOut};
+    use serde::de::{SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(refs: &[FileRef], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(refs.iter().map(FileRefOut))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<FileRef>, D::Error> {
+        struct Refs;
+
+        impl<'de> Visitor<'de> for Refs {
+            type Value = Vec<FileRef>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a sequence")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<FileRef>, A::Error> {
+                // serde's own `Vec` reserves what the format promises, up to 1 MiB.
+                let cap = seq.size_hint().unwrap_or(0);
+                let mut refs = Vec::with_capacity(cap.min(1024 * 1024 / size_of::<FileRef>()));
+                while let Some(FileRefIn(fref)) = seq.next_element()? {
+                    refs.push(fref);
+                }
+                Ok(refs)
+            }
+        }
+
+        d.deserialize_seq(Refs)
     }
 }
 
@@ -212,7 +337,7 @@ impl io::Write for Bounded<'_> {
 /// room for the largest padded plaintext plus the AEAD tag (so later steps never reallocate).
 fn padded_plaintext(item: &Item) -> Result<Zeroizing<Vec<u8>>> {
     let mut buf = Zeroizing::new(Vec::with_capacity(MAX_ITEM_JSON + BUCKET + TAG_LEN));
-    serde_json::to_writer(Bounded(&mut buf), item).map_err(|e| {
+    serde_json::to_writer(Bounded(&mut buf), &ItemOut(item)).map_err(|e| {
         if e.is_io() {
             CoreError::TooLarge { what: "item" }
         } else {
@@ -228,7 +353,7 @@ fn padded_plaintext(item: &Item) -> Result<Zeroizing<Vec<u8>>> {
 /// True when `a` and `b` are the same item in every field. `Item` has no `PartialEq` (a file
 /// key is not compared with `==`), so this compares what is written to disk: the JSON of all
 /// fields (none is skipped), padded the same way.
-pub(crate) fn same_item(a: &Item, b: &Item) -> bool {
+pub fn same_item(a: &Item, b: &Item) -> bool {
     matches!((padded_plaintext(a), padded_plaintext(b)), (Ok(a), Ok(b)) if a == b)
 }
 
@@ -287,7 +412,7 @@ pub fn open_item(
     let json = unpad(&buf)?;
     check_json(json, MAX_ITEM_JSON, MAX_JSON_DEPTH)?;
     // serde_json's own messages can quote the value that failed, so none of them are passed on.
-    let item: Item = serde_json::from_slice(json).map_err(|_| DAMAGED)?;
+    let ItemIn(item) = serde_json::from_slice(json).map_err(|_| DAMAGED)?;
     // The AD already binds the id; checking it again costs nothing.
     if item.id != *expected_id {
         return Err(DAMAGED);
@@ -346,7 +471,7 @@ mod tests {
 
     /// Items have no `PartialEq` (keys must not be compared casually); JSON covers every field.
     fn json(item: &Item) -> serde_json::Value {
-        serde_json::to_value(item).unwrap()
+        serde_json::to_value(ItemOut(item)).unwrap()
     }
 
     #[test]
@@ -385,7 +510,7 @@ mod tests {
     }
 
     fn json_len(item: &Item) -> usize {
-        serde_json::to_vec(item).unwrap().len()
+        serde_json::to_vec(&ItemOut(item)).unwrap().len()
     }
 
     /// A note whose JSON is exactly `n` bytes (plain ASCII notes, so no escaping).
@@ -415,6 +540,14 @@ mod tests {
         out.extend(nonce);
         out.extend(buf);
         out
+    }
+
+    /// Reads an `ItemKind` through `KindWire`, the way `serde_json::from_str` reads a type.
+    fn kind_from(text: &str) -> serde_json::Result<ItemKind> {
+        let mut de = serde_json::Deserializer::from_str(text);
+        let kind = KindWire::deserialize(&mut de)?;
+        de.end()?;
+        Ok(kind)
     }
 
     fn open(bytes: &[u8]) -> crate::Result<Item> {
@@ -552,7 +685,7 @@ mod tests {
     fn id_inside_must_match_even_if_the_ad_does() {
         let (v, k) = vault();
         let other = ItemId([0xCC; 16]);
-        let json = serde_json::to_vec(&login()).unwrap(); // says id AA
+        let json = serde_json::to_vec(&ItemOut(&login())).unwrap(); // says id AA
         let sealed = seal_raw(&pad(&json), &other, &v, &k); // sealed for CC
         assert!(matches!(
             open_item(&sealed, &other, &v, &k),
@@ -586,7 +719,7 @@ mod tests {
     fn bad_padding_damaged() {
         let (v, k) = vault();
         let id = ItemId([0xAA; 16]);
-        let json = serde_json::to_vec(&base(ItemKind::Note)).unwrap();
+        let json = serde_json::to_vec(&ItemOut(&base(ItemKind::Note))).unwrap();
         let mut no_marker = json.clone();
         no_marker.resize(512, 0);
         let mut not_bucketed = json.clone();
@@ -678,13 +811,13 @@ mod tests {
     fn unknown_fields_are_rejected_everywhere() {
         let mut item = json(&login());
         item["extra"] = 1.into();
-        assert!(serde_json::from_value::<Item>(item).is_err());
+        assert!(serde_json::from_value::<ItemIn>(item).is_err());
 
         let mut with_file = login();
         with_file.attachments = vec![file_ref()];
         let mut item = json(&with_file);
         item["attachments"][0]["extra"] = 1.into();
-        assert!(serde_json::from_value::<Item>(item).is_err());
+        assert!(serde_json::from_value::<ItemIn>(item).is_err());
 
         for kind in [
             r#"{"login":{"username":"","password":"","urls":[],"extra":1}}"#,
@@ -695,7 +828,7 @@ mod tests {
             r#""other""#,
             r#"{"kind":"note"}"#, // the old internally tagged shape
         ] {
-            assert!(serde_json::from_str::<ItemKind>(kind).is_err(), "{kind}");
+            assert!(kind_from(kind).is_err(), "{kind}");
         }
         for kind in [
             r#""note""#,
@@ -703,13 +836,13 @@ mod tests {
             r#""collection""#,
             r#"{"login":{"username":"","password":"","urls":[]}}"#,
         ] {
-            assert!(serde_json::from_str::<ItemKind>(kind).is_ok(), "{kind}");
+            assert!(kind_from(kind).is_ok(), "{kind}");
         }
     }
 
     #[test]
     fn file_ref_json_is_pinned() {
-        let text = serde_json::to_string(&file_ref()).unwrap();
+        let text = serde_json::to_string(&FileRefOut(&file_ref())).unwrap();
         let expected = format!(
             concat!(
                 r#"{{"file_id":"{}","blob_version":1,"chunk_size":1048576,"#,
@@ -721,14 +854,14 @@ mod tests {
             "33".repeat(16)
         );
         assert_eq!(text, expected);
-        let back: FileRef = serde_json::from_str(&text).unwrap();
+        let FileRefIn(back) = serde_json::from_str(&text).unwrap();
         assert_eq!(back.file_key.as_bytes(), &[0x42; 32]);
         assert_eq!(back.nonce_prefix, [7; 19]);
     }
 
     #[test]
     fn bad_file_key_rejected_with_fixed_text() {
-        let good = serde_json::to_value(file_ref()).unwrap();
+        let good = serde_json::to_value(FileRefOut(&file_ref())).unwrap();
         // 4 bytes; not base64; 33 bytes; empty.
         for bad in [
             "QUFBQQ==",
@@ -738,7 +871,8 @@ mod tests {
         ] {
             let mut v = good.clone();
             v["file_key"] = bad.into();
-            let err = serde_json::from_value::<FileRef>(v)
+            let err = serde_json::from_value::<FileRefIn>(v)
+                .map(|FileRefIn(fref)| fref)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("invalid file key"), "{err}");

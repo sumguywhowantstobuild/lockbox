@@ -127,7 +127,7 @@ fn find_existing(parent: &Path, id: &VaultId, cancel: &CancelToken) -> Result<Op
 
 /// Test hook: once an entry is written, closed and synced, flips one data byte of it, so the
 /// read-back that follows must catch it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 fn corrupt_if_armed(path: &Path) -> Result<()> {
     if crate::fsio::failpoint::check("restore.corrupt_extract").is_err() {
         crate::fsio::testutil::flip_byte(path, 0)?;
@@ -196,7 +196,7 @@ impl PreparedRestore {
             before_restore: None,
         };
         validate_journal(&entry)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.before_journal")?;
         {
             // The look at the journal path and the publish are one step for everybody who
@@ -205,7 +205,7 @@ impl PreparedRestore {
             if journal_exists(journal)? {
                 return Err(IN_PROGRESS);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("restore.under_lock")?;
             if let Err(e) = create_journal(journal, &entry) {
                 // An error reported after the journal landed leaves one that is ours; it goes.
@@ -217,7 +217,7 @@ impl PreparedRestore {
         // Until the folder exists it is not ours to remove: whatever is at that path stays, and
         // only this operation's journal goes.
         let created: Result<()> = (|| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("restore.before_staging")?;
             Ok(fs::create_dir(&staging)?)
         })();
@@ -279,7 +279,7 @@ impl PreparedRestore {
             }
             file.sync_all()?;
             drop(file); // The read-back below opens it again.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             corrupt_if_armed(&path)?;
             let hash = copy_hashed(
                 &mut open_shared_read(&path)?,
@@ -288,7 +288,7 @@ impl PreparedRestore {
                 cancel,
             )?;
             check_listed(&listed, &e.name, hash)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("restore.after_entry")?;
         }
 
@@ -444,7 +444,7 @@ impl PreparedRestore {
         before: Option<PathBuf>,
     ) -> Result<()> {
         self.own_journal(lock)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check(match step {
             JournalStep::Swapping => "restore.swap_under_lock",
             JournalStep::Extracting => "restore.revert_under_lock",
@@ -478,16 +478,16 @@ impl PreparedRestore {
         self.rewrite_journal(&lock, JournalStep::Swapping, before.clone())?;
         self.armed = false;
         self.swap_started = true;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.after_journal")?;
 
         // Step 3.
         if let Some(b) = &before {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             let moved = crate::fsio::failpoint::check("restore.fail_move_existing")
                 .and_then(|()| rename_dir_no_replace(&self.target, b))
                 .and_then(|()| crate::fsio::failpoint::check("restore.fail_after_move_existing"));
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-internals")))]
             let moved = rename_dir_no_replace(&self.target, b);
             if let Err(e) = moved {
                 // A rename can report an error after it moved the folder. Only T still in place
@@ -515,15 +515,15 @@ impl PreparedRestore {
             }
         }
         // Reached with or without a vault to replace.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.after_move_existing")?;
 
         // Step 4.
         clear_hidden(&self.staging)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.fail_move_staging")?;
         rename_dir_no_replace(&self.staging, &self.target)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         {
             crate::fsio::failpoint::check("restore.fail_after_move_staging")?;
             crate::fsio::failpoint::check("restore.after_move_staging")?;
@@ -531,7 +531,7 @@ impl PreparedRestore {
 
         // Step 5.
         sync_dir(&parent)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.before_journal_done")?;
         remove_journal_if_owner(&lock, &self.journal, &self.staging)?;
         Ok(self.outcome(before))
@@ -567,7 +567,7 @@ pub fn recover_restore(journal: &Path) -> Result<Recovery> {
         return Ok(Recovery::NothingToDo);
     };
     validate_journal_on_disk(&j)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("recover.under_lock")?;
     check_staging_parent(&j.staging)?;
 
@@ -587,10 +587,10 @@ pub fn recover_restore(journal: &Path) -> Result<Recovery> {
     };
     let done: Result<()> = (|| {
         if let Some(b) = move_back {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("recover.fail_rename")?;
             rename_dir_no_replace(b, target)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("recover.after_rename")?;
         }
         remove_staging(staging)?;
@@ -623,7 +623,7 @@ pub fn dismiss_restore_journal(journal: &Path) -> Result<()> {
         ) => {}
         Err(e) => return Err(e),
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("dismiss.before_delete")?;
     remove_file_retry(journal)
 }

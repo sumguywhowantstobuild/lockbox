@@ -1,8 +1,10 @@
-//! Encrypted files through the public API only: import, replace, export, purge.
+//! Encrypted files through the public API (`internals` only to read a file key): import,
+//! replace, export, purge.
 //! Every vault creation runs a real ~1 s Argon2id derivation, so tests share vaults.
 
 use lockbox_core::blob::{CancelToken, NoJournal, OutputJournal};
 use lockbox_core::ids::{FileId, ItemId};
+use lockbox_core::internals::item::file_key;
 use lockbox_core::item::ItemKind;
 use lockbox_core::{CoreError, Vault};
 use std::cell::RefCell;
@@ -183,8 +185,7 @@ fn replace_records_retired_blob() {
     let second = write(parent.path(), "v2.txt", b"version two!");
     let id = vault.new_file_item(None, &first, &cancel).unwrap();
     let old = first_file(&vault, &id);
-    let old_key = vault.get_item(&id).unwrap().attachments[0]
-        .file_key
+    let old_key = file_key(&vault.get_item(&id).unwrap().attachments[0])
         .as_bytes()
         .to_owned();
 
@@ -197,7 +198,7 @@ fn replace_records_retired_blob() {
     assert_eq!(item.attachments[0].file_id, new);
     assert_eq!(item.attachments[0].name, "v2.txt");
     assert_ne!(
-        item.attachments[0].file_key.as_bytes(),
+        file_key(&item.attachments[0]).as_bytes(),
         &old_key,
         "a new key"
     );

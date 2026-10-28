@@ -256,7 +256,7 @@ pub(super) fn unlock_source(
 
     let (mut items, mut damaged) = (BTreeMap::new(), Vec::new());
     for id in src.item_ids()? {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("source.item")?;
         cancel.check()?;
         let bytes = match src.item_bytes(&id) {

@@ -87,7 +87,7 @@ pub(super) fn load_all(
 
 fn write_item_file(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write(path, bytes)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("items.after_write")?;
     Ok(())
 }

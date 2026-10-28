@@ -109,7 +109,7 @@ fn verify(temp: &Path, manifest: &BackupManifest, cancel: &CancelToken) -> Resul
 /// Test hook: once the temp is written and closed, flips one data byte inside it, so the
 /// re-read must catch it: in `vault.json` (`backup.corrupt_temp`) or in the first digit of the
 /// manifest's `created_at` (`backup.corrupt_manifest`), which leaves the manifest valid JSON.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 fn corrupt_if_armed(temp: &Path) -> Result<()> {
     use crate::fsio::failpoint;
     let header = failpoint::check("backup.corrupt_temp").is_err();
@@ -172,12 +172,12 @@ impl Vault {
         let published = (|| {
             // Returns only after the writer and the file are dropped.
             let (manifest, report) = self.write_archive(file, cancel)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             corrupt_if_armed(&temp)?;
             verify(&temp, &manifest, cancel)?;
             // Windows keeps a file's attributes when it replaces another: unhide first.
             clear_hidden(&temp)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("backup.before_publish")?;
             // Last chance to stop: once the rename starts, publication completes.
             cancel.check()?;

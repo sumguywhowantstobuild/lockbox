@@ -140,7 +140,7 @@ fn differing_slot<'a>(
 }
 
 fn repair(file: &Path, bytes: &[u8]) -> Result<()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("unlock.repair_write")?;
     atomic_write(file, bytes)
 }

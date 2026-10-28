@@ -77,6 +77,9 @@ impl Argon2Params {
     }
 
     /// The settings as bytes for a key slot's authenticated data: m, t, p, each u32 little-endian.
+    // `&self` so `Option<&Argon2Params>::map` can take it by name (`slots::slot_ad`); clippy asks
+    // for `self` only now that the type is no longer exported.
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_ad_bytes(&self) -> [u8; 12] {
         let mut bytes = [0u8; 12];
         bytes[0..4].copy_from_slice(&self.memory_kib.to_le_bytes());

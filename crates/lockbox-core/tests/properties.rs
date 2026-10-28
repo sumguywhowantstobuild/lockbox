@@ -4,14 +4,16 @@
 //! Bad input comes in two kinds. Random bytes stop at the first check. A valid file with a
 //! few bytes changed (the `*_survives_corruption` tests) gets past it into the deeper ones.
 
-use lockbox_core::blob::{
-    BLOB_VERSION, CHUNK_SIZE, CancelToken, blob_len, chunk_count, decrypt_stream, encrypt_stream,
-};
-use lockbox_core::header::{HEADER_FILE, parse_header};
+use lockbox_core::blob::CancelToken;
 use lockbox_core::ids::{FileId, ItemId, VaultId};
-use lockbox_core::item::{FileRef, Item, ItemKind, open_item, seal_item};
+use lockbox_core::internals::blob::{
+    BLOB_VERSION, CHUNK_SIZE, blob_len, chunk_count, decrypt_stream, encrypt_stream,
+};
+use lockbox_core::internals::header::{HEADER_FILE, parse_header};
+use lockbox_core::internals::item::{FileRefParts, open_item, same_item, seal_item};
+use lockbox_core::internals::secret::{Key32, random_bytes};
+use lockbox_core::item::{FileRef, Item, ItemKind};
 use lockbox_core::recovery::RecoverySecret;
-use lockbox_core::secret::{Key32, random_bytes};
 use lockbox_core::{CoreError, Vault};
 use proptest::collection::vec;
 use proptest::option;
@@ -27,11 +29,6 @@ const ITEM_ID: ItemId = ItemId([0xAA; 16]);
 
 fn key() -> Key32 {
     Key32::from_bytes([0x22; 32])
-}
-
-/// Items have no `PartialEq` (keys must not be compared casually); JSON covers every field.
-fn json(item: &Item) -> serde_json::Value {
-    serde_json::to_value(item).unwrap()
 }
 
 /// Any Unicode text, control characters included, of up to `max` characters.
@@ -80,7 +77,7 @@ fn file_ref() -> impl Strategy<Value = FileRef> {
         .prop_map(
             |((id, blob_version, chunk_size, file_key, nonce_prefix), rest)| {
                 let (length, chunk_count, name, media_type) = rest;
-                FileRef {
+                FileRef::from(FileRefParts {
                     file_id: FileId(id),
                     blob_version,
                     chunk_size,
@@ -90,7 +87,7 @@ fn file_ref() -> impl Strategy<Value = FileRef> {
                     chunk_count,
                     name,
                     media_type,
-                }
+                })
             },
         )
 }
@@ -136,7 +133,7 @@ fn item() -> impl Strategy<Value = Item> {
 
 /// A record for a freshly made blob of `length` bytes.
 fn file_ref_for(length: u64) -> FileRef {
-    FileRef {
+    FileRef::from(FileRefParts {
         file_id: FileId::random(),
         blob_version: BLOB_VERSION,
         chunk_size: CHUNK_SIZE,
@@ -146,7 +143,7 @@ fn file_ref_for(length: u64) -> FileRef {
         chunk_count: chunk_count(length),
         name: "file".into(),
         media_type: "application/octet-stream".into(),
-    }
+    })
 }
 
 fn seal_blob(data: &[u8], fref: &FileRef) -> Vec<u8> {
@@ -278,7 +275,9 @@ proptest! {
     fn item_round_trip_any_content(item in item()) {
         let sealed = seal_item(&item, &VAULT_ID, &key()).unwrap();
         let opened = open_item(&sealed, &item.id, &VAULT_ID, &key()).unwrap();
-        prop_assert_eq!(json(&opened), json(&item));
+        // Items have no `PartialEq` (keys must not be compared casually); this compares
+        // every field, as written to disk.
+        prop_assert!(same_item(&opened, &item));
     }
 
     /// Half the cases sit on a chunk edge (1 MiB less 1, exactly, and plus 1), where

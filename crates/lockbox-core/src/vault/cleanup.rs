@@ -121,7 +121,7 @@ pub(super) fn check_folder(folder: &Path) -> Result<()> {
 }
 
 fn delete_blob(files: &Path, id: &FileId) -> Result<()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("cleanup.delete_blob")?;
     remove_file_retry(&blob_in(files, id))
 }

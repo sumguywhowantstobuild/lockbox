@@ -18,7 +18,7 @@ use crate::search::SearchIndex;
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
 use std::fs;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 use std::io::Read;
 use std::io::{self, ErrorKind};
 use std::path::Path;
@@ -238,7 +238,7 @@ impl Vault {
             attachments.push(self.copy_attachment(source, old, cancel, published)?);
         }
         // The failpoint first: `arm_cancel` cancels and lets the step succeed.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("copy.before_commit")?;
         cancel.check()?;
         let now = created_at_now();
@@ -269,11 +269,11 @@ impl Vault {
         let (mut blob, blob_size) = source.source.blob(&old.file_id)?;
         let vault_id = &source.header.vault_id;
         let (reader, mut writer) = io::pipe()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         let panic_in_worker = PANIC_IN_WORKER.with(std::cell::Cell::get);
         std::thread::scope(|scope| {
             let worker = std::thread::Builder::new().spawn_scoped(scope, move || {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-internals"))]
                 {
                     use crate::fsio::failpoint;
                     if panic_in_worker {
@@ -289,9 +289,9 @@ impl Vault {
             let imported = {
                 // `reader` is moved into this block: when the import stops early, it drops, and
                 // a worker blocked on a full pipe gets `BrokenPipe` instead of waiting forever.
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-internals"))]
                 let mut reader = MidStream::new(reader);
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "test-internals")))]
                 let mut reader = reader;
                 let (len, name) = (old.length, old.name.clone());
                 self.import_stream_tracked(&mut reader, len, name, cancel, published)
@@ -315,14 +315,14 @@ impl Vault {
 
 /// Reads from `inner` and, once 1 MiB has passed, reaches the failpoint `copy.mid_stream` (once),
 /// so a test can look at the disk while a copy is half done.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 struct MidStream<R> {
     inner: R,
     passed: u64,
     fired: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 impl<R> MidStream<R> {
     fn new(inner: R) -> Self {
         MidStream {
@@ -333,7 +333,7 @@ impl<R> MidStream<R> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 impl<R: Read> Read for MidStream<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
@@ -346,7 +346,7 @@ impl<R: Read> Read for MidStream<R> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 thread_local! {
     /// Makes the copy worker of this thread's next copies panic (the worker cannot be armed
     /// directly: failpoints are per thread, and the worker is another thread).

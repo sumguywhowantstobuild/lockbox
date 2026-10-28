@@ -60,8 +60,13 @@ jobs:
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --locked --all-targets ${{ matrix.packages }} -- -D warnings
+      # The engine's private modules, failpoints and the integration tests that build on them (`test-internals`).
+      - name: Lint (engine internals)
+        run: cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
       - name: Test
         run: cargo test --locked ${{ matrix.packages }}
+      - name: Test (engine internals)
+        run: cargo test -p lockbox-core --locked --features test-internals
       # The only run where release-only checks (`cfg(not(dev))`, such as refusing the dev server) are compiled in.
       - name: Bridge tests (release configuration)
         if: matrix.label == 'windows'

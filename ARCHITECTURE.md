@@ -7,19 +7,35 @@ are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file ci
 
 The core is a library with no UI. It does all the encryption and holds every key. Its Rust API is internal to the app:
 the place where secrets must not cross is the IPC boundary (the bridge between the Rust core and the UI, built in Plan
-3). *Known gap:* the public API still exposes internal helpers (raw keys, header writes, file-system helpers). Narrowing
-it is the first job of Plan 3; none of it reaches a UI today. The core has Windows-specific file code
-(`fsio/windows.rs`) and a portable fallback (`fsio/portable.rs`), so the same code builds and is tested on Linux CI and
-can be reused for Android later.
+3).
+
+The public surface is what the shell uses, and nothing more:
+
+- from the crate root: `Vault`, `ReadOnlyVault`, `CoreError`, `Result`, `BackupReport`, `BackupSummary`,
+  `CleanupReport`, `CreatedVault`, `Credential`, `PreparedRestore`, `Recovery`, `RestoreOutcome`, `UnlockReport`,
+  `dismiss_restore_journal`, `read_vault_name`, `recover_restore`, `verify_backup`, `version`;
+- `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef}`; `recovery::RecoverySecret`;
+  `generator::{PasswordOptions, PassphraseOptions, generate_password, generate_passphrase}`;
+  `blob::{CancelToken, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::MIN_PASSWORD_CHARS`;
+  `fsio::{atomic_write, remove_file_retry, remove_dir_all_retry}` (the shell's state files and sweeps).
+
+`Item`, `ItemKind` and `FileRef` have no serde: an item is only ever written sealed, through crate-private wire types,
+so no code outside the engine can serialise one to the screen. A `FileRef`'s key, nonce prefix, blob version and chunk
+size are crate-private. Raw keys, header writes and the other low-level modules are private. The `test-internals`
+feature (tests only, never in a shipped build) re-exports them under `lockbox_core::internals` and turns the
+failpoints on, for the integration tests and the shell's tests.
+
+The core has Windows-specific file code (`fsio/windows.rs`) and a portable fallback (`fsio/portable.rs`), so the same
+code builds and is tested on Linux CI and can be reused for Android later.
 
 ## Code map
 
-Everything below is in `crates/lockbox-core/src/`. App code should go through `Vault`; the low-level modules are public
-so the tests can build on them. A "blob" is one stored file, encrypted.
+Everything below is in `crates/lockbox-core/src/`. App code goes through `Vault`; the low-level modules are private
+(tests reach them through `internals`). A "blob" is one stored file, encrypted.
 
 | Module | Its one job |
 |---|---|
-| `lib.rs` | Crate root; re-exports `Vault`, `CoreError`, the reports; denies `unsafe` for the whole crate |
+| `lib.rs` | Crate root; the public surface (re-exports and the facades of `blob`, `fsio`, `item`, `kdf`, `recovery`); `internals`; denies `unsafe` for the whole crate |
 | `error.rs` | The single error type, `CoreError`. Fixed wording; no message contains input, secrets or item content |
 | `ids.rs` | Random 16-byte IDs (vault, item, file), written as 32 lowercase hex characters |
 | `ad.rs` | Encoding of "associated data" (the extra context an encryption is bound to); frozen by test vectors |
@@ -31,7 +47,7 @@ so the tests can build on them. A "blob" is one stored file, encrypted.
 | `aead.rs` | The one XChaCha20-Poly1305 call (encryption that also detects tampering) for whole buffers: key slots and items |
 | `slots.rs` | Key slots: wrap and unwrap the vault key under the password key or the recovery key |
 | `header.rs` | `vault.json` and its `.bak`: strict parse, header MAC (a tamper-evident stamp), writing both copies in order |
-| `item.rs` | The item model (login, note, file, collection) and its sealed file format, padded to 512 bytes |
+| `item.rs` | The item model (login, note, file, collection) and its sealed file format, padded to 512 bytes; its JSON through crate-private wire types |
 | `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); `authenticate_copy` (copies a blob unchanged while checking every chunk); cancel token; output-journal hook |
 | `manifest.rs` | `backup-manifest.json`: the list of everything in a backup (path, size, SHA-256) with a MAC, and its strict parser |
 | `archive.rs` | The backup file (one stored ZIP64 archive): our own strict reader for the few shapes we write, and the writer |
@@ -53,7 +69,8 @@ so the tests can build on them. A "blob" is one stored file, encrypted.
 | `search.rs` | The in-memory search index (returns item IDs only) |
 | `generator.rs` | Password and passphrase generator (EFF word list in `wordlists/`) |
 
-Tests: unit tests sit beside the code. `tests/` uses the public API only: `vault_lifecycle.rs`, `files.rs`,
+Tests: unit tests sit beside the code. `tests/` uses the public API, and `internals` where it must build or read what
+the API keeps private (those tests need `--features test-internals`): `vault_lifecycle.rs`, `files.rs`,
 `properties.rs` (random and corrupted input), and three checks run on purpose, `search.rs` (5 000 items),
 `large_file.rs` (4 GiB) and `backup_large.rs` (a 4 GiB file through backup, test, restore and export). The parsers for
 backup input (the archive, the manifest, the restore journal) have property tests beside their code, because they are

@@ -166,10 +166,10 @@ fn write_pair(dir: &Path, files: [(&str, &VaultHeader); 2]) -> Result<()> {
             what: "vault header",
         });
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("write_headers.before_first")?;
     atomic_write(&dir.join(files[0].0), &bytes[0])?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("write_headers.before_second")?;
     atomic_write(&dir.join(files[1].0), &bytes[1])
 }

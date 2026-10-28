@@ -1,17 +1,19 @@
 //! The large-file check (spec 5.5): a file of 4 GiB + 1 byte goes into a vault and comes
 //! back out byte for byte, while memory stays flat. It writes about 12 GiB and takes
 //! minutes, so it only runs when asked for:
-//! `cargo test --release --locked -p lockbox-core --test large_file -- --ignored --nocapture`
+//! `cargo test --release --locked -p lockbox-core --features test-internals --test large_file --
+//! --ignored --nocapture`
 
 use lockbox_core::Vault;
 use lockbox_core::blob::{CancelToken, NoJournal};
-use lockbox_core::fsio::peak_memory_bytes;
-use lockbox_core::header::{CONTAINER_VERSION, VaultHeader, header_mac, write_headers};
 use lockbox_core::ids::VaultId;
-use lockbox_core::kdf::{Argon2Params, derive_password_key};
-use lockbox_core::recovery::{RecoverySecret, derive_recovery_key};
-use lockbox_core::secret::{Key32, random_bytes};
-use lockbox_core::slots::{SlotType, wrap_slot};
+use lockbox_core::internals::fsio::peak_memory_bytes;
+use lockbox_core::internals::header::{CONTAINER_VERSION, VaultHeader, header_mac, write_headers};
+use lockbox_core::internals::kdf::{Argon2Params, derive_password_key};
+use lockbox_core::internals::recovery::derive_recovery_key;
+use lockbox_core::internals::secret::{Key32, random_bytes};
+use lockbox_core::internals::slots::{SlotType, wrap_slot};
+use lockbox_core::recovery::RecoverySecret;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Write};

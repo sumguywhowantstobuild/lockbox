@@ -83,7 +83,7 @@ fn manifest_hmac(
     for piece in mac_message(m).chunks(MAC_PIECE) {
         cancel.check()?;
         hmac.update(piece);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("manifest.mac_piece")?;
     }
     cancel.check()?;

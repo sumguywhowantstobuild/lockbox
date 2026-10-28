@@ -261,7 +261,7 @@ pub(super) fn remove_staging(staging: &Path) -> Result<()> {
     }
     check_real_name(staging)?;
     check_folder(staging)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("restore.remove_staging")?;
     remove_dir_all_retry(staging)
 }
@@ -350,7 +350,7 @@ pub(super) fn remove_journal_if_owner(
 ) -> Result<()> {
     match read_journal(journal) {
         Ok(Some(j)) if j.staging == staging => {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("journal.before_owner_delete")?;
             remove_file_retry(journal)
         }

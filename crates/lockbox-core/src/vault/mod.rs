@@ -212,7 +212,7 @@ impl Vault {
         fs::create_dir_all(staging.join("files").join("orphaned"))?;
         write_headers(&staging, &header)?;
         fsio::sync_dir(&staging)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         fsio::failpoint::check("create.before_rename")?;
 
         // The final folder must not be hidden (Windows keeps a folder's attributes when it is renamed).

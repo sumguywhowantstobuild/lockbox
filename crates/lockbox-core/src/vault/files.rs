@@ -97,7 +97,7 @@ pub(super) fn export_blob(
         drop(out);
         // Windows keeps a file's attributes when it replaces another: unhide first.
         clear_hidden(&temp)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("export.before_publish")?;
         // Last chance to stop: once the rename starts, publication completes.
         cancel.check()?;
@@ -157,7 +157,7 @@ impl Vault {
             .into_owned();
         let (mut file, len) = open_source(src)?;
         let fref = self.import_stream(&mut file, len, name, cancel)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("import.before_item_write")?;
         // A cancel here leaves the published blob as an orphan (cleanup sets it aside), no item.
         cancel.check()?;
@@ -209,13 +209,13 @@ impl Vault {
             encrypt_stream(src, declared_len, &mut out, vault_id, &fref, cancel)?;
             out.sync_all()?;
             drop(out); // Windows cannot move a file that is still open.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("import.before_publish")?;
             // Last chance to stop: once the rename starts, publication completes.
             cancel.check()?;
             published.push(fref.file_id);
             replace_file(&partial, &self.blob_path(&fref.file_id))?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("import.after_publish")?;
             Ok(())
         })();
@@ -334,7 +334,7 @@ impl Vault {
             marked.purging = true;
             self.commit_item(marked)?;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("purge.after_mark")?;
         let item = self.get_item(id)?;
         // A blob that another item still attaches is not this item's to delete.

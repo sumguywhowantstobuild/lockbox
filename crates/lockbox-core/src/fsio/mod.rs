@@ -131,7 +131,7 @@ pub fn rename_file_no_replace(from: &Path, to: &Path) -> Result<()> {
     retry(|| sys::rename_file_no_replace(from, to)).map_err(taken_or_io)?;
     // An error here is one reported after the file landed, as the portable version can (it
     // links first, then removes the source and syncs the folder).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     failpoint::check("publish.after_link")?;
     Ok(())
 }
@@ -292,7 +292,7 @@ fn write_then_publish(
         file.sync_all()?;
         clear_hidden(&tmp)?;
         drop(file); // Windows cannot replace a file that is still open without delete sharing.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         failpoint::check("atomic_write.before_replace")?;
         publish(&tmp, target)
     })();
@@ -304,8 +304,8 @@ fn write_then_publish(
 
 /// Test hooks that make a named step fail, to prove the order of crash-safe writes.
 /// Thread-local, so parallel tests do not disturb each other.
-#[cfg(test)]
-pub(crate) mod failpoint {
+#[cfg(any(test, feature = "test-internals"))]
+pub mod failpoint {
     use crate::Result;
     use crate::blob::CancelToken;
     use std::cell::RefCell;
@@ -367,8 +367,8 @@ pub(crate) mod failpoint {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod testutil {
+#[cfg(any(test, feature = "test-internals"))]
+pub mod testutil {
     use std::path::{Path, PathBuf};
 
     /// A fresh folder under the system temp dir, deleted on drop.
@@ -387,6 +387,12 @@ pub(crate) mod testutil {
 
         pub fn path(&self) -> &Path {
             &self.0
+        }
+    }
+
+    impl Default for TempDir {
+        fn default() -> Self {
+            Self::new()
         }
     }
 
