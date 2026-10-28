@@ -127,8 +127,9 @@ must give an error with fixed wording, never a panic.
 - **Export** (`export_file`): refuses a destination inside the vault. Decrypts into a hidden temp file beside the
   destination (recorded first through the journal hook, a list that lets a crash cleanup find leftovers), checks the
   whole stream, flushes, unhides, checks for cancel, then publishes over the destination through the journal's gate
-  (`rename_replace_gated`, then `sync_after_replace`; rule 1) (spec 7.2). A failed, cancelled or refused export leaves
-  an existing destination alone.
+  (`rename_replace_gated`, then `sync_after_replace`; rule 1) (spec 7.2). An export that fails, is cancelled or is
+  refused before the rename leaves an existing destination alone. Once the rename has happened the destination holds
+  the new copy; if making that durable then fails, the error is returned as published, durability not confirmed.
 - **Purge** (`purge_item`, trashed items only): rewrite the item with `purging: true`, delete its blobs from `files/`
   and the quarantine (never one another item still attaches; refused while `files/` or `files/orphaned/` is a link),
   then delete the item file. A crash in between is finished at the next unlock. Refused while `items/` is a link,

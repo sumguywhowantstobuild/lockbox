@@ -59,7 +59,9 @@ pub trait OutputJournal {
     /// Writes `temp` down before it exists. An error stops the output there: the temp is never
     /// created, and `clear` is not called for it.
     fn record(&self, temp: &Path) -> Result<()>;
-    /// Forgets `temp`, once it is gone: published, or removed after a failure.
+    /// Forgets `temp`, once it is gone: published, or removed after a failure. It may run while
+    /// a panic is unwinding; a panic from it is then contained, so the first panic reaches the
+    /// caller. Outside unwinding, a panic from it propagates.
     fn clear(&self, temp: &Path);
     /// Runs one attempt of the rename that publishes the output: `attempt` tries the rename
     /// once, without retrying, and nothing else (making the rename durable comes after, outside
@@ -68,7 +70,8 @@ pub trait OutputJournal {
     /// from here included, stops the output. While the rename has not happened (a refusal, an
     /// error, the last attempt failing, a panic), the destination is untouched and the temp is
     /// removed, then cleared (it stays recorded if it cannot be removed). Once the rename has
-    /// happened, the destination is replaced and the temp is cleared; if making that durable
+    /// happened, the destination is replaced and the temp is cleared, even if this call then
+    /// fails or panics, and nothing at the old temp path is removed; if making the rename durable
     /// then fails, the output returns that error: published, durability not confirmed.
     fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
         attempt()

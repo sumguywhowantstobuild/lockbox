@@ -98,13 +98,18 @@ pub(super) fn check_export_space(fref: &FileRef, dest: &Path) -> Result<()> {
 /// It exists only once `journal` has recorded it, and it never stands for a file it did not
 /// create. Until it is published, every way out (an error, a refusal, exhausted retries, a panic
 /// unwinding) drops its file handle, removes it, and clears the record if the removal worked;
-/// otherwise it stays recorded for the launch sweep. Once the rename has happened it owns
-/// nothing.
+/// otherwise it stays recorded for the launch sweep. It is disarmed inside the rename attempt,
+/// the moment the rename succeeds: from then on it removes nothing (whatever is at the old path
+/// now is not the temp), and on every way out it only clears the record, since the temp is gone.
+///
+/// The record is cleared from `Drop`, so a panic from the journal's `clear` is contained there
+/// while another panic is already unwinding (the original panic then reaches the caller instead
+/// of aborting the process). Otherwise a panic from `clear` propagates as usual.
 pub(super) struct OutputTemp<'j> {
     path: PathBuf,
     file: Option<File>,
     journal: &'j dyn OutputJournal,
-    published: bool,
+    renamed: bool,
 }
 
 impl<'j> OutputTemp<'j> {
@@ -133,7 +138,7 @@ impl<'j> OutputTemp<'j> {
                 path,
                 file: Some(file),
                 journal,
-                published: false,
+                renamed: false,
             }),
             Err(error) => {
                 journal.clear(&path);
@@ -163,28 +168,47 @@ impl<'j> OutputTemp<'j> {
     }
 
     /// Renames the finished temp over `dest`, each attempt passing the journal's gate (the waits
-    /// between attempts do not). If the rename does not happen, the temp is cleaned up as on any
-    /// other failure and `dest` is untouched. Once it has happened, the record is cleared and the
-    /// move is made durable; an error from that step means `dest` is published but its
-    /// durability is not confirmed, and nothing is removed.
+    /// between attempts do not). The guard is disarmed inside the attempt, as soon as the rename
+    /// has succeeded. If the rename does not happen, the temp is cleaned up as on any other
+    /// failure and `dest` is untouched. Once it has happened, the record is cleared (by `Drop`,
+    /// also when the journal's `publish` then fails or panics) and the move is made durable; an
+    /// error from that last step means `dest` is published but its durability is not confirmed,
+    /// and nothing is removed.
     pub(super) fn publish(mut self, dest: &Path) -> Result<()> {
         self.close();
         let journal = self.journal;
-        rename_replace_gated(&self.path, dest, |attempt| journal.publish(attempt))?;
-        self.published = true;
-        journal.clear(&self.path);
+        rename_replace_gated(
+            &self.path,
+            dest,
+            |attempt| journal.publish(attempt),
+            || self.renamed = true,
+        )?;
+        drop(self);
         sync_after_replace(dest)
+    }
+
+    /// Clears the record. While a panic is unwinding, a panic from the journal is contained so
+    /// that it does not abort the process; the panic already unwinding is the one the caller gets.
+    fn clear_record(&self) {
+        if std::thread::panicking() {
+            let clear = || self.journal.clear(&self.path);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(clear));
+        } else {
+            self.journal.clear(&self.path);
+        }
     }
 }
 
 impl Drop for OutputTemp<'_> {
     fn drop(&mut self) {
-        if self.published {
+        if self.renamed {
+            // The temp is now the destination; whatever is at its old path is not ours.
+            self.clear_record();
             return;
         }
         self.close();
         if remove_file_retry(&self.path).is_ok() {
-            self.journal.clear(&self.path);
+            self.clear_record();
         }
     }
 }
@@ -1063,18 +1087,27 @@ pub(super) mod tests {
     };
 
     /// A journal for the gate tests: logs each call by name and each recorded and cleared path,
-    /// and asserts in `record` that the temp does not exist yet. On request it fails `record`
-    /// (with [`JOURNAL_FULL`]), refuses `publish` with `Cancelled` without running the attempt,
-    /// or panics in `publish`.
+    /// asserts in `record` that the temp does not exist yet, and notes whether a `publish` call
+    /// is running and how many attempts returned Ok. On request it fails `record` (with
+    /// [`JOURNAL_FULL`]), refuses `publish` with `Cancelled` without running the attempt, panics
+    /// in `publish` before the attempt, runs the attempt and then puts another writer's file at
+    /// the old temp path and panics, or panics in `clear`.
     #[derive(Default)]
     pub(in crate::vault) struct GateJournal {
         pub(in crate::vault) calls: RefCell<Vec<&'static str>>,
         pub(in crate::vault) recorded: RefCell<Vec<PathBuf>>,
         pub(in crate::vault) cleared: RefCell<Vec<PathBuf>>,
+        pub(in crate::vault) inside_publish: std::cell::Cell<bool>,
+        pub(in crate::vault) attempts_ok: std::cell::Cell<usize>,
         pub(in crate::vault) fail_record: bool,
         pub(in crate::vault) refuse_publish: bool,
         pub(in crate::vault) panic_in_publish: bool,
+        pub(in crate::vault) squat_after_attempt: bool,
+        pub(in crate::vault) panic_in_clear: bool,
     }
+
+    /// What a squatting `GateJournal` writes at the old temp path.
+    pub(in crate::vault) const SQUAT: &[u8] = b"another writer's file";
 
     impl OutputJournal for GateJournal {
         fn record(&self, temp: &Path) -> Result<()> {
@@ -1092,6 +1125,9 @@ pub(super) mod tests {
         fn clear(&self, temp: &Path) {
             self.calls.borrow_mut().push("clear");
             self.cleared.borrow_mut().push(temp.to_path_buf());
+            if self.panic_in_clear {
+                panic!("clear panicked");
+            }
         }
         fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
             self.calls.borrow_mut().push("publish");
@@ -1101,7 +1137,18 @@ pub(super) mod tests {
             if self.refuse_publish {
                 return Err(CoreError::Cancelled);
             }
-            attempt()
+            self.inside_publish.set(true);
+            let result = attempt();
+            self.inside_publish.set(false);
+            if result.is_ok() {
+                self.attempts_ok.set(self.attempts_ok.get() + 1);
+            }
+            if self.squat_after_attempt {
+                let temp = self.recorded.borrow().last().cloned().unwrap();
+                fs::write(temp, SQUAT).unwrap();
+                panic!("publish panicked after the rename");
+            }
+            result
         }
     }
 
@@ -1319,6 +1366,91 @@ pub(super) mod tests {
         assert_eq!(*journal.cleared.borrow(), *journal.recorded.borrow());
     }
 
+    /// The panic message `caught` carries (a `&str` or a `String`).
+    fn panic_text(caught: &(dyn std::any::Any + Send)) -> &str {
+        caught
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| caught.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("")
+    }
+
+    /// `publish` panics, and the journal's `clear` panics too while the guard cleans up: the
+    /// second panic is contained (no abort), the caller gets the original one, the temp is
+    /// removed, and the destination is left as it was.
+    #[test]
+    fn clear_panic_while_unwinding_keeps_the_original_panic() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        fs::write(&copy, b"OLD COPY").unwrap();
+        fs::write(&backup, b"OLD BACKUP").unwrap();
+        let cancel = CancelToken::new();
+        let journal = GateJournal {
+            panic_in_publish: true,
+            panic_in_clear: true,
+            ..GateJournal::default()
+        };
+        let export = catch_unwind(AssertUnwindSafe(|| {
+            vault.export_file(&id, &file, &copy, &journal, &cancel)
+        }));
+        assert_eq!(panic_text(&*export.unwrap_err()), "publish panicked");
+        let made = catch_unwind(AssertUnwindSafe(|| {
+            vault.backup(&backup, &journal, &cancel)
+        }));
+        assert_eq!(panic_text(&*made.unwrap_err()), "publish panicked");
+        assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
+        assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
+        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        let once = ["record", "publish", "clear"];
+        assert_eq!(*journal.calls.borrow(), [once, once].concat());
+    }
+
+    /// The rename succeeds, then `publish` puts another writer's file at the old temp path and
+    /// panics: the guard was disarmed at the rename, so that file survives; the destination
+    /// holds the new output; and the record is cleared, as on the success path (the temp itself
+    /// is gone, so the journal must not keep pointing a crash sweep at that path).
+    #[test]
+    fn publish_panic_after_the_rename_removes_nothing() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        fs::write(&copy, b"OLD COPY").unwrap();
+        fs::write(&backup, b"OLD BACKUP").unwrap();
+        let cancel = CancelToken::new();
+        let journal = GateJournal {
+            squat_after_attempt: true,
+            ..GateJournal::default()
+        };
+        let export = catch_unwind(AssertUnwindSafe(|| {
+            vault.export_file(&id, &file, &copy, &journal, &cancel)
+        }));
+        assert_eq!(
+            panic_text(&*export.unwrap_err()),
+            "publish panicked after the rename"
+        );
+        let made = catch_unwind(AssertUnwindSafe(|| {
+            vault.backup(&backup, &journal, &cancel)
+        }));
+        assert!(made.is_err());
+        assert_eq!(fs::read(&copy).unwrap(), b"hello", "the copy is published");
+        assert!(
+            crate::archive::BackupArchive::open(&backup, &cancel).is_ok(),
+            "the backup is published"
+        );
+        let recorded = journal.recorded.borrow().clone();
+        for temp in &recorded {
+            assert_eq!(fs::read(temp).unwrap(), SQUAT, "the other file survives");
+        }
+        let once = ["record", "publish", "clear"];
+        assert_eq!(*journal.calls.borrow(), [once, once].concat());
+        assert_eq!(*journal.cleared.borrow(), recorded);
+    }
+
     /// The rename went through but making it durable failed (the folder sync, a failpoint
     /// here): the error is returned, the destination holds the new content, the temp is gone
     /// and cleared, and no cleanup ran on the destination.
@@ -1332,11 +1464,31 @@ pub(super) mod tests {
         fs::write(&copy, b"OLD COPY").unwrap();
         fs::write(&backup, b"OLD BACKUP").unwrap();
         let cancel = CancelToken::new();
-        let journal = GateJournal::default();
+        let journal = std::rc::Rc::new(GateJournal::default());
+        // The durability step runs after `publish` has returned from an attempt that worked,
+        // never inside the attempt.
+        let (j, syncs) = (
+            std::rc::Rc::clone(&journal),
+            std::rc::Rc::new(std::cell::Cell::new(0)),
+        );
+        let seen = std::rc::Rc::clone(&syncs);
+        failpoint::observe(
+            "publish.after_rename",
+            Box::new(move || {
+                assert!(!j.inside_publish.get(), "the sync ran inside publish");
+                seen.set(seen.get() + 1);
+                assert_eq!(
+                    j.attempts_ok.get(),
+                    seen.get(),
+                    "no attempt returned Ok yet"
+                );
+            }),
+        );
         failpoint::arm("publish.after_rename");
-        let exported = vault.export_file(&id, &file, &copy, &journal, &cancel);
-        let made = vault.backup(&backup, &journal, &cancel);
+        let exported = vault.export_file(&id, &file, &copy, &*journal, &cancel);
+        let made = vault.backup(&backup, &*journal, &cancel);
         failpoint::disarm_all();
+        assert_eq!(syncs.get(), 2, "the durability step ran once per output");
         assert!(matches!(exported, Err(CoreError::Io(_))), "{exported:?}");
         assert!(matches!(made, Err(CoreError::Io(_))), "{made:?}");
         assert_eq!(fs::read(&copy).unwrap(), b"hello", "the copy is published");

@@ -137,14 +137,23 @@ pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
 
 /// The move half of [`replace_file`], for publishing an output: each attempt of the move runs
 /// through `gate` (the output journal's `publish`), and the waits between attempts come outside
-/// it. A gate refusal or a non-transient error stops the retries and is returned; `to` is then
-/// untouched. On success the move is done but not yet durable: call [`sync_after_replace`].
+/// it. `renamed` runs inside the attempt the moment the move has succeeded, before control
+/// returns to the gate, so the caller knows the move happened even if the gate then fails or
+/// panics. A gate refusal or a non-transient error stops the retries and is returned; if
+/// `renamed` has not run, `to` is untouched. On success the move is done but not yet durable:
+/// call [`sync_after_replace`].
 pub(crate) fn rename_replace_gated(
     from: &Path,
     to: &Path,
     gate: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()>,
+    mut renamed: impl FnMut(),
 ) -> Result<()> {
-    retry_gated(|| sys::rename_replace(from, to), gate, std::thread::sleep)
+    let attempt = || -> io::Result<()> {
+        sys::rename_replace(from, to)?;
+        renamed();
+        Ok(())
+    };
+    retry_gated(attempt, gate, std::thread::sleep)
 }
 
 /// The durability half of [`replace_file`], after a successful [`rename_replace_gated`] to
