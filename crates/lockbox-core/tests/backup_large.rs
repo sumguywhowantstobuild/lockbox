@@ -12,7 +12,7 @@ use lockbox_core::internals::kdf::{Argon2Params, derive_password_key};
 use lockbox_core::internals::recovery::{self, derive_recovery_key};
 use lockbox_core::internals::secret::{Key32, random_bytes};
 use lockbox_core::internals::slots::{SlotType, wrap_slot};
-use lockbox_core::{Credential, PreparedRestore, Vault, verify_backup};
+use lockbox_core::{Credential, PreparedRestore, RestoreDestination, Vault, verify_backup};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -176,6 +176,7 @@ fn backup_restore_over_4_gib() {
         &backup,
         &restored,
         Credential::Password(PASSWORD),
+        RestoreDestination::SameVault,
         &journal,
         &cancel,
     )

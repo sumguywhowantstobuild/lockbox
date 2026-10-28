@@ -5,6 +5,7 @@ use crate::fsio::{atomic_write, read_retry};
 use crate::header::{
     HEADER_BACKUP, HEADER_FILE, MAX_HEADER_BYTES, VaultHeader, parse_header, verify_header_mac,
 };
+use crate::ids::VaultId;
 use crate::kdf::{Argon2Params, derive_password_key};
 use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
@@ -275,16 +276,28 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
     Ok((vault, report))
 }
 
+/// The header in `dir`, read without the key and so not authenticated: `vault.json`, else
+/// `.bak` as unlocking falls back; if both fail, the `vault.json` error is returned.
+fn read_unverified_header(dir: &Path) -> Result<VaultHeader> {
+    match load(&dir.join(HEADER_FILE)) {
+        Ok(copy) => Ok(copy.header),
+        Err(e) if may_try_backup(&e) => load(&dir.join(HEADER_BACKUP)).map(|c| c.header).or(Err(e)),
+        Err(e) => Err(e),
+    }
+}
+
 /// The vault's name, read without unlocking (for the list of vaults). Falls back to
 /// `.bak` like unlocking does; if both fail, the `vault.json` error is returned.
 pub fn read_vault_name(dir: &Path) -> Result<String> {
-    match load(&dir.join(HEADER_FILE)) {
-        Ok(copy) => Ok(copy.header.name),
-        Err(e) if may_try_backup(&e) => load(&dir.join(HEADER_BACKUP))
-            .map(|c| c.header.name)
-            .or(Err(e)),
-        Err(e) => Err(e),
-    }
+    read_unverified_header(dir).map(|h| h.name)
+}
+
+/// The vault's ID, read without unlocking, with the same `.bak` fallback as
+/// [`read_vault_name`]. Like the name it is not authenticated (that needs the key): it is for
+/// avoiding mistakes, such as listing or deleting the wrong pre-restore folder, not for
+/// deciding what someone who can write to the disk may do.
+pub fn read_vault_id(dir: &Path) -> Result<VaultId> {
+    read_unverified_header(dir).map(|h| h.vault_id)
 }
 
 #[cfg(test)]
@@ -323,6 +336,21 @@ mod tests {
                 Err(CoreError::UnsupportedVersion)
             ));
         }
+    }
+
+    /// The ID is read with no credential and no lock, even while the vault is open, and falls
+    /// back to `.bak` as the name does.
+    #[test]
+    fn read_vault_id_without_unlocking() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", "correct horse battery").unwrap();
+        let (dir, id) = (created.vault.dir().to_path_buf(), created.vault.id());
+        assert_eq!(read_vault_id(&dir).unwrap(), id);
+        drop(created.vault);
+        std::fs::write(dir.join(HEADER_FILE), b"damaged in place").unwrap();
+        assert_eq!(read_vault_id(&dir).unwrap(), id);
+        std::fs::write(dir.join(HEADER_BACKUP), b"damaged in place").unwrap();
+        assert!(read_vault_id(&dir).is_err());
     }
 
     #[test]

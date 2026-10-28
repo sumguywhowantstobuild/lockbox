@@ -1,11 +1,28 @@
 //! Vault names, folder names and the creation time. Pure functions, no file access.
 
+use super::journal::is_pre_restore_name;
 use crate::ids::VaultId;
 use crate::{CoreError, Result};
+use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Longest vault name accepted, in Unicode scalar values.
 const MAX_NAME_CHARS: usize = 200;
+/// Longest folder name the user may choose, in UTF-16 code units: what Windows counts in a
+/// path component, so a name it would refuse is refused before anything is written.
+const MAX_CHOSEN_FOLDER_UNITS: usize = 200;
+/// Characters Windows does not allow in a file or folder name.
+const FORBIDDEN_IN_NAME: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+/// Windows device names, matched in upper case. A file or folder of one of these names, with
+/// or without an extension, opens the device instead.
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM0", "COM1", "COM2", "COM3", "COM4",
+    "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3",
+    "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
+];
+const BAD_FOLDER_NAME: CoreError = CoreError::InvalidInput {
+    what: "folder name",
+};
 /// Longest folder name produced: Windows tools cope badly with long paths.
 const MAX_FOLDER_CHARS: usize = 64;
 /// Characters of the vault ID appended to the folder name.
@@ -32,6 +49,40 @@ pub(crate) fn folder_name(name: &str, id: &VaultId) -> String {
     // Windows silently drops trailing spaces from folder names.
     let base = base.trim_end_matches(' ');
     format!("{}{suffix}", if base.is_empty() { "Vault" } else { base })
+}
+
+/// Whether `stem`, a name's part before its first `.`, is a Windows device name (`CON`, `PRN`,
+/// `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM0`–`COM9`, `LPT0`–`LPT9`, and `COM¹`–`COM³`,
+/// `LPT¹`–`LPT³`), in any letter case. Spaces after it are dropped before the match, so
+/// `NUL .txt` counts too: refusing a name too many costs nothing. The one copy of the list:
+/// the folder-name check here and the shell's file names use it.
+pub fn is_reserved_device_name(stem: &str) -> bool {
+    let stem = stem.trim_end_matches(' ').to_uppercase();
+    RESERVED_DEVICE_NAMES.contains(&stem.as_str())
+}
+
+/// A folder name the user chose for a restore (spec 6.8 step 3), refused as "folder name"
+/// unless it is one plain path component that Windows keeps exactly as given and that no
+/// restore treats as its own: not empty; at most 200 UTF-16 units; not starting with `.` (so
+/// never `.`, `..`, hidden or a staging name); no `\ / : * ? " < > |` or control character; no
+/// trailing dot or space (Windows drops them); no device name before the first `.`; and no
+/// `.before-restore`, in any case (a pre-restore copy's name).
+pub(crate) fn check_folder_name(name: &str) -> Result<()> {
+    let one_component = matches!(
+        Path::new(name).components().collect::<Vec<_>>()[..],
+        [Component::Normal(n)] if n == name
+    );
+    let stem = name.split('.').next().unwrap_or(name);
+    let ok = one_component
+        && name.encode_utf16().count() <= MAX_CHOSEN_FOLDER_UNITS
+        && !name.starts_with('.')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || FORBIDDEN_IN_NAME.contains(&c))
+        && !name.ends_with(['.', ' '])
+        && !is_reserved_device_name(stem)
+        && !is_pre_restore_name(name);
+    if ok { Ok(()) } else { Err(BAD_FOLDER_NAME) }
 }
 
 /// Seconds since the Unix epoch.

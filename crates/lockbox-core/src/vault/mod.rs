@@ -34,13 +34,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use backup::BackupReport;
+pub use journal::{JournalStep, JournalView, inspect_restore_journal};
 pub(crate) use naming::folder_name;
+pub use naming::is_reserved_device_name;
 pub use readonly::ReadOnlyVault;
 pub use restore::{
-    PreparedRestore, Recovery, RestoreOutcome, dismiss_restore_journal, recover_restore,
+    PreparedRestore, Recovery, RestoreDestination, RestoreOutcome, dismiss_restore_journal,
+    recover_restore,
 };
 pub use source::{BackupSummary, verify_backup};
-pub use unlock::{Credential, read_vault_name};
+pub use unlock::{Credential, read_vault_id, read_vault_name};
 
 /// How long one password check should take on this machine.
 const KDF_TARGET: Duration = Duration::from_secs(1);

@@ -12,8 +12,9 @@ the place where secrets must not cross is the IPC boundary (the bridge between t
 The public surface is what the shell uses, and nothing more:
 
 - from the crate root: `Vault`, `ReadOnlyVault`, `CoreError`, `Result`, `BackupReport`, `BackupSummary`,
-  `CleanupReport`, `CreatedVault`, `Credential`, `PreparedRestore`, `Recovery`, `RestoreOutcome`, `UnlockReport`,
-  `dismiss_restore_journal`, `read_vault_name`, `recover_restore`, `verify_backup`, `version`;
+  `CleanupReport`, `CreatedVault`, `Credential`, `JournalStep`, `JournalView`, `PreparedRestore`, `Recovery`,
+  `RestoreDestination`, `RestoreOutcome`, `UnlockReport`, `dismiss_restore_journal`, `inspect_restore_journal`,
+  `is_reserved_device_name`, `read_vault_id`, `read_vault_name`, `recover_restore`, `verify_backup`, `version`;
 - `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef}`; `recovery::RecoverySecret`;
   `generator::{PasswordOptions, PassphraseOptions, generate_password, generate_passphrase}`;
   `blob::{CancelToken, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::MIN_PASSWORD_CHARS`;
@@ -131,6 +132,28 @@ must give an error with fixed wording, never a panic.
   and the quarantine (never one another item still attaches; refused while `files/` or `files/orphaned/` is a link),
   then delete the item file. A crash in between is finished at the next unlock. *Known gap:* deleting the item file
   does not yet check that `items/` is a real folder; a follow-up adds that check.
+
+### Restore a backup (`PreparedRestore::prepare`, `commit`; spec 6.8)
+1. `prepare` refuses while anything is at the journal path, then opens the archive with its own parser, unlocks it
+   with the password or recovery key, and checks the manifest, every header and item hash, the header MAC, that every
+   blob belongs to an item, and the free space. Nothing is written yet.
+2. The destination in the chosen parent folder (`RestoreDestination`):
+   - `SameVault`: the one real folder there whose header (either copy, read without the key) has the backup's vault
+     ID is replaced (several are refused); without one, a new folder `<name>-<short id>`.
+   - `NewFolder(name)`: for a vault folder whose two header copies are unreadable. Refused while a readable copy of
+     the vault is in the parent ("vault already here"), for a name `check_folder_name` refuses ("folder name"), and,
+     like every new folder, when anything at all is at that name ("destination exists"). The damaged folder is never
+     touched.
+3. Only then: the journal (`extracting`) under its lock, the hidden `.restore-<hex>` staging folder beside the
+   target, and the extraction, each entry hashed as it is written and again as it is read back. Any error removes the
+   staging folder, then the journal.
+4. `commit` takes the replaced vault's lock (`VaultInUse` if it is open), picks a free `.before-restore` name,
+   re-validates the journal under its lock, writes `swapping`, renames the old vault aside, renames the staging folder
+   into place with a rename that never replaces (so a name taken after step 2 stops the swap), and removes the
+   journal.
+5. At launch, `recover_restore` finishes or undoes a swap that was cut short. `inspect_restore_journal` reads the
+   same journal through the same read-and-validate code without acting on it (only `<journal>.lock` may be created),
+   so the interface can show where the folders are and whether their drive is there.
 
 ### Passwords and the recovery key
 Every header write first asks a private guard on the open vault. It refuses (with a fixed message) while a header

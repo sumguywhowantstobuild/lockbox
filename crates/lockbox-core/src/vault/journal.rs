@@ -40,11 +40,32 @@ pub(super) struct RestoreJournal {
     pub before_restore: Option<PathBuf>,
 }
 
+/// How far a restore got: the journal's `step`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum JournalStep {
+pub enum JournalStep {
+    /// The backup was being copied into the staging folder; nothing had moved.
     Extracting,
+    /// The swap had begun: the old vault may be at `before_restore`, the restored one at the
+    /// target or still in the staging folder.
     Swapping,
+}
+
+/// What a restore journal says, read without acting on it ([`inspect_restore_journal`]), so the
+/// interface can tell the user where things are. The paths are the user's own folders: shown
+/// to them, never put in error text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalView {
+    pub step: JournalStep,
+    /// The hidden `.restore-<hex>` folder the backup was extracted into.
+    pub staging: PathBuf,
+    /// The folder the restored vault takes.
+    pub target: PathBuf,
+    /// Where the vault that was there went, once the swap had begun.
+    pub before_restore: Option<PathBuf>,
+    /// Whether the folder that holds all three is there (it is not while its drive is
+    /// unplugged; recovery then says `RestorePending`).
+    pub parent_present: bool,
 }
 
 /// A fresh staging folder path `.restore-<32 lowercase hex>` in `parent`; nothing is created.
@@ -236,6 +257,35 @@ pub(super) fn read_journal(path: &Path) -> Result<Option<RestoreJournal>> {
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|_| DAMAGED)
+}
+
+/// The journal at `path`, read under the held lock and through the whole of spec 6.8 validation
+/// ([`read_journal`], then [`validate_journal_on_disk`]): what recovery acts on and what
+/// [`inspect_restore_journal`] shows. A missing journal is `None`. Reads only.
+pub(super) fn read_checked_journal(
+    _lock: &JournalLock,
+    path: &Path,
+) -> Result<Option<RestoreJournal>> {
+    let Some(j) = read_journal(path)? else {
+        return Ok(None);
+    };
+    validate_journal_on_disk(&j)?;
+    Ok(Some(j))
+}
+
+/// Reads the restore journal at `journal` without acting on it: `None` when there is none.
+/// It fails exactly as startup recovery does on the same file (too large, an unknown version,
+/// or `Damaged { what: "restore journal" }`, links included) and touches no folder. It reads
+/// under the journal lock, so it writes nothing but `<journal>.lock`, created if missing.
+pub fn inspect_restore_journal(journal: &Path) -> Result<Option<JournalView>> {
+    let lock = lock_journal(journal)?;
+    Ok(read_checked_journal(&lock, journal)?.map(|j| JournalView {
+        parent_present: check_staging_parent(&j.staging).is_ok(),
+        step: j.step,
+        staging: j.staging,
+        target: j.target,
+        before_restore: j.before_restore,
+    }))
 }
 
 /// Refused, as `Damaged`, unless the existing entry at `path` is listed in its parent under
@@ -890,6 +940,173 @@ mod tests {
         fs::write(&file, b"x").unwrap();
         assert!(remove_staging_then_journal(&file, &journal).is_err());
         assert!(file.exists() && journal.exists());
+    }
+
+    // ---- Plan 3 Task 5: reading the journal without acting on it.
+
+    use crate::vault::restore::tests::{Tree, tree};
+    use crate::vault::restore::{Recovery, recover_restore};
+
+    /// A journal's folder, and the journal path inside it.
+    fn journal_place() -> (TempDir, PathBuf) {
+        let dir = TempDir::new();
+        let path = dir.path().join("restore-journal.json");
+        (dir, path)
+    }
+
+    /// Everything under `dir` except the journal's lock file, the one thing inspecting may write.
+    fn without_lock(dir: &Path) -> Tree {
+        tree(dir)
+            .into_iter()
+            .filter(|(name, _)| name != "restore-journal.json.lock")
+            .collect()
+    }
+
+    #[track_caller]
+    fn assert_same_error<T: std::fmt::Debug, U: std::fmt::Debug>(
+        inspected: Result<T>,
+        recovered: Result<U>,
+    ) {
+        let (inspected, recovered) = (inspected.unwrap_err(), recovered.unwrap_err());
+        assert_eq!(format!("{inspected:?}"), format!("{recovered:?}"));
+    }
+
+    /// A state recovery acts on (B there, T missing: it would move B back and remove S). The
+    /// view says what the journal says, and nothing changes but the lock file, whether it was
+    /// there before or not; recovery, run afterwards, still finds everything to do.
+    #[test]
+    fn inspect_reads_without_acting() {
+        let parent = TempDir::new();
+        let (journal_dir, path) = journal_place();
+        let j = journal(parent.path());
+        let b = j.before_restore.clone().unwrap();
+        for (dir, marker) in [(&j.staging, "S"), (&b, "B")] {
+            fs::create_dir(dir).unwrap();
+            fs::write(dir.join("marker"), marker).unwrap();
+        }
+        write_journal(&path, &j).unwrap();
+        let before = (tree(parent.path()), tree(journal_dir.path()));
+
+        for round in ["no lock file yet", "lock file there"] {
+            let view = inspect_restore_journal(&path).unwrap().unwrap();
+            let expected = JournalView {
+                step: JournalStep::Swapping,
+                staging: j.staging.clone(),
+                target: j.target.clone(),
+                before_restore: Some(b.clone()),
+                parent_present: true,
+            };
+            assert_eq!(view, expected, "{round}");
+            let after = (tree(parent.path()), without_lock(journal_dir.path()));
+            assert!(after == before, "{round}: a file or folder changed");
+            assert!(!lock_is_held(&path), "{round}: the lock was kept");
+        }
+        assert_eq!(
+            names(journal_dir.path()),
+            ["restore-journal.json", "restore-journal.json.lock"]
+        );
+        assert_eq!(recover_restore(&path).unwrap(), Recovery::RolledBack);
+        assert_eq!(fs::read_to_string(j.target.join("marker")).unwrap(), "B");
+    }
+
+    /// The folder that holds S, T and B is gone (its drive is not plugged in): the view says
+    /// so, as recovery's `RestorePending` does, and nothing is created there.
+    #[test]
+    fn inspect_reports_missing_parent() {
+        let parent = TempDir::new();
+        let (_journal_dir, path) = journal_place();
+        let gone = parent.path().join("unplugged");
+        let j = journal(&gone);
+        write_journal(&path, &j).unwrap();
+        let bytes = fs::read(&path).unwrap();
+
+        let view = inspect_restore_journal(&path).unwrap().unwrap();
+        assert!(!view.parent_present);
+        assert_eq!(
+            (view.step, view.staging, view.target, view.before_restore),
+            (
+                j.step,
+                j.staging.clone(),
+                j.target.clone(),
+                j.before_restore.clone()
+            )
+        );
+        assert!(matches!(
+            recover_restore(&path),
+            Err(CoreError::RestorePending)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert!(!gone.exists(), "the folder was created");
+
+        // Plugged in again.
+        fs::create_dir(&gone).unwrap();
+        assert!(
+            inspect_restore_journal(&path)
+                .unwrap()
+                .unwrap()
+                .parent_present
+        );
+    }
+
+    #[test]
+    fn inspect_no_journal_is_none() {
+        let (journal_dir, path) = journal_place();
+        assert_eq!(inspect_restore_journal(&path).unwrap(), None);
+        assert_eq!(names(journal_dir.path()), ["restore-journal.json.lock"]);
+        assert!(!lock_is_held(&path));
+    }
+
+    /// A journal recovery refuses is refused the same way here, and kept byte for byte: bad
+    /// JSON, a `..` path, a staging folder that is a link, and (not `Damaged`) a newer version
+    /// and an oversized file.
+    #[test]
+    fn inspect_damaged_journal_is_damaged() {
+        let parent = TempDir::new();
+        let odd = parent.path().join("sub").join("..");
+        let dot_dot = RestoreJournal {
+            staging: odd.join(format!("{STAGING_PREFIX}{}", "ab".repeat(16))),
+            target: odd.join("Family-abababab"),
+            before_restore: Some(odd.join("Family-abababab.before-restore")),
+            ..journal(parent.path())
+        };
+        let mut newer = serde_json::to_value(journal(parent.path())).unwrap();
+        newer["version"] = 2.into();
+        let outside = TempDir::new();
+        let linked = journal(parent.path());
+        make_dir_link(&linked.staging, outside.path());
+        let cases: [(&str, Vec<u8>, bool); 5] = [
+            ("bad json", b"{ not json".to_vec(), true),
+            ("a .. path", journal_bytes(&dot_dot).unwrap(), true),
+            ("a staging link", journal_bytes(&linked).unwrap(), true),
+            ("newer version", serde_json::to_vec(&newer).unwrap(), false),
+            ("too large", vec![b' '; MAX_JOURNAL_BYTES + 1], false),
+        ];
+        for (what, bytes, is_damaged) in cases {
+            let (_journal_dir, path) = journal_place();
+            fs::write(&path, &bytes).unwrap();
+            let before = tree(parent.path());
+
+            let inspected = inspect_restore_journal(&path);
+            if is_damaged {
+                assert!(
+                    matches!(
+                        inspected,
+                        Err(CoreError::Damaged {
+                            what: "restore journal"
+                        })
+                    ),
+                    "{what}: {inspected:?}"
+                );
+            }
+            assert_same_error(inspected, recover_restore(&path));
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                bytes,
+                "{what}: the journal changed"
+            );
+            assert!(tree(parent.path()) == before, "{what}: a folder changed");
+        }
+        assert!(fs::symlink_metadata(&linked.staging).is_ok());
     }
 
     /// Property tests (spec 5.4): the journal is read back from the user's profile, where it

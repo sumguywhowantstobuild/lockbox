@@ -314,8 +314,15 @@ Lockbox defends.
   it has to work without the drive, and the folder holds nothing the backup itself does not.
 - A vault whose two header files are both unreadable cannot be restored in place. Restore cannot tell that its folder
   is that vault, so it makes a new folder; while the damaged one still has the name Lockbox gave it, that name is
-  taken, and the restore stops ("destination exists"). Restore into another folder instead. *Parked for Plan 3,*
-  which decides what the restore dialog offers here.
+  taken, and the restore stops ("destination exists") before writing anything. The restore dialog then offers a new
+  folder you name, beside the damaged one (for example `Family-1a2b3c4d (restored)`): the backup is restored there, and
+  the damaged folder is left exactly as it was, for you to delete once you no longer need it. A new folder is refused,
+  again before anything is written, while a readable copy of the same vault is in that folder ("vault already here":
+  two working copies would make every later restore there refuse "several copies"), when its name is not one plain
+  Windows folder name (at most 200 characters as Windows counts them, no `\ / : * ? " < > |`, no leading dot, no
+  trailing dot or space, no device name such as `CON` or `NUL.txt`, and no `.before-restore`), and when anything at
+  all already has that name, in any letter case. *Accepted:* restore never replaces a folder it cannot identify, since
+  that folder may hold data the backup does not.
 - An item whose attached file the backup left out (missing or damaged when the backup was made) cannot be copied out
   of that backup into another vault: the copy stops at that file ("file missing"). Restore the backup instead; the
   item comes back without that one file ("test a backup" counts such files). *Parked for Plan 3,* which decides
