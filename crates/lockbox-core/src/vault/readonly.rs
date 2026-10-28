@@ -3,7 +3,7 @@
 //! backup): exports write only a decrypted copy, to a place the caller picks. Opening takes no
 //! lock and repairs, cleans and creates nothing, so a folder is exactly as it was afterwards.
 
-use super::files::{check_export_space, export_blob, refuse_inside};
+use super::files::{check_export_space, export_blob, refuse_inside, refuse_vault_folder};
 use super::items::BEING_DELETED;
 use super::naming::created_at_now;
 use super::source::{FILE_MISSING, HEADER_MAC, VaultSource, unlock_source};
@@ -11,44 +11,20 @@ use super::{Credential, Vault};
 use crate::archive::BackupArchive;
 use crate::blob::{CancelToken, OutputJournal, decrypt_stream};
 use crate::fsio::parent_dir;
-use crate::header::{HEADER_BACKUP, HEADER_FILE, VaultHeader, verify_header_mac};
+use crate::header::{VaultHeader, verify_header_mac};
 use crate::ids::{FileId, ItemId, VaultId};
 use crate::item::{FileRef, Item, ItemKind};
 use crate::search::SearchIndex;
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
-use std::fs;
+use std::io;
 #[cfg(any(test, feature = "test-internals"))]
 use std::io::Read;
-use std::io::{self, ErrorKind};
 use std::path::Path;
 
 const DESTINATION_IS_BACKUP: CoreError = CoreError::InvalidInput {
     what: "destination is the backup",
 };
-const DESTINATION_IN_VAULT: CoreError = CoreError::InvalidInput {
-    what: "destination in a vault folder",
-};
-
-/// Refuses `dest` when its folder, or any folder above it, holds `vault.json` or
-/// `vault.json.bak`: that is a vault folder (a live vault, a pre-restore copy, a staging folder)
-/// or a folder inside one, where the decrypted copy could replace one of that vault's files.
-/// The folder is resolved first (links, junctions, `..`, short names), and each name is looked
-/// up with `symlink_metadata`, so a link named `vault.json` counts too.
-pub(super) fn refuse_vault_folder(dest: &Path) -> Result<()> {
-    let folder = fs::canonicalize(parent_dir(dest))?;
-    for dir in folder.ancestors() {
-        for name in [HEADER_FILE, HEADER_BACKUP] {
-            match fs::symlink_metadata(dir.join(name)) {
-                Ok(_) => return Err(DESTINATION_IN_VAULT),
-                Err(e) if e.kind() == ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
-    Ok(())
-}
-
 /// A vault that can only be read: its items, a search over them, and decrypted copies of its
 /// files. Damaged item files are listed, not hidden and not fatal.
 pub struct ReadOnlyVault {
@@ -459,8 +435,9 @@ mod tests {
     }
 
     impl OutputJournal for Recorder {
-        fn record(&self, temp: &Path) {
+        fn record(&self, temp: &Path) -> Result<()> {
             self.recorded.borrow_mut().push(temp.to_path_buf());
+            Ok(())
         }
         fn clear(&self, temp: &Path) {
             self.cleared.borrow_mut().push(temp.to_path_buf());
@@ -1997,5 +1974,69 @@ mod tests {
         let new_file = live.get_item(&new).unwrap().attachments[0].file_id;
         assert_ne!(new_file, file);
         assert_eq!(saved(&live, &f.out(), &new, &new_file), data);
+    }
+
+    /// Every kind of output publishes through the journal's gate: a vault's export, a backup,
+    /// and a read-only vault's export from a backup and from a folder.
+    #[test]
+    fn publish_runs_for_each_kind() {
+        use crate::vault::files::tests::GateJournal;
+        let mut f = Fixture::new();
+        let (item, file) = f.file_item(b"hello");
+        let cancel = CancelToken::new();
+        let journal = GateJournal::default();
+        let out = f.out();
+        f.vault
+            .export_file(&item, &file, &out.join("live.bin"), &journal, &cancel)
+            .unwrap();
+        let backup = out.join("a.lockbox-backup");
+        f.vault.backup(&backup, &journal, &cancel).unwrap();
+        let folder = f.parent.path().join("Family.before-restore");
+        copy_folder(f.vault.dir(), &folder);
+        for (ro, name) in [
+            (open_backup(&backup).unwrap(), "from-backup.bin"),
+            (open_folder(&folder).unwrap(), "from-folder.bin"),
+        ] {
+            ro.export_file(&item, &file, &out.join(name), &journal, &cancel)
+                .unwrap();
+            assert_eq!(fs::read(out.join(name)).unwrap(), b"hello");
+        }
+        let once = ["record", "publish", "clear"];
+        assert_eq!(*journal.calls.borrow(), [once; 4].concat());
+    }
+
+    /// A folder source whose `files/` is a link (to a folder holding the real blob) is refused
+    /// by the read-only export as by the check and the copy, before anything is created; a
+    /// missing `files/` is still a missing file.
+    #[test]
+    fn export_from_linked_files_folder_refused() {
+        use crate::vault::files::tests::{GateJournal, remove_dir_link};
+        let mut f = Fixture::new();
+        let (item, file) = f.file_item(b"hello");
+        let folder = f.parent.path().join("Family.before-restore");
+        copy_folder(f.vault.dir(), &folder);
+        let real = f.parent.path().join("real-files");
+        fs::rename(folder.join("files"), &real).unwrap();
+        make_dir_link(&folder.join("files"), &real);
+        let ro = open_folder(&folder).unwrap();
+        let journal = GateJournal::default();
+        let dest = f.out().join("a.bin");
+        let cancel = CancelToken::new();
+        not_plain(ro.export_file(&item, &file, &dest, &journal, &cancel));
+        assert!(names(&f.out()).is_empty(), "{:?}", names(&f.out()));
+        assert!(journal.calls.borrow().is_empty());
+
+        remove_dir_link(&folder.join("files"));
+        let missing = ro.export_file(&item, &file, &dest, &journal, &cancel);
+        assert!(
+            matches!(
+                missing,
+                Err(CoreError::Damaged {
+                    what: "file missing"
+                })
+            ),
+            "{missing:?}"
+        );
+        assert!(names(&f.out()).is_empty());
     }
 }

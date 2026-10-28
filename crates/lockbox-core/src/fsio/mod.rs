@@ -73,14 +73,38 @@ pub fn check_space(needed: u64, file_bytes: u64, v: &VolumeInfo) -> Result<()> {
 /// Runs `op`, retrying while another program briefly holds the file (Windows errors
 /// 32 sharing violation and 5 access denied: antivirus, indexer, backup tools).
 /// Waits 20 ms, doubling, at most 1 s each, for up to 10 attempts. `sleep` is injected for tests.
-fn retry_with<T>(
-    mut op: impl FnMut() -> io::Result<T>,
+fn retry_with<T>(op: impl FnMut() -> io::Result<T>, sleep: impl FnMut(Duration)) -> io::Result<T> {
+    backoff(op, is_transient, sleep)
+}
+
+/// [`retry_with`] where each attempt runs inside `gate`, which gets `op` as one single attempt
+/// and may refuse it. The waits come between gate calls, never inside one. Whatever the gate
+/// returns is retried only if it is a transient I/O error (its own or the attempt's), so any
+/// other refusal stops the retries.
+fn retry_gated(
+    mut op: impl FnMut() -> io::Result<()>,
+    mut gate: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()>,
+    sleep: impl FnMut(Duration),
+) -> Result<()> {
+    backoff(
+        || gate(&mut || -> Result<()> { Ok(op()?) }),
+        |e| matches!(e, CoreError::Io(e) if is_transient(e)),
+        sleep,
+    )
+}
+
+/// The one retry loop: runs `op` until it succeeds, fails with an error `transient` does not
+/// accept, or has had [`MAX_ATTEMPTS`]; waits [`FIRST_WAIT`], doubling, at most [`MAX_WAIT`],
+/// before each new attempt.
+fn backoff<T, E>(
+    mut op: impl FnMut() -> std::result::Result<T, E>,
+    transient: impl Fn(&E) -> bool,
     mut sleep: impl FnMut(Duration),
-) -> io::Result<T> {
+) -> std::result::Result<T, E> {
     let mut wait = FIRST_WAIT;
     for attempt in 1.. {
         match op() {
-            Err(e) if attempt < MAX_ATTEMPTS && is_transient(&e) => {
+            Err(e) if attempt < MAX_ATTEMPTS && transient(&e) => {
                 sleep(wait);
                 wait = (wait * 2).min(MAX_WAIT);
             }
@@ -109,6 +133,17 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
 /// Moves `from` over `to` (replacing it) and makes the move durable.
 pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
     Ok(retry(|| sys::replace_file(from, to))?)
+}
+
+/// [`replace_file`] for publishing an output: each attempt of the move runs through `gate`
+/// (the output journal's `publish`), and the waits between attempts come outside it. An error
+/// from the gate that is not a transient one stops the retries and is returned.
+pub(crate) fn replace_file_gated(
+    from: &Path,
+    to: &Path,
+    gate: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()>,
+) -> Result<()> {
+    retry_gated(|| sys::replace_file(from, to), gate, std::thread::sleep)
 }
 
 /// A destination that is already taken.
@@ -658,6 +693,83 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(calls, 1);
+    }
+
+    /// Counts its gate calls and says whether one is running.
+    #[derive(Default)]
+    struct Gate {
+        calls: std::cell::Cell<u32>,
+        inside: std::cell::Cell<bool>,
+        refuse: bool,
+    }
+
+    impl crate::blob::OutputJournal for Gate {
+        fn record(&self, _temp: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn clear(&self, _temp: &Path) {}
+        fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+            self.calls.set(self.calls.get() + 1);
+            if self.refuse {
+                return Err(CoreError::Cancelled);
+            }
+            self.inside.set(true);
+            let result = attempt();
+            self.inside.set(false);
+            result
+        }
+    }
+
+    /// The rename fails with a sharing violation twice, then works: the journal's gate runs
+    /// once per attempt, and every wait comes between gate calls, never inside one.
+    #[test]
+    fn publish_called_once_per_attempt() {
+        use crate::blob::OutputJournal;
+        let journal = Gate::default();
+        let (mut renames, mut waits) = (0, 0);
+        let result = retry_gated(
+            || {
+                renames += 1;
+                match renames {
+                    1 | 2 => Err(std::io::Error::from_raw_os_error(32)),
+                    _ => Ok(()),
+                }
+            },
+            |attempt| journal.publish(attempt),
+            |_| {
+                assert!(!journal.inside.get(), "a wait inside publish");
+                waits += 1;
+            },
+        );
+        // On non-Windows, 32 is some other error and is not retried.
+        if cfg!(windows) {
+            result.unwrap();
+            assert_eq!((journal.calls.get(), renames, waits), (3, 3, 2));
+        } else {
+            assert!(matches!(result, Err(CoreError::Io(_))));
+            assert_eq!((journal.calls.get(), renames, waits), (1, 1, 0));
+        }
+    }
+
+    /// A gate's own refusal is not retried, and the rename never runs.
+    #[test]
+    fn publish_refusal_stops_the_retries() {
+        use crate::blob::OutputJournal;
+        let journal = Gate {
+            refuse: true,
+            ..Gate::default()
+        };
+        let mut renames = 0;
+        let result = retry_gated(
+            || {
+                renames += 1;
+                Ok(())
+            },
+            |attempt| journal.publish(attempt),
+            |_: Duration| panic!("must not wait"),
+        );
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!((journal.calls.get(), renames), (1, 0));
     }
 
     #[test]

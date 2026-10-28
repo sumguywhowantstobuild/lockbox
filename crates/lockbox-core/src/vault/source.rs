@@ -173,11 +173,14 @@ impl VaultSource {
     }
 
     /// The stored blob (ciphertext) and its size. A blob that is not there is
-    /// `Damaged { "file missing" }`; so is a link named like one.
+    /// `Damaged { "file missing" }`; so is a link named like one. A folder's linked `files`
+    /// folder is refused, as [`blob_ids`](Self::blob_ids) refuses it; a missing one holds no blob.
     pub(super) fn blob(&self, id: &FileId) -> Result<(Box<dyn Read + Send>, u64)> {
         match self {
             Self::Folder(dir) => {
-                let path = blob_in(&dir.join(FILES_DIR), id);
+                let files = dir.join(FILES_DIR);
+                check_folder(&files)?;
+                let path = blob_in(&files, id);
                 match fs::symlink_metadata(&path) {
                     Ok(m) if m.is_file() => {}
                     Ok(_) => return Err(FILE_MISSING),

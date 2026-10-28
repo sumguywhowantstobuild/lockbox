@@ -130,8 +130,8 @@ must give an error with fixed wording, never a panic.
   cancelled export leaves an existing destination alone.
 - **Purge** (`purge_item`, trashed items only): rewrite the item with `purging: true`, delete its blobs from `files/`
   and the quarantine (never one another item still attaches; refused while `files/` or `files/orphaned/` is a link),
-  then delete the item file. A crash in between is finished at the next unlock. *Known gap:* deleting the item file
-  does not yet check that `items/` is a real folder; a follow-up adds that check.
+  then delete the item file. A crash in between is finished at the next unlock. Refused while `items/` is a link,
+  checked before the mark and again before the item file is deleted.
 
 ### Restore a backup (`PreparedRestore::prepare`, `commit`; spec 6.8)
 1. `prepare` refuses while anything is at the journal path, then opens the archive with its own parser, unlocks it
@@ -172,7 +172,9 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
 
 1. **All writes go through `atomic_write` or `replace_file`.** Nothing is written in place. A file gets its final name
    only by one of these two (header and item files by `atomic_write`; blobs and exports by a temp file and
-   `replace_file`), and the vault folder itself only by `rename_dir_no_replace`. (The folders inside it, `items/`,
+   `replace_file`), and the vault folder itself only by `rename_dir_no_replace`. A decrypted copy or a backup is
+   published by `replace_file_gated`: the same retried move, each attempt run through the output journal's `publish`
+   gate, with the waits between attempts outside it; a refusal from the gate stops it, and the temp is removed. (The folders inside it, `items/`,
    `files/` and `files/orphaned/`, are empty working folders created in place with `create_dir_all`.) That same
    no-replace rename also moves blobs into and out of `files/orphaned/` during cleanup; it is a rename, not a write.
    Restore is the exception in two places: it writes each entry in place inside its hidden staging folder (a new
@@ -239,8 +241,9 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
     it was opened from: opening a backup or a `.before-restore` folder takes no lock and repairs, cleans and creates
     nothing. Its exports (`export_file`) write only a decrypted copy of a file, to a place the user picked, and only
     when asked; that place may not be the backup itself, inside the folder being viewed, or inside any vault folder (a
-    folder that holds `vault.json` or `vault.json.bak`, or any folder under one). A function that must not change a
-    vault cannot be handed one that can. Spec 6.9.
+    folder that holds `vault.json` or `vault.json.bak`, or any folder under one). `Vault::export_file` refuses the
+    same vault folders (and its own vault folder). A function that must not change a vault cannot be handed one that
+    can. Spec 6.9.
 
 ## Where the "why" lives
 

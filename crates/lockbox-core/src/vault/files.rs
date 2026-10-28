@@ -10,7 +10,8 @@
 //! is certainly not in the vault.
 
 use super::Vault;
-use super::items::{BEING_DELETED, blank_item, edited};
+use super::cleanup::check_folder;
+use super::items::{BEING_DELETED, ITEMS_DIR, blank_item, edited};
 use super::source::FILE_MISSING;
 use crate::blob::{
     CancelToken, OutputJournal, blob_len, check_length, decrypt_stream, encrypt_stream,
@@ -18,8 +19,9 @@ use crate::blob::{
 };
 use crate::fsio::{
     check_space, clear_hidden, create_hidden_file, hidden_temp_path, parent_dir, remove_file_retry,
-    replace_file, volume_info,
+    replace_file, replace_file_gated, volume_info,
 };
+use crate::header::{HEADER_BACKUP, HEADER_FILE};
 use crate::ids::{FileId, ItemId, VaultId};
 use crate::item::{FileRef, Item, ItemKind};
 use crate::{CoreError, Result};
@@ -63,16 +65,70 @@ pub(super) fn refuse_inside(folder: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+const DESTINATION_IN_VAULT: CoreError = CoreError::InvalidInput {
+    what: "destination in a vault folder",
+};
+
+/// Refuses `dest` when its folder, or any folder above it, holds `vault.json` or
+/// `vault.json.bak`: that is a vault folder (a live vault, a pre-restore copy, a staging folder)
+/// or a folder inside one, where the decrypted copy could replace one of that vault's files.
+/// The folder is resolved first (links, junctions, `..`, short names), and each name is looked
+/// up with `symlink_metadata`, so a link named `vault.json` counts too.
+pub(super) fn refuse_vault_folder(dest: &Path) -> Result<()> {
+    let folder = fs::canonicalize(parent_dir(dest))?;
+    for dir in folder.ancestors() {
+        for name in [HEADER_FILE, HEADER_BACKUP] {
+            match fs::symlink_metadata(dir.join(name)) {
+                Ok(_) => return Err(DESTINATION_IN_VAULT),
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuses an export whose decrypted copy would not fit beside `dest`. Checked before the blob
 /// is opened.
 pub(super) fn check_export_space(fref: &FileRef, dest: &Path) -> Result<()> {
     check_space(fref.length, fref.length, &volume_info(parent_dir(dest))?)
 }
 
+/// Records the output temp `temp` in `journal`, then creates it, hidden and new. A journal that
+/// cannot record stops the output before the temp exists (nothing to clear). If the file cannot
+/// be created (the name is taken: the other file is not ours to delete), the record is cleared.
+/// `step` is the failpoint between the two, which tests use to look at the disk there.
+pub(super) fn create_journalled_temp(
+    temp: &Path,
+    journal: &dyn OutputJournal,
+    step: &'static str,
+) -> Result<File> {
+    journal.record(temp)?;
+    #[cfg(any(test, feature = "test-internals"))]
+    let created = crate::fsio::failpoint::check(step).and_then(|()| create_hidden_file(temp));
+    #[cfg(not(any(test, feature = "test-internals")))]
+    let created = {
+        let _ = step;
+        create_hidden_file(temp)
+    };
+    created.inspect_err(|_| journal.clear(temp))
+}
+
+/// Renames the finished output temp over `dest`, each attempt passing the journal's gate (the
+/// waits between attempts do not). The caller removes and clears the temp if this fails.
+pub(super) fn publish_journalled(
+    temp: &Path,
+    dest: &Path,
+    journal: &dyn OutputJournal,
+) -> Result<()> {
+    replace_file_gated(temp, dest, |attempt| journal.publish(attempt))
+}
+
 /// The verify-then-publish half of an export, shared by [`Vault`] and the read-only vault: the
 /// decrypted copy is built in a hidden temp file beside `dest`, and an existing `dest` is
 /// replaced only once every chunk has authenticated. The caller has refused a `dest` that must
-/// not be written and has checked the space. The temp is recorded in `journal` before it exists.
+/// not be written and has checked the space. The temp is recorded in `journal` before it exists,
+/// and each attempt of the rename passes the journal's gate.
 pub(super) fn export_blob(
     blob: &mut impl Read,
     blob_size: u64,
@@ -83,15 +139,8 @@ pub(super) fn export_blob(
     cancel: &CancelToken,
 ) -> Result<()> {
     let temp = hidden_temp_path(parent_dir(dest), ".lockbox-partial");
-    journal.record(&temp);
-    // Owned only once this succeeds; if the name is taken, the other file is not ours to delete.
-    let mut out = match create_hidden_file(&temp) {
-        Ok(out) => out,
-        Err(error) => {
-            journal.clear(&temp);
-            return Err(error);
-        }
-    };
+    // Owned only once this succeeds.
+    let mut out = create_journalled_temp(&temp, journal, "export.after_record")?;
     let published = (|| {
         decrypt_stream(blob, blob_size, &mut out, vault_id, fref, cancel)?;
         out.sync_all()?;
@@ -100,9 +149,9 @@ pub(super) fn export_blob(
         clear_hidden(&temp)?;
         #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("export.before_publish")?;
-        // Last chance to stop: once the rename starts, publication completes.
+        // Last chance to cancel: from here only the journal's gate can still stop it.
         cancel.check()?;
-        replace_file(&temp, dest)
+        publish_journalled(&temp, dest, journal)
     })();
     // Only a temp that is really gone leaves the journal; otherwise launch cleanup retries.
     if published.is_ok() || remove_file_retry(&temp).is_ok() {
@@ -284,6 +333,8 @@ impl Vault {
     /// Saves a decrypted copy of an attachment at `dest`: verify fully, then publish. The
     /// copy is built in a hidden temp file beside `dest`; an existing `dest` is replaced only
     /// once every chunk has authenticated. The temp is recorded in `journal` before it exists.
+    /// A `dest` inside this vault, or in any vault folder (one whose folder, or a folder above
+    /// it, holds `vault.json` or `vault.json.bak`), is refused before anything is created.
     pub fn export_file(
         &self,
         item: &ItemId,
@@ -299,6 +350,7 @@ impl Vault {
             .find(|f| f.file_id == *file)
             .ok_or(CoreError::NotFound)?;
         refuse_inside(parent_dir(dest), &self.dir)?;
+        refuse_vault_folder(dest)?;
         check_export_space(fref, dest)?;
         let mut blob = File::open(self.blob_path(file)).map_err(|e| match e.kind() {
             ErrorKind::NotFound => FILE_MISSING,
@@ -320,7 +372,9 @@ impl Vault {
     /// attaches (spec 6.4): the item is first
     /// rewritten with `purging: true`, so a crash or error leaves an intent that a retry (or
     /// cleanup at unlock) finishes. Blobs are deleted from the quarantine too; a blob that is
-    /// already gone is fine.
+    /// already gone is fine. Refused while `items/` is a link, checked before the mark and
+    /// again before the item file is deleted: neither may go through a link that could lead
+    /// outside the vault.
     pub fn purge_item(&mut self, id: &ItemId) -> Result<()> {
         let stored = self.get_item(id)?;
         if stored.trashed_at.is_none() {
@@ -328,6 +382,8 @@ impl Vault {
                 what: "not in trash",
             });
         }
+        let items = self.dir.join(ITEMS_DIR);
+        check_folder(&items)?;
         if !stored.purging {
             let mut marked = edited(stored)?;
             marked.purging = true;
@@ -345,6 +401,7 @@ impl Vault {
         {
             self.delete_blob_everywhere(blob)?;
         }
+        check_folder(&items)?;
         remove_file_retry(&self.item_path(id))?;
         self.items.remove(id);
         self.reindex();
@@ -353,7 +410,7 @@ impl Vault {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::blob::MAX_FILE_BYTES;
     use crate::fsio::{VolumeInfo, failpoint, set_volume_override, testutil::TempDir};
@@ -688,8 +745,9 @@ mod tests {
     struct Recorder(RefCell<Vec<(&'static str, PathBuf)>>);
 
     impl OutputJournal for Recorder {
-        fn record(&self, temp: &Path) {
+        fn record(&self, temp: &Path) -> Result<()> {
             self.0.borrow_mut().push(("record", temp.to_path_buf()));
+            Ok(())
         }
         fn clear(&self, temp: &Path) {
             self.0.borrow_mut().push(("clear", temp.to_path_buf()));
@@ -933,5 +991,289 @@ mod tests {
             .export_file(&id, &file, &outside, &NoJournal, &CancelToken::new())
             .unwrap();
         assert_eq!(fs::read(&outside).unwrap(), b"hello");
+    }
+
+    // ---- Plan 3 Task 7: purge checks items/, export refuses vault folders, the publish gate ----
+
+    /// What the record-failure test's journal answers.
+    pub(in crate::vault) const JOURNAL_FULL: CoreError = CoreError::InvalidInput {
+        what: "journal full",
+    };
+
+    /// A journal for the gate tests: logs each call by name, and on request fails `record`
+    /// (with [`JOURNAL_FULL`]) or refuses `publish` with `Cancelled` without running the attempt.
+    #[derive(Default)]
+    pub(in crate::vault) struct GateJournal {
+        pub(in crate::vault) calls: RefCell<Vec<&'static str>>,
+        pub(in crate::vault) fail_record: bool,
+        pub(in crate::vault) refuse_publish: bool,
+    }
+
+    impl OutputJournal for GateJournal {
+        fn record(&self, _temp: &Path) -> Result<()> {
+            self.calls.borrow_mut().push("record");
+            if self.fail_record {
+                return Err(JOURNAL_FULL);
+            }
+            Ok(())
+        }
+        fn clear(&self, _temp: &Path) {
+            self.calls.borrow_mut().push("clear");
+        }
+        fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+            self.calls.borrow_mut().push("publish");
+            if self.refuse_publish {
+                return Err(CoreError::Cancelled);
+            }
+            attempt()
+        }
+    }
+
+    #[track_caller]
+    pub(in crate::vault) fn not_plain<T: std::fmt::Debug>(result: Result<T>) {
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::InvalidInput {
+                    what: "not a plain folder"
+                })
+            ),
+            "{result:?}"
+        );
+    }
+
+    /// Removes the folder link `link` (a junction on Windows, a symlink elsewhere), never what
+    /// it leads to.
+    pub(in crate::vault) fn remove_dir_link(link: &Path) {
+        fs::remove_dir(link)
+            .or_else(|_| fs::remove_file(link))
+            .unwrap();
+    }
+
+    /// Neither the mark nor the delete of a purge goes through a linked `items/`: the item file
+    /// the link leads to, named like the purged item's, is left as it was.
+    #[test]
+    fn purge_refused_when_items_is_a_link() {
+        use crate::fsio::testutil::make_dir_link;
+        use std::rc::Rc;
+        let _cleanup = Cleanup;
+        let (parent, mut vault, id, file) = vault_with_file();
+        vault.trash_item(&id).unwrap();
+        let items = vault.dir().join("items");
+        let name = vault.item_path(&id).file_name().unwrap().to_owned();
+
+        // `items/` is a link before the purge starts: refused before the mark.
+        let elsewhere = parent.path().join("elsewhere");
+        fs::rename(&items, &elsewhere).unwrap();
+        make_dir_link(&items, &elsewhere);
+        let before = fs::read(elsewhere.join(&name)).unwrap();
+        not_plain(vault.purge_item(&id));
+        assert_eq!(fs::read(elsewhere.join(&name)).unwrap(), before);
+        assert!(!vault.get_item(&id).unwrap().purging, "not marked");
+        assert!(blob_path(&vault, &file).exists(), "no blob deleted");
+        remove_dir_link(&items);
+        fs::rename(&elsewhere, &items).unwrap();
+
+        // `items/` becomes a link once the item is marked: refused before the item file goes.
+        let moved = parent.path().join("moved");
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let (from, to, keep) = (items.clone(), moved.clone(), Rc::clone(&seen));
+        let item_file = name.clone();
+        failpoint::observe(
+            "purge.after_mark",
+            Box::new(move || {
+                fs::rename(&from, &to).unwrap();
+                make_dir_link(&from, &to);
+                *keep.borrow_mut() = fs::read(to.join(&item_file)).unwrap();
+            }),
+        );
+        not_plain(vault.purge_item(&id));
+        failpoint::disarm_all();
+        assert!(!seen.borrow().is_empty(), "the swap ran");
+        assert_eq!(fs::read(moved.join(&name)).unwrap(), *seen.borrow());
+        assert!(vault.get_item(&id).unwrap().purging, "marked, not finished");
+
+        // Back to a real folder, a retry finishes the purge.
+        remove_dir_link(&items);
+        fs::rename(&moved, &items).unwrap();
+        vault.purge_item(&id).unwrap();
+        assert!(matches!(vault.get_item(&id), Err(CoreError::NotFound)));
+        assert!(!vault.item_path(&id).exists());
+    }
+
+    /// A vault's export never lands in another vault's folder or a folder inside it.
+    #[test]
+    fn export_into_another_vault_refused() {
+        let (parent, vault, id, file) = vault_with_file();
+        let other = Vault::create(parent.path(), "Other", PW).unwrap().vault;
+        let before = (
+            file_names(other.dir()),
+            file_names(&other.dir().join("items")),
+        );
+        let journal = GateJournal::default();
+        for dest in [
+            other.dir().join("a.txt"),
+            other.dir().join("items").join("a.txt"),
+        ] {
+            let result = vault.export_file(&id, &file, &dest, &journal, &CancelToken::new());
+            assert!(
+                matches!(
+                    result,
+                    Err(CoreError::InvalidInput {
+                        what: "destination in a vault folder"
+                    })
+                ),
+                "{result:?}"
+            );
+        }
+        assert!(
+            journal.calls.borrow().is_empty(),
+            "refused before the journal"
+        );
+        let after = (
+            file_names(other.dir()),
+            file_names(&other.dir().join("items")),
+        );
+        assert_eq!(after, before, "nothing created in the other vault");
+    }
+
+    /// A journal that cannot record the temp stops the export and the backup before the temp
+    /// exists; nothing was recorded, so nothing is cleared. With a working journal, the steps
+    /// `export.after_record` and `backup.after_record` come after the record and before the temp.
+    #[test]
+    fn journal_record_failure_creates_no_temp() {
+        use std::rc::Rc;
+        let _cleanup = Cleanup;
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let cancel = CancelToken::new();
+        let journal = GateJournal {
+            fail_record: true,
+            ..GateJournal::default()
+        };
+        let full = |r: Result<()>| {
+            assert!(
+                matches!(
+                    r,
+                    Err(CoreError::InvalidInput {
+                        what: "journal full"
+                    })
+                ),
+                "{r:?}"
+            );
+        };
+        full(vault.export_file(&id, &file, &out.join("a.txt"), &journal, &cancel));
+        full(
+            vault
+                .backup(&out.join("b.lockbox-backup"), &journal, &cancel)
+                .map(|_| ()),
+        );
+        assert!(
+            file_names(&out).is_empty(),
+            "no temp: {:?}",
+            file_names(&out)
+        );
+        assert_eq!(*journal.calls.borrow(), ["record", "record"]);
+
+        // The new steps: reached once each, with the record made and no temp yet.
+        let reached = Rc::new(RefCell::new(Vec::new()));
+        for step in ["export.after_record", "backup.after_record"] {
+            let (seen, folder) = (Rc::clone(&reached), out.clone());
+            failpoint::observe(
+                step,
+                Box::new(move || seen.borrow_mut().push((step, file_names(&folder)))),
+            );
+        }
+        let journal = GateJournal::default();
+        vault
+            .export_file(&id, &file, &out.join("a.txt"), &journal, &cancel)
+            .unwrap();
+        vault
+            .backup(&out.join("b.lockbox-backup"), &journal, &cancel)
+            .unwrap();
+        // Before the backup's temp, the folder holds only the export just published.
+        let copied = vec!["a.txt".to_owned()];
+        assert_eq!(
+            *reached.borrow(),
+            [
+                ("export.after_record", Vec::new()),
+                ("backup.after_record", copied)
+            ]
+        );
+    }
+
+    /// A gate that refuses the rename: the existing destination stays byte for byte, the temp
+    /// is removed and cleared, and the refusal is the result.
+    #[test]
+    fn publish_refusal_keeps_destination() {
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        fs::write(&copy, b"OLD COPY").unwrap();
+        fs::write(&backup, b"OLD BACKUP").unwrap();
+        let cancel = CancelToken::new();
+        let journal = GateJournal {
+            refuse_publish: true,
+            ..GateJournal::default()
+        };
+        let result = vault.export_file(&id, &file, &copy, &journal, &cancel);
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        let result = vault.backup(&backup, &journal, &cancel);
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
+        assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
+        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        let once = ["record", "publish", "clear"];
+        assert_eq!(*journal.calls.borrow(), [once, once].concat());
+    }
+
+    /// The export's real rename, refused twice by a program holding the destination (a sharing
+    /// violation each time): the journal's gate runs once per attempt, and the third publishes.
+    #[cfg(windows)]
+    #[test]
+    fn held_destination_publishes_once_per_attempt() {
+        use std::cell::Cell;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        /// Holds the destination open (no delete sharing) while its first `holds` attempts run.
+        struct Holding {
+            dest: PathBuf,
+            holds: u32,
+            calls: Cell<u32>,
+        }
+        impl OutputJournal for Holding {
+            fn record(&self, _temp: &Path) -> Result<()> {
+                Ok(())
+            }
+            fn clear(&self, _temp: &Path) {}
+            fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+                self.calls.set(self.calls.get() + 1);
+                let _held = (self.calls.get() <= self.holds).then(|| {
+                    let mut options = fs::OpenOptions::new();
+                    options.read(true).share_mode(1 | 2);
+                    options.open(&self.dest).unwrap()
+                });
+                attempt()
+            }
+        }
+
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let dest = out.join("a.txt");
+        fs::write(&dest, b"OLD").unwrap();
+        let journal = Holding {
+            dest: dest.clone(),
+            holds: 2,
+            calls: Cell::new(0),
+        };
+        vault
+            .export_file(&id, &file, &dest, &journal, &CancelToken::new())
+            .unwrap();
+        assert_eq!(journal.calls.get(), 3);
+        assert_eq!(fs::read(&dest).unwrap(), b"hello");
+        assert_eq!(file_names(&out), ["a.txt"]);
     }
 }

@@ -58,8 +58,9 @@ fn pattern(len: usize) -> Vec<u8> {
 struct Recorder(RefCell<Vec<(&'static str, PathBuf)>>);
 
 impl OutputJournal for Recorder {
-    fn record(&self, temp: &Path) {
+    fn record(&self, temp: &Path) -> lockbox_core::Result<()> {
         self.0.borrow_mut().push(("record", temp.to_path_buf()));
+        Ok(())
     }
     fn clear(&self, temp: &Path) {
         self.0.borrow_mut().push(("clear", temp.to_path_buf()));

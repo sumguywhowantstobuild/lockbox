@@ -6,6 +6,7 @@
 
 use super::cleanup::ORPHANED_DIR;
 use super::files::FILES_DIR;
+use super::files::refuse_vault_folder;
 use super::folder_name;
 use super::items::ITEMS_DIR;
 use super::journal::{
@@ -16,7 +17,6 @@ use super::journal::{
     validate_journal, validate_journal_on_disk, write_journal,
 };
 use super::naming::{check_folder_name, check_path_room};
-use super::readonly::refuse_vault_folder;
 use super::source::{
     VaultSource, attached_blobs, attached_refs, check_listed, check_opened, copy_blob,
     manifest_hashes, unlock_source,

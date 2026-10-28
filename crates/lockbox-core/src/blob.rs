@@ -53,17 +53,30 @@ impl CancelToken {
 }
 
 /// Where temporary plaintext files are written down before they exist, so a crash cannot
-/// leave one behind unnoticed (spec 7.2). Plan 3 provides the real journal.
+/// leave one behind unnoticed (spec 7.2), and the gate every rename that publishes an output (a
+/// decrypted copy or a backup) passes. Plan 3 provides the real journal.
 pub trait OutputJournal {
-    fn record(&self, temp: &Path);
+    /// Writes `temp` down before it exists. An error stops the output there: the temp is never
+    /// created, and `clear` is not called for it.
+    fn record(&self, temp: &Path) -> Result<()>;
+    /// Forgets `temp`, once it is gone: published, or removed after a failure.
     fn clear(&self, temp: &Path);
+    /// Runs one attempt of the rename that publishes the output: `attempt` tries the rename
+    /// once, without retrying. Called once per attempt; the engine waits between attempts
+    /// outside this call. An error that is not a sharing violation or access denied (Windows)
+    /// stops the output: the temp is removed and cleared, and the destination is untouched.
+    fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        attempt()
+    }
 }
 
-/// A journal that remembers nothing.
+/// A journal that remembers nothing and never holds a rename back.
 pub struct NoJournal;
 
 impl OutputJournal for NoJournal {
-    fn record(&self, _temp: &Path) {}
+    fn record(&self, _temp: &Path) -> Result<()> {
+        Ok(())
+    }
     fn clear(&self, _temp: &Path) {}
 }
 
