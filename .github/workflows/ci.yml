@@ -65,8 +65,9 @@ jobs:
         run: cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
       - name: Test
         run: cargo test --locked ${{ matrix.packages }}
+      # Integration tests only: the engine's unit and doc tests already ran in "Test", without the feature.
       - name: Test (engine internals)
-        run: cargo test -p lockbox-core --locked --features test-internals
+        run: cargo test -p lockbox-core --locked --features test-internals --test '*'
       # The only run where release-only checks (`cfg(not(dev))`, such as refusing the dev server) are compiled in.
       - name: Bridge tests (release configuration)
         if: matrix.label == 'windows'
