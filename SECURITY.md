@@ -323,10 +323,12 @@ Lockbox defends.
   trailing dot or space, no device name such as `CON` or `NUL.txt`, and no `.before-restore`), and when anything at
   all already has that name, in any letter case. *Accepted:* restore never replaces a folder it cannot identify, since
   that folder may hold data the backup does not.
-- An item whose attached file the backup left out (missing or damaged when the backup was made) cannot be copied out
-  of that backup into another vault: the copy stops at that file ("file missing"). Restore the backup instead; the
-  item comes back without that one file ("test a backup" counts such files). *Parked for Plan 3,* which decides
-  whether such a copy should go ahead without the file.
+- An item whose attached file the backup left out (missing or damaged when the backup was made), or whose file is
+  gone from a `.before-restore` folder, is not copied out of it by default: the copy stops ("file missing") before
+  anything is written. On request, the copy goes ahead without those files and reports which ones it left out; the
+  item's other files are copied in full. A file that is there but damaged still stops the whole copy, and the files
+  it had already copied are removed. *Accepted:* a missing file cannot be brought back from that source, and the copy
+  never leaves one out unless you ask.
 - Every stored file is labelled `application/octet-stream`; there is no file-type table yet. *Accepted:* the label is
   only display information and the file's bytes are unaffected; how files are opened is decided with the interface.
 - A stored file's name is kept as text; a name that is not valid Unicode (very rare on Windows) is stored with

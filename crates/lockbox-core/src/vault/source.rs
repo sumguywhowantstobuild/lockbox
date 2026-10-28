@@ -17,7 +17,7 @@ use crate::manifest::verify_manifest_mac_cancellable;
 use crate::secret::Key32;
 use crate::{CoreError, Result};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -46,7 +46,7 @@ const DAMAGED_FILE: CoreError = CoreError::Damaged {
 const NO_HEADER: CoreError = CoreError::Damaged {
     what: "backup: no header",
 };
-const FILE_MISSING: CoreError = CoreError::Damaged {
+pub(super) const FILE_MISSING: CoreError = CoreError::Damaged {
     what: "file missing",
 };
 
@@ -155,6 +155,21 @@ impl VaultSource {
                 })
                 .collect()),
         }
+    }
+
+    /// The attachments in `refs` whose blob this source does not have, in the order of `refs`:
+    /// those [`blob_ids`](Self::blob_ids) does not list (so, in a folder, a link named like a
+    /// blob is missing too, as for [`blob`](Self::blob)). Nothing is listed when `refs` is empty.
+    pub(super) fn missing_blobs(&self, refs: &[FileRef]) -> Result<Vec<FileId>> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let present: BTreeSet<FileId> = self.blob_ids()?.into_iter().collect();
+        Ok(refs
+            .iter()
+            .map(|r| r.file_id)
+            .filter(|id| !present.contains(id))
+            .collect())
     }
 
     /// The stored blob (ciphertext) and its size. A blob that is not there is

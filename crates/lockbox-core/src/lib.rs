@@ -172,9 +172,9 @@ pub mod internals {
 
 pub use error::{CoreError, Result};
 pub use vault::{
-    BackupReport, BackupSummary, CleanupReport, CreatedVault, Credential, JournalStep, JournalView,
-    PreparedRestore, ReadOnlyVault, Recovery, RestoreDestination, RestoreOutcome, UnlockReport,
-    Vault, dismiss_restore_journal, inspect_restore_journal, is_reserved_device_name,
+    BackupReport, BackupSummary, CleanupReport, CopiedItem, CreatedVault, Credential, JournalStep,
+    JournalView, PreparedRestore, ReadOnlyVault, Recovery, RestoreDestination, RestoreOutcome,
+    UnlockReport, Vault, dismiss_restore_journal, inspect_restore_journal, is_reserved_device_name,
     read_vault_id, read_vault_name, recover_restore, verify_backup,
 };
 
