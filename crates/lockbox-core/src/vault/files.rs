@@ -19,7 +19,7 @@ use crate::blob::{
 };
 use crate::fsio::{
     check_space, clear_hidden, create_hidden_file, hidden_temp_path, parent_dir, remove_file_retry,
-    replace_file, replace_file_gated, volume_info,
+    rename_replace_gated, replace_file, sync_after_replace, volume_info,
 };
 use crate::header::{HEADER_BACKUP, HEADER_FILE};
 use crate::ids::{FileId, ItemId, VaultId};
@@ -94,34 +94,99 @@ pub(super) fn check_export_space(fref: &FileRef, dest: &Path) -> Result<()> {
     check_space(fref.length, fref.length, &volume_info(parent_dir(dest))?)
 }
 
-/// Records the output temp `temp` in `journal`, then creates it, hidden and new. A journal that
-/// cannot record stops the output before the temp exists (nothing to clear). If the file cannot
-/// be created (the name is taken: the other file is not ours to delete), the record is cleared.
-/// `step` is the failpoint between the two, which tests use to look at the disk there.
-pub(super) fn create_journalled_temp(
-    temp: &Path,
-    journal: &dyn OutputJournal,
-    step: &'static str,
-) -> Result<File> {
-    journal.record(temp)?;
-    #[cfg(any(test, feature = "test-internals"))]
-    let created = crate::fsio::failpoint::check(step).and_then(|()| create_hidden_file(temp));
-    #[cfg(not(any(test, feature = "test-internals")))]
-    let created = {
-        let _ = step;
-        create_hidden_file(temp)
-    };
-    created.inspect_err(|_| journal.clear(temp))
+/// The hidden temp file an output (a decrypted copy or a backup) is built in, and its one owner.
+/// It exists only once `journal` has recorded it, and it never stands for a file it did not
+/// create. Until it is published, every way out (an error, a refusal, exhausted retries, a panic
+/// unwinding) drops its file handle, removes it, and clears the record if the removal worked;
+/// otherwise it stays recorded for the launch sweep. Once the rename has happened it owns
+/// nothing.
+pub(super) struct OutputTemp<'j> {
+    path: PathBuf,
+    file: Option<File>,
+    journal: &'j dyn OutputJournal,
+    published: bool,
 }
 
-/// Renames the finished output temp over `dest`, each attempt passing the journal's gate (the
-/// waits between attempts do not). The caller removes and clears the temp if this fails.
-pub(super) fn publish_journalled(
-    temp: &Path,
-    dest: &Path,
-    journal: &dyn OutputJournal,
-) -> Result<()> {
-    replace_file_gated(temp, dest, |attempt| journal.publish(attempt))
+impl<'j> OutputTemp<'j> {
+    /// Records a fresh temp name `.<hex><suffix>` in `dir`, then creates that file, hidden and
+    /// new. A journal that cannot record stops the output before the temp exists (nothing to
+    /// clear). If the file cannot be created (the name is taken: the other file is not ours to
+    /// delete), the record is cleared. `step` is the failpoint between the two, which tests use to
+    /// look at the disk there.
+    pub(super) fn create(
+        dir: &Path,
+        suffix: &str,
+        journal: &'j dyn OutputJournal,
+        step: &'static str,
+    ) -> Result<Self> {
+        let path = hidden_temp_path(dir, suffix);
+        journal.record(&path)?;
+        #[cfg(any(test, feature = "test-internals"))]
+        let created = crate::fsio::failpoint::check(step).and_then(|()| create_hidden_file(&path));
+        #[cfg(not(any(test, feature = "test-internals")))]
+        let created = {
+            let _ = step;
+            create_hidden_file(&path)
+        };
+        match created {
+            Ok(file) => Ok(OutputTemp {
+                path,
+                file: Some(file),
+                journal,
+                published: false,
+            }),
+            Err(error) => {
+                journal.clear(&path);
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The open temp, for writing. Only before [`close`](Self::close) or
+    /// [`take_file`](Self::take_file).
+    pub(super) fn file(&mut self) -> &mut File {
+        self.file.as_mut().expect("the temp is still open")
+    }
+
+    /// Hands the open temp to a writer that drops it when it is done (or fails). Only once.
+    pub(super) fn take_file(&mut self) -> File {
+        self.file.take().expect("the temp is still open")
+    }
+
+    /// Drops the handle on the temp: Windows can neither move nor delete a file that is open.
+    pub(super) fn close(&mut self) {
+        drop(self.file.take());
+    }
+
+    /// Renames the finished temp over `dest`, each attempt passing the journal's gate (the waits
+    /// between attempts do not). If the rename does not happen, the temp is cleaned up as on any
+    /// other failure and `dest` is untouched. Once it has happened, the record is cleared and the
+    /// move is made durable; an error from that step means `dest` is published but its
+    /// durability is not confirmed, and nothing is removed.
+    pub(super) fn publish(mut self, dest: &Path) -> Result<()> {
+        self.close();
+        let journal = self.journal;
+        rename_replace_gated(&self.path, dest, |attempt| journal.publish(attempt))?;
+        self.published = true;
+        journal.clear(&self.path);
+        sync_after_replace(dest)
+    }
+}
+
+impl Drop for OutputTemp<'_> {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        self.close();
+        if remove_file_retry(&self.path).is_ok() {
+            self.journal.clear(&self.path);
+        }
+    }
 }
 
 /// The verify-then-publish half of an export, shared by [`Vault`] and the read-only vault: the
@@ -138,26 +203,23 @@ pub(super) fn export_blob(
     journal: &dyn OutputJournal,
     cancel: &CancelToken,
 ) -> Result<()> {
-    let temp = hidden_temp_path(parent_dir(dest), ".lockbox-partial");
-    // Owned only once this succeeds.
-    let mut out = create_journalled_temp(&temp, journal, "export.after_record")?;
-    let published = (|| {
-        decrypt_stream(blob, blob_size, &mut out, vault_id, fref, cancel)?;
-        out.sync_all()?;
-        drop(out);
-        // Windows keeps a file's attributes when it replaces another: unhide first.
-        clear_hidden(&temp)?;
-        #[cfg(any(test, feature = "test-internals"))]
-        crate::fsio::failpoint::check("export.before_publish")?;
-        // Last chance to cancel: from here only the journal's gate can still stop it.
-        cancel.check()?;
-        publish_journalled(&temp, dest, journal)
-    })();
-    // Only a temp that is really gone leaves the journal; otherwise launch cleanup retries.
-    if published.is_ok() || remove_file_retry(&temp).is_ok() {
-        journal.clear(&temp);
-    }
-    published
+    // Every early return below, and a panic, leaves the clean-up to `temp`.
+    let mut temp = OutputTemp::create(
+        parent_dir(dest),
+        ".lockbox-partial",
+        journal,
+        "export.after_record",
+    )?;
+    decrypt_stream(blob, blob_size, temp.file(), vault_id, fref, cancel)?;
+    temp.file().sync_all()?;
+    temp.close();
+    // Windows keeps a file's attributes when it replaces another: unhide first.
+    clear_hidden(temp.path())?;
+    #[cfg(any(test, feature = "test-internals"))]
+    crate::fsio::failpoint::check("export.before_publish")?;
+    // Last chance to cancel: from here only the journal's gate can still stop it.
+    cancel.check()?;
+    temp.publish(dest)
 }
 
 /// Opens the file to import and returns it with its size. On Windows other programs may
@@ -1000,28 +1062,42 @@ pub(super) mod tests {
         what: "journal full",
     };
 
-    /// A journal for the gate tests: logs each call by name, and on request fails `record`
-    /// (with [`JOURNAL_FULL`]) or refuses `publish` with `Cancelled` without running the attempt.
+    /// A journal for the gate tests: logs each call by name and each recorded and cleared path,
+    /// and asserts in `record` that the temp does not exist yet. On request it fails `record`
+    /// (with [`JOURNAL_FULL`]), refuses `publish` with `Cancelled` without running the attempt,
+    /// or panics in `publish`.
     #[derive(Default)]
     pub(in crate::vault) struct GateJournal {
         pub(in crate::vault) calls: RefCell<Vec<&'static str>>,
+        pub(in crate::vault) recorded: RefCell<Vec<PathBuf>>,
+        pub(in crate::vault) cleared: RefCell<Vec<PathBuf>>,
         pub(in crate::vault) fail_record: bool,
         pub(in crate::vault) refuse_publish: bool,
+        pub(in crate::vault) panic_in_publish: bool,
     }
 
     impl OutputJournal for GateJournal {
-        fn record(&self, _temp: &Path) -> Result<()> {
+        fn record(&self, temp: &Path) -> Result<()> {
+            assert!(
+                fs::symlink_metadata(temp).is_err(),
+                "the temp exists before its record"
+            );
             self.calls.borrow_mut().push("record");
+            self.recorded.borrow_mut().push(temp.to_path_buf());
             if self.fail_record {
                 return Err(JOURNAL_FULL);
             }
             Ok(())
         }
-        fn clear(&self, _temp: &Path) {
+        fn clear(&self, temp: &Path) {
             self.calls.borrow_mut().push("clear");
+            self.cleared.borrow_mut().push(temp.to_path_buf());
         }
         fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
             self.calls.borrow_mut().push("publish");
+            if self.panic_in_publish {
+                panic!("publish panicked");
+            }
             if self.refuse_publish {
                 return Err(CoreError::Cancelled);
             }
@@ -1176,21 +1252,29 @@ pub(super) mod tests {
         );
         assert_eq!(*journal.calls.borrow(), ["record", "record"]);
 
-        // The new steps: reached once each, with the record made and no temp yet.
+        // The new steps: reached once each, after this output's temp was recorded and before
+        // that temp exists. The journal asserts in `record` that the temp is not there yet.
+        let journal = Rc::new(GateJournal::default());
         let reached = Rc::new(RefCell::new(Vec::new()));
-        for step in ["export.after_record", "backup.after_record"] {
-            let (seen, folder) = (Rc::clone(&reached), out.clone());
+        for (step, records) in [("export.after_record", 1), ("backup.after_record", 2)] {
+            let (seen, folder, j) = (Rc::clone(&reached), out.clone(), Rc::clone(&journal));
             failpoint::observe(
                 step,
-                Box::new(move || seen.borrow_mut().push((step, file_names(&folder)))),
+                Box::new(move || {
+                    let recorded = j.recorded.borrow();
+                    assert_eq!(recorded.len(), records, "{step}: reached before the record");
+                    let temp = &recorded[records - 1];
+                    assert_eq!(temp.parent(), Some(folder.as_path()));
+                    assert!(fs::symlink_metadata(temp).is_err(), "{step}: temp exists");
+                    seen.borrow_mut().push((step, file_names(&folder)));
+                }),
             );
         }
-        let journal = GateJournal::default();
         vault
-            .export_file(&id, &file, &out.join("a.txt"), &journal, &cancel)
+            .export_file(&id, &file, &out.join("a.txt"), &*journal, &cancel)
             .unwrap();
         vault
-            .backup(&out.join("b.lockbox-backup"), &journal, &cancel)
+            .backup(&out.join("b.lockbox-backup"), &*journal, &cancel)
             .unwrap();
         // Before the backup's temp, the folder holds only the export just published.
         let copied = vec!["a.txt".to_owned()];
@@ -1201,6 +1285,69 @@ pub(super) mod tests {
                 ("backup.after_record", copied)
             ]
         );
+    }
+
+    /// A `publish` that panics: the unwinding removes the temp and clears its record, and the
+    /// destination is left as it was, for the export and for the backup.
+    #[test]
+    fn publish_panic_cleans_up_the_temp() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        fs::write(&copy, b"OLD COPY").unwrap();
+        fs::write(&backup, b"OLD BACKUP").unwrap();
+        let cancel = CancelToken::new();
+        let journal = GateJournal {
+            panic_in_publish: true,
+            ..GateJournal::default()
+        };
+        let export = catch_unwind(AssertUnwindSafe(|| {
+            vault.export_file(&id, &file, &copy, &journal, &cancel)
+        }));
+        assert!(export.is_err(), "the panic reaches the caller");
+        let made = catch_unwind(AssertUnwindSafe(|| {
+            vault.backup(&backup, &journal, &cancel)
+        }));
+        assert!(made.is_err(), "the panic reaches the caller");
+        assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
+        assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
+        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        let once = ["record", "publish", "clear"];
+        assert_eq!(*journal.calls.borrow(), [once, once].concat());
+        assert_eq!(*journal.cleared.borrow(), *journal.recorded.borrow());
+    }
+
+    /// The rename went through but making it durable failed (the folder sync, a failpoint
+    /// here): the error is returned, the destination holds the new content, the temp is gone
+    /// and cleared, and no cleanup ran on the destination.
+    #[test]
+    fn sync_failure_after_the_rename_keeps_the_published_output() {
+        let _cleanup = Cleanup;
+        let (parent, vault, id, file) = vault_with_file();
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let (copy, backup) = (out.join("a.txt"), out.join("b.lockbox-backup"));
+        fs::write(&copy, b"OLD COPY").unwrap();
+        fs::write(&backup, b"OLD BACKUP").unwrap();
+        let cancel = CancelToken::new();
+        let journal = GateJournal::default();
+        failpoint::arm("publish.after_rename");
+        let exported = vault.export_file(&id, &file, &copy, &journal, &cancel);
+        let made = vault.backup(&backup, &journal, &cancel);
+        failpoint::disarm_all();
+        assert!(matches!(exported, Err(CoreError::Io(_))), "{exported:?}");
+        assert!(matches!(made, Err(CoreError::Io(_))), "{made:?}");
+        assert_eq!(fs::read(&copy).unwrap(), b"hello", "the copy is published");
+        assert!(
+            crate::archive::BackupArchive::open(&backup, &cancel).is_ok(),
+            "the backup is published"
+        );
+        assert_eq!(file_names(&out), ["a.txt", "b.lockbox-backup"], "no temp");
+        let once = ["record", "publish", "clear"];
+        assert_eq!(*journal.calls.borrow(), [once, once].concat());
+        assert_eq!(*journal.cleared.borrow(), *journal.recorded.borrow());
     }
 
     /// A gate that refuses the rename: the existing destination stays byte for byte, the temp

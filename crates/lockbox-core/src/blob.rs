@@ -62,9 +62,14 @@ pub trait OutputJournal {
     /// Forgets `temp`, once it is gone: published, or removed after a failure.
     fn clear(&self, temp: &Path);
     /// Runs one attempt of the rename that publishes the output: `attempt` tries the rename
-    /// once, without retrying. Called once per attempt; the engine waits between attempts
-    /// outside this call. An error that is not a sharing violation or access denied (Windows)
-    /// stops the output: the temp is removed and cleared, and the destination is untouched.
+    /// once, without retrying, and nothing else (making the rename durable comes after, outside
+    /// this call). Called once per attempt; the engine waits between attempts outside this call.
+    /// A sharing violation or access denied (Windows) is retried; any other error, a refusal
+    /// from here included, stops the output. While the rename has not happened (a refusal, an
+    /// error, the last attempt failing, a panic), the destination is untouched and the temp is
+    /// removed, then cleared (it stays recorded if it cannot be removed). Once the rename has
+    /// happened, the destination is replaced and the temp is cleared; if making that durable
+    /// then fails, the output returns that error: published, durability not confirmed.
     fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
         attempt()
     }

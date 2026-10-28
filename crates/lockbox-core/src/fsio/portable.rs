@@ -14,7 +14,17 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 
 pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     // If the folder sync fails after the rename, the new content is already in place even though an error is returned.
-    fs::rename(from, to)?;
+    rename_replace(from, to)?;
+    sync_after_replace(to)
+}
+
+/// The move half of [`replace_file`]: replaces `to` with `from`, not yet durable.
+pub fn rename_replace(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
+
+/// The durability half of [`replace_file`], after the move: flushes the folder holding `to`.
+pub fn sync_after_replace(to: &Path) -> io::Result<()> {
     sync_dir(parent_dir(to))
 }
 

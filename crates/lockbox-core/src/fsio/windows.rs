@@ -63,6 +63,18 @@ pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     move_file(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
 }
 
+/// The move half of [`replace_file`]: here the whole of it, one `MoveFileExW` with
+/// `MOVEFILE_WRITE_THROUGH`.
+pub fn rename_replace(from: &Path, to: &Path) -> io::Result<()> {
+    replace_file(from, to)
+}
+
+/// The durability half of [`replace_file`]: nothing more to do here, the move itself was
+/// write-through.
+pub fn sync_after_replace(_to: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// Moves `from` to `to`; fails (`AlreadyExists`) rather than replace.
 pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     move_file(from, to, MOVEFILE_WRITE_THROUGH)

@@ -135,15 +135,25 @@ pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
     Ok(retry(|| sys::replace_file(from, to))?)
 }
 
-/// [`replace_file`] for publishing an output: each attempt of the move runs through `gate`
-/// (the output journal's `publish`), and the waits between attempts come outside it. An error
-/// from the gate that is not a transient one stops the retries and is returned.
-pub(crate) fn replace_file_gated(
+/// The move half of [`replace_file`], for publishing an output: each attempt of the move runs
+/// through `gate` (the output journal's `publish`), and the waits between attempts come outside
+/// it. A gate refusal or a non-transient error stops the retries and is returned; `to` is then
+/// untouched. On success the move is done but not yet durable: call [`sync_after_replace`].
+pub(crate) fn rename_replace_gated(
     from: &Path,
     to: &Path,
     gate: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()>,
 ) -> Result<()> {
-    retry_gated(|| sys::replace_file(from, to), gate, std::thread::sleep)
+    retry_gated(|| sys::rename_replace(from, to), gate, std::thread::sleep)
+}
+
+/// The durability half of [`replace_file`], after a successful [`rename_replace_gated`] to
+/// `to`: flushes the folder where that is needed (not on Windows, where the move was
+/// write-through). An error here means `to` is already replaced, but durability is not confirmed.
+pub(crate) fn sync_after_replace(to: &Path) -> Result<()> {
+    #[cfg(any(test, feature = "test-internals"))]
+    failpoint::check("publish.after_rename")?;
+    Ok(sys::sync_after_replace(to)?)
 }
 
 /// A destination that is already taken.

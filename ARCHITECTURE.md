@@ -126,8 +126,9 @@ must give an error with fixed wording, never a panic.
   cleanup sets aside (spec 6.4). Replacing a file lists the old one in the item's `retired_blobs`; cleanup deletes it.
 - **Export** (`export_file`): refuses a destination inside the vault. Decrypts into a hidden temp file beside the
   destination (recorded first through the journal hook, a list that lets a crash cleanup find leftovers), checks the
-  whole stream, flushes, unhides, checks for cancel, then `replace_file` over the destination (spec 7.2). A failed or
-  cancelled export leaves an existing destination alone.
+  whole stream, flushes, unhides, checks for cancel, then publishes over the destination through the journal's gate
+  (`rename_replace_gated`, then `sync_after_replace`; rule 1) (spec 7.2). A failed, cancelled or refused export leaves
+  an existing destination alone.
 - **Purge** (`purge_item`, trashed items only): rewrite the item with `purging: true`, delete its blobs from `files/`
   and the quarantine (never one another item still attaches; refused while `files/` or `files/orphaned/` is a link),
   then delete the item file. A crash in between is finished at the next unlock. Refused while `items/` is a link,
@@ -172,11 +173,15 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
 
 1. **All writes go through `atomic_write` or `replace_file`.** Nothing is written in place. A file gets its final name
    only by one of these two (header and item files by `atomic_write`; blobs and exports by a temp file and
-   `replace_file`), and the vault folder itself only by `rename_dir_no_replace`. A decrypted copy or a backup is
-   published by `replace_file_gated`: the same retried move, each attempt run through the output journal's `publish`
-   gate, with the waits between attempts outside it; a refusal from the gate stops it, and the temp is removed. (The folders inside it, `items/`,
+   `replace_file`), and the vault folder itself only by `rename_dir_no_replace`. (The folders inside it, `items/`,
    `files/` and `files/orphaned/`, are empty working folders created in place with `create_dir_all`.) That same
    no-replace rename also moves blobs into and out of `files/orphaned/` during cleanup; it is a rename, not a write.
+   A decrypted copy or a backup is published by `replace_file`'s two halves, split: `rename_replace_gated` retries the
+   move with each attempt run through the output journal's `publish` gate (the waits between attempts outside it),
+   then `sync_after_replace` makes it durable. A transient error (sharing violation, access denied) is retried; a gate
+   refusal or any other error stops the retries, and the temp is then removed, its record cleared only if the removal
+   worked (otherwise it stays recorded for the crash sweep). A durability error after the move is returned with the
+   destination already published.
    Restore is the exception in two places: it writes each entry in place inside its hidden staging folder (a new
    file, synced, closed and read back before the next), which holds no vault until it is renamed into place and is
    removed whole by the clean-up, recovery or a dismissal (rule 15); and it publishes the restore journal's first
