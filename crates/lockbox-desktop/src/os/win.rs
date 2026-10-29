@@ -1,6 +1,6 @@
 //! Direct Windows and WebView2 calls: WebView2's file-drop setting, the hidden window that hears Windows lock,
-//! sleep, sign-out, shutdown and drive removal ([`spawn`]), and the real [`Os`]: volumes, known folders and file
-//! dialogs. Every `unsafe` block of the crate is here, each with a `// SAFETY:` comment.
+//! sleep, sign-out, shutdown and drive removal ([`spawn`]), and the real [`Os`]: volumes, known folders, file
+//! dialogs and opening links. Every `unsafe` block of the crate is here, each with a `// SAFETY:` comment.
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, OnceCell};
@@ -33,7 +33,9 @@ use windows_sys::Win32::Storage::CloudFilters::{
 use windows_sys::Win32::Storage::FileSystem::{
     GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
 };
-use windows_sys::Win32::System::Com::CoTaskMemFree;
+use windows_sys::Win32::System::Com::{
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED, HPOWERNOTIFY, RegisterSuspendResumeNotification,
@@ -44,19 +46,19 @@ use windows_sys::Win32::System::RemoteDesktop::{
 };
 use windows_sys::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData, KF_FLAG_DEFAULT,
-    SHGetKnownFolderPath,
+    SHGetKnownFolderPath, ShellExecuteW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME,
     DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+    PostMessageW, PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_SHOWNORMAL,
     SendMessageTimeoutW, UnregisterClassW, WM_APP, WM_CLOSE, WM_DESTROY, WM_NULL, WNDCLASSW,
     WS_OVERLAPPED,
 };
 use windows_sys::core::PWSTR;
 
 use super::signals::{DeviceHeader, classify, wants_device_header};
-use super::{Dialogs, DriveType, Env, KnownFolder, Os, OsSignal, Volumes};
+use super::{Dialogs, DriveType, Env, KnownFolder, Launcher, Os, OsSignal, Volumes};
 use crate::{lock, window};
 
 #[cfg(test)]
@@ -104,6 +106,48 @@ impl Os {
             volumes: Arc::new(WinVolumes),
             env: Arc::new(WinEnv),
             dialogs: Arc::new(WinDialogs { app }),
+            launcher: Arc::new(WinLauncher),
+        }
+    }
+}
+
+/// Opens web links with `ShellExecuteW`, verb `open`: the user's default browser.
+pub struct WinLauncher;
+
+impl Launcher for WinLauncher {
+    fn open_url(&self, url: &tauri::Url) -> io::Result<()> {
+        let verb = wide_text(OsStr::new("open"))?;
+        let link = wide_text(OsStr::new(url.as_str()))?;
+        // COM first, as `ShellExecuteW` asks of its caller (it may hand the link to a shell extension): the
+        // single-threaded apartment, which rfd's dialogs also use on these blocking-pool threads, undone below. A thread
+        // already in the multithreaded apartment (`RPC_E_CHANGED_MODE`, a failure) keeps it and is not undone.
+        // SAFETY: the reserved pointer is null and the flags are valid `COINIT` values.
+        let com = unsafe {
+            CoInitializeEx(
+                ptr::null(),
+                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+            )
+        };
+        // SAFETY: `verb` and `link` are NUL-terminated UTF-16 strings that live through the call; no owner window,
+        // parameters or working directory (null), which the call accepts.
+        let result = unsafe {
+            ShellExecuteW(
+                ptr::null_mut(),
+                verb.as_ptr(),
+                link.as_ptr(),
+                ptr::null(),
+                ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if com >= 0 {
+            // SAFETY: balances the successful `CoInitializeEx` above (`S_OK` or `S_FALSE`) on this same thread.
+            unsafe { CoUninitialize() };
+        }
+        // Greater than 32 means it launched; the rest are error codes (only the kind crosses, never the link).
+        match result as isize > 32 {
+            true => Ok(()),
+            false => Err(io::Error::other("link not opened")),
         }
     }
 }
@@ -158,7 +202,12 @@ unsafe fn wide_until_nul(text: *const u16) -> OsString {
 /// `path` as a NUL-terminated UTF-16 string, for a Windows call. A path holding a NUL itself is refused: Windows
 /// would read only the part before it.
 fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide_text(path.as_os_str())
+}
+
+/// `text` as a NUL-terminated UTF-16 string, for a Windows call; refused when it holds a NUL itself.
+fn wide_text(text: &OsStr) -> io::Result<Vec<u16>> {
+    let mut wide: Vec<u16> = text.encode_wide().collect();
     if wide.contains(&0) {
         return Err(io::ErrorKind::InvalidInput.into());
     }

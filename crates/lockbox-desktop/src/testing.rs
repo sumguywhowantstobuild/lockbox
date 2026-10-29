@@ -1,4 +1,4 @@
-//! Tests only: fakes for the OS calls (`os::{Env, Volumes, Dialogs}`), a shell built on them inside a temp folder,
+//! Tests only: fakes for the OS calls (`os::{Env, Volumes, Dialogs, Launcher}`), a shell built on them inside a temp folder,
 //! and the lock that keeps key derivations off a timing test's CPU.
 
 use std::collections::{HashMap, VecDeque};
@@ -11,7 +11,7 @@ use std::{fs, io};
 use lockbox_core::internals::fsio::testutil::TempDir;
 
 use crate::lock;
-use crate::os::{Dialogs, DriveType, Env, KnownFolder, Os, Volumes};
+use crate::os::{Dialogs, DriveType, Env, KnownFolder, Launcher, Os, Volumes};
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
 
@@ -255,6 +255,25 @@ impl Dialogs for FakeDialogs {
     }
 }
 
+/// A launcher that records each link it is given (its parsed form) instead of opening it.
+#[derive(Default)]
+pub struct FakeLauncher {
+    opened: Mutex<Vec<String>>,
+}
+
+impl FakeLauncher {
+    pub fn opened(&self) -> Vec<String> {
+        lock(&self.opened).clone()
+    }
+}
+
+impl Launcher for FakeLauncher {
+    fn open_url(&self, url: &tauri::Url) -> io::Result<()> {
+        lock(&self.opened).push(url.as_str().to_owned());
+        Ok(())
+    }
+}
+
 /// A shell on fake OS calls, inside its own temp folder: the known folders in `profile`, `local` and `roaming`, and
 /// a `vaults` folder for the test's own vaults.
 pub struct TestShell {
@@ -262,6 +281,7 @@ pub struct TestShell {
     pub env: Arc<FakeEnv>,
     pub volumes: Arc<FakeVolumes>,
     pub dialogs: Arc<FakeDialogs>,
+    pub launcher: Arc<FakeLauncher>,
     /// Tauri's app-data folders, as the app passes them in.
     pub app_dirs: Vec<PathBuf>,
     /// Kept last, so the shell (and every vault it holds) is gone before the folder is removed.
@@ -274,6 +294,7 @@ impl TestShell {
         let env = Arc::new(FakeEnv::new(temp.path()));
         let volumes = Arc::new(FakeVolumes::default());
         let dialogs = Arc::new(FakeDialogs::default());
+        let launcher = Arc::new(FakeLauncher::default());
         let app_dirs = vec![
             env.folder(KnownFolder::RoamingAppData)
                 .join("io.github.sumguywhowantstobuild.lockbox"),
@@ -285,6 +306,7 @@ impl TestShell {
             volumes: volumes.clone(),
             env: env.clone(),
             dialogs: dialogs.clone(),
+            launcher: launcher.clone(),
         };
         let shell = Arc::new(Shell::new(Arc::new(NoEvents), os, app_dirs.clone()).unwrap());
         TestShell {
@@ -292,6 +314,7 @@ impl TestShell {
             env,
             volumes,
             dialogs,
+            launcher,
             app_dirs,
             temp,
         }

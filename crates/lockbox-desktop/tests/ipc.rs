@@ -84,15 +84,17 @@ fn granted_command_runs_in_main_window() {
 
 /// Each listed command passes the ACL and reaches its handler (fix round 1: `add_existing_vault_confirm` was added).
 /// This test app keeps no shell state, so a command that needs it stops at Tauri's "state not managed" answer:
-/// past the ACL, inside the handler.
+/// past the ACL, inside the handler. The generator needs none: its own request check refuses the empty body.
 #[test]
 fn every_listed_command_reaches_its_handler() {
     let app = app();
     let main = main_webview(&app);
+    let malformed = json!({ "code": "invalid_input", "what": "request" });
     for cmd in COMMANDS {
         match invoke(&main, APP_ORIGIN, cmd, InvokeBody::Json(json!({}))) {
             Ok(_) => assert_eq!(*cmd, "app_info"),
             Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            Err(answer) if cmd.starts_with("generate_") && answer == malformed => {}
             other => panic!("{cmd} did not reach its handler: {other:?}"),
         }
     }

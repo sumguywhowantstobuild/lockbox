@@ -20,6 +20,22 @@
     "allow-recover-vault-confirm",
     "allow-change-password",
     "allow-regenerate-recovery",
-    "allow-accept-header"
+    "allow-accept-header",
+    "allow-list-items",
+    "allow-get-item",
+    "allow-reveal-password",
+    "allow-new-item",
+    "allow-update-item",
+    "allow-trash-item",
+    "allow-restore-item",
+    "allow-delete-collection",
+    "allow-purge-item",
+    "allow-old-trash",
+    "allow-search-all",
+    "allow-open-url",
+    "allow-list-orphans",
+    "allow-delete-orphans",
+    "allow-generate-password",
+    "allow-generate-passphrase"
   ]
 }

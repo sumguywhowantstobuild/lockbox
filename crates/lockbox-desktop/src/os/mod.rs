@@ -16,6 +16,7 @@ pub struct Os {
     pub volumes: Arc<dyn Volumes>,
     pub env: Arc<dyn Env>,
     pub dialogs: Arc<dyn Dialogs>,
+    pub launcher: Arc<dyn Launcher>,
 }
 
 /// A folder Windows keeps for each user (`SHGetKnownFolderPath`).
@@ -76,6 +77,14 @@ pub trait Dialogs: Send + Sync {
         suggested: &str,
         filter: Option<(&str, &[&str])>,
     ) -> Option<PathBuf>;
+}
+
+/// Opens things outside the app with the user's default programs (`ShellExecuteW`). Never called under a session or
+/// vault lock: a launch may wait for Windows or the user (spec §7.4).
+pub trait Launcher: Send + Sync {
+    /// Opens a web link in the default browser. `url` is already parsed and checked to be `http` or `https`; the
+    /// launcher passes on its parsed form (`as_str()`), never the text it was parsed from.
+    fn open_url(&self, url: &tauri::Url) -> io::Result<()>;
 }
 
 /// Whether `a` and `b` name the same path as the file system compares names: component by component (so a trailing

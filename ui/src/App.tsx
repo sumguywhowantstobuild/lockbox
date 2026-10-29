@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { callPlain, open, type Opened } from "./bridge";
+import { call, callPlain, open, type Opened } from "./bridge";
 import { useDroppedFileReachedPage } from "./dropProbe";
 
 interface AppInfo {
@@ -18,10 +18,22 @@ const OUTSIDE = "https://example.com";
 const TEST_VAULT = "Lockbox test vault";
 const TEST_VAULT_PASSWORD = "hands-on check only";
 
+// The test login the hands-on checks add. Its password guards nothing real.
+const TEST_LOGIN = {
+  title: "Test login",
+  username: "test@example.com",
+  password: "hands-on check only",
+  url: "https://example.com",
+};
+
+// The session the last create or unlock opened: "Add test login" adds to it.
+let testSession: { session: number; generation: number } | undefined;
+
 // What an opening command's answer means for the test page.
 function describe(answer: Opened<unknown>, done: string): string {
   if (answer === "Dismissed") return "Closed";
   if ("Confirm" in answer) return "Asked first: the folder is synced by a cloud provider";
+  testSession = { session: answer.session, generation: answer.generation };
   return `${done} (session ${String(answer.session)})`;
 }
 
@@ -45,6 +57,34 @@ async function unlockTestVault(): Promise<string> {
   if (vault === undefined) return "No test vault yet: create it first";
   const answer = await open("unlock_vault", { id: vault.id, password: TEST_VAULT_PASSWORD });
   return describe(answer, "Unlocked");
+}
+
+// A new login in the open test vault, then its first edit (revision 0): the item commands end to end.
+async function addTestLogin(): Promise<string> {
+  if (testSession === undefined) return "No test vault open: create or unlock it first";
+  const { session, generation } = testSession;
+  const created = await call<string>("new_item", {
+    session,
+    generation,
+    kind: "login",
+    title: TEST_LOGIN.title,
+    collection: null,
+  });
+  await call<null>("update_item", {
+    session,
+    generation,
+    edit: {
+      id: created.data,
+      revision: 0,
+      title: TEST_LOGIN.title,
+      notes: "",
+      collection: null,
+      username: TEST_LOGIN.username,
+      password: TEST_LOGIN.password,
+      urls: [TEST_LOGIN.url],
+    },
+  });
+  return `Test login added (session ${String(session)})`;
 }
 
 // A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
@@ -139,7 +179,16 @@ export default function App() {
           >
             Unlock test vault
           </button>{" "}
-          Creates &quot;{TEST_VAULT}&quot; in the default vaults folder, then unlocks it from the vault list.
+          <button
+            type="button"
+            onClick={() => {
+              run(addTestLogin);
+            }}
+          >
+            Add test login
+          </button>{" "}
+          Creates &quot;{TEST_VAULT}&quot; in the default vaults folder, then unlocks it from the vault list; adds a
+          login to the vault last opened.
           {vaultStatus !== undefined && <output> {vaultStatus}</output>}
         </li>
       </ul>

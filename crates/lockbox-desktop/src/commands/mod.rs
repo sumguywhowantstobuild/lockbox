@@ -2,6 +2,8 @@
 //! request and parses it with [`args`] into a struct that refuses unknown fields.
 
 mod args;
+mod generator;
+pub mod items;
 mod list;
 mod sessions;
 pub mod vaults;
@@ -36,7 +38,23 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         vaults::recover_vault_confirm,
         vaults::change_password,
         vaults::regenerate_recovery,
-        vaults::accept_header
+        vaults::accept_header,
+        items::list_items,
+        items::get_item,
+        items::reveal_password,
+        items::new_item,
+        items::update_item,
+        items::trash_item,
+        items::restore_item,
+        items::delete_collection,
+        items::purge_item,
+        items::old_trash,
+        items::search_all,
+        items::open_url,
+        items::list_orphans,
+        items::delete_orphans,
+        generator::generate_password,
+        generator::generate_passphrase
     ]
 }
 

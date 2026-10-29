@@ -21,6 +21,7 @@ pub mod session;
 pub mod shell;
 #[cfg(test)]
 mod testing;
+pub mod views;
 pub mod window;
 
 pub use commands::handler;
