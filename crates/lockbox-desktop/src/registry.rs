@@ -249,9 +249,11 @@ mod tests {
         let (a, b) = (folder(&temp, "a"), folder(&temp, "b"));
         assert_eq!(registry.add(&a), Ok(1));
         assert_eq!(registry.add(&b), Ok(2));
-        // The same folder again, in another letter case, keeps its ID.
+        // The same folder again, in another letter case or with a trailing separator, keeps its ID.
         let upper = PathBuf::from(a.to_string_lossy().to_uppercase());
         assert_eq!(registry.add(&upper), Ok(1));
+        let trailing = PathBuf::from(format!("{}\\", a.display()));
+        assert_eq!(registry.add(&trailing), Ok(1));
         assert_eq!(
             registry.list(),
             Ok(vec![entry(1, None, true), entry(2, None, true)])

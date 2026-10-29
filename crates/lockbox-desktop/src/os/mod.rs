@@ -6,7 +6,7 @@ pub mod signals;
 #[cfg(windows)]
 pub mod win;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -78,11 +78,24 @@ pub trait Dialogs: Send + Sync {
     ) -> Option<PathBuf>;
 }
 
-/// Whether `a` and `b` name the same path as the file system compares names: on Windows ordinal and ignoring case,
-/// with Windows' own case table (not Unicode lowercasing, which merges names Windows keeps apart); elsewhere exactly.
+/// Whether `a` and `b` name the same path as the file system compares names: component by component (so a trailing
+/// separator changes nothing), each on Windows ordinal and ignoring case, with Windows' own case table (not Unicode
+/// lowercasing, which merges names Windows keeps apart); elsewhere exactly.
 pub fn same_path(a: &Path, b: &Path) -> bool {
+    let (mut a, mut b) = (a.components(), b.components());
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if same_name(x.as_os_str(), y.as_os_str()) => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Whether two names (one path component each) are equal as the file system compares them; see [`same_path`].
+pub fn same_name(a: &OsStr, b: &OsStr) -> bool {
     #[cfg(windows)]
-    return win::equal_ignoring_case(a.as_os_str(), b.as_os_str());
+    return win::equal_ignoring_case(a, b);
     #[cfg(not(windows))]
     return a == b;
 }

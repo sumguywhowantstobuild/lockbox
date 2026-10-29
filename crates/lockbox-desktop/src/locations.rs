@@ -113,7 +113,11 @@ fn canonical_or_nearest(dir: &Path) -> io::Result<Option<(PathBuf, PathBuf)>> {
         if !rest.components().all(is_plain_new_name) {
             return Ok(None);
         }
-        let full = existing.join(rest);
+        // Joining an empty rest would add a trailing separator: another spelling of the same folder.
+        let full = match rest.as_os_str().is_empty() {
+            true => existing.clone(),
+            false => existing.join(rest),
+        };
         return Ok(Some((existing, full)));
     }
     Err(io::ErrorKind::NotFound.into())
@@ -243,9 +247,8 @@ fn dropbox_folders(info: &Path) -> Vec<PathBuf> {
 pub fn is_within(path: &Path, root: &Path) -> bool {
     let mut path = path.components();
     root.components().all(|part| {
-        path.next().is_some_and(|own| {
-            crate::os::same_path(Path::new(own.as_os_str()), Path::new(part.as_os_str()))
-        })
+        path.next()
+            .is_some_and(|own| crate::os::same_name(own.as_os_str(), part.as_os_str()))
     })
 }
 

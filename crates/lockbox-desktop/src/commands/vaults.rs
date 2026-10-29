@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use lockbox_core::blob::CancelToken;
 use lockbox_core::fsio::remove_dir_all_retry;
 use lockbox_core::kdf::check_new_password;
 use lockbox_core::recovery::RecoverySecret;
@@ -129,6 +130,22 @@ const HEADER_FILES: [&str; 2] = ["vault.json", "vault.json.bak"];
 /// What a create that a lock overtook made: the vault exists and is on the vault list, but is not open.
 const VAULT_CREATED: &str = "vault created";
 
+/// `Locked` once a lock of all vaults has cancelled the open: checked right before a step that cannot be undone
+/// (making the vault, accepting a header, setting a password), so a lock that lands before it changes nothing.
+fn not_cancelled(cancel: &CancelToken) -> ShellResult<()> {
+    match cancel.is_cancelled() {
+        true => Err(ShellError::Locked),
+        false => Ok(()),
+    }
+}
+
+/// A create whose vault the list could not take, and that could not be removed again: the vault is on disk, in the
+/// folder the user chose, but not on the list and its recovery key never shown. The page tells the user to add it
+/// with "Add existing vault" and make a new recovery key. Fixed text, no path (R5).
+const VAULT_NOT_LISTED: ShellError = ShellError::InvalidInput {
+    what: "vault not listed",
+};
+
 /// Tests only: the step a recovery reaches once the new password is set, just before it gives back the session.
 #[cfg(test)]
 const PASSWORD_SET: &str = "shell.recover.password_set";
@@ -239,8 +256,8 @@ impl Shell {
             },
             false => default_vault_parent(self.os.env.as_ref())?,
         };
-        let answer = self.sessions.open(None, Some(VAULT_CREATED), |_| {
-            self.create_in(parent, name, password, false)
+        let answer = self.sessions.open(None, Some(VAULT_CREATED), |cancel| {
+            self.create_in(parent, name, password, false, cancel)
         })?;
         created(answer)
     }
@@ -262,7 +279,7 @@ impl Shell {
             token,
             Some(VAULT_CREATED),
             pick,
-            |(parent, name, password), _| self.create_in(parent, name, password, true),
+            |(parent, name, password), cancel| self.create_in(parent, name, password, true, cancel),
         )?;
         created(answer)
     }
@@ -277,6 +294,7 @@ impl Shell {
         name: String,
         password: Zeroizing<String>,
         cloud_confirmed: bool,
+        cancel: &CancelToken,
     ) -> ShellResult<OpenStep<Zeroizing<String>>> {
         let check = self.check_location(&parent)?;
         // The folder as checked, from here on.
@@ -295,6 +313,7 @@ impl Shell {
         let creating = self.creating();
         // Before anything is written, so a full or damaged list never leaves the new vault off it.
         self.registry.check_room()?;
+        not_cancelled(cancel)?;
         // The default vaults folder is made on first use; a folder the user picked exists already.
         fs::create_dir_all(&parent)?;
         let created = Vault::create(&parent, &name, &password)?;
@@ -307,11 +326,14 @@ impl Shell {
             Err(e) => {
                 // Not on the list (its write failed, or it would grow too large): removed again, so no vault is left
                 // that Lockbox cannot show and whose recovery key was never shown. The vault closes first, freeing its
-                // `.lock`; only the folder this create made is removed, best effort.
+                // `.lock`; only the folder this create made is removed. If that fails too, the vault (or part of
+                // it) stays on disk: `VAULT_NOT_LISTED` tells the user, who knows its password, to add it.
                 let made = created.vault.dir().to_path_buf();
                 drop(created);
-                let _ = remove_dir_all_retry(&made);
-                return Err(e);
+                return Err(match remove_dir_all_retry(&made) {
+                    Ok(()) => e,
+                    Err(_) => VAULT_NOT_LISTED,
+                });
             }
         };
         Ok(OpenStep::Session(
@@ -398,7 +420,7 @@ impl Shell {
         let secret = RecoverySecret::parse(&recovery_key)?;
         let answer = self
             .sessions
-            .open(Some(location.clone()), Some("password"), |_| {
+            .open(Some(location.clone()), Some("password"), |cancel| {
                 let check = self.check_location(&dir)?;
                 let (mut vault, report) = Vault::unlock_with_recovery(&check.path, &secret)?;
                 if report.header_mac_mismatch {
@@ -412,6 +434,7 @@ impl Shell {
                         token,
                     }));
                 }
+                not_cancelled(cancel)?;
                 vault.change_password(&new_password)?;
                 #[cfg(test)]
                 test_step(PASSWORD_SET)?;
@@ -458,11 +481,12 @@ impl Shell {
             token,
             Some("password"),
             pick,
-            |(location, vault, new_password, mut report), _| {
+            |(location, vault, new_password, mut report), cancel| {
                 // Before `accept_header` writes anything.
                 check_new_password(&new_password)?;
                 // Checked again: the folder may have moved drives while the question waited.
                 let check = self.check_location(location.path())?;
+                not_cancelled(cancel)?;
                 let mut vault = *vault;
                 vault.accept_header()?;
                 vault.change_password(&new_password)?;
@@ -709,13 +733,17 @@ pub(super) async fn accept_header(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::os::windows::fs::OpenOptionsExt;
     use std::path::Path;
+    use std::rc::Rc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use lockbox_core::internals::fsio::failpoint;
+    use lockbox_core::internals::fsio::testutil::make_dir_link;
     use lockbox_core::internals::header::{
         HEADER_BACKUP, HEADER_FILE, parse_header, serialize_header,
     };
@@ -723,6 +751,7 @@ mod tests {
     use lockbox_core::{CoreError, read_vault_name};
     use serde_json::{Value, json};
     use tauri::ipc::InvokeBody;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
     use super::super::{MALFORMED, parse};
     use super::*;
@@ -980,9 +1009,12 @@ mod tests {
     fn lock_as_a_confirm_takes_its_choice_is_seen() {
         let ts = TestShell::new();
 
-        // Recovery: the header accepted and the password set, but the session never opens.
+        // Recovery: the session never opens. The lock lands while the confirm's closure runs; whether its cancel is
+        // seen before the header is accepted (`Locked`, nothing changed; fix round 2) or after the password is set
+        // (`LockedAfterChange`) depends on timing, and both are right.
         let (id, dir, recovery) = registered(&ts);
         change_header(&dir);
+        let before = headers(&dir);
         let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))).unwrap();
         let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
             panic!("the changed header asks first");
@@ -990,14 +1022,17 @@ mod tests {
         let locker = lock_once_taken(&ts);
         let answer = heavy(|| ts.shell.recover_vault_confirm(&token, true));
         join(&locker);
-        assert_eq!(
-            answer.err(),
-            Some(ShellError::LockedAfterChange { what: "password" })
-        );
+        match answer.err() {
+            Some(ShellError::Locked) => assert_eq!(headers(&dir), before, "nothing changed"),
+            Some(ShellError::LockedAfterChange { what: "password" }) => {
+                assert!(password_works(&dir, NEW_PW))
+            }
+            other => panic!("not overtaken by the lock: {other:?}"),
+        }
         assert!(ts.shell.sessions.list().is_empty(), "no session");
         assert!(is_free(&dir));
 
-        // Creation in a cloud folder: the vault is made and listed, but not opened.
+        // Creation in a cloud folder: never opened; made and listed only if the cancel came after the vault was made.
         let synced = ts.temp.path().join("synced");
         fs::create_dir(&synced).unwrap();
         ts.volumes.add_sync_root(&synced);
@@ -1013,16 +1048,22 @@ mod tests {
         let locker = lock_once_taken(&ts);
         let answer = heavy(|| ts.shell.create_vault_confirm(&token));
         join(&locker);
-        assert_eq!(
-            answer.err(),
-            Some(ShellError::LockedAfterChange {
-                what: "vault created"
-            })
-        );
         assert!(ts.shell.sessions.list().is_empty(), "no session");
         let entries = ts.shell.registry.entries();
-        assert_eq!(entries.len(), 2, "the new vault is on the list");
-        assert!(is_free(&entries[1].1));
+        match answer.err() {
+            Some(ShellError::Locked) => {
+                assert_eq!(entries.len(), 1, "nothing made");
+                assert!(vault_folders(&synced).is_empty());
+            }
+            Some(ShellError::LockedAfterChange {
+                what: "vault created",
+            }) => {
+                assert_eq!(entries.len(), 2, "the new vault is on the list");
+                assert!(is_free(&entries[1].1));
+            }
+            other => panic!("not overtaken by the lock: {other:?}"),
+        }
+        let listed = entries.len();
 
         // A lock before the yes: the choice is gone, nothing is created.
         let token = ask();
@@ -1031,7 +1072,7 @@ mod tests {
             ts.shell.create_vault_confirm(&token).err(),
             Some(ShellError::NotFound)
         );
-        assert_eq!(ts.shell.registry.entries().len(), 2);
+        assert_eq!(ts.shell.registry.entries().len(), listed);
 
         // A lock while the confirm's closure runs (after it registered): made, listed, not opened.
         let token = ask();
@@ -1049,7 +1090,7 @@ mod tests {
             })
         );
         assert!(ts.shell.sessions.list().is_empty());
-        assert_eq!(ts.shell.registry.entries().len(), 3);
+        assert_eq!(ts.shell.registry.entries().len(), listed + 1);
     }
 
     /// When this thread's next create reaches its staging folder, runs `second` on another thread and lets this create
@@ -1140,22 +1181,43 @@ mod tests {
         .unwrap();
         let elsewhere = ts.vaults();
         ts.dialogs.answer(Some(elsewhere.clone()));
+        // Fix round 2 (G5): each create records whether it reached the engine's create (its staging folder), so the
+        // test shows the creation lock at work, not only the cleanup of a vault the list could not take.
         let second = second_at_staging(&ts, |shell| {
-            shell.create_vault("Work".into(), secret(PW), true)
+            let reached = Rc::new(Cell::new(false));
+            let seen = Rc::clone(&reached);
+            failpoint::observe("create.before_rename", Box::new(move || seen.set(true)));
+            let answer = shell.create_vault("Work".into(), secret(PW), true);
+            failpoint::disarm_all();
+            (answer.map(|_| ()), reached.get())
         });
-        let (first, second) = heavy(|| {
+        let first_reached = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&first_reached);
+        failpoint::observe("create.before_rename", Box::new(move || seen.set(true)));
+        let (first, (second, second_reached)) = heavy(|| {
             let first = ts.shell.create_vault("Family".into(), secret(PW), false);
             (first, joined(&second))
         });
         failpoint::disarm_all();
         let full = ShellError::TooLarge { what: "vault list" };
-        let answers = [first.map(|_| ()), second.map(|_| ())];
+        let answers = [
+            (first.map(|_| ()), first_reached.get()),
+            (second, second_reached),
+        ];
         assert_eq!(
-            answers.iter().filter(|answer| answer.is_ok()).count(),
+            answers.iter().filter(|(answer, _)| answer.is_ok()).count(),
             1,
             "exactly one through"
         );
-        assert!(answers.contains(&Err(full)));
+        for (answer, reached) in &answers {
+            if answer.is_err() {
+                assert_eq!(*answer, Err(full));
+                assert!(
+                    !reached,
+                    "refused at the room check, before anything was made"
+                );
+            }
+        }
         let entries = ts.shell.registry.entries();
         assert_eq!(entries.len(), MAX_VAULTS);
         let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
@@ -1206,6 +1268,144 @@ mod tests {
         assert!(vault_folders(&default).is_empty(), "the vault is removed");
         assert!(ts.shell.sessions.list().is_empty());
         assert_eq!(ts.shell.registry.entries().len(), 1);
+    }
+
+    /// Fix round 2 (G1): a vault the list cannot take, and that cannot be removed again either, is reported as such
+    /// (`"vault not listed"`): it is on disk, and the user can add it and make a new recovery key.
+    #[test]
+    fn vault_left_off_the_list_is_reported() {
+        let ts = TestShell::new();
+        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let held: Rc<RefCell<Option<fs::File>>> = Rc::default();
+        let hold = Rc::clone(&held);
+        let parent = default.clone();
+        // Once the vault is published: the list's write fails, and its header is held open without delete sharing,
+        // as a scanner might, so the removal fails too (after its retries).
+        failpoint::observe(
+            "create.before_rename",
+            Box::new(move || {
+                failpoint::arm("atomic_write.before_replace");
+                let (hold, parent) = (Rc::clone(&hold), parent.clone());
+                failpoint::observe(
+                    "atomic_write.before_replace",
+                    Box::new(move || {
+                        if hold.borrow().is_some() {
+                            return;
+                        }
+                        let vault = vault_folders(&parent).pop().expect("the vault is made");
+                        let file = fs::OpenOptions::new()
+                            .read(true)
+                            .share_mode(FILE_SHARE_READ)
+                            .open(vault.join(HEADER_FILE))
+                            .unwrap();
+                        *hold.borrow_mut() = Some(file);
+                    }),
+                );
+            }),
+        );
+        let answer = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
+        failpoint::disarm_all();
+        assert!(held.borrow().is_some(), "the header was held");
+        assert_eq!(
+            answer.map(|_| ()),
+            Err(ShellError::InvalidInput {
+                what: "vault not listed"
+            })
+        );
+        let left = vault_folders(&default);
+        assert_eq!(left.len(), 1, "still on disk");
+        assert!(ts.shell.sessions.list().is_empty());
+        assert!(ts.shell.registry.entries().is_empty());
+        drop(held.borrow_mut().take());
+    }
+
+    /// Fix round 2 (G2): adding a folder the list already holds finds its entry, however the folder is spelled
+    /// (a trailing separator, another letter case), and the check never adds a separator of its own.
+    #[test]
+    fn adding_a_listed_folder_finds_its_entry() {
+        let ts = TestShell::new();
+        heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false)).unwrap();
+        let (id, dir) = ts.shell.registry.entries()[0].clone();
+        let text = dir.to_string_lossy().into_owned();
+        assert!(!text.ends_with('\\'));
+        assert_eq!(ts.shell.check_location(&dir).unwrap().path, dir);
+        for spelled in [
+            dir.clone(),
+            PathBuf::from(format!("{text}\\")),
+            PathBuf::from(text.to_uppercase()),
+        ] {
+            ts.dialogs.answer(Some(spelled.clone()));
+            let entry = done(ts.shell.add_existing_vault().unwrap());
+            assert_eq!(entry.id, id, "{}", spelled.display());
+        }
+        assert_eq!(ts.shell.registry.entries(), vec![(id, dir)]);
+    }
+
+    /// Makes the junction `link` lead to `target` instead.
+    fn retarget(link: &Path, target: &Path) {
+        fs::remove_dir(link).unwrap();
+        make_dir_link(link, target);
+    }
+
+    /// Fix round 2 (G4): create, add, unlock and recover use the folder their check looked at, not the path they
+    /// were given: a junction on the way that is moved during the check (to another folder holding another vault)
+    /// does not change where they act.
+    #[test]
+    fn the_checked_folder_is_the_one_used() {
+        let ts = TestShell::new();
+        let folder = |name: &str| {
+            let dir = ts.temp.path().join(name);
+            fs::create_dir(&dir).unwrap();
+            dir
+        };
+        let (here, there) = (folder("here"), folder("there"));
+        let other = heavy(|| Vault::create(&there, "Work", NEW_PW)).unwrap();
+        let other_vault = other.vault.dir().to_path_buf();
+        drop(other);
+        let move_during_check = |link: &Path, to: &Path| {
+            let (link, to) = (link.to_path_buf(), to.to_path_buf());
+            ts.volumes
+                .during_next_check(Box::new(move || retarget(&link, &to)));
+        };
+
+        // Create: chosen through a junction to `here`, moved to `there` mid-check.
+        let parent_link = ts.vaults().join("parent-link");
+        make_dir_link(&parent_link, &here);
+        move_during_check(&parent_link, &there);
+        ts.dialogs.answer(Some(parent_link.clone()));
+        let created =
+            done(heavy(|| ts.shell.create_vault("Family".into(), secret(PW), true)).unwrap());
+        let made = vault_folders(&here);
+        assert_eq!(made.len(), 1, "made where the check looked");
+        assert_eq!(vault_folders(&there).len(), 1, "only the other vault there");
+        let (id, listed) = ts.shell.registry.entries()[0].clone();
+        assert_eq!(listed, fs::canonicalize(&made[0]).unwrap());
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // Add: the same vault through a junction, moved to the other vault mid-check.
+        let vault_link = ts.vaults().join("vault-link");
+        make_dir_link(&vault_link, &made[0]);
+        move_during_check(&vault_link, &other_vault);
+        ts.dialogs.answer(Some(vault_link.clone()));
+        let entry = done(ts.shell.add_existing_vault().unwrap());
+        assert_eq!((entry.id, entry.name.as_deref()), (id, Some("Family")));
+        assert_eq!(ts.shell.registry.entries().len(), 1);
+
+        // Unlock and recover: a listed folder reached through a junction, moved mid-check.
+        let listed_link = ts.vaults().join("listed-link");
+        make_dir_link(&listed_link, &made[0]);
+        let via_link = fs::canonicalize(ts.vaults()).unwrap().join("listed-link");
+        let link_id = ts.shell.registry.add(&via_link).unwrap();
+        move_during_check(&listed_link, &other_vault);
+        let view = heavy(|| ts.shell.unlock_vault(link_id, secret(PW))).unwrap();
+        assert_eq!(view.data.info.name, "Family");
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        retarget(&listed_link, &made[0]);
+        move_during_check(&listed_link, &other_vault);
+        let key = created.data.recovery_key.clone();
+        let recovered = heavy(|| ts.shell.recover_vault(link_id, key, secret(NEW_PW)));
+        assert_eq!(done(recovered.unwrap()).data.info.name, "Family");
     }
 
     #[test]
@@ -1269,13 +1469,43 @@ mod tests {
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&dir));
 
+        // Fix round 2 (G6): the open checks its cancel before the step it cannot undo, so a lock seen during the
+        // check changes nothing: no new password, no accepted header, no new vault.
         lock_now();
-        assert!(matches!(
-            heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))),
-            Err(ShellError::Locked | ShellError::LockedAfterChange { .. })
-        ));
+        assert_eq!(
+            heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW))).err(),
+            Some(ShellError::Locked)
+        );
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&dir));
+        assert!(password_works(&dir, PW), "the password is unchanged");
+
+        change_header(&dir);
+        let before = headers(&dir);
+        let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))).unwrap();
+        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
+            panic!("the changed header asks first");
+        };
+        lock_now();
+        assert_eq!(
+            heavy(|| ts.shell.recover_vault_confirm(&token, true)).err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(headers(&dir), before, "nothing accepted");
+        assert!(is_free(&dir));
+
+        lock_now();
+        assert_eq!(
+            heavy(|| ts.shell.create_vault("Work".into(), secret(PW), false)).err(),
+            Some(ShellError::Locked)
+        );
+        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        assert!(
+            !default.exists() || vault_folders(&default).is_empty(),
+            "nothing made"
+        );
+        assert_eq!(ts.shell.registry.entries().len(), 1);
+        assert!(ts.shell.sessions.list().is_empty());
     }
 
     /// Fix round 1 (F3): a folder name Windows would change on creation (here, into the state folder) is refused.

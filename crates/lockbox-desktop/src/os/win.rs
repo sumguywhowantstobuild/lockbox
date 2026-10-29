@@ -339,13 +339,43 @@ impl<R: Runtime> WinDialogs<R> {
     }
 }
 
+/// Held from saving the working directory, through the dialog, to putting it back. Its own lock, outside the
+/// sessions' lock order: dialogs are shown before any session, `Pending` or creation lock is taken, never under one.
+static DIALOG: Mutex<()> = Mutex::new(());
+
+/// Tests only: how many dialogs had to wait for another.
+#[cfg(test)]
+static DIALOG_WAITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn dialog_waits() -> usize {
+    DIALOG_WAITS.load(Ordering::SeqCst)
+}
+
+/// Takes [`DIALOG`], waiting for a dialog shown on another thread.
+fn dialog_turn() -> std::sync::MutexGuard<'static, ()> {
+    #[cfg(test)]
+    match DIALOG.try_lock() {
+        Ok(turn) => return turn,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            DIALOG_WAITS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    lock(&DIALOG)
+}
+
 /// Runs `show` (a dialog) and puts the process's working directory back as it was. rfd 0.17.2's folder dialog
 /// replaces the default options (`SetOptions(FOS_PICKFOLDERS)` in `build_pick_folder`), dropping `FOS_NOCHANGEDIR`,
 /// so Windows may move the working directory into the folder chosen and hold it open (a USB stick then cannot be
 /// safely removed). Its single-file open and save dialogs keep the defaults; they are wrapped too, so no dialog
 /// depends on that. Best effort: a directory that cannot be read first or set back stays as it is; nothing in the
 /// shell uses relative paths.
+///
+/// One dialog at a time ([`DIALOG`]): the working directory is the whole process's, so a second dialog that saved it
+/// while the first had moved it would put the first's folder back afterwards.
 fn keeping_current_dir<T>(show: impl FnOnce() -> T) -> T {
+    let _turn = dialog_turn();
     let before = std::env::current_dir();
     let answer = show();
     if let Ok(before) = before {
@@ -1005,20 +1035,59 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(1);
 
     /// Fix round 1 (F12): a dialog that moves the process's working directory (rfd's folder dialog drops
-    /// `FOS_NOCHANGEDIR`) gets it moved back. The move lasts only inside the call, into this test's own folder.
+    /// `FOS_NOCHANGEDIR`) gets it moved back. Fix round 2 (G3): also when two dialogs overlap, the second starting
+    /// while the first has moved it. The moves last only inside the calls, into this test's own folders; the only
+    /// test that moves the working directory.
     #[test]
-    fn dialog_leaves_the_working_directory_as_it_was() {
+    fn dialogs_leave_the_working_directory_as_it_was() {
+        use lockbox_core::internals::fsio::testutil::TempDir;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Instant;
+
         let before = std::env::current_dir().unwrap();
-        let temp = lockbox_core::internals::fsio::testutil::TempDir::new();
+        let (first_dir, second_dir) = (TempDir::new(), TempDir::new());
         let answer = keeping_current_dir(|| {
-            std::env::set_current_dir(temp.path()).unwrap();
+            std::env::set_current_dir(first_dir.path()).unwrap();
             7
         });
-        let after = std::env::current_dir().unwrap();
+        let after_one = std::env::current_dir().unwrap();
+
+        let (second_in, first_done) = (AtomicBool::new(false), AtomicBool::new(false));
+        let give_up = Instant::now() + Duration::from_secs(60);
+        thread::scope(|s| {
+            let first = s.spawn(|| {
+                keeping_current_dir(|| {
+                    std::env::set_current_dir(first_dir.path()).unwrap();
+                    let waits = dialog_waits();
+                    let second = s.spawn(|| {
+                        keeping_current_dir(|| {
+                            second_in.store(true, Ordering::SeqCst);
+                            std::env::set_current_dir(second_dir.path()).unwrap();
+                            // Ends after the first has put the directory back.
+                            while !first_done.load(Ordering::SeqCst) {
+                                assert!(Instant::now() < give_up, "the first never ended");
+                                thread::sleep(Duration::from_millis(1));
+                            }
+                        })
+                    });
+                    // Until the second dialog is shown, or waits for this one.
+                    while !second_in.load(Ordering::SeqCst) && dialog_waits() == waits {
+                        assert!(Instant::now() < give_up, "the second never started");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    second
+                })
+            });
+            let second = first.join().unwrap();
+            first_done.store(true, Ordering::SeqCst);
+            second.join().unwrap();
+        });
+        let after_two = std::env::current_dir().unwrap();
         // Put back here as well, so a failure does not leave the test program in a folder about to be deleted.
         std::env::set_current_dir(&before).unwrap();
         assert_eq!(answer, 7);
-        assert_eq!(after, before);
+        assert_eq!(after_one, before);
+        assert_eq!(after_two, before);
     }
 
     fn started() -> (SignalThread, Receiver<OsSignal>) {
