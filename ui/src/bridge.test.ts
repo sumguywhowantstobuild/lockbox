@@ -39,14 +39,32 @@ test("accepts_response_with_current_generation", async () => {
 test("call_many_keeps_only_current_elements", async () => {
   await opened(1, 2);
   await opened(3, 5);
-  invoke.mockResolvedValueOnce([
-    tagged(1, 2, "a"),
-    tagged(1, 1, "b"),
-    tagged(3, 5, "c"),
-    tagged(3, 6, "d"),
-    tagged(9, 1, "never opened"),
-  ]);
-  await expect(bridge.callMany("search_all", { query: "x" })).resolves.toEqual([tagged(1, 2, "a"), tagged(3, 5, "c")]);
+  invoke.mockResolvedValueOnce({
+    hits: [tagged(1, 2, "a"), tagged(1, 1, "b"), tagged(3, 5, "c"), tagged(3, 6, "d"), tagged(9, 1, "never opened")],
+    busy: [4],
+  });
+  await expect(bridge.callMany("search_all", { query: "x" })).resolves.toEqual({
+    hits: [tagged(1, 2, "a"), tagged(3, 5, "c")],
+    busy: [4],
+  });
+});
+
+// Fix round 2: the search's real shape, `{ hits, busy }`, with a vault that locks between the call and its answer.
+test("search_hit_from_a_vault_locked_meanwhile_is_dropped", async () => {
+  await bridge.onLocked();
+  const [, locked] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
+  await opened(1, 2);
+  await opened(3, 5);
+  let answer: (value: unknown) => void = () => undefined;
+  invoke.mockReturnValueOnce(
+    new Promise((resolve) => {
+      answer = resolve;
+    }),
+  );
+  const searched = bridge.callMany("search_all", { query: "bank" });
+  locked({ payload: { session: 1, generation: 3, reason: "windows_locked" } });
+  answer({ hits: [tagged(1, 2, ["read before the lock"]), tagged(3, 5, ["current"])], busy: [7] });
+  await expect(searched).resolves.toEqual({ hits: [tagged(3, 5, ["current"])], busy: [7] });
 });
 
 test("open_sets_current_generation", async () => {

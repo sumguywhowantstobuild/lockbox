@@ -64,10 +64,22 @@ export async function call<T>(cmd: string, args?: InvokeArgs): Promise<Tagged<T>
   return answer;
 }
 
-/** A command over several sessions (`search_all`): keeps only the elements from a current generation. */
-export async function callMany<T>(cmd: string, args?: InvokeArgs): Promise<Tagged<T>[]> {
-  const answers = await invoke<Tagged<T>[]>(cmd, args);
-  return answers.filter(isCurrent);
+/**
+ * What a command over several sessions answers (`search_all`, the shell's `views::SearchResults`): one tagged answer
+ * per vault searched, and the sessions that were busy (a long change held them), to search again later.
+ */
+export interface SearchResults<T> {
+  hits: Tagged<T>[];
+  busy: number[];
+}
+
+/**
+ * A command over several sessions (`search_all`): keeps only the hits from a current generation; `busy` (sessions
+ * only, no vault data) passes through as it came.
+ */
+export async function callMany<T>(cmd: string, args?: InvokeArgs): Promise<SearchResults<T>> {
+  const answer = await invoke<SearchResults<T>>(cmd, args);
+  return { hits: answer.hits.filter(isCurrent), busy: answer.busy };
 }
 
 /**
