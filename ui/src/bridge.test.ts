@@ -67,7 +67,7 @@ test("open_unwraps_outcome", async () => {
   invoke.mockResolvedValueOnce(tagged(4, 1, "items"));
   await expect(bridge.call("list_items")).resolves.toEqual(tagged(4, 1, "items"));
 
-  const question = { Confirm: { HeaderChanged: { token: "0123456789abcdef0123456789abcdef" } } };
+  const question = { Confirm: { HeaderChanged: { token: "ab".repeat(16) } } };
   invoke.mockResolvedValueOnce(question);
   await expect(bridge.open("recover_vault")).resolves.toEqual(question);
   invoke.mockResolvedValueOnce("Dismissed");

@@ -1,2 +1,4 @@
 # Test fixture: a fake value in scripts/scan.test.mjs, committed in f66dd77 before the line was marked gitleaks:allow.
 f66dd77c891a11e92587363b47c6b5b041448c00:scripts/scan.test.mjs:generic-api-key:53
+# Test fixture: a fake confirmation token in ui/src/bridge.test.ts, committed in 7166d21 before it was replaced by a repeated pattern.
+7166d210e039687eb37a9243fe026a1048a52af3:ui/src/bridge.test.ts:generic-api-key:70

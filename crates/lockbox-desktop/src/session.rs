@@ -552,10 +552,10 @@ pub struct Sessions {
     notifier: Arc<dyn Notifier>,
     hooks: RwLock<Vec<LockHook>>,
     pending: Pending,
-    /// Tests only: how many lock calls have entered the lock path, counted before they wait for `transitions`, so a
-    /// test can tell that a second lock has started before it checks that this lock is still waiting.
+    /// Tests only: how many lock calls found `transitions` held and had to wait their turn, so a test can tell that a
+    /// second lock is really waiting for the first, not merely late.
     #[cfg(test)]
-    locks_entered: std::sync::atomic::AtomicUsize,
+    locks_waited: std::sync::atomic::AtomicUsize,
 }
 
 impl Sessions {
@@ -567,7 +567,7 @@ impl Sessions {
             hooks: RwLock::default(),
             pending: Pending::default(),
             #[cfg(test)]
-            locks_entered: Default::default(),
+            locks_waited: Default::default(),
         }
     }
 
@@ -818,13 +818,24 @@ impl Sessions {
         self.lock_where(None, reason);
     }
 
+    /// Takes `transitions` for a lock, waiting while another lock (or an open publishing) holds it.
+    fn lock_turn(&self) -> MutexGuard<'_, ()> {
+        match self.transitions.try_lock() {
+            Ok(turn) => turn,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                self.locks_waited.fetch_add(1, Ordering::SeqCst);
+                lock(&self.transitions)
+            }
+        }
+    }
+
     /// The steps of §7.4, in order.
     fn lock_where(&self, only: Option<SessionId>, reason: LockReason) {
         // One lock at a time, all five steps: a second lock waits for the first to finish, so it never finds a session
         // half-locked (already taken in step 1, its publish attempt not yet over) and returns, hooks run, too early.
-        #[cfg(test)]
-        self.locks_entered.fetch_add(1, Ordering::SeqCst);
-        let _turn = lock(&self.transitions);
+        let _turn = self.lock_turn();
         // (1) Under the sessions mutex: the state, the generation, and everything a lock takes away...
         let (locked, opening, pending) = {
             let mut inner = self.inner();
@@ -1868,49 +1879,44 @@ mod tests {
         }
         let (entered, go) = (Meet::default(), Meet::default());
         let all_returned = AtomicBool::new(false);
-        let entered_locks = || sessions.locks_entered.load(Ordering::SeqCst);
-        let (waiting, second_entered, returned_early, logged_early, published) =
-            thread::scope(|s| {
-                let publishing = s.spawn(|| {
-                    sessions.publish(id, generation, || {
-                        entered.wait();
-                        go.wait();
-                        lock(&log).push("publish done".to_string());
-                        Ok(())
-                    })
-                });
-                entered.wait();
-                let manual = s.spawn(|| sessions.lock(id, LockReason::Manual));
-                // The manual lock has done step (1) and now waits for the publish guard.
-                let waiting = wait_until(GIVE_UP, || {
-                    entered_locks() == 1 && state(&sessions, id) == SessionState::Locked
-                });
-                let all = s.spawn(|| {
-                    sessions.lock_all(LockReason::Idle);
-                    all_returned.store(true, Ordering::SeqCst);
-                });
-                // The second lock has provably entered the lock path while the publish is still held...
-                let second_entered = wait_until(GIVE_UP, || entered_locks() == 2);
-                // ...and is given time to finish if it could: one that skipped the session would return in
-                // microseconds, while one waiting its turn cannot return before `go`, however long this waits.
-                let returned_early = wait_until(Duration::from_millis(200), || {
-                    all_returned.load(Ordering::SeqCst)
-                });
-                let logged_early = lock(&log).clone();
-                go.wait();
-                let published = publishing.join().unwrap();
-                manual.join().unwrap();
-                all.join().unwrap();
-                (
-                    waiting,
-                    second_entered,
-                    returned_early,
-                    logged_early,
-                    published,
-                )
+        let (waiting, second_waits, returned_early, logged_early, published) = thread::scope(|s| {
+            let publishing = s.spawn(|| {
+                sessions.publish(id, generation, || {
+                    entered.wait();
+                    go.wait();
+                    lock(&log).push("publish done".to_string());
+                    Ok(())
+                })
             });
+            entered.wait();
+            let manual = s.spawn(|| sessions.lock(id, LockReason::Manual));
+            // The manual lock has done step (1) and now waits for the publish guard, holding its turn.
+            let waiting = wait_until(GIVE_UP, || state(&sessions, id) == SessionState::Locked);
+            let all = s.spawn(|| {
+                sessions.lock_all(LockReason::Idle);
+                all_returned.store(true, Ordering::SeqCst);
+            });
+            // The second lock has provably found the first one's turn taken while the publish is still held:
+            // without the turn it never waits, and this fails. Waiting, it cannot return or run hooks before `go`.
+            let second_waits = wait_until(GIVE_UP, || {
+                sessions.locks_waited.load(Ordering::SeqCst) == 1
+            });
+            let returned_early = all_returned.load(Ordering::SeqCst);
+            let logged_early = lock(&log).clone();
+            go.wait();
+            let published = publishing.join().unwrap();
+            manual.join().unwrap();
+            all.join().unwrap();
+            (
+                waiting,
+                second_waits,
+                returned_early,
+                logged_early,
+                published,
+            )
+        });
         assert!(waiting, "the manual lock reached the publish guard");
-        assert!(second_entered, "lock_all entered the lock path");
+        assert!(second_waits, "lock_all waited for the first lock's turn");
         assert!(
             !returned_early,
             "lock_all returned before the first lock finished"
