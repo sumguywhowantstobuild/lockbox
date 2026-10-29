@@ -296,8 +296,8 @@ impl Shell {
     /// about a cloud folder unless `cloud_confirmed`, then creates the vault there and adds it to the vault list. A
     /// lock of all vaults seen before the vault is made (its `cancel`, checked right before) answers `Locked`, with
     /// nothing made; one that lands after it leaves the vault on disk and on the vault list:
-    /// `LockedAfterChange { what: "vault created" }`. A vault left on disk off the list answers `"vault not listed"`
-    /// either way.
+    /// `LockedAfterChange { what: "vault created" }`. If the list refuses the vault and it is removed again, a lock
+    /// answers `Locked` (nothing is left); if the removal fails too, `"vault not listed"`, with or without a lock.
     fn create_in(
         &self,
         parent: PathBuf,

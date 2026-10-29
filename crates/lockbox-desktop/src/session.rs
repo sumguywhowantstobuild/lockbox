@@ -1238,6 +1238,44 @@ mod tests {
         );
     }
 
+    /// Fix round 4 (I1): an open that a lock overtakes and whose closure then fails answers `Locked`, whatever the
+    /// failure and whether or not it names a change; only a refusal reporting something left on disk
+    /// (`VAULT_NOT_LISTED`) is answered as it is.
+    #[test]
+    fn failed_open_overtaken_by_a_lock_answers_locked() {
+        let (_, sessions) = sessions();
+        let failures = [
+            (
+                ShellError::InvalidInput { what: "folder" },
+                ShellError::Locked,
+            ),
+            (
+                lockbox_core::CoreError::WrongPassword.into(),
+                ShellError::Locked,
+            ),
+            (ShellError::NotFound, ShellError::Locked),
+            (ShellError::Cancelled, ShellError::Locked),
+            (
+                ShellError::TooLarge { what: "vault list" },
+                ShellError::Locked,
+            ),
+            (
+                crate::error::VAULT_NOT_LISTED,
+                crate::error::VAULT_NOT_LISTED,
+            ),
+        ];
+        for (failure, expected) in failures {
+            for what in [None, Some("vault created")] {
+                let answer = sessions.open::<()>(None, what, |_| {
+                    sessions.lock_all(LockReason::WindowsLocked);
+                    Err(failure)
+                });
+                assert_eq!(answer.err(), Some(expected), "{failure:?} ({what:?})");
+            }
+        }
+        assert!(sessions.list().is_empty());
+    }
+
     /// Review Focus 1: Windows locks during the one-second password check.
     #[test]
     fn lock_during_unlock_discards_vault() {
