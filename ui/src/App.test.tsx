@@ -12,7 +12,8 @@ test("renders_version_from_app_info", async () => {
   invoke.mockResolvedValue({ version: "9.8.7" });
   render(<App />);
   expect(await screen.findByText("Lockbox 9.8.7")).toBeTruthy();
-  expect(invoke).toHaveBeenCalledWith("app_info");
+  // Through the bridge's `callPlain`, which passes its (absent) arguments on.
+  expect(invoke).toHaveBeenCalledWith("app_info", undefined);
   expect(screen.getByRole("heading", { name: "Hands-on checks" })).toBeTruthy();
 });
 

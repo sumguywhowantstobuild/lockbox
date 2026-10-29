@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
+import { callPlain } from "./bridge";
 import { useDroppedFileReachedPage } from "./dropProbe";
 
 interface AppInfo {
@@ -27,7 +27,7 @@ export default function App() {
   const droppedFileReachedPage = useDroppedFileReachedPage();
 
   useEffect(() => {
-    invoke<AppInfo>("app_info").then(
+    callPlain<AppInfo>("app_info").then(
       (info) => {
         setVersion(info.version);
       },

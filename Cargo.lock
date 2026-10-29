@@ -2196,6 +2196,7 @@ dependencies = [
 name = "lockbox-desktop"
 version = "0.1.0"
 dependencies = [
+ "lockbox-core",
  "serde",
  "serde_json",
  "tauri",

@@ -3,24 +3,42 @@
 
 mod args;
 mod list;
+mod sessions;
 
-pub use args::{InvalidRequest, ShellResult, args};
+pub use args::args;
 pub use list::COMMANDS;
 
 use serde::{Deserialize, Serialize};
 use tauri::Runtime;
 use tauri::ipc::{Invoke, Request};
 
+use crate::error::{ShellError, ShellResult};
+
 /// The invoke handler shared by the app (`run`) and the tests (`MockRuntime`). Every command listed here is also in
 /// [`COMMANDS`], or the page could never be granted it.
 pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![app_info]
+    tauri::generate_handler![
+        app_info,
+        sessions::list_sessions,
+        sessions::lock_vault,
+        sessions::lock_all
+    ]
 }
 
 /// The body of a command that takes no arguments: `{}`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NoArgs {}
+
+/// Runs `work` on Tauri's blocking pool: anything slower than a lookup stays off the async runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> ShellResult<T> + Send + 'static,
+) -> ShellResult<T> {
+    // The pool answers an error only when `work` panicked (or the runtime is shutting down): it did not finish.
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .unwrap_or(Err(ShellError::Cancelled))
+}
 
 #[derive(Debug, Serialize)]
 pub struct AppInfo {

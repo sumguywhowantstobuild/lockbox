@@ -9,7 +9,7 @@ use std::mem::offset_of;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -36,6 +36,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::OsSignal;
 use super::signals::{DeviceHeader, classify, wants_device_header};
+use crate::lock;
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -107,12 +108,6 @@ thread_local! {
     static SESSION_NOTICE: Cell<bool> = const { Cell::new(false) };
     /// The window's suspend-and-resume registration (0: none), undone just before it is destroyed.
     static POWER_NOTICE: Cell<HPOWERNOTIFY> = const { Cell::new(0) };
-}
-
-/// Locks `mutex`, also after a panic elsewhere left it poisoned: what each lock here guards is never left
-/// half-written.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The thread that owns Lockbox's hidden signal window ([`spawn`]). Only dropping it closes the window or undoes its

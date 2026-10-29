@@ -3,30 +3,18 @@
 //! request gets one fixed answer.
 
 use serde::de::DeserializeOwned;
-use serde::ser::{Serialize, SerializeStruct, Serializer};
 use tauri::ipc::{InvokeBody, Request};
 
-/// What a command returns. Task 8 replaces `InvalidRequest` with `ShellError`, which serialises the same way.
-pub type ShellResult<T> = Result<T, InvalidRequest>;
+use crate::error::{ShellError, ShellResult};
 
 /// The answer to a malformed request: `{"code":"invalid_input","what":"request"}`, never the parser's text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InvalidRequest;
-
-impl Serialize for InvalidRequest {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut error = serializer.serialize_struct("InvalidRequest", 2)?;
-        error.serialize_field("code", "invalid_input")?;
-        error.serialize_field("what", "request")?;
-        error.end()
-    }
-}
+const MALFORMED: ShellError = ShellError::InvalidInput { what: "request" };
 
 /// Parses the request's JSON body into `T`, a `#[serde(deny_unknown_fields)]` struct. Anything else (a field `T`
-/// does not have, a wrong type, a body that is not JSON) is `InvalidRequest`.
+/// does not have, a wrong type, a body that is not JSON) is [`MALFORMED`].
 pub fn args<T: DeserializeOwned>(request: &Request<'_>) -> ShellResult<T> {
     match request.body() {
-        InvokeBody::Json(body) => T::deserialize(body).map_err(|_| InvalidRequest),
-        InvokeBody::Raw(_) => Err(InvalidRequest),
+        InvokeBody::Json(body) => T::deserialize(body).map_err(|_| MALFORMED),
+        InvokeBody::Raw(_) => Err(MALFORMED),
     }
 }

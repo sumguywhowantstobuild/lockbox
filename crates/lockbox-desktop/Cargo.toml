@@ -8,7 +8,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+lockbox-core = { path = "../lockbox-core" }
+serde ={ version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-single-instance = "2.5.4"
@@ -32,6 +33,8 @@ windows-sys = { version = "0.61", features = [
 tauri-build = { version = "2.7.4", features = [] }
 
 [dev-dependencies]
+# The engine's failpoints and test helpers, for the shell's tests only.
+lockbox-core = { path = "../lockbox-core", features = ["test-internals"] }
 tauri = { version = "2.12.5", features = ["test"] }
 
 [features]

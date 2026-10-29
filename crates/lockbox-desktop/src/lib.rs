@@ -11,14 +11,20 @@ compile_error!("lockbox-desktop is Windows-only");
 compile_error!("release builds need `--features custom-protocol` (cargo tauri build adds it)");
 
 pub mod commands;
+pub mod error;
 mod os;
+pub mod pending;
+pub mod session;
+pub mod shell;
 pub mod window;
 
 pub use commands::handler;
 
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 
 use tauri::{Manager, RunEvent};
+
+use crate::shell::{Events, Shell};
 
 /// Starts the app and runs it until it exits.
 pub fn run() {
@@ -53,6 +59,12 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             drop(signals);
 
+            // Before the window, so every command finds it.
+            let shell = Shell::new(Arc::new(Events(app.handle().clone())));
+            if !app.manage(Arc::new(shell)) {
+                return Err("Lockbox will not run: its vault sessions could not be kept".into());
+            }
+
             window::main_window(app.handle())?;
             // Fail closed as well: never run with files droppable into the page.
             if !window::external_drop_is_off() {
@@ -70,6 +82,12 @@ pub fn run() {
             // Task 11: lock every vault here (`Shell::shutdown`) before the process ends.
         }
     });
+}
+
+/// Locks `mutex`, also after a panic elsewhere left it poisoned: what each lock of the crate guards is never left
+/// half-written.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Debug builds only: prints each Windows signal on standard error, one line each, for the hands-on check. A line
