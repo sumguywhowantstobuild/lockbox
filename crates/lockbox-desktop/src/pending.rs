@@ -3,16 +3,20 @@
 //! (`Sessions::lock_all`).
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use lockbox_core::Vault;
 use lockbox_core::ids::VaultId;
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
+use crate::session::Location;
 
 /// How long a choice waits for its answer.
 const LIFETIME: Duration = Duration::from_secs(5 * 60);
@@ -60,8 +64,22 @@ impl fmt::Debug for Token {
 }
 
 /// What waits in [`Pending`] for the user's answer. Each task adds the variants it needs; a typed password is kept
-/// as a `Zeroizing<String>`.
+/// as a `Zeroizing<String>`. No `Debug`: it holds passwords, names and paths (R5).
 pub enum PendingChoice {
+    /// `create_vault` in a cloud folder, waiting for the user's yes (`Confirm::CloudFolder`): the folder chosen, so
+    /// the dialog is not shown again, and what the vault is created with.
+    CreateVault {
+        parent: PathBuf,
+        name: String,
+        password: Zeroizing<String>,
+    },
+    /// `recover_vault` after a header changed outside Lockbox (`Confirm::HeaderChanged`): the vault, unlocked with
+    /// the recovery key (it holds its `.lock` while it waits), and the new password to set once the user accepts.
+    RecoverVault {
+        location: Location,
+        vault: Box<Vault>,
+        new_password: Zeroizing<String>,
+    },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
     Test(Option<Box<lockbox_core::Vault>>),

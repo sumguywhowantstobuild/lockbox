@@ -4,8 +4,11 @@
 mod args;
 mod list;
 mod sessions;
+pub mod vaults;
 
 pub use args::args;
+#[cfg(test)]
+use args::{MALFORMED, parse};
 pub use list::COMMANDS;
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +24,18 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         app_info,
         sessions::list_sessions,
         sessions::lock_vault,
-        sessions::lock_all
+        sessions::lock_all,
+        vaults::list_vaults,
+        vaults::add_existing_vault,
+        vaults::forget_vault,
+        vaults::create_vault,
+        vaults::create_vault_confirm,
+        vaults::unlock_vault,
+        vaults::recover_vault,
+        vaults::recover_vault_confirm,
+        vaults::change_password,
+        vaults::regenerate_recovery,
+        vaults::accept_header
     ]
 }
 

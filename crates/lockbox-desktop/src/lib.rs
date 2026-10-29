@@ -12,10 +12,15 @@ compile_error!("release builds need `--features custom-protocol` (cargo tauri bu
 
 pub mod commands;
 pub mod error;
+pub mod locations;
 mod os;
+pub mod paths;
 pub mod pending;
+pub mod registry;
 pub mod session;
 pub mod shell;
+#[cfg(test)]
+mod testing;
 pub mod window;
 
 pub use commands::handler;
@@ -59,8 +64,14 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             drop(signals);
 
-            // Before the window, so every command finds it.
-            let shell = Shell::new(Arc::new(Events(app.handle().clone())));
+            // Before the window, so every command finds it. No vault may live in the folders Tauri keeps for the
+            // app, which an uninstaller may delete (spec §6.10).
+            let app_dirs = vec![app.path().app_data_dir()?, app.path().app_local_data_dir()?];
+            let shell = Shell::new(
+                Arc::new(Events(app.handle().clone())),
+                os::Os::windows(app.handle().clone()),
+                app_dirs,
+            )?;
             if !app.manage(Arc::new(shell)) {
                 return Err("Lockbox will not run: its vault sessions could not be kept".into());
             }

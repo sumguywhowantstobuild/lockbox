@@ -8,6 +8,17 @@
     "allow-app-info",
     "allow-list-sessions",
     "allow-lock-vault",
-    "allow-lock-all"
+    "allow-lock-all",
+    "allow-list-vaults",
+    "allow-add-existing-vault",
+    "allow-forget-vault",
+    "allow-create-vault",
+    "allow-create-vault-confirm",
+    "allow-unlock-vault",
+    "allow-recover-vault",
+    "allow-recover-vault-confirm",
+    "allow-change-password",
+    "allow-regenerate-recovery",
+    "allow-accept-header"
   ]
 }

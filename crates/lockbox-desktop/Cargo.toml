@@ -13,21 +13,33 @@ serde ={ version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-single-instance = "2.5.4"
+# Typed passwords and the recovery key, wiped when dropped; `serde` so they parse from a request and the recovery
+# key crosses to the screen once.
+zeroize = { version = "1.9", features = ["serde"] }
 
 # WebView2's own controller, to turn off external file drops (`os::win`). The versions wry 0.57 already uses.
 [target.'cfg(windows)'.dependencies]
+# File dialogs, called from Rust only (`os::win`). Its Windows backend needs no feature.
+rfd = { version = "0.17.2", default-features = false }
 webview2-com = "0.39.1"
 windows-core = { version = "0.62", default-features = false }
 # The hidden window that hears Windows lock, sleep, sign-out, shutdown and drive removal (`os::win`): the engine's
 # version. `Win32_Graphics_Gdi` only because windows-sys gates `WNDCLASSW` and `RegisterClassW` behind it.
 # `Win32_Globalization`: `CompareStringOrdinal`, to compare vault paths as Windows does.
+# Where a vault may live (spec §6.10): `Win32_Storage_FileSystem` (drive type, file system, volume root),
+# `Win32_Storage_CloudFilters` (cloud sync roots), `Win32_UI_Shell` and `Win32_System_Com` (known folders, and freeing
+# the path Windows hands back).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_CloudFilters",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
     "Win32_System_RemoteDesktop",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

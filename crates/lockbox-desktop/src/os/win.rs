@@ -1,13 +1,14 @@
-//! Direct Windows and WebView2 calls: WebView2's file-drop setting, and the hidden window that hears Windows lock,
-//! sleep, sign-out, shutdown and drive removal ([`spawn`]). Every `unsafe` block of the crate is here, each with a
-//! `// SAFETY:` comment.
+//! Direct Windows and WebView2 calls: WebView2's file-drop setting, the hidden window that hears Windows lock,
+//! sleep, sign-out, shutdown and drive removal ([`spawn`]), and the real [`Os`]: volumes, known folders and file
+//! dialogs. Every `unsafe` block of the crate is here, each with a `// SAFETY:` comment.
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, OnceCell};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::mem::offset_of;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -15,12 +16,21 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use tauri::{AppHandle, Manager, Runtime};
+
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, ICoreWebView2Controller4,
 };
 use windows_core::{BOOL, Interface};
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, TRUE, WPARAM};
+use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, MAX_PATH, TRUE, WPARAM};
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+use windows_sys::Win32::Storage::CloudFilters::{
+    CF_SYNC_ROOT_BASIC_INFO, CF_SYNC_ROOT_INFO_BASIC, CfGetSyncRootInfoByPath,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
+};
+use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED, HPOWERNOTIFY, RegisterSuspendResumeNotification,
@@ -29,6 +39,10 @@ use windows_sys::Win32::System::Power::{
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
+use windows_sys::Win32::UI::Shell::{
+    FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData, KF_FLAG_DEFAULT,
+    SHGetKnownFolderPath,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME,
     DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
@@ -36,10 +50,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SendMessageTimeoutW, UnregisterClassW, WM_APP, WM_CLOSE, WM_DESTROY, WM_NULL, WNDCLASSW,
     WS_OVERLAPPED,
 };
+use windows_sys::core::PWSTR;
 
-use super::OsSignal;
 use super::signals::{DeviceHeader, classify, wants_device_header};
-use crate::lock;
+use super::{Dialogs, DriveType, Env, KnownFolder, Os, OsSignal, Volumes};
+use crate::{lock, window};
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -77,6 +92,243 @@ pub fn equal_ignoring_case(a: &OsStr, b: &OsStr) -> bool {
     // SAFETY: each pointer is to a live buffer of exactly the number of UTF-16 units passed with it (explicit lengths,
     // so no terminator is read), and the function only reads them. It answers 0 on failure, which is "not equal".
     unsafe { CompareStringOrdinal(a.as_ptr(), a_len, b.as_ptr(), b_len, TRUE) == CSTR_EQUAL }
+}
+
+impl Os {
+    /// The real OS calls; the dialogs open over the app's main window.
+    pub fn windows<R: Runtime>(app: AppHandle<R>) -> Os {
+        Os {
+            volumes: Arc::new(WinVolumes),
+            env: Arc::new(WinEnv),
+            dialogs: Arc::new(WinDialogs { app }),
+        }
+    }
+}
+
+/// Environment variables from the process, known folders from `SHGetKnownFolderPath`.
+pub struct WinEnv;
+
+impl Env for WinEnv {
+    fn var(&self, name: &str) -> Option<OsString> {
+        std::env::var_os(name)
+    }
+
+    fn known_folder(&self, id: KnownFolder) -> io::Result<PathBuf> {
+        let folder = match id {
+            KnownFolder::Profile => &FOLDERID_Profile,
+            KnownFolder::LocalAppData => &FOLDERID_LocalAppData,
+            KnownFolder::RoamingAppData => &FOLDERID_RoamingAppData,
+        };
+        let mut path: PWSTR = ptr::null_mut();
+        // SAFETY: `folder` points to a GUID constant; flags 0 (`KF_FLAG_DEFAULT`) and a null token ask for the current
+        // user's folder; `path` is a writable pointer the call fills with a buffer it allocates.
+        let result = unsafe {
+            SHGetKnownFolderPath(folder, KF_FLAG_DEFAULT as u32, ptr::null_mut(), &mut path)
+        };
+        let found = match result >= 0 && !path.is_null() {
+            // SAFETY: on success `path` is a NUL-terminated UTF-16 string, read up to its terminator before it is
+            // freed below.
+            true => Ok(PathBuf::from(unsafe { wide_until_nul(path) })),
+            false => Err(io::Error::new(io::ErrorKind::NotFound, "known folder")),
+        };
+        // SAFETY: the buffer was allocated by the call (with the COM allocator) and must be freed by the caller,
+        // even on failure; freeing null does nothing. Nothing reads it afterwards.
+        unsafe { CoTaskMemFree(path.cast_const().cast()) };
+        found
+    }
+}
+
+/// The NUL-terminated UTF-16 string at `text`, without its terminator.
+///
+/// # Safety
+/// `text` must point to a readable UTF-16 string ending in a NUL unit.
+unsafe fn wide_until_nul(text: *const u16) -> OsString {
+    let mut len = 0;
+    // SAFETY: the caller's promise: every unit up to and including the terminator is readable.
+    while unsafe { *text.add(len) } != 0 {
+        len += 1;
+    }
+    // SAFETY: the `len` units before the terminator were just read one by one.
+    OsString::from_wide(unsafe { std::slice::from_raw_parts(text, len) })
+}
+
+/// `path` as a NUL-terminated UTF-16 string, for a Windows call. A path holding a NUL itself is refused: Windows
+/// would read only the part before it.
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+/// The text a call wrote into `buffer`, up to its first NUL (or the whole buffer).
+fn text_in(buffer: &[u16]) -> OsString {
+    let len = buffer
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(buffer.len());
+    OsString::from_wide(&buffer[..len])
+}
+
+/// `GetDriveTypeW`'s answers (WinBase.h). windows-sys keeps them under `Win32_System_WindowsProgramming`, a feature
+/// pulled in for these five numbers alone otherwise.
+const DRIVE_REMOVABLE: u32 = 2;
+const DRIVE_FIXED: u32 = 3;
+const DRIVE_REMOTE: u32 = 4;
+const DRIVE_CDROM: u32 = 5;
+const DRIVE_RAMDISK: u32 = 6;
+
+/// Room for a volume label or file system name: Windows' documented maximum, `MAX_PATH + 1`.
+const VOLUME_TEXT: usize = MAX_PATH as usize + 1;
+
+/// Volumes as Windows reports them.
+pub struct WinVolumes;
+
+impl WinVolumes {
+    /// The volume's label and file system name (`GetVolumeInformationW`).
+    fn information(root: &Path) -> io::Result<(String, String)> {
+        let root = wide_path(root)?;
+        let (mut label, mut file_system) = ([0u16; VOLUME_TEXT], [0u16; VOLUME_TEXT]);
+        // SAFETY: `root` is NUL-terminated; each output buffer is writable for the length passed with it (in UTF-16
+        // units, terminator included); the serial number, name length and flags are not asked for (null).
+        let ok = unsafe {
+            GetVolumeInformationW(
+                root.as_ptr(),
+                label.as_mut_ptr(),
+                VOLUME_TEXT as u32,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                file_system.as_mut_ptr(),
+                VOLUME_TEXT as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            text_in(&label).to_string_lossy().into_owned(),
+            text_in(&file_system).to_string_lossy().into_owned(),
+        ))
+    }
+}
+
+impl Volumes for WinVolumes {
+    fn drive_type(&self, root: &Path) -> DriveType {
+        let Ok(root) = wide_path(root) else {
+            return DriveType::Unknown;
+        };
+        // SAFETY: `root` is a NUL-terminated string the call only reads.
+        match unsafe { GetDriveTypeW(root.as_ptr()) } {
+            DRIVE_FIXED => DriveType::Fixed,
+            DRIVE_REMOVABLE => DriveType::Removable,
+            DRIVE_REMOTE => DriveType::Remote,
+            DRIVE_CDROM => DriveType::CdRom,
+            DRIVE_RAMDISK => DriveType::RamDisk,
+            // `DRIVE_UNKNOWN`, `DRIVE_NO_ROOT_DIR`, and anything newer.
+            _ => DriveType::Unknown,
+        }
+    }
+
+    fn file_system(&self, root: &Path) -> io::Result<String> {
+        Self::information(root).map(|(_, file_system)| file_system)
+    }
+
+    fn volume_label(&self, root: &Path) -> io::Result<String> {
+        Self::information(root).map(|(label, _)| label)
+    }
+
+    fn volume_root(&self, path: &Path) -> io::Result<PathBuf> {
+        let wide = wide_path(path)?;
+        // The root is never longer than the path, plus a trailing backslash and the terminator; at least `MAX_PATH`,
+        // as the documentation advises.
+        let mut root = vec![0u16; (wide.len() + 1).max(MAX_PATH as usize + 1)];
+        let len = u32::try_from(root.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+        // SAFETY: `wide` is NUL-terminated; `root` is writable for `len` UTF-16 units, which the call fills with a
+        // NUL-terminated path.
+        let ok = unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), len) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(PathBuf::from(text_in(&root)))
+    }
+
+    fn under_sync_root(&self, path: &Path) -> bool {
+        let Ok(path) = wide_path(path) else {
+            return false;
+        };
+        let mut info = CF_SYNC_ROOT_BASIC_INFO::default();
+        let mut returned = 0u32;
+        // SAFETY: `path` is NUL-terminated; `info` is a writable `CF_SYNC_ROOT_BASIC_INFO`, the structure the BASIC
+        // class fills, and its size is passed; `returned` is writable. Any failure (not under a sync root among
+        // them) means no.
+        let result = unsafe {
+            CfGetSyncRootInfoByPath(
+                path.as_ptr(),
+                CF_SYNC_ROOT_INFO_BASIC,
+                (&raw mut info).cast(),
+                size_of::<CF_SYNC_ROOT_BASIC_INFO>() as u32,
+                &mut returned,
+            )
+        };
+        result >= 0
+    }
+
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        path.try_exists()
+    }
+}
+
+/// `rfd`'s dialogs (Windows' common item dialogs), owned by the main window: while one is open, the window does not
+/// take input. Each call shows the dialog on the calling thread (a blocking-pool thread, never the main one) and
+/// waits for the user.
+pub struct WinDialogs<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> WinDialogs<R> {
+    /// A dialog titled `title`, over the main window when it is there. Built on the thread that shows it: rfd's
+    /// dialog holds the window's raw handle, which is not `Send`.
+    fn dialog(&self, title: &str) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new().set_title(title);
+        match self.app.get_webview_window(window::MAIN) {
+            Some(main) => dialog.set_parent(&main),
+            None => dialog,
+        }
+    }
+
+    fn filtered(&self, title: &str, filter: Option<(&str, &[&str])>) -> rfd::FileDialog {
+        let dialog = self.dialog(title);
+        match filter {
+            Some((name, extensions)) => dialog.add_filter(name, extensions),
+            None => dialog,
+        }
+    }
+}
+
+impl<R: Runtime> Dialogs for WinDialogs<R> {
+    fn pick_folder(&self, title: &str) -> Option<PathBuf> {
+        self.dialog(title).pick_folder()
+    }
+
+    fn pick_file(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
+        self.filtered(title, filter).pick_file()
+    }
+
+    /// Windows asks before replacing an existing file: rfd leaves the save dialog's default options, which include
+    /// `FOS_OVERWRITEPROMPT`.
+    fn save_file(
+        &self,
+        title: &str,
+        suggested: &str,
+        filter: Option<(&str, &[&str])>,
+    ) -> Option<PathBuf> {
+        self.filtered(title, filter)
+            .set_file_name(suggested)
+            .save_file()
+    }
 }
 
 /// Posted by [`SignalThread::keep_awake`]: wparam 1 asks Windows to stay awake, 0 lets it sleep again. The window

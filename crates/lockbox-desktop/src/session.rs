@@ -584,7 +584,7 @@ impl Sessions {
     /// unlocked session there is answered as it is, without running `open` (`Done` with `None`), and an open of that
     /// location already under way answers `Busy`. A lock of all vaults while `open` runs cancels its token and
     /// discards what it made, a vault or a choice to park: `Locked`, or `LockedAfterChange` when `what` names the
-    /// change `open` made on disk and it succeeded.
+    /// change `open` made on disk and it gave back a session (a question means the change was not made).
     pub fn open<X>(
         &self,
         location: Option<Location>,
@@ -630,7 +630,12 @@ impl Sessions {
             // A discarded vault closes after both locks are released.
             drop(inner);
             drop(turn);
-            return Err(overtaken(&step, what));
+            // Only a new session means `what` was done: a question changes nothing.
+            let made = match &step {
+                Ok(OpenStep::Session(..)) => Ok(()),
+                _ => Err(ShellError::Locked),
+            };
+            return Err(overtaken(&made, what));
         }
         match step? {
             OpenStep::Ask(choice, confirm) => {
@@ -956,7 +961,7 @@ impl Sessions {
 mod tests {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Condvar, Mutex, OnceLock, PoisonError, RwLock, RwLockWriteGuard};
+    use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
     use std::thread;
     use std::time::Instant;
 
@@ -969,26 +974,12 @@ mod tests {
     use super::*;
     use crate::error::ShellError;
     use crate::lock;
+    use crate::testing::{heavy, quiet};
 
     const PW: &str = "correct horse battery";
     /// How long a test thread waits for the other one before it fails instead of hanging. Generous: a vault created
     /// before a meeting point can take many seconds while every other test derives keys too.
     const GIVE_UP: Duration = Duration::from_secs(60);
-
-    /// Each Argon2 run (creating, unlocking or opening a vault) keeps several cores busy for about a second. They
-    /// share this lock for reading; a timing test holds it for writing while it measures, so no test's key
-    /// derivation slows the thread it times.
-    static CPU: RwLock<()> = RwLock::new(());
-
-    fn heavy<T>(work: impl FnOnce() -> T) -> T {
-        let _shared = CPU.read().unwrap_or_else(PoisonError::into_inner);
-        work()
-    }
-
-    /// Never call [`heavy`] while holding this: the same thread would wait for itself.
-    fn quiet() -> RwLockWriteGuard<'static, ()> {
-        CPU.write().unwrap_or_else(PoisonError::into_inner)
-    }
 
     /// Where two threads meet, like a two-party `Barrier`, but one that gives up after [`GIVE_UP`]: a test whose
     /// other thread failed then fails too, instead of hanging.
@@ -1494,6 +1485,21 @@ mod tests {
             sessions.pending().take(&token),
             Err(ShellError::NotFound)
         ));
+    }
+
+    /// Task 9: a question changes nothing, so a lock racing it answers `Locked` even for an open that names its
+    /// change (`recover_vault` asks before it sets the new password).
+    #[test]
+    fn ask_racing_lock_with_what_says_locked() {
+        let (_, sessions) = sessions();
+        let answer = sessions.open(None, Some("password"), |_| {
+            sessions.lock_all(LockReason::Manual);
+            Ok(OpenStep::<()>::Ask(PendingChoice::Test(None), |token| {
+                Confirm::HeaderChanged { token }
+            }))
+        });
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert_eq!(sessions.pending().len(), 0);
     }
 
     #[test]

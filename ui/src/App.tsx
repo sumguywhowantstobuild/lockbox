@@ -1,12 +1,51 @@
 import { useEffect, useState } from "react";
-import { callPlain } from "./bridge";
+import { callPlain, open, type Opened } from "./bridge";
 import { useDroppedFileReachedPage } from "./dropProbe";
 
 interface AppInfo {
   version: string;
 }
 
+interface VaultEntry {
+  id: number;
+  name: string | null;
+  available: boolean;
+}
+
 const OUTSIDE = "https://example.com";
+
+// The hands-on checks' own vault, in the default vaults folder. Its password guards nothing real.
+const TEST_VAULT = "Lockbox test vault";
+const TEST_VAULT_PASSWORD = "hands-on check only";
+
+// What an opening command's answer means for the test page.
+function describe(answer: Opened<unknown>, done: string): string {
+  if (answer === "Dismissed") return "Closed";
+  if ("Confirm" in answer) return "Asked first: the folder is synced by a cloud provider";
+  return `${done} (session ${String(answer.session)})`;
+}
+
+// Errors carry fixed fields only (a code and fixed text), so the page shows them as they are.
+function failed(error: unknown): string {
+  return `Refused: ${JSON.stringify(error)}`;
+}
+
+async function createTestVault(): Promise<string> {
+  const answer = await open("create_vault", {
+    name: TEST_VAULT,
+    password: TEST_VAULT_PASSWORD,
+    choose_folder: false,
+  });
+  return describe(answer, "Created and unlocked");
+}
+
+async function unlockTestVault(): Promise<string> {
+  const vaults = await callPlain<VaultEntry[]>("list_vaults");
+  const vault = vaults.find((entry) => entry.name === TEST_VAULT);
+  if (vault === undefined) return "No test vault yet: create it first";
+  const answer = await open("unlock_vault", { id: vault.id, password: TEST_VAULT_PASSWORD });
+  return describe(answer, "Unlocked");
+}
 
 // A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
 // `data:` link does not reliably start a download, so it could not show the rule failing).
@@ -24,7 +63,14 @@ function downloadProbeFile(): void {
 // A bare test page: the real screens come in Plan 4. Each hands-on check gets a probe here, with what "passes" means.
 export default function App() {
   const [version, setVersion] = useState<string>();
+  const [vaultStatus, setVaultStatus] = useState<string>();
   const droppedFileReachedPage = useDroppedFileReachedPage();
+
+  function run(step: () => Promise<string>): void {
+    step().then(setVaultStatus, (error: unknown) => {
+      setVaultStatus(failed(error));
+    });
+  }
 
   useEffect(() => {
     callPlain<AppInfo>("app_info").then(
@@ -75,6 +121,26 @@ export default function App() {
           <div data-testid="drop-zone">Drop a file here</div>
           Passes when, after dragging a file in from Explorer, this never says otherwise.
           {droppedFileReachedPage && <strong> A dropped file reached the page</strong>}
+        </li>
+        <li>
+          <button
+            type="button"
+            onClick={() => {
+              run(createTestVault);
+            }}
+          >
+            Create test vault
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(unlockTestVault);
+            }}
+          >
+            Unlock test vault
+          </button>{" "}
+          Creates &quot;{TEST_VAULT}&quot; in the default vaults folder, then unlocks it from the vault list.
+          {vaultStatus !== undefined && <output> {vaultStatus}</output>}
         </li>
       </ul>
     </main>

@@ -109,6 +109,13 @@ impl From<CoreError> for ShellError {
     }
 }
 
+/// The shell's own file system calls: like an engine I/O error, only the kind crosses.
+impl From<std::io::Error> for ShellError {
+    fn from(error: std::io::Error) -> Self {
+        CoreError::from(error).into()
+    }
+}
+
 /// The answer of a command that may need the user's yes first (`Confirm`) or opens a dialog the user may close
 /// (`Dismissed`).
 #[derive(Serialize)]
@@ -124,7 +131,9 @@ pub enum Outcome<T> {
 /// same command again with its flag set. Each task adds the variants it needs.
 #[derive(Serialize)]
 pub enum Confirm {
-    /// The vault's header was changed outside Lockbox (spec §5.2): accept it before the recovery goes on (Task 9).
+    /// The folder is synced by a cloud provider, which Lockbox does not support (spec §6.10): go on anyway?
+    CloudFolder { token: Token },
+    /// The vault's header was changed outside Lockbox (spec §5.2): accept it before the recovery goes on.
     HeaderChanged { token: Token },
 }
 

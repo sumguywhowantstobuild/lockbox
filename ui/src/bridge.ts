@@ -12,7 +12,7 @@ export interface Tagged<T> {
 }
 
 /** A question the user answers before the command goes on. Each command that asks adds its variant. */
-export type Confirm = { HeaderChanged: { token: string } };
+export type Confirm = { CloudFolder: { token: string } } | { HeaderChanged: { token: string } };
 
 /** The answer of a command that may ask first or open a dialog the user may close. */
 export type Outcome<T> = { Done: T } | { Confirm: Confirm } | "Dismissed";

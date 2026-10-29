@@ -1,11 +1,18 @@
 //! The app's state behind every command: plain Rust, so almost every rule is tested without a window. Later tasks add
-//! auto-lock, the clipboard, the output journal, the registry, settings and the restore state.
+//! auto-lock, the clipboard, the output journal, settings and the restore state.
 
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
+use crate::error::ShellResult;
+use crate::locations::{LocationCheck, check_location};
+use crate::os::{KnownFolder, Os};
+use crate::paths::{StatePaths, state_paths};
+use crate::registry::Registry;
 use crate::session::{LockReason, Notice, Notifier, SessionId, Sessions};
 use crate::window;
 
@@ -18,13 +25,39 @@ pub const NOTICE_EVENT: &str = "lockbox://notice";
 
 pub struct Shell {
     pub sessions: Sessions,
+    pub registry: Registry,
+    pub paths: StatePaths,
+    pub(crate) os: Os,
+    /// The folders no vault may be inside (spec §6.10): Tauri's app-data folders, the Roaming profile and the state
+    /// folder.
+    forbidden: Vec<PathBuf>,
 }
 
 impl Shell {
-    pub fn new(notifier: Arc<dyn Notifier>) -> Self {
-        Shell {
+    /// `app_dirs`: Tauri's `app_data_dir` and `app_local_data_dir`, which an uninstaller may delete. Reads only the
+    /// known folders: nothing is written until a command saves state.
+    pub fn new(notifier: Arc<dyn Notifier>, os: Os, app_dirs: Vec<PathBuf>) -> io::Result<Self> {
+        let paths = state_paths(os.env.as_ref())?;
+        let mut forbidden = app_dirs;
+        forbidden.push(os.env.known_folder(KnownFolder::RoamingAppData)?);
+        forbidden.push(paths.root.clone());
+        Ok(Shell {
             sessions: Sessions::new(notifier),
-        }
+            registry: Registry::new(paths.registry.clone(), Arc::clone(&os.volumes)),
+            paths,
+            os,
+            forbidden,
+        })
+    }
+
+    /// Whether a vault may be at `dir` (see [`check_location`]).
+    pub fn check_location(&self, dir: &Path) -> ShellResult<LocationCheck> {
+        check_location(
+            self.os.volumes.as_ref(),
+            self.os.env.as_ref(),
+            &self.forbidden,
+            dir,
+        )
     }
 }
 
