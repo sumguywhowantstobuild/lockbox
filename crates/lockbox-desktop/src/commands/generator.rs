@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tauri::ipc::Request;
 use zeroize::Zeroizing;
 
-use super::args;
+use super::{args, blocking};
 use crate::error::ShellResult;
 
 /// A generator command's body: `{ "options": { .. } }`.
@@ -72,16 +72,17 @@ fn passphrase(options: PassphraseArgs) -> ShellResult<Zeroizing<String>> {
     })?)
 }
 
+/// Random draws, and the word list parsed on first use: on the blocking pool, off the async runtime.
 #[tauri::command]
 pub(super) async fn generate_password(request: Request<'_>) -> ShellResult<Zeroizing<String>> {
     let Generate { options } = args(&request)?;
-    password(options)
+    blocking(move || password(options)).await
 }
 
 #[tauri::command]
 pub(super) async fn generate_passphrase(request: Request<'_>) -> ShellResult<Zeroizing<String>> {
     let Generate { options } = args(&request)?;
-    passphrase(options)
+    blocking(move || passphrase(options)).await
 }
 
 #[cfg(test)]

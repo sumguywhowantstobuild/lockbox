@@ -20,7 +20,7 @@ use super::{args, blocking};
 use crate::error::{ShellError, ShellResult};
 use crate::session::{SessionId, SessionState, Tagged, VaultRef};
 use crate::shell::Shell;
-use crate::views::{ItemDetail, ItemList, ItemSummary, OrphanView};
+use crate::views::{ItemDetail, ItemList, ItemSummary, OrphanView, SearchResults};
 
 /// The page's limits (`TooLarge`), in bytes; the engine's own 1 MiB item cap stays behind them.
 const MAX_TITLE: usize = 1024;
@@ -371,35 +371,53 @@ impl Shell {
         })
     }
 
-    /// Searches every unlocked vault (Ctrl+K): one answer per vault, tagged with its generation. A vault that locks,
-    /// or is busy with a long change, while the search runs is left out; the page checks each answer's generation.
-    pub fn search_all(&self, query: &str) -> ShellResult<Vec<Tagged<Vec<ItemSummary>>>> {
+    /// Each unlocked session with its current generation, read in one step.
+    fn unlocked(&self) -> Vec<(SessionId, u64)> {
+        let sessions = self.sessions.list().into_iter();
+        sessions
+            .filter(|info| info.state == SessionState::Unlocked)
+            .map(|info| (info.session, info.generation))
+            .collect()
+    }
+
+    /// Searches every unlocked vault (Ctrl+K): one answer per vault, tagged with its generation, and the vaults that
+    /// were busy (a long change held them past the short wait; any other refusal is counted there too, never
+    /// hidden). A vault that locks while the search runs is in neither: once every vault was searched, every answer
+    /// is checked again in one step, so nothing read before a lock is returned after it (§9). The page checks each
+    /// answer's generation as well.
+    pub fn search_all(&self, query: &str) -> ShellResult<SearchResults> {
         if query.chars().count() > MAX_QUERY_CHARS {
             return Err(ShellError::TooLarge { what: "search" });
         }
-        let unlocked = self
-            .sessions
-            .list()
-            .into_iter()
-            .filter(|info| info.state == SessionState::Unlocked);
-        let found = unlocked.filter_map(|info| {
-            let answer = self
-                .sessions
-                .read(info.session, info.generation, |vault, _| {
-                    let vault = items(&vault);
-                    let ids = vault.find(query, SEARCH_LIMIT);
-                    let hits = ids.iter().filter_map(|id| vault.item(id).ok());
-                    let summaries = hits.map(ItemSummary::of).collect();
-                    read_done()?;
-                    Ok(summaries)
-                });
-            answer.ok()
-        });
-        Ok(found.collect())
+        let (mut hits, mut busy) = (Vec::new(), Vec::new());
+        for (session, generation) in self.unlocked() {
+            let answer = self.sessions.read(session, generation, |vault, _| {
+                let vault = items(&vault);
+                let ids = vault.find(query, SEARCH_LIMIT);
+                let found = ids.iter().filter_map(|id| vault.item(id).ok());
+                let summaries = found.map(ItemSummary::of).collect();
+                read_done()?;
+                Ok(summaries)
+            });
+            match answer {
+                Ok(tagged) => hits.push(tagged),
+                // Locked since the list was read, or gone: left out.
+                Err(ShellError::Locked | ShellError::NotFound) => {}
+                Err(_) => busy.push((session, generation)),
+            }
+        }
+        let current = self.unlocked();
+        hits.retain(|tagged: &Tagged<_>| current.contains(&(tagged.session, tagged.generation)));
+        busy.retain(|asked| current.contains(asked));
+        Ok(SearchResults {
+            hits,
+            busy: busy.into_iter().map(|(session, _)| session).collect(),
+        })
     }
 
     /// Opens the login's link number `index` in the default browser, only an `http` or `https` one (spec §4.2). The
-    /// launch happens after the session is let go: it may wait for Windows.
+    /// launch happens after the session is let go (it may wait for Windows); the generation is checked once more after
+    /// it, so a lock during the launch answers `Locked`.
     pub fn open_url(
         &self,
         session: SessionId,
@@ -416,6 +434,9 @@ impl Shell {
             web_link(stored.ok_or(ShellError::NotFound)?)
         })?;
         self.os.launcher.open_url(&link.data)?;
+        if !self.unlocked().contains(&(link.session, link.generation)) {
+            return Err(ShellError::Locked);
+        }
         Ok(Tagged {
             session: link.session,
             generation: link.generation,
@@ -647,7 +668,7 @@ pub(super) async fn old_trash(
 pub(super) async fn search_all(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
-) -> ShellResult<Vec<Tagged<Vec<ItemSummary>>>> {
+) -> ShellResult<SearchResults> {
     let SearchAll { query } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.search_all(&query)).await
@@ -698,15 +719,20 @@ pub(super) async fn delete_orphans(
 mod tests {
     use std::cell::Cell;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::Duration;
 
     use lockbox_core::blob::CancelToken;
-    use lockbox_core::ids::{FileId, ItemId};
+    use lockbox_core::ids::{FileId, ItemId, VaultId};
     use lockbox_core::internals::fsio::failpoint;
-    use lockbox_core::internals::item::{FileRefParts, file_key};
+    use lockbox_core::internals::header::parse_header;
+    use lockbox_core::internals::item::{FileRefParts, file_key, open_item, seal_item};
+    use lockbox_core::internals::kdf::derive_password_key;
     use lockbox_core::internals::secret::Key32;
+    use lockbox_core::internals::slots::{SlotType, unwrap_slot};
     use lockbox_core::item::{Item, ItemKind};
     use lockbox_core::{CoreError, Credential, ReadOnlyVault};
     use serde_json::{Value, json};
@@ -718,9 +744,11 @@ mod tests {
     use crate::error::{Outcome, ShellError};
     use crate::session::{Location, LockReason, OpenStep, Opened, SessionId};
     use crate::testing::{TestShell, heavy};
-    use crate::views::{ItemDetail, ItemList, ItemSummary};
+    use crate::views::{ItemDetail, ItemList, ItemSummary, SearchResults};
 
     const PW: &str = "correct horse battery";
+    /// How long a test thread waits for the other before it fails instead of hanging.
+    const GIVE_UP: Duration = Duration::from_secs(60);
     /// The login's password: it must never reach a view.
     const LOGIN_PW: &str = "Pw-0123456789-xyz";
 
@@ -819,36 +847,45 @@ mod tests {
         let src = ts.temp.path().join("statement.pdf");
         fs::write(&src, b"statement").unwrap();
         let item_id = ItemId::from_hex(&id).unwrap();
-        let key = ts
+        let (file_id, key) = ts
             .shell
             .sessions
             .write(s, g, |vault, cancel| {
-                vault.attach_file(&item_id, &src, cancel)?;
+                let file_id = vault.attach_file(&item_id, &src, cancel)?;
                 let item = vault.get_item(&item_id)?;
-                Ok(*file_key(&item.attachments[0]).as_bytes())
+                Ok((file_id, *file_key(&item.attachments[0]).as_bytes()))
             })
             .unwrap()
             .data;
 
-        let list = serde_json::to_string(&ts.shell.list_items(s, g).unwrap()).unwrap();
+        let list = serde_json::to_value(ts.shell.list_items(s, g).unwrap()).unwrap();
         let detail = serde_json::to_value(ts.shell.get_item(s, g, &id).unwrap()).unwrap();
-        let found = serde_json::to_string(&ts.shell.search_all("Bank").unwrap()).unwrap();
-        for json in [&list, &detail.to_string(), &found] {
-            assert_clean(json, &[&key]);
-            assert!(json.contains(&id), "the item is listed");
+        let found = serde_json::to_value(ts.shell.search_all("Bank").unwrap()).unwrap();
+        for json in [&list, &detail, &found] {
+            assert_clean(&json.to_string(), &[&key]);
         }
-        assert_eq!(detail["data"]["has_password"], true);
-        let file = &detail["data"]["summary"]["attachments"][0];
-        let mut fields: Vec<&str> = file
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        fields.sort_unstable();
-        assert_eq!(fields, ["file_id", "length", "media_type", "name"]);
-        assert_eq!(file["name"], "statement.pdf");
-        assert_eq!(file["length"], 9);
+        // Every field and value, whatever a secret's encoding would be: an added field fails here.
+        let summary = json!({
+            "id": id, "kind": "login", "title": "Bank", "username": "ada@example.com", "collection": null,
+            "trashed": false,
+            "attachments": [{
+                "file_id": file_id.to_hex(), "name": "statement.pdf", "length": 9,
+                "media_type": "application/octet-stream",
+            }],
+        });
+        let tagged = |data: Value| json!({ "session": s.0, "generation": g, "data": data });
+        assert_eq!(list, tagged(json!({ "items": [summary], "damaged": [] })));
+        assert_eq!(
+            detail,
+            tagged(json!({
+                "summary": summary, "revision": 2, "notes": "a note", "urls": ["https://bank.example"],
+                "has_password": true,
+            }))
+        );
+        assert_eq!(
+            found,
+            json!({ "hits": [tagged(json!([summary]))], "busy": [] })
+        );
 
         // The nonce prefix is never shown by the engine: an item built by hand, with a known key and prefix.
         let (file_key, nonce) = ([0xC3; 32], [0x5A; 19]);
@@ -883,14 +920,32 @@ mod tests {
             purging: false,
             retired_blobs: Vec::new(),
         };
-        let views = [
-            serde_json::to_string(&ItemSummary::of(&item)).unwrap(),
-            serde_json::to_string(&ItemDetail::of(&item)).unwrap(),
-            serde_json::to_string(&ItemList::of([&item].into_iter(), &[])).unwrap(),
-        ];
-        for json in &views {
-            assert_clean(json, &[&file_key, &nonce]);
+        let summary = serde_json::to_value(ItemSummary::of(&item)).unwrap();
+        let detail = serde_json::to_value(ItemDetail::of(&item)).unwrap();
+        let list = serde_json::to_value(ItemList::of([&item].into_iter(), &[item.id])).unwrap();
+        for json in [&summary, &detail, &list] {
+            assert_clean(&json.to_string(), &[&file_key, &nonce]);
         }
+        let expected = json!({
+            "id": "07".repeat(16), "kind": "login", "title": "Bank", "username": "ada", "collection": null,
+            "trashed": false,
+            "attachments": [{
+                "file_id": "09".repeat(16), "name": "statement.pdf", "length": 9,
+                "media_type": "application/pdf",
+            }],
+        });
+        assert_eq!(summary, expected);
+        assert_eq!(
+            detail,
+            json!({
+                "summary": expected, "revision": 1, "notes": "a note", "urls": ["https://bank.example"],
+                "has_password": true,
+            })
+        );
+        assert_eq!(
+            list,
+            json!({ "items": [expected], "damaged": ["07".repeat(16)] })
+        );
     }
 
     #[test]
@@ -1038,63 +1093,74 @@ mod tests {
         let id = login(&ts, s, g, "Bank");
         let file = item_file(&ts, 0, &id);
         let before = fs::read(&file).unwrap();
-        let long = |n: usize| "a".repeat(n);
         let too_large = |what| Some(ShellError::TooLarge { what });
-
-        let over: [(ItemEdit, &str); 6] = [
-            (
-                ItemEdit {
-                    title: long(1025),
-                    ..edit(&id, 1, "", None)
-                },
-                "title",
-            ),
-            (
-                ItemEdit {
-                    username: Some(long(1025)),
-                    ..edit(&id, 1, "Bank", None)
-                },
-                "username",
-            ),
-            (
-                ItemEdit {
-                    urls: Some(vec![long(2049)]),
-                    ..edit(&id, 1, "Bank", None)
-                },
-                "url",
-            ),
-            (
-                ItemEdit {
-                    urls: Some(vec!["https://a.example".to_owned(); 33]),
-                    ..edit(&id, 1, "Bank", None)
-                },
-                "urls",
-            ),
-            (
-                ItemEdit {
-                    notes: secret(&long(524_289)),
-                    ..edit(&id, 1, "Bank", None)
-                },
-                "notes",
-            ),
-            (edit(&id, 1, "Bank", Some(&long(4097))), "password"),
-        ];
-        for (change, what) in over {
-            assert_eq!(
-                ts.shell.update_item(s, g, change).err(),
-                too_large(what),
-                "{what}"
-            );
-        }
-        // A new item's title, a collection's name among them.
-        for kind in [NewKind::Note, NewKind::Collection] {
-            assert_eq!(
-                ts.shell.new_item(s, g, kind, long(1025), None).err(),
-                too_large("title")
-            );
+        // Every limit but the query's counts bytes: each is tried in ASCII and in "é" (2 bytes, 1 character), where
+        // one byte over the limit is far fewer characters than the limit.
+        for unit in ["a", "é"] {
+            let long = |n: usize| bytes_of(unit, n);
+            let over: [(ItemEdit, &str); 6] = [
+                (
+                    ItemEdit {
+                        title: long(1025),
+                        ..edit(&id, 1, "", None)
+                    },
+                    "title",
+                ),
+                (
+                    ItemEdit {
+                        username: Some(long(1025)),
+                        ..edit(&id, 1, "Bank", None)
+                    },
+                    "username",
+                ),
+                (
+                    ItemEdit {
+                        urls: Some(vec![long(2049)]),
+                        ..edit(&id, 1, "Bank", None)
+                    },
+                    "url",
+                ),
+                (
+                    ItemEdit {
+                        urls: Some(vec!["https://a.example".to_owned(); 33]),
+                        ..edit(&id, 1, "Bank", None)
+                    },
+                    "urls",
+                ),
+                (
+                    ItemEdit {
+                        notes: secret(&long(524_289)),
+                        ..edit(&id, 1, "Bank", None)
+                    },
+                    "notes",
+                ),
+                (edit(&id, 1, "Bank", Some(&long(4097))), "password"),
+            ];
+            for (change, what) in over {
+                assert_eq!(
+                    ts.shell.update_item(s, g, change).err(),
+                    too_large(what),
+                    "{what} in {unit}"
+                );
+            }
+            // A new item's title, a collection's name among them.
+            for kind in [NewKind::Note, NewKind::Collection] {
+                assert_eq!(
+                    ts.shell.new_item(s, g, kind, long(1025), None).err(),
+                    too_large("title"),
+                    "{kind:?} in {unit}"
+                );
+            }
         }
         // The query counts characters, not bytes.
-        assert_eq!(ts.shell.search_all(&long(257)).err(), too_large("search"));
+        assert_eq!(
+            ts.shell.search_all(&"a".repeat(257)).err(),
+            too_large("search")
+        );
+        assert_eq!(
+            ts.shell.search_all(&"é".repeat(257)).err(),
+            too_large("search")
+        );
         assert!(ts.shell.search_all(&"é".repeat(256)).is_ok());
 
         // Nothing was written.
@@ -1103,21 +1169,39 @@ mod tests {
         assert_eq!(list.items.len(), 1);
         assert_eq!(ts.shell.get_item(s, g, &id).unwrap().data.revision, 1);
 
-        // Every field at its limit is saved (well under the engine's 1 MiB item cap).
-        let full = ItemEdit {
-            id: id.clone(),
-            revision: 1,
-            title: long(1024),
-            notes: secret(&long(524_288)),
-            collection: None,
-            username: Some(long(1024)),
-            password: Some(secret(&long(4096))),
-            urls: Some(vec![long(2048); 32]),
-        };
-        ts.shell.update_item(s, g, full).unwrap();
-        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
-        assert_eq!((detail.revision, detail.urls.len()), (2, 32));
-        assert_eq!(detail.notes.len(), 524_288);
+        // Every field at its limit is saved (well under the engine's 1 MiB item cap), in both units.
+        for (revision, unit) in [(1, "a"), (2, "é")] {
+            let long = |n: usize| bytes_of(unit, n);
+            let full = ItemEdit {
+                id: id.clone(),
+                revision,
+                title: long(1024),
+                notes: secret(&long(524_288)),
+                collection: None,
+                username: Some(long(1024)),
+                password: Some(secret(&long(4096))),
+                urls: Some(vec![long(2048); 32]),
+            };
+            ts.shell.update_item(s, g, full).unwrap();
+            let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+            assert_eq!((detail.revision, detail.urls.len()), (revision + 1, 32));
+            assert_eq!(detail.notes.len(), 524_288);
+            assert!(detail.summary.title.starts_with(unit));
+            let collection = ts
+                .shell
+                .new_item(s, g, NewKind::Collection, long(1024), None)
+                .unwrap();
+            assert_eq!(collection.session, s);
+        }
+    }
+
+    /// `n` bytes of `unit` repeated, made up with one `a` when `unit`'s length does not divide `n`.
+    fn bytes_of(unit: &str, n: usize) -> String {
+        let mut text = unit.repeat(n / unit.len());
+        while text.len() < n {
+            text.push('a');
+        }
+        text
     }
 
     /// §9: a lock between the vault work and the answer returns no data. The lock lands at the read's last step
@@ -1137,38 +1221,94 @@ mod tests {
         failpoint::disarm_all();
         assert_eq!(revealed.err(), Some(ShellError::Locked));
 
-        // Two vaults with a match each; the first one searched locks during its search.
+        // Two vaults with a match each, Family searched first, then Work.
         let (registry_id, _) = ts.shell.registry.entries()[0].clone();
-        let family = heavy(|| ts.shell.unlock_vault(registry_id, secret(PW))).unwrap();
+        let unlock_family = || {
+            heavy(|| ts.shell.unlock_vault(registry_id, secret(PW)))
+                .unwrap()
+                .session
+        };
+        let family = unlock_family();
         let (work, gw) = open_vault(&ts, "Work");
         login(&ts, work, gw, "Bank");
+        let hits = |found: &SearchResults| -> Vec<SessionId> {
+            found.hits.iter().map(|tagged| tagged.session).collect()
+        };
+
+        // Family locks during its own search: nothing from it.
+        let shell = Arc::clone(&ts.shell);
+        let found = search_locking(&ts, 1, move || {
+            shell.sessions.lock(family, LockReason::Manual)
+        });
+        assert_eq!(hits(&found), [work], "nothing from the vault that locked");
+
+        // Family locks after its search, during Work's: its hits, already collected, are dropped; Work's kept.
+        unlock_family();
+        let shell = Arc::clone(&ts.shell);
+        let found = search_locking(&ts, 2, move || {
+            shell.sessions.lock(family, LockReason::Manual)
+        });
+        assert_eq!(hits(&found), [work], "nothing read before the lock");
+        assert!(found.busy.is_empty());
+
+        // Every vault locks during the second search: nothing at all, the first vault's hits included.
+        unlock_family();
+        let shell = Arc::clone(&ts.shell);
+        let found = search_locking(&ts, 2, move || {
+            shell.sessions.lock_all(LockReason::WindowsLocked)
+        });
+        assert!(found.hits.is_empty());
+        assert!(found.busy.is_empty());
+    }
+
+    /// Searches every vault for "Bank", running `lock` at the end of the `at`th vault's read; both vaults read.
+    fn search_locking(ts: &TestShell, at: usize, lock: impl Fn() + 'static) -> SearchResults {
         let searched = Rc::new(Cell::new(0));
-        let (shell, count) = (Arc::clone(&ts.shell), Rc::clone(&searched));
-        let first = family.session;
+        let count = Rc::clone(&searched);
         failpoint::observe(
             READ_DONE,
             Box::new(move || {
                 count.set(count.get() + 1);
-                if count.get() == 1 {
-                    shell.sessions.lock(first, LockReason::Manual);
+                if count.get() == at {
+                    lock();
                 }
             }),
         );
-        let found = ts.shell.search_all("Bank").unwrap();
+        let found = ts.shell.search_all("Bank");
         failpoint::disarm_all();
         assert_eq!(searched.get(), 2, "both vaults were searched");
-        let sessions: Vec<SessionId> = found.iter().map(|tagged| tagged.session).collect();
-        assert_eq!(sessions, [work], "nothing from the vault that locked");
+        found.unwrap()
+    }
 
-        // A lock of all vaults during the search: nothing at all.
-        let shell = Arc::clone(&ts.shell);
-        failpoint::observe(
-            READ_DONE,
-            Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
-        );
-        let found = ts.shell.search_all("Bank").unwrap();
-        failpoint::disarm_all();
-        assert!(found.is_empty());
+    /// A vault held by a long change past the short wait is reported busy, never silently left out.
+    #[test]
+    fn search_all_reports_busy_vaults() {
+        let ts = TestShell::new();
+        let (family, gf) = open_vault(&ts, "Family");
+        let (work, gw) = open_vault(&ts, "Work");
+        login(&ts, family, gf, "Bank");
+        login(&ts, work, gw, "Bank");
+        let (held, is_held) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let shell = &ts.shell;
+        let found = thread::scope(|scope| {
+            let holder = scope.spawn(move || {
+                shell.sessions.write_long(family, gf, |_, _| {
+                    held.send(()).unwrap();
+                    released.recv_timeout(GIVE_UP).unwrap();
+                    Ok(())
+                })
+            });
+            is_held.recv_timeout(GIVE_UP).expect("the change started");
+            let found = shell.search_all("Bank");
+            release.send(()).unwrap();
+            assert!(holder.join().unwrap().is_ok());
+            found.unwrap()
+        });
+        assert_eq!(found.busy, [family]);
+        let hits: Vec<SessionId> = found.hits.iter().map(|tagged| tagged.session).collect();
+        assert_eq!(hits, [work]);
+        assert_eq!(found.hits[0].data.len(), 1);
     }
 
     #[test]
@@ -1183,10 +1323,10 @@ mod tests {
             .unwrap();
 
         let found = ts.shell.search_all("bank").unwrap();
-        assert_eq!(found.len(), 2);
+        assert_eq!(found.hits.len(), 2);
 
         ts.shell.sessions.lock(family, LockReason::Manual);
-        let found = ts.shell.search_all("bank").unwrap();
+        let found = ts.shell.search_all("bank").unwrap().hits;
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].session, found[0].generation), (work, gw));
         let ids: Vec<&str> = found[0].data.iter().map(|item| item.id.as_str()).collect();
@@ -1240,6 +1380,22 @@ mod tests {
             Some(ShellError::NotFound)
         );
         assert_eq!(ts.launcher.opened().len(), 2, "nothing else was launched");
+    }
+
+    /// §7.4: the answer is checked once more after the launch, which runs with no session held.
+    #[test]
+    fn lock_during_link_launch_answers_locked() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        let shell = Arc::clone(&ts.shell);
+        ts.launcher
+            .during_next_open(Box::new(move || shell.sessions.lock(s, LockReason::Manual)));
+        assert_eq!(
+            ts.shell.open_url(s, g, &id, 0).err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(ts.launcher.opened(), ["https://bank.example/"]);
     }
 
     #[test]
@@ -1318,9 +1474,6 @@ mod tests {
                 .as_deref(),
             Some(collection.as_str())
         );
-        // Trashed just now: in the trash for more than 0 days is nothing yet.
-        assert!(ts.shell.old_trash(s, g, 0).unwrap().data.is_empty());
-
         ts.shell.restore_item(s, g, &member).unwrap();
         let list = ts.shell.list_items(s, g).unwrap().data;
         assert!(
@@ -1332,8 +1485,107 @@ mod tests {
         ts.shell.purge_item(s, g, &member).unwrap();
         let list = ts.shell.list_items(s, g).unwrap().data;
         assert_eq!(list.items.len(), 1);
-        assert!(ts.shell.list_orphans(s, g).unwrap().data.is_empty());
-        assert_eq!(ts.shell.delete_orphans(s, g).unwrap().data, 0);
+    }
+
+    /// The vault key, from the vault's password slot: for a test that writes an item file by hand.
+    fn vault_key(dir: &Path) -> (VaultId, Key32) {
+        let header = parse_header(&fs::read(dir.join("vault.json")).unwrap()).unwrap();
+        let slot = header
+            .slots
+            .iter()
+            .find(|slot| slot.slot_type == SlotType::Password)
+            .unwrap();
+        let params = slot.kdf.as_ref().unwrap();
+        let slot_key = heavy(|| derive_password_key(PW, &slot.salt, params)).unwrap();
+        let key = unwrap_slot(slot, &header.vault_id, &slot_key).unwrap();
+        (header.vault_id, key)
+    }
+
+    /// `old_trash` lists only what has been in the trash long enough, and removes nothing.
+    #[test]
+    fn old_trash_lists_only_old_items() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let old = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Old".into(), None)
+            .unwrap()
+            .data;
+        let fresh = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Fresh".into(), None)
+            .unwrap()
+            .data;
+        ts.shell.trash_item(s, g, &old).unwrap();
+        ts.shell.trash_item(s, g, &fresh).unwrap();
+        let (registry_id, dir) = ts.shell.registry.entries()[0].clone();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // "Old" went to the trash in 2020: rewritten by hand, sealed with the vault's own key.
+        let (vault_id, key) = vault_key(&dir);
+        let file = item_file(&ts, 0, &old);
+        let id = ItemId::from_hex(&old).unwrap();
+        let mut item = open_item(&fs::read(&file).unwrap(), &id, &vault_id, &key).unwrap();
+        item.trashed_at = Some("2020-01-01T00:00:00Z".into());
+        fs::write(&file, seal_item(&item, &vault_id, &key).unwrap()).unwrap();
+
+        let unlocked = heavy(|| ts.shell.unlock_vault(registry_id, secret(PW))).unwrap();
+        let (s, g) = (unlocked.session, unlocked.generation);
+        assert_eq!(ts.shell.old_trash(s, g, 30).unwrap().data, [old]);
+        assert_eq!(ts.shell.list_items(s, g).unwrap().data.items.len(), 2);
+    }
+
+    /// The orphans listed are the quarantined files, and only unreferenced ones are deleted.
+    #[test]
+    fn orphans_listed_and_only_unreferenced_deleted() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        let src = ts.temp.path().join("statement.pdf");
+        fs::write(&src, b"statement").unwrap();
+        let item_id = ItemId::from_hex(&id).unwrap();
+        let kept = ts
+            .shell
+            .sessions
+            .write(s, g, |vault, cancel| {
+                Ok(vault.attach_file(&item_id, &src, cancel)?)
+            })
+            .unwrap()
+            .data;
+        // In the quarantine: a file no item references, and a copy of one the login still attaches.
+        let files = vault_dir(&ts, 0).join("files");
+        let orphaned = files.join("orphaned");
+        fs::create_dir_all(&orphaned).unwrap();
+        let stray = FileId([0xAB; 16]);
+        fs::write(orphaned.join(format!("{}.blob", stray.to_hex())), b"12345").unwrap();
+        let kept_blob = format!("{}.blob", kept.to_hex());
+        fs::copy(files.join(&kept_blob), orphaned.join(&kept_blob)).unwrap();
+        let kept_len = fs::metadata(files.join(&kept_blob)).unwrap().len();
+
+        let listed = serde_json::to_value(ts.shell.list_orphans(s, g).unwrap().data).unwrap();
+        let mut expected = vec![
+            json!({ "file_id": stray.to_hex(), "length": 5 }),
+            json!({ "file_id": kept.to_hex(), "length": kept_len }),
+        ];
+        expected.sort_by_key(|orphan| orphan["file_id"].as_str().unwrap().to_owned());
+        assert_eq!(listed, Value::Array(expected));
+
+        assert_eq!(ts.shell.delete_orphans(s, g).unwrap().data, 1);
+        assert!(!orphaned.join(format!("{}.blob", stray.to_hex())).exists());
+        assert!(
+            orphaned.join(&kept_blob).exists(),
+            "a referenced file stays"
+        );
+        assert!(files.join(&kept_blob).exists());
+        let left: Vec<String> = ts
+            .shell
+            .list_orphans(s, g)
+            .unwrap()
+            .data
+            .iter()
+            .map(|orphan| orphan.file_id.clone())
+            .collect();
+        assert_eq!(left, [kept.to_hex()]);
     }
 
     #[test]

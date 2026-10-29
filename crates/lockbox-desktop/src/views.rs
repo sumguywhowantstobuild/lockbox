@@ -8,6 +8,8 @@ use lockbox_core::item::{FileRef, Item, ItemKind};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
+use crate::session::{SessionId, Tagged};
+
 /// An attached file: what the page shows of it, never what opens it.
 #[derive(Serialize)]
 pub struct FileView {
@@ -105,6 +107,15 @@ impl ItemList {
             damaged: damaged.iter().map(ItemId::to_hex).collect(),
         }
     }
+}
+
+/// What a search of every unlocked vault found: one tagged answer per vault searched, and the vaults that were busy
+/// (a long change held them past the short wait), which the page names so the user can search again. A vault that
+/// locked is in neither.
+#[derive(Serialize)]
+pub struct SearchResults {
+    pub hits: Vec<Tagged<Vec<ItemSummary>>>,
+    pub busy: Vec<SessionId>,
 }
 
 /// A quarantined file no item references (spec §6.4), with its size in bytes.

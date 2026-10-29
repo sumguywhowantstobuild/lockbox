@@ -259,17 +259,28 @@ impl Dialogs for FakeDialogs {
 #[derive(Default)]
 pub struct FakeLauncher {
     opened: Mutex<Vec<String>>,
+    /// Run once, inside the next launch, before it returns.
+    on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeLauncher {
     pub fn opened(&self) -> Vec<String> {
         lock(&self.opened).clone()
     }
+
+    /// Runs `hook` once, inside the next launch: while the link is being opened.
+    pub fn during_next_open(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.on_open) = Some(hook);
+    }
 }
 
 impl Launcher for FakeLauncher {
     fn open_url(&self, url: &tauri::Url) -> io::Result<()> {
         lock(&self.opened).push(url.as_str().to_owned());
+        let hook = lock(&self.on_open).take();
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(())
     }
 }
