@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use lockbox_core::Vault;
 use lockbox_core::ids::VaultId;
+use lockbox_core::{UnlockReport, Vault};
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
@@ -66,20 +66,25 @@ impl fmt::Debug for Token {
 /// What waits in [`Pending`] for the user's answer. Each task adds the variants it needs; a typed password is kept
 /// as a `Zeroizing<String>`. No `Debug`: it holds passwords, names and paths (R5).
 pub enum PendingChoice {
-    /// `create_vault` in a cloud folder, waiting for the user's yes (`Confirm::CloudFolder`): the folder chosen, so
-    /// the dialog is not shown again, and what the vault is created with.
+    /// `create_vault` in a cloud folder, waiting for the user's yes (`Confirm::CloudFolder`): the folder chosen
+    /// (canonical, as checked), so the dialog is not shown again, and what the vault is created with.
     CreateVault {
         parent: PathBuf,
         name: String,
         password: Zeroizing<String>,
     },
     /// `recover_vault` after a header changed outside Lockbox (`Confirm::HeaderChanged`): the vault, unlocked with
-    /// the recovery key (it holds its `.lock` while it waits), and the new password to set once the user accepts.
+    /// the recovery key (it holds its `.lock` while it waits), the new password to set once the user accepts, and what
+    /// that unlock found, for the answer.
     RecoverVault {
         location: Location,
         vault: Box<Vault>,
         new_password: Zeroizing<String>,
+        report: UnlockReport,
     },
+    /// `add_existing_vault` of a folder a cloud provider syncs, waiting for the user's yes (`Confirm::CloudFolder`):
+    /// the folder chosen (canonical), so the dialog is not shown again.
+    AddVault { dir: PathBuf },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
     Test(Option<Box<lockbox_core::Vault>>),
@@ -103,6 +108,10 @@ impl Drop for DropMarker {
 #[derive(Default)]
 pub struct Pending {
     parked: Mutex<Vec<Parked>>,
+    /// Tests only: run once, right after the next take has removed its choice (with `parked` released), so a test can
+    /// lock every vault at exactly that point.
+    #[cfg(test)]
+    after_take: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 struct Parked {
@@ -161,17 +170,45 @@ impl Pending {
         token
     }
 
-    fn take_at(&self, token: &Token, now: Instant) -> ShellResult<PendingChoice> {
+    /// Like [`take`](Self::take), for a caller holding the sessions mutex (`Sessions::open_choice`): the choice
+    /// parked under `token` (`None` for a token taken before, expired, or dropped by a lock) and the expired choices
+    /// are handed back, to be dropped (whatever the caller does not keep) once that mutex is released.
+    pub(crate) fn claim(&self, token: &Token) -> (Option<PendingChoice>, Vec<PendingChoice>) {
+        self.claim_at(token, Instant::now())
+    }
+
+    fn claim_at(&self, token: &Token, now: Instant) -> (Option<PendingChoice>, Vec<PendingChoice>) {
         let mut parked = lock(&self.parked);
         let expired = take_expired(&mut parked, now);
         let found = parked
             .iter()
             .position(|p| p.token.matches(token))
-            .map(|at| parked.swap_remove(at));
-        // The expired choices close after the lock is released.
+            .map(|at| parked.swap_remove(at).choice);
         drop(parked);
+        #[cfg(test)]
+        self.run_after_take();
+        (found, expired)
+    }
+
+    fn take_at(&self, token: &Token, now: Instant) -> ShellResult<PendingChoice> {
+        let (found, expired) = self.claim_at(token, now);
+        // The expired choices close here, with no lock held.
         drop(expired);
-        found.map(|p| p.choice).ok_or(ShellError::NotFound)
+        found.ok_or(ShellError::NotFound)
+    }
+
+    /// Tests only: runs `hook` once, right after the next take removes its choice.
+    #[cfg(test)]
+    pub(crate) fn after_take(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.after_take) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn run_after_take(&self) {
+        let hook = lock(&self.after_take).take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     fn sweep_at(&self, now: Instant) {

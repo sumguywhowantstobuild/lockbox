@@ -27,6 +27,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         sessions::lock_all,
         vaults::list_vaults,
         vaults::add_existing_vault,
+        vaults::add_existing_vault_confirm,
         vaults::forget_vault,
         vaults::create_vault,
         vaults::create_vault_confirm,

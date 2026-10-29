@@ -111,7 +111,10 @@ pub const LOCAL_NTFS: FakeVolume = FakeVolume {
 pub struct FakeVolumes {
     /// Canonical roots, each with its volume.
     mounted: Mutex<Vec<(PathBuf, FakeVolume)>>,
-    sync_roots: Mutex<Vec<PathBuf>>,
+    /// Canonical sync roots, each with the provider name it registered (`None`: unreadable).
+    sync_roots: Mutex<Vec<(PathBuf, Option<String>)>>,
+    /// Run once, on the next `volume_root` call: in the middle of a location check.
+    on_volume_root: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 fn canonical(dir: &Path) -> PathBuf {
@@ -128,9 +131,28 @@ impl FakeVolumes {
         lock(&self.mounted).push((canonical(root), volume));
     }
 
-    /// From now on, the existing folder `root` is a cloud sync root.
+    /// From now on, the existing folder `root` is a cloud sync root whose provider name cannot be read.
     pub fn add_sync_root(&self, root: &Path) {
-        lock(&self.sync_roots).push(canonical(root));
+        lock(&self.sync_roots).push((canonical(root), None));
+    }
+
+    /// From now on, the existing folder `root` is a cloud sync root registered by the provider `name`.
+    pub fn add_sync_root_named(&self, root: &Path, name: &str) {
+        lock(&self.sync_roots).push((canonical(root), Some(name.to_owned())));
+    }
+
+    /// The innermost sync root `path` is inside.
+    fn sync_root(&self, path: &Path) -> Option<(PathBuf, Option<String>)> {
+        lock(&self.sync_roots)
+            .iter()
+            .filter(|(root, _)| inside(path, root))
+            .max_by_key(|(root, _)| root.components().count())
+            .cloned()
+    }
+
+    /// Runs `hook` once, on the next `volume_root` call: in the middle of the next location check.
+    pub fn during_next_check(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.on_volume_root) = Some(hook);
     }
 
     /// The innermost mounted volume `path` is inside.
@@ -164,6 +186,10 @@ impl Volumes for FakeVolumes {
     }
 
     fn volume_root(&self, path: &Path) -> io::Result<PathBuf> {
+        let hook = lock(&self.on_volume_root).take();
+        if let Some(hook) = hook {
+            hook();
+        }
         if let Some((root, _)) = self.mounted_at(path) {
             return Ok(root);
         }
@@ -175,7 +201,11 @@ impl Volumes for FakeVolumes {
     }
 
     fn under_sync_root(&self, path: &Path) -> bool {
-        lock(&self.sync_roots).iter().any(|root| inside(path, root))
+        self.sync_root(path).is_some()
+    }
+
+    fn sync_root_provider(&self, path: &Path) -> Option<String> {
+        self.sync_root(path)?.1
     }
 
     fn exists(&self, path: &Path) -> io::Result<bool> {

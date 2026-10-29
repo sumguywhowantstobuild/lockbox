@@ -66,8 +66,8 @@ pub mod item {
 
 /// Password rules.
 pub mod kdf {
-    pub use crate::kdf_impl::MIN_PASSWORD_CHARS;
     pub(crate) use crate::kdf_impl::*;
+    pub use crate::kdf_impl::{MIN_PASSWORD_CHARS, check_new_password};
 }
 
 /// The recovery secret: parse what the user types, show a new one.

@@ -22,10 +22,13 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, ICoreWebView2Controller4,
 };
 use windows_core::{BOOL, Interface};
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, MAX_PATH, TRUE, WPARAM};
+use windows_sys::Win32::Foundation::{
+    ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, HINSTANCE, HWND, LPARAM, LRESULT, MAX_PATH, TRUE,
+    WPARAM,
+};
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Storage::CloudFilters::{
-    CF_SYNC_ROOT_BASIC_INFO, CF_SYNC_ROOT_INFO_BASIC, CfGetSyncRootInfoByPath,
+    CF_SYNC_ROOT_INFO_PROVIDER, CF_SYNC_ROOT_PROVIDER_INFO, CfGetSyncRootInfoByPath,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
@@ -256,29 +259,57 @@ impl Volumes for WinVolumes {
     }
 
     fn under_sync_root(&self, path: &Path) -> bool {
-        let Ok(path) = wide_path(path) else {
-            return false;
-        };
-        let mut info = CF_SYNC_ROOT_BASIC_INFO::default();
-        let mut returned = 0u32;
-        // SAFETY: `path` is NUL-terminated; `info` is a writable `CF_SYNC_ROOT_BASIC_INFO`, the structure the BASIC
-        // class fills, and its size is passed; `returned` is writable. Any failure (not under a sync root among
-        // them) means no.
-        let result = unsafe {
-            CfGetSyncRootInfoByPath(
-                path.as_ptr(),
-                CF_SYNC_ROOT_INFO_BASIC,
-                (&raw mut info).cast(),
-                size_of::<CF_SYNC_ROOT_BASIC_INFO>() as u32,
-                &mut returned,
-            )
-        };
-        result >= 0
+        sync_root(path).is_some()
+    }
+
+    fn sync_root_provider(&self, path: &Path) -> Option<String> {
+        sync_root(path).flatten()
     }
 
     fn exists(&self, path: &Path) -> io::Result<bool> {
         path.try_exists()
     }
+}
+
+/// `HRESULT_FROM_WIN32`: a Win32 error code as an `HRESULT`.
+const fn hresult_from_win32(code: u32) -> i32 {
+    ((code & 0xFFFF) | 0x8007_0000) as i32
+}
+
+/// The sync root above `path` (an existing one), as Windows has it registered (`CfGetSyncRootInfoByPath`, provider
+/// class): `None` when there is none (or the path cannot be passed), else `Some` of its provider name, `None` when
+/// that cannot be read.
+///
+/// windows-sys 0.61.2's `CF_SYNC_ROOT_PROVIDER_INFO` is fixed-size: a status, then the name and the version as
+/// 256-unit NUL-terminated arrays (`CF_MAX_PROVIDER_NAME_LENGTH` is 255); only the standard class ends in a
+/// variable-length identity. The whole structure is passed, so a too-small answer should not come; it would still
+/// mean a sync root, so it counts as one with an unreadable name.
+fn sync_root(path: &Path) -> Option<Option<String>> {
+    let path = wide_path(path).ok()?;
+    let mut info = CF_SYNC_ROOT_PROVIDER_INFO::default();
+    let mut returned = 0u32;
+    // SAFETY: `path` is NUL-terminated; `info` is a writable, zeroed `CF_SYNC_ROOT_PROVIDER_INFO`, the structure the
+    // provider class fills, and its full size is passed; `returned` is writable. Nothing is read from `info` unless
+    // the call succeeded.
+    let result = unsafe {
+        CfGetSyncRootInfoByPath(
+            path.as_ptr(),
+            CF_SYNC_ROOT_INFO_PROVIDER,
+            (&raw mut info).cast(),
+            size_of::<CF_SYNC_ROOT_PROVIDER_INFO>() as u32,
+            &mut returned,
+        )
+    };
+    if result >= 0 {
+        // Zeroed before the call and NUL-terminated by it, so the name ends inside the array.
+        let name = text_in(&info.ProviderName).into_string().ok();
+        return Some(name.filter(|name| !name.is_empty()));
+    }
+    let too_small = [ERROR_MORE_DATA, ERROR_INSUFFICIENT_BUFFER]
+        .into_iter()
+        .any(|code| result == hresult_from_win32(code));
+    // Any other failure (not under a sync root among them) means none.
+    too_small.then_some(None)
 }
 
 /// `rfd`'s dialogs (Windows' common item dialogs), owned by the main window: while one is open, the window does not
@@ -308,13 +339,28 @@ impl<R: Runtime> WinDialogs<R> {
     }
 }
 
+/// Runs `show` (a dialog) and puts the process's working directory back as it was. rfd 0.17.2's folder dialog
+/// replaces the default options (`SetOptions(FOS_PICKFOLDERS)` in `build_pick_folder`), dropping `FOS_NOCHANGEDIR`,
+/// so Windows may move the working directory into the folder chosen and hold it open (a USB stick then cannot be
+/// safely removed). Its single-file open and save dialogs keep the defaults; they are wrapped too, so no dialog
+/// depends on that. Best effort: a directory that cannot be read first or set back stays as it is; nothing in the
+/// shell uses relative paths.
+fn keeping_current_dir<T>(show: impl FnOnce() -> T) -> T {
+    let before = std::env::current_dir();
+    let answer = show();
+    if let Ok(before) = before {
+        let _ = std::env::set_current_dir(before);
+    }
+    answer
+}
+
 impl<R: Runtime> Dialogs for WinDialogs<R> {
     fn pick_folder(&self, title: &str) -> Option<PathBuf> {
-        self.dialog(title).pick_folder()
+        keeping_current_dir(|| self.dialog(title).pick_folder())
     }
 
     fn pick_file(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
-        self.filtered(title, filter).pick_file()
+        keeping_current_dir(|| self.filtered(title, filter).pick_file())
     }
 
     /// Windows asks before replacing an existing file: rfd leaves the save dialog's default options, which include
@@ -325,9 +371,11 @@ impl<R: Runtime> Dialogs for WinDialogs<R> {
         suggested: &str,
         filter: Option<(&str, &[&str])>,
     ) -> Option<PathBuf> {
-        self.filtered(title, filter)
-            .set_file_name(suggested)
-            .save_file()
+        keeping_current_dir(|| {
+            self.filtered(title, filter)
+                .set_file_name(suggested)
+                .save_file()
+        })
     }
 }
 
@@ -955,6 +1003,23 @@ mod tests {
 
     /// The deadline for every wait in these tests: a slow or stuck window fails a test instead of hanging it.
     const WAIT: Duration = Duration::from_secs(1);
+
+    /// Fix round 1 (F12): a dialog that moves the process's working directory (rfd's folder dialog drops
+    /// `FOS_NOCHANGEDIR`) gets it moved back. The move lasts only inside the call, into this test's own folder.
+    #[test]
+    fn dialog_leaves_the_working_directory_as_it_was() {
+        let before = std::env::current_dir().unwrap();
+        let temp = lockbox_core::internals::fsio::testutil::TempDir::new();
+        let answer = keeping_current_dir(|| {
+            std::env::set_current_dir(temp.path()).unwrap();
+            7
+        });
+        let after = std::env::current_dir().unwrap();
+        // Put back here as well, so a failure does not leave the test program in a folder about to be deleted.
+        std::env::set_current_dir(&before).unwrap();
+        assert_eq!(answer, 7);
+        assert_eq!(after, before);
+    }
 
     fn started() -> (SignalThread, Receiver<OsSignal>) {
         let (sink, signals) = mpsc::channel();

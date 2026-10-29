@@ -11,6 +11,7 @@
     "allow-lock-all",
     "allow-list-vaults",
     "allow-add-existing-vault",
+    "allow-add-existing-vault-confirm",
     "allow-forget-vault",
     "allow-create-vault",
     "allow-create-vault-confirm",

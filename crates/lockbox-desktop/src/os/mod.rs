@@ -58,6 +58,9 @@ pub trait Volumes: Send + Sync {
     fn volume_root(&self, path: &Path) -> io::Result<PathBuf>;
     /// Whether `path` (an existing one) is inside a folder a cloud provider syncs and has registered with Windows.
     fn under_sync_root(&self, path: &Path) -> bool;
+    /// The provider name the sync root above `path` (an existing one) registered with Windows, such as `OneDrive`;
+    /// `None` when there is no sync root there or its name cannot be read.
+    fn sync_root_provider(&self, path: &Path) -> Option<String>;
     fn exists(&self, path: &Path) -> io::Result<bool>;
 }
 

@@ -5,9 +5,8 @@
 //! drives since), and restored to (Task 15).
 
 use std::collections::HashMap;
-use std::fs;
-use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::{fmt, fs, io};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,11 +14,23 @@ use crate::error::{ShellError, ShellResult};
 use crate::os::{DriveType, Env, KnownFolder, Volumes};
 use crate::paths::read_capped;
 
-/// What a folder's check found that the user should hear about before going on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a folder's check found: the folder as checked, and what the user should hear about before going on.
+#[derive(Clone, PartialEq, Eq)]
 pub struct LocationCheck {
+    /// The folder, canonical (`\\?\`): what the check looked at, so the caller uses that, not the path it passed.
+    /// For a folder still to be made, its nearest existing folder's canonical path with the rest added.
+    pub path: PathBuf,
     /// The cloud provider syncing the folder, if any: not supported, so the user is asked first.
     pub cloud: Option<CloudProvider>,
+}
+
+/// Never shows the path (R5).
+impl fmt::Debug for LocationCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocationCheck")
+            .field("cloud", &self.cloud)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -27,17 +38,19 @@ pub enum CloudProvider {
     OneDrive,
     GoogleDrive,
     Dropbox,
-    /// A cloud sync root Windows knows of, in none of the providers' known places.
+    /// A cloud sync root Windows knows of, registered under another name and in none of the providers' known places.
     Other,
 }
 
 /// Checks `dir` (an absolute path; a folder still to be made is checked through its nearest existing ancestor)
-/// against the rules above. `forbidden` lists the folders no vault may be inside: Tauri's app-data folders, the
-/// Roaming profile and the state folder.
+/// against the rules above, and gives back the canonical path it checked, for the caller to use from then on.
+/// `forbidden` lists the folders no vault may be inside: Tauri's app-data folders, the Roaming profile and the state
+/// folder.
 ///
 /// Refusals (`InvalidInput`): `"removable drive"`, `"network drive"`, `"drive type not supported"` (CD-ROM, RAM disk,
 /// unknown), `"file system not supported"` (not NTFS), `"app data folder"`; and `"folder"` for a path that is not
-/// absolute or not valid Unicode (the vault list stores paths as JSON text).
+/// absolute or not valid Unicode (the vault list stores paths as JSON text), one with an existing folder on the way
+/// that cannot be resolved, or one whose part still to be made is not a plain name Windows keeps as given.
 pub fn check_location(
     volumes: &dyn Volumes,
     env: &dyn Env,
@@ -74,12 +87,15 @@ pub fn check_location(
     }
     Ok(LocationCheck {
         cloud: cloud_provider(volumes, env, &existing, &full, &root),
+        path: full,
     })
 }
 
 /// `dir` canonicalised: its nearest existing ancestor's canonical path (the part `fs::canonicalize` can resolve),
-/// and that path with the rest of `dir` added back. `None` when `dir` is relative or the rest is not plain names
-/// (`..` there could climb anywhere unseen).
+/// and that path with the rest of `dir` added back. `None` when `dir` is relative; when an ancestor exists but cannot
+/// be resolved (a link that leads nowhere, a volume with no drive letter): climbing past it would check the wrong
+/// folder; or when the rest is not plain names Windows keeps as given (`..` could climb anywhere unseen, a trailing
+/// dot or space is dropped when the folder is made, a device name opens the device).
 fn canonical_or_nearest(dir: &Path) -> io::Result<Option<(PathBuf, PathBuf)>> {
     if !dir.is_absolute() {
         return Ok(None);
@@ -87,17 +103,31 @@ fn canonical_or_nearest(dir: &Path) -> io::Result<Option<(PathBuf, PathBuf)>> {
     for ancestor in dir.ancestors() {
         let existing = match fs::canonicalize(ancestor) {
             Ok(existing) => existing,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::symlink_metadata(ancestor) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                _ => return Ok(None),
+            },
             Err(e) => return Err(e),
         };
         let rest = dir.strip_prefix(ancestor).unwrap_or(Path::new(""));
-        if !rest.components().all(|c| matches!(c, Component::Normal(_))) {
+        if !rest.components().all(is_plain_new_name) {
             return Ok(None);
         }
         let full = existing.join(rest);
         return Ok(Some((existing, full)));
     }
     Err(io::ErrorKind::NotFound.into())
+}
+
+/// Whether `part` of a folder still to be made is a plain name that Windows creates exactly as given.
+fn is_plain_new_name(part: Component<'_>) -> bool {
+    let Component::Normal(name) = part else {
+        return false;
+    };
+    // A name that is not Unicode is refused later, as the whole path is.
+    name.to_str().is_none_or(|name| {
+        !name.ends_with(['.', ' ']) && !lockbox_core::is_reserved_device_name(name)
+    })
 }
 
 /// The cloud provider syncing `full` (whose nearest existing folder is `existing`, on the volume `root`). Windows is
@@ -109,20 +139,45 @@ fn cloud_provider(
     full: &Path,
     root: &Path,
 ) -> Option<CloudProvider> {
-    let known = known_cloud_folders(env)
-        .into_iter()
-        .find(|(_, folder)| is_within(full, folder))
-        .map(|(provider, _)| provider);
+    let known = || {
+        known_cloud_folders(env)
+            .into_iter()
+            .find(|(_, folder)| is_within(full, folder))
+            .map(|(provider, _)| provider)
+    };
     if volumes.under_sync_root(existing) {
-        // The sync root's own registration names its provider only as free text; a known place says which one.
-        return Some(known.unwrap_or(CloudProvider::Other));
+        // The provider the sync root registered, when it is one of the three; else a known place says which one.
+        let registered = volumes
+            .sync_root_provider(existing)
+            .as_deref()
+            .and_then(registered_provider);
+        return Some(registered.or_else(known).unwrap_or(CloudProvider::Other));
     }
-    known.or_else(|| {
+    known().or_else(|| {
         volumes
             .volume_label(root)
             .is_ok_and(|label| label.eq_ignore_ascii_case("Google Drive"))
             .then_some(CloudProvider::GoogleDrive)
     })
+}
+
+/// The provider a sync root's registered name stands for, ignoring letter case: the provider's name alone, or
+/// followed by ` - ` and the account (OneDrive registers `OneDrive - Personal`, or the organisation's name for a work
+/// account). Any other name is `None`.
+fn registered_provider(name: &str) -> Option<CloudProvider> {
+    let name = name.trim().to_ascii_lowercase();
+    [
+        ("onedrive", CloudProvider::OneDrive),
+        ("dropbox", CloudProvider::Dropbox),
+        ("google drive", CloudProvider::GoogleDrive),
+        ("googledrive", CloudProvider::GoogleDrive),
+    ]
+    .into_iter()
+    .find(|(provider, _)| {
+        name.strip_prefix(provider)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(" - "))
+    })
+    .map(|(_, provider)| provider)
 }
 
 /// Each provider's known folders, canonical: OneDrive's from its environment variables, Dropbox's from its
@@ -196,16 +251,21 @@ pub fn is_within(path: &Path, root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use lockbox_core::internals::fsio::testutil::TempDir;
+    use lockbox_core::internals::fsio::testutil::{TempDir, make_dir_link};
 
     use super::*;
     use crate::testing::{FakeEnv, FakeVolume, FakeVolumes, LOCAL_NTFS, TestShell};
 
-    fn refused(what: &'static str) -> ShellResult<LocationCheck> {
+    fn refused(what: &'static str) -> ShellResult<Option<CloudProvider>> {
         Err(ShellError::InvalidInput { what })
     }
 
-    const NOT_CLOUD: ShellResult<LocationCheck> = Ok(LocationCheck { cloud: None });
+    const NOT_CLOUD: ShellResult<Option<CloudProvider>> = Ok(None);
+
+    /// The shell's check of `dir`: refused, or the cloud provider found.
+    fn check(ts: &TestShell, dir: &Path) -> ShellResult<Option<CloudProvider>> {
+        ts.shell.check_location(dir).map(|check| check.cloud)
+    }
 
     /// A new folder `name` inside `parent`, made on the spot.
     fn folder(parent: &Path, name: &str) -> PathBuf {
@@ -240,7 +300,7 @@ mod tests {
             // The volume's root, a folder on it, and a folder still to be made on it.
             let inner = folder(&root, "Vaults");
             for dir in [root.clone(), inner.clone(), inner.join("not yet")] {
-                assert_eq!(ts.shell.check_location(&dir), refused(what), "{what}");
+                assert_eq!(check(&ts, &dir), refused(what), "{what}");
             }
         }
 
@@ -255,7 +315,7 @@ mod tests {
         for root in &forbidden {
             for dir in [root.clone(), root.join("Vaults"), root.join("a").join("b")] {
                 assert_eq!(
-                    ts.shell.check_location(&dir),
+                    check(&ts, &dir),
                     refused("app data folder"),
                     "{}",
                     dir.display()
@@ -263,20 +323,19 @@ mod tests {
             }
             fs::create_dir_all(root.join("Vaults")).unwrap();
             let upper = PathBuf::from(root.join("Vaults").to_string_lossy().to_uppercase());
-            assert_eq!(ts.shell.check_location(&upper), refused("app data folder"));
+            assert_eq!(check(&ts, &upper), refused("app data folder"));
         }
         // Next to them is fine: only the folders themselves are forbidden, not the whole Local profile.
         let beside = ts.env.folder(KnownFolder::LocalAppData).join("Elsewhere");
-        assert_eq!(ts.shell.check_location(&beside), NOT_CLOUD);
+        assert_eq!(check(&ts, &beside), NOT_CLOUD);
     }
 
     #[test]
     fn fixed_ntfs_accepted() {
         let ts = TestShell::new();
-        assert_eq!(ts.shell.check_location(&ts.vaults()), NOT_CLOUD);
+        assert_eq!(check(&ts, &ts.vaults()), NOT_CLOUD);
         assert_eq!(
-            ts.shell
-                .check_location(&ts.vaults().join("not yet").join("made")),
+            check(&ts, &ts.vaults().join("not yet").join("made")),
             NOT_CLOUD
         );
         // A USB hard drive that Windows reports as fixed is accepted (spec §6.10).
@@ -289,23 +348,20 @@ mod tests {
                 label: "USB disk",
             },
         );
-        assert_eq!(ts.shell.check_location(&folder(&usb, "Vaults")), NOT_CLOUD);
+        assert_eq!(check(&ts, &folder(&usb, "Vaults")), NOT_CLOUD);
     }
 
     #[test]
     fn relative_or_climbing_paths_checked_where_they_lead() {
         let ts = TestShell::new();
-        assert_eq!(
-            ts.shell.check_location(Path::new("Vaults")),
-            refused("folder")
-        );
+        assert_eq!(check(&ts, Path::new("Vaults")), refused("folder"));
         // A name Windows allows but Unicode does not (a lone surrogate): the vault list could not store it.
         let lone_surrogate = {
             use std::os::windows::ffi::OsStringExt;
             std::ffi::OsString::from_wide(&[0x56, 0xD800])
         };
         assert_eq!(
-            ts.shell.check_location(&ts.vaults().join(lone_surrogate)),
+            check(&ts, &ts.vaults().join(lone_surrogate)),
             refused("folder")
         );
         // `..` is resolved as Windows resolves it, even past a folder still to be made: it cannot climb into a
@@ -317,11 +373,81 @@ mod tests {
             ts.vaults().join("not yet").join("..").join("..").join(name),
         ] {
             assert_eq!(
-                ts.shell.check_location(&climbing),
+                check(&ts, &climbing),
                 refused("app data folder"),
                 "{}",
                 climbing.display()
             );
+        }
+    }
+
+    /// Fix round 1 (F3): the check gives back the canonical path it checked, for the caller to use, and refuses a
+    /// name still to be made that Windows would change (a trailing dot or space) or that names a device.
+    #[test]
+    fn check_gives_back_the_canonical_path() {
+        let ts = TestShell::new();
+        let vaults = fs::canonicalize(ts.vaults()).unwrap();
+        let upper = PathBuf::from(ts.vaults().to_string_lossy().to_uppercase());
+        assert_eq!(ts.shell.check_location(&upper).unwrap().path, vaults);
+        let deeper = ts.vaults().join("new").join("deeper");
+        assert_eq!(
+            ts.shell.check_location(&deeper).unwrap().path,
+            vaults.join("new").join("deeper")
+        );
+        for name in ["Family.", "Family ", "CON", "nul.txt", "Lpt1"] {
+            for dir in [ts.vaults().join(name), ts.vaults().join(name).join("x")] {
+                assert_eq!(check(&ts, &dir).err(), refused("folder").err(), "{name}");
+            }
+        }
+        // The state folder's name with a trailing dot while the state folder does not exist yet: Windows would make
+        // the state folder itself from it.
+        assert!(!ts.shell.paths.root.exists());
+        let local = ts.env.folder(KnownFolder::LocalAppData);
+        assert_eq!(
+            check(&ts, &local.join("Lockbox.")).err(),
+            refused("folder").err()
+        );
+    }
+
+    /// Fix round 1 (F4): a link on the way that leads nowhere is refused, not skipped as if it were missing (the check
+    /// would then land on the folder above it, maybe another drive).
+    #[test]
+    fn dangling_link_on_the_way_refused() {
+        let ts = TestShell::new();
+        let target = ts.temp.path().join("gone");
+        fs::create_dir(&target).unwrap();
+        let link = ts.vaults().join("link");
+        make_dir_link(&link, &target);
+        fs::remove_dir(&target).unwrap();
+        for dir in [link.clone(), link.join("Vaults"), link.join("a").join("b")] {
+            assert_eq!(
+                check(&ts, &dir).err(),
+                refused("folder").err(),
+                "{}",
+                dir.display()
+            );
+        }
+    }
+
+    /// Fix round 1 (F13): a junction into the Roaming profile or the state folder is checked where it leads.
+    #[test]
+    fn link_into_a_forbidden_folder_refused() {
+        let ts = TestShell::new();
+        fs::create_dir_all(&ts.shell.paths.root).unwrap();
+        for (name, target) in [
+            ("roaming", ts.env.folder(KnownFolder::RoamingAppData)),
+            ("state", ts.shell.paths.root.clone()),
+        ] {
+            let link = ts.vaults().join(name);
+            make_dir_link(&link, &target);
+            for dir in [link.clone(), link.join("Vaults"), link.join("a").join("b")] {
+                assert_eq!(
+                    check(&ts, &dir).err(),
+                    refused("app data folder").err(),
+                    "{}",
+                    dir.display()
+                );
+            }
         }
     }
 
@@ -348,6 +474,42 @@ mod tests {
             Some(CloudProvider::OneDrive)
         );
         assert_eq!(cloud(&volumes, &env, &folder(temp.path(), "Plain")), None);
+    }
+
+    /// Fix round 1 (F9): the provider a sync root registered with Windows names it, with none of the providers'
+    /// known places set; a name that is none of the three falls back to the known places, then to `Other`.
+    #[test]
+    fn cloud_provider_from_the_sync_root_registration() {
+        let temp = TempDir::new();
+        let (env, volumes) = (FakeEnv::new(temp.path()), FakeVolumes::default());
+        let table = [
+            ("OneDrive", CloudProvider::OneDrive),
+            ("onedrive", CloudProvider::OneDrive),
+            // What OneDrive registers on a real PC, and for a work account.
+            ("OneDrive - Personal", CloudProvider::OneDrive),
+            ("OneDrive - Contoso Ltd", CloudProvider::OneDrive),
+            ("Dropbox", CloudProvider::Dropbox),
+            ("DROPBOX", CloudProvider::Dropbox),
+            ("Google Drive", CloudProvider::GoogleDrive),
+            ("Nextcloud", CloudProvider::Other),
+            ("OneDriveX", CloudProvider::Other),
+        ];
+        for (at, (name, provider)) in table.into_iter().enumerate() {
+            let root = folder(temp.path(), &format!("root-{at}"));
+            volumes.add_sync_root_named(&root, name);
+            assert_eq!(
+                cloud(&volumes, &env, &root.join("Vaults")),
+                Some(provider),
+                "{name}"
+            );
+        }
+        let business = folder(temp.path(), "OneDrive - Contoso");
+        env.set_var("OneDriveCommercial", business.as_os_str());
+        volumes.add_sync_root_named(&business, "Contoso Sync");
+        assert_eq!(
+            cloud(&volumes, &env, &business.join("Vaults")),
+            Some(CloudProvider::OneDrive)
+        );
     }
 
     #[test]
@@ -461,5 +623,25 @@ mod tests {
         assert!(is_within(&canonical, &root), "{}", root.display());
         assert_eq!(volumes.drive_type(&root), DriveType::Fixed);
         assert_eq!(volumes.file_system(&root).unwrap(), "NTFS");
+        assert_eq!(volumes.sync_root_provider(&canonical), None);
+
+        // Fix round 1 (F13): a real sync root is seen, and its registration names OneDrive. Only where OneDrive is set
+        // up (its folder in `%OneDrive%`); reading the variable is safe (only setting one is not).
+        let onedrive = std::env::var_os("OneDrive")
+            .map(PathBuf::from)
+            .and_then(|dir| fs::canonicalize(dir).ok());
+        let Some(onedrive) = onedrive else {
+            println!(
+                "real_volumes_on_this_pc: no OneDrive folder here, the sync-root case is skipped"
+            );
+            return;
+        };
+        assert!(volumes.under_sync_root(&onedrive));
+        let name = volumes.sync_root_provider(&onedrive);
+        assert_eq!(
+            name.as_deref().and_then(registered_provider),
+            Some(CloudProvider::OneDrive),
+            "{name:?}"
+        );
     }
 }

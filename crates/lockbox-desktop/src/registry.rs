@@ -3,7 +3,7 @@
 //! a vault by its ID; its path never leaves Rust.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::{Arc, Mutex};
 
 use lockbox_core::{CoreError, read_vault_name};
@@ -80,10 +80,11 @@ impl Registry {
             .collect())
     }
 
-    /// Adds the vault folder `path` (canonical) and returns its ID; a folder already on the list keeps its ID.
-    /// `TooLarge` once the list holds [`MAX_VAULTS`]. A damaged list is refused and left as it is.
+    /// Adds the vault folder `path` (canonical: a local drive's verbatim path, `\\?\C:\..`) and returns its ID; a
+    /// folder already on the list keeps its ID. `TooLarge` once the list holds [`MAX_VAULTS`], or when it would
+    /// grow larger than it can be read back. A damaged list is refused and left as it is.
     pub fn add(&self, path: &Path) -> ShellResult<u32> {
-        if !path.is_absolute() || path.to_str().is_none() {
+        if !on_local_drive(path) || path.to_str().is_none() {
             return Err(ShellError::InvalidInput { what: "folder" });
         }
         let _edit = lock(&self.edits);
@@ -153,8 +154,9 @@ impl Registry {
         }
     }
 
-    /// The list on disk, checked: at most [`MAX_VAULTS`], IDs from 1 and each once, absolute paths. Empty when there
-    /// is no file yet.
+    /// The list on disk, checked: at most [`MAX_VAULTS`], IDs from 1 and each once, every path a local drive's
+    /// verbatim path as `add` stores it (a network share or device path from a tampered file would be opened by every
+    /// `list`). Empty when there is no file yet.
     fn load(&self) -> ShellResult<Vec<Stored>> {
         let Some(file) = read_state::<RegistryFile>(&self.file, WHAT)? else {
             return Ok(Vec::new());
@@ -166,7 +168,7 @@ impl Registry {
         let valid = vaults.len() <= MAX_VAULTS
             && ids.len() == vaults.len()
             && ids.first().is_none_or(|&lowest| lowest >= 1)
-            && vaults.iter().all(|v| v.path.is_absolute());
+            && vaults.iter().all(|v| on_local_drive(&v.path));
         match valid {
             true => Ok(vaults),
             false => Err(CoreError::Damaged { what: WHAT }.into()),
@@ -180,8 +182,18 @@ impl Registry {
                 version: StateVersion,
                 vaults,
             },
+            WHAT,
         )
     }
+}
+
+/// Whether `path` starts with a local drive's verbatim prefix (`\\?\C:\`), the form `fs::canonicalize` gives a
+/// folder on a lettered drive: not a share (`\\server\..`, `\\?\UNC\..`), a device or volume path, or a plain one.
+fn on_local_drive(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+    ) && path.is_absolute()
 }
 
 fn room_for_one(vaults: &[Stored]) -> ShellResult<()> {
@@ -200,6 +212,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::paths::MAX_STATE_FILE;
     use crate::testing::{FakeVolumes, heavy};
 
     fn registry(temp: &TempDir) -> Registry {
@@ -264,14 +277,28 @@ mod tests {
         // A missing folder is listed as unavailable.
         fs::remove_dir(&b).unwrap();
         assert_eq!(registry.list().unwrap()[0], entry(2, None, false));
+
+        // Only a local drive's canonical (verbatim) path is added (fix round 1, F10).
+        for path in [
+            r"C:\Vaults\v",
+            r"\\server\share\v",
+            r"\\?\UNC\server\share\v",
+        ] {
+            assert_eq!(
+                registry.add(Path::new(path)),
+                Err(ShellError::InvalidInput { what: "folder" }),
+                "{path}"
+            );
+        }
     }
 
     #[test]
     fn registry_full_at_a_thousand() {
         let temp = TempDir::new();
         let registry = registry(&temp);
+        let base = fs::canonicalize(temp.path()).unwrap();
         let vaults: Vec<_> = (1..=MAX_VAULTS as u32)
-            .map(|id| json!({ "id": id, "path": temp.path().join(format!("v{id}")) }))
+            .map(|id| json!({ "id": id, "path": base.join(format!("v{id}")) }))
             .collect();
         fs::create_dir_all(registry.file.parent().unwrap()).unwrap();
         fs::write(
@@ -284,7 +311,51 @@ mod tests {
         assert_eq!(registry.check_room(), Err(full));
         assert_eq!(registry.add(&folder(&temp, "one more")), Err(full));
         // A folder already listed is still found.
-        assert_eq!(registry.add(&temp.path().join("v7")), Ok(7));
+        assert_eq!(registry.add(&base.join("v7")), Ok(7));
+    }
+
+    /// Fix round 1 (F6): an add that would make the list larger than it can be read back is refused, and the list
+    /// stays as it was. The list is filled with long paths (Windows allows about 32,000 characters).
+    #[test]
+    fn registry_never_grows_past_what_it_reads() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let long = |at: usize| base.join(format!("{at:04}{}", "x".repeat(2000)));
+        let size = |count: usize| {
+            let vaults = (0..count)
+                .map(|at| Stored {
+                    id: at as u32 + 1,
+                    path: long(at),
+                })
+                .collect();
+            let file = RegistryFile {
+                version: StateVersion,
+                vaults,
+            };
+            (serde_json::to_vec_pretty(&file).unwrap().len(), file.vaults)
+        };
+        // A few entries short of the cap, written through the list's own save.
+        let (one, _) = size(1);
+        let each = size(2).0 - one;
+        let seeded = (MAX_STATE_FILE as usize - one) / each - 3;
+        let (_, vaults) = size(seeded);
+        registry.save(vaults).unwrap();
+        let mut added = seeded;
+        let refused = loop {
+            match registry.add(&long(added)) {
+                Ok(_) => added += 1,
+                Err(e) => break e,
+            }
+            assert!(added < seeded + 10, "never refused");
+        };
+        assert_eq!(refused, ShellError::TooLarge { what: WHAT });
+        assert!(added < MAX_VAULTS, "refused for its size, not its count");
+        let before = fs::read(&registry.file).unwrap();
+        assert!(before.len() as u64 <= MAX_STATE_FILE);
+        assert_eq!(registry.list().unwrap().len(), added, "still readable");
+        assert_eq!(registry.add(&long(added)), Err(refused));
+        assert_eq!(fs::read(&registry.file).unwrap(), before, "file kept");
     }
 
     #[test]
@@ -292,10 +363,21 @@ mod tests {
         let temp = TempDir::new();
         let registry = registry(&temp);
         fs::create_dir_all(registry.file.parent().unwrap()).unwrap();
-        let a = temp.path().join("a");
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let a = base.join("a");
         let too_many: Vec<_> = (1..=MAX_VAULTS as u32 + 1)
-            .map(|id| json!({ "id": id, "path": temp.path().join(format!("v{id}")) }))
+            .map(|id| json!({ "id": id, "path": base.join(format!("v{id}")) }))
             .collect();
+        // Fix round 1 (F10): only a local drive's verbatim path (`\\?\C:\..`), as `add` stores it. A network share
+        // or a device path would be opened by every `list`.
+        let elsewhere = [
+            r"C:\Vaults\v",
+            r"\\server\share\v",
+            r"\\?\UNC\server\share\v",
+            r"\\.\C:\Vaults\v",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\v",
+        ]
+        .map(|path| json!({ "version": 1, "vaults": [ { "id": 1, "path": path } ] }).to_string());
         for text in [
             json!({ "version": 1, "vaults": [], "extra": 1 }).to_string(), // unknown field
             json!({ "version": 1, "vaults": [ { "id": 1, "path": a, "name": "x" } ] }).to_string(),
@@ -306,7 +388,10 @@ mod tests {
                 .to_string(),
             json!({ "version": 1, "vaults": too_many }).to_string(),
             "{".to_string(),
-        ] {
+        ]
+        .into_iter()
+        .chain(elsewhere)
+        {
             fs::write(&registry.file, &text).unwrap();
             assert_eq!(registry.list(), Err(damaged()), "{text}");
             assert_eq!(registry.add(&folder(&temp, "b")), Err(damaged()), "{text}");

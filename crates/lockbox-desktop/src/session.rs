@@ -62,7 +62,7 @@ impl Location {
         fs::canonicalize(file).map(Location::Backup)
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         match self {
             Location::Folder(path) | Location::Backup(path) => path,
         }
@@ -422,6 +422,19 @@ impl Inner {
         })
     }
 
+    /// What an open of `location` answers without running: the session already unlocked there, or `Busy` while
+    /// another open of it is under way. `None`: it runs.
+    fn open_answer<X>(&self, location: Option<&Location>) -> Option<ShellResult<OpenAnswer<X>>> {
+        let location = location?;
+        if let Some(entry) = self.unlocked_at(location) {
+            return Some(Ok(Outcome::Done(tag_info(entry.info(), None))));
+        }
+        self.opening
+            .iter()
+            .any(|opening| opening.location.as_ref() == Some(location))
+            .then_some(Err(BUSY_OPENING))
+    }
+
     fn unlocked_at(&self, location: &Location) -> Option<&Entry> {
         self.sessions
             .iter()
@@ -542,8 +555,9 @@ fn tag_info<X>(info: SessionInfo, x: Option<X>) -> Tagged<(SessionInfo, Option<X
 /// Every session, unlocked or locked, and the rules of §7.4.
 ///
 /// Lock order: `transitions`, then the sessions mutex, then (briefly, inside) [`Pending`]'s. A lock hook or a
-/// publish closure must never call [`lock`](Self::lock), [`lock_all`](Self::lock_all) or [`open`](Self::open): it
-/// runs while a lock (or the lock waiting for it) holds `transitions`, so it would wait for itself.
+/// publish closure must never call [`lock`](Self::lock), [`lock_all`](Self::lock_all), [`open`](Self::open) or
+/// [`open_choice`](Self::open_choice): it runs while a lock (or the lock waiting for it) holds `transitions`, so it
+/// would wait for itself.
 pub struct Sessions {
     /// Held by each lock for all five steps, and by an open while it publishes what it made: lock transitions
     /// happen one at a time, never interleaved. Never held while an opening closure runs.
@@ -556,6 +570,9 @@ pub struct Sessions {
     /// second lock is really waiting for the first, not merely late.
     #[cfg(test)]
     locks_waited: std::sync::atomic::AtomicUsize,
+    /// Tests only: how many times a thread found the sessions mutex held and had to wait for it.
+    #[cfg(test)]
+    inner_waited: std::sync::atomic::AtomicUsize,
 }
 
 impl Sessions {
@@ -568,7 +585,15 @@ impl Sessions {
             pending: Pending::default(),
             #[cfg(test)]
             locks_waited: Default::default(),
+            #[cfg(test)]
+            inner_waited: Default::default(),
         }
+    }
+
+    /// Tests only: how many times a thread has had to wait for the sessions mutex.
+    #[cfg(test)]
+    pub(crate) fn inner_waits(&self) -> usize {
+        self.inner_waited.load(Ordering::SeqCst)
     }
 
     /// The choices waiting for the user's yes. [`lock_all`](Self::lock_all) drops them all.
@@ -577,6 +602,14 @@ impl Sessions {
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
+        #[cfg(test)]
+        match self.inner.try_lock() {
+            Ok(inner) => return inner,
+            Err(TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                self.inner_waited.fetch_add(1, Ordering::SeqCst);
+            }
+        }
         lock(&self.inner)
     }
 
@@ -591,35 +624,77 @@ impl Sessions {
         what: Option<&'static str>,
         open: impl FnOnce(&CancelToken) -> ShellResult<OpenStep<X>>,
     ) -> ShellResult<OpenAnswer<X>> {
-        let (id, epoch, cancel) = {
+        self.open_with(what, |_| Ok((location, ())), |(), cancel| open(cancel))
+    }
+
+    /// Like [`open`](Self::open), for the user's yes to a question: the choice parked under `token` is taken in the
+    /// same step that registers the open, so a lock of all vaults either comes first (it drops the choice: `NotFound`)
+    /// or sees the open under way and discards what it makes. `pick` takes the choice apart into the open's location
+    /// and what `open` needs, or hands it back when it belongs to another question (`NotFound`). It runs under the
+    /// sessions mutex, so it must only move or clone values. Every choice not passed to `open` is dropped once the
+    /// mutexes are released.
+    pub fn open_choice<C, X>(
+        &self,
+        token: &Token,
+        what: Option<&'static str>,
+        pick: impl FnOnce(PendingChoice) -> Result<(Option<Location>, C), PendingChoice>,
+        open: impl FnOnce(C, &CancelToken) -> ShellResult<OpenStep<X>>,
+    ) -> ShellResult<OpenAnswer<X>> {
+        let claim = |unused: &mut Vec<PendingChoice>| {
+            let (found, expired) = self.pending.claim(token);
+            unused.extend(expired);
+            pick(found.ok_or(ShellError::NotFound)?).map_err(|other| {
+                unused.push(other);
+                ShellError::NotFound
+            })
+        };
+        self.open_with(what, claim, open)
+    }
+
+    /// [`open`](Self::open) and [`open_choice`](Self::open_choice): `claim` runs under the sessions mutex, right
+    /// before the open is registered, and gives the location and what `open` needs. The choices it puts aside, and
+    /// what it gave when `open` does not run, are dropped after that mutex is released.
+    fn open_with<C, X>(
+        &self,
+        what: Option<&'static str>,
+        claim: impl FnOnce(&mut Vec<PendingChoice>) -> ShellResult<(Option<Location>, C)>,
+        open: impl FnOnce(C, &CancelToken) -> ShellResult<OpenStep<X>>,
+    ) -> ShellResult<OpenAnswer<X>> {
+        let mut unused = Vec::new();
+        let started = {
             let mut inner = self.inner();
-            if let Some(location) = &location {
-                if let Some(entry) = inner.unlocked_at(location) {
-                    return Ok(Outcome::Done(tag_info(entry.info(), None)));
-                }
-                if inner
-                    .opening
-                    .iter()
-                    .any(|opening| opening.location.as_ref() == Some(location))
-                {
-                    return Err(BUSY_OPENING);
-                }
+            match claim(&mut unused) {
+                Err(e) => Err((Err(e), None)),
+                Ok((location, c)) => match inner.open_answer(location.as_ref()) {
+                    Some(answer) => Err((answer, Some(c))),
+                    None => {
+                        let id = inner.serial();
+                        let cancel = CancelToken::new();
+                        inner.opening.push(Opening {
+                            id,
+                            location,
+                            cancel: cancel.clone(),
+                        });
+                        Ok((id, inner.epoch, cancel, c))
+                    }
+                },
             }
-            let id = inner.serial();
-            let cancel = CancelToken::new();
-            inner.opening.push(Opening {
-                id,
-                location,
-                cancel: cancel.clone(),
-            });
-            (id, inner.epoch, cancel)
+        };
+        // Released: a choice put aside may be an unlocked vault.
+        drop(unused);
+        let (id, epoch, cancel, c) = match started {
+            Ok(started) => started,
+            Err((answer, c)) => {
+                drop(c);
+                return answer;
+            }
         };
         let mut opening = OpeningGuard {
             sessions: self,
             id,
             done: false,
         };
-        let step = open(&cancel);
+        let step = open(c, &cancel);
 
         // Publishing what the open made waits for a lock under way to finish, so it never lands between that lock's
         // steps.

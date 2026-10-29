@@ -3,13 +3,18 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+#[cfg(test)]
+use std::sync::TryLockError;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
 use crate::error::ShellResult;
 use crate::locations::{LocationCheck, check_location};
+use crate::lock;
 use crate::os::{KnownFolder, Os};
 use crate::paths::{StatePaths, state_paths};
 use crate::registry::Registry;
@@ -31,6 +36,11 @@ pub struct Shell {
     /// The folders no vault may be inside (spec §6.10): Tauri's app-data folders, the Roaming profile and the state
     /// folder.
     forbidden: Vec<PathBuf>,
+    /// One vault creation or addition at a time ([`creating`](Self::creating)).
+    creating: Mutex<()>,
+    /// Tests only: how many times a creation or addition had to wait for another.
+    #[cfg(test)]
+    creating_waited: AtomicUsize,
 }
 
 impl Shell {
@@ -47,7 +57,35 @@ impl Shell {
             paths,
             os,
             forbidden,
+            creating: Mutex::default(),
+            #[cfg(test)]
+            creating_waited: AtomicUsize::new(0),
         })
+    }
+
+    /// Held from the vault list's room check to the new vault's place on it (a create), or from a folder's check to
+    /// its place on the list (an addition): the engine's create removes every unfinished staging folder in its
+    /// parent, another create's included, and two creates could both pass the room check for the last place.
+    ///
+    /// Outside the sessions' lock order: taken only inside an opening closure or outside any session call, never
+    /// while calling a [`Sessions`] lock or open method, and released before the closure returns. Nothing is dropped
+    /// while it is held that could be a vault.
+    pub(crate) fn creating(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        match self.creating.try_lock() {
+            Ok(creating) => return creating,
+            Err(TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                self.creating_waited.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        lock(&self.creating)
+    }
+
+    /// Tests only: how many times a creation or addition has had to wait for another.
+    #[cfg(test)]
+    pub(crate) fn creation_waits(&self) -> usize {
+        self.creating_waited.load(Ordering::SeqCst)
     }
 
     /// Whether a vault may be at `dir` (see [`check_location`]).

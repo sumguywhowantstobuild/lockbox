@@ -82,6 +82,22 @@ fn granted_command_runs_in_main_window() {
     assert_eq!(answer, Ok(json!({ "version": env!("CARGO_PKG_VERSION") })));
 }
 
+/// Each listed command passes the ACL and reaches its handler (fix round 1: `add_existing_vault_confirm` was added).
+/// This test app keeps no shell state, so a command that needs it stops at Tauri's "state not managed" answer:
+/// past the ACL, inside the handler.
+#[test]
+fn every_listed_command_reaches_its_handler() {
+    let app = app();
+    let main = main_webview(&app);
+    for cmd in COMMANDS {
+        match invoke(&main, APP_ORIGIN, cmd, InvokeBody::Json(json!({}))) {
+            Ok(_) => assert_eq!(*cmd, "app_info"),
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            other => panic!("{cmd} did not reach its handler: {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn other_window_is_refused() {
     let app = app();

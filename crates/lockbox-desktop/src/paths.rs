@@ -88,10 +88,14 @@ pub fn read_state<T: DeserializeOwned>(file: &Path, what: &'static str) -> Shell
 }
 
 /// Saves `value` as the state file `file`, crash-safe (the engine's `atomic_write`), making the state folder first
-/// if it is not there yet.
-pub fn write_state<T: Serialize>(file: &Path, value: &T) -> ShellResult<()> {
+/// if it is not there yet. A value larger than [`MAX_STATE_FILE`] once written is refused (`TooLarge { what }`)
+/// before the file is touched: [`read_state`] would take it for damaged, so the old file stays instead.
+pub fn write_state<T: Serialize>(file: &Path, value: &T, what: &'static str) -> ShellResult<()> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|_| ShellError::InvalidInput { what: "state file" })?;
+    if bytes.len() as u64 > MAX_STATE_FILE {
+        return Err(ShellError::TooLarge { what });
+    }
     if let Some(folder) = file.parent() {
         fs::create_dir_all(folder)?;
     }
@@ -167,7 +171,7 @@ mod tests {
             version: StateVersion,
             items: vec![1, 2],
         };
-        write_state(&file, &sample).unwrap();
+        write_state(&file, &sample, "sample").unwrap();
         let written: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
         assert_eq!(written, json!({ "version": 1, "items": [1, 2] }));
         assert_eq!(read_state::<Sample>(&file, "sample"), Ok(Some(sample)));
@@ -192,6 +196,31 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(&file).unwrap(), text, "the file is kept");
         }
+    }
+
+    /// Fix round 1 (F6): a state file is never written larger than it may be read back: refused before the file is
+    /// touched, so the old one stays readable.
+    #[test]
+    fn state_file_over_one_mebibyte_is_not_written() {
+        let temp = TempDir::new();
+        let file = temp.path().join("sample.json");
+        let small = Sample {
+            version: StateVersion,
+            items: vec![1],
+        };
+        write_state(&file, &small, "sample").unwrap();
+        let before = fs::read(&file).unwrap();
+        // About 7 bytes per item in the pretty JSON: well over the cap.
+        let large = Sample {
+            version: StateVersion,
+            items: (0..MAX_STATE_FILE as u32 / 4).collect(),
+        };
+        assert_eq!(
+            write_state(&file, &large, "sample"),
+            Err(ShellError::TooLarge { what: "sample" })
+        );
+        assert_eq!(fs::read(&file).unwrap(), before, "the old file stays");
+        assert_eq!(read_state::<Sample>(&file, "sample"), Ok(Some(small)));
     }
 
     #[test]
