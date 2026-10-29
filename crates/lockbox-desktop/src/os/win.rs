@@ -4,8 +4,10 @@
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, OnceCell};
+use std::ffi::OsStr;
 use std::io;
 use std::mem::offset_of;
+use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -17,7 +19,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, ICoreWebView2Controller4,
 };
 use windows_core::{BOOL, Interface};
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, TRUE, WPARAM};
+use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED, HPOWERNOTIFY, RegisterSuspendResumeNotification,
@@ -62,6 +65,18 @@ pub fn turn_off_external_drop(controller: &ICoreWebView2Controller) -> bool {
             && controller.AllowExternalDrop(&mut allowed).is_ok()
     };
     confirmed && !allowed.as_bool()
+}
+
+/// Whether `a` and `b` are equal as Windows compares file names: ordinal, ignoring case (`CompareStringOrdinal`,
+/// which uppercases each UTF-16 unit with the system's table, the same per-unit rule NTFS applies to names).
+pub fn equal_ignoring_case(a: &OsStr, b: &OsStr) -> bool {
+    let (a, b): (Vec<u16>, Vec<u16>) = (a.encode_wide().collect(), b.encode_wide().collect());
+    let (Ok(a_len), Ok(b_len)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
+        return false;
+    };
+    // SAFETY: each pointer is to a live buffer of exactly the number of UTF-16 units passed with it (explicit lengths,
+    // so no terminator is read), and the function only reads them. It answers 0 on failure, which is "not equal".
+    unsafe { CompareStringOrdinal(a.as_ptr(), a_len, b.as_ptr(), b_len, TRUE) == CSTR_EQUAL }
 }
 
 /// Posted by [`SignalThread::keep_awake`]: wparam 1 asks Windows to stay awake, 0 lets it sleep again. The window

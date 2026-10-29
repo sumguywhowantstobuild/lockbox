@@ -4,7 +4,6 @@
 //! The sessions mutex is held only for lookups and state changes: never across vault work, while waiting for a
 //! vault's `RwLock`, or while waiting for a publish guard.
 
-use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
@@ -18,8 +17,8 @@ use lockbox_core::{ReadOnlyVault, Vault};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
-use crate::lock;
 use crate::pending::{Pending, PendingChoice, Token};
+use crate::{lock, os};
 
 /// How long a short command waits for a vault another command is using, and how often it tries again.
 const SHORT_WAIT: Duration = Duration::from_millis(500);
@@ -45,7 +44,7 @@ pub struct Tagged<T> {
 }
 
 /// Where a session's vault is: a vault folder, or a backup file opened read-only. Canonical (see [`Location::folder`]
-/// and [`Location::backup`]) and compared case-insensitively, as Windows compares paths.
+/// and [`Location::backup`]) and compared as Windows compares names: ordinal, ignoring case.
 #[derive(Clone)]
 pub enum Location {
     Folder(PathBuf),
@@ -76,23 +75,12 @@ impl PartialEq for Location {
             (self, other),
             (Location::Folder(_), Location::Folder(_)) | (Location::Backup(_), Location::Backup(_))
         );
-        same_kind && folded(self.path()).eq(folded(other.path()))
+        same_kind && os::same_path(self.path(), other.path())
     }
 }
 
+/// No `Hash`: it would have to fold case exactly as Windows does, and nothing needs it.
 impl Eq for Location {}
-
-/// `path`'s UTF-16 units with each character lowercased, for comparing paths case-insensitively. A unit that is not
-/// part of a character (Windows allows them in names) stands for itself; it never equals a character's code.
-fn folded(path: &Path) -> impl Iterator<Item = u32> + '_ {
-    char::decode_utf16(path.as_os_str().encode_wide()).flat_map(|unit| {
-        let (lower, lone) = match unit {
-            Ok(c) => (Some(c.to_lowercase()), None),
-            Err(e) => (None, Some(u32::from(e.unpaired_surrogate()))),
-        };
-        lower.into_iter().flatten().map(u32::from).chain(lone)
-    })
-}
 
 /// Never shows the path (R5).
 impl fmt::Debug for Location {
@@ -218,37 +206,47 @@ impl Handle {
     }
 }
 
-/// A vault, and the signal it gives once it is dropped. Fields drop in order, so the vault goes first.
+/// A vault, counted among its session's [`Vaults`] until it is dropped. Fields drop in order, so the vault goes
+/// before the count does.
 struct Held<T> {
     vault: T,
-    _dropped: Dropped,
+    _counted: Counted,
 }
 
-/// Marks its [`Released`] done when dropped.
-struct Dropped(Arc<Released>);
+/// One vault of a session, counted from when it becomes the session's until it is dropped.
+struct Counted(Arc<Vaults>);
 
-impl Drop for Dropped {
-    fn drop(&mut self) {
-        *lock(&self.0.done) = true;
-        self.0.signal.notify_all();
+impl Counted {
+    fn new(vaults: &Arc<Vaults>) -> Counted {
+        *lock(&vaults.alive) += 1;
+        Counted(Arc::clone(vaults))
     }
 }
 
-/// Whether a session's latest vault has been dropped ([`Sessions::release_wait`]).
-#[derive(Default)]
-struct Released {
-    done: Mutex<bool>,
-    signal: Condvar,
+impl Drop for Counted {
+    fn drop(&mut self) {
+        *lock(&self.0.alive) -= 1;
+        self.0.dropped.notify_all();
+    }
 }
 
-impl Released {
-    fn wait(&self, max: Duration) -> bool {
-        let done = lock(&self.done);
-        let (done, _) = self
-            .signal
-            .wait_timeout_while(done, max, |done| !*done)
+/// How many of a session's vaults are still alive, from every time it was unlocked: a command started in an earlier
+/// generation may still hold that generation's vault ([`Sessions::release_wait`]).
+#[derive(Default)]
+struct Vaults {
+    alive: Mutex<usize>,
+    dropped: Condvar,
+}
+
+impl Vaults {
+    /// Waits up to `max` for none to be alive.
+    fn wait_none(&self, max: Duration) -> bool {
+        let alive = lock(&self.alive);
+        let (alive, _) = self
+            .dropped
+            .wait_timeout_while(alive, max, |alive| *alive > 0)
             .unwrap_or_else(PoisonError::into_inner);
-        *done
+        *alive == 0
     }
 }
 
@@ -278,8 +276,8 @@ struct Entry {
     gate: Arc<Gate>,
     /// `Some` while unlocked.
     live: Option<Live>,
-    /// For the latest vault the session held.
-    released: Arc<Released>,
+    /// Every vault this session has held that is not dropped yet.
+    vaults: Arc<Vaults>,
 }
 
 impl Entry {
@@ -433,26 +431,6 @@ impl Inner {
     /// Makes `opened` the unlocked session at `location`: the session that was there before, unlocked again with
     /// the next generation, or a new one at generation 1.
     fn insert(&mut self, location: Location, opened: Opened) -> SessionInfo {
-        let released = Arc::new(Released::default());
-        let dropped = Dropped(Arc::clone(&released));
-        let (name, read_only, handle) = match opened {
-            Opened::Writable(vault) => (
-                vault.name().to_owned(),
-                false,
-                Handle::Writable(Arc::new(Held {
-                    vault: RwLock::new(vault),
-                    _dropped: dropped,
-                })),
-            ),
-            Opened::ReadOnly(vault) => (
-                vault.name().to_owned(),
-                true,
-                Handle::ReadOnly(Arc::new(Held {
-                    vault,
-                    _dropped: dropped,
-                })),
-            ),
-        };
         let at = match self.sessions.iter().position(|e| e.location == location) {
             Some(at) => at,
             None => {
@@ -461,21 +439,39 @@ impl Inner {
                     id: SessionId(self.last_session),
                     location,
                     name: String::new(),
-                    read_only,
+                    read_only: false,
                     state: SessionState::Locked,
                     gate: Arc::default(),
                     live: None,
-                    released: Arc::default(),
+                    vaults: Arc::default(),
                 });
                 self.sessions.len() - 1
             }
         };
         let entry = &mut self.sessions[at];
+        let counted = Counted::new(&entry.vaults);
+        let (name, read_only, handle) = match opened {
+            Opened::Writable(vault) => (
+                vault.name().to_owned(),
+                false,
+                Handle::Writable(Arc::new(Held {
+                    vault: RwLock::new(vault),
+                    _counted: counted,
+                })),
+            ),
+            Opened::ReadOnly(vault) => (
+                vault.name().to_owned(),
+                true,
+                Handle::ReadOnly(Arc::new(Held {
+                    vault,
+                    _counted: counted,
+                })),
+            ),
+        };
         entry.gate.generation.fetch_add(1, Ordering::SeqCst);
         entry.name = name;
         entry.read_only = read_only;
         entry.state = SessionState::Unlocked;
-        entry.released = released;
         entry.live = Some(Live {
             handle,
             cancel: CancelToken::new(),
@@ -544,7 +540,14 @@ fn tag_info<X>(info: SessionInfo, x: Option<X>) -> Tagged<(SessionInfo, Option<X
 }
 
 /// Every session, unlocked or locked, and the rules of §7.4.
+///
+/// Lock order: `transitions`, then the sessions mutex, then (briefly, inside) [`Pending`]'s. A lock hook or a
+/// publish closure must never call [`lock`](Self::lock), [`lock_all`](Self::lock_all) or [`open`](Self::open): it
+/// runs while a lock (or the lock waiting for it) holds `transitions`, so it would wait for itself.
 pub struct Sessions {
+    /// Held by each lock for all five steps, and by an open while it publishes what it made: lock transitions
+    /// happen one at a time, never interleaved. Never held while an opening closure runs.
+    transitions: Mutex<()>,
     inner: Mutex<Inner>,
     notifier: Arc<dyn Notifier>,
     hooks: RwLock<Vec<LockHook>>,
@@ -554,6 +557,7 @@ pub struct Sessions {
 impl Sessions {
     pub fn new(notifier: Arc<dyn Notifier>) -> Self {
         Sessions {
+            transitions: Mutex::default(),
             inner: Mutex::default(),
             notifier,
             hooks: RwLock::default(),
@@ -611,22 +615,30 @@ impl Sessions {
         };
         let step = open(&cancel);
 
+        // Publishing what the open made waits for a lock under way to finish, so it never lands between that lock's
+        // steps.
+        let turn = lock(&self.transitions);
         let mut inner = self.inner();
         opening.finish(&mut inner);
         if inner.epoch != epoch {
-            // Dropped after the mutex: a discarded vault closes outside it.
+            // A discarded vault closes after both locks are released.
             drop(inner);
+            drop(turn);
             return Err(overtaken(&step, what));
         }
         match step? {
             OpenStep::Ask(choice, confirm) => {
-                let token = self.pending.put(choice);
+                let (token, expired) = self.pending.park(choice);
+                drop(inner);
+                drop(turn);
+                drop(expired);
                 Ok(Outcome::Confirm(confirm(token)))
             }
             OpenStep::Session(location, opened, x) => {
                 // Only an open without a location can race another open of the same place.
                 if inner.unlocked_at(&location).is_some() {
                     drop(inner);
+                    drop(turn);
                     return Err(BUSY_OPENING);
                 }
                 let info = inner.insert(location, opened);
@@ -775,7 +787,7 @@ impl Sessions {
 
     /// One publish attempt (a rename or a clipboard write): under that session's publish guard, never the sessions
     /// mutex, so a lock waits for this one attempt at most and never for its retries. `f` runs only while the
-    /// session is still unlocked in `generation`.
+    /// session is still unlocked in `generation`; it must not lock or open a session.
     pub fn publish<T>(
         &self,
         id: SessionId,
@@ -802,6 +814,9 @@ impl Sessions {
 
     /// The steps of §7.4, in order.
     fn lock_where(&self, only: Option<SessionId>, reason: LockReason) {
+        // One lock at a time, all five steps: a second lock waits for the first to finish, so it never finds a session
+        // half-locked (already taken in step 1, its publish attempt not yet over) and returns, hooks run, too early.
+        let _turn = lock(&self.transitions);
         // (1) Under the sessions mutex: the state, the generation, and everything a lock takes away...
         let (locked, opening, pending) = {
             let mut inner = self.inner();
@@ -875,7 +890,7 @@ impl Sessions {
         }
     }
 
-    /// Adds a hook that runs after every lock, after those added before it.
+    /// Adds a hook that runs after every lock, after those added before it. It must not lock or open a session.
     pub fn on_lock(&self, hook: LockHook) {
         self.hooks
             .write()
@@ -887,18 +902,19 @@ impl Sessions {
         self.inner().sessions.iter().map(Entry::info).collect()
     }
 
-    /// Waits up to `max` for the last reference to the vault of the locked session `id` to drop. True once it has
-    /// (or when there is no such session), false while the session is unlocked or something still holds it.
+    /// Waits up to `max` for every vault the locked session `id` has held to drop, those of earlier unlocks that a
+    /// command still holds included. True once they have (or when there is no such session), false while the
+    /// session is unlocked or something still holds one.
     pub fn release_wait(&self, id: SessionId, max: Duration) -> bool {
-        let released = {
+        let vaults = {
             let inner = self.inner();
             match inner.sessions.iter().find(|entry| entry.id == id) {
                 None => return true,
                 Some(entry) if entry.live.is_some() => return false,
-                Some(entry) => Arc::clone(&entry.released),
+                Some(entry) => Arc::clone(&entry.vaults),
             }
         };
-        released.wait(max)
+        vaults.wait_none(max)
     }
 
     /// Each unlocked session and its location.
@@ -1090,9 +1106,24 @@ mod tests {
         true
     }
 
-    /// Spins until `cancel` is set, giving up after [`GIVE_UP`] so a failing test cannot hang.
-    fn until_cancelled(cancel: &CancelToken) {
-        wait_until(GIVE_UP, || cancel.is_cancelled());
+    /// Spins until `cancel` is set and returns when it saw it; fails the test if it never is (after [`GIVE_UP`]), so
+    /// a broken cancel cannot pass on the generation check alone.
+    fn until_cancelled(cancel: &CancelToken) -> Instant {
+        assert!(
+            wait_until(GIVE_UP, || cancel.is_cancelled()),
+            "the operation's token was never cancelled"
+        );
+        Instant::now()
+    }
+
+    /// How soon after a lock a running operation must see its cancel. It polls every millisecond; the margin is for a
+    /// loaded test machine.
+    const PROMPT: Duration = Duration::from_secs(1);
+
+    /// Whether `seen` (set by the operation) came within [`PROMPT`] of `locked_at`.
+    fn prompt(locked_at: Instant, seen: &OnceLock<Instant>) -> bool {
+        seen.get()
+            .is_some_and(|seen| seen.saturating_duration_since(locked_at) < PROMPT)
     }
 
     #[test]
@@ -1168,24 +1199,27 @@ mod tests {
         let (_, sessions) = sessions();
         let (id, generation, dir) = open_writable(&sessions, parent.path());
         let (started, finish) = (Meet::default(), Meet::default());
-        let (held, released, free, answer) = thread::scope(|s| {
+        let seen = OnceLock::new();
+        let (locked_at, held, released, free, answer) = thread::scope(|s| {
             let reading = s.spawn(|| {
                 sessions.read_long(id, generation, |_, cancel| {
                     started.wait();
-                    until_cancelled(cancel);
+                    seen.set(until_cancelled(cancel)).unwrap();
                     // Hold the vault a little past the cancel, as an operation finishing its chunk does.
                     finish.wait();
                     Ok(())
                 })
             });
             started.wait();
+            let locked_at = Instant::now();
             sessions.lock(id, LockReason::Manual);
             let held = !sessions.release_wait(id, Duration::from_millis(50));
             finish.wait();
             let released = sessions.release_wait(id, Duration::from_secs(1));
             let free = is_free(&dir);
-            (held, released, free, reading.join().unwrap())
+            (locked_at, held, released, free, reading.join().unwrap())
         });
+        assert!(prompt(locked_at, &seen), "the read saw the cancel promptly");
         assert!(held, "the read still held the vault");
         assert!(released, "the last reference dropped");
         assert!(free, "the vault's .lock is free");
@@ -1410,7 +1444,10 @@ mod tests {
                     let vault = unlock(&dir)?;
                     inside.wait();
                     locked.wait();
-                    Ok(OpenStep::<()>::Ask(PendingChoice::Test(Some(vault)), ask))
+                    Ok(OpenStep::<()>::Ask(
+                        PendingChoice::Test(Some(Box::new(vault))),
+                        ask,
+                    ))
                 })
             });
             inside.wait();
@@ -1601,26 +1638,33 @@ mod tests {
         let (id, generation, _) = open_writable(&sessions, parent.path());
         let _quiet = quiet();
         let held = Meet::default();
-        let (second, second_took, lock_took, holder) = thread::scope(|s| {
+        let (second, second_took, lock_took, stopped_after, holder) = thread::scope(|s| {
             let holder = s.spawn(|| {
-                sessions.write_long(id, generation, |_, cancel| {
+                let answer = sessions.write_long(id, generation, |_, cancel| {
                     held.wait();
                     until_cancelled(cancel);
                     Ok(())
-                })
+                });
+                (answer, Instant::now())
             });
             held.wait();
             let start = Instant::now();
             let second = sessions.write_long(id, generation, |_, _| Ok(()));
             let second_took = start.elapsed();
-            let start = Instant::now();
+            let locked_at = Instant::now();
             sessions.lock_all(LockReason::Manual);
-            let lock_took = start.elapsed();
-            (second.err(), second_took, lock_took, holder.join().unwrap())
+            let lock_took = locked_at.elapsed();
+            let (holder, ended) = holder.join().unwrap();
+            let stopped_after = ended.saturating_duration_since(locked_at);
+            (second.err(), second_took, lock_took, stopped_after, holder)
         });
         assert_eq!(second, Some(BUSY));
         assert!(second_took < Duration::from_millis(50), "{second_took:?}");
         assert!(lock_took < Duration::from_millis(50), "{lock_took:?}");
+        assert!(
+            stopped_after < PROMPT,
+            "the write stopped {stopped_after:?} after the lock"
+        );
         assert_eq!(holder.err(), Some(ShellError::Locked));
     }
 
@@ -1639,25 +1683,22 @@ mod tests {
         for lock_source in [true, false] {
             let from = open_read_only(&sessions, &copy);
             let started = Meet::default();
-            let saw_cancel = AtomicBool::new(false);
-            let answer = thread::scope(|s| {
+            let seen = OnceLock::new();
+            let (locked_at, answer) = thread::scope(|s| {
                 let copying = s.spawn(|| {
                     sessions.read_write(from.0, from.1, to.0, to.1, |_, _, cancel| {
                         started.wait();
-                        until_cancelled(cancel);
-                        saw_cancel.store(cancel.is_cancelled(), Ordering::SeqCst);
+                        seen.set(until_cancelled(cancel)).unwrap();
                         Ok(())
                     })
                 });
                 started.wait();
+                let locked_at = Instant::now();
                 sessions.lock(if lock_source { from.0 } else { to.0 }, LockReason::Manual);
-                copying.join().unwrap()
+                (locked_at, copying.join().unwrap())
             });
             assert_eq!(answer.err(), Some(ShellError::Locked));
-            assert!(
-                saw_cancel.load(Ordering::SeqCst),
-                "the copy's token is cancelled"
-            );
+            assert!(prompt(locked_at, &seen), "the copy saw the cancel promptly");
             if lock_source {
                 assert!(
                     sessions.read(to.0, to.1, |_, _| Ok(())).is_ok(),
@@ -1789,7 +1830,7 @@ mod tests {
         let dir = create_closed(parent.path());
         let with_vault = sessions
             .pending()
-            .put(PendingChoice::Test(Some(unlock(&dir).unwrap())));
+            .put(PendingChoice::Test(Some(Box::new(unlock(&dir).unwrap()))));
         let plain = sessions.pending().put(PendingChoice::Test(None));
         assert!(!is_free(&dir));
 
@@ -1801,5 +1842,115 @@ mod tests {
             ));
         }
         assert!(is_free(&dir), "the parked vault was dropped");
+    }
+
+    /// Fix round 1: a second lock must not skip a session whose first lock is still waiting for a publish attempt,
+    /// nor run its hooks (the clipboard clear) and return while that attempt can still write.
+    #[test]
+    fn overlapping_locks_finish_in_turn() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let (id, generation, _) = open_writable(&sessions, parent.path());
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        {
+            let log = log.clone();
+            sessions.on_lock(Box::new(move |which, reason| {
+                lock(&log).push(format!("hook {which:?} {reason:?}"));
+            }));
+        }
+        let (entered, go) = (Meet::default(), Meet::default());
+        let all_returned = AtomicBool::new(false);
+        let (waiting, returned_early, logged_early, published) = thread::scope(|s| {
+            let publishing = s.spawn(|| {
+                sessions.publish(id, generation, || {
+                    entered.wait();
+                    go.wait();
+                    lock(&log).push("publish done".to_string());
+                    Ok(())
+                })
+            });
+            entered.wait();
+            let manual = s.spawn(|| sessions.lock(id, LockReason::Manual));
+            // The manual lock has done step (1) and now waits for the publish guard.
+            let waiting = wait_until(GIVE_UP, || state(&sessions, id) == SessionState::Locked);
+            let all = s.spawn(|| {
+                sessions.lock_all(LockReason::Idle);
+                all_returned.store(true, Ordering::SeqCst);
+            });
+            thread::sleep(Duration::from_millis(100));
+            let returned_early = all_returned.load(Ordering::SeqCst);
+            let logged_early = lock(&log).clone();
+            go.wait();
+            let published = publishing.join().unwrap();
+            manual.join().unwrap();
+            all.join().unwrap();
+            (waiting, returned_early, logged_early, published)
+        });
+        assert!(waiting, "the manual lock reached the publish guard");
+        assert!(
+            !returned_early,
+            "lock_all returned before the first lock finished"
+        );
+        assert_eq!(
+            logged_early,
+            Vec::<String>::new(),
+            "no hook ran before the publish ended"
+        );
+        assert_eq!(published, Ok(()));
+        assert_eq!(
+            *lock(&log),
+            [
+                "publish done".to_string(),
+                format!("hook Some({id:?}) Manual"),
+                "hook None Idle".to_string(),
+            ]
+        );
+    }
+
+    /// Fix round 1: a vault from an earlier unlock that a running operation still holds is waited for too.
+    #[test]
+    fn release_wait_counts_every_copy() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let dir = create_closed(parent.path());
+        let (id, first) = open_read_only(&sessions, &dir);
+        let (started, finish) = (Meet::default(), Meet::default());
+        let (reopened, held, released, answer) = thread::scope(|s| {
+            let reading = s.spawn(|| {
+                sessions.read_long(id, first, |_, _| {
+                    started.wait();
+                    finish.wait();
+                    Ok(())
+                })
+            });
+            started.wait();
+            sessions.lock(id, LockReason::Manual);
+            let reopened = open_read_only(&sessions, &dir);
+            sessions.lock(id, LockReason::Manual);
+            let held = !sessions.release_wait(id, Duration::from_millis(50));
+            finish.wait();
+            let released = sessions.release_wait(id, Duration::from_secs(1));
+            (reopened, held, released, reading.join().unwrap())
+        });
+        assert_eq!(
+            reopened,
+            (id, first + 2),
+            "the same session, unlocked again"
+        );
+        assert!(held, "the first unlock's vault was still held");
+        assert!(released, "every copy dropped");
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+    }
+
+    /// Fix round 1: locations compare as Windows compares names (ordinal, ignoring case), not by Unicode lowercase.
+    #[cfg(windows)]
+    #[test]
+    fn paths_compare_as_windows_does() {
+        let at = |name: &str| Location::Folder(Path::new("C:\\Vaults").join(name));
+        // Lowercasing U+0130 gives "i" + U+0307; Windows keeps them apart.
+        assert_ne!(at("\u{0130}"), at("i\u{0307}"));
+        assert_eq!(at("\u{00C9}t\u{00E9}"), at("\u{00E9}T\u{00C9}"));
+        assert_eq!(at("FAMILY"), at("family"));
+        assert_ne!(at("family"), at("familia"));
     }
 }

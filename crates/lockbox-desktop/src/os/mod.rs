@@ -5,6 +5,17 @@ pub mod signals;
 #[cfg(windows)]
 pub mod win;
 
+use std::path::Path;
+
+/// Whether `a` and `b` name the same path as the file system compares names: on Windows ordinal and ignoring case,
+/// with Windows' own case table (not Unicode lowercasing, which merges names Windows keeps apart); elsewhere exactly.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    return win::equal_ignoring_case(a.as_os_str(), b.as_os_str());
+    #[cfg(not(windows))]
+    return a == b;
+}
+
 /// A Windows event that locks every vault (spec §7.4), or the vaults on a drive that went away (spec §6.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsSignal {

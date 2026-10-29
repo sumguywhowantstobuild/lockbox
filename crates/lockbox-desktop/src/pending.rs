@@ -64,7 +64,21 @@ impl fmt::Debug for Token {
 pub enum PendingChoice {
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
-    Test(Option<lockbox_core::Vault>),
+    Test(Option<Box<lockbox_core::Vault>>),
+    /// Tests only: records when it is dropped.
+    #[cfg(test)]
+    Marker(DropMarker),
+}
+
+/// Tests only: sets its flag when dropped.
+#[cfg(test)]
+pub struct DropMarker(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[cfg(test)]
+impl Drop for DropMarker {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// The choices waiting for an answer, each until it is taken, it expires, or every vault locks.
@@ -80,15 +94,27 @@ struct Parked {
 }
 
 impl Pending {
-    /// Parks `choice` and returns the token that takes it back.
+    /// Parks `choice` and returns the token that takes it back. Expired choices are dropped on the way.
     pub fn put(&self, choice: PendingChoice) -> Token {
         self.put_at(choice, Instant::now())
     }
 
     /// Takes the choice parked under `token`, once. `NotFound` for a token taken before, expired, or dropped by a
-    /// lock.
+    /// lock. Expired choices are dropped on the way.
     pub fn take(&self, token: &Token) -> ShellResult<PendingChoice> {
         self.take_at(token, Instant::now())
+    }
+
+    /// Drops every expired choice: an unlocked vault waiting for a yes holds its key and its `.lock`, so it should
+    /// not outlive its five minutes. For a periodic caller (Task 11's idle tick); `put` and `take` sweep too.
+    pub fn sweep_expired(&self) {
+        self.sweep_at(Instant::now());
+    }
+
+    /// Like [`put`](Self::put), for a caller holding the sessions mutex (`Sessions::open`): the expired choices are
+    /// handed back, to be dropped once that mutex is released, since one may be a vault.
+    pub(crate) fn park(&self, choice: PendingChoice) -> (Token, Vec<PendingChoice>) {
+        self.park_at(choice, Instant::now())
     }
 
     /// Removes every choice, for the caller to drop.
@@ -99,24 +125,27 @@ impl Pending {
             .collect()
     }
 
-    /// Drops nothing: `Sessions::open` parks under the sessions mutex, and an expired choice may be a vault, which
-    /// is closed outside it ([`take`](Self::take) clears the expired ones).
-    fn put_at(&self, choice: PendingChoice, now: Instant) -> Token {
+    fn park_at(&self, choice: PendingChoice, now: Instant) -> (Token, Vec<PendingChoice>) {
         let token = Token::random();
-        lock(&self.parked).push(Parked {
+        let mut parked = lock(&self.parked);
+        let expired = take_expired(&mut parked, now);
+        parked.push(Parked {
             token: Token(token.0.clone()),
             until: now + LIFETIME,
             choice,
         });
+        (token, expired)
+    }
+
+    fn put_at(&self, choice: PendingChoice, now: Instant) -> Token {
+        // The expired choices are dropped here, after the lock is released.
+        let (token, _expired) = self.park_at(choice, now);
         token
     }
 
     fn take_at(&self, token: &Token, now: Instant) -> ShellResult<PendingChoice> {
         let mut parked = lock(&self.parked);
-        let (expired, live): (Vec<Parked>, Vec<Parked>) = std::mem::take(&mut *parked)
-            .into_iter()
-            .partition(|p| p.until <= now);
-        *parked = live;
+        let expired = take_expired(&mut parked, now);
         let found = parked
             .iter()
             .position(|p| p.token.matches(token))
@@ -127,15 +156,68 @@ impl Pending {
         found.map(|p| p.choice).ok_or(ShellError::NotFound)
     }
 
+    fn sweep_at(&self, now: Instant) {
+        let expired = take_expired(&mut lock(&self.parked), now);
+        drop(expired);
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         lock(&self.parked).len()
     }
 }
 
+/// Takes the expired choices out of `parked`, for the caller to drop after releasing its lock.
+fn take_expired(parked: &mut Vec<Parked>, now: Instant) -> Vec<PendingChoice> {
+    let (expired, live): (Vec<Parked>, Vec<Parked>) = std::mem::take(parked)
+        .into_iter()
+        .partition(|p| p.until <= now);
+    *parked = live;
+    expired.into_iter().map(|p| p.choice).collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+
+    fn marker() -> (Arc<AtomicBool>, PendingChoice) {
+        let dropped = Arc::new(AtomicBool::new(false));
+        (dropped.clone(), PendingChoice::Marker(DropMarker(dropped)))
+    }
+
+    /// Fix round 1: an expired choice (it may hold an unlocked vault and its `.lock`) is dropped by the next put, not
+    /// only refused by a take.
+    #[test]
+    fn expired_choice_dropped_on_next_put() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let (dropped, choice) = marker();
+        pending.put_at(choice, now);
+        pending.put_at(
+            PendingChoice::Test(None),
+            now + LIFETIME - Duration::from_secs(1),
+        );
+        assert!(!dropped.load(Ordering::SeqCst), "not expired yet");
+        pending.put_at(PendingChoice::Test(None), now + LIFETIME);
+        assert!(dropped.load(Ordering::SeqCst), "the next put dropped it");
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn sweep_drops_expired_choices() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let (dropped, choice) = marker();
+        pending.put_at(choice, now);
+        pending.sweep_at(now + LIFETIME - Duration::from_secs(1));
+        assert!(!dropped.load(Ordering::SeqCst), "not expired yet");
+        pending.sweep_at(now + LIFETIME);
+        assert!(dropped.load(Ordering::SeqCst), "the sweep dropped it");
+        assert_eq!(pending.len(), 0);
+    }
 
     #[test]
     fn token_expires_after_five_minutes() {

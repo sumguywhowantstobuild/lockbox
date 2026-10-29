@@ -83,10 +83,12 @@ export async function open<T>(cmd: string, args?: InvokeArgs): Promise<Opened<T>
   return tagged;
 }
 
-/** Listens for locks: each makes the session's older answers stale, then `handler` runs (to clear the screens). */
+/**
+ * Listens for locks: each makes the session's older answers stale, then `handler` runs (to clear the screens). An
+ * event older than what the bridge has seen (it arrived after the session was unlocked again) is ignored.
+ */
 export function onLocked(handler?: (event: LockedEvent) => void): Promise<UnlistenFn> {
   return listen<LockedEvent>("lockbox://locked", ({ payload }) => {
-    advance(payload.session, payload.generation);
-    handler?.(payload);
+    if (advance(payload.session, payload.generation)) handler?.(payload);
   });
 }

@@ -93,3 +93,17 @@ test("on_locked_makes_older_answers_stale", async () => {
   invoke.mockResolvedValueOnce(tagged(1, 2, "info"));
   await expect(bridge.open("unlock_vault")).rejects.toBeInstanceOf(bridge.StaleAnswer);
 });
+
+// Fix round 1: a lock event that arrives after the session was unlocked again must not clear the screens.
+test("late_lock_event_for_older_generation_is_ignored", async () => {
+  const cleared = vi.fn();
+  await bridge.onLocked(cleared);
+  const [, handler] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
+  await opened(1, 3);
+  handler({ payload: { session: 1, generation: 2, reason: "manual" } });
+  expect(cleared).not.toHaveBeenCalled();
+  invoke.mockResolvedValueOnce(tagged(1, 3, "items"));
+  await expect(bridge.call("list_items")).resolves.toEqual(tagged(1, 3, "items"));
+  handler({ payload: { session: 1, generation: 4, reason: "manual" } });
+  expect(cleared).toHaveBeenCalledOnce();
+});
