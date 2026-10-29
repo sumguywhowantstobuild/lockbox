@@ -51,6 +51,21 @@ pub struct CoreErrorView {
 
 pub type ShellResult<T> = Result<T, ShellError>;
 
+/// A create whose vault the vault list could not take, and that could not be removed again: the vault is on disk,
+/// in the folder the user chose, but not on the list and its recovery key never shown. The page tells the user to add
+/// it with "Add existing vault" and make a new recovery key. Fixed text, no path (R5).
+pub const VAULT_NOT_LISTED: ShellError = ShellError::InvalidInput {
+    what: "vault not listed",
+};
+
+impl ShellError {
+    /// Whether this refusal reports something already left on disk that the user must act on
+    /// ([`VAULT_NOT_LISTED`]). It is answered as it is even when a lock overtook the command: `Locked` would hide it.
+    pub fn reports_a_leftover(&self) -> bool {
+        *self == VAULT_NOT_LISTED
+    }
+}
+
 impl CoreErrorView {
     fn kind(kind: &'static str) -> Self {
         CoreErrorView {

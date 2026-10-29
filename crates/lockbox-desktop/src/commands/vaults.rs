@@ -19,8 +19,9 @@ use tauri::ipc::Request;
 use zeroize::Zeroizing;
 
 use super::{NoArgs, args, blocking};
-use crate::error::{Confirm, Outcome, ShellError, ShellResult};
-use crate::locations::CloudProvider;
+use crate::error::{Confirm, Outcome, ShellError, ShellResult, VAULT_NOT_LISTED};
+use crate::locations::{CloudProvider, LocationCheck};
+use crate::os::same_path;
 use crate::paths::default_vault_parent;
 use crate::pending::{PendingChoice, Token};
 use crate::registry::VaultEntry;
@@ -130,6 +131,16 @@ const HEADER_FILES: [&str; 2] = ["vault.json", "vault.json.bak"];
 /// What a create that a lock overtook made: the vault exists and is on the vault list, but is not open.
 const VAULT_CREATED: &str = "vault created";
 
+/// Refuses (`"folder"`) a checked folder that is not `location`, the place the session was registered under before
+/// the open (a junction on the listed path moved in between): the session must never hold one vault under another's
+/// place, where a later unlock of that place would be answered with it.
+fn same_place(check: &LocationCheck, location: &Location) -> ShellResult<()> {
+    match same_path(&check.path, location.path()) {
+        true => Ok(()),
+        false => Err(ShellError::InvalidInput { what: "folder" }),
+    }
+}
+
 /// `Locked` once a lock of all vaults has cancelled the open: checked right before a step that cannot be undone
 /// (making the vault, accepting a header, setting a password), so a lock that lands before it changes nothing.
 fn not_cancelled(cancel: &CancelToken) -> ShellResult<()> {
@@ -139,16 +150,13 @@ fn not_cancelled(cancel: &CancelToken) -> ShellResult<()> {
     }
 }
 
-/// A create whose vault the list could not take, and that could not be removed again: the vault is on disk, in the
-/// folder the user chose, but not on the list and its recovery key never shown. The page tells the user to add it
-/// with "Add existing vault" and make a new recovery key. Fixed text, no path (R5).
-const VAULT_NOT_LISTED: ShellError = ShellError::InvalidInput {
-    what: "vault not listed",
-};
-
 /// Tests only: the step a recovery reaches once the new password is set, just before it gives back the session.
 #[cfg(test)]
 const PASSWORD_SET: &str = "shell.recover.password_set";
+
+/// Tests only: the step an unlock or a recovery reaches inside its open, before its location check.
+#[cfg(test)]
+const CHECKING: &str = "shell.open.checking";
 
 /// Tests only: a named step a test can watch or make fail (the engine's failpoints, which are per thread: an opening
 /// closure runs on the thread that called the command).
@@ -286,8 +294,10 @@ impl Shell {
 
     /// The opening closure of a create: checks `parent` (again, after a yes: it may have changed since), asks first
     /// about a cloud folder unless `cloud_confirmed`, then creates the vault there and adds it to the vault list. A
-    /// lock of all vaults before the answer still leaves the vault on disk and on the vault list:
-    /// `LockedAfterChange { what: "vault created" }`.
+    /// lock of all vaults seen before the vault is made (its `cancel`, checked right before) answers `Locked`, with
+    /// nothing made; one that lands after it leaves the vault on disk and on the vault list:
+    /// `LockedAfterChange { what: "vault created" }`. A vault left on disk off the list answers `"vault not listed"`
+    /// either way.
     fn create_in(
         &self,
         parent: PathBuf,
@@ -380,7 +390,10 @@ impl Shell {
     ) -> ShellResult<Tagged<UnlockView>> {
         let (dir, location) = self.registered(id)?;
         let answer = self.sessions.open(Some(location.clone()), None, |_| {
+            #[cfg(test)]
+            test_step(CHECKING)?;
             let check = self.check_location(&dir)?;
+            same_place(&check, &location)?;
             let (vault, report) = Vault::unlock_with_password(&check.path, &password)?;
             let unlocked = (report, check.cloud);
             Ok(OpenStep::Session(
@@ -421,7 +434,10 @@ impl Shell {
         let answer = self
             .sessions
             .open(Some(location.clone()), Some("password"), |cancel| {
+                #[cfg(test)]
+                test_step(CHECKING)?;
                 let check = self.check_location(&dir)?;
+                same_place(&check, &location)?;
                 let (mut vault, report) = Vault::unlock_with_recovery(&check.path, &secret)?;
                 if report.header_mac_mismatch {
                     let choice = PendingChoice::RecoverVault {
@@ -1279,13 +1295,15 @@ mod tests {
         let held: Rc<RefCell<Option<fs::File>>> = Rc::default();
         let hold = Rc::clone(&held);
         let parent = default.clone();
+        let shell = Arc::clone(&ts.shell);
         // Once the vault is published: the list's write fails, and its header is held open without delete sharing,
-        // as a scanner might, so the removal fails too (after its retries).
+        // as a scanner might, so the removal fails too (after its retries). Fix round 3 (H1): and every vault locks
+        // right then, before the create answers; the warning must survive that lock.
         failpoint::observe(
             "create.before_rename",
             Box::new(move || {
                 failpoint::arm("atomic_write.before_replace");
-                let (hold, parent) = (Rc::clone(&hold), parent.clone());
+                let (hold, parent, shell) = (Rc::clone(&hold), parent.clone(), Arc::clone(&shell));
                 failpoint::observe(
                     "atomic_write.before_replace",
                     Box::new(move || {
@@ -1299,6 +1317,7 @@ mod tests {
                             .open(vault.join(HEADER_FILE))
                             .unwrap();
                         *hold.borrow_mut() = Some(file);
+                        shell.sessions.lock_all(LockReason::WindowsLocked);
                     }),
                 );
             }),
@@ -1406,6 +1425,59 @@ mod tests {
         let key = created.data.recovery_key.clone();
         let recovered = heavy(|| ts.shell.recover_vault(link_id, key, secret(NEW_PW)));
         assert_eq!(done(recovered.unwrap()).data.info.name, "Family");
+    }
+
+    /// Fix round 3 (H2): a listed folder that leads elsewhere by the time it is checked (a junction moved after the
+    /// session's place was read) is refused, so a session never holds one vault under another's place. The other
+    /// vault's own password and recovery key are used: without the refusal they would open it.
+    #[test]
+    fn session_is_named_by_the_checked_folder() {
+        let ts = TestShell::new();
+        let (_, family, _) = registered(&ts);
+        let elsewhere = ts.temp.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        let other = heavy(|| Vault::create(&elsewhere, "Work", NEW_PW)).unwrap();
+        let (work, work_key) = (other.vault.dir().to_path_buf(), other.recovery.to_display());
+        drop(other);
+        let link = ts.vaults().join("listed-link");
+        make_dir_link(&link, &family);
+        let id = ts
+            .shell
+            .registry
+            .add(&fs::canonicalize(ts.vaults()).unwrap().join("listed-link"))
+            .unwrap();
+        let move_once_open = || {
+            retarget(&link, &family);
+            let (link, work) = (link.clone(), work.clone());
+            let mut moved = false;
+            failpoint::observe(
+                CHECKING,
+                Box::new(move || {
+                    if !moved {
+                        moved = true;
+                        retarget(&link, &work);
+                    }
+                }),
+            );
+        };
+        let refused = Some(ShellError::InvalidInput { what: "folder" });
+
+        move_once_open();
+        let answer = heavy(|| ts.shell.unlock_vault(id, secret(NEW_PW)));
+        failpoint::disarm_all();
+        assert_eq!(answer.err(), refused);
+
+        move_once_open();
+        let answer = heavy(|| ts.shell.recover_vault(id, work_key, secret(PW)));
+        failpoint::disarm_all();
+        assert_eq!(answer.err(), refused);
+
+        assert!(ts.shell.sessions.list().is_empty());
+        assert!(is_free(&family) && is_free(&work));
+        assert!(
+            password_works(&work, NEW_PW),
+            "the other vault is unchanged"
+        );
     }
 
     #[test]

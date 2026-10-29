@@ -617,7 +617,8 @@ impl Sessions {
     /// unlocked session there is answered as it is, without running `open` (`Done` with `None`), and an open of that
     /// location already under way answers `Busy`. A lock of all vaults while `open` runs cancels its token and
     /// discards what it made, a vault or a choice to park: `Locked`, or `LockedAfterChange` when `what` names the
-    /// change `open` made on disk and it gave back a session (a question means the change was not made).
+    /// change `open` made on disk and it gave back a session (a question means the change was not made). A refusal
+    /// that reports something left on disk ([`ShellError::reports_a_leftover`]) is answered as it is.
     pub fn open<X>(
         &self,
         location: Option<Location>,
@@ -705,9 +706,11 @@ impl Sessions {
             // A discarded vault closes after both locks are released.
             drop(inner);
             drop(turn);
-            // Only a new session means `what` was done: a question changes nothing.
+            // Only a new session means `what` was done: a question changes nothing. A refusal reporting something
+            // left on disk (a vault off the list) is answered as it is: `Locked` would hide it.
             let made = match &step {
                 Ok(OpenStep::Session(..)) => Ok(()),
+                Err(e) if e.reports_a_leftover() => return Err(*e),
                 _ => Err(ShellError::Locked),
             };
             return Err(overtaken(&made, what));

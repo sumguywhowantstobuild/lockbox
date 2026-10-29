@@ -113,3 +113,48 @@ pub enum OsSignal {
     /// Windows is signing out or shutting down, and may end the process as soon as the window has the message.
     Ending,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fix round 3 (H3): what `same_path` treats as one folder, and what it keeps apart. The registry, `Location`
+    /// and `is_within` all rest on it, so a later "simplification" must not merge folders Windows keeps apart.
+    #[test]
+    fn same_path_table() {
+        let same = |a: &str, b: &str| same_path(Path::new(a), Path::new(b));
+        let one_folder = [
+            (r"\\?\C:\Vaults\Family", r"\\?\C:\Vaults\Family"),
+            // A trailing separator, a doubled one, another letter case.
+            (r"\\?\C:\Vaults\Family", r"\\?\C:\Vaults\Family\"),
+            (r"C:\Vaults\Family", r"C:\Vaults\\Family"),
+            (r"\\?\C:\Vaults\Family", r"\\?\c:\VAULTS\family"),
+            // `.` in a plain path is the folder itself, as Windows reads it.
+            (r"C:\Vaults\.\Family", r"C:\Vaults\Family"),
+        ];
+        for (a, b) in one_folder {
+            assert!(same(a, b), "{a} and {b} should be one folder");
+            assert!(same(b, a), "{b} and {a} should be one folder");
+        }
+        let apart = [
+            // `..` is never resolved here: it may lead through a link.
+            (r"C:\Vaults\..\Family", r"C:\Family"),
+            // A verbatim path and a plain one: different prefixes.
+            (r"\\?\C:\Vaults\Family", r"C:\Vaults\Family"),
+            // Windows does not normalise a verbatim path, so its `.` is a name of its own.
+            (r"\\?\C:\Vaults\.", r"\\?\C:\Vaults"),
+            (r"\\?\C:\Vaults\Family", r"\\?\D:\Vaults\Family"),
+            (r"\\?\C:\Vaults\Family", r"\\?\C:\Vaults\Family2"),
+            (r"\\?\C:\Vaults\Family", r"\\?\C:\Vaults"),
+            (r"\\?\C:\Vaults\Family", r"\\?\C:\Vaults\Family "),
+        ];
+        for (a, b) in apart {
+            assert!(!same(a, b), "{a} and {b} should be apart");
+            assert!(!same(b, a), "{b} and {a} should be apart");
+        }
+        let name = |a: &str, b: &str| same_name(OsStr::new(a), OsStr::new(b));
+        assert!(name("Family", "fAMILY"));
+        assert!(!name("Family", "Family "));
+        assert!(!name("Family", "Famil"));
+    }
+}
