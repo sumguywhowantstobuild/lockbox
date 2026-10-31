@@ -44,6 +44,8 @@ use windows_sys::Win32::System::Power::{
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
+use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData, KF_FLAG_DEFAULT,
     SHGetKnownFolderPath, ShellExecuteW,
@@ -58,7 +60,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::core::PWSTR;
 
 use super::signals::{DeviceHeader, classify, wants_device_header};
-use super::{Dialogs, DriveType, Env, KnownFolder, Launcher, Os, OsSignal, Volumes};
+use super::{
+    Dialogs, DriveType, Env, IdleSource, KnownFolder, Launcher, Os, OsSignal, Power, SystemClock,
+    Volumes,
+};
 use crate::{lock, window};
 
 #[cfg(test)]
@@ -105,8 +110,46 @@ impl Os {
         Os {
             volumes: Arc::new(WinVolumes),
             env: Arc::new(WinEnv),
-            dialogs: Arc::new(WinDialogs { app }),
+            dialogs: Arc::new(WinDialogs { app: app.clone() }),
             launcher: Arc::new(WinLauncher),
+            idle: Arc::new(WinIdle),
+            power: Arc::new(WinPower { app }),
+            clock: Arc::new(SystemClock),
+        }
+    }
+}
+
+/// Idle time from `GetLastInputInfo`: the tick count of the session's last keyboard or mouse input, against
+/// `GetTickCount` now. Both wrap after 49.7 days, so the difference is taken wrapping.
+pub struct WinIdle;
+
+impl IdleSource for WinIdle {
+    fn since_last_input(&self) -> Duration {
+        let mut info = LASTINPUTINFO {
+            cbSize: size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        // SAFETY: `info` is a writable LASTINPUTINFO whose `cbSize` is its own size, as the call requires.
+        if unsafe { GetLastInputInfo(&mut info) } == 0 {
+            // Fails only for a wrong `cbSize`. Fail closed: a vault never stays unlocked because idle time is unknown.
+            return Duration::MAX;
+        }
+        // SAFETY: takes no arguments.
+        let now = unsafe { GetTickCount() };
+        Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime)))
+    }
+}
+
+/// Keeps the PC awake through the signal window's thread ([`SignalThread::keep_awake`]), which the app keeps in its
+/// state from before the shell is made. Without it (never, once the app runs) nothing changes.
+pub struct WinPower<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> Power for WinPower<R> {
+    fn keep_awake(&self, on: bool) {
+        if let Some(signal_thread) = self.app.try_state::<SignalThread>() {
+            signal_thread.keep_awake(on);
         }
     }
 }
@@ -573,13 +616,6 @@ impl SignalThread {
     /// (`ES_CONTINUOUS` alone) or until the window closes, which withdraws the request. The request
     /// belongs to the thread that makes it, so it is posted to the window and made on the window's own thread. If the
     /// post fails (the window's queue is full), the request is not changed.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task 11 keeps Windows awake during long operations"
-        )
-    )]
     pub fn keep_awake(&self, on: bool) {
         let window = lock(&self.shared.window);
         if *window != 0 {

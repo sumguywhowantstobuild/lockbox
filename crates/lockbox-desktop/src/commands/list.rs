@@ -33,4 +33,6 @@ pub const COMMANDS: &[&str] = &[
     "delete_orphans",
     "generate_password",
     "generate_passphrase",
+    "get_settings",
+    "set_settings",
 ];

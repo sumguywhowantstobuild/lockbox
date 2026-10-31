@@ -1,17 +1,20 @@
-//! Tests only: fakes for the OS calls (`os::{Env, Volumes, Dialogs, Launcher}`), a shell built on them inside a temp folder,
-//! and the lock that keeps key derivations off a timing test's CPU.
+//! Tests only: fakes for the OS calls (`os::{Env, Volumes, Dialogs, Launcher, IdleSource, Power, Clock}`), a shell built
+//! on them inside a temp folder, and the lock that keeps key derivations off a timing test's CPU.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use lockbox_core::internals::fsio::testutil::TempDir;
 
 use crate::lock;
-use crate::os::{Dialogs, DriveType, Env, KnownFolder, Launcher, Os, Volumes};
+use crate::os::{
+    Clock, Dialogs, DriveType, Env, IdleSource, KnownFolder, Launcher, Os, Power, Volumes,
+};
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
 
@@ -32,13 +35,86 @@ pub fn quiet() -> RwLockWriteGuard<'static, ()> {
     CPU.write().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A notifier that drops every event.
-pub struct NoEvents;
+/// A notifier that records each `locked` and `busy` event.
+#[derive(Default)]
+pub struct Events {
+    locked: Mutex<Vec<(SessionId, u64, LockReason)>>,
+    busy: Mutex<Vec<(Option<SessionId>, Vec<&'static str>)>>,
+}
 
-impl Notifier for NoEvents {
-    fn locked(&self, _session: SessionId, _generation: u64, _reason: LockReason) {}
-    fn busy(&self, _session: Option<SessionId>, _operations: &[&'static str]) {}
+impl Events {
+    pub fn locked(&self) -> Vec<(SessionId, u64, LockReason)> {
+        lock(&self.locked).clone()
+    }
+
+    pub fn busy(&self) -> Vec<(Option<SessionId>, Vec<&'static str>)> {
+        lock(&self.busy).clone()
+    }
+}
+
+impl Notifier for Events {
+    fn locked(&self, session: SessionId, generation: u64, reason: LockReason) {
+        lock(&self.locked).push((session, generation, reason));
+    }
+
+    fn busy(&self, session: Option<SessionId>, operations: &[&'static str]) {
+        lock(&self.busy).push((session, operations.to_vec()));
+    }
+
     fn notice(&self, _notice: &Notice) {}
+}
+
+/// Idle time the test sets: none until it does.
+#[derive(Default)]
+pub struct FakeIdle(Mutex<Duration>);
+
+impl FakeIdle {
+    pub fn set(&self, since_last_input: Duration) {
+        *lock(&self.0) = since_last_input;
+    }
+}
+
+impl IdleSource for FakeIdle {
+    fn since_last_input(&self) -> Duration {
+        *lock(&self.0)
+    }
+}
+
+/// Records each keep-awake request.
+#[derive(Default)]
+pub struct FakePower(Mutex<Vec<bool>>);
+
+impl FakePower {
+    pub fn calls(&self) -> Vec<bool> {
+        lock(&self.0).clone()
+    }
+}
+
+impl Power for FakePower {
+    fn keep_awake(&self, on: bool) {
+        lock(&self.0).push(on);
+    }
+}
+
+/// A clock that stands still until the test moves it.
+pub struct FakeClock(Mutex<Instant>);
+
+impl FakeClock {
+    pub fn set(&self, now: Instant) {
+        *lock(&self.0) = now;
+    }
+}
+
+impl Default for FakeClock {
+    fn default() -> Self {
+        FakeClock(Mutex::new(Instant::now()))
+    }
+}
+
+impl Clock for FakeClock {
+    fn now(&self) -> Instant {
+        *lock(&self.0)
+    }
 }
 
 /// Environment variables set by the test, and known folders inside a temp folder.
@@ -115,6 +191,8 @@ pub struct FakeVolumes {
     sync_roots: Mutex<Vec<(PathBuf, Option<String>)>>,
     /// Run once, on the next `volume_root` call: in the middle of a location check.
     on_volume_root: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Folders gone (their drive unplugged): they and everything in them do not exist.
+    vanished: Mutex<Vec<PathBuf>>,
 }
 
 fn canonical(dir: &Path) -> PathBuf {
@@ -153,6 +231,11 @@ impl FakeVolumes {
     /// Runs `hook` once, on the next `volume_root` call: in the middle of the next location check.
     pub fn during_next_check(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.on_volume_root) = Some(hook);
+    }
+
+    /// From now on, the folder `dir` and everything in it are gone, as if its drive were unplugged.
+    pub fn vanish(&self, dir: &Path) {
+        lock(&self.vanished).push(canonical(dir));
     }
 
     /// The innermost mounted volume `path` is inside.
@@ -209,6 +292,9 @@ impl Volumes for FakeVolumes {
     }
 
     fn exists(&self, path: &Path) -> io::Result<bool> {
+        if lock(&self.vanished).iter().any(|gone| inside(path, gone)) {
+            return Ok(false);
+        }
         path.try_exists()
     }
 }
@@ -293,6 +379,11 @@ pub struct TestShell {
     pub volumes: Arc<FakeVolumes>,
     pub dialogs: Arc<FakeDialogs>,
     pub launcher: Arc<FakeLauncher>,
+    pub idle: Arc<FakeIdle>,
+    pub power: Arc<FakePower>,
+    pub clock: Arc<FakeClock>,
+    /// The events the shell sent.
+    pub events: Arc<Events>,
     /// Tauri's app-data folders, as the app passes them in.
     pub app_dirs: Vec<PathBuf>,
     /// Kept last, so the shell (and every vault it holds) is gone before the folder is removed.
@@ -306,6 +397,10 @@ impl TestShell {
         let volumes = Arc::new(FakeVolumes::default());
         let dialogs = Arc::new(FakeDialogs::default());
         let launcher = Arc::new(FakeLauncher::default());
+        let idle = Arc::new(FakeIdle::default());
+        let power = Arc::new(FakePower::default());
+        let clock = Arc::new(FakeClock::default());
+        let events = Arc::new(Events::default());
         let app_dirs = vec![
             env.folder(KnownFolder::RoamingAppData)
                 .join("io.github.sumguywhowantstobuild.lockbox"),
@@ -318,14 +413,21 @@ impl TestShell {
             env: env.clone(),
             dialogs: dialogs.clone(),
             launcher: launcher.clone(),
+            idle: idle.clone(),
+            power: power.clone(),
+            clock: clock.clone(),
         };
-        let shell = Arc::new(Shell::new(Arc::new(NoEvents), os, app_dirs.clone()).unwrap());
+        let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone()).unwrap());
         TestShell {
             shell,
             env,
             volumes,
             dialogs,
             launcher,
+            idle,
+            power,
+            clock,
+            events,
             app_dirs,
             temp,
         }

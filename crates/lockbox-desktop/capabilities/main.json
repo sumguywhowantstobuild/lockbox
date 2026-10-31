@@ -36,6 +36,8 @@
     "allow-list-orphans",
     "allow-delete-orphans",
     "allow-generate-password",
-    "allow-generate-passphrase"
+    "allow-generate-passphrase",
+    "allow-get-settings",
+    "allow-set-settings"
   ]
 }

@@ -10,6 +10,7 @@ compile_error!("lockbox-desktop is Windows-only");
 #[cfg(all(dev, not(debug_assertions)))]
 compile_error!("release builds need `--features custom-protocol` (cargo tauri build adds it)");
 
+pub mod autolock;
 pub mod commands;
 pub mod error;
 pub mod locations;
@@ -18,6 +19,7 @@ pub mod paths;
 pub mod pending;
 pub mod registry;
 pub mod session;
+pub mod settings;
 pub mod shell;
 #[cfg(test)]
 mod testing;
@@ -27,8 +29,10 @@ pub mod window;
 pub use commands::handler;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::time::Instant;
+use std::{io, thread};
 
-use tauri::{Manager, RunEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
 use crate::shell::{Events, Shell};
 
@@ -59,23 +63,21 @@ pub fn run() {
                         .into(),
                 );
             }
-            // Until Task 11 locks the vaults on them, debug builds print each signal and release builds ignore them.
-            #[cfg(debug_assertions)]
-            print_signals(signals)?;
-            #[cfg(not(debug_assertions))]
-            drop(signals);
 
             // Before the window, so every command finds it. No vault may live in the folders Tauri keeps for the
             // app, which an uninstaller may delete (spec §6.10).
             let app_dirs = vec![app.path().app_data_dir()?, app.path().app_local_data_dir()?];
-            let shell = Shell::new(
+            let shell = Arc::new(Shell::new(
                 Arc::new(Events(app.handle().clone())),
                 os::Os::windows(app.handle().clone()),
                 app_dirs,
-            )?;
-            if !app.manage(Arc::new(shell)) {
+            )?);
+            if !app.manage(Arc::clone(&shell)) {
                 return Err("Lockbox will not run: its vault sessions could not be kept".into());
             }
+            // Fail closed here too: never run without the auto-lock. Signals that came before this wait in the channel.
+            route_signals(signals, Arc::clone(&shell))?;
+            start_ticks(shell)?;
 
             window::main_window(app.handle())?;
             // Fail closed as well: never run with files droppable into the page.
@@ -89,11 +91,24 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("the Lockbox app could not start");
 
-    app.run(|_app, event| {
-        if let RunEvent::ExitRequested { .. } = event {
-            // Task 11: lock every vault here (`Shell::shutdown`) before the process ends.
-        }
+    app.run(|app, event| match event {
+        // Both lock every vault before the process ends: closing the main window, then the exit that follows (the
+        // second call returns at once).
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { .. },
+            ..
+        } if label == window::MAIN => shutdown(app),
+        RunEvent::ExitRequested { .. } => shutdown(app),
+        _ => {}
     });
+}
+
+/// [`Shell::shutdown`], when the shell was made (a failed setup ends the app before there is one).
+fn shutdown(app: &AppHandle) {
+    if let Some(shell) = app.try_state::<Arc<Shell>>() {
+        shell.shutdown();
+    }
 }
 
 /// Locks `mutex`, also after a panic elsewhere left it poisoned: what each lock of the crate guards is never left
@@ -102,17 +117,33 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Debug builds only: prints each Windows signal on standard error, one line each, for the hands-on check. A line
-/// holds the signal's name and, for a drive, its drive-letter mask; nothing else.
-#[cfg(debug_assertions)]
-fn print_signals(signals: mpsc::Receiver<os::OsSignal>) -> std::io::Result<()> {
-    std::thread::Builder::new()
-        .name("lockbox-signal-print".into())
+/// Hands each Windows signal to the auto-lock, on a thread of its own: never on the signal window's thread, which
+/// must not wait. Debug builds also print each signal on standard error, one line each, for the hands-on check: the
+/// signal's name and, for a drive, its drive-letter mask; nothing else.
+fn route_signals(signals: mpsc::Receiver<os::OsSignal>, shell: Arc<Shell>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("lockbox-signal-route".into())
         .spawn(move || {
             for signal in signals {
+                #[cfg(debug_assertions)]
                 eprintln!("Lockbox debug: Windows signal {signal:?}");
+                shell.autolock.signal(signal);
             }
+            #[cfg(debug_assertions)]
             eprintln!("Lockbox debug: Windows signals stopped");
+        })?;
+    Ok(())
+}
+
+/// The auto-lock's timer: a tick every [`autolock::TICK`] for as long as the app runs.
+fn start_ticks(shell: Arc<Shell>) -> io::Result<()> {
+    thread::Builder::new()
+        .name("lockbox-autolock".into())
+        .spawn(move || {
+            loop {
+                thread::sleep(autolock::TICK);
+                shell.autolock.tick(Instant::now());
+            }
         })?;
     Ok(())
 }

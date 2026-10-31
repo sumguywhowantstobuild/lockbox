@@ -1,5 +1,5 @@
 //! The app's state behind every command: plain Rust, so almost every rule is tested without a window. Later tasks add
-//! auto-lock, the clipboard, the output journal, settings and the restore state.
+//! the clipboard, the output journal and the restore state.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
+use crate::autolock::AutoLock;
 use crate::error::ShellResult;
 use crate::locations::{LocationCheck, check_location};
 use crate::lock;
@@ -19,6 +20,7 @@ use crate::os::{KnownFolder, Os};
 use crate::paths::{StatePaths, state_paths};
 use crate::registry::Registry;
 use crate::session::{LockReason, Notice, Notifier, SessionId, Sessions};
+use crate::settings::SettingsStore;
 use crate::window;
 
 /// A session locked: `{ session, generation, reason }`.
@@ -29,7 +31,10 @@ pub const BUSY_EVENT: &str = "lockbox://busy";
 pub const NOTICE_EVENT: &str = "lockbox://notice";
 
 pub struct Shell {
-    pub sessions: Sessions,
+    pub sessions: Arc<Sessions>,
+    pub settings: Arc<SettingsStore>,
+    /// Locks the vaults on idle, Windows' signals, vanished folders and app exit.
+    pub autolock: AutoLock,
     pub registry: Registry,
     pub paths: StatePaths,
     pub(crate) os: Os,
@@ -45,14 +50,19 @@ pub struct Shell {
 
 impl Shell {
     /// `app_dirs`: Tauri's `app_data_dir` and `app_local_data_dir`, which an uninstaller may delete. Reads only the
-    /// known folders: nothing is written until a command saves state.
+    /// known folders and the settings: nothing is written until a command saves state.
     pub fn new(notifier: Arc<dyn Notifier>, os: Os, app_dirs: Vec<PathBuf>) -> io::Result<Self> {
         let paths = state_paths(os.env.as_ref())?;
         let mut forbidden = app_dirs;
         forbidden.push(os.env.known_folder(KnownFolder::RoamingAppData)?);
         forbidden.push(paths.root.clone());
+        let sessions = Arc::new(Sessions::new(Arc::clone(&notifier)));
+        let settings = Arc::new(SettingsStore::load(paths.settings.clone()));
+        let autolock = AutoLock::new(Arc::clone(&sessions), Arc::clone(&settings), notifier, &os);
         Ok(Shell {
-            sessions: Sessions::new(notifier),
+            sessions,
+            settings,
+            autolock,
             registry: Registry::new(paths.registry.clone(), Arc::clone(&os.volumes)),
             paths,
             os,
@@ -86,6 +96,15 @@ impl Shell {
     #[cfg(test)]
     pub(crate) fn creation_waits(&self) -> usize {
         self.creating_waited.load(Ordering::SeqCst)
+    }
+
+    /// Closing the app (the main window's close request, the app's exit, or Windows ending the session): locks every
+    /// vault on a helper thread and cancels every long operation, then waits at most
+    /// [`SHUTDOWN_WAIT`](crate::autolock::SHUTDOWN_WAIT) for the lock and its hooks (the clipboard clear and the "Open"
+    /// cleanup, which treat `None` as all) before the process may exit. It does no hook work of its own. Only the
+    /// first call does anything; later ones return at once.
+    pub fn shutdown(&self) {
+        self.autolock.shutdown();
     }
 
     /// Whether a vault may be at `dir` (see [`check_location`]).

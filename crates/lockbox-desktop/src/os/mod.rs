@@ -10,6 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The OS calls the shell makes, behind their traits.
 pub struct Os {
@@ -17,6 +18,34 @@ pub struct Os {
     pub env: Arc<dyn Env>,
     pub dialogs: Arc<dyn Dialogs>,
     pub launcher: Arc<dyn Launcher>,
+    pub idle: Arc<dyn IdleSource>,
+    pub power: Arc<dyn Power>,
+    pub clock: Arc<dyn Clock>,
+}
+
+/// How long the user has left Windows alone (spec §7.4: idle means no keyboard or mouse input anywhere in Windows).
+pub trait IdleSource: Send + Sync {
+    fn since_last_input(&self) -> Duration;
+}
+
+/// Keeps the PC awake while a long operation runs (spec §7.4).
+pub trait Power: Send + Sync {
+    /// `true` asks Windows to stay awake until called with `false`.
+    fn keep_awake(&self, on: bool);
+}
+
+/// The time now, on the monotonic clock: when a long operation ended.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// [`Instant::now`].
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 /// A folder Windows keeps for each user (`SHGetKnownFolderPath`).

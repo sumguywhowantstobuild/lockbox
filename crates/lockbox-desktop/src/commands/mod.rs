@@ -6,6 +6,7 @@ mod generator;
 pub mod items;
 mod list;
 mod sessions;
+mod settings;
 pub mod vaults;
 
 pub use args::args;
@@ -54,7 +55,9 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         items::list_orphans,
         items::delete_orphans,
         generator::generate_password,
-        generator::generate_passphrase
+        generator::generate_passphrase,
+        settings::get_settings,
+        settings::set_settings
     ]
 }
 

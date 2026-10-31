@@ -29,6 +29,8 @@ windows-core = { version = "0.62", default-features = false }
 # Where a vault may live (spec §6.10): `Win32_Storage_FileSystem` (drive type, file system, volume root),
 # `Win32_Storage_CloudFilters` (cloud sync roots), `Win32_UI_Shell` and `Win32_System_Com` (known folders, and freeing
 # the path Windows hands back).
+# Auto-lock (spec §7.4): `Win32_UI_Input_KeyboardAndMouse` (`GetLastInputInfo`) and `Win32_System_SystemInformation`
+# (`GetTickCount`), for idle time.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
@@ -39,6 +41,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
     "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

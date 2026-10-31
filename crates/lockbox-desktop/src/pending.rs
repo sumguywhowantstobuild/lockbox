@@ -211,7 +211,8 @@ impl Pending {
         }
     }
 
-    fn sweep_at(&self, now: Instant) {
+    /// [`sweep_expired`](Self::sweep_expired) at `now`: the auto-lock's tick passes its own time.
+    pub(crate) fn sweep_at(&self, now: Instant) {
         let expired = take_expired(&mut lock(&self.parked), now);
         drop(expired);
     }
