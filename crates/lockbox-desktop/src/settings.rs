@@ -83,8 +83,13 @@ impl From<Settings> for SettingsFile {
 /// The settings in effect, and their file. Read once, at launch; each change is saved before it takes effect.
 pub struct SettingsStore {
     file: PathBuf,
-    /// Also held while a change is saved, so two changes land in the file in the order they take effect.
+    /// Held only to copy the settings in or out: the auto-lock's tick reads it and must never wait for the disk.
     current: Mutex<Settings>,
+    /// Held while a change is saved and put in effect, so two changes land in the file in the order they take effect.
+    saving: Mutex<()>,
+    /// Tests only: run once, inside the next save, before the file is written.
+    #[cfg(test)]
+    on_save: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl SettingsStore {
@@ -103,6 +108,9 @@ impl SettingsStore {
         SettingsStore {
             file,
             current: Mutex::new(saved.unwrap_or_default()),
+            saving: Mutex::default(),
+            #[cfg(test)]
+            on_save: Mutex::default(),
         }
     }
 
@@ -114,10 +122,26 @@ impl SettingsStore {
     /// Checks `settings`, saves them and puts them in effect.
     pub fn set(&self, settings: Settings) -> ShellResult<()> {
         settings.check()?;
-        let mut current = lock(&self.current);
+        let _saving = lock(&self.saving);
+        #[cfg(test)]
+        self.run_on_save();
         write_state(&self.file, &SettingsFile::from(settings), WHAT)?;
-        *current = settings;
+        *lock(&self.current) = settings;
         Ok(())
+    }
+
+    /// Tests only: runs `hook` once, inside the next save, before the file is written.
+    #[cfg(test)]
+    pub(crate) fn during_next_save(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.on_save) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn run_on_save(&self) {
+        let hook = lock(&self.on_save).take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }
 

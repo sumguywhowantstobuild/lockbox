@@ -4,6 +4,7 @@
 //! The sessions mutex is held only for lookups and state changes: never across vault work, while waiting for a
 //! vault's `RwLock`, or while waiting for a publish guard.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
@@ -177,6 +178,70 @@ pub enum SessionState {
 
 /// A hook run after every lock, with the session that locked (`None`: all of them).
 pub type LockHook = Box<dyn Fn(Option<SessionId>, LockReason) + Send + Sync>;
+
+/// The lock hooks, and whose turn it is to run them: each lock's hooks run after those of the locks that revoked
+/// before it, one lock's at a time.
+#[derive(Default)]
+struct Hooks {
+    list: RwLock<Vec<LockHook>>,
+    /// The next turn to hand out. Taken under `transitions`, so turns follow the order of the revocations.
+    next: AtomicU64,
+    /// The turn whose hooks may run now.
+    serving: Mutex<u64>,
+    turn: Condvar,
+}
+
+/// One lock's step (5), its hooks, handed out once its steps (1) to (4) are done ([`Sessions::revoke_all`] and
+/// [`Sessions::close`]). [`run`](Self::run) waits for the hooks of every earlier lock, then runs this lock's. Dropped
+/// without running (a panic on the way), it still waits its turn and passes it on, running nothing.
+#[must_use = "later locks' hooks wait for this turn"]
+pub struct HookTurn {
+    hooks: Arc<Hooks>,
+    ticket: u64,
+    only: Option<SessionId>,
+    reason: LockReason,
+    taken: bool,
+}
+
+impl HookTurn {
+    /// Runs the hooks, in the order they were added. A hook that panics is passed over: the hooks after it still run
+    /// (the "Open" cleanup after a failed clipboard clear).
+    pub fn run(mut self) {
+        self.take(true);
+    }
+
+    fn take(&mut self, run: bool) {
+        self.taken = true;
+        let serving = lock(&self.hooks.serving);
+        let serving = self
+            .hooks
+            .turn
+            .wait_while(serving, |serving| *serving != self.ticket)
+            .unwrap_or_else(PoisonError::into_inner);
+        // Released while the hooks run: the turn alone keeps other locks' hooks out.
+        drop(serving);
+        if run {
+            let list = self
+                .hooks
+                .list
+                .read()
+                .unwrap_or_else(PoisonError::into_inner);
+            for hook in list.iter() {
+                let _ = catch_unwind(AssertUnwindSafe(|| hook(self.only, self.reason)));
+            }
+        }
+        *lock(&self.hooks.serving) += 1;
+        self.hooks.turn.notify_all();
+    }
+}
+
+impl Drop for HookTurn {
+    fn drop(&mut self) {
+        if !self.taken {
+            self.take(false);
+        }
+    }
+}
 
 /// An unlocked session's vault. The session holds one reference and each running command another; the last to let
 /// go drops the vault (key wiped, `.lock` released).
@@ -389,6 +454,8 @@ struct Inner {
     opening: Vec<Opening>,
     /// Bumped by every lock of all vaults: an open that started before one discards what it made.
     epoch: u64,
+    /// Set for good when the app starts closing ([`Sessions::close`]): no open starts after it.
+    closed: bool,
     last_session: u64,
     /// Numbers opens and two-session links.
     last_serial: u64,
@@ -554,17 +621,18 @@ fn tag_info<X>(info: SessionInfo, x: Option<X>) -> Tagged<(SessionInfo, Option<X
 
 /// Every session, unlocked or locked, and the rules of §7.4.
 ///
-/// Lock order: `transitions`, then the sessions mutex, then (briefly, inside) [`Pending`]'s. A lock hook or a
-/// publish closure must never call [`lock`](Self::lock), [`lock_all`](Self::lock_all), [`open`](Self::open) or
-/// [`open_choice`](Self::open_choice): it runs while a lock (or the lock waiting for it) holds `transitions`, so it
-/// would wait for itself.
+/// Lock order: `transitions`, then the sessions mutex, then (briefly, inside) [`Pending`]'s. A publish closure must
+/// never call [`lock`](Self::lock), [`lock_all`](Self::lock_all), [`open`](Self::open) or
+/// [`open_choice`](Self::open_choice): it runs while a lock may be waiting for it holding `transitions`, so it would
+/// wait for itself. A lock hook must not either: a lock's call returns only after its hooks ran, and hooks run one
+/// lock at a time.
 pub struct Sessions {
-    /// Held by each lock for all five steps, and by an open while it publishes what it made: lock transitions
-    /// happen one at a time, never interleaved. Never held while an opening closure runs.
+    /// Held by each lock for its steps (1) to (4), and by an open while it publishes what it made: revocations
+    /// happen one at a time, never interleaved. Never held while an opening closure or a lock hook runs.
     transitions: Mutex<()>,
     inner: Mutex<Inner>,
     notifier: Arc<dyn Notifier>,
-    hooks: RwLock<Vec<LockHook>>,
+    hooks: Arc<Hooks>,
     pending: Pending,
     /// Tests only: how many lock calls found `transitions` held and had to wait their turn, so a test can tell that a
     /// second lock is really waiting for the first, not merely late.
@@ -581,7 +649,7 @@ impl Sessions {
             transitions: Mutex::default(),
             inner: Mutex::default(),
             notifier,
-            hooks: RwLock::default(),
+            hooks: Arc::default(),
             pending: Pending::default(),
             #[cfg(test)]
             locks_waited: Default::default(),
@@ -664,6 +732,10 @@ impl Sessions {
         let mut unused = Vec::new();
         let started = {
             let mut inner = self.inner();
+            // The app is closing: nothing opens any more, and a choice still parked was dropped by the closing lock.
+            if inner.closed {
+                return Err(ShellError::Locked);
+            }
             match claim(&mut unused) {
                 Err(e) => Err((Err(e), None)),
                 Ok((location, c)) => match inner.open_answer(location.as_ref()) {
@@ -891,14 +963,27 @@ impl Sessions {
         f()
     }
 
-    /// Locks one session; nothing happens if it is not unlocked.
+    /// Locks one session; nothing happens if it is not unlocked. Returns once its hooks ran.
     pub fn lock(&self, id: SessionId, reason: LockReason) {
         self.lock_where(Some(id), reason);
     }
 
-    /// Locks every session, cancels every open under way, and drops every pending choice.
+    /// Locks every session, cancels every open under way, and drops every pending choice. Returns once its hooks ran.
     pub fn lock_all(&self, reason: LockReason) {
         self.lock_where(None, reason);
+    }
+
+    /// Steps (1) to (4) of [`lock_all`](Self::lock_all), for a caller that must know when every session is revoked
+    /// before the hooks run (the auto-lock): this never waits for a hook, this lock's or an earlier one's. Run the
+    /// turn it gives for step (5).
+    pub(crate) fn revoke_all(&self, reason: LockReason) -> Option<HookTurn> {
+        self.revoke(None, reason, false, true)
+    }
+
+    /// The app is closing: [`revoke_all`](Self::revoke_all) for good. Nothing opens after it, whenever it was asked
+    /// to. With `hooks` false (no thread to run them on, so nothing may wait for one), no turn is taken.
+    pub(crate) fn close(&self, hooks: bool) -> Option<HookTurn> {
+        self.revoke(None, LockReason::AppClosing, true, hooks)
     }
 
     /// Takes `transitions` for a lock, waiting while another lock (or an open publishing) holds it.
@@ -916,8 +1001,23 @@ impl Sessions {
 
     /// The steps of §7.4, in order.
     fn lock_where(&self, only: Option<SessionId>, reason: LockReason) {
-        // One lock at a time, all five steps: a second lock waits for the first to finish, so it never finds a session
-        // half-locked (already taken in step 1, its publish attempt not yet over) and returns, hooks run, too early.
+        if let Some(turn) = self.revoke(only, reason, false, true) {
+            turn.run();
+        }
+    }
+
+    /// Steps (1) to (4) of §7.4, then the turn for step (5) when `hooks` (`None` too when the one session asked
+    /// for was not unlocked). `close` (only with `only` `None`) shuts out every later open.
+    fn revoke(
+        &self,
+        only: Option<SessionId>,
+        reason: LockReason,
+        close: bool,
+        hooks: bool,
+    ) -> Option<HookTurn> {
+        // One revocation at a time: a second lock waits for the first one's steps (1) to (4), so it never finds a
+        // session half-locked (already taken in step 1, its publish attempt not yet over) and runs its hooks too
+        // early. Hooks are not part of it: a hook that blocks never keeps another session unlocked.
         let _turn = self.lock_turn();
         // (1) Under the sessions mutex: the state, the generation, and everything a lock takes away...
         let (locked, opening, pending) = {
@@ -926,6 +1026,7 @@ impl Sessions {
                 Some(_) => (Vec::new(), Vec::new()),
                 None => {
                     inner.epoch += 1;
+                    inner.closed |= close;
                     let opening: Vec<CancelToken> =
                         inner.opening.iter().map(|o| o.cancel.clone()).collect();
                     (opening, self.pending.drain())
@@ -954,7 +1055,7 @@ impl Sessions {
             (locked, opening, pending)
         };
         if only.is_some() && locked.is_empty() {
-            return;
+            return None;
         }
         // ...then each publish guard once, so an attempt that saw the old generation has finished.
         for session in &locked {
@@ -981,20 +1082,21 @@ impl Sessions {
         for (id, generation) in notices {
             self.notifier.locked(id, generation, reason);
         }
-        // (5) The hooks, in the order they were added (the clipboard's first).
-        for hook in self
-            .hooks
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-        {
-            hook(only, reason);
-        }
+        // (5) The hooks, in the order they were added (the clipboard's first), once the caller runs this turn: after
+        // the hooks of every lock that revoked before this one.
+        hooks.then(|| HookTurn {
+            hooks: Arc::clone(&self.hooks),
+            ticket: self.hooks.next.fetch_add(1, Ordering::SeqCst),
+            only,
+            reason,
+            taken: false,
+        })
     }
 
     /// Adds a hook that runs after every lock, after those added before it. It must not lock or open a session.
     pub fn on_lock(&self, hook: LockHook) {
         self.hooks
+            .list
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .push(hook);

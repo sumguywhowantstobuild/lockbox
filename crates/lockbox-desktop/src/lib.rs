@@ -91,15 +91,17 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("the Lockbox app could not start");
 
+    // Every way out locks every vault before the process ends: closing the main window, the exit request that follows,
+    // and the loop's end. Windows signing out or shutting down (`WM_ENDSESSION`) reaches the app only as `Exit`: tao
+    // 0.37.2 sends it, then calls `process::exit` as soon as this callback returns. Each call returns once every vault
+    // is revoked (later calls at once), or after `autolock::SHUTDOWN_WAIT` at most.
     app.run(|app, event| match event {
-        // Both lock every vault before the process ends: closing the main window, then the exit that follows (the
-        // second call returns at once).
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { .. },
             ..
         } if label == window::MAIN => shutdown(app),
-        RunEvent::ExitRequested { .. } => shutdown(app),
+        RunEvent::ExitRequested { .. } | RunEvent::Exit => shutdown(app),
         _ => {}
     });
 }

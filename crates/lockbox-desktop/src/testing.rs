@@ -40,9 +40,16 @@ pub fn quiet() -> RwLockWriteGuard<'static, ()> {
 pub struct Events {
     locked: Mutex<Vec<(SessionId, u64, LockReason)>>,
     busy: Mutex<Vec<(Option<SessionId>, Vec<&'static str>)>>,
+    /// Run once, inside the next `busy` event, before it is recorded.
+    on_busy: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Events {
+    /// Runs `hook` once, inside the next `busy` event: it may block or panic there.
+    pub fn during_next_busy(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.on_busy) = Some(hook);
+    }
+
     pub fn locked(&self) -> Vec<(SessionId, u64, LockReason)> {
         lock(&self.locked).clone()
     }
@@ -58,6 +65,10 @@ impl Notifier for Events {
     }
 
     fn busy(&self, session: Option<SessionId>, operations: &[&'static str]) {
+        let hook = lock(&self.on_busy).take();
+        if let Some(hook) = hook {
+            hook();
+        }
         lock(&self.busy).push((session, operations.to_vec()));
     }
 
@@ -193,6 +204,10 @@ pub struct FakeVolumes {
     on_volume_root: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Folders gone (their drive unplugged): they and everything in them do not exist.
     vanished: Mutex<Vec<PathBuf>>,
+    /// Run once, inside the next `exists` call: it may block there, as a stalled drive does.
+    on_exists: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// How many `exists` calls have started.
+    exists_calls: AtomicUsize,
 }
 
 fn canonical(dir: &Path) -> PathBuf {
@@ -231,6 +246,16 @@ impl FakeVolumes {
     /// Runs `hook` once, on the next `volume_root` call: in the middle of the next location check.
     pub fn during_next_check(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.on_volume_root) = Some(hook);
+    }
+
+    /// Runs `hook` once, inside the next `exists` call.
+    pub fn during_next_exists(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.on_exists) = Some(hook);
+    }
+
+    /// How many `exists` calls have started.
+    pub fn exists_calls(&self) -> usize {
+        self.exists_calls.load(Ordering::SeqCst)
     }
 
     /// From now on, the folder `dir` and everything in it are gone, as if its drive were unplugged.
@@ -292,6 +317,11 @@ impl Volumes for FakeVolumes {
     }
 
     fn exists(&self, path: &Path) -> io::Result<bool> {
+        self.exists_calls.fetch_add(1, Ordering::SeqCst);
+        let hook = lock(&self.on_exists).take();
+        if let Some(hook) = hook {
+            hook();
+        }
         if lock(&self.vanished).iter().any(|gone| inside(path, gone)) {
             return Ok(false);
         }

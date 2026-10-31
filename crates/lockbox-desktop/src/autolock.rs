@@ -3,11 +3,15 @@
 //! the PC awake while they run ([`AutoLock::begin`]).
 //!
 //! Nothing here runs on the signal window's thread: the app's signal receiver calls [`AutoLock::signal`], and a
-//! timer thread calls [`AutoLock::tick`] every [`TICK`].
+//! timer thread calls [`AutoLock::tick`] every [`TICK`]. Folder checks run on a thread of their own, so a drive that
+//! stops answering never holds up the idle lock.
+//!
+//! Lock order: the operations' list ([`Operations::running`]), then the sessions' own locks. The list is held across a
+//! revocation (which never waits for a hook), never across a hook, the notifier or a keep-awake request.
 
 use std::path::{Component, Path, Prefix};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,7 +26,8 @@ use crate::settings::SettingsStore;
 /// signal can lock.
 pub const TICK: Duration = Duration::from_secs(5);
 
-/// The longest [`AutoLock::shutdown`] waits for the lock and its hooks before the process may exit.
+/// The longest a [`shutdown`](AutoLock::shutdown) call waits, from the moment it is made, before the process may
+/// exit.
 pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
 /// Locks the vaults on idle, Windows' signals, vanished folders and app exit.
@@ -32,13 +37,25 @@ pub struct AutoLock {
     volumes: Arc<dyn Volumes>,
     idle: Arc<dyn IdleSource>,
     operations: Arc<Operations>,
-    /// Set by the first [`shutdown`](Self::shutdown).
-    closing: AtomicBool,
+    closing: Arc<Closing>,
+    /// Set while a folder check runs: at most one at a time.
+    probing: Arc<AtomicBool>,
+    /// Tests only: the last folder check's thread.
+    #[cfg(test)]
+    probe_thread: Mutex<Option<thread::JoinHandle<()>>>,
+    #[cfg(test)]
+    on_tick: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(test)]
+    fail_spawn: AtomicBool,
 }
 
 /// The long operations under way, shared with each [`LongOp`].
 struct Operations {
+    /// Never held across a call out of this module but a session revocation.
     running: Mutex<Running>,
+    /// The keep-awake state last asked for. Held while asking Windows and telling the page, so both see the changes
+    /// in order.
+    announcing: Mutex<bool>,
     power: Arc<dyn Power>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn Notifier>,
@@ -50,6 +67,10 @@ struct Running {
     operations: Vec<Operation>,
     /// When the last operation to end did; `None` before any has.
     last_end: Option<Instant>,
+    /// This idle period has locked already: set by the idle lock, cleared by input or an operation ending.
+    idle_locked: bool,
+    /// The app is closing: no operation starts any more.
+    closed: bool,
 }
 
 struct Operation {
@@ -59,78 +80,180 @@ struct Operation {
     cancel: CancelToken,
 }
 
+impl Running {
+    /// How long the user has been idle at `now`, given `since_input`: none while an operation runs, else counted at
+    /// most from the end of the last one.
+    fn idle_for(&self, since_input: Duration, now: Instant) -> Duration {
+        if !self.operations.is_empty() {
+            return Duration::ZERO;
+        }
+        match self.last_end {
+            Some(end) => since_input.min(now.saturating_duration_since(end)),
+            None => since_input,
+        }
+    }
+
+    fn cancel_all(&self) {
+        for operation in &self.operations {
+            operation.cancel.cancel();
+        }
+    }
+}
+
 /// A long operation under way ([`AutoLock::begin`]): while any exists, idle time does not count and the PC is kept
 /// awake. Dropping it ends the operation.
 pub struct LongOp {
-    id: u64,
+    /// `None`: refused, the app is closing.
+    id: Option<u64>,
     session: Option<SessionId>,
     operations: Arc<Operations>,
 }
 
 impl Drop for LongOp {
     fn drop(&mut self) {
-        self.operations.end(self.id, self.session);
+        if let Some(id) = self.id {
+            self.operations.end(id, self.session);
+        }
     }
 }
 
 impl Operations {
-    /// Keep-awake requests and busy events are made under the lock, so they reach Windows and the page in the order
-    /// the operations started and ended.
-    fn begin(&self, session: Option<SessionId>, what: &'static str, cancel: CancelToken) -> u64 {
-        let mut running = lock(&self.running);
-        running.last_id += 1;
-        let id = running.last_id;
-        if running.operations.is_empty() {
-            self.power.keep_awake(true);
-        }
-        running.operations.push(Operation {
+    fn begin(
+        self: &Arc<Self>,
+        session: Option<SessionId>,
+        what: &'static str,
+        cancel: CancelToken,
+    ) -> LongOp {
+        let id = {
+            let mut running = lock(&self.running);
+            if running.closed {
+                cancel.cancel();
+                None
+            } else {
+                running.last_id += 1;
+                let id = running.last_id;
+                running.operations.push(Operation {
+                    id,
+                    session,
+                    what,
+                    cancel,
+                });
+                Some(id)
+            }
+        };
+        // The guard exists before anything else runs: if the notifier or Windows fails, unwinding drops it and the
+        // operation ends.
+        let operation = LongOp {
             id,
             session,
-            what,
-            cancel,
-        });
-        self.announce(&running, session);
-        id
+            operations: Arc::clone(self),
+        };
+        if id.is_some() {
+            self.announce(Some(session));
+        }
+        operation
     }
 
     fn end(&self, id: u64, session: Option<SessionId>) {
+        {
+            let mut running = lock(&self.running);
+            running.operations.retain(|operation| operation.id != id);
+            running.last_end = Some(self.clock.now());
+            running.idle_locked = false;
+        }
+        // While unwinding, only the keep-awake request is put right: a second panic would abort the process.
+        self.announce((!thread::panicking()).then_some(session));
+    }
+
+    /// Asks Windows to keep the PC awake while any operation runs, and with `Some(session)`, sends `lockbox://busy`:
+    /// the operations now running for that session (or without one).
+    fn announce(&self, busy: Option<Option<SessionId>>) {
+        let mut awake = lock(&self.announcing);
+        let (any, names) = {
+            let running = lock(&self.running);
+            let names: Vec<&'static str> = match busy {
+                Some(session) => running
+                    .operations
+                    .iter()
+                    .filter(|operation| operation.session == session)
+                    .map(|operation| operation.what)
+                    .collect(),
+                None => Vec::new(),
+            };
+            (!running.operations.is_empty(), names)
+        };
+        if any != *awake {
+            self.power.keep_awake(any);
+            *awake = any;
+        }
+        if let Some(session) = busy {
+            self.notifier.busy(session, &names);
+        }
+    }
+
+    /// The app is closing: cancels every operation, and refuses every later one.
+    fn close(&self) {
         let mut running = lock(&self.running);
-        running.operations.retain(|operation| operation.id != id);
-        running.last_end = Some(self.clock.now());
-        if running.operations.is_empty() {
-            self.power.keep_awake(false);
-        }
-        self.announce(&running, session);
+        running.closed = true;
+        running.cancel_all();
+    }
+}
+
+/// How far closing the app has got, for every [`shutdown`](AutoLock::shutdown) call to wait on.
+#[derive(Default)]
+struct Closing {
+    phase: Mutex<Phase>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct Phase {
+    /// The first call's deadline, which also bounds the hooks for every later call. `None` until closing starts.
+    hooks_deadline: Option<Instant>,
+    /// Every vault is revoked and nothing can open.
+    revoked: bool,
+    /// The hooks are done too (or skipped).
+    done: bool,
+}
+
+impl Closing {
+    fn update(&self, change: impl FnOnce(&mut Phase)) {
+        change(&mut lock(&self.phase));
+        self.changed.notify_all();
     }
 
-    /// `lockbox://busy`: the operations now running for `session` (or without one).
-    fn announce(&self, running: &Running, session: Option<SessionId>) {
-        let names: Vec<&'static str> = running
-            .operations
-            .iter()
-            .filter(|operation| operation.session == session)
-            .map(|operation| operation.what)
-            .collect();
-        self.notifier.busy(session, &names);
-    }
-
-    fn cancel_all(&self) {
-        for operation in &lock(&self.running).operations {
-            operation.cancel.cancel();
+    /// Waits until `reached` or `deadline`.
+    fn wait(&self, deadline: Instant, reached: impl Fn(&Phase) -> bool) {
+        let mut phase = lock(&self.phase);
+        while !reached(&phase) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            phase = self
+                .changed
+                .wait_timeout(phase, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
     }
+}
 
-    /// How long the user has been idle at `now`, given `since_input`: none while an operation runs, else counted at
-    /// most from the end of the last one.
-    fn idle_for(&self, since_input: Duration, now: Instant) -> Duration {
-        let running = lock(&self.running);
-        if !running.operations.is_empty() {
-            return Duration::ZERO;
-        }
-        match running.last_end {
-            Some(end) => since_input.min(now.saturating_duration_since(end)),
-            None => since_input,
-        }
+/// Marks closing done when dropped, also when the helper thread panicked: no caller waits past its deadline for it.
+struct MarkDone(Arc<Closing>);
+
+impl Drop for MarkDone {
+    fn drop(&mut self) {
+        self.0.update(|phase| phase.done = true);
+    }
+}
+
+/// Clears the folder check's flag when dropped, also after a panic, so the next tick can check again.
+struct DoneProbing(Arc<AtomicBool>);
+
+impl Drop for DoneProbing {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -149,46 +272,117 @@ impl AutoLock {
             idle: Arc::clone(&os.idle),
             operations: Arc::new(Operations {
                 running: Mutex::default(),
+                announcing: Mutex::new(false),
                 power: Arc::clone(&os.power),
                 clock: Arc::clone(&os.clock),
                 notifier,
             }),
-            closing: AtomicBool::new(false),
+            closing: Arc::default(),
+            probing: Arc::default(),
+            #[cfg(test)]
+            probe_thread: Mutex::default(),
+            #[cfg(test)]
+            on_tick: Mutex::default(),
+            #[cfg(test)]
+            fail_spawn: AtomicBool::new(false),
+        }
+    }
+
+    /// Tests only: runs `hook` once, inside the next tick, after it has read the idle time and before it locks.
+    #[cfg(test)]
+    pub(crate) fn during_next_tick(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.on_tick) = Some(hook);
+    }
+
+    /// Tests only: the next shutdown cannot start its helper thread.
+    #[cfg(test)]
+    pub(crate) fn fail_next_spawn(&self) {
+        self.fail_spawn.store(true, Ordering::SeqCst);
+    }
+
+    /// Tests only: waits for the last folder check to finish.
+    #[cfg(test)]
+    pub(crate) fn wait_probe(&self) {
+        let probe = lock(&self.probe_thread).take();
+        if let Some(probe) = probe {
+            probe.join().expect("the folder check ran");
         }
     }
 
     /// Starts a long operation the user asked for (an import, Save a copy, Open, a backup or a restore), shown to the
     /// page as `what` under `session` (`None`: an operation without one, such as testing or restoring a backup).
-    /// Windows lock, sleep and app exit cancel `cancel`.
+    /// Windows lock, sleep and app exit cancel `cancel`. Once the app is closing, `cancel` is cancelled at once and
+    /// nothing is registered.
     pub fn begin(
         &self,
         session: Option<SessionId>,
         what: &'static str,
         cancel: CancelToken,
     ) -> LongOp {
-        LongOp {
-            id: self.operations.begin(session, what, cancel),
-            session,
-            operations: Arc::clone(&self.operations),
+        self.operations.begin(session, what, cancel)
+    }
+
+    /// The timer's call, every [`TICK`]: drops the expired pending choices, starts a check for vanished folders, and
+    /// locks everything (opens under way and pending choices included) once the user has been idle for the idle
+    /// time, once per idle period.
+    pub fn tick(&self, now: Instant) {
+        self.sessions.pending().sweep_at(now);
+        self.start_probe();
+        let since_input = self.idle.since_last_input();
+        let limit = self.settings.get().idle_limit();
+        #[cfg(test)]
+        {
+            let hook = lock(&self.on_tick).take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        // Decided and revoked under the operations' list, so no operation begins or ends in between.
+        let mut running = lock(&self.operations.running);
+        if running.idle_for(since_input, now) < limit {
+            running.idle_locked = false;
+            return;
+        }
+        if running.idle_locked || running.closed {
+            return;
+        }
+        running.idle_locked = true;
+        let turn = self.sessions.revoke_all(LockReason::Idle);
+        drop(running);
+        if let Some(turn) = turn {
+            turn.run();
         }
     }
 
-    /// The timer's call, every [`TICK`]: drops the expired pending choices, locks as unavailable each vault whose
-    /// folder is gone, then locks every vault once the user has been idle for the idle time.
-    pub fn tick(&self, now: Instant) {
-        self.sessions.pending().sweep_at(now);
-        // Before the idle check, so a vault that is gone is shown as unavailable rather than locked.
-        for (id, location) in self.sessions.locations() {
-            // A folder whose existence cannot be read is taken for gone: the vault cannot be reached either.
-            if !matches!(self.volumes.exists(location.path()), Ok(true)) {
-                self.sessions.lock(id, LockReason::DriveGone);
-            }
+    /// Checks, on a thread of its own, that each unlocked session's folder is still there, and locks as unavailable
+    /// each one that is not (a folder whose existence cannot be read counts as gone). One check at a time: while one
+    /// stalls, only finding vanished folders waits.
+    /// The sessions checked are those unlocked at the tick; a lock that came since makes locking one again a no-op,
+    /// and locking a vault whose folder was missing is never wrong.
+    fn start_probe(&self) {
+        let locations = self.sessions.locations();
+        if locations.is_empty() || self.probing.swap(true, Ordering::SeqCst) {
+            return;
         }
-        let idle = self.operations.idle_for(self.idle.since_last_input(), now);
-        // Only with a vault to lock: a lock of all vaults also cancels opens under way and runs the lock hooks.
-        if idle >= self.settings.get().idle_limit() && !self.sessions.locations().is_empty() {
-            self.sessions.lock_all(LockReason::Idle);
+        let (sessions, volumes) = (Arc::clone(&self.sessions), Arc::clone(&self.volumes));
+        let done = DoneProbing(Arc::clone(&self.probing));
+        let probe = thread::Builder::new()
+            .name("lockbox-folder-check".into())
+            .spawn(move || {
+                let _done = done;
+                for (id, location) in locations {
+                    if !matches!(volumes.exists(location.path()), Ok(true)) {
+                        sessions.lock(id, LockReason::DriveGone);
+                    }
+                }
+            });
+        // A thread that cannot start drops `done`, so the next tick tries again.
+        #[cfg(test)]
+        if let Ok(probe) = probe {
+            *lock(&self.probe_thread) = Some(probe);
         }
+        #[cfg(not(test))]
+        drop(probe);
     }
 
     /// A Windows signal (spec §7.4 and §6.10).
@@ -207,39 +401,80 @@ impl AutoLock {
         }
     }
 
-    /// Windows lock and sleep: cancels every long operation, then locks every vault. The operations are cancelled
-    /// first so they stop at once, even while the lock waits its turn, and again after, for one begun meanwhile (a
-    /// restore has no session for the lock to cancel).
+    /// Windows lock and sleep: cancels every long operation and revokes every vault in one step (no operation begins
+    /// in between), then runs the hooks.
     fn lock_now(&self, reason: LockReason) {
-        self.operations.cancel_all();
-        self.sessions.lock_all(reason);
-        self.operations.cancel_all();
+        let turn = {
+            let running = lock(&self.operations.running);
+            running.cancel_all();
+            self.sessions.revoke_all(reason)
+        };
+        if let Some(turn) = turn {
+            turn.run();
+        }
     }
 
-    /// Closing the app ([`Shell::shutdown`](crate::shell::Shell::shutdown)): locks every vault on a helper thread,
-    /// cancels every long operation, then waits at most [`SHUTDOWN_WAIT`] for the lock and its hooks. A hook that
-    /// blocks is left behind: the process exits anyway. Only the first call does anything.
+    /// Closing the app ([`Shell::shutdown`](crate::shell::Shell::shutdown)). The first call starts it on a helper
+    /// thread: every long operation cancelled and refused from then on, every vault revoked and no open after it, then
+    /// the hooks. Every call returns once every vault is revoked and the hooks are done, or at [`SHUTDOWN_WAIT`] after
+    /// it was made, whichever comes first; the hooks get no longer than the first call's deadline. If the helper
+    /// thread cannot start, the vaults are revoked here (which never waits for a hook) and the hooks are skipped.
     pub(crate) fn shutdown(&self) {
-        if self.closing.swap(true, Ordering::SeqCst) {
-            return;
+        let deadline = Instant::now() + SHUTDOWN_WAIT;
+        let mut first = false;
+        self.closing.update(|phase| {
+            first = phase.hooks_deadline.is_none();
+            phase.hooks_deadline.get_or_insert(deadline);
+        });
+        if first {
+            self.start_closing();
         }
-        let (done, finished) = mpsc::channel();
-        let sessions = Arc::clone(&self.sessions);
-        // If the thread cannot start, `done` is dropped with it and the wait below ends at once: the process exit
-        // still drops every vault (its key with the process memory, its `.lock` released by Windows).
-        let _ = thread::Builder::new()
+        self.closing.wait(deadline, |phase| phase.revoked);
+        let hooks_deadline = lock(&self.closing.phase).hooks_deadline.unwrap_or(deadline);
+        self.closing
+            .wait(hooks_deadline.min(deadline), |phase| phase.done);
+    }
+
+    fn start_closing(&self) {
+        let (sessions, operations, closing) = (
+            Arc::clone(&self.sessions),
+            Arc::clone(&self.operations),
+            Arc::clone(&self.closing),
+        );
+        let helper = move || {
+            let _done = MarkDone(Arc::clone(&closing));
+            operations.close();
+            let turn = sessions.close(true);
+            closing.update(|phase| phase.revoked = true);
+            if let Some(turn) = turn {
+                turn.run();
+            }
+        };
+        #[cfg(test)]
+        let spawned = match self.fail_spawn.load(Ordering::SeqCst) {
+            true => Err(std::io::Error::other("no thread")),
+            false => thread::Builder::new()
+                .name("lockbox-closing".into())
+                .spawn(helper),
+        };
+        #[cfg(not(test))]
+        let spawned = thread::Builder::new()
             .name("lockbox-closing".into())
-            .spawn(move || {
-                sessions.lock_all(LockReason::AppClosing);
-                let _ = done.send(());
+            .spawn(helper);
+        if spawned.is_err() {
+            self.operations.close();
+            // No turn is taken, so no hook runs and none is waited for.
+            let _ = self.sessions.close(false);
+            self.closing.update(|phase| {
+                phase.revoked = true;
+                phase.done = true;
             });
-        self.operations.cancel_all();
-        let _ = finished.recv_timeout(SHUTDOWN_WAIT);
+        }
     }
 }
 
 /// The bit of the drive `path` is on in a `DriveRemoved` mask (bit 0 for A:), or 0 for a path without a drive letter
-/// (a volume mounted in a folder: the tick finds it gone).
+/// (a volume mounted in a folder: the folder check finds it gone).
 fn drive_bit(path: &Path) -> u32 {
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return 0;
@@ -255,9 +490,13 @@ fn drive_bit(path: &Path) -> u32 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
 
     use lockbox_core::internals::fsio::failpoint;
+    use lockbox_core::internals::lockfile::VaultLock;
     use zeroize::Zeroizing;
 
     use super::*;
@@ -265,12 +504,45 @@ mod tests {
     use crate::lock;
     use crate::pending::PendingChoice;
     use crate::session::{LockReason, SessionState};
+    use crate::settings::Settings;
     use crate::testing::{TestShell, heavy};
 
     const PW: &str = "correct horse battery";
     const MIB: usize = 1024 * 1024;
     /// How long a blocked hook waits for the test before it gives up, so a failing test cannot hang.
     const GIVE_UP: Duration = Duration::from_secs(60);
+    /// How long a test waits for something that should happen at once (another thread's step) before it fails.
+    const PATIENCE: Duration = Duration::from_secs(10);
+    /// What a shutdown may take past [`SHUTDOWN_WAIT`]: waking from its wait, and the test thread being scheduled
+    /// again, on a loaded machine.
+    const SCHEDULING_MARGIN: Duration = Duration::from_millis(250);
+
+    /// Polls `done` every millisecond for up to `max`.
+    fn wait_until(max: Duration, done: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while !done() {
+            if start.elapsed() > max {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
+    /// Whether nothing holds the vault in `dir` (its key is dropped with it): its `.lock` is free.
+    fn is_free(dir: &Path) -> bool {
+        VaultLock::acquire(dir).is_ok()
+    }
+
+    /// A lock hook that counts its runs.
+    fn count_hooks(ts: &TestShell) -> Arc<AtomicUsize> {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        ts.shell.sessions.on_lock(Box::new(move |_, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+        }));
+        runs
+    }
 
     /// `minutes:seconds` as a duration.
     fn at(minutes: u64, seconds: u64) -> Duration {
@@ -446,6 +718,7 @@ mod tests {
         // The folder is gone at the next tick: that vault alone locks, as unavailable.
         ts.volumes.vanish(&family_dir);
         autolock.tick(ts.clock.now());
+        autolock.wait_probe();
         assert_eq!(state(&ts, family), SessionState::Unavailable);
         assert_eq!(state(&ts, work), SessionState::Unlocked);
         assert_eq!(locks(&ts), [(family, LockReason::DriveGone)]);
@@ -565,7 +838,7 @@ mod tests {
         let took = started.elapsed();
         assert!(took >= SHUTDOWN_WAIT, "it waited for the hook ({took:?})");
         assert!(
-            took < SHUTDOWN_WAIT + Duration::from_secs(1),
+            took < SHUTDOWN_WAIT + SCHEDULING_MARGIN,
             "it stopped waiting ({took:?})"
         );
         assert_eq!(state(&ts, family), SessionState::Locked);
@@ -635,5 +908,358 @@ mod tests {
                     .ends_with(".partial")
             })
             .count()
+    }
+
+    /// Fix round 1 (2): a lock whose hook blocks (vault A's) never keeps another vault (B) unlocked: Windows lock,
+    /// sleep and the app's exit each revoke B at once, whatever A's hook is doing.
+    fn blocked_hook_case(what: &str, trigger: fn(&TestShell)) {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let work = open_vault(&ts, "Work");
+        let (entered, hook_entered) = mpsc::channel();
+        let entered = Mutex::new(entered);
+        let (release, released) = mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        ts.shell.sessions.on_lock(Box::new(move |only, _| {
+            if only == Some(family) {
+                let _ = lock(&entered).send(());
+                let _ = lock(&released).recv_timeout(GIVE_UP);
+            }
+        }));
+        let revoked = thread::scope(|s| {
+            s.spawn(|| ts.shell.sessions.lock(family, LockReason::Manual));
+            hook_entered
+                .recv_timeout(GIVE_UP)
+                .expect("the first lock's hook runs");
+            let triggering = s.spawn(|| trigger(&ts));
+            let revoked = wait_until(PATIENCE, || state(&ts, work) == SessionState::Locked)
+                && ts.shell.sessions.release_wait(work, GIVE_UP);
+            release.send(()).unwrap();
+            triggering.join().unwrap();
+            revoked
+        });
+        assert!(revoked, "{what}: the other vault was revoked at once");
+    }
+
+    #[test]
+    fn blocked_hook_never_delays_other_vaults() {
+        blocked_hook_case("Windows lock", |ts| {
+            ts.shell.autolock.signal(OsSignal::SessionLocked)
+        });
+        blocked_hook_case("sleep", |ts| ts.shell.autolock.signal(OsSignal::Suspending));
+        blocked_hook_case("app exit", |ts| ts.shell.shutdown());
+    }
+
+    /// Fix round 1 (3): once the app is closing, no vault opens and no long operation runs (`begin` hands back its
+    /// token cancelled).
+    #[test]
+    fn closing_refuses_new_work() {
+        let ts = TestShell::new();
+        ts.shell.shutdown();
+        let ran = AtomicBool::new(false);
+        let answer = ts.shell.sessions.open::<()>(None, None, |_| {
+            ran.store(true, Ordering::SeqCst);
+            Err(ShellError::InvalidInput { what: "folder" })
+        });
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert!(!ran.load(Ordering::SeqCst), "the open never ran");
+
+        let restore = CancelToken::new();
+        let _restore = ts.shell.autolock.begin(None, "restore", restore.clone());
+        assert!(restore.is_cancelled(), "a late operation is cancelled");
+        assert!(ts.power.calls().is_empty(), "nothing is kept awake");
+        assert!(ts.events.busy().is_empty(), "nothing is shown as running");
+    }
+
+    /// Fix round 1 (3, 7): two shutdowns at once (the window's close request and Windows ending the session) each
+    /// return only once every vault is revoked, or at their own deadline. Here a publish attempt holds the revocation
+    /// back past both deadlines.
+    #[test]
+    fn concurrent_shutdowns_wait_for_revocation() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let generation = ts.shell.sessions.list()[0].generation;
+        let dir = vault_dir(&ts, 0);
+        let (entered, publishing_entered) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let results = thread::scope(|s| {
+            let publishing = s.spawn(|| {
+                ts.shell.sessions.publish(family, generation, || {
+                    entered.send(()).unwrap();
+                    let _ = lock(&released).recv_timeout(GIVE_UP);
+                    Ok(())
+                })
+            });
+            publishing_entered.recv_timeout(GIVE_UP).unwrap();
+            let shutdown = || {
+                let started = Instant::now();
+                ts.shell.shutdown();
+                (started.elapsed(), is_free(&dir))
+            };
+            let callers = [s.spawn(shutdown), s.spawn(shutdown)];
+            let results = callers.map(|caller| caller.join().unwrap());
+            release.send(()).unwrap();
+            publishing.join().unwrap().unwrap();
+            results
+        });
+        for (took, revoked) in results {
+            assert!(
+                revoked || took >= SHUTDOWN_WAIT,
+                "returned after {took:?} with the vault still open"
+            );
+            assert!(took < SHUTDOWN_WAIT + SCHEDULING_MARGIN, "{took:?}");
+        }
+        assert_eq!(state(&ts, family), SessionState::Locked);
+    }
+
+    /// Fix round 1 (7): a hook that panics neither stretches the shutdown nor stops the hooks after it.
+    #[test]
+    fn shutdown_survives_a_panicking_hook() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        ts.shell
+            .sessions
+            .on_lock(Box::new(|_, _| panic!("a hook failed")));
+        let after = count_hooks(&ts);
+        let started = Instant::now();
+        ts.shell.shutdown();
+        assert!(started.elapsed() < SHUTDOWN_WAIT + SCHEDULING_MARGIN);
+        assert_eq!(state(&ts, family), SessionState::Locked);
+        assert_eq!(after.load(Ordering::SeqCst), 1, "the next hook still ran");
+    }
+
+    /// Fix round 1 (7): one deadline from entry bounds the whole shutdown, also while a notifier blocks an operation's
+    /// start (which held the operations mutex before this round).
+    #[test]
+    fn shutdown_bound_holds_under_operation_contention() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let (entered, notifier_entered) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        ts.events.during_next_busy(Box::new(move || {
+            entered.send(()).unwrap();
+            let _ = released.recv_timeout(PATIENCE);
+        }));
+        let import = CancelToken::new();
+        let took = thread::scope(|s| {
+            let beginning = s.spawn(|| {
+                drop(
+                    ts.shell
+                        .autolock
+                        .begin(Some(family), "import", import.clone()),
+                );
+            });
+            notifier_entered.recv_timeout(GIVE_UP).unwrap();
+            let started = Instant::now();
+            ts.shell.shutdown();
+            let took = started.elapsed();
+            let _ = release.send(());
+            beginning.join().unwrap();
+            took
+        });
+        assert!(took < SHUTDOWN_WAIT + SCHEDULING_MARGIN, "{took:?}");
+        assert_eq!(state(&ts, family), SessionState::Locked);
+        assert!(import.is_cancelled());
+    }
+
+    /// Fix round 1 (3, 7): with no helper thread, every vault is still revoked (inline, bounded) and the hooks are
+    /// skipped.
+    #[test]
+    fn shutdown_without_helper_revokes_inline() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let hooks = count_hooks(&ts);
+        let restore = CancelToken::new();
+        let _restore = ts.shell.autolock.begin(None, "restore", restore.clone());
+        ts.shell.autolock.fail_next_spawn();
+        let started = Instant::now();
+        ts.shell.shutdown();
+        assert!(started.elapsed() < SHUTDOWN_WAIT + SCHEDULING_MARGIN);
+        assert_eq!(state(&ts, family), SessionState::Locked);
+        assert!(ts.shell.sessions.release_wait(family, GIVE_UP));
+        assert!(restore.is_cancelled());
+        assert_eq!(hooks.load(Ordering::SeqCst), 0, "no hook ran");
+    }
+
+    /// Fix round 1 (4): idle locks an open under way and the pending choices too, with no vault unlocked; one lock per
+    /// idle period, and a new one after input.
+    #[test]
+    fn idle_locks_opens_and_pending_once_per_period() {
+        let ts = TestShell::new();
+        let hooks = count_hooks(&ts);
+        let pending = ts.shell.sessions.pending();
+        let _token = pending.put(PendingChoice::Test(None));
+        let t0 = ts.clock.now();
+        let (inside, open_inside) = mpsc::channel();
+        let (go, opened_may_go) = mpsc::channel::<()>();
+        let opened_may_go = Mutex::new(opened_may_go);
+        let answer = thread::scope(|s| {
+            let opening = s.spawn(|| {
+                ts.shell.sessions.open::<()>(None, None, |_| {
+                    inside.send(()).unwrap();
+                    let _ = lock(&opened_may_go).recv_timeout(GIVE_UP);
+                    Err(ShellError::InvalidInput { what: "folder" })
+                })
+            });
+            open_inside.recv_timeout(GIVE_UP).unwrap();
+            ts.idle.set(at(5, 0));
+            ts.shell.autolock.tick(t0 + at(5, 0));
+            go.send(()).unwrap();
+            opening.join().unwrap()
+        });
+        assert_eq!(
+            answer.err(),
+            Some(ShellError::Locked),
+            "the open is discarded"
+        );
+        assert_eq!(pending.len(), 0, "the pending choice is dropped");
+        assert_eq!(hooks.load(Ordering::SeqCst), 1);
+
+        // Still idle: no second lock.
+        ts.idle.set(at(5, 5));
+        ts.shell.autolock.tick(t0 + at(5, 5));
+        assert_eq!(hooks.load(Ordering::SeqCst), 1, "one lock per idle period");
+        // Input, then idle again: a new lock.
+        ts.idle.set(at(0, 1));
+        ts.shell.autolock.tick(t0 + at(5, 10));
+        ts.idle.set(at(5, 0));
+        ts.shell.autolock.tick(t0 + at(10, 10));
+        assert_eq!(
+            hooks.load(Ordering::SeqCst),
+            2,
+            "a new idle period locks again"
+        );
+    }
+
+    /// Fix round 1 (6): an operation that begins after the tick has read the idle time, but before it would lock,
+    /// is respected.
+    #[test]
+    fn begin_during_tick_is_respected() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let t0 = ts.clock.now();
+        let import = CancelToken::new();
+        let running = Arc::new(Mutex::new(None));
+        let (shell, kept, token) = (Arc::clone(&ts.shell), Arc::clone(&running), import.clone());
+        ts.shell.autolock.during_next_tick(Box::new(move || {
+            *lock(&kept) = Some(shell.autolock.begin(Some(family), "import", token));
+        }));
+        ts.idle.set(at(5, 0));
+        ts.shell.autolock.tick(t0 + at(5, 0));
+        assert_eq!(state(&ts, family), SessionState::Unlocked);
+        assert!(!import.is_cancelled());
+        assert!(lock(&running).is_some());
+    }
+
+    /// Fix round 1 (6): an operation that begins and ends while the tick decides restarts the idle time.
+    #[test]
+    fn begin_and_end_during_tick_is_respected() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let t0 = ts.clock.now();
+        let (shell, clock) = (Arc::clone(&ts.shell), Arc::clone(&ts.clock));
+        ts.shell.autolock.during_next_tick(Box::new(move || {
+            clock.set(t0 + at(5, 0));
+            drop(
+                shell
+                    .autolock
+                    .begin(Some(family), "backup", CancelToken::new()),
+            );
+        }));
+        ts.idle.set(at(5, 0));
+        ts.shell.autolock.tick(t0 + at(5, 0));
+        assert_eq!(state(&ts, family), SessionState::Unlocked);
+    }
+
+    /// Fix round 1 (5): a folder check that stalls (a drive not answering) never holds up the idle lock, and no
+    /// second check starts while it stalls.
+    #[test]
+    fn blocked_probe_never_delays_idle() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let t0 = ts.clock.now();
+        let (release, released) = mpsc::channel::<()>();
+        ts.volumes.during_next_exists(Box::new(move || {
+            let _ = released.recv_timeout(GIVE_UP);
+        }));
+        let calls = ts.volumes.exists_calls();
+        ts.idle.set(at(5, 0));
+        let (done, tick_done) = mpsc::channel();
+        let (returned, locked, probes) = thread::scope(|s| {
+            let ticking = s.spawn(|| {
+                ts.shell.autolock.tick(t0 + at(5, 0));
+                done.send(()).unwrap();
+            });
+            let returned = tick_done.recv_timeout(PATIENCE).is_ok();
+            let locked = state(&ts, family) == SessionState::Locked;
+            let probing = wait_until(PATIENCE, || ts.volumes.exists_calls() == calls + 1);
+            if returned {
+                ts.shell.autolock.tick(t0 + at(5, 5));
+            }
+            let probes = ts.volumes.exists_calls() - calls;
+            release.send(()).unwrap();
+            ticking.join().unwrap();
+            (returned, locked, probing.then_some(probes))
+        });
+        ts.shell.autolock.wait_probe();
+        assert!(returned, "the tick did not wait for the folder check");
+        assert!(locked, "the idle lock happened");
+        assert_eq!(locks(&ts), [(family, LockReason::Idle)]);
+        assert_eq!(probes, Some(1), "one folder check at a time");
+    }
+
+    /// Fix round 1 (5): a settings save that is slow to write never holds up the tick, which uses the settings in
+    /// effect until the new ones are saved.
+    #[test]
+    fn settings_save_never_delays_tick() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let t0 = ts.clock.now();
+        ts.idle.set(at(5, 0));
+        let returned = Arc::new(AtomicBool::new(false));
+        let (shell, seen) = (Arc::clone(&ts.shell), Arc::clone(&returned));
+        ts.shell.settings.during_next_save(Box::new(move || {
+            let (done, tick_done) = mpsc::channel();
+            thread::spawn(move || {
+                shell.autolock.tick(t0 + at(5, 0));
+                let _ = done.send(());
+            });
+            seen.store(tick_done.recv_timeout(PATIENCE).is_ok(), Ordering::SeqCst);
+        }));
+        ts.shell
+            .settings
+            .set(Settings {
+                idle_minutes: 30,
+                ..ts.shell.settings.get()
+            })
+            .unwrap();
+        assert!(
+            returned.load(Ordering::SeqCst),
+            "the tick did not wait for the save"
+        );
+        assert_eq!(state(&ts, family), SessionState::Locked);
+        assert_eq!(ts.shell.settings.get().idle_minutes, 30);
+    }
+
+    /// Fix round 1 (8): a notifier that panics while an operation begins leaves no operation behind to pause the idle
+    /// time forever, and the keep-awake request is withdrawn.
+    #[test]
+    fn notifier_panic_in_begin_leaves_no_operation() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let t0 = ts.clock.now();
+        ts.events
+            .during_next_busy(Box::new(|| panic!("the page could not be told")));
+        let begun = catch_unwind(AssertUnwindSafe(|| {
+            ts.shell
+                .autolock
+                .begin(Some(family), "import", CancelToken::new())
+        }));
+        assert!(begun.is_err(), "the panic reached the caller");
+        assert_eq!(ts.power.calls(), [true, false]);
+        ts.idle.set(at(5, 0));
+        ts.shell.autolock.tick(t0 + at(5, 0));
+        assert_eq!(state(&ts, family), SessionState::Locked);
     }
 }
