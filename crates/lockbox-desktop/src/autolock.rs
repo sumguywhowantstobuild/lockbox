@@ -64,8 +64,9 @@ struct Operations {
     /// The keep-awake state last asked for. Held while asking Windows and telling the page, so both see the changes
     /// in order.
     announcing: Mutex<bool>,
-    /// The closing gate: set for good at the shutdown's entry, read under `running` where an operation registers.
-    closed: AtomicBool,
+    /// The sessions' closing gate ([`Sessions::closing_gate`]): set for good at the shutdown's entry, read under
+    /// `running` where an operation registers.
+    closed: Arc<AtomicBool>,
     power: Arc<dyn Power>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn Notifier>,
@@ -199,14 +200,8 @@ impl Operations {
         }
     }
 
-    /// Shuts the closing gate: from now on no operation registers. Takes no lock, so the shutdown sets it at once.
-    fn shut(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-    }
-
-    /// The app is closing: shuts the gate and cancels every operation registered before it.
+    /// The app is closing (the gate already shut): cancels every operation registered before the gate.
     fn close(&self) {
-        self.shut();
         lock(&self.running).cancel_all();
     }
 }
@@ -277,6 +272,7 @@ impl AutoLock {
         notifier: Arc<dyn Notifier>,
         os: &Os,
     ) -> AutoLock {
+        let closed = sessions.closing_gate();
         AutoLock {
             sessions,
             settings,
@@ -285,7 +281,7 @@ impl AutoLock {
             operations: Arc::new(Operations {
                 running: Mutex::default(),
                 announcing: Mutex::new(false),
-                closed: AtomicBool::new(false),
+                closed,
                 power: Arc::clone(&os.power),
                 clock: Arc::clone(&os.clock),
                 notifier,
@@ -376,7 +372,8 @@ impl AutoLock {
     /// each one that is not (a folder whose existence cannot be read counts as gone). One check at a time: while one
     /// stalls, only finding vanished folders waits.
     /// The sessions checked are those unlocked at the tick, each in the generation it had then: a session locked and
-    /// unlocked again since is left alone. Every vanished one is revoked in one step, and nothing waits for hooks.
+    /// unlocked again since is left alone. Each vanished one is revoked as soon as its check answers, and nothing waits
+    /// for hooks.
     fn start_probe(&self) {
         let unlocked = self.sessions.unlocked();
         if unlocked.is_empty() || self.probing.swap(true, Ordering::SeqCst) {
@@ -388,13 +385,12 @@ impl AutoLock {
             .name("lockbox-folder-check".into())
             .spawn(move || {
                 let _done = done;
-                let gone: Vec<(SessionId, Option<u64>)> = unlocked
-                    .into_iter()
-                    .filter(|(_, _, location)| !matches!(volumes.exists(location.path()), Ok(true)))
-                    .map(|(id, generation, _)| (id, Some(generation)))
-                    .collect();
-                if !gone.is_empty() {
-                    let _ = sessions.revoke_some(&gone, LockReason::DriveGone);
+                // Each one revoked as soon as its check answers: a later check that stalls must not hold it up.
+                for (id, generation, location) in unlocked {
+                    if !matches!(volumes.exists(location.path()), Ok(true)) {
+                        let _ =
+                            sessions.revoke_some(&[(id, Some(generation))], LockReason::DriveGone);
+                    }
                 }
             });
         // A thread that cannot start drops `done`, so the next tick tries again.
@@ -449,10 +445,9 @@ impl AutoLock {
             phase.hooks_deadline.get_or_insert(deadline);
         });
         if first {
-            // Before anything else, and without waiting for any lock: the gates are read where opens and operations
-            // register and publish.
+            // Before anything else, and without waiting for any lock: the one closing gate, read where opens
+            // register and publish and where long operations register, so both are shut out at the same instant.
             self.sessions.shut();
-            self.operations.shut();
             self.start_closing();
         }
         self.closing.wait(deadline, |phase| phase.revoked);
@@ -1504,5 +1499,48 @@ mod tests {
         assert_eq!(reopened.session, family);
         assert_eq!(state(&ts, family), SessionState::Unlocked);
         assert_eq!(ts.shell.sessions.list()[0].generation, reopened.generation);
+    }
+
+    /// Fix round 3 (1): the hook thread starts with the shell, and a shell whose hook thread cannot start does not
+    /// start at all, so no hook ever runs on a trigger thread.
+    #[test]
+    fn hook_thread_must_start_with_the_shell() {
+        crate::session::fail_next_hook_thread();
+        let refused = TestShell::try_new().err().map(|error| error.to_string());
+        assert_eq!(
+            refused.as_deref(),
+            Some("the lock hook thread could not start")
+        );
+    }
+
+    /// Fix round 3 (2): a vanished folder is revoked as soon as its check answers, even while the next folder's check
+    /// stalls.
+    #[test]
+    fn vanished_folder_locks_while_another_check_stalls() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let work = open_vault(&ts, "Work");
+        ts.volumes.vanish(&vault_dir(&ts, 0));
+        let (entered, check_entered) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        ts.volumes.during_exists_at(
+            &vault_dir(&ts, 1),
+            Box::new(move || {
+                entered.send(()).unwrap();
+                let _ = released.recv_timeout(GIVE_UP);
+            }),
+        );
+        ts.shell.autolock.tick(ts.clock.now());
+        check_entered
+            .recv_timeout(GIVE_UP)
+            .expect("the second folder's check runs");
+        let revoked = wait_until(PATIENCE, || state(&ts, family) == SessionState::Unavailable);
+        release.send(()).unwrap();
+        ts.shell.autolock.wait_probe();
+        assert!(
+            revoked,
+            "the vanished vault was revoked while the other check stalled"
+        );
+        assert_eq!(state(&ts, work), SessionState::Unlocked);
     }
 }

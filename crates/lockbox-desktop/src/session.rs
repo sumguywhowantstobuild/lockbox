@@ -181,20 +181,20 @@ pub enum SessionState {
 pub type LockHook = Box<dyn Fn(Option<SessionId>, LockReason) + Send + Sync>;
 
 /// The lock hooks, and the one thread that runs them: each lock's hooks after those of the locks that revoked before
-/// it, one lock's at a time. No revocation and no auto-lock trigger waits for them.
-#[derive(Default)]
+/// it, one lock's at a time. The thread starts with the sessions ([`Sessions::new`]), so no hook ever runs anywhere
+/// else, and no revocation and no auto-lock trigger waits for one.
 struct Hooks {
     list: Arc<RwLock<Vec<LockHook>>>,
-    /// The hook thread's queue: `None` until the first lock, or after the thread went away. Jobs are queued under
-    /// `transitions`, so they run in the order of the revocations.
-    worker: Mutex<Option<mpsc::Sender<HookJob>>>,
+    /// The hook thread's queue. Jobs are queued under `transitions`, so they run in the order of the revocations.
+    queue: mpsc::Sender<HookJob>,
 }
 
-/// One lock's step (5): its hooks, with what locked.
+/// One lock's step (5): its hooks, with what locked. Dropped without running (the hook thread gone), it still counts
+/// as done, so nothing waits for it forever.
 struct HookJob {
     only: Option<SessionId>,
     reason: LockReason,
-    done: Arc<Completion>,
+    _done: MarkRun,
 }
 
 #[derive(Default)]
@@ -203,7 +203,7 @@ struct Completion {
     finished: Condvar,
 }
 
-/// Marks a job done when dropped, also when a hook panicked past the catch.
+/// Marks a job done when dropped: after its hooks ran, also when one panicked past the catch, or unrun.
 struct MarkRun(Arc<Completion>);
 
 impl Drop for MarkRun {
@@ -217,7 +217,6 @@ impl HookJob {
     /// Runs the hooks, in the order they were added. A hook that panics is passed over: the hooks after it still run
     /// (the "Open" cleanup after a failed clipboard clear).
     fn run(self, list: &RwLock<Vec<LockHook>>) {
-        let _done = MarkRun(self.done);
         let list = list.read().unwrap_or_else(PoisonError::into_inner);
         for hook in list.iter() {
             let _ = catch_unwind(AssertUnwindSafe(|| hook(self.only, self.reason)));
@@ -240,45 +239,13 @@ impl HooksDone {
     }
 }
 
-impl Hooks {
-    /// Queues `jobs` for the hook thread, starting it if there is none. What cannot be queued (no thread can start)
-    /// is handed back, in order, for the caller to run itself.
-    fn dispatch(&self, jobs: Vec<HookJob>) -> Vec<HookJob> {
-        let mut worker = lock(&self.worker);
-        let mut left = Vec::new();
-        for job in jobs {
-            if !left.is_empty() {
-                left.push(job);
-                continue;
-            }
-            let job = match worker.as_ref() {
-                Some(queue) => match queue.send(job) {
-                    Ok(()) => continue,
-                    Err(mpsc::SendError(job)) => job,
-                },
-                None => job,
-            };
-            // No thread yet, or it went away: start one.
-            let Ok(queue) = spawn_hook_thread(Arc::clone(&self.list)) else {
-                *worker = None;
-                left.push(job);
-                continue;
-            };
-            match queue.send(job) {
-                Ok(()) => *worker = Some(queue),
-                Err(mpsc::SendError(job)) => {
-                    *worker = None;
-                    left.push(job);
-                }
-            }
-        }
-        left
-    }
-}
-
 /// Starts the hook thread: it runs each job it is sent, in order, and ends once its queue's sender is gone (the
 /// sessions dropped).
 fn spawn_hook_thread(list: Arc<RwLock<Vec<LockHook>>>) -> io::Result<mpsc::Sender<HookJob>> {
+    #[cfg(test)]
+    if FAIL_HOOK_THREAD.take() {
+        return Err(io::Error::other("no thread"));
+    }
     let (queue, jobs) = mpsc::channel::<HookJob>();
     thread::Builder::new()
         .name("lockbox-lock-hooks".into())
@@ -288,6 +255,18 @@ fn spawn_hook_thread(list: Arc<RwLock<Vec<LockHook>>>) -> io::Result<mpsc::Sende
             }
         })?;
     Ok(queue)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the next hook thread started on this thread fails to start.
+    static FAIL_HOOK_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests only: the next hook thread this thread starts fails to start.
+#[cfg(test)]
+pub(crate) fn fail_next_hook_thread() {
+    FAIL_HOOK_THREAD.set(true);
 }
 
 /// Which sessions a revocation takes.
@@ -686,8 +665,9 @@ pub struct Sessions {
     inner: Mutex<Inner>,
     notifier: Arc<dyn Notifier>,
     hooks: Hooks,
-    /// Set for good when the app starts closing ([`shut`](Self::shut)): checked where opens register and publish.
-    closing: AtomicBool,
+    /// The closing gate, set for good when the app starts closing ([`shut`](Self::shut)): read where opens register
+    /// and publish, and (shared through [`closing_gate`](Self::closing_gate)) where long operations register.
+    closing: Arc<AtomicBool>,
     pending: Pending,
     /// Tests only: how many lock calls found `transitions` held and had to wait their turn, so a test can tell that a
     /// second lock is really waiting for the first, not merely late.
@@ -699,19 +679,29 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    pub fn new(notifier: Arc<dyn Notifier>) -> Self {
-        Sessions {
+    /// Starts the hook thread first: without it there are no sessions (`the lock hook thread could not start`).
+    pub fn new(notifier: Arc<dyn Notifier>) -> io::Result<Self> {
+        let list = Arc::default();
+        let queue = spawn_hook_thread(Arc::clone(&list))
+            .map_err(|_| io::Error::other("the lock hook thread could not start"))?;
+        Ok(Sessions {
             transitions: Mutex::default(),
             inner: Mutex::default(),
             notifier,
-            hooks: Hooks::default(),
-            closing: AtomicBool::new(false),
+            hooks: Hooks { list, queue },
+            closing: Arc::default(),
             pending: Pending::default(),
             #[cfg(test)]
             locks_waited: Default::default(),
             #[cfg(test)]
             inner_waited: Default::default(),
-        }
+        })
+    }
+
+    /// The closing gate itself, for the auto-lock to read where long operations register: one flag, so opens and
+    /// operations are shut out at the same instant.
+    pub(crate) fn closing_gate(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.closing)
     }
 
     /// Tests only: how many times a thread has had to wait for the sessions mutex.
@@ -1168,26 +1158,20 @@ impl Sessions {
             Which::Some(_) => notified.iter().map(|&id| Some(id)).collect(),
         };
         let last = only.len() - 1;
-        let jobs = only
-            .into_iter()
-            .enumerate()
-            .map(|(n, only)| HookJob {
+        for (n, only) in only.into_iter().enumerate() {
+            let job = HookJob {
                 only,
                 reason,
                 // Only the last job's end is waited for: the jobs before it run first.
-                done: if n == last {
-                    Arc::clone(&done)
-                } else {
-                    Arc::default()
-                },
-            })
-            .collect();
-        let left = self.hooks.dispatch(jobs);
-        drop(turn);
-        // No hook thread could start: run them here, now that the revocation is over.
-        for job in left {
-            job.run(&self.hooks.list);
+                _done: MarkRun(match n == last {
+                    true => Arc::clone(&done),
+                    false => Arc::default(),
+                }),
+            };
+            // A send fails only with the hook thread gone; the job then drops unrun, counted as done.
+            let _ = self.hooks.queue.send(job);
         }
+        drop(turn);
         Some(HooksDone(done))
     }
 
@@ -1315,7 +1299,7 @@ mod tests {
 
     fn sessions() -> (Arc<Recorder>, Sessions) {
         let recorder = Arc::new(Recorder::default());
-        (recorder.clone(), Sessions::new(recorder))
+        (recorder.clone(), Sessions::new(recorder).unwrap())
     }
 
     /// A new vault named "Family" in `parent`, open.
@@ -2126,7 +2110,7 @@ mod tests {
     fn lock_steps_run_in_spec_order() {
         let parent = TempDir::new();
         let steps = Arc::new(Steps::default());
-        let sessions = Sessions::new(steps.clone());
+        let sessions = Sessions::new(steps.clone()).unwrap();
         let (id, generation, dir) = open_writable(&sessions, parent.path());
         let token = sessions
             .read(id, generation, |_, cancel| Ok(cancel.clone()))

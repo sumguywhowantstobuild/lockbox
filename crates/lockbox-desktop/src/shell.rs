@@ -56,7 +56,7 @@ impl Shell {
         let mut forbidden = app_dirs;
         forbidden.push(os.env.known_folder(KnownFolder::RoamingAppData)?);
         forbidden.push(paths.root.clone());
-        let sessions = Arc::new(Sessions::new(Arc::clone(&notifier)));
+        let sessions = Arc::new(Sessions::new(Arc::clone(&notifier))?);
         let settings = Arc::new(SettingsStore::load(paths.settings.clone()));
         let autolock = AutoLock::new(Arc::clone(&sessions), Arc::clone(&settings), notifier, &os);
         Ok(Shell {

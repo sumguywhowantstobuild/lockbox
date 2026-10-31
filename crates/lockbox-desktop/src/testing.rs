@@ -177,6 +177,9 @@ impl Env for FakeEnv {
     }
 }
 
+/// A step a test runs once, inside a fake's call.
+type Hook = Box<dyn FnOnce() + Send>;
+
 /// A volume as [`FakeVolumes`] reports it.
 #[derive(Clone, Copy)]
 pub struct FakeVolume {
@@ -206,6 +209,8 @@ pub struct FakeVolumes {
     vanished: Mutex<Vec<PathBuf>>,
     /// Run once, inside the next `exists` call: it may block there, as a stalled drive does.
     on_exists: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Run once, inside the next `exists` call for a path inside the folder given with it.
+    on_exists_at: Mutex<Option<(PathBuf, Hook)>>,
     /// How many `exists` calls have started.
     exists_calls: AtomicUsize,
 }
@@ -251,6 +256,11 @@ impl FakeVolumes {
     /// Runs `hook` once, inside the next `exists` call.
     pub fn during_next_exists(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.on_exists) = Some(hook);
+    }
+
+    /// Runs `hook` once, inside the next `exists` call for a path inside `dir`.
+    pub fn during_exists_at(&self, dir: &Path, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.on_exists_at) = Some((canonical(dir), hook));
     }
 
     /// How many `exists` calls have started.
@@ -318,6 +328,16 @@ impl Volumes for FakeVolumes {
 
     fn exists(&self, path: &Path) -> io::Result<bool> {
         self.exists_calls.fetch_add(1, Ordering::SeqCst);
+        let hook = {
+            let mut at = lock(&self.on_exists_at);
+            match at.as_ref() {
+                Some((dir, _)) if inside(path, dir) => at.take().map(|(_, hook)| hook),
+                _ => None,
+            }
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
         let hook = lock(&self.on_exists).take();
         if let Some(hook) = hook {
             hook();
@@ -422,6 +442,11 @@ pub struct TestShell {
 
 impl TestShell {
     pub fn new() -> TestShell {
+        TestShell::try_new().unwrap()
+    }
+
+    /// Like [`new`](Self::new), with the shell's own refusal to start handed back.
+    pub fn try_new() -> io::Result<TestShell> {
         let temp = TempDir::new();
         let env = Arc::new(FakeEnv::new(temp.path()));
         let volumes = Arc::new(FakeVolumes::default());
@@ -447,8 +472,8 @@ impl TestShell {
             power: power.clone(),
             clock: clock.clone(),
         };
-        let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone()).unwrap());
-        TestShell {
+        let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone())?);
+        Ok(TestShell {
             shell,
             env,
             volumes,
@@ -460,7 +485,7 @@ impl TestShell {
             events,
             app_dirs,
             temp,
-        }
+        })
     }
 
     /// The folder for the test's own vaults.
