@@ -100,7 +100,9 @@ the account's email setting, so turn on "Keep my email addresses private" in Git
 - An osv finding we accept for now goes in `osv-scanner.toml` at the repo root (osv-scanner reads it for the
   `Cargo.lock` next to it), as an `[[IgnoredVulns]]` entry with a one-line `reason` and an `ignoreUntil` date. Every
   entry must expire: when the date passes the scan fails again, and the entry is fixed or renewed after a fresh
-  look. Today's entries are Linux-only crates and one compile-time-only crate in Tauri's tree.
+  look. Today's entries are Linux-only crates and one compile-time-only crate in Tauri's tree. An npm finding goes
+  in `ui/osv-scanner.toml` instead (osv-scanner reads the file next to each lockfile); today's entry is a lint-time
+  dev tool.
 - CI job "Security scan" (Windows) installs pinned versions: gitleaks 8.30.1 and osv-scanner 2.7.0 downloaded from their
   GitHub releases and checked against SHA-256 values copied from the releases (the job fails on a mismatch), and
   `pip install semgrep==1.179.0`, then runs the scanner's own tests before the scan. Bumping a version means getting the new SHA-256 from the release's checksum file (osv-scanner: `osv-scanner_SHA256SUMS`).
