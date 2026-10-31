@@ -6,9 +6,10 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
-    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, TryLockError, TryLockResult,
+    Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock, TryLockError, TryLockResult, mpsc,
 };
 use std::time::{Duration, Instant};
 use std::{fmt, fs, io, thread};
@@ -179,68 +180,122 @@ pub enum SessionState {
 /// A hook run after every lock, with the session that locked (`None`: all of them).
 pub type LockHook = Box<dyn Fn(Option<SessionId>, LockReason) + Send + Sync>;
 
-/// The lock hooks, and whose turn it is to run them: each lock's hooks run after those of the locks that revoked
-/// before it, one lock's at a time.
+/// The lock hooks, and the one thread that runs them: each lock's hooks after those of the locks that revoked before
+/// it, one lock's at a time. No revocation and no auto-lock trigger waits for them.
 #[derive(Default)]
 struct Hooks {
-    list: RwLock<Vec<LockHook>>,
-    /// The next turn to hand out. Taken under `transitions`, so turns follow the order of the revocations.
-    next: AtomicU64,
-    /// The turn whose hooks may run now.
-    serving: Mutex<u64>,
-    turn: Condvar,
+    list: Arc<RwLock<Vec<LockHook>>>,
+    /// The hook thread's queue: `None` until the first lock, or after the thread went away. Jobs are queued under
+    /// `transitions`, so they run in the order of the revocations.
+    worker: Mutex<Option<mpsc::Sender<HookJob>>>,
 }
 
-/// One lock's step (5), its hooks, handed out once its steps (1) to (4) are done ([`Sessions::revoke_all`] and
-/// [`Sessions::close`]). [`run`](Self::run) waits for the hooks of every earlier lock, then runs this lock's. Dropped
-/// without running (a panic on the way), it still waits its turn and passes it on, running nothing.
-#[must_use = "later locks' hooks wait for this turn"]
-pub struct HookTurn {
-    hooks: Arc<Hooks>,
-    ticket: u64,
+/// One lock's step (5): its hooks, with what locked.
+struct HookJob {
     only: Option<SessionId>,
     reason: LockReason,
-    taken: bool,
+    done: Arc<Completion>,
 }
 
-impl HookTurn {
+#[derive(Default)]
+struct Completion {
+    done: Mutex<bool>,
+    finished: Condvar,
+}
+
+/// Marks a job done when dropped, also when a hook panicked past the catch.
+struct MarkRun(Arc<Completion>);
+
+impl Drop for MarkRun {
+    fn drop(&mut self) {
+        *lock(&self.0.done) = true;
+        self.0.finished.notify_all();
+    }
+}
+
+impl HookJob {
     /// Runs the hooks, in the order they were added. A hook that panics is passed over: the hooks after it still run
     /// (the "Open" cleanup after a failed clipboard clear).
-    pub fn run(mut self) {
-        self.take(true);
-    }
-
-    fn take(&mut self, run: bool) {
-        self.taken = true;
-        let serving = lock(&self.hooks.serving);
-        let serving = self
-            .hooks
-            .turn
-            .wait_while(serving, |serving| *serving != self.ticket)
-            .unwrap_or_else(PoisonError::into_inner);
-        // Released while the hooks run: the turn alone keeps other locks' hooks out.
-        drop(serving);
-        if run {
-            let list = self
-                .hooks
-                .list
-                .read()
-                .unwrap_or_else(PoisonError::into_inner);
-            for hook in list.iter() {
-                let _ = catch_unwind(AssertUnwindSafe(|| hook(self.only, self.reason)));
-            }
+    fn run(self, list: &RwLock<Vec<LockHook>>) {
+        let _done = MarkRun(self.done);
+        let list = list.read().unwrap_or_else(PoisonError::into_inner);
+        for hook in list.iter() {
+            let _ = catch_unwind(AssertUnwindSafe(|| hook(self.only, self.reason)));
         }
-        *lock(&self.hooks.serving) += 1;
-        self.hooks.turn.notify_all();
     }
 }
 
-impl Drop for HookTurn {
-    fn drop(&mut self) {
-        if !self.taken {
-            self.take(false);
-        }
+/// Tells when one lock's hooks have run, and with them every earlier lock's.
+pub struct HooksDone(Arc<Completion>);
+
+impl HooksDone {
+    pub fn wait(&self) {
+        let done = lock(&self.0.done);
+        drop(
+            self.0
+                .finished
+                .wait_while(done, |done| !*done)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
     }
+}
+
+impl Hooks {
+    /// Queues `jobs` for the hook thread, starting it if there is none. What cannot be queued (no thread can start)
+    /// is handed back, in order, for the caller to run itself.
+    fn dispatch(&self, jobs: Vec<HookJob>) -> Vec<HookJob> {
+        let mut worker = lock(&self.worker);
+        let mut left = Vec::new();
+        for job in jobs {
+            if !left.is_empty() {
+                left.push(job);
+                continue;
+            }
+            let job = match worker.as_ref() {
+                Some(queue) => match queue.send(job) {
+                    Ok(()) => continue,
+                    Err(mpsc::SendError(job)) => job,
+                },
+                None => job,
+            };
+            // No thread yet, or it went away: start one.
+            let Ok(queue) = spawn_hook_thread(Arc::clone(&self.list)) else {
+                *worker = None;
+                left.push(job);
+                continue;
+            };
+            match queue.send(job) {
+                Ok(()) => *worker = Some(queue),
+                Err(mpsc::SendError(job)) => {
+                    *worker = None;
+                    left.push(job);
+                }
+            }
+        }
+        left
+    }
+}
+
+/// Starts the hook thread: it runs each job it is sent, in order, and ends once its queue's sender is gone (the
+/// sessions dropped).
+fn spawn_hook_thread(list: Arc<RwLock<Vec<LockHook>>>) -> io::Result<mpsc::Sender<HookJob>> {
+    let (queue, jobs) = mpsc::channel::<HookJob>();
+    thread::Builder::new()
+        .name("lockbox-lock-hooks".into())
+        .spawn(move || {
+            for job in jobs {
+                job.run(&list);
+            }
+        })?;
+    Ok(queue)
+}
+
+/// Which sessions a revocation takes.
+enum Which<'a> {
+    /// Every session, every open under way and every pending choice; with `close`, no open after it either.
+    All { close: bool },
+    /// These sessions, each only while unlocked in the generation given with it (`None`: whichever is current).
+    Some(&'a [(SessionId, Option<u64>)]),
 }
 
 /// An unlocked session's vault. The session holds one reference and each running command another; the last to let
@@ -454,8 +509,6 @@ struct Inner {
     opening: Vec<Opening>,
     /// Bumped by every lock of all vaults: an open that started before one discards what it made.
     epoch: u64,
-    /// Set for good when the app starts closing ([`Sessions::close`]): no open starts after it.
-    closed: bool,
     last_session: u64,
     /// Numbers opens and two-session links.
     last_serial: u64,
@@ -632,7 +685,9 @@ pub struct Sessions {
     transitions: Mutex<()>,
     inner: Mutex<Inner>,
     notifier: Arc<dyn Notifier>,
-    hooks: Arc<Hooks>,
+    hooks: Hooks,
+    /// Set for good when the app starts closing ([`shut`](Self::shut)): checked where opens register and publish.
+    closing: AtomicBool,
     pending: Pending,
     /// Tests only: how many lock calls found `transitions` held and had to wait their turn, so a test can tell that a
     /// second lock is really waiting for the first, not merely late.
@@ -649,7 +704,8 @@ impl Sessions {
             transitions: Mutex::default(),
             inner: Mutex::default(),
             notifier,
-            hooks: Arc::default(),
+            hooks: Hooks::default(),
+            closing: AtomicBool::new(false),
             pending: Pending::default(),
             #[cfg(test)]
             locks_waited: Default::default(),
@@ -732,8 +788,8 @@ impl Sessions {
         let mut unused = Vec::new();
         let started = {
             let mut inner = self.inner();
-            // The app is closing: nothing opens any more, and a choice still parked was dropped by the closing lock.
-            if inner.closed {
+            // The app is closing: nothing opens any more.
+            if self.closing.load(Ordering::SeqCst) {
                 return Err(ShellError::Locked);
             }
             match claim(&mut unused) {
@@ -774,7 +830,8 @@ impl Sessions {
         let turn = lock(&self.transitions);
         let mut inner = self.inner();
         opening.finish(&mut inner);
-        if inner.epoch != epoch {
+        // A lock of all vaults since the open started, or the app closing (whose lock may not have run yet).
+        if inner.epoch != epoch || self.closing.load(Ordering::SeqCst) {
             // A discarded vault closes after both locks are released.
             drop(inner);
             drop(turn);
@@ -963,27 +1020,48 @@ impl Sessions {
         f()
     }
 
-    /// Locks one session; nothing happens if it is not unlocked. Returns once its hooks ran.
+    /// Locks one session; nothing happens if it is not unlocked. Returns once its hooks ran (the page's lock command
+    /// answers after the clipboard is cleared).
     pub fn lock(&self, id: SessionId, reason: LockReason) {
-        self.lock_where(Some(id), reason);
+        if let Some(done) = self.revoke(Which::Some(&[(id, None)]), reason, true) {
+            done.wait();
+        }
     }
 
     /// Locks every session, cancels every open under way, and drops every pending choice. Returns once its hooks ran.
     pub fn lock_all(&self, reason: LockReason) {
-        self.lock_where(None, reason);
+        if let Some(done) = self.revoke(Which::All { close: false }, reason, true) {
+            done.wait();
+        }
     }
 
-    /// Steps (1) to (4) of [`lock_all`](Self::lock_all), for a caller that must know when every session is revoked
-    /// before the hooks run (the auto-lock): this never waits for a hook, this lock's or an earlier one's. Run the
-    /// turn it gives for step (5).
-    pub(crate) fn revoke_all(&self, reason: LockReason) -> Option<HookTurn> {
-        self.revoke(None, reason, false, true)
+    /// Steps (1) to (4) of [`lock_all`](Self::lock_all); its hooks are queued for the hook thread, and the answer tells
+    /// when they have run. Never waits for a hook, this lock's or an earlier one's (the auto-lock's triggers).
+    pub(crate) fn revoke_all(&self, reason: LockReason) -> Option<HooksDone> {
+        self.revoke(Which::All { close: false }, reason, true)
     }
 
-    /// The app is closing: [`revoke_all`](Self::revoke_all) for good. Nothing opens after it, whenever it was asked
-    /// to. With `hooks` false (no thread to run them on, so nothing may wait for one), no turn is taken.
-    pub(crate) fn close(&self, hooks: bool) -> Option<HookTurn> {
-        self.revoke(None, LockReason::AppClosing, true, hooks)
+    /// Like [`revoke_all`](Self::revoke_all) for `sessions`, in one step: each only while still unlocked in the
+    /// generation given with it (`None`: whichever is current). `None` when none of them was.
+    pub(crate) fn revoke_some(
+        &self,
+        sessions: &[(SessionId, Option<u64>)],
+        reason: LockReason,
+    ) -> Option<HooksDone> {
+        self.revoke(Which::Some(sessions), reason, true)
+    }
+
+    /// Shuts the closing gate: from now on no open registers or publishes. Takes no lock, so the app's exit sets it
+    /// at once; [`close`](Self::close) then revokes everything.
+    pub(crate) fn shut(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+    }
+
+    /// The app is closing: shuts the gate and revokes every session, for good. With `hooks` false (no thread may be
+    /// waited for), no hook is queued.
+    pub(crate) fn close(&self, hooks: bool) -> Option<HooksDone> {
+        self.shut();
+        self.revoke(Which::All { close: true }, LockReason::AppClosing, hooks)
     }
 
     /// Takes `transitions` for a lock, waiting while another lock (or an open publishing) holds it.
@@ -999,34 +1077,24 @@ impl Sessions {
         }
     }
 
-    /// The steps of §7.4, in order.
-    fn lock_where(&self, only: Option<SessionId>, reason: LockReason) {
-        if let Some(turn) = self.revoke(only, reason, false, true) {
-            turn.run();
-        }
-    }
-
-    /// Steps (1) to (4) of §7.4, then the turn for step (5) when `hooks` (`None` too when the one session asked
-    /// for was not unlocked). `close` (only with `only` `None`) shuts out every later open.
-    fn revoke(
-        &self,
-        only: Option<SessionId>,
-        reason: LockReason,
-        close: bool,
-        hooks: bool,
-    ) -> Option<HookTurn> {
+    /// Steps (1) to (4) of §7.4 for `which`, in one step, then step (5): with `hooks`, one hook job per lock (one
+    /// for all, or one per session taken) queued for the hook thread, in order. `None` when `Which::Some` found none
+    /// of its sessions unlocked, or without `hooks`.
+    fn revoke(&self, which: Which<'_>, reason: LockReason, hooks: bool) -> Option<HooksDone> {
         // One revocation at a time: a second lock waits for the first one's steps (1) to (4), so it never finds a
         // session half-locked (already taken in step 1, its publish attempt not yet over) and runs its hooks too
         // early. Hooks are not part of it: a hook that blocks never keeps another session unlocked.
-        let _turn = self.lock_turn();
+        let turn = self.lock_turn();
         // (1) Under the sessions mutex: the state, the generation, and everything a lock takes away...
         let (locked, opening, pending) = {
             let mut inner = self.inner();
-            let (opening, pending) = match only {
-                Some(_) => (Vec::new(), Vec::new()),
-                None => {
+            let (opening, pending) = match which {
+                Which::Some(_) => (Vec::new(), Vec::new()),
+                Which::All { close } => {
                     inner.epoch += 1;
-                    inner.closed |= close;
+                    if close {
+                        self.shut();
+                    }
                     let opening: Vec<CancelToken> =
                         inner.opening.iter().map(|o| o.cancel.clone()).collect();
                     (opening, self.pending.drain())
@@ -1039,7 +1107,13 @@ impl Sessions {
             let locked: Vec<Locking> = inner
                 .sessions
                 .iter_mut()
-                .filter(|entry| only.is_none_or(|id| entry.id == id))
+                .filter(|entry| match which {
+                    Which::All { .. } => true,
+                    Which::Some(sessions) => sessions.iter().any(|&(id, generation)| {
+                        entry.id == id
+                            && generation.is_none_or(|generation| entry.gate.is(generation))
+                    }),
+                })
                 .filter_map(|entry| {
                     let live = entry.live.take()?;
                     entry.state = state;
@@ -1054,7 +1128,7 @@ impl Sessions {
                 .collect();
             (locked, opening, pending)
         };
-        if only.is_some() && locked.is_empty() {
+        if matches!(which, Which::Some(_)) && locked.is_empty() {
             return None;
         }
         // ...then each publish guard once, so an attempt that saw the old generation has finished.
@@ -1079,18 +1153,42 @@ impl Sessions {
             .collect();
         drop(pending);
         // (4) Tell the UI.
-        for (id, generation) in notices {
+        for &(id, generation) in &notices {
             self.notifier.locked(id, generation, reason);
         }
-        // (5) The hooks, in the order they were added (the clipboard's first), once the caller runs this turn: after
-        // the hooks of every lock that revoked before this one.
-        hooks.then(|| HookTurn {
-            hooks: Arc::clone(&self.hooks),
-            ticket: self.hooks.next.fetch_add(1, Ordering::SeqCst),
-            only,
-            reason,
-            taken: false,
-        })
+        let notified: Vec<SessionId> = notices.into_iter().map(|(id, _)| id).collect();
+        // (5) The hooks, in the order they were added (the clipboard's first), on the hook thread: after the hooks of
+        // every lock that revoked before this one, since they are queued here, still in turn.
+        if !hooks {
+            return None;
+        }
+        let done = Arc::new(Completion::default());
+        let only: Vec<Option<SessionId>> = match which {
+            Which::All { .. } => vec![None],
+            Which::Some(_) => notified.iter().map(|&id| Some(id)).collect(),
+        };
+        let last = only.len() - 1;
+        let jobs = only
+            .into_iter()
+            .enumerate()
+            .map(|(n, only)| HookJob {
+                only,
+                reason,
+                // Only the last job's end is waited for: the jobs before it run first.
+                done: if n == last {
+                    Arc::clone(&done)
+                } else {
+                    Arc::default()
+                },
+            })
+            .collect();
+        let left = self.hooks.dispatch(jobs);
+        drop(turn);
+        // No hook thread could start: run them here, now that the revocation is over.
+        for job in left {
+            job.run(&self.hooks.list);
+        }
+        Some(HooksDone(done))
     }
 
     /// Adds a hook that runs after every lock, after those added before it. It must not lock or open a session.
@@ -1119,6 +1217,19 @@ impl Sessions {
             }
         };
         vaults.wait_none(max)
+    }
+
+    /// Each unlocked session, its generation and its location.
+    pub(crate) fn unlocked(&self) -> Vec<(SessionId, u64, Location)> {
+        self.inner()
+            .sessions
+            .iter()
+            .filter(|entry| entry.live.is_some())
+            .map(|entry| {
+                let generation = entry.gate.generation.load(Ordering::SeqCst);
+                (entry.id, generation, entry.location.clone())
+            })
+            .collect()
     }
 
     /// Each unlocked session and its location.
