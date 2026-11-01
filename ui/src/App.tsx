@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { call, callPlain, open, type Opened } from "./bridge";
+import { call, callPlain, open, type Opened, type Outcome } from "./bridge";
 import { useDroppedFileReachedPage } from "./dropProbe";
 
 interface AppInfo {
@@ -31,6 +31,14 @@ let testSession: { session: number; generation: number } | undefined;
 
 // The test login "Add test login" made last, with the session it was made in: "Copy test password" copies its password.
 let testLogin: { session: number; generation: number; id: string } | undefined;
+
+// The file item "Add test file" made last, and its stored file: "Save a copy" saves that file.
+let testFile: { session: number; generation: number; id: string; fileId: string } | undefined;
+
+// The part of `get_item`'s answer the test page reads: the stored files' IDs.
+interface ItemFiles {
+  summary: { attachments: { file_id: string }[] };
+}
 
 // What an opening command's answer means for the test page.
 function describe(answer: Opened<unknown>, done: string): string {
@@ -97,6 +105,31 @@ async function copyTestPassword(): Promise<string> {
   const { session, generation, id } = testLogin;
   await call<null>("copy_field", { session, generation, id, field: "password" });
   return `Test password copied (session ${String(session)}): paste it, then wait for the clear`;
+}
+
+// A file picked in Rust's own open dialog, stored as a new file item in the open test vault: its path never reaches
+// this page.
+async function addTestFile(): Promise<string> {
+  if (testSession === undefined) return "No test vault open: create or unlock it first";
+  const { session, generation } = testSession;
+  const added = await call<Outcome<string>>("add_file", { session, generation, collection: null });
+  if (added.data === "Dismissed") return "Closed";
+  if (!("Done" in added.data)) return "Asked first";
+  const id = added.data.Done;
+  const item = await call<ItemFiles>("get_item", { session, generation, id });
+  const fileId = item.data.summary.attachments[0]?.file_id;
+  if (fileId === undefined) return "The new item holds no file";
+  testFile = { session, generation, id, fileId };
+  return `Test file added (session ${String(session)})`;
+}
+
+// A decrypted copy of the test file, where Rust's own save dialog says (Windows asks there before replacing a file).
+async function saveTestCopy(): Promise<string> {
+  if (testFile === undefined) return "No test file yet: add it first";
+  const { session, generation, id, fileId } = testFile;
+  const saved = await call<Outcome<null>>("save_file_copy", { session, generation, id, file_id: fileId });
+  if (saved.data === "Dismissed") return "Closed";
+  return `Copy saved (session ${String(session)})`;
 }
 
 // A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
@@ -207,8 +240,25 @@ export default function App() {
           >
             Copy test password
           </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(addTestFile);
+            }}
+          >
+            Add test file
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(saveTestCopy);
+            }}
+          >
+            Save a copy
+          </button>{" "}
           Creates &quot;{TEST_VAULT}&quot; in the default vaults folder, then unlocks it from the vault list; adds a
-          login to the vault last opened; copies that login&apos;s password to the clipboard.
+          login to the vault last opened; copies that login&apos;s password to the clipboard; adds a file you pick to
+          that vault; saves a copy of that file where you choose.
           {vaultStatus !== undefined && <output> {vaultStatus}</output>}
         </li>
       </ul>

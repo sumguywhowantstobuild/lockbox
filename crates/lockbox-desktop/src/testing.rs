@@ -43,6 +43,8 @@ pub fn quiet() -> RwLockWriteGuard<'static, ()> {
 pub struct Events {
     locked: Mutex<Vec<(SessionId, u64, LockReason)>>,
     busy: Mutex<Vec<(Option<SessionId>, Vec<&'static str>)>>,
+    /// Each notice, as the page would receive it.
+    notices: Mutex<Vec<serde_json::Value>>,
     /// Run once, inside the next `busy` event, before it is recorded.
     on_busy: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -60,6 +62,10 @@ impl Events {
     pub fn busy(&self) -> Vec<(Option<SessionId>, Vec<&'static str>)> {
         lock(&self.busy).clone()
     }
+
+    pub fn notices(&self) -> Vec<serde_json::Value> {
+        lock(&self.notices).clone()
+    }
 }
 
 impl Notifier for Events {
@@ -75,7 +81,10 @@ impl Notifier for Events {
         lock(&self.busy).push((session, operations.to_vec()));
     }
 
-    fn notice(&self, _notice: &Notice) {}
+    fn notice(&self, notice: &Notice) {
+        let notice = serde_json::to_value(notice).expect("a notice serialises");
+        lock(&self.notices).push(notice);
+    }
 }
 
 /// Idle time the test sets: none until it does.
@@ -684,6 +693,8 @@ impl Volumes for FakeVolumes {
 pub struct FakeDialogs {
     answers: Mutex<VecDeque<Option<PathBuf>>>,
     opened: AtomicUsize,
+    /// Run once, inside the next dialog, before it answers: while the user would be choosing.
+    on_open: Mutex<Option<Hook>>,
 }
 
 impl FakeDialogs {
@@ -695,8 +706,17 @@ impl FakeDialogs {
         self.opened.load(Ordering::SeqCst)
     }
 
+    /// Runs `hook` once, inside the next dialog, before it answers.
+    pub fn during_next_dialog(&self, hook: Hook) {
+        *lock(&self.on_open) = Some(hook);
+    }
+
     fn next(&self) -> Option<PathBuf> {
         self.opened.fetch_add(1, Ordering::SeqCst);
+        let hook = lock(&self.on_open).take();
+        if let Some(hook) = hook {
+            hook();
+        }
         lock(&self.answers).pop_front().flatten()
     }
 }
@@ -830,4 +850,59 @@ impl TestShell {
     pub fn vaults(&self) -> PathBuf {
         self.temp.path().join("vaults")
     }
+
+    /// A new vault named `name`, created and unlocked through the shell: its session and generation.
+    pub fn open_vault(&self, name: &str) -> (SessionId, u64) {
+        let password = zeroize::Zeroizing::new(TEST_PASSWORD.to_owned());
+        let created = heavy(|| self.shell.create_vault(name.into(), password, false));
+        let Ok(crate::error::Outcome::Done(tagged)) = created else {
+            panic!("the vault did not open");
+        };
+        (tagged.session, tagged.generation)
+    }
+
+    /// A file item holding a file named `name` with `bytes`, stored in the session's vault: the item's ID and the
+    /// file's ID, in hex.
+    pub fn stored_file(
+        &self,
+        session: SessionId,
+        generation: u64,
+        name: &str,
+        bytes: &[u8],
+    ) -> (String, String) {
+        let source = self.temp.path().join("sources");
+        fs::create_dir_all(&source).unwrap();
+        let source = source.join(name);
+        fs::write(&source, bytes).unwrap();
+        let stored = self
+            .shell
+            .sessions
+            .write(session, generation, |vault, cancel| {
+                let id = vault.new_file_item(None, &source, cancel)?;
+                let file = vault.get_item(&id)?.attachments[0].file_id;
+                Ok((id.to_hex(), file.to_hex()))
+            });
+        fs::remove_file(&source).unwrap();
+        stored.unwrap().data
+    }
+
+    /// The entries of the output journal; empty when there is no journal file.
+    pub fn journal(&self) -> Vec<PathBuf> {
+        let Ok(text) = fs::read(&self.shell.paths.outputs) else {
+            return Vec::new();
+        };
+        let journal: serde_json::Value = serde_json::from_slice(&text).unwrap();
+        assert_eq!(journal["version"], 1);
+        serde_json::from_value(journal["entries"].clone()).unwrap()
+    }
+
+    /// A new folder `name` in the test's temp folder, canonical (as a dialog's answer is made before use).
+    pub fn folder(&self, name: &str) -> PathBuf {
+        let dir = self.temp.path().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::canonicalize(dir).unwrap()
+    }
 }
+
+/// The password of every vault [`TestShell::open_vault`] makes.
+pub const TEST_PASSWORD: &str = "correct horse battery";

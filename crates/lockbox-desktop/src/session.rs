@@ -123,7 +123,10 @@ pub enum LockReason {
 /// variants (Tasks 13 to 15).
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Notice {}
+pub enum Notice {
+    /// The launch sweep of the output journal: `{ "kind": "output_sweep", removed, kept, unreadable }`.
+    OutputSweep(crate::outputs::SweepReport),
+}
 
 /// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`).
 pub trait Notifier: Send + Sync {

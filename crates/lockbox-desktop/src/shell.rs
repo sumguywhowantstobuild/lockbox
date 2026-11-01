@@ -1,6 +1,7 @@
-//! The app's state behind every command: plain Rust, so almost every rule is tested without a window. Later tasks add
-//! the output journal and the restore state.
+//! The app's state behind every command: plain Rust, so almost every rule is tested without a window. A later task
+//! adds the restore state.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -14,10 +15,11 @@ use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
 use crate::autolock::AutoLock;
 use crate::clipboard::Clipboard;
-use crate::error::ShellResult;
-use crate::locations::{LocationCheck, check_location};
+use crate::error::{ShellError, ShellResult};
+use crate::locations::{LocationCheck, check_location, is_within};
 use crate::lock;
 use crate::os::{KnownFolder, Os};
+use crate::outputs::{Outputs, SweepReport};
 use crate::paths::{StatePaths, state_paths};
 use crate::registry::Registry;
 use crate::session::{LockReason, Notice, Notifier, SessionId, Sessions};
@@ -39,8 +41,12 @@ pub struct Shell {
     /// Locks the vaults on idle, Windows' signals, vanished folders and app exit.
     pub autolock: AutoLock,
     pub registry: Registry,
+    /// The output journal (spec §7.2): every temporary plaintext file, written down before it exists.
+    pub outputs: Outputs,
     pub paths: StatePaths,
     pub(crate) os: Os,
+    /// Where the launch sweep's notice goes.
+    notifier: Arc<dyn Notifier>,
     /// The folders no vault may be inside (spec §6.10): Tauri's app-data folders, the Roaming profile and the state
     /// folder.
     forbidden: Vec<PathBuf>,
@@ -62,7 +68,12 @@ impl Shell {
         let sessions = Arc::new(Sessions::new(Arc::clone(&notifier))?);
         let settings = Arc::new(SettingsStore::load(paths.settings.clone()));
         // The auto-lock adds no lock hook; the clipboard reads the close's deadline from it.
-        let autolock = AutoLock::new(Arc::clone(&sessions), Arc::clone(&settings), notifier, &os);
+        let autolock = AutoLock::new(
+            Arc::clone(&sessions),
+            Arc::clone(&settings),
+            Arc::clone(&notifier),
+            &os,
+        );
         let clipboard = Clipboard::new(&os, Arc::clone(&settings), autolock.close_deadline())?;
         // The first lock hook, before any other (the "Open" cleanup comes after it): a lock clears the clipboard
         // before anything else of its hooks runs.
@@ -73,8 +84,10 @@ impl Shell {
             clipboard,
             autolock,
             registry: Registry::new(paths.registry.clone(), Arc::clone(&os.volumes)),
+            outputs: Outputs::new(&paths, Arc::clone(&os.volumes)),
             paths,
             os,
+            notifier,
             forbidden,
             creating: Mutex::default(),
             #[cfg(test)]
@@ -114,6 +127,38 @@ impl Shell {
     /// first call does anything; later ones return at once.
     pub fn shutdown(&self) {
         self.autolock.shutdown();
+    }
+
+    /// Launch work, in the app's `.setup` (never in a second copy of the app): sweeps the output journal's leftovers
+    /// and tells the page what it found (`lockbox://notice`, `output_sweep`) when there was anything to tell.
+    pub fn sweep_outputs(&self) -> SweepReport {
+        let report = self.outputs.sweep();
+        if report != SweepReport::default() {
+            self.notifier.notice(&Notice::OutputSweep(report));
+        }
+        report
+    }
+
+    /// Where an output the user chose in a save dialog (Save a copy, a backup) goes: `dest` with its folder canonical
+    /// (links, junctions and short names resolved), so the checks and the output journal name the folder it really
+    /// lands in. Refused inside the state folder (spec §7.2): `InvalidInput { what: "state folder" }`.
+    pub fn output_destination(&self, dest: &Path) -> ShellResult<PathBuf> {
+        let (Some(name), Some(folder)) = (dest.file_name(), dest.parent()) else {
+            return Err(ShellError::InvalidInput { what: "file name" });
+        };
+        let folder = fs::canonicalize(folder)?;
+        let state = match fs::canonicalize(&self.paths.root) {
+            Ok(state) => Some(state),
+            // Not made yet: nothing is inside it.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        if state.is_some_and(|state| is_within(&folder, &state)) {
+            return Err(ShellError::InvalidInput {
+                what: "state folder",
+            });
+        }
+        Ok(folder.join(name))
     }
 
     /// Whether a vault may be at `dir` (see [`check_location`]).

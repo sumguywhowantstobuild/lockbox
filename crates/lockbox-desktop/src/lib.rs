@@ -16,6 +16,7 @@ pub mod commands;
 pub mod error;
 pub mod locations;
 mod os;
+pub mod outputs;
 pub mod paths;
 pub mod pending;
 pub mod registry;
@@ -76,6 +77,9 @@ pub fn run() {
             if !app.manage(Arc::clone(&shell)) {
                 return Err("Lockbox will not run: its vault sessions could not be kept".into());
             }
+            // Launch work, here only: a second copy of the app exits before setup, so it never sweeps the first
+            // copy's temps. The output journal's leftovers first (spec §7.2).
+            shell.sweep_outputs();
             // Fail closed here too: never run without the auto-lock. Signals that came before this wait in the channel.
             route_signals(signals, Arc::clone(&shell))?;
             start_ticks(shell)?;
