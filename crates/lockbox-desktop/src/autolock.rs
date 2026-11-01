@@ -436,7 +436,8 @@ impl AutoLock {
     /// once (no open and no long operation is admitted after it), then finishes on a helper thread: every long
     /// operation cancelled, every vault revoked, then the hooks. Every call returns once every vault is revoked and the hooks are done, or at [`SHUTDOWN_WAIT`] after
     /// it was made, whichever comes first; the hooks get no longer than the first call's deadline. If the helper
-    /// thread cannot start, the vaults are revoked here (which never waits for a hook) and the hooks are skipped.
+    /// thread cannot start, the vaults are revoked here and the hooks run on the hook thread, waited for here until the
+    /// same deadline.
     pub(crate) fn shutdown(&self) {
         let deadline = Instant::now() + SHUTDOWN_WAIT;
         let mut first = false;
@@ -448,7 +449,7 @@ impl AutoLock {
             // Before anything else, and without waiting for any lock: the one closing gate, read where opens
             // register and publish and where long operations register, so both are shut out at the same instant.
             self.sessions.shut();
-            self.start_closing();
+            self.start_closing(deadline);
         }
         self.closing.wait(deadline, |phase| phase.revoked);
         let hooks_deadline = lock(&self.closing.phase).hooks_deadline.unwrap_or(deadline);
@@ -456,7 +457,7 @@ impl AutoLock {
             .wait(hooks_deadline.min(deadline), |phase| phase.done);
     }
 
-    fn start_closing(&self) {
+    fn start_closing(&self, deadline: Instant) {
         let (sessions, operations, closing) = (
             Arc::clone(&self.sessions),
             Arc::clone(&self.operations),
@@ -474,7 +475,7 @@ impl AutoLock {
             }
             let _done = MarkDone(Arc::clone(&closing));
             operations.close();
-            let hooks = sessions.close(true);
+            let hooks = sessions.close();
             closing.update(|phase| phase.revoked = true);
             if let Some(hooks) = hooks {
                 hooks.wait();
@@ -493,15 +494,17 @@ impl AutoLock {
             .spawn(helper);
         if spawned.is_err() {
             self.operations.close();
-            // No hook is queued, so none is waited for. Not bounded by the deadline: the revocation waits for a publish
-            // attempt under way (one rename or clipboard write). That needs Windows to refuse a thread at exit while a
-            // rename stalls; it costs a slow exit, never an open vault, and a deadline here would need a second lock
-            // path (fix round 2, controller ruling).
-            let _ = self.sessions.close(false);
-            self.closing.update(|phase| {
-                phase.revoked = true;
-                phase.done = true;
-            });
+            // Not bounded by the deadline: the revocation waits for a publish attempt under way (one rename or
+            // clipboard write). That needs Windows to refuse a thread at exit while a rename stalls; it costs a slow
+            // exit, never an open vault, and a deadline here would need a second lock path (fix round 2, controller
+            // ruling). The hooks (the clipboard clear first) run on the hook thread, which started with the sessions,
+            // and are waited for until `deadline` (Task 12 fix round 1).
+            let hooks = self.sessions.close();
+            self.closing.update(|phase| phase.revoked = true);
+            if let Some(hooks) = hooks {
+                hooks.wait_until(deadline);
+            }
+            self.closing.update(|phase| phase.done = true);
         }
     }
 }
@@ -1097,8 +1100,8 @@ mod tests {
         assert!(import.is_cancelled());
     }
 
-    /// Fix round 1 (3, 7): with no helper thread, every vault is still revoked (inline, bounded) and the hooks are
-    /// skipped.
+    /// Fix round 1 (3, 7): with no helper thread, every vault is still revoked (inline, bounded); since Task 12 fix
+    /// round 1 the hooks run too, waited for within the close's time.
     #[test]
     fn shutdown_without_helper_revokes_inline() {
         let ts = TestShell::new();
@@ -1113,7 +1116,9 @@ mod tests {
         assert_eq!(state(&ts, family), SessionState::Locked);
         assert!(ts.shell.sessions.release_wait(family, GIVE_UP));
         assert!(restore.is_cancelled());
-        assert_eq!(hooks.load(Ordering::SeqCst), 0, "no hook ran");
+        // Task 12 fix round 1 (3): the hooks still run, on the hook thread that is already there (the clipboard clear
+        // among them), within the close's time.
+        assert_eq!(hooks.load(Ordering::SeqCst), 1, "the hooks did not run");
     }
 
     /// Fix round 1 (4): idle locks an open under way and the pending choices too, with no vault unlocked; one lock per

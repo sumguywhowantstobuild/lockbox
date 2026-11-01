@@ -1,25 +1,32 @@
 //! Copying a field to the clipboard (spec §7.3), entirely in Rust (§4.1): the value never crosses to the page. Each
 //! copy is kept out of clipboard history and cloud sync ([`ClipboardBackend::write_secret`]), and cleared after the
-//! clear delay, or when its vault locks, or when the app closes, but only while the clipboard still holds it: whatever
-//! the user copied since is left alone.
+//! clear delay, or when its vault locks, or when the app closes, but only while the clipboard still holds it (its
+//! own random tag is still there): whatever the user copied since is left alone. A clear that finds the clipboard
+//! busy is tried again until it is done or the copy is gone.
 
-use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
+use crate::autolock::SHUTDOWN_WAIT;
 use crate::error::ShellResult;
 use crate::lock;
-use crate::os::{CLIPBOARD_FAILED, ClipboardBackend, Clock, Os, Timer};
-use crate::session::{LockHook, SessionId, Sessions};
+use crate::os::{CLIPBOARD_FAILED, ClipboardBackend, Clock, CopyTag, Os, Timer};
+use crate::session::{LockHook, LockReason, SessionId, Sessions};
 use crate::settings::SettingsStore;
+
+/// How long after a failed clear (the clipboard busy) the next try comes. Each try is itself bounded (ten openings
+/// 5 ms apart), so a program holding the clipboard costs a try every quarter second, never a blocked thread.
+pub const CLEAR_RETRY: Duration = Duration::from_millis(250);
 
 /// The clipboard copy Lockbox made last, while it may still be on the clipboard.
 #[derive(Debug, Clone, Copy)]
 struct Owned {
-    /// The clipboard's sequence number right after the copy: any later change moves it on.
-    seq: NonZeroU32,
+    /// The copy's tag: while the clipboard holds it, the copy is still there.
+    tag: CopyTag,
     /// The session the value came from: its lock clears the copy.
     session: SessionId,
     /// This copy's own number: only this copy's timer clears it.
@@ -29,6 +36,8 @@ struct Owned {
 /// What the lock hook and the timers share with [`Clipboard`].
 struct Shared {
     backend: Arc<dyn ClipboardBackend>,
+    timer: Arc<dyn Timer>,
+    clock: Arc<dyn Clock>,
     /// Held across each write (so the copy on the clipboard and the one recorded here are always the same) and each
     /// clear. Lock order: a session's publish guard, then this. The hook and the timers take only this.
     owned: Mutex<Option<Owned>>,
@@ -36,16 +45,59 @@ struct Shared {
 }
 
 impl Shared {
-    /// Clears the recorded copy when `ours` picks it and the clipboard still holds it. Afterwards nothing is recorded,
-    /// unless the clipboard could not be opened or emptied: the copy then stays recorded, so its timer (if still to
-    /// come), a lock or the app's close tries again.
-    fn clear_where(&self, ours: impl Fn(&Owned) -> bool) {
+    /// One try at clearing the recorded copy, when `ours` picks it: emptied while its tag is still on the clipboard,
+    /// left alone otherwise, and forgotten either way. `Some(copy_id)` when the clipboard could not be opened or
+    /// emptied: the copy stays recorded and needs another try.
+    fn try_clear(&self, ours: impl Fn(&Owned) -> bool) -> Option<u64> {
         let mut owned = lock(&self.owned);
-        let Some(copy) = owned.filter(|copy| ours(copy)) else {
-            return;
+        let copy = owned.filter(|copy| ours(copy))?;
+        match self.backend.clear_if(&copy.tag) {
+            Ok(_) => {
+                *owned = None;
+                None
+            }
+            Err(_) => Some(copy.copy_id),
+        }
+    }
+
+    /// Clears the copy `ours` picks, and keeps trying every [`CLEAR_RETRY`] on the timer until it is done.
+    fn clear(self: &Arc<Self>, ours: impl Fn(&Owned) -> bool) {
+        if let Some(copy_id) = self.try_clear(ours) {
+            self.retry(copy_id);
+        }
+    }
+
+    /// Another try at clearing the copy `copy_id`, [`CLEAR_RETRY`] from now on the timer. Without a timer, tries here
+    /// for up to [`SHUTDOWN_WAIT`] instead (a thread could not start: the copy must not wait for a lock).
+    fn retry(self: &Arc<Self>, copy_id: u64) {
+        let shared = Arc::downgrade(self);
+        let again = move || {
+            if let Some(shared) = Weak::upgrade(&shared) {
+                shared.clear(|owned| owned.copy_id == copy_id);
+            }
         };
-        if self.backend.clear_if(copy.seq).is_ok() {
-            *owned = None;
+        let armed = self
+            .timer
+            .at(self.clock.now() + CLEAR_RETRY, Box::new(again));
+        if armed.is_err() {
+            self.clear_until(
+                |owned| owned.copy_id == copy_id,
+                Instant::now() + SHUTDOWN_WAIT,
+            );
+        }
+    }
+
+    /// Tries to clear the copy `ours` picks, here and now, every [`CLEAR_RETRY`] until `deadline`: for app close,
+    /// after which no timer runs. True once it is done (or there was nothing to clear).
+    fn clear_until(&self, ours: impl Fn(&Owned) -> bool, deadline: Instant) -> bool {
+        loop {
+            if self.try_clear(&ours).is_none() {
+                return true;
+            }
+            if Instant::now() + CLEAR_RETRY > deadline {
+                return false;
+            }
+            thread::sleep(CLEAR_RETRY);
         }
     }
 }
@@ -53,8 +105,6 @@ impl Shared {
 /// Lockbox's clipboard copies (spec §7.3).
 pub struct Clipboard {
     shared: Arc<Shared>,
-    timer: Arc<dyn Timer>,
-    clock: Arc<dyn Clock>,
     settings: Arc<SettingsStore>,
     /// Tests only: run once, right after the next write's publish ends, before its timer is set.
     #[cfg(test)]
@@ -67,11 +117,11 @@ impl Clipboard {
         Clipboard {
             shared: Arc::new(Shared {
                 backend: Arc::clone(&os.clipboard),
+                timer: Arc::clone(&os.timer),
+                clock: Arc::clone(&os.clock),
                 owned: Mutex::default(),
                 copies: AtomicU64::new(0),
             }),
-            timer: Arc::clone(&os.timer),
-            clock: Arc::clone(&os.clock),
             settings,
             #[cfg(test)]
             after_write: Mutex::default(),
@@ -79,20 +129,28 @@ impl Clipboard {
     }
 
     /// The lock hook, to be added before any other (spec §7.4 step 5): a lock of the session the copy came from, or
-    /// of all (`None`, app close included), clears the copy while it is still on the clipboard. Runs on the lock-hook
-    /// thread; its clipboard opening gives up after [`CLIPBOARD_TRIES`](crate::os::CLIPBOARD_TRIES) short tries, so it
-    /// never holds up the hooks after it for long.
+    /// of all (`None`), clears the copy while it is still on the clipboard. Runs on the lock-hook thread. A lock tries
+    /// once (ten short openings) and, if the clipboard is busy, leaves the retries to the timer, so it never holds up
+    /// the hooks after it for long. App close tries again here until [`SHUTDOWN_WAIT`] has passed, since no timer
+    /// runs once the app is gone; the close waits for it no longer than that anyway.
     pub fn lock_hook(&self) -> LockHook {
         let shared = Arc::clone(&self.shared);
-        Box::new(move |only, _reason| {
-            shared.clear_where(|owned| only.is_none_or(|locked| locked == owned.session));
+        Box::new(move |only, reason| {
+            let ours = |owned: &Owned| only.is_none_or(|locked| locked == owned.session);
+            match reason {
+                LockReason::AppClosing => {
+                    shared.clear_until(ours, Instant::now() + SHUTDOWN_WAIT);
+                }
+                _ => shared.clear(ours),
+            }
         })
     }
 
-    /// Copies `secret`, a value read from `session` in `generation`, to the clipboard, and clears it after the clear
-    /// delay as set now. The write runs inside [`Sessions::publish`]: never once the session has locked (`Locked`,
-    /// nothing written), and recorded before the publish ends, so a lock that comes after it always finds the copy and
-    /// its hook clears it.
+    /// Copies `secret`, a value read from `session` in `generation`, to the clipboard with a new random tag, and
+    /// clears it after the clear delay as set now. The write runs inside [`Sessions::publish`]: never once the session
+    /// has locked (`Locked`, nothing written), and recorded before the publish ends, so a lock that comes after it
+    /// always finds the copy and its hook clears it. A write that fails before touching the clipboard leaves the
+    /// earlier copy recorded; one whose clean-up failed too records this copy, to be cleared by its tag.
     pub fn copy(
         &self,
         sessions: &Sessions,
@@ -101,18 +159,29 @@ impl Clipboard {
         secret: Zeroizing<String>,
     ) -> ShellResult<()> {
         let delay = self.settings.get().clipboard_delay();
-        let copy_id = sessions.publish(session, generation, || {
+        let mut tag = CopyTag::default();
+        getrandom::fill(&mut tag).map_err(|_| CLIPBOARD_FAILED)?;
+        let (copy_id, failed) = sessions.publish(session, generation, || {
             let mut owned = lock(&self.shared.owned);
-            let seq = self.shared.backend.write_secret(&secret)?;
-            let copy_id = self.shared.copies.fetch_add(1, Ordering::SeqCst) + 1;
-            *owned = Some(Owned {
-                seq,
-                session,
-                copy_id,
-            });
-            Ok(copy_id)
+            let written = self.shared.backend.write_secret(&secret, &tag);
+            match written {
+                Err(failed) if !failed.left_behind => Err(failed.error),
+                written => {
+                    let copy_id = self.shared.copies.fetch_add(1, Ordering::SeqCst) + 1;
+                    *owned = Some(Owned {
+                        tag,
+                        session,
+                        copy_id,
+                    });
+                    Ok((copy_id, written.err()))
+                }
+            }
         })?;
         drop(secret);
+        if let Some(failed) = failed {
+            self.shared.retry(copy_id);
+            return Err(failed.error);
+        }
         #[cfg(test)]
         {
             let hook = lock(&self.after_write).take();
@@ -123,16 +192,16 @@ impl Clipboard {
         let shared = Arc::downgrade(&self.shared);
         let clear = move || {
             if let Some(shared) = Weak::upgrade(&shared) {
-                shared.clear_where(|owned| owned.copy_id == copy_id);
+                shared.clear(|owned| owned.copy_id == copy_id);
             }
         };
-        if self
+        let armed = self
+            .shared
             .timer
-            .at(self.clock.now() + delay, Box::new(clear))
-            .is_err()
-        {
+            .at(self.shared.clock.now() + delay, Box::new(clear));
+        if armed.is_err() {
             // Without a timer the copy would stay until a lock: take it off now instead.
-            self.shared.clear_where(|owned| owned.copy_id == copy_id);
+            self.shared.clear(|owned| owned.copy_id == copy_id);
             return Err(CLIPBOARD_FAILED);
         }
         Ok(())
@@ -154,7 +223,7 @@ impl Clipboard {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::sync::Barrier;
+    use std::sync::{Barrier, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -163,13 +232,16 @@ mod tests {
 
     use super::*;
     use crate::error::{Outcome, ShellError};
+    use crate::os::CLIPBOARD_BUSY;
     use crate::os::EXCLUSION_FORMATS;
-    use crate::session::{Location, LockReason, OpenStep, Opened};
+    use crate::session::{Location, LockReason, OpenStep, Opened, SessionState};
     use crate::settings::Settings;
     use crate::testing::{TestShell, heavy};
 
     const PW: &str = "correct horse battery";
     const SECRET: &str = "Pw-0123456789-xyz";
+    /// How long a test thread waits for another before it fails instead of hanging.
+    const GIVE_UP: Duration = Duration::from_secs(60);
 
     fn secret(text: &str) -> Zeroizing<String> {
         Zeroizing::new(text.to_owned())
@@ -267,7 +339,7 @@ mod tests {
         let (s, g) = unlock(&ts, &family);
         let start = ts.clock.now();
         copy(&ts, s, g, SECRET).unwrap();
-        ts.clipboard.user_copy("mine");
+        assert!(ts.clipboard.user_copy("mine"));
         at(&ts, start, secs(30));
         assert_eq!(
             ts.clipboard.text().as_deref(),
@@ -277,7 +349,7 @@ mod tests {
 
         let start = ts.clock.now();
         copy(&ts, s, g, SECRET).unwrap();
-        ts.clipboard.user_copy("mine again");
+        assert!(ts.clipboard.user_copy("mine again"));
         ts.shell.sessions.lock(s, LockReason::Manual);
         assert_eq!(
             ts.clipboard.text().as_deref(),
@@ -286,7 +358,7 @@ mod tests {
         );
         let (s, g) = unlock(&ts, &family);
         copy(&ts, s, g, SECRET).unwrap();
-        ts.clipboard.user_copy("mine a third time");
+        assert!(ts.clipboard.user_copy("mine a third time"));
         ts.shell.sessions.lock_all(LockReason::Manual);
         at(&ts, start, secs(300));
         assert_eq!(
@@ -423,9 +495,10 @@ mod tests {
         assert_eq!(ts.shell.clipboard.owner(), None);
     }
 
-    /// A clear that finds the clipboard busy keeps the copy recorded: the lock that follows clears it.
+    /// Fix round 1 (2): a timer clear that finds the clipboard busy keeps trying, [`CLEAR_RETRY`] apart, and clears
+    /// the copy once the clipboard is free, with nothing more from the user.
     #[test]
-    fn busy_clear_is_tried_again_at_the_lock() {
+    fn busy_timer_clear_is_retried_until_done() {
         let ts = TestShell::new();
         let family = new_vault(&ts.vaults(), "Family");
         let (s, g) = unlock(&ts, &family);
@@ -433,11 +506,173 @@ mod tests {
         copy(&ts, s, g, SECRET).unwrap();
         ts.clipboard.hold_open_elsewhere(true);
         at(&ts, start, secs(30));
+        at(&ts, start, secs(30) + CLEAR_RETRY);
         assert_eq!(ts.clipboard.text().as_deref(), Some(SECRET));
-        assert_eq!(ts.shell.clipboard.owner(), Some(s));
+        assert_eq!(ts.shell.clipboard.owner(), Some(s), "given up while busy");
         ts.clipboard.hold_open_elsewhere(false);
+        at(&ts, start, secs(30) + CLEAR_RETRY * 2);
+        assert_eq!(ts.clipboard.text(), None, "never tried again");
+        assert_eq!(ts.shell.clipboard.owner(), None);
+        assert_eq!(ts.timer.waiting(), 0, "still retrying after the clear");
+    }
+
+    /// Fix round 1 (2): a lock whose clear finds the clipboard busy returns, and leaves a retry that clears the copy
+    /// once the clipboard is free.
+    #[test]
+    fn busy_lock_clear_is_retried_until_done() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        copy(&ts, s, g, SECRET).unwrap();
+        ts.clipboard.hold_open_elsewhere(true);
         ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(ts.clipboard.text().as_deref(), Some(SECRET));
+        ts.clipboard.hold_open_elsewhere(false);
+        let now = ts.clock.now();
+        at(&ts, now, CLEAR_RETRY);
+        assert_eq!(
+            ts.clipboard.text(),
+            None,
+            "never tried again after the lock"
+        );
+        assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// Fix round 1 (2): closing the app while the clipboard is busy keeps trying within the close's time, so the copy
+    /// is gone before the app is.
+    #[test]
+    fn busy_close_clear_is_retried_within_the_deadline() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        copy(&ts, s, g, SECRET).unwrap();
+        // Busy through the first try (ten openings), free for the next.
+        ts.clipboard.hold_open_for(10);
+        ts.shell.shutdown();
+        assert_eq!(ts.clipboard.text(), None, "app close left the copy");
+        assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// Fix round 1 (3): when the close's helper thread cannot start, the clipboard is still cleared.
+    #[test]
+    fn shutdown_without_helper_still_clears() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        copy(&ts, s, g, SECRET).unwrap();
+        ts.shell.autolock.fail_next_spawn();
+        ts.shell.shutdown();
+        assert_eq!(ts.clipboard.text(), None, "app close left the copy");
+        assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// Fix round 1 (2): no timer at all and a busy clipboard at the immediate clear: the copy is still taken off,
+    /// tried again here for a short while.
+    #[test]
+    fn no_timer_and_busy_clear_still_clears() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        ts.timer.fail_all();
+        // The write's own opening goes through; the immediate clear's ten tries find it busy.
+        let clipboard = Arc::clone(&ts.clipboard);
+        ts.shell
+            .clipboard
+            .after_next_write(Box::new(move || clipboard.hold_open_for(10)));
+        assert_eq!(copy(&ts, s, g, SECRET), Err(CLIPBOARD_FAILED));
         assert_eq!(ts.clipboard.text(), None);
+        assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// Fix round 1 (4): the write fails and so does its empty: the copy's tag may still be there, so the copy stays
+    /// recorded and a retry clears it.
+    #[test]
+    fn failed_rollback_keeps_the_copy_owned_and_retries() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        ts.clipboard.fail_text();
+        ts.clipboard.fail_empty_at(1);
+        assert_eq!(copy(&ts, s, g, SECRET), Err(CLIPBOARD_FAILED));
+        assert_eq!(ts.clipboard.text(), None, "the text was left");
+        assert!(ts.clipboard.tag().is_some());
+        assert_eq!(ts.shell.clipboard.owner(), Some(s));
+        let now = ts.clock.now();
+        at(&ts, now, CLEAR_RETRY);
+        assert_eq!(ts.clipboard.tag(), None, "never cleared");
+        assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// A write that fails before touching the clipboard keeps the earlier copy recorded, so its clear still comes.
+    #[test]
+    fn clean_failure_keeps_the_earlier_copy() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        let start = ts.clock.now();
+        copy(&ts, s, g, SECRET).unwrap();
+        ts.clipboard.hold_open_for(10);
+        assert_eq!(copy(&ts, s, g, "second"), Err(CLIPBOARD_BUSY));
+        assert_eq!(ts.clipboard.text().as_deref(), Some(SECRET));
+        at(&ts, start, secs(30));
+        assert_eq!(ts.clipboard.text(), None, "the earlier copy was forgotten");
+    }
+
+    /// Fix round 1 (1, 7): another program copies the instant Lockbox's write closes the clipboard. Neither the timer,
+    /// nor a lock, nor app close ever clears it.
+    #[test]
+    fn copy_right_after_the_write_is_never_cleared() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        let start = ts.clock.now();
+        let clipboard = Arc::clone(&ts.clipboard);
+        ts.clipboard
+            .after_next_close(Box::new(move || assert!(clipboard.user_copy("theirs"))));
+        copy(&ts, s, g, SECRET).unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some("theirs"));
+        at(&ts, start, secs(30));
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        ts.shell.shutdown();
+        assert_eq!(
+            ts.clipboard.text().as_deref(),
+            Some("theirs"),
+            "their copy was cleared"
+        );
+    }
+
+    /// Fix round 1 (7): a lock that revokes the session while the write is still under way (after the clipboard
+    /// closed, before the copy is recorded) waits for the write, then finds the copy and clears it.
+    #[test]
+    fn lock_during_the_write_clears_it() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        let shell = Arc::clone(&ts.shell);
+        let (locker_out, locker) = mpsc::channel();
+        ts.clipboard.after_next_close(Box::new(move || {
+            let locking = Arc::clone(&shell);
+            let handle = thread::spawn(move || locking.sessions.lock_all(LockReason::Manual));
+            // Revoked (step 1 done): the lock now waits for this write's publish attempt to end.
+            let began = Instant::now();
+            while shell
+                .sessions
+                .list()
+                .iter()
+                .any(|info| info.session == s && info.state == SessionState::Unlocked)
+            {
+                assert!(began.elapsed() < GIVE_UP, "the lock never revoked");
+                thread::yield_now();
+            }
+            locker_out.send(handle).unwrap();
+        }));
+        assert_eq!(
+            copy(&ts, s, g, SECRET),
+            Ok(()),
+            "the write had started before the lock"
+        );
+        locker.recv().unwrap().join().unwrap();
+        assert_eq!(ts.clipboard.text(), None, "the lock missed the copy");
         assert_eq!(ts.shell.clipboard.owner(), None);
     }
 
@@ -464,7 +699,7 @@ mod tests {
         let ts = TestShell::new();
         let family = new_vault(&ts.vaults(), "Family");
         let (s, g) = unlock(&ts, &family);
-        ts.clipboard.user_copy("theirs");
+        assert!(ts.clipboard.user_copy("theirs"));
         ts.clipboard.fail_format_at(2);
         assert_eq!(copy(&ts, s, g, SECRET), Err(CLIPBOARD_FAILED));
         assert_eq!(

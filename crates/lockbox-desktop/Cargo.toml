@@ -11,6 +11,8 @@ publish = false
 lockbox-core = { path = "../lockbox-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# A clipboard copy's tag (spec §7.3): the OS random source, the engine's version.
+getrandom = "0.4"
 tauri = { version = "2.12.5", features = [] }
 tauri-plugin-single-instance = "2.5.4"
 # Typed passwords and the recovery key, wiped when dropped; `serde` so they parse from a request and the recovery
@@ -34,6 +36,8 @@ windows-core = { version = "0.62", default-features = false }
 # the path Windows hands back).
 # Auto-lock (spec §7.4): `Win32_UI_Input_KeyboardAndMouse` (`GetLastInputInfo`) and `Win32_System_SystemInformation`
 # (`GetTickCount`), for idle time.
+# Clipboard text written by Rust itself, so a refused block is wiped (spec §7.3): `Win32_System_DataExchange`
+# (`SetClipboardData`) and `Win32_System_Memory` (global blocks).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
@@ -41,7 +45,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_CloudFilters",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Power",
     "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",

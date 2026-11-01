@@ -307,6 +307,11 @@ impl Shell {
         })?;
         self.clipboard
             .copy(&self.sessions, value.session, value.generation, value.data)?;
+        // The generation once more before answering (spec §7.4): a lock after the write (whose hook clears the copy)
+        // answers `Locked`, as `open_url` does.
+        if !self.unlocked().contains(&(session, generation)) {
+            return Err(ShellError::Locked);
+        }
         Ok(Tagged {
             session,
             generation,
@@ -1688,7 +1693,7 @@ mod tests {
                 .unwrap();
         assert!(!json.contains(LOGIN_PW), "the answer holds the password");
 
-        ts.clipboard.user_copy("theirs");
+        assert!(ts.clipboard.user_copy("theirs"));
         let opens = ts.clipboard.opens();
         let note = ts
             .shell
@@ -1734,12 +1739,30 @@ mod tests {
 
         // A stale generation: `Locked`, nothing written.
         ts.shell.sessions.lock(s, LockReason::Manual);
-        ts.clipboard.user_copy("theirs");
+        assert!(ts.clipboard.user_copy("theirs"));
         assert_eq!(
             ts.shell.copy_field(s, g, &id, CopyField::Password).err(),
             Some(ShellError::Locked)
         );
         assert_eq!(ts.clipboard.text().as_deref(), Some("theirs"));
+    }
+
+    /// Fix round 1 (6): a lock that comes after the write, before the command answers: `Locked`, as every command
+    /// answers once its session has locked, and the copy is cleared by the lock.
+    #[test]
+    fn copy_field_answers_locked_when_a_lock_follows_the_write() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        let shell = Arc::clone(&ts.shell);
+        ts.shell.clipboard.after_next_write(Box::new(move || {
+            shell.sessions.lock_all(LockReason::Manual);
+        }));
+        assert_eq!(
+            ts.shell.copy_field(s, g, &id, CopyField::Password).err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(ts.clipboard.text(), None);
     }
 
     #[test]

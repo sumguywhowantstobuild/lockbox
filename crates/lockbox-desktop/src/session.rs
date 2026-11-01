@@ -237,6 +237,18 @@ impl HooksDone {
                 .unwrap_or_else(PoisonError::into_inner),
         );
     }
+
+    /// Like [`wait`](Self::wait), giving up at `deadline`: whether the hooks have run.
+    pub fn wait_until(&self, deadline: Instant) -> bool {
+        let done = lock(&self.0.done);
+        let left = deadline.saturating_duration_since(Instant::now());
+        let (done, _) = self
+            .0
+            .finished
+            .wait_timeout_while(done, left, |done| !*done)
+            .unwrap_or_else(PoisonError::into_inner);
+        *done
+    }
 }
 
 /// Starts the hook thread: it runs each job it is sent, in order, and ends once its queue's sender is gone (the
@@ -1047,11 +1059,11 @@ impl Sessions {
         self.closing.store(true, Ordering::SeqCst);
     }
 
-    /// The app is closing: shuts the gate and revokes every session, for good. With `hooks` false (no thread may be
-    /// waited for), no hook is queued.
-    pub(crate) fn close(&self, hooks: bool) -> Option<HooksDone> {
+    /// The app is closing: shuts the gate and revokes every session, for good. Its hooks are queued like any lock's;
+    /// the answer tells when they have run.
+    pub(crate) fn close(&self) -> Option<HooksDone> {
         self.shut();
-        self.revoke(Which::All { close: true }, LockReason::AppClosing, hooks)
+        self.revoke(Which::All { close: true }, LockReason::AppClosing, true)
     }
 
     /// Takes `transitions` for a lock, waiting while another lock (or an open publishing) holds it.

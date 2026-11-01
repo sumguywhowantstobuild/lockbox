@@ -32,17 +32,41 @@ pub struct Os {
     pub timer: Arc<dyn Timer>,
 }
 
+/// A copy's own tag (spec §7.3): 16 random bytes from the OS, written beside the copy in [`TAG_FORMAT`]. Not secret
+/// and not derived from the copied value; it only tells Lockbox's copy apart from anything copied since.
+pub type CopyTag = [u8; 16];
+
 /// The clipboard as Lockbox uses it (spec §7.3). Each method is one clipboard opening: tried every
 /// [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times, then [`CLIPBOARD_BUSY`]. The clipboard is opened with no
 /// owner window, so a program that holds it open with no window of its own does not make it busy (Windows' rule).
 pub trait ClipboardBackend: Send + Sync {
-    /// Puts `text` on the clipboard, marked to stay out of clipboard history, cloud sync and clipboard monitors: the
-    /// clipboard's sequence number with Lockbox's copy on it. Nothing is written unless all three marks can be; a
-    /// failure after the clipboard was emptied empties it again, so a copy is never left without its marks.
-    fn write_secret(&self, text: &str) -> ShellResult<NonZeroU32>;
-    /// Empties the clipboard only while it still holds Lockbox's copy (its sequence number is still `ours`), checked
-    /// and emptied in the same opening: whether it did. Anything copied since is left alone.
-    fn clear_if(&self, ours: NonZeroU32) -> ShellResult<bool>;
+    /// Puts `text` on the clipboard with `tag` in [`TAG_FORMAT`] and the three [`EXCLUSION_FORMATS`] that keep it out
+    /// of clipboard history, cloud sync and clipboard monitors, all in one opening. The text goes last, so it is never
+    /// on the clipboard without its marks. A failure after the clipboard was emptied empties it again in the same
+    /// opening; [`WriteFailed::left_behind`] says when that failed too.
+    fn write_secret(&self, text: &str, tag: &CopyTag) -> Result<(), WriteFailed>;
+    /// Empties the clipboard only while it still holds the copy tagged `tag`, checked and emptied in the same opening:
+    /// whether it did. Anything copied since (which empties the clipboard, tag included) is left alone.
+    fn clear_if(&self, tag: &CopyTag) -> ShellResult<bool>;
+}
+
+/// A write that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteFailed {
+    pub error: ShellError,
+    /// The write had started and the empty after its failure failed as well: the clipboard may still hold the copy's
+    /// tag and marks (never its text, which goes last), to be cleared later by the tag.
+    pub left_behind: bool,
+}
+
+impl WriteFailed {
+    /// Nothing of the copy is on the clipboard.
+    fn clean(error: ShellError) -> WriteFailed {
+        WriteFailed {
+            error,
+            left_behind: false,
+        }
+    }
 }
 
 /// Another program kept the clipboard open through every try.
@@ -68,9 +92,11 @@ pub const EXCLUSION_FORMATS: [&str; 3] = [
     "CanIncludeInClipboardHistory",
     "CanUploadToCloudClipboard",
 ];
+/// Lockbox's own format, holding the copy's [`CopyTag`].
+pub const TAG_FORMAT: &str = "Lockbox.CopyTag";
 
-/// The clipboard's single steps, as Windows offers them (`clipboard_win::raw`). [`ClipboardSteps`] puts them in
-/// order, so the order and its failure paths are the same for the real clipboard and the tests' fake.
+/// The clipboard's single steps, as Windows offers them. [`ClipboardSteps`] puts them in order, so the order and its
+/// failure paths are the same for the real clipboard and the tests' fake.
 pub trait ClipboardCalls: Send + Sync {
     /// The open clipboard: closed when dropped, on the thread that opened it.
     type Opened;
@@ -79,12 +105,13 @@ pub trait ClipboardCalls: Send + Sync {
     /// One try at opening the clipboard; `None` while another program has it open.
     fn open(&self) -> Option<Self::Opened>;
     fn empty(&self) -> bool;
-    /// Sets the clipboard's text (it empties the clipboard first, as `raw::set_string` does).
+    /// Adds the text (`CF_UNICODETEXT`), keeping what is already on the clipboard. On a failure no copy of the text
+    /// is left in memory the clipboard does not own.
     fn set_text(&self, text: &str) -> bool;
-    /// Adds `format` with a DWORD 0, keeping what is already on the clipboard.
-    fn set_dword_zero(&self, format: NonZeroU32) -> bool;
-    /// The clipboard's sequence number (`GetClipboardSequenceNumber`); `None` without access.
-    fn seq_num(&self) -> Option<NonZeroU32>;
+    /// Adds `format` holding `bytes`, keeping what is already on the clipboard.
+    fn set_bytes(&self, format: NonZeroU32, bytes: &[u8]) -> bool;
+    /// What `format` holds on the clipboard; `None` when it is not there.
+    fn read_bytes(&self, format: NonZeroU32) -> Option<Vec<u8>>;
 }
 
 /// [`ClipboardBackend`] from single [`ClipboardCalls`] steps.
@@ -104,54 +131,54 @@ impl<C: ClipboardCalls> ClipboardSteps<C> {
         Err(CLIPBOARD_BUSY)
     }
 
-    /// The text, then each exclusion format: false at the first step that fails.
-    fn fill(&self, text: &str, formats: [NonZeroU32; 3]) -> bool {
-        self.0.set_text(text)
-            && formats
+    /// The tag's format and the exclusion formats, registered before anything is written.
+    fn formats(&self) -> ShellResult<(NonZeroU32, [NonZeroU32; 3])> {
+        let tag = self.0.register_format(TAG_FORMAT);
+        match (
+            tag,
+            EXCLUSION_FORMATS.map(|name| self.0.register_format(name)),
+        ) {
+            (Some(tag), [Some(a), Some(b), Some(c)]) => Ok((tag, [a, b, c])),
+            _ => Err(CLIPBOARD_FAILED),
+        }
+    }
+
+    /// The tag, each exclusion format, then the text: false at the first step that fails.
+    fn fill(&self, text: &str, tag: &CopyTag, formats: (NonZeroU32, [NonZeroU32; 3])) -> bool {
+        let (tag_format, exclusions) = formats;
+        self.0.set_bytes(tag_format, tag)
+            && exclusions
                 .into_iter()
-                .all(|format| self.0.set_dword_zero(format))
+                .all(|format| self.0.set_bytes(format, &0u32.to_ne_bytes()))
+            && self.0.set_text(text)
     }
 }
 
 impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
-    /// The sequence number is read right after the clipboard is closed, not while it is open: closing it after a
-    /// change adds the formats Windows derives from the text (`CF_TEXT`, `CF_OEMTEXT`, `CF_LOCALE`), each moving the
-    /// number on (+3 on Windows 11, seen in the hands-on probe), so a number read while open never matches again.
-    /// Another program copying in the instant between the close and the read would have its own copy cleared at the
-    /// delay; Lockbox's copy is gone either way.
-    fn write_secret(&self, text: &str) -> ShellResult<NonZeroU32> {
-        // Registered before anything is written: a copy is never on the clipboard without its marks.
-        let [Some(a), Some(b), Some(c)] =
-            EXCLUSION_FORMATS.map(|name| self.0.register_format(name))
-        else {
-            return Err(CLIPBOARD_FAILED);
-        };
-        {
-            let _open = self.open()?;
-            if !self.0.empty() {
-                return Err(CLIPBOARD_FAILED);
-            }
-            if !self.fill(text, [a, b, c]) {
-                // Never a copy left without all its marks. Best effort: the failure is answered either way.
-                self.0.empty();
-                return Err(CLIPBOARD_FAILED);
-            }
+    fn write_secret(&self, text: &str, tag: &CopyTag) -> Result<(), WriteFailed> {
+        let formats = self.formats().map_err(WriteFailed::clean)?;
+        let _open = self.open().map_err(WriteFailed::clean)?;
+        if !self.0.empty() {
+            return Err(WriteFailed::clean(CLIPBOARD_FAILED));
         }
-        match self.0.seq_num() {
-            Some(seq) => Ok(seq),
-            None => {
-                // A copy whose number is unknown could never be cleared: take it off now, best effort.
-                if let Ok(_open) = self.open() {
-                    self.0.empty();
-                }
-                Err(CLIPBOARD_FAILED)
-            }
+        if self.fill(text, tag, formats) {
+            return Ok(());
         }
+        // Still in the same opening: nothing half-written is left for another program to see.
+        Err(WriteFailed {
+            error: CLIPBOARD_FAILED,
+            left_behind: !self.0.empty(),
+        })
     }
 
-    fn clear_if(&self, ours: NonZeroU32) -> ShellResult<bool> {
+    fn clear_if(&self, tag: &CopyTag) -> ShellResult<bool> {
+        let format = self.0.register_format(TAG_FORMAT).ok_or(CLIPBOARD_FAILED)?;
         let _open = self.open()?;
-        if self.0.seq_num() != Some(ours) {
+        let still_ours = self
+            .0
+            .read_bytes(format)
+            .is_some_and(|held| held.get(..tag.len()) == Some(tag.as_slice()));
+        if !still_ours {
             return Ok(false);
         }
         match self.0.empty() {
@@ -358,6 +385,13 @@ mod tests {
 
     /// How long a test waits for the timer thread before it fails instead of hanging.
     const GIVE_UP: Duration = Duration::from_secs(60);
+    const TAG: CopyTag = [7; 16];
+    const OTHER_TAG: CopyTag = [9; 16];
+
+    fn fake_steps() -> (Arc<FakeClipboard>, ClipboardSteps<FakeClipboard>) {
+        let fake = Arc::new(FakeClipboard::default());
+        (Arc::clone(&fake), ClipboardSteps(fake))
+    }
 
     /// The real timer runs a job whose time has come while a later one, scheduled first, still waits. No timing
     /// window: the near job is due at once, the far one an hour away.
@@ -396,57 +430,168 @@ mod tests {
         );
     }
 
-    /// Each opening is tried [`CLIPBOARD_TRIES`] times, then answers [`CLIPBOARD_BUSY`], with nothing written.
+    /// Fix round 1 (7): a job scheduled for later runs once its time comes, with nothing else sent to the timer to
+    /// wake it, and never before its time.
+    #[test]
+    fn thread_timer_wakes_for_a_future_deadline() {
+        let timer = ThreadTimer::default();
+        // The thread started and waiting first, and the job a second out, so it is surely still waiting (not already
+        // due) when the thread takes it, even on a loaded machine.
+        let (started, is_started) = mpsc::channel();
+        timer
+            .at(Instant::now(), Box::new(move || started.send(()).unwrap()))
+            .unwrap();
+        is_started.recv_timeout(GIVE_UP).unwrap();
+        let when = Instant::now() + Duration::from_secs(1);
+        let (ran, ran_at) = mpsc::channel();
+        timer
+            .at(when, Box::new(move || ran.send(Instant::now()).unwrap()))
+            .unwrap();
+        let ran_at = ran_at.recv_timeout(GIVE_UP).expect("the timer never woke");
+        assert!(ran_at >= when, "ran before its time");
+    }
+
+    /// Each opening is tried [`CLIPBOARD_TRIES`] times, [`CLIPBOARD_RETRY`] apart, then answers [`CLIPBOARD_BUSY`],
+    /// with nothing written.
     #[test]
     fn busy_clipboard_answers_busy_after_ten_tries() {
-        let fake = Arc::new(FakeClipboard::default());
-        let steps = ClipboardSteps(Arc::clone(&fake));
-        fake.user_copy("theirs");
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy("theirs"));
         fake.hold_open_elsewhere(true);
-        let theirs = fake.seq();
-        assert_eq!(steps.write_secret("ours"), Err(CLIPBOARD_BUSY));
+        let began = Instant::now();
+        assert_eq!(
+            steps.write_secret("ours", &TAG),
+            Err(WriteFailed {
+                error: CLIPBOARD_BUSY,
+                left_behind: false
+            })
+        );
+        assert!(
+            began.elapsed() >= CLIPBOARD_RETRY * (CLIPBOARD_TRIES - 1),
+            "the tries were not spaced"
+        );
         assert_eq!(fake.opens(), 10);
-        assert_eq!(steps.clear_if(theirs), Err(CLIPBOARD_BUSY));
+        assert_eq!(steps.clear_if(&TAG), Err(CLIPBOARD_BUSY));
         assert_eq!(fake.opens(), 20);
         assert_eq!(fake.text().as_deref(), Some("theirs"));
 
-        // Free again: the write holds the text and all three marks, and clears only while it is still there.
+        // Free again: the write holds the text, the tag and all three marks, and clears only while the tag is there.
         fake.hold_open_elsewhere(false);
-        let ours = steps.write_secret("ours").unwrap();
+        steps.write_secret("ours", &TAG).unwrap();
         assert_eq!(fake.text().as_deref(), Some("ours"));
+        assert_eq!(fake.tag(), Some(TAG.to_vec()));
         assert_eq!(fake.formats(), EXCLUSION_FORMATS);
         assert!(!fake.is_open(), "the clipboard was left open");
-        assert_eq!(steps.clear_if(ours), Ok(true));
+        assert_eq!(steps.clear_if(&OTHER_TAG), Ok(false));
+        assert_eq!(
+            fake.text().as_deref(),
+            Some("ours"),
+            "another tag cleared it"
+        );
+        assert_eq!(steps.clear_if(&TAG), Ok(true));
         assert_eq!(fake.text(), None);
-        assert_eq!(steps.clear_if(ours), Ok(false));
+        assert_eq!(steps.clear_if(&TAG), Ok(false));
     }
 
-    /// Closing the clipboard after a write adds the formats Windows derives from the text, which moves the sequence
-    /// number on: the number recorded is the one after the close, so the clear still finds the copy.
+    /// Fix round 1 (1, 7): the write is one opening, the text last; the check and the clear are one opening, and
+    /// another program trying to copy between them is refused until the clear is done.
     #[test]
-    fn sequence_is_read_after_the_close() {
-        let fake = Arc::new(FakeClipboard::default());
-        let steps = ClipboardSteps(Arc::clone(&fake));
-        let ours = steps.write_secret("ours").unwrap();
-        assert_eq!(ours, fake.seq());
-        assert_eq!(steps.clear_if(ours), Ok(true));
+    fn write_and_clear_are_each_one_opening() {
+        let (fake, steps) = fake_steps();
+        steps.write_secret("ours", &TAG).unwrap();
+        assert_eq!(
+            fake.take_events(),
+            [
+                "open", "empty", "set tag", "set mark", "set mark", "set mark", "set text", "close"
+            ]
+        );
+        let other = Arc::clone(&fake);
+        let (refused, was_refused) = mpsc::channel();
+        fake.during_next_read(Box::new(move || {
+            refused.send(!other.user_copy("theirs")).unwrap();
+        }));
+        assert_eq!(steps.clear_if(&TAG), Ok(true));
+        assert!(
+            was_refused.recv().unwrap(),
+            "a copy got in between the check and the clear"
+        );
+        assert_eq!(fake.take_events(), ["open", "read tag", "empty", "close"]);
         assert_eq!(fake.text(), None);
+        // Not ours: looked at, never touched.
+        assert!(fake.user_copy("theirs"));
+        assert_eq!(steps.clear_if(&TAG), Ok(false));
+        assert_eq!(fake.take_events(), ["open", "read tag", "close"]);
+        assert_eq!(fake.text().as_deref(), Some("theirs"));
+    }
 
-        // No sequence number to be had: the copy could never be cleared by it, so it is taken off at once.
-        fake.hide_sequence();
-        assert_eq!(steps.write_secret("ours"), Err(CLIPBOARD_FAILED));
+    /// Fix round 1 (1): another program copies the instant Lockbox's write closes the clipboard. Its copy has no tag,
+    /// so no clear ever takes it.
+    #[test]
+    fn copy_right_after_the_close_is_never_cleared() {
+        let (fake, steps) = fake_steps();
+        let other = Arc::clone(&fake);
+        fake.after_next_close(Box::new(move || assert!(other.user_copy("theirs"))));
+        steps.write_secret("ours", &TAG).unwrap();
+        assert_eq!(fake.text().as_deref(), Some("theirs"));
+        assert_eq!(steps.clear_if(&TAG), Ok(false));
+        assert_eq!(fake.text().as_deref(), Some("theirs"));
+    }
+
+    /// A step that fails empties the clipboard again in the same opening; when that empty fails too, the write says
+    /// so (Fix round 1, 4). The text goes last, so a failure before it never leaves the text.
+    #[test]
+    fn failed_step_empties_in_the_same_opening() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy("theirs"));
+        fake.fail_format_at(2);
+        assert_eq!(
+            steps.write_secret("ours", &TAG),
+            Err(WriteFailed {
+                error: CLIPBOARD_FAILED,
+                left_behind: false
+            })
+        );
+        assert_eq!(
+            fake.take_events(),
+            [
+                "open", "empty", "set tag", "set mark", "set mark", "set mark", "empty", "close"
+            ]
+        );
+        assert_eq!((fake.text(), fake.tag()), (None, None));
+
+        // The text itself refused, and the empty after it fails: the tag and marks may be left, never the text.
+        let (fake, steps) = fake_steps();
+        fake.fail_text();
+        fake.fail_empty_at(1);
+        assert_eq!(
+            steps.write_secret("ours", &TAG),
+            Err(WriteFailed {
+                error: CLIPBOARD_FAILED,
+                left_behind: true
+            })
+        );
         assert_eq!(fake.text(), None);
-        assert!(!fake.is_open(), "the clipboard was left open");
+        assert_eq!(fake.tag(), Some(TAG.to_vec()));
+        assert!(!fake.is_open());
+        // Cleared later by its tag.
+        assert_eq!(steps.clear_if(&TAG), Ok(true));
+        assert_eq!(fake.tag(), None);
     }
 
     /// A format Windows will not register: nothing is written, the clipboard is not even opened.
     #[test]
     fn unregistered_format_writes_nothing() {
-        let fake = Arc::new(FakeClipboard::default());
-        fake.user_copy("theirs");
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy("theirs"));
         fake.refuse_registration();
-        let steps = ClipboardSteps(Arc::clone(&fake));
-        assert_eq!(steps.write_secret("ours"), Err(CLIPBOARD_FAILED));
+        assert_eq!(
+            steps.write_secret("ours", &TAG),
+            Err(WriteFailed {
+                error: CLIPBOARD_FAILED,
+                left_behind: false
+            })
+        );
+        assert_eq!(steps.clear_if(&TAG), Err(CLIPBOARD_FAILED));
         assert_eq!(fake.opens(), 0);
         assert_eq!(fake.text().as_deref(), Some("theirs"));
     }

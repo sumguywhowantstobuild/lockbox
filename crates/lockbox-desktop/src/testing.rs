@@ -15,7 +15,7 @@ use lockbox_core::internals::fsio::testutil::TempDir;
 use crate::lock;
 use crate::os::{
     ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS, Env, IdleSource,
-    Job, KnownFolder, Launcher, Os, Power, Timer, Volumes,
+    Job, KnownFolder, Launcher, Os, Power, TAG_FORMAT, Timer, Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
@@ -130,28 +130,38 @@ impl Clock for FakeClock {
     }
 }
 
-/// The clipboard as the test sees it: its text, the formats added beside it, its sequence number (moved on by every
-/// change, as Windows does), and whether it is open.
+/// The clipboard as the test sees it: its text, the tag and the marks beside it, and whether it is open.
 #[derive(Default)]
 struct Clip {
     open: bool,
-    /// Changed in the current opening: closing it adds the text formats Windows derives from the text.
-    changed: bool,
-    /// The sequence number cannot be read.
-    no_sequence: bool,
-    /// Another program has it open: every try at opening fails.
-    held_elsewhere: bool,
-    seq: u32,
+    /// Another program has it open: every try at opening fails while this is above zero, each try counting it down
+    /// (`usize::MAX`: until released).
+    held_for: usize,
     text: Option<String>,
-    /// The names of the formats added beside the text, in order.
+    /// What [`TAG_FORMAT`] holds.
+    tag: Option<Vec<u8>>,
+    /// The names of the exclusion formats added, in order.
     formats: Vec<&'static str>,
-    /// The format added when this many are already there fails.
+    /// The exclusion format added when this many are already there fails.
     fail_format_at: Option<usize>,
+    fail_text: bool,
+    /// Counts the coming empties down: the one reaching zero fails.
+    fail_empty_in: Option<usize>,
     refuse_registration: bool,
+    /// Each step, in order: `open`, `close`, `empty`, `set tag`, `set mark`, `set text`, `read tag`.
+    events: Vec<&'static str>,
+    /// Run once, right after the next close, with the clipboard free again.
+    after_close: Option<Hook>,
+    /// Run once, inside the next read of the tag, with the clipboard still open.
+    during_read: Option<Hook>,
 }
 
+/// The format IDs the fake hands out: the exclusion formats from `0xC000`, the tag's format at [`FAKE_TAG_FORMAT`].
+const FAKE_FORMATS: u32 = 0xC000;
+const FAKE_TAG_FORMAT: u32 = 0xC010;
+
 /// A clipboard in memory, driven through [`ClipboardSteps`](crate::os::ClipboardSteps) like the real one. Counts the
-/// tries at opening it.
+/// tries at opening it and records each step.
 #[derive(Default)]
 pub struct FakeClipboard {
     clip: Arc<Mutex<Clip>>,
@@ -161,42 +171,57 @@ pub struct FakeClipboard {
 /// The fake clipboard, open: closed when dropped.
 pub struct FakeOpened(Arc<Mutex<Clip>>);
 
-/// How many formats Windows adds when a clipboard holding text is closed after a change: `CF_TEXT`, `CF_OEMTEXT` and
-/// `CF_LOCALE`, each moving the sequence number on (seen on Windows 11 in the hands-on probe).
-const DERIVED_FORMATS: u32 = 3;
-
 impl Drop for FakeOpened {
     fn drop(&mut self) {
-        let mut clip = lock(&self.0);
-        if std::mem::take(&mut clip.changed) && clip.text.is_some() {
-            clip.seq += DERIVED_FORMATS;
+        let hook = {
+            let mut clip = lock(&self.0);
+            clip.open = false;
+            clip.events.push("close");
+            clip.after_close.take()
+        };
+        if let Some(hook) = hook {
+            hook();
         }
-        clip.open = false;
     }
 }
 
 impl FakeClipboard {
-    /// The user (another program) copies `text`.
-    pub fn user_copy(&self, text: &str) {
+    /// The user (another program) copies `text`, which empties the clipboard first, as every copy does. Refused while
+    /// the clipboard is open (false), as Windows refuses it.
+    pub fn user_copy(&self, text: &str) -> bool {
         let mut clip = lock(&self.clip);
-        clip.seq += 1;
+        if clip.open {
+            return false;
+        }
         clip.text = Some(text.to_owned());
+        clip.tag = None;
         clip.formats.clear();
+        true
     }
 
     /// From now on, while `held`, another program keeps the clipboard open.
     pub fn hold_open_elsewhere(&self, held: bool) {
-        lock(&self.clip).held_elsewhere = held;
+        lock(&self.clip).held_for = if held { usize::MAX } else { 0 };
     }
 
-    /// From now on, adding a format fails once `n` are already on the clipboard.
+    /// Another program keeps the clipboard open through the next `tries` tries at opening it.
+    pub fn hold_open_for(&self, tries: usize) {
+        lock(&self.clip).held_for = tries;
+    }
+
+    /// From now on, adding an exclusion format fails once `n` are already on the clipboard.
     pub fn fail_format_at(&self, n: usize) {
         lock(&self.clip).fail_format_at = Some(n);
     }
 
-    /// From now on, the sequence number cannot be read.
-    pub fn hide_sequence(&self) {
-        lock(&self.clip).no_sequence = true;
+    /// From now on, adding the text fails.
+    pub fn fail_text(&self) {
+        lock(&self.clip).fail_text = true;
+    }
+
+    /// The `n`th empty from now (0: the next one) fails, leaving the clipboard as it was.
+    pub fn fail_empty_at(&self, n: usize) {
+        lock(&self.clip).fail_empty_in = Some(n);
     }
 
     /// From now on, Windows refuses to register clipboard formats.
@@ -204,16 +229,26 @@ impl FakeClipboard {
         lock(&self.clip).refuse_registration = true;
     }
 
+    /// Runs `hook` once, right after the next close.
+    pub fn after_next_close(&self, hook: Hook) {
+        lock(&self.clip).after_close = Some(hook);
+    }
+
+    /// Runs `hook` once, inside the next read of the tag, while the clipboard is open.
+    pub fn during_next_read(&self, hook: Hook) {
+        lock(&self.clip).during_read = Some(hook);
+    }
+
     pub fn text(&self) -> Option<String> {
         lock(&self.clip).text.clone()
     }
 
-    pub fn formats(&self) -> Vec<&'static str> {
-        lock(&self.clip).formats.clone()
+    pub fn tag(&self) -> Option<Vec<u8>> {
+        lock(&self.clip).tag.clone()
     }
 
-    pub fn seq(&self) -> NonZeroU32 {
-        NonZeroU32::new(lock(&self.clip).seq).expect("the clipboard has changed at least once")
+    pub fn formats(&self) -> Vec<&'static str> {
+        lock(&self.clip).formats.clone()
     }
 
     pub fn is_open(&self) -> bool {
@@ -224,6 +259,11 @@ impl FakeClipboard {
     pub fn opens(&self) -> usize {
         self.opens.load(Ordering::SeqCst)
     }
+
+    /// The steps so far, and forgets them.
+    pub fn take_events(&self) -> Vec<&'static str> {
+        std::mem::take(&mut lock(&self.clip).events)
+    }
 }
 
 impl ClipboardCalls for FakeClipboard {
@@ -233,26 +273,42 @@ impl ClipboardCalls for FakeClipboard {
         if lock(&self.clip).refuse_registration {
             return None;
         }
+        if name == TAG_FORMAT {
+            return NonZeroU32::new(FAKE_TAG_FORMAT);
+        }
         let at = EXCLUSION_FORMATS.iter().position(|known| *known == name)?;
-        NonZeroU32::new(0xC000 + u32::try_from(at).ok()?)
+        NonZeroU32::new(FAKE_FORMATS + u32::try_from(at).ok()?)
     }
 
     fn open(&self) -> Option<FakeOpened> {
         self.opens.fetch_add(1, Ordering::SeqCst);
         let mut clip = lock(&self.clip);
-        if clip.open || clip.held_elsewhere {
+        if clip.held_for > 0 {
+            if clip.held_for != usize::MAX {
+                clip.held_for -= 1;
+            }
             return None;
         }
+        assert!(!clip.open, "opened twice");
         clip.open = true;
+        clip.events.push("open");
         Some(FakeOpened(Arc::clone(&self.clip)))
     }
 
     fn empty(&self) -> bool {
         let mut clip = lock(&self.clip);
         assert!(clip.open, "emptied while closed");
-        clip.changed = true;
-        clip.seq += 1;
+        clip.events.push("empty");
+        match clip.fail_empty_in {
+            Some(0) => {
+                clip.fail_empty_in = None;
+                return false;
+            }
+            Some(n) => clip.fail_empty_in = Some(n - 1),
+            None => {}
+        }
         clip.text = None;
+        clip.tag = None;
         clip.formats.clear();
         true
     }
@@ -260,29 +316,44 @@ impl ClipboardCalls for FakeClipboard {
     fn set_text(&self, text: &str) -> bool {
         let mut clip = lock(&self.clip);
         assert!(clip.open, "written while closed");
-        clip.changed = true;
-        clip.seq += 2;
+        clip.events.push("set text");
+        if clip.fail_text {
+            return false;
+        }
         clip.text = Some(text.to_owned());
-        clip.formats.clear();
         true
     }
 
-    fn set_dword_zero(&self, format: NonZeroU32) -> bool {
+    fn set_bytes(&self, format: NonZeroU32, bytes: &[u8]) -> bool {
         let mut clip = lock(&self.clip);
         assert!(clip.open, "written while closed");
+        if format.get() == FAKE_TAG_FORMAT {
+            clip.events.push("set tag");
+            clip.tag = Some(bytes.to_vec());
+            return true;
+        }
+        clip.events.push("set mark");
+        assert_eq!(bytes, 0u32.to_ne_bytes(), "a mark is a DWORD 0");
         if clip.fail_format_at == Some(clip.formats.len()) {
             return false;
         }
-        let name = EXCLUSION_FORMATS[(format.get() - 0xC000) as usize];
-        clip.changed = true;
-        clip.seq += 1;
+        let name = EXCLUSION_FORMATS[(format.get() - FAKE_FORMATS) as usize];
         clip.formats.push(name);
         true
     }
 
-    fn seq_num(&self) -> Option<NonZeroU32> {
-        let clip = lock(&self.clip);
-        NonZeroU32::new(clip.seq).filter(|_| !clip.no_sequence)
+    fn read_bytes(&self, format: NonZeroU32) -> Option<Vec<u8>> {
+        let (held, hook) = {
+            let mut clip = lock(&self.clip);
+            assert!(clip.open, "read while closed");
+            assert_eq!(format.get(), FAKE_TAG_FORMAT, "only the tag is read");
+            clip.events.push("read tag");
+            (clip.tag.clone(), clip.during_read.take())
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+        held
     }
 }
 
@@ -292,12 +363,19 @@ pub struct FakeTimer {
     jobs: Mutex<Vec<(Instant, Job)>>,
     /// The next job cannot be scheduled.
     fail_next: AtomicBool,
+    /// No job can be scheduled any more.
+    fail_all: AtomicBool,
 }
 
 impl FakeTimer {
     /// The next job cannot be scheduled, as if the timer thread could not start.
     pub fn fail_next(&self) {
         self.fail_next.store(true, Ordering::SeqCst);
+    }
+
+    /// From now on, no job can be scheduled.
+    pub fn fail_all(&self) {
+        self.fail_all.store(true, Ordering::SeqCst);
     }
 
     /// Runs, earliest first, every job due at `now`.
@@ -322,7 +400,7 @@ impl FakeTimer {
 
 impl Timer for FakeTimer {
     fn at(&self, when: Instant, job: Job) -> io::Result<()> {
-        if self.fail_next.swap(false, Ordering::SeqCst) {
+        if self.fail_next.swap(false, Ordering::SeqCst) || self.fail_all.load(Ordering::SeqCst) {
             return Err(io::Error::other("no timer"));
         }
         lock(&self.jobs).push((when, job));
