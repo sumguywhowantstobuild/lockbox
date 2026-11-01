@@ -54,7 +54,9 @@ pub mod blob {
 /// Crash-safe file helpers, for the shell's own state files and sweeps.
 pub mod fsio {
     pub(crate) use crate::fsio_impl::*;
-    pub use crate::fsio_impl::{atomic_write, remove_dir_all_retry, remove_file_retry};
+    pub use crate::fsio_impl::{
+        atomic_write, remove_dir_all_retry, remove_file_retry, rename_file_no_replace,
+    };
 }
 
 /// Saved entries. No serde: an item's JSON (password and file keys included) is only ever written

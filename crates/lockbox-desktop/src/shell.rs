@@ -47,6 +47,8 @@ pub struct Shell {
     pub(crate) os: Os,
     /// Where the launch sweep's notice goes.
     notifier: Arc<dyn Notifier>,
+    /// The launch sweep's report, when it had anything to tell ([`launch_notices`](Self::launch_notices)).
+    launch_sweep: Mutex<Option<SweepReport>>,
     /// The folders no vault may be inside (spec §6.10): Tauri's app-data folders, the Roaming profile and the state
     /// folder.
     forbidden: Vec<PathBuf>,
@@ -88,6 +90,7 @@ impl Shell {
             paths,
             os,
             notifier,
+            launch_sweep: Mutex::default(),
             forbidden,
             creating: Mutex::default(),
             #[cfg(test)]
@@ -129,14 +132,25 @@ impl Shell {
         self.autolock.shutdown();
     }
 
-    /// Launch work, in the app's `.setup` (never in a second copy of the app): sweeps the output journal's leftovers
-    /// and tells the page what it found (`lockbox://notice`, `output_sweep`) when there was anything to tell.
+    /// Launch work, in the app's `.setup` (never in a second copy of the app): sweeps the output journal's leftovers.
+    /// When there was anything to tell, the report is kept for [`launch_notices`](Self::launch_notices) (launch work
+    /// runs before the page can listen) and also sent as `lockbox://notice` (`output_sweep`).
     pub fn sweep_outputs(&self) -> SweepReport {
         let report = self.outputs.sweep();
         if report != SweepReport::default() {
+            *lock(&self.launch_sweep) = Some(report);
             self.notifier.notice(&Notice::OutputSweep(report));
         }
         report
+    }
+
+    /// What launch found that the page should show, asked by the page once it has loaded: each launch notice, counts
+    /// and flags only. Kept, not used up, so a reloaded page shows it again.
+    pub fn launch_notices(&self) -> Vec<Notice> {
+        lock(&self.launch_sweep)
+            .map(Notice::OutputSweep)
+            .into_iter()
+            .collect()
     }
 
     /// Where an output the user chose in a save dialog (Save a copy, a backup) goes: `dest` with its folder canonical

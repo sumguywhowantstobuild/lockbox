@@ -6,6 +6,7 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "allow-app-info",
+    "allow-launch-notices",
     "allow-list-sessions",
     "allow-lock-vault",
     "allow-lock-all",

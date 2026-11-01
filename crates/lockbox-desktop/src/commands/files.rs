@@ -269,10 +269,12 @@ pub(super) async fn reset_output_journal(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::fs::{self, OpenOptions};
     use std::os::windows::fs::OpenOptionsExt;
     use std::path::PathBuf;
-    use std::sync::mpsc;
+    use std::rc::Rc;
+    use std::sync::{Mutex, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -284,6 +286,7 @@ mod tests {
     use super::super::{MALFORMED, parse};
     use super::*;
     use crate::error::ShellError;
+    use crate::outputs::Attempt;
     use crate::session::LockReason;
     use crate::testing::{TestShell, quiet};
 
@@ -317,9 +320,10 @@ mod tests {
         assert_eq!(names(dest.parent().unwrap()), ["report.pdf"]);
     }
 
-    /// The destination is held open with no sharing, so each rename attempt fails; a lock during the retries returns
-    /// within 100 ms (it waits for one attempt at most). The file is let go right after the lock, so only the publish
-    /// gate stops the next attempt: `Locked`, the destination as it was, the temp gone and cleared.
+    /// The destination is held open with no sharing, so each rename attempt fails. Once a real rename attempt has
+    /// failed with a sharing violation (told from inside the attempt), a lock during the engine's wait before the next
+    /// one returns within 100 ms. The file is let go right after the lock, so only the publish gate stops the next
+    /// attempt: refused, `Locked`, the destination as it was, the temp gone and cleared.
     #[test]
     fn lock_not_delayed_by_a_held_file() {
         let ts = TestShell::new();
@@ -329,29 +333,124 @@ mod tests {
             .share_mode(0)
             .open(&dest)
             .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (failed, failed_rx) = mpsc::channel();
+        let attempts = Arc::clone(&seen);
+        ts.shell.outputs.on_attempt(Box::new(move |attempt| {
+            attempts.lock().unwrap().push((attempt, Instant::now()));
+            if matches!(attempt, Attempt::Failed(_)) {
+                let _ = failed.send(());
+            }
+        }));
         let shell = Arc::clone(&ts.shell);
         let (took, took_rx) = mpsc::channel();
         // No key derivation slows the lock while it is timed.
         let _quiet = quiet();
         let locker = thread::spawn(move || {
-            let give_up = Instant::now() + GIVE_UP;
-            while shell.outputs.publish_attempts() == 0 {
-                assert!(Instant::now() < give_up, "no publish attempt came");
-                thread::yield_now();
-            }
+            failed_rx
+                .recv_timeout(GIVE_UP)
+                .expect("a rename attempt failed");
             let started = Instant::now();
             shell.sessions.lock_all(LockReason::Manual);
-            took.send(started.elapsed()).unwrap();
+            took.send((started, started.elapsed())).unwrap();
             drop(held);
         });
         ts.dialogs.answer(Some(dest.clone()));
         let saved = ts.shell.save_file_copy(s, g, &id, &file_id);
         locker.join().unwrap();
-        let took = took_rx.recv().unwrap();
+        let (locked_at, took) = took_rx.recv().unwrap();
         assert!(took < Duration::from_millis(100), "the lock took {took:?}");
         assert_eq!(saved.err(), LOCKED);
+        let seen = seen.lock().unwrap().clone();
+        let (first, failed_at) = seen[0];
+        assert!(
+            matches!(first, Attempt::Failed(Some(32 | 5))),
+            "first a sharing violation: {seen:?}"
+        );
+        assert!(
+            failed_at <= locked_at,
+            "the lock came after a failed rename"
+        );
+        assert_eq!(seen.last().map(|(a, _)| *a), Some(Attempt::Refused));
+        assert!(!seen.iter().any(|(a, _)| *a == Attempt::Renamed));
         untouched(&dest);
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// Fix round 1: a readable journal whose write fails while the temp is recorded: the export stops before its
+    /// temp exists (it never reaches `export.after_record`), the destination is as it was and the journal unchanged.
+    #[test]
+    fn record_write_failure_stops_the_output() {
+        let _cleanup = Cleanup;
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        let paths = &ts.shell.paths;
+        let journal = r#"{ "version": 1, "entries": [] }"#;
+        fs::create_dir_all(&paths.root).unwrap();
+        fs::write(&paths.outputs, journal).unwrap();
+        let reached = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&reached);
+        failpoint::observe("export.after_record", Box::new(move || seen.set(true)));
+        failpoint::arm("atomic_write.before_replace");
+        ts.dialogs.answer(Some(dest.clone()));
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id);
+        assert!(
+            matches!(saved, Err(ShellError::Core(view)) if view.kind == "io"),
+            "refused as an I/O error"
+        );
+        assert!(!reached.get(), "the temp was never made");
+        untouched(&dest);
+        assert_eq!(fs::read_to_string(&paths.outputs).unwrap(), journal);
+    }
+
+    /// Fix round 1: a clear that cannot write the journal, with the real `CallJournal`, also while a panic unwinds:
+    /// nothing panics further, the temp is removed, its entry stays (the next sweep drops it, nothing being there).
+    #[test]
+    fn clear_failure_keeps_the_entry() {
+        let _cleanup = Cleanup;
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        let one_temp_listed = |ts: &TestShell| {
+            let entries = ts.journal();
+            assert_eq!(entries.len(), 1, "the entry stays");
+            assert!(!entries[0].exists(), "the temp is removed");
+        };
+
+        // The export fails at its last step, and the journal cannot be written from then on.
+        failpoint::arm("export.before_publish");
+        failpoint::observe(
+            "export.before_publish",
+            Box::new(|| failpoint::arm("atomic_write.before_replace")),
+        );
+        ts.dialogs.answer(Some(dest.clone()));
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id);
+        assert!(matches!(saved, Err(ShellError::Core(view)) if view.kind == "io"));
+        untouched(&dest);
+        one_temp_listed(&ts);
+        failpoint::disarm_all();
+        assert_eq!(
+            ts.shell.outputs.sweep(),
+            crate::outputs::SweepReport::default()
+        );
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+
+        // A panic at the same step: the clear runs while it unwinds, and its failure is contained too.
+        failpoint::observe(
+            "export.before_publish",
+            Box::new(|| {
+                failpoint::arm("atomic_write.before_replace");
+                panic!("a test panic inside the export");
+            }),
+        );
+        ts.dialogs.answer(Some(dest.clone()));
+        let shell = Arc::clone(&ts.shell);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            shell.save_file_copy(s, g, &id, &file_id)
+        }));
+        assert!(unwound.is_err(), "the panic reached the caller");
+        failpoint::disarm_all();
+        untouched(&dest);
+        one_temp_listed(&ts);
     }
 
     /// A lock while the copy is being made (here at its last step before the rename): `Locked`, the existing

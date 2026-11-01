@@ -11,11 +11,13 @@ use std::ffi::OsStr;
 use std::fs::{self, Metadata};
 use std::io;
 use std::os::windows::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf, Prefix};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use lockbox_core::blob::OutputJournal;
-use lockbox_core::fsio::{remove_dir_all_retry, remove_file_retry};
+use lockbox_core::fsio::rename_file_no_replace;
 use lockbox_core::{CoreError, Result as CoreResult};
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +44,12 @@ const MAX_SET_ASIDE: u32 = 99;
 /// `FILE_ATTRIBUTE_REPARSE_POINT`: a link, a junction, a mount point or a cloud placeholder.
 const REPARSE_POINT: u32 = 0x400;
 
+/// The sweep's delete attempts, as the engine retries its own: at most 10, while another program briefly holds the
+/// leftover (a sharing violation or access denied), waiting 20 ms and doubling, at most 1 s, between them.
+const DELETE_TRIES: u32 = 10;
+const FIRST_WAIT: Duration = Duration::from_millis(20);
+const MAX_WAIT: Duration = Duration::from_secs(1);
+
 /// What the launch sweep did: leftovers removed, entries kept for a later launch (a drive not connected, a leftover
 /// that could not be removed yet), and whether the journal could not be read (nothing was removed then).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -62,14 +70,44 @@ struct JournalFile {
 /// lock, which is taken under a vault's lock (an export records while it reads its vault), never the other way round.
 pub struct Outputs {
     file: PathBuf,
-    /// The state folder and its `open\` folder, where "Open" copies live (a later task makes them).
-    root: PathBuf,
+    /// The state folder's `open\` folder, where "Open" copies live (a later task makes them), as Lockbox computes it
+    /// from the known folder: never a resolved copy of a folder that may lead elsewhere.
     open: PathBuf,
     volumes: Arc<dyn Volumes>,
     edits: Mutex<()>,
-    /// Tests only: how many publish attempts have started.
     #[cfg(test)]
-    attempts: std::sync::atomic::AtomicUsize,
+    hooks: TestHooks,
+}
+
+/// Tests only: told how each publish attempt went.
+#[cfg(test)]
+type AttemptHook = Box<dyn Fn(Attempt) + Send + Sync>;
+
+/// Tests only: run once at a step, with the path it is about to use.
+#[cfg(test)]
+type PathHook = Box<dyn FnOnce(&Path) + Send>;
+
+/// Tests only: steps a test watches or acts in.
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    /// Told the outcome of each publish attempt, as soon as the attempt has returned.
+    on_attempt: Mutex<Option<AttemptHook>>,
+    /// Run once, after a delete attempt of the sweep has failed and before the next one.
+    on_retry: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Run once, right before reset moves the journal to the name it is given.
+    on_set_aside: Mutex<Option<PathHook>>,
+}
+
+/// Tests only: how one publish attempt went.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Attempt {
+    /// The rename ran and failed, with this OS error.
+    Failed(Option<i32>),
+    Renamed,
+    /// The session's publish gate refused it: the rename never ran.
+    Refused,
 }
 
 /// What the sweep does with one entry.
@@ -86,19 +124,38 @@ impl Outputs {
     pub fn new(paths: &StatePaths, volumes: Arc<dyn Volumes>) -> Outputs {
         Outputs {
             file: paths.outputs.clone(),
-            root: paths.root.clone(),
             open: paths.open.clone(),
             volumes,
             edits: Mutex::default(),
             #[cfg(test)]
-            attempts: std::sync::atomic::AtomicUsize::new(0),
+            hooks: TestHooks::default(),
         }
     }
 
-    /// Tests only: how many publish attempts have started.
+    /// Tests only: `hook` is told how each publish attempt went, as soon as it has returned.
     #[cfg(test)]
-    pub(crate) fn publish_attempts(&self) -> usize {
-        self.attempts.load(std::sync::atomic::Ordering::SeqCst)
+    pub(crate) fn on_attempt(&self, hook: AttemptHook) {
+        *lock(&self.hooks.on_attempt) = Some(hook);
+    }
+
+    /// Tests only: tells the `on_attempt` hook how a publish attempt went.
+    #[cfg(test)]
+    fn attempted(&self, attempt: Attempt) {
+        if let Some(hook) = lock(&self.hooks.on_attempt).as_ref() {
+            hook(attempt);
+        }
+    }
+
+    /// Tests only: runs `hook` once, after a failed delete attempt of the sweep and before the next.
+    #[cfg(test)]
+    pub(crate) fn on_retry(&self, hook: Box<dyn FnOnce() + Send>) {
+        *lock(&self.hooks.on_retry) = Some(hook);
+    }
+
+    /// Tests only: runs `hook` once, right before reset moves the journal to the name it is given.
+    #[cfg(test)]
+    pub(crate) fn on_set_aside(&self, hook: PathHook) {
+        *lock(&self.hooks.on_set_aside) = Some(hook);
     }
 
     /// The journal for one output (a decrypted copy, a backup) made from the session `session` in `generation`: it
@@ -174,12 +231,15 @@ impl Outputs {
     }
 
     /// The launch sweep (spec §7.2): deletes the leftovers the journal lists that are certainly Lockbox's, and only
-    /// those. An entry is deleted only when all of these hold:
-    /// - it is an absolute path on a local drive or a share, made of plain names only (no `.` or `..`);
-    /// - it is an "Open" folder (its name 32 lowercase hex, directly inside `open\`, which is itself a real folder
-    ///   right inside the state folder), or an engine temp (`.<16 lowercase hex>.lockbox-partial` or
-    ///   `.lockbox-backup-partial`) whose folder, resolved, is the folder written down: no link anywhere along it;
-    /// - it is, by its own metadata, a plain folder or a plain file (not a link, junction or other reparse point).
+    /// those. An entry is deleted only when all of these hold, checked again right before every delete attempt:
+    /// - its text is an absolute path on a local drive (`C:\`, `\\?\C:\`) or a share (`\\?\UNC\server\share\`),
+    ///   then plain names only: no `.`, `..` or empty part, refused as written, before anything normalises it;
+    /// - it is an "Open" folder (its name 32 lowercase hex, directly inside `open\` as Lockbox spells it from the
+    ///   known folder), or an engine temp (`.<16 lowercase hex>.lockbox-partial` or `.lockbox-backup-partial`) whose
+    ///   folder, resolved, is the folder written down;
+    /// - no folder on its way, from the drive or share down (the state folder and the folders above it included), is
+    ///   a link, a junction or any other reparse point;
+    /// - it is, by its own metadata, a plain folder or a plain file.
     ///
     /// Anything else is dropped from the journal and left on disk; an entry on a drive that is not connected, or that
     /// could not be removed, is kept for the next launch. A journal that cannot be read removes nothing and stays as
@@ -195,11 +255,10 @@ impl Outputs {
         if entries.is_empty() {
             return SweepReport::default();
         }
-        let open = self.open_folder();
         let mut report = SweepReport::default();
         let mut kept = Vec::new();
         for entry in entries {
-            match self.sweep_one(&entry, open.as_deref()) {
+            match self.sweep_one(&entry) {
                 Swept::Removed => report.removed += 1,
                 Swept::Kept => kept.push(entry),
                 Swept::Dropped => {}
@@ -211,63 +270,81 @@ impl Outputs {
         report
     }
 
-    /// One entry of the sweep. `open`: the `open\` folder, canonical, when it may hold "Open" folders.
-    fn sweep_one(&self, entry: &Path, open: Option<&Path>) -> Swept {
-        let Some(root) = drive_root(entry) else {
-            return Swept::Dropped;
+    /// One entry of the sweep: every delete attempt, retries included, comes right after a full check of its own, so
+    /// a folder swapped for a link between two attempts stops the next one.
+    fn sweep_one(&self, entry: &Path) -> Swept {
+        let mut wait = FIRST_WAIT;
+        for attempt in 1..=DELETE_TRIES {
+            let folder = match self.check(entry) {
+                Checked::Delete { folder } => folder,
+                Checked::Keep => return Swept::Kept,
+                Checked::Drop => return Swept::Dropped,
+            };
+            match delete_once(entry, folder) {
+                Ok(()) => return Swept::Removed,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Swept::Dropped,
+                Err(e) if attempt < DELETE_TRIES && is_transient(&e) => {
+                    #[cfg(test)]
+                    if let Some(hook) = lock(&self.hooks.on_retry).take() {
+                        hook();
+                    }
+                    thread::sleep(wait);
+                    wait = (wait * 2).min(MAX_WAIT);
+                }
+                Err(_) => return Swept::Kept,
+            }
+        }
+        Swept::Kept
+    }
+
+    /// Whether `entry` may be deleted now (see [`sweep`](Self::sweep)), and whether it is a folder.
+    fn check(&self, entry: &Path) -> Checked {
+        let Some(root) = plain_root(entry) else {
+            return Checked::Drop;
         };
         let (Some(name), Some(folder)) =
             (entry.file_name().and_then(OsStr::to_str), entry.parent())
         else {
-            return Swept::Dropped;
+            return Checked::Drop;
         };
-        let in_open = same_path(folder, &self.open) || open.is_some_and(|o| same_path(folder, o));
-        let is_folder = match (in_open && is_open_name(name), is_temp_name(name)) {
+        let is_folder = match (
+            is_open_name(name) && self.is_open(folder),
+            is_temp_name(name),
+        ) {
             (true, _) => true,
             (false, true) => false,
-            (false, false) => return Swept::Dropped,
+            (false, false) => return Checked::Drop,
         };
         if !matches!(self.volumes.exists(&root), Ok(true)) {
-            return Swept::Kept;
+            return Checked::Keep;
         }
-        let no_link = match is_folder {
-            true => open.is_some(),
-            false => fs::canonicalize(folder).is_ok_and(|real| same_path(&real, folder)),
-        };
-        if !no_link {
-            return Swept::Dropped;
+        match no_link_below(&root, folder) {
+            Checked::Delete { .. } => {}
+            not_safe => return not_safe,
+        }
+        // A temp is written down with its folder resolved; one spelled any other way is not Lockbox's.
+        if !is_folder && !fs::canonicalize(folder).is_ok_and(|real| same_path(&real, folder)) {
+            return Checked::Drop;
         }
         match fs::symlink_metadata(entry) {
-            Ok(meta) if plain(&meta, is_folder) => {}
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Swept::Kept,
+            Ok(meta) if plain(&meta, is_folder) => Checked::Delete { folder: is_folder },
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Checked::Keep,
             // Not a plain file or folder, or already gone.
-            _ => return Swept::Dropped,
-        }
-        let removed = match is_folder {
-            true => remove_dir_all_retry(entry),
-            false => remove_file_retry(entry),
-        };
-        match removed {
-            Ok(()) => Swept::Removed,
-            Err(_) => Swept::Kept,
+            _ => Checked::Drop,
         }
     }
 
-    /// `open\`, canonical, when it is a real folder (not a link) whose canonical path is `<state folder>\open`;
-    /// `None` otherwise, and then no "Open" folder is swept.
-    fn open_folder(&self) -> Option<PathBuf> {
-        let meta = fs::symlink_metadata(&self.open).ok()?;
-        if !plain(&meta, true) {
-            return None;
-        }
-        let open = fs::canonicalize(&self.open).ok()?;
-        let root = fs::canonicalize(&self.root).ok()?;
-        same_path(&open, &root.join(self.open.file_name()?)).then_some(open)
+    /// Whether `folder` is the `open\` folder as Lockbox spells it (or that same text in its verbatim form).
+    fn is_open(&self, folder: &Path) -> bool {
+        same_path(folder, &self.open)
+            || verbatim(&self.open).is_some_and(|open| same_path(folder, &open))
     }
 
     /// Sets a damaged journal aside, as `pending-outputs.json.damaged-<n>` (the first free `n` from 1 to 99), so
-    /// decrypted output works again; its leftovers are no longer swept. A journal that reads fine (or none) is left
-    /// as it is. `TooLarge` once all 99 names are taken.
+    /// decrypted output works again; its leftovers are no longer swept. Each move never replaces anything (the
+    /// engine's no-replace move: one step, so a file that appears at that name is never overwritten); a name that is
+    /// taken moves on to the next. A journal that reads fine (or none) is left as it is. `TooLarge` once all 99 names
+    /// are taken.
     pub fn reset(&self) -> ShellResult<()> {
         let _edit = lock(&self.edits);
         if self.load().is_ok() {
@@ -276,11 +353,16 @@ impl Outputs {
         for n in 1..=MAX_SET_ASIDE {
             let mut aside = self.file.clone().into_os_string();
             aside.push(format!(".damaged-{n}"));
-            match fs::symlink_metadata(&aside) {
-                Ok(_) => continue,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    return Ok(fs::rename(&self.file, &aside)?);
-                }
+            #[cfg(test)]
+            if let Some(hook) = lock(&self.hooks.on_set_aside).take() {
+                hook(Path::new(&aside));
+            }
+            match rename_file_no_replace(&self.file, Path::new(&aside)) {
+                Ok(()) => return Ok(()),
+                // The engine's answer when something is already at that name.
+                Err(CoreError::InvalidInput {
+                    what: "destination exists",
+                }) => {}
                 Err(e) => return Err(e.into()),
             }
         }
@@ -290,30 +372,90 @@ impl Outputs {
     }
 }
 
-/// The root of the drive or share `path` is on (`C:\`, `\\?\C:\`, `\\?\UNC\server\share\`), when `path` is absolute
-/// and made of plain names after it (no `.` or `..`); `None` for anything else (a relative path, a device path).
-fn drive_root(path: &Path) -> Option<PathBuf> {
-    let mut parts = path.components();
-    let Some(Component::Prefix(prefix)) = parts.next() else {
-        return None;
+/// Whether a check lets the sweep delete an entry, keep it for later, or drop it.
+enum Checked {
+    Delete { folder: bool },
+    Keep,
+    Drop,
+}
+
+/// One delete attempt, without retrying: an "Open" folder and everything in it (std's removal does not follow links
+/// inside it and removes read-only files), or a temp, its read-only flag cleared first.
+fn delete_once(entry: &Path, folder: bool) -> io::Result<()> {
+    if folder {
+        return fs::remove_dir_all(entry);
+    }
+    let mut permissions = fs::symlink_metadata(entry)?.permissions();
+    if permissions.readonly() {
+        // On Windows this clears only the read-only attribute (the lint's worry is Unix modes).
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(entry, permissions)?;
+    }
+    fs::remove_file(entry)
+}
+
+/// Windows' sharing violation and access denied: another program holds the leftover for a moment.
+fn is_transient(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(32 | 5))
+}
+
+/// Checks each existing folder from below `root` down to `folder` with `symlink_metadata`: `Delete` when every one is
+/// a plain folder, `Drop` when one is a link, junction or other reparse point (or not a folder, or not there: nothing
+/// below it is either), `Keep` when one cannot be read.
+fn no_link_below(root: &Path, folder: &Path) -> Checked {
+    let Ok(rest) = folder.strip_prefix(root) else {
+        return Checked::Drop;
     };
-    let local_or_share = matches!(
-        prefix.kind(),
-        Prefix::Disk(_) | Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(..)
-    );
-    if !local_or_share || parts.next() != Some(Component::RootDir) {
+    let mut at = root.to_path_buf();
+    for part in rest.iter() {
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Ok(meta) if plain(&meta, true) => {}
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Checked::Keep,
+            _ => return Checked::Drop,
+        }
+    }
+    Checked::Delete { folder: true }
+}
+
+/// `path` in its verbatim form (`\\?\C:\..`) when it is a plain drive path (`C:\..`), as text only: nothing resolved.
+fn verbatim(path: &Path) -> Option<PathBuf> {
+    let text = path.to_str()?;
+    let bytes = text.as_bytes();
+    let drive = bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..3] == br":\";
+    drive.then(|| PathBuf::from(format!(r"\\?\{text}")))
+}
+
+/// The root of the drive or share `path` is on (`C:\`, `\\?\C:\`, `\\?\UNC\server\share\`), when the text of
+/// `path` is that root followed by plain names only: no `.`, `..` or empty part (a doubled or trailing separator), no
+/// `/`. Read from the text as written, never through `Path::components`, which drops a `.` in the middle. `None` for
+/// anything else: a relative or drive-relative path, a plain `\\server\share` or device path, a bare root.
+fn plain_root(path: &Path) -> Option<PathBuf> {
+    let text = path.to_str()?;
+    if text.contains('/') {
         return None;
     }
-    let mut names = 0;
-    for part in parts {
-        if !matches!(part, Component::Normal(_)) {
+    let plain = |part: &str| !part.is_empty() && part != "." && part != "..";
+    let (root, rest) = if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        let mut parts = share.splitn(3, '\\');
+        let (server, name, rest) = (parts.next()?, parts.next()?, parts.next()?);
+        if !plain(server) || !plain(name) {
             return None;
         }
-        names += 1;
-    }
-    let mut root = PathBuf::from(prefix.as_os_str());
-    root.push(Component::RootDir);
-    (names > 0).then_some(root)
+        (format!(r"\\?\UNC\{server}\{name}\"), rest)
+    } else {
+        let (verbatim, drive) = match text.strip_prefix(r"\\?\") {
+            Some(drive) => (r"\\?\", drive),
+            None => ("", text),
+        };
+        let bytes = drive.as_bytes();
+        if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || &bytes[1..3] != br":\" {
+            return None;
+        }
+        (format!("{verbatim}{}", &drive[..3]), &drive[3..])
+    };
+    (!rest.is_empty() && rest.split('\\').all(plain)).then(|| PathBuf::from(root))
 }
 
 fn is_lower_hex(text: &str, len: usize) -> bool {
@@ -404,18 +546,25 @@ impl OutputJournal for CallJournal<'_> {
     /// One rename attempt, under the session's publish guard and only while it is still unlocked in the output's
     /// generation: a lock waits for this one attempt at most, never for the engine's retries, and refuses the next.
     fn publish(&self, attempt: &mut dyn FnMut() -> CoreResult<()>) -> CoreResult<()> {
-        #[cfg(test)]
-        self.outputs
-            .attempts
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut tried = None;
         let gate = self.sessions.publish(self.session, self.generation, || {
-            tried = Some(attempt());
+            let result = attempt();
+            #[cfg(test)]
+            self.outputs.attempted(match &result {
+                Ok(()) => Attempt::Renamed,
+                Err(CoreError::Io(e)) => Attempt::Failed(e.raw_os_error()),
+                Err(_) => Attempt::Failed(None),
+            });
+            tried = Some(result);
             Ok(())
         });
         match gate {
             Ok(()) => tried.unwrap_or(Err(REFUSED)),
-            Err(error) => Err(self.refuse(error)),
+            Err(error) => {
+                #[cfg(test)]
+                self.outputs.attempted(Attempt::Refused);
+                Err(self.refuse(error))
+            }
         }
     }
 }
@@ -423,9 +572,12 @@ impl OutputJournal for CallJournal<'_> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::fs;
+    use std::fs::{self, OpenOptions};
+    use std::os::windows::fs::OpenOptionsExt;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use lockbox_core::CoreError;
     use lockbox_core::blob::OutputJournal;
@@ -435,6 +587,7 @@ mod tests {
 
     use super::*;
     use crate::error::{Outcome, ShellError};
+    use crate::os::KnownFolder;
     use crate::session::VaultRef;
     use crate::testing::TestShell;
 
@@ -652,6 +805,219 @@ mod tests {
         assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
         assert!(elsewhere.join(OPEN).join("inside.txt").is_file());
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// Fix round 1: the state folder itself a junction to the user's own folder, which holds `open\<32 hex>`: the
+    /// entry, spelled as Lockbox spells the state folder, is dropped and what the junction leads to stays.
+    #[cfg(windows)]
+    #[test]
+    fn sweep_refuses_a_junctioned_state_root() {
+        let ts = TestShell::new();
+        let paths = ts.shell.paths.clone();
+        let victim = ts.folder("victim");
+        let theirs = victim.join("open").join(OPEN);
+        fs::create_dir_all(&theirs).unwrap();
+        fs::write(theirs.join("inside.txt"), b"mine").unwrap();
+        assert!(!paths.root.exists(), "nothing saved yet");
+        make_dir_link(&paths.root, &victim);
+        write_journal(&ts, &[paths.open.join(OPEN)]);
+
+        assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
+        assert!(theirs.join("inside.txt").is_file());
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// Fix round 1: a junction higher up (the Local AppData folder itself): the "Open" folder behind it stays.
+    #[cfg(windows)]
+    #[test]
+    fn sweep_refuses_a_junctioned_higher_ancestor() {
+        let ts = TestShell::new();
+        let paths = ts.shell.paths.clone();
+        let local = ts.env.folder(KnownFolder::LocalAppData);
+        let victim = ts.folder("victim");
+        let theirs = victim.join("Lockbox").join("open").join(OPEN);
+        fs::create_dir_all(&theirs).unwrap();
+        fs::write(theirs.join("inside.txt"), b"mine").unwrap();
+        fs::remove_dir(&local).unwrap();
+        make_dir_link(&local, &victim);
+        write_journal(&ts, &[paths.open.join(OPEN)]);
+
+        assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
+        assert!(theirs.join("inside.txt").is_file());
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// Fix round 1: "plain names only" holds for the text as written: a `.`, `..` or empty part is refused before
+    /// anything normalises it away, for a drive path, a verbatim drive path and a share.
+    #[test]
+    fn entry_shapes() {
+        let root = |text: &str| plain_root(Path::new(text));
+        assert_eq!(root(r"C:\Users\me\x"), Some(PathBuf::from(r"C:\")));
+        assert_eq!(root(r"\\?\C:\Users\me\x"), Some(PathBuf::from(r"\\?\C:\")));
+        assert_eq!(
+            root(r"\\?\UNC\server\share\me\x"),
+            Some(PathBuf::from(r"\\?\UNC\server\share\"))
+        );
+        for refused in [
+            r"C:\Users\.\x",
+            r"C:\Users\..\x",
+            r"C:\Users\\x",
+            r"C:\Users\x\",
+            r"C:\Users\x\.",
+            r"\\?\C:\Users\.\x",
+            r"\\?\C:\Users\..\x",
+            r"\\?\UNC\server\share\.\x",
+            r"\\?\UNC\server\.\x",
+            r"\\?\UNC\server\share",
+            r"C:\",
+            r"C:x",
+            r"C:/Users/x",
+            r"Users\x",
+            r"\Users\x",
+            r"\\server\share\x",
+            r"\\.\C:\x",
+            r"\\?\Volume{0}\x",
+        ] {
+            assert_eq!(root(refused), None, "{refused}");
+        }
+    }
+
+    /// Fix round 1: an "Open" folder named through `open\.\<32 hex>` (which `Path::components` would quietly turn
+    /// into `open\<32 hex>`) is dropped, and the folder stays.
+    #[test]
+    fn sweep_drops_dotted_entries() {
+        let ts = TestShell::new();
+        let paths = &ts.shell.paths;
+        let open = paths.open.join(OPEN);
+        fs::create_dir_all(&open).unwrap();
+        let spelled = paths.open.to_string_lossy().into_owned();
+        write_journal(&ts, &[PathBuf::from(format!(r"{spelled}\.\{OPEN}"))]);
+
+        assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
+        assert!(open.is_dir());
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// Fix round 1: every delete attempt checks the entry again. The leftover is held open, so the first attempt
+    /// fails; before the next, its folder (then `open\`) is swapped for a junction to a folder holding a file (a
+    /// folder) of the same name. The next check sees the link: the entry is dropped and the user's file stays.
+    #[cfg(windows)]
+    #[test]
+    fn sweep_rechecks_before_each_delete() {
+        let ts = TestShell::new();
+        let paths = ts.shell.paths.clone();
+        let docs = ts.folder("Documents");
+        let out = docs.join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join(TEMP), b"plaintext").unwrap();
+        let victim = docs.join("victim");
+        fs::create_dir(&victim).unwrap();
+        fs::write(victim.join(TEMP), b"mine").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(out.join(TEMP))
+            .unwrap();
+        let swapped = Arc::new(AtomicBool::new(false));
+        let (moved, done) = (docs.join("out moved"), Arc::clone(&swapped));
+        let (from, to) = (out.clone(), victim.clone());
+        ts.shell.outputs.on_retry(Box::new(move || {
+            drop(held);
+            fs::rename(&from, &moved).unwrap();
+            make_dir_link(&from, &to);
+            done.store(true, Ordering::SeqCst);
+        }));
+        write_journal(&ts, &[out.join(TEMP)]);
+        assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
+        assert!(
+            swapped.load(Ordering::SeqCst),
+            "the swap ran between attempts"
+        );
+        assert_eq!(fs::read(victim.join(TEMP)).unwrap(), b"mine");
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+
+        // The same for an "Open" folder, with `open\` itself swapped.
+        let open = paths.open.join(OPEN);
+        fs::create_dir_all(&open).unwrap();
+        let held = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(open.join("statement.pdf"))
+            .unwrap();
+        let theirs = docs.join("their open");
+        fs::create_dir_all(theirs.join(OPEN)).unwrap();
+        fs::write(theirs.join(OPEN).join("inside.txt"), b"mine").unwrap();
+        swapped.store(false, Ordering::SeqCst);
+        let (from, moved, to, done) = (
+            paths.open.clone(),
+            docs.join("open moved"),
+            theirs.clone(),
+            Arc::clone(&swapped),
+        );
+        ts.shell.outputs.on_retry(Box::new(move || {
+            drop(held);
+            fs::rename(&from, &moved).unwrap();
+            make_dir_link(&from, &to);
+            done.store(true, Ordering::SeqCst);
+        }));
+        write_journal(&ts, &[open]);
+        assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
+        assert!(
+            swapped.load(Ordering::SeqCst),
+            "the swap ran between attempts"
+        );
+        assert!(theirs.join(OPEN).join("inside.txt").is_file());
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// Fix round 1: reset never replaces a file. Another program takes the first free name right before the move:
+    /// that file stays and the journal goes to the next name. With all 99 names taken: `TooLarge`, journal kept.
+    #[test]
+    fn reset_never_overwrites() {
+        let ts = TestShell::new();
+        let paths = ts.shell.paths.clone();
+        fs::create_dir_all(&paths.root).unwrap();
+        fs::write(&paths.outputs, "not json").unwrap();
+        let aside = |n: u32| paths.root.join(format!("pending-outputs.json.damaged-{n}"));
+        ts.shell.outputs.on_set_aside(Box::new(|name| {
+            fs::write(name, b"another program's").unwrap();
+        }));
+        ts.shell.outputs.reset().unwrap();
+        assert_eq!(fs::read(aside(1)).unwrap(), b"another program's");
+        assert_eq!(fs::read_to_string(aside(2)).unwrap(), "not json");
+        assert!(!paths.outputs.exists());
+
+        fs::write(&paths.outputs, "not json").unwrap();
+        for n in 3..=99 {
+            fs::write(aside(n), b"taken").unwrap();
+        }
+        assert_eq!(
+            ts.shell.outputs.reset(),
+            Err(ShellError::TooLarge {
+                what: "damaged output journals"
+            })
+        );
+        assert_eq!(fs::read_to_string(&paths.outputs).unwrap(), "not json");
+        assert!(!paths.root.join("pending-outputs.json.damaged-100").exists());
+    }
+
+    /// Fix round 1: the launch sweep's report is kept for the page, which asks for it once loaded (the event goes
+    /// out before the page listens). Nothing to tell: no notice.
+    #[test]
+    fn launch_notices_kept_for_the_page() {
+        let ts = TestShell::new();
+        let notices = || serde_json::to_value(ts.shell.launch_notices()).unwrap();
+        assert_eq!(notices(), json!([]));
+        ts.shell.sweep_outputs();
+        assert_eq!(notices(), json!([]), "a clean launch has nothing to tell");
+        fs::create_dir_all(&ts.shell.paths.root).unwrap();
+        fs::write(&ts.shell.paths.outputs, "not json").unwrap();
+        ts.shell.sweep_outputs();
+        let notice = json!({ "kind": "output_sweep", "removed": 0, "kept": 0, "unreadable": true });
+        assert_eq!(notices(), json!([notice]));
+        assert_eq!(notices(), json!([notice]), "kept, not used up");
     }
 
     /// An entry on a drive that is not connected stays for a later launch; one on a connected drive whose temp is

@@ -2,6 +2,7 @@
 /// command; `capabilities/main.json` grants each of them, and `tests/ipc.rs` checks the two agree.
 pub const COMMANDS: &[&str] = &[
     "app_info",
+    "launch_notices",
     "list_sessions",
     "lock_vault",
     "lock_all",

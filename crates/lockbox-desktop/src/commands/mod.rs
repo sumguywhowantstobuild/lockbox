@@ -26,6 +26,7 @@ use crate::error::{ShellError, ShellResult};
 pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         app_info,
+        launch_notices,
         sessions::list_sessions,
         sessions::lock_vault,
         sessions::lock_all,
@@ -94,4 +95,15 @@ async fn app_info(request: Request<'_>) -> ShellResult<AppInfo> {
     Ok(AppInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// What launch found that the page should show (the output sweep's counts): kept by the shell, since launch work runs
+/// before the page listens for `lockbox://notice`. The page asks once it has loaded.
+#[tauri::command]
+async fn launch_notices(
+    shell: tauri::State<'_, std::sync::Arc<crate::shell::Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Vec<crate::session::Notice>> {
+    let NoArgs {} = args(&request)?;
+    Ok(shell.launch_notices())
 }

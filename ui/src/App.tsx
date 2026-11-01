@@ -148,6 +148,7 @@ function downloadProbeFile(): void {
 // A bare test page: the real screens come in Plan 4. Each hands-on check gets a probe here, with what "passes" means.
 export default function App() {
   const [version, setVersion] = useState<string>();
+  const [launchNotices, setLaunchNotices] = useState<string>();
   const [vaultStatus, setVaultStatus] = useState<string>();
   const droppedFileReachedPage = useDroppedFileReachedPage();
 
@@ -166,11 +167,21 @@ export default function App() {
         setVersion("(version unavailable)");
       },
     );
+    // What launch found (the output sweep's counts), kept by Rust: its event went out before this page listened.
+    callPlain<unknown[]>("launch_notices").then(
+      (notices) => {
+        setLaunchNotices(notices.length === 0 ? "none" : JSON.stringify(notices));
+      },
+      (error: unknown) => {
+        setLaunchNotices(failed(error));
+      },
+    );
   }, []);
 
   return (
     <main>
       <h1>Lockbox {version ?? ""}</h1>
+      <p>Launch notices: {launchNotices ?? "…"}</p>
       <h2>Hands-on checks</h2>
       <ul>
         <li>
