@@ -61,11 +61,12 @@ impl Shell {
         forbidden.push(paths.root.clone());
         let sessions = Arc::new(Sessions::new(Arc::clone(&notifier))?);
         let settings = Arc::new(SettingsStore::load(paths.settings.clone()));
-        let clipboard = Clipboard::new(&os, Arc::clone(&settings));
+        // The auto-lock adds no lock hook; the clipboard reads the close's deadline from it.
+        let autolock = AutoLock::new(Arc::clone(&sessions), Arc::clone(&settings), notifier, &os);
+        let clipboard = Clipboard::new(&os, Arc::clone(&settings), autolock.close_deadline())?;
         // The first lock hook, before any other (the "Open" cleanup comes after it): a lock clears the clipboard
         // before anything else of its hooks runs.
         sessions.on_lock(clipboard.lock_hook());
-        let autolock = AutoLock::new(Arc::clone(&sessions), Arc::clone(&settings), notifier, &os);
         Ok(Shell {
             sessions,
             settings,

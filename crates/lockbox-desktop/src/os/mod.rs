@@ -110,8 +110,9 @@ pub trait ClipboardCalls: Send + Sync {
     fn set_text(&self, text: &str) -> bool;
     /// Adds `format` holding `bytes`, keeping what is already on the clipboard.
     fn set_bytes(&self, format: NonZeroU32, bytes: &[u8]) -> bool;
-    /// What `format` holds on the clipboard; `None` when it is not there.
-    fn read_bytes(&self, format: NonZeroU32) -> Option<Vec<u8>>;
+    /// What `format` holds on the clipboard: `Ok(None)` only when it is confirmed not there, an error when it is there
+    /// (or may be) but could not be read.
+    fn read_bytes(&self, format: NonZeroU32) -> ShellResult<Option<Vec<u8>>>;
 }
 
 /// [`ClipboardBackend`] from single [`ClipboardCalls`] steps.
@@ -174,10 +175,11 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
     fn clear_if(&self, tag: &CopyTag) -> ShellResult<bool> {
         let format = self.0.register_format(TAG_FORMAT).ok_or(CLIPBOARD_FAILED)?;
         let _open = self.open()?;
+        // A read that fails is an error (tried again later), never taken for the tag being gone.
         let still_ours = self
             .0
-            .read_bytes(format)
-            .is_some_and(|held| held.get(..tag.len()) == Some(tag.as_slice()));
+            .read_bytes(format)?
+            .is_some_and(|held| is_tag(&held, tag));
         if !still_ours {
             return Ok(false);
         }
@@ -188,48 +190,98 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
     }
 }
 
+/// Whether `held`, what [`TAG_FORMAT`] holds, is exactly `tag`: the 16 bytes, then nothing, or only zeros (a block
+/// may be rounded up to a larger size, `GlobalSize`, and Lockbox's blocks are zero-filled). Anything shorter, or
+/// anything else after the tag, is not this copy's.
+fn is_tag(held: &[u8], tag: &CopyTag) -> bool {
+    held.split_at_checked(tag.len())
+        .is_some_and(|(head, rest)| head == tag && rest.iter().all(|&byte| byte == 0))
+}
+
 /// Work a [`Timer`] runs later.
 pub type Job = Box<dyn FnOnce() + Send>;
 
 /// Runs work at a set time: the clipboard's clear after the delay (spec §7.3).
 pub trait Timer: Send + Sync {
-    /// Runs `job` once [`Instant::now`] reaches `when`, on the timer's own thread. An error when it cannot be
-    /// scheduled (the thread could not start).
+    /// Starts the timer's thread, once (later calls do nothing). Called when the clipboard is built, so the app never
+    /// runs without it.
+    fn start(&self) -> io::Result<()>;
+    /// Runs `job` once [`Instant::now`] reaches `when`, on the timer's own thread. An error only when the timer was
+    /// never started (or its thread is gone, which a started timer's never is).
     fn at(&self, when: Instant, job: Job) -> io::Result<()>;
 }
 
-/// The real [`Timer`]: one thread, started on first use, that runs each job when its time comes, the earliest
-/// first. A job that panics is passed over; the thread carries on.
+/// What the timer thread tells a test each time it starts a timed wait: the time it waits for, and when it began.
+#[cfg(test)]
+type WaitAck = mpsc::Sender<(Instant, Instant)>;
+
+/// The real [`Timer`]: one thread, started by [`start`](Timer::start), that runs each job when its time comes, the
+/// earliest first. A job that panics is passed over; the thread carries on.
 #[derive(Default)]
 pub struct ThreadTimer {
     queue: Mutex<Option<mpsc::Sender<(Instant, Job)>>>,
+    /// Tests only: told each time the thread starts a timed wait.
+    #[cfg(test)]
+    waits: Mutex<Option<WaitAck>>,
 }
 
 impl Timer for ThreadTimer {
-    fn at(&self, when: Instant, job: Job) -> io::Result<()> {
+    fn start(&self) -> io::Result<()> {
         let mut queue = lock(&self.queue);
-        if queue.is_none() {
-            let (sender, jobs) = mpsc::channel();
-            thread::Builder::new()
-                .name("lockbox-timer".into())
-                .spawn(move || run_timer(jobs))?;
-            *queue = Some(sender);
+        if queue.is_some() {
+            return Ok(());
         }
-        match queue.as_ref().map(|sender| sender.send((when, job))) {
+        let (sender, jobs) = mpsc::channel();
+        #[cfg(test)]
+        let waits = lock(&self.waits).clone();
+        thread::Builder::new()
+            .name("lockbox-timer".into())
+            .spawn(move || {
+                run_timer(
+                    jobs,
+                    #[cfg(test)]
+                    waits,
+                )
+            })?;
+        *queue = Some(sender);
+        Ok(())
+    }
+
+    fn at(&self, when: Instant, job: Job) -> io::Result<()> {
+        match lock(&self.queue)
+            .as_ref()
+            .map(|sender| sender.send((when, job)))
+        {
             Some(Ok(())) => Ok(()),
-            _ => Err(io::Error::other("the timer stopped")),
+            _ => Err(io::Error::other("the timer is not running")),
         }
+    }
+}
+
+impl ThreadTimer {
+    /// Tests only: a timer, not yet started, whose thread reports each timed wait it starts.
+    #[cfg(test)]
+    fn reporting_waits(acks: WaitAck) -> ThreadTimer {
+        let timer = ThreadTimer::default();
+        *lock(&timer.waits) = Some(acks);
+        timer
     }
 }
 
 /// The timer thread: waits for the earliest job's time or a new job, whichever comes first, then runs every job
 /// whose time has come. Ends when its [`ThreadTimer`] is dropped.
-fn run_timer(jobs: mpsc::Receiver<(Instant, Job)>) {
+fn run_timer(jobs: mpsc::Receiver<(Instant, Job)>, #[cfg(test)] waits: Option<WaitAck>) {
     let mut waiting: Vec<(Instant, Job)> = Vec::new();
     loop {
         let received = match waiting.iter().map(|(when, _)| *when).min() {
             None => jobs.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            Some(next) => jobs.recv_timeout(next.saturating_duration_since(Instant::now())),
+            Some(next) => {
+                #[cfg(test)]
+                if let Some(waits) = &waits {
+                    let _ = waits.send((next, Instant::now()));
+                }
+                jobs.recv_timeout(next.saturating_duration_since(Instant::now()))
+            }
         };
         match received {
             Ok(job) => waiting.push(job),
@@ -398,6 +450,7 @@ mod tests {
     #[test]
     fn thread_timer_runs_due_jobs_first() {
         let timer = ThreadTimer::default();
+        timer.start().unwrap();
         let far_ran = Arc::new(AtomicBool::new(false));
         let far = Arc::clone(&far_ran);
         timer
@@ -430,25 +483,77 @@ mod tests {
         );
     }
 
-    /// Fix round 1 (7): a job scheduled for later runs once its time comes, with nothing else sent to the timer to
-    /// wake it, and never before its time.
+    /// Fix round 1 (7), fix round 2 (6): a job scheduled for later runs once its time comes, with nothing else sent to
+    /// the timer to wake it, and never before its time. The thread reports that it started a timed wait for that very
+    /// time before the time came, so the job was not simply due already when the thread took it.
     #[test]
     fn thread_timer_wakes_for_a_future_deadline() {
-        let timer = ThreadTimer::default();
-        // The thread started and waiting first, and the job a second out, so it is surely still waiting (not already
-        // due) when the thread takes it, even on a loaded machine.
-        let (started, is_started) = mpsc::channel();
-        timer
-            .at(Instant::now(), Box::new(move || started.send(()).unwrap()))
-            .unwrap();
-        is_started.recv_timeout(GIVE_UP).unwrap();
+        let (acks, waits) = mpsc::channel();
+        let timer = ThreadTimer::reporting_waits(acks);
+        timer.start().unwrap();
         let when = Instant::now() + Duration::from_secs(1);
         let (ran, ran_at) = mpsc::channel();
         timer
             .at(when, Box::new(move || ran.send(Instant::now()).unwrap()))
             .unwrap();
+        let (waits_for, began) = waits.recv_timeout(GIVE_UP).expect("no timed wait");
+        assert_eq!(waits_for, when, "waited for another time");
+        assert!(began < when, "the wait began only after the job was due");
         let ran_at = ran_at.recv_timeout(GIVE_UP).expect("the timer never woke");
         assert!(ran_at >= when, "ran before its time");
+    }
+
+    /// Fix round 2 (2): a timer that was never started takes no job; starting it twice starts one thread.
+    #[test]
+    fn thread_timer_runs_only_once_started() {
+        let timer = ThreadTimer::default();
+        assert!(timer.at(Instant::now(), Box::new(|| {})).is_err());
+        timer.start().unwrap();
+        timer.start().unwrap();
+        let (ran, has_run) = mpsc::channel();
+        timer
+            .at(Instant::now(), Box::new(move || ran.send(()).unwrap()))
+            .unwrap();
+        assert!(has_run.recv_timeout(GIVE_UP).is_ok());
+    }
+
+    /// Fix round 2 (4): only exactly this copy's tag counts, followed by nothing or by the zero bytes a block may be
+    /// rounded up with. A shorter payload, or one with anything else after the tag, is someone else's.
+    #[test]
+    fn only_the_exact_tag_counts() {
+        let mut padded = TAG.to_vec();
+        padded.extend([0; 8]);
+        let mut longer = TAG.to_vec();
+        longer.push(1);
+        let mut zeros_then_more = TAG.to_vec();
+        zeros_then_more.extend([0, 0, 0, 1]);
+        let table: [(&[u8], bool); 6] = [
+            (&TAG, true),
+            (&padded, true),
+            (&TAG[..15], false),
+            (&longer, false),
+            (&zeros_then_more, false),
+            (&OTHER_TAG, false),
+        ];
+        for (payload, ours) in table {
+            let (fake, steps) = fake_steps();
+            steps.write_secret("ours", &TAG).unwrap();
+            fake.replace_tag(payload);
+            assert_eq!(steps.clear_if(&TAG), Ok(ours), "{payload:?}");
+            assert_eq!(fake.text().is_none(), ours, "{payload:?}");
+        }
+    }
+
+    /// Fix round 2 (1): a tag that is there but cannot be read is not taken for a missing one: the clear fails (to
+    /// be tried again) and touches nothing.
+    #[test]
+    fn unreadable_tag_is_an_error_not_absence() {
+        let (fake, steps) = fake_steps();
+        steps.write_secret("ours", &TAG).unwrap();
+        fake.fail_next_read();
+        assert_eq!(steps.clear_if(&TAG), Err(CLIPBOARD_FAILED));
+        assert_eq!(fake.text().as_deref(), Some("ours"));
+        assert_eq!(steps.clear_if(&TAG), Ok(true));
     }
 
     /// Each opening is tried [`CLIPBOARD_TRIES`] times, [`CLIPBOARD_RETRY`] apart, then answers [`CLIPBOARD_BUSY`],

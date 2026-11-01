@@ -40,7 +40,7 @@ use windows_sys::Win32::System::Com::{
 };
 use windows_sys::Win32::System::DataExchange::SetClipboardData;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
+use windows_sys::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED, HPOWERNOTIFY, RegisterSuspendResumeNotification,
     SetThreadExecutionState, UnregisterSuspendResumeNotification,
@@ -65,9 +65,10 @@ use windows_sys::core::PWSTR;
 
 use super::signals::{DeviceHeader, classify, wants_device_header};
 use super::{
-    ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, IdleSource, KnownFolder, Launcher, Os,
-    OsSignal, Power, SystemClock, ThreadTimer, Volumes,
+    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, IdleSource,
+    KnownFolder, Launcher, Os, OsSignal, Power, SystemClock, ThreadTimer, Volumes,
 };
+use crate::error::ShellResult;
 use crate::{lock, window};
 
 #[cfg(test)]
@@ -125,9 +126,10 @@ impl Os {
     }
 }
 
-/// The clipboard's single steps: through `clipboard-win` 5.4.3 for opening, emptying, formats and reading, and our
-/// own call for the text, so a block Windows refuses is wiped before it is freed (`clipboard-win`'s `set_string`
-/// frees it as it is). The clipboard is opened with no owner window, as `clipboard_win::Clipboard::new` does.
+/// The clipboard's single steps: through `clipboard-win` 5.4.3 for opening, emptying and reading, and our own
+/// [`Block`] for every value written (the text, the tag and the marks), so a block Windows refuses is wiped before it
+/// is freed and every block starts zero-filled. The clipboard is opened with no owner window, as
+/// `clipboard_win::Clipboard::new` does.
 pub struct WinClipboard;
 
 /// `CF_UNICODETEXT` (winuser.h), named here rather than pulling in `Win32_System_Ole` for one constant.
@@ -149,77 +151,135 @@ impl ClipboardCalls for WinClipboard {
     }
 
     fn set_text(&self, text: &str) -> bool {
-        let Some(block) = text_block(text) else {
+        // UTF-16 units plus the terminating NUL, which the zero-filled block already holds.
+        let Some(len) = text
+            .encode_utf16()
+            .count()
+            .checked_add(1)
+            .and_then(|units| units.checked_mul(size_of::<u16>()))
+        else {
             return false;
         };
-        // SAFETY: `block` is a live, unlocked movable global block holding a NUL-terminated UTF-16 string, as
-        // `CF_UNICODETEXT` requires. `ClipboardSteps` calls this only while the clipboard is open on this thread (if it
-        // is not, Windows refuses). On success the clipboard owns the block and it is never touched here again.
-        if unsafe { SetClipboardData(CF_UNICODETEXT, block) }.is_null() {
-            wipe(block);
-            // SAFETY: Windows refused the block, so it is still ours, unlocked, and freed once.
-            unsafe { GlobalFree(block) };
+        let Some(mut block) = Block::new(len) else {
             return false;
+        };
+        for (slot, unit) in block
+            .bytes()
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(text.encode_utf16())
+        {
+            *slot = unit.to_ne_bytes();
         }
-        true
+        block.give(CF_UNICODETEXT)
     }
 
     fn set_bytes(&self, format: NonZeroU32, bytes: &[u8]) -> bool {
-        clipboard_win::raw::set_without_clear(format.get(), bytes).is_ok()
+        let Some(mut block) = Block::new(bytes.len()) else {
+            return false;
+        };
+        block.bytes().copy_from_slice(bytes);
+        block.give(format.get())
     }
 
-    fn read_bytes(&self, format: NonZeroU32) -> Option<Vec<u8>> {
+    fn read_bytes(&self, format: NonZeroU32) -> ShellResult<Option<Vec<u8>>> {
+        // Absent only when Windows says so; a format that is there but cannot be read is an error, never "gone".
+        if !clipboard_win::raw::is_format_avail(format.get()) {
+            return Ok(None);
+        }
         let mut held = Vec::new();
-        clipboard_win::raw::get_vec(format.get(), &mut held).ok()?;
-        Some(held)
+        clipboard_win::raw::get_vec(format.get(), &mut held).map_err(|_| CLIPBOARD_FAILED)?;
+        Ok(Some(held))
     }
 }
 
-/// A movable global block holding `text` as UTF-16 with its terminating NUL, built as `clipboard-win`'s `set_string`
-/// builds it (`GHND`: movable and zero-filled, so the last unit is the NUL). The text is encoded straight into the
-/// block: no other copy of it is made.
-fn text_block(text: &str) -> Option<HGLOBAL> {
-    let units = text.encode_utf16().count().checked_add(1)?;
-    let bytes = units.checked_mul(size_of::<u16>())?;
-    // SAFETY: a plain allocation; a null handle is checked below.
-    let block = unsafe { GlobalAlloc(GHND, bytes) };
-    if block.is_null() {
-        return None;
-    }
-    // SAFETY: `block` is a live movable block of `bytes` bytes, locked here and unlocked below.
-    let at = unsafe { GlobalLock(block) }.cast::<u16>();
-    if at.is_null() {
-        // Nothing written yet: the block holds only zeros.
-        // SAFETY: `block` is ours, unlocked, and freed once.
-        unsafe { GlobalFree(block) };
-        return None;
-    }
-    // SAFETY: while locked, `at` is the block's address, aligned for `u16` (global blocks are 8-byte aligned), with
-    // `units` writable units; nothing else holds it.
-    let slots = unsafe { slice::from_raw_parts_mut(at, units) };
-    for (slot, unit) in slots.iter_mut().zip(text.encode_utf16()) {
-        *slot = unit;
-    }
-    slots[units - 1] = 0;
-    // SAFETY: undoes the lock above; `slots` is not used after it.
-    unsafe { GlobalUnlock(block) };
-    Some(block)
+/// A movable, zero-filled global block (`GHND`), locked from its allocation until it is given to the clipboard or
+/// freed. The same pointer it is filled through wipes it if the clipboard refuses it, so a refused block is never
+/// freed unwiped (no second `GlobalLock`, which could fail).
+///
+/// Microsoft's rules followed (learn.microsoft.com, `SetClipboardData`, `GlobalLock`, `GlobalUnlock`): on success the
+/// system owns the block; the application must not write to or free it, but may keep it locked to read until
+/// `CloseClipboard`, and must unlock it before the clipboard is closed. So [`give`](Self::give) calls
+/// `SetClipboardData` with the block still locked (nothing is written through the pointer after that call), then, on
+/// success, `GlobalUnlock` once, all inside the caller's opening. On refusal the block is still ours: wiped through
+/// the pointer, unlocked, then `GlobalFree`.
+struct Block {
+    handle: HGLOBAL,
+    /// The block's address while locked, valid for `len` bytes (a movable block does not move while locked).
+    at: *mut u8,
+    len: usize,
 }
 
-/// Overwrites a block the clipboard never took with zeros (volatile writes, so they are not optimised away), before
-/// it is freed. A block that cannot be locked cannot be wiped; a live movable block always can be.
-fn wipe(block: HGLOBAL) {
-    // SAFETY: `block` is a live global block of ours; `GlobalSize` only reads its size (0 on failure).
-    let size = unsafe { GlobalSize(block) };
-    // SAFETY: as above; locked here and unlocked below.
-    let at = unsafe { GlobalLock(block) }.cast::<u8>();
-    if at.is_null() {
-        return;
+impl Block {
+    /// A zero-filled block of `len` bytes (at least one), locked. `None` if it cannot be made or locked; nothing has
+    /// been written to it then.
+    fn new(len: usize) -> Option<Block> {
+        // SAFETY: a plain allocation; a null handle is checked below.
+        let handle = unsafe { GlobalAlloc(GHND, len.max(1)) };
+        if handle.is_null() {
+            return None;
+        }
+        // SAFETY: `handle` is a live movable block of ours; locked here, unlocked in `give` or `drop`.
+        let at = unsafe { GlobalLock(handle) }.cast::<u8>();
+        if at.is_null() {
+            // Never locked, never written: only zeros to free.
+            // SAFETY: `handle` is ours, unlocked, and freed once.
+            unsafe { GlobalFree(handle) };
+            return None;
+        }
+        Some(Block { handle, at, len })
     }
-    // SAFETY: while locked, `at` is the block's address with `size` writable bytes; nothing else holds it.
-    unsafe { slice::from_raw_parts_mut(at, size) }.zeroize();
-    // SAFETY: undoes the lock above.
-    unsafe { GlobalUnlock(block) };
+
+    /// The block's first `len` bytes, to fill.
+    fn bytes(&mut self) -> &mut [u8] {
+        // SAFETY: `at` is the locked block's address with at least `len` writable bytes (the block was allocated with
+        // that size); `&mut self` keeps any other use of the pointer out while the slice lives.
+        unsafe { slice::from_raw_parts_mut(self.at, self.len) }
+    }
+
+    /// Gives the block to the clipboard as `format`: true when the clipboard took it. Only inside an opening.
+    fn give(self, format: u32) -> bool {
+        // SAFETY: `handle` is a live global block holding the format's data. `ClipboardSteps` calls this only while
+        // the clipboard is open on this thread (if it is not, Windows refuses). Keeping it locked through the call is
+        // allowed: it must only be unlocked before the clipboard closes, which happens just below.
+        let taken = !unsafe { SetClipboardData(format, self.handle) }.is_null();
+        if !taken {
+            // Dropped: wiped through `at`, unlocked, freed.
+            return false;
+        }
+        // SAFETY: the system owns the block now; undoing this code's lock (reading-only rights remain until close) is
+        // what Microsoft requires before the clipboard is closed. The block is never touched again.
+        unsafe { GlobalUnlock(self.handle) };
+        std::mem::forget(self);
+        true
+    }
+}
+
+impl Drop for Block {
+    /// A block the clipboard did not take: wiped (volatile writes, not optimised away) through the pointer it was
+    /// filled through, then unlocked and freed.
+    fn drop(&mut self) {
+        self.bytes().zeroize();
+        #[cfg(test)]
+        refused_block_seen(self.bytes());
+        // SAFETY: undoes the lock taken in `new`; `at` is not used after it.
+        unsafe { GlobalUnlock(self.handle) };
+        // SAFETY: the block is still ours (never given), unlocked, and freed once.
+        unsafe { GlobalFree(self.handle) };
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the bytes of the last block refused on this thread, as they were right before it was freed.
+    static REFUSED: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Tests only: records what a refused block held right before it was freed.
+#[cfg(test)]
+fn refused_block_seen(bytes: &[u8]) {
+    REFUSED.set(Some(bytes.to_vec()));
 }
 
 /// Idle time from `GetLastInputInfo`: the tick count of the session's last keyboard or mouse input, against
@@ -1806,35 +1866,26 @@ mod tests {
         clipboard_win::get_clipboard_string().ok()
     }
 
-    /// Fix round 1 (5): the text block holds the text and its NUL, and is all zeros once wiped. Touches no clipboard
-    /// content: the refused write below fails because this thread has not opened the clipboard.
+    /// Fix round 1 (5), fix round 2 (5): a block Windows refuses is wiped through the pointer it was filled through,
+    /// right before it is freed, for the text and for any other value. Touches no clipboard content: the writes are
+    /// refused because this thread has not opened the clipboard.
     #[test]
-    fn text_block_is_wiped_before_it_is_freed() {
+    fn refused_block_is_wiped_before_it_is_freed() {
         let text = "Pw-\u{e9}\u{1F600}-7f3a";
-        let block = text_block(text).unwrap();
-        let read = |block: HGLOBAL| {
-            // SAFETY: `block` is a live block of ours; locked and unlocked here, read in between as `size` bytes.
-            unsafe {
-                let size = GlobalSize(block);
-                let at = GlobalLock(block).cast::<u8>();
-                assert!(!at.is_null());
-                let bytes = slice::from_raw_parts(at, size).to_vec();
-                GlobalUnlock(block);
-                bytes
-            }
-        };
-        let mut expected: Vec<u8> = text.encode_utf16().flat_map(u16::to_ne_bytes).collect();
-        expected.extend([0, 0]);
-        let held = read(block);
-        assert_eq!(&held[..expected.len()], expected, "the text and its NUL");
-        wipe(block);
-        assert!(read(block).iter().all(|&byte| byte == 0), "not wiped");
-        // SAFETY: the block is ours and freed once.
-        unsafe { GlobalFree(block) };
-
-        assert!(
-            !WinClipboard.set_text("refused"),
-            "written without an opening"
+        REFUSED.set(None);
+        assert!(!WinClipboard.set_text(text), "written without an opening");
+        let units = text.encode_utf16().count() + 1;
+        assert_eq!(
+            REFUSED.take(),
+            Some(vec![0; units * 2]),
+            "the text block was not wiped"
+        );
+        let format = clipboard_win::raw::register_format("Lockbox.CopyTag").unwrap();
+        assert!(!WinClipboard.set_bytes(format, &TAG));
+        assert_eq!(
+            REFUSED.take(),
+            Some(vec![0; 16]),
+            "the tag block was not wiped"
         );
     }
 
@@ -1863,6 +1914,7 @@ mod tests {
             let mut tag = Vec::new();
             clipboard_win::raw::get_vec(tag_format.get(), &mut tag).unwrap();
             assert_eq!(&tag[..16], TAG, "the tag");
+            assert!(tag[16..].iter().all(|&byte| byte == 0), "more than the tag");
         }
         assert_eq!(clipboard_text().as_deref(), Some(SAMPLE));
         // Still Lockbox's copy: the clear empties it.
@@ -1894,7 +1946,7 @@ mod tests {
         fn set_bytes(&self, format: NonZeroU32, bytes: &[u8]) -> bool {
             WinClipboard.set_bytes(format, bytes)
         }
-        fn read_bytes(&self, format: NonZeroU32) -> Option<Vec<u8>> {
+        fn read_bytes(&self, format: NonZeroU32) -> ShellResult<Option<Vec<u8>>> {
             let held = WinClipboard.read_bytes(format);
             let step = lock(&self.during_read).take();
             if let Some(step) = step {
@@ -1932,11 +1984,14 @@ mod tests {
             }))),
         }));
         instrumented.write_secret(SAMPLE, &NEWER_TAG).unwrap();
+        // The hook is for the matching clear, the one that empties: take it out for this mismatching one.
+        let competitor = lock(&instrumented.0.during_read).take();
         assert_eq!(
             instrumented.clear_if(&TAG),
             Ok(false),
             "an old tag cleared it"
         );
+        *lock(&instrumented.0.during_read) = competitor;
         assert_eq!(clipboard_text().as_deref(), Some(SAMPLE));
         assert_eq!(instrumented.clear_if(&NEWER_TAG), Ok(true));
         assert_eq!(clipboard_text(), None);

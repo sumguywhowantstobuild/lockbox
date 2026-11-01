@@ -12,10 +12,11 @@ use std::{fs, io};
 
 use lockbox_core::internals::fsio::testutil::TempDir;
 
+use crate::error::ShellResult;
 use crate::lock;
 use crate::os::{
-    ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS, Env, IdleSource,
-    Job, KnownFolder, Launcher, Os, Power, TAG_FORMAT, Timer, Volumes,
+    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS,
+    Env, IdleSource, Job, KnownFolder, Launcher, Os, Power, TAG_FORMAT, Timer, Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
@@ -154,6 +155,8 @@ struct Clip {
     after_close: Option<Hook>,
     /// Run once, inside the next read of the tag, with the clipboard still open.
     during_read: Option<Hook>,
+    /// The next read of the tag fails, though the tag is there.
+    fail_read: bool,
 }
 
 /// The format IDs the fake hands out: the exclusion formats from `0xC000`, the tag's format at [`FAKE_TAG_FORMAT`].
@@ -237,6 +240,16 @@ impl FakeClipboard {
     /// Runs `hook` once, inside the next read of the tag, while the clipboard is open.
     pub fn during_next_read(&self, hook: Hook) {
         lock(&self.clip).during_read = Some(hook);
+    }
+
+    /// The next read of the tag fails, as `GetClipboardData` or `GlobalLock` can.
+    pub fn fail_next_read(&self) {
+        lock(&self.clip).fail_read = true;
+    }
+
+    /// The tag's format now holds `payload`, as if written that way (another program's, or a block rounded up).
+    pub fn replace_tag(&self, payload: &[u8]) {
+        lock(&self.clip).tag = Some(payload.to_vec());
     }
 
     pub fn text(&self) -> Option<String> {
@@ -342,18 +355,22 @@ impl ClipboardCalls for FakeClipboard {
         true
     }
 
-    fn read_bytes(&self, format: NonZeroU32) -> Option<Vec<u8>> {
-        let (held, hook) = {
+    fn read_bytes(&self, format: NonZeroU32) -> ShellResult<Option<Vec<u8>>> {
+        let (held, failed, hook) = {
             let mut clip = lock(&self.clip);
             assert!(clip.open, "read while closed");
             assert_eq!(format.get(), FAKE_TAG_FORMAT, "only the tag is read");
             clip.events.push("read tag");
-            (clip.tag.clone(), clip.during_read.take())
+            let failed = std::mem::take(&mut clip.fail_read);
+            (clip.tag.clone(), failed, clip.during_read.take())
         };
         if let Some(hook) = hook {
             hook();
         }
-        held
+        match failed {
+            true => Err(CLIPBOARD_FAILED),
+            false => Ok(held),
+        }
     }
 }
 
@@ -363,19 +380,12 @@ pub struct FakeTimer {
     jobs: Mutex<Vec<(Instant, Job)>>,
     /// The next job cannot be scheduled.
     fail_next: AtomicBool,
-    /// No job can be scheduled any more.
-    fail_all: AtomicBool,
 }
 
 impl FakeTimer {
     /// The next job cannot be scheduled, as if the timer thread could not start.
     pub fn fail_next(&self) {
         self.fail_next.store(true, Ordering::SeqCst);
-    }
-
-    /// From now on, no job can be scheduled.
-    pub fn fail_all(&self) {
-        self.fail_all.store(true, Ordering::SeqCst);
     }
 
     /// Runs, earliest first, every job due at `now`.
@@ -398,9 +408,26 @@ impl FakeTimer {
     }
 }
 
+thread_local! {
+    /// The next fake timer started on this thread fails to start.
+    static FAIL_TIMER_START: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The next fake timer this thread starts fails to start, as if its thread could not be made.
+pub fn fail_next_timer_start() {
+    FAIL_TIMER_START.set(true);
+}
+
 impl Timer for FakeTimer {
+    fn start(&self) -> io::Result<()> {
+        match FAIL_TIMER_START.take() {
+            true => Err(io::Error::other("no thread")),
+            false => Ok(()),
+        }
+    }
+
     fn at(&self, when: Instant, job: Job) -> io::Result<()> {
-        if self.fail_next.swap(false, Ordering::SeqCst) || self.fail_all.load(Ordering::SeqCst) {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(io::Error::other("no timer"));
         }
         lock(&self.jobs).push((when, job));

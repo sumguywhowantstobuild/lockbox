@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use lockbox_core::blob::CancelToken;
 
+use crate::clipboard::CloseDeadline;
 use crate::lock;
 use crate::os::{Clock, IdleSource, Os, OsSignal, Power, Volumes};
 use crate::session::{LockReason, Notifier, SessionId, Sessions};
@@ -455,6 +456,20 @@ impl AutoLock {
         let hooks_deadline = lock(&self.closing.phase).hooks_deadline.unwrap_or(deadline);
         self.closing
             .wait(hooks_deadline.min(deadline), |phase| phase.done);
+    }
+
+    /// Reads the close's deadline (the first shutdown call's, `None` until closing starts): the clipboard's close-time
+    /// clear stops at it, since the close stops waiting for the hooks there.
+    pub(crate) fn close_deadline(&self) -> CloseDeadline {
+        let closing = Arc::clone(&self.closing);
+        Arc::new(move || lock(&closing.phase).hooks_deadline)
+    }
+
+    /// Tests only: the close's deadline as if a close had started with it, without starting one.
+    #[cfg(test)]
+    pub(crate) fn set_close_deadline(&self, deadline: Instant) {
+        self.closing
+            .update(|phase| phase.hooks_deadline = Some(deadline));
     }
 
     fn start_closing(&self, deadline: Instant) {
