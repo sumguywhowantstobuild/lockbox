@@ -372,6 +372,7 @@ impl Outputs {
 }
 
 /// Whether a check lets the sweep delete an entry, keep it for later, or drop it.
+#[derive(Debug, PartialEq, Eq)]
 enum Checked {
     Delete { folder: bool },
     Keep,
@@ -399,34 +400,74 @@ fn is_transient(e: &io::Error) -> bool {
     matches!(e.raw_os_error(), Some(32 | 5))
 }
 
-/// Checks each existing folder from below `root` down to `folder`: `Delete` when none leads elsewhere, `Drop` when one
-/// is a link, a junction or a mount point (a name-surrogate reparse point, its tag read from the folder itself:
-/// [`win::is_redirect`]) or is not a folder or not there (nothing below it is either), `Keep` when one cannot be read.
-/// A folder whose reparse point keeps it in place (a cloud-file folder such as OneDrive's) passes.
+/// Checks the drive or share `root` itself, then each folder below it down to `folder`: `Delete` when none leads
+/// elsewhere, `Drop` when one is a link, a junction or a mount point (a name-surrogate reparse point, its tag read from
+/// the folder itself: [`win::is_redirect`]) or is not a folder or not there (nothing below it is either). A folder
+/// below the root that cannot be read keeps the entry (`Keep`); a root that cannot be read drops it. A folder whose
+/// reparse point keeps it in place (a cloud-file folder such as OneDrive's) passes.
 fn no_link_below(root: &Path, folder: &Path) -> Checked {
+    no_link_on_the_way(&Disk, root, folder)
+}
+
+/// How the folders on an entry's way are read: from the disk ([`Disk`]), or by a test's fake (a drive or share root
+/// that is a link cannot be made without admin rights).
+trait FolderProbe {
+    /// The item's own attributes (`symlink_metadata`: never what it leads to).
+    fn attributes(&self, at: &Path) -> io::Result<u32>;
+    /// Whether the item leads elsewhere ([`win::is_redirect`]); asked only of a reparse point.
+    fn redirects(&self, at: &Path) -> io::Result<bool>;
+}
+
+struct Disk;
+
+impl FolderProbe for Disk {
+    fn attributes(&self, at: &Path) -> io::Result<u32> {
+        Ok(fs::symlink_metadata(at)?.file_attributes())
+    }
+
+    fn redirects(&self, at: &Path) -> io::Result<bool> {
+        win::is_redirect(at)
+    }
+}
+
+/// [`no_link_below`] through `probe`.
+fn no_link_on_the_way(probe: &dyn FolderProbe, root: &Path, folder: &Path) -> Checked {
     let Ok(rest) = folder.strip_prefix(root) else {
         return Checked::Drop;
     };
+    // The drive or share root first, as strictly: one that is a link, or cannot be read, drops the entry.
+    if let Some(stop) = folder_stops(probe, root, Checked::Drop) {
+        return stop;
+    }
     let mut at = root.to_path_buf();
     for part in rest.iter() {
         at.push(part);
-        let meta = match fs::symlink_metadata(&at) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Checked::Drop,
-            Err(_) => return Checked::Keep,
-        };
-        if meta.file_attributes() & DIRECTORY == 0 {
-            return Checked::Drop;
-        }
-        if meta.file_attributes() & REPARSE_POINT != 0 {
-            match win::is_redirect(&at) {
-                Ok(false) => {}
-                Ok(true) => return Checked::Drop,
-                Err(_) => return Checked::Keep,
-            }
+        if let Some(stop) = folder_stops(probe, &at, Checked::Keep) {
+            return stop;
         }
     }
     Checked::Delete { folder: true }
+}
+
+/// What the folder `at` says about the way through it: nothing (`None`) when it is a folder that leads nowhere else;
+/// `Drop` when it leads elsewhere, is not a folder or is not there; `unreadable` when it cannot be read.
+fn folder_stops(probe: &dyn FolderProbe, at: &Path, unreadable: Checked) -> Option<Checked> {
+    let attributes = match probe.attributes(at) {
+        Ok(attributes) => attributes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(Checked::Drop),
+        Err(_) => return Some(unreadable),
+    };
+    if attributes & DIRECTORY == 0 {
+        return Some(Checked::Drop);
+    }
+    if attributes & REPARSE_POINT == 0 {
+        return None;
+    }
+    match probe.redirects(at) {
+        Ok(false) => None,
+        Ok(true) => Some(Checked::Drop),
+        Err(_) => Some(unreadable),
+    }
 }
 
 /// `path` in its verbatim form (`\\?\C:\..`) when it is a plain drive path (`C:\..`), as text only: nothing resolved.
@@ -855,6 +896,60 @@ mod tests {
         assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
         assert!(theirs.join("inside.txt").is_file());
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// Fix round 2: the drive or share root is checked like every folder below it, before the walk goes down. A root
+    /// that is a link cannot be made without admin rights, so a fake stands in for the disk (unit level).
+    #[test]
+    fn root_is_checked_too() {
+        /// The root reads as given; every folder below it is a plain folder.
+        struct Fake {
+            root: PathBuf,
+            /// `None`: the root's attributes cannot be read.
+            attributes: Option<u32>,
+            /// `None`: its reparse tag cannot be read.
+            redirect: Option<bool>,
+        }
+        impl FolderProbe for Fake {
+            fn attributes(&self, at: &Path) -> io::Result<u32> {
+                if at != self.root {
+                    return Ok(DIRECTORY);
+                }
+                self.attributes
+                    .ok_or_else(|| io::ErrorKind::PermissionDenied.into())
+            }
+            fn redirects(&self, at: &Path) -> io::Result<bool> {
+                if at != self.root {
+                    return Ok(false);
+                }
+                self.redirect
+                    .ok_or_else(|| io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        const LINK: u32 = DIRECTORY | REPARSE_POINT;
+        let drop = Checked::Drop;
+        let pass = Checked::Delete { folder: true };
+        for root in [r"\\?\C:\", r"C:\", r"\\?\UNC\server\share\"] {
+            let folder = Path::new(root).join("Users").join("me");
+            let check = |attributes, redirect| {
+                let fake = Fake {
+                    root: PathBuf::from(root),
+                    attributes,
+                    redirect,
+                };
+                no_link_on_the_way(&fake, Path::new(root), &folder)
+            };
+            assert_eq!(check(Some(DIRECTORY), None), pass, "{root}: a plain root");
+            assert_eq!(check(Some(LINK), Some(true)), drop, "{root}: a linked root");
+            assert_eq!(check(Some(LINK), None), drop, "{root}: its tag unreadable");
+            assert_eq!(check(None, None), drop, "{root}: unreadable");
+            assert_eq!(check(Some(0), None), drop, "{root}: not a folder");
+            assert_eq!(
+                check(Some(LINK), Some(false)),
+                pass,
+                "{root}: a cloud-file root"
+            );
+        }
     }
 
     /// Fix round 1: "plain names only" holds for the text as written: a `.`, `..` or empty part is refused before

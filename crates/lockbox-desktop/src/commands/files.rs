@@ -320,12 +320,14 @@ mod tests {
         assert_eq!(names(dest.parent().unwrap()), ["report.pdf"]);
     }
 
-    /// The destination is held open with no sharing, so each rename attempt fails. Once a real rename attempt has
-    /// failed with a sharing violation (told from inside the attempt), a lock during the engine's wait before the next
-    /// one returns within 100 ms. The file is let go right after the lock, so only the publish gate stops the next
-    /// attempt: refused, `Locked`, the destination as it was, the temp gone and cleared.
+    /// The destination is held open with no sharing, so each rename attempt fails with a sharing violation. At the
+    /// start of the engine's wait before the next attempt (the step `publish.retry_wait`, outside the publish guard),
+    /// the export pauses while another thread locks: the lock returns within 100 ms, before the next attempt begins.
+    /// The file is let go right after the lock, so only the publish gate stops the next attempt: refused, `Locked`,
+    /// the destination as it was, the temp gone and cleared.
     #[test]
     fn lock_not_delayed_by_a_held_file() {
+        let _cleanup = Cleanup;
         let ts = TestShell::new();
         let (s, g, id, file_id, dest) = with_destination(&ts);
         let held = OpenOptions::new()
@@ -334,45 +336,60 @@ mod tests {
             .open(&dest)
             .unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let (failed, failed_rx) = mpsc::channel();
         let attempts = Arc::clone(&seen);
         ts.shell.outputs.on_attempt(Box::new(move |attempt| {
             attempts.lock().unwrap().push((attempt, Instant::now()));
-            if matches!(attempt, Attempt::Failed(_)) {
-                let _ = failed.send(());
-            }
         }));
+        // The first wait: tell the locker, and stay in the wait until it has locked.
+        let (waiting, waiting_rx) = mpsc::channel();
+        let (locked, locked_rx) = mpsc::channel::<()>();
+        let mut first_wait = Some((waiting, locked_rx));
+        failpoint::observe(
+            "publish.retry_wait",
+            Box::new(move || {
+                if let Some((waiting, locked)) = first_wait.take() {
+                    waiting.send(Instant::now()).unwrap();
+                    locked.recv_timeout(GIVE_UP).expect("the locker locked");
+                }
+            }),
+        );
         let shell = Arc::clone(&ts.shell);
-        let (took, took_rx) = mpsc::channel();
         // No key derivation slows the lock while it is timed.
         let _quiet = quiet();
         let locker = thread::spawn(move || {
-            failed_rx
+            let wait_began = waiting_rx
                 .recv_timeout(GIVE_UP)
-                .expect("a rename attempt failed");
+                .expect("the engine waited between attempts");
             let started = Instant::now();
             shell.sessions.lock_all(LockReason::Manual);
-            took.send((started, started.elapsed())).unwrap();
+            let returned = Instant::now();
             drop(held);
+            locked.send(()).unwrap();
+            (wait_began, started, returned)
         });
         ts.dialogs.answer(Some(dest.clone()));
         let saved = ts.shell.save_file_copy(s, g, &id, &file_id);
-        locker.join().unwrap();
-        let (locked_at, took) = took_rx.recv().unwrap();
+        let (wait_began, lock_started, lock_returned) = locker.join().unwrap();
+        let took = lock_returned - lock_started;
         assert!(took < Duration::from_millis(100), "the lock took {took:?}");
         assert_eq!(saved.err(), LOCKED);
         let seen = seen.lock().unwrap().clone();
-        let (first, failed_at) = seen[0];
+        assert_eq!(
+            seen.len(),
+            2,
+            "one failed attempt, then one refused: {seen:?}"
+        );
+        let ((first, failed_at), (next, next_at)) = (seen[0], seen[1]);
         assert!(
             matches!(first, Attempt::Failed(Some(32 | 5))),
             "first a sharing violation: {seen:?}"
         );
+        assert!(failed_at <= wait_began && wait_began <= lock_started);
         assert!(
-            failed_at <= locked_at,
-            "the lock came after a failed rename"
+            lock_returned <= next_at,
+            "the lock returned before the next attempt"
         );
-        assert_eq!(seen.last().map(|(a, _)| *a), Some(Attempt::Refused));
-        assert!(!seen.iter().any(|(a, _)| *a == Attempt::Renamed));
+        assert_eq!(next, Attempt::Refused);
         untouched(&dest);
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
     }

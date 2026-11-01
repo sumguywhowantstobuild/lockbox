@@ -153,7 +153,14 @@ pub(crate) fn rename_replace_gated(
         renamed();
         Ok(())
     };
-    retry_gated(attempt, gate, std::thread::sleep)
+    let wait = |time| {
+        // Tests: the start of each wait between attempts, outside the gate. Only observers act
+        // here: a wait cannot fail, so an armed step is ignored.
+        #[cfg(any(test, feature = "test-internals"))]
+        let _ = failpoint::check("publish.retry_wait");
+        std::thread::sleep(time)
+    };
+    retry_gated(attempt, gate, wait)
 }
 
 /// The durability half of [`replace_file`], after a successful [`rename_replace_gated`] to
@@ -571,6 +578,56 @@ mod tests {
         exists(atomic_create(&link, b"x"));
         assert!(std::fs::symlink_metadata(&link).is_ok());
         assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    /// Task 13 fix round 2: the step `publish.retry_wait` starts each wait between two publish
+    /// attempts, outside the gate (the shell's publish guard): after one gate call has returned and
+    /// before the next begins.
+    #[cfg(windows)]
+    #[test]
+    fn publish_retry_wait_is_outside_the_gate() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Disarm;
+        impl Drop for Disarm {
+            fn drop(&mut self) {
+                failpoint::disarm_all();
+            }
+        }
+        let _disarm = Disarm;
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&to, b"old").unwrap();
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let waits = Rc::clone(&steps);
+        failpoint::observe(
+            "publish.retry_wait",
+            Box::new(move || waits.borrow_mut().push("wait")),
+        );
+        let mut calls = 0;
+        rename_replace_gated(
+            &from,
+            &to,
+            |attempt| {
+                calls += 1;
+                steps.borrow_mut().push("gate in");
+                // The first attempt meets a sharing violation, as when another program holds `to`.
+                let result = match calls {
+                    1 => Err(io::Error::from_raw_os_error(32).into()),
+                    _ => attempt(),
+                };
+                steps.borrow_mut().push("gate out");
+                result
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(
+            *steps.borrow(),
+            ["gate in", "gate out", "wait", "gate in", "gate out"]
+        );
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
     }
 
     /// A no-replace move onto a taken name is told apart from every other failure.
