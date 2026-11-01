@@ -1,6 +1,6 @@
 # Lockbox — Design Spec
 
-**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 6 (2026-10-27, Plan 3 decisions)
+**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 6 (2026-10-27, Plan 3 decisions; §7.3 clipboard ownership updated 2026-11-01)
 
 ## 1. Purpose
 
@@ -514,10 +514,12 @@ authenticated.
 Copied secrets are marked so **Windows clipboard history (Win+V) and cloud clipboard don't store them** (the Windows
 "exclude from clipboard history / monitoring" formats). After the delay, and when the vault locks, the clipboard is
 cleared **only if it still holds what Lockbox put there.** Clipboard access uses a short timeout, since another app can
-hold the clipboard open. "Still holds what Lockbox put there" means the Windows clipboard sequence number is unchanged
-since Lockbox's write; the write and the reading of that number happen in one clipboard opening, and so do the check
-and the clear. If any of the three exclusion formats cannot be set, the clipboard is emptied and the copy fails. Each
-copy has its own timer. Locking a vault clears a copy made from that vault; locking all vaults clears any.
+hold the clipboard open. "Still holds what Lockbox put there" means the copy's own tag (16 random bytes, not derived from
+the secret, in a private clipboard format written in the same opening as the text) is still on the clipboard; the
+check and the clear happen in one clipboard opening. (Not the clipboard sequence number: Windows adds derived text
+formats when the clipboard closes, which changes it after Lockbox's write.) If any of the three exclusion formats
+cannot be set, the clipboard is emptied and the copy fails. Each copy has its own timer; a clear that finds the
+clipboard busy keeps trying until it succeeds or the copy is gone. Locking a vault clears a copy made from that vault; locking all vaults clears any.
 
 ### 7.4 Locking (concurrency contract)
 - **Idle** means no keyboard or mouse input anywhere in Windows for the configured minutes. **While a long operation the
