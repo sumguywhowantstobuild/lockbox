@@ -129,6 +129,11 @@ impl Clock for FakeClock {
     fn now(&self) -> Instant {
         *lock(&self.0)
     }
+
+    /// No real wait: the clock moves on by `time`.
+    fn sleep(&self, time: Duration) {
+        *lock(&self.0) += time;
+    }
 }
 
 /// The clipboard as the test sees it: its text, the tag and the marks beside it, and whether it is open.
@@ -169,6 +174,10 @@ const FAKE_TAG_FORMAT: u32 = 0xC010;
 pub struct FakeClipboard {
     clip: Arc<Mutex<Clip>>,
     opens: AtomicUsize,
+    /// The clock each try at opening is timed by, once the test gives one.
+    clock: Mutex<Option<Arc<FakeClock>>>,
+    /// When each try at opening was made, by that clock.
+    open_times: Mutex<Vec<Instant>>,
 }
 
 /// The fake clipboard, open: closed when dropped.
@@ -273,6 +282,16 @@ impl FakeClipboard {
         self.opens.load(Ordering::SeqCst)
     }
 
+    /// From now on, each try at opening is timed by `clock`.
+    pub fn watch_clock(&self, clock: Arc<FakeClock>) {
+        *lock(&self.clock) = Some(clock);
+    }
+
+    /// When each try at opening was made since the last call, by the watched clock.
+    pub fn take_open_times(&self) -> Vec<Instant> {
+        std::mem::take(&mut lock(&self.open_times))
+    }
+
     /// The steps so far, and forgets them.
     pub fn take_events(&self) -> Vec<&'static str> {
         std::mem::take(&mut lock(&self.clip).events)
@@ -295,6 +314,9 @@ impl ClipboardCalls for FakeClipboard {
 
     fn open(&self) -> Option<FakeOpened> {
         self.opens.fetch_add(1, Ordering::SeqCst);
+        if let Some(clock) = lock(&self.clock).as_ref() {
+            lock(&self.open_times).push(clock.now());
+        }
         let mut clip = lock(&self.clip);
         if clip.held_for > 0 {
             if clip.held_for != usize::MAX {
@@ -765,6 +787,7 @@ impl TestShell {
         let power = Arc::new(FakePower::default());
         let clock = Arc::new(FakeClock::default());
         let clipboard = Arc::new(FakeClipboard::default());
+        clipboard.watch_clock(clock.clone());
         let timer = Arc::new(FakeTimer::default());
         let events = Arc::new(Events::default());
         let app_dirs = vec![
@@ -782,7 +805,7 @@ impl TestShell {
             idle: idle.clone(),
             power: power.clone(),
             clock: clock.clone(),
-            clipboard: Arc::new(ClipboardSteps(clipboard.clone())),
+            clipboard: Arc::new(ClipboardSteps::new(clipboard.clone(), clock.clone())),
             timer: timer.clone(),
         };
         let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone())?);

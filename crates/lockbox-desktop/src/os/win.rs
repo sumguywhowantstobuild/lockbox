@@ -120,7 +120,10 @@ impl Os {
             idle: Arc::new(WinIdle),
             power: Arc::new(WinPower { app }),
             clock: Arc::new(SystemClock),
-            clipboard: Arc::new(ClipboardSteps(Arc::new(WinClipboard))),
+            clipboard: Arc::new(ClipboardSteps::new(
+                Arc::new(WinClipboard),
+                Arc::new(SystemClock),
+            )),
             timer: Arc::new(ThreadTimer::default()),
         }
     }
@@ -135,18 +138,36 @@ pub struct WinClipboard;
 /// `CF_UNICODETEXT` (winuser.h), named here rather than pulling in `Win32_System_Ole` for one constant.
 const CF_UNICODETEXT: u32 = 13;
 
+/// The clipboard opened by [`WinClipboard`]: `clipboard_win::Clipboard`, which closes it when dropped.
+pub struct WinOpened(#[allow(dead_code)] clipboard_win::Clipboard);
+
+#[cfg(test)]
+impl Drop for WinOpened {
+    /// Tests only: the close, as a step (the clipboard itself closes when the field drops, right after this).
+    fn drop(&mut self) {
+        clipboard_step("close");
+    }
+}
+
 impl ClipboardCalls for WinClipboard {
-    type Opened = clipboard_win::Clipboard;
+    type Opened = WinOpened;
 
     fn register_format(&self, name: &str) -> Option<NonZeroU32> {
         clipboard_win::raw::register_format(name)
     }
 
-    fn open(&self) -> Option<clipboard_win::Clipboard> {
-        clipboard_win::Clipboard::new().ok()
+    fn open(&self) -> Option<WinOpened> {
+        let opened = clipboard_win::Clipboard::new().ok().map(WinOpened);
+        #[cfg(test)]
+        if opened.is_some() {
+            clipboard_step("open");
+        }
+        opened
     }
 
     fn empty(&self) -> bool {
+        #[cfg(test)]
+        clipboard_step("empty");
         clipboard_win::raw::empty().is_ok()
     }
 
@@ -184,6 +205,8 @@ impl ClipboardCalls for WinClipboard {
     }
 
     fn read_bytes(&self, format: NonZeroU32) -> ShellResult<Option<Vec<u8>>> {
+        #[cfg(test)]
+        clipboard_step("read");
         // Absent only when Windows says so; a format that is there but cannot be read is an error, never "gone".
         if !clipboard_win::raw::is_format_avail(format.get()) {
             return Ok(None);
@@ -274,6 +297,18 @@ impl Drop for Block {
 thread_local! {
     /// Tests only: the bytes of the last block refused on this thread, as they were right before it was freed.
     static REFUSED: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the real clipboard steps this thread took (`open`, `read`, `empty`, `close`), and the test's own.
+    static CLIPBOARD_STEPS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tests only: records one clipboard step on this thread.
+#[cfg(test)]
+fn clipboard_step(step: &'static str) {
+    CLIPBOARD_STEPS.with_borrow_mut(|steps| steps.push(step));
 }
 
 /// Tests only: records what a refused block held right before it was freed.
@@ -1858,7 +1893,7 @@ mod tests {
     const NEWER_TAG: CopyTag = [0xa5; 16];
 
     fn real_clipboard() -> ClipboardSteps<WinClipboard> {
-        ClipboardSteps(Arc::new(WinClipboard))
+        ClipboardSteps::new(Arc::new(WinClipboard), Arc::new(SystemClock))
     }
 
     /// The clipboard's text, read in an opening of its own.
@@ -1918,8 +1953,8 @@ mod tests {
         }
         assert_eq!(clipboard_text().as_deref(), Some(SAMPLE));
         // Still Lockbox's copy: the clear empties it.
-        assert_eq!(clipboard.clear_if(&NEWER_TAG), Ok(false));
-        assert_eq!(clipboard.clear_if(&TAG), Ok(true));
+        assert_eq!(clipboard.clear_if(&NEWER_TAG, None), Ok(false));
+        assert_eq!(clipboard.clear_if(&TAG, None), Ok(true));
         assert_eq!(clipboard_text(), None);
     }
 
@@ -1930,11 +1965,11 @@ mod tests {
     }
 
     impl ClipboardCalls for DuringRead {
-        type Opened = clipboard_win::Clipboard;
+        type Opened = WinOpened;
         fn register_format(&self, name: &str) -> Option<NonZeroU32> {
             WinClipboard.register_format(name)
         }
-        fn open(&self) -> Option<clipboard_win::Clipboard> {
+        fn open(&self) -> Option<WinOpened> {
             WinClipboard.open()
         }
         fn empty(&self) -> bool {
@@ -1966,34 +2001,46 @@ mod tests {
         thread::spawn(|| clipboard_win::set_clipboard_string("theirs").unwrap())
             .join()
             .unwrap();
-        assert_eq!(clipboard.clear_if(&TAG), Ok(false));
+        assert_eq!(clipboard.clear_if(&TAG, None), Ok(false));
         assert_eq!(clipboard_text().as_deref(), Some("theirs"));
 
         // Another program (with a window, as programs open it) tries to copy between the check and the clear: the
         // clipboard is still open, so it cannot get in, and the clear takes only Lockbox's copy.
         let (signal_thread, _signals) = started();
         let window = window_of(&signal_thread);
-        let instrumented = ClipboardSteps(Arc::new(DuringRead {
-            during_read: Mutex::new(Some(Box::new(move || {
-                let got_in = thread::spawn(move || {
-                    clipboard_win::Clipboard::new_for(window as HWND).is_ok()
-                })
-                .join()
-                .unwrap();
-                assert!(!got_in, "another program opened the clipboard mid-clear");
-            }))),
-        }));
+        let instrumented = ClipboardSteps::new(
+            Arc::new(DuringRead {
+                during_read: Mutex::new(Some(Box::new(move || {
+                    let got_in = thread::spawn(move || {
+                        clipboard_win::Clipboard::new_for(window as HWND).is_ok()
+                    })
+                    .join()
+                    .unwrap();
+                    assert!(!got_in, "another program opened the clipboard mid-clear");
+                    clipboard_step("competitor refused");
+                }))),
+            }),
+            Arc::new(SystemClock),
+        );
         instrumented.write_secret(SAMPLE, &NEWER_TAG).unwrap();
         // The hook is for the matching clear, the one that empties: take it out for this mismatching one.
-        let competitor = lock(&instrumented.0.during_read).take();
+        let competitor = lock(&instrumented.calls.during_read).take();
         assert_eq!(
-            instrumented.clear_if(&TAG),
+            instrumented.clear_if(&TAG, None),
             Ok(false),
             "an old tag cleared it"
         );
-        *lock(&instrumented.0.during_read) = competitor;
+        *lock(&instrumented.calls.during_read) = competitor;
         assert_eq!(clipboard_text().as_deref(), Some(SAMPLE));
-        assert_eq!(instrumented.clear_if(&NEWER_TAG), Ok(true));
+        CLIPBOARD_STEPS.take();
+        assert_eq!(instrumented.clear_if(&NEWER_TAG, None), Ok(true));
+        // Fix round 3 (2): the real steps of the matching clear. The tag check and the empty share one opening, with
+        // no close between them, and the other program's try falls inside that span.
+        assert_eq!(
+            CLIPBOARD_STEPS.take(),
+            ["open", "read", "competitor refused", "empty", "close"],
+            "the check and the empty are not one opening"
+        );
         assert_eq!(clipboard_text(), None);
     }
 
@@ -2023,7 +2070,7 @@ mod tests {
                 left_behind: false
             })
         );
-        assert_eq!(clipboard.clear_if(&TAG), Err(CLIPBOARD_BUSY));
+        assert_eq!(clipboard.clear_if(&TAG, None), Err(CLIPBOARD_BUSY));
         let took = began.elapsed();
         release.send(()).unwrap();
         holder.join().unwrap();

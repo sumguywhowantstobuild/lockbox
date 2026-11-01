@@ -46,8 +46,9 @@ pub trait ClipboardBackend: Send + Sync {
     /// opening; [`WriteFailed::left_behind`] says when that failed too.
     fn write_secret(&self, text: &str, tag: &CopyTag) -> Result<(), WriteFailed>;
     /// Empties the clipboard only while it still holds the copy tagged `tag`, checked and emptied in the same opening:
-    /// whether it did. Anything copied since (which empties the clipboard, tag included) is left alone.
-    fn clear_if(&self, tag: &CopyTag) -> ShellResult<bool>;
+    /// whether it did. Anything copied since (which empties the clipboard, tag included) is left alone. With
+    /// `until` (the app close's deadline), no try at opening starts at or after it and no wait runs past it.
+    fn clear_if(&self, tag: &CopyTag, until: Option<Instant>) -> ShellResult<bool>;
 }
 
 /// A write that failed.
@@ -115,18 +116,32 @@ pub trait ClipboardCalls: Send + Sync {
     fn read_bytes(&self, format: NonZeroU32) -> ShellResult<Option<Vec<u8>>>;
 }
 
-/// [`ClipboardBackend`] from single [`ClipboardCalls`] steps.
-pub struct ClipboardSteps<C>(pub Arc<C>);
+/// [`ClipboardBackend`] from single [`ClipboardCalls`] steps, waiting between tries on `clock`.
+pub struct ClipboardSteps<C> {
+    calls: Arc<C>,
+    clock: Arc<dyn Clock>,
+}
 
 impl<C: ClipboardCalls> ClipboardSteps<C> {
-    /// One opening: tried every [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times.
-    fn open(&self) -> ShellResult<C::Opened> {
+    pub fn new(calls: Arc<C>, clock: Arc<dyn Clock>) -> ClipboardSteps<C> {
+        ClipboardSteps { calls, clock }
+    }
+
+    /// One opening: tried every [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times. With `until`, no try starts
+    /// at or after it and no wait runs past it: [`CLIPBOARD_BUSY`] once it has come.
+    fn open(&self, until: Option<Instant>) -> ShellResult<C::Opened> {
         for tried in 1..=CLIPBOARD_TRIES {
-            if let Some(opened) = self.0.open() {
+            if until.is_some_and(|until| self.clock.now() >= until) {
+                return Err(CLIPBOARD_BUSY);
+            }
+            if let Some(opened) = self.calls.open() {
                 return Ok(opened);
             }
             if tried < CLIPBOARD_TRIES {
-                thread::sleep(CLIPBOARD_RETRY);
+                let left = until.map_or(CLIPBOARD_RETRY, |until| {
+                    until.saturating_duration_since(self.clock.now())
+                });
+                self.clock.sleep(CLIPBOARD_RETRY.min(left));
             }
         }
         Err(CLIPBOARD_BUSY)
@@ -134,10 +149,10 @@ impl<C: ClipboardCalls> ClipboardSteps<C> {
 
     /// The tag's format and the exclusion formats, registered before anything is written.
     fn formats(&self) -> ShellResult<(NonZeroU32, [NonZeroU32; 3])> {
-        let tag = self.0.register_format(TAG_FORMAT);
+        let tag = self.calls.register_format(TAG_FORMAT);
         match (
             tag,
-            EXCLUSION_FORMATS.map(|name| self.0.register_format(name)),
+            EXCLUSION_FORMATS.map(|name| self.calls.register_format(name)),
         ) {
             (Some(tag), [Some(a), Some(b), Some(c)]) => Ok((tag, [a, b, c])),
             _ => Err(CLIPBOARD_FAILED),
@@ -147,19 +162,19 @@ impl<C: ClipboardCalls> ClipboardSteps<C> {
     /// The tag, each exclusion format, then the text: false at the first step that fails.
     fn fill(&self, text: &str, tag: &CopyTag, formats: (NonZeroU32, [NonZeroU32; 3])) -> bool {
         let (tag_format, exclusions) = formats;
-        self.0.set_bytes(tag_format, tag)
+        self.calls.set_bytes(tag_format, tag)
             && exclusions
                 .into_iter()
-                .all(|format| self.0.set_bytes(format, &0u32.to_ne_bytes()))
-            && self.0.set_text(text)
+                .all(|format| self.calls.set_bytes(format, &0u32.to_ne_bytes()))
+            && self.calls.set_text(text)
     }
 }
 
 impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
     fn write_secret(&self, text: &str, tag: &CopyTag) -> Result<(), WriteFailed> {
         let formats = self.formats().map_err(WriteFailed::clean)?;
-        let _open = self.open().map_err(WriteFailed::clean)?;
-        if !self.0.empty() {
+        let _open = self.open(None).map_err(WriteFailed::clean)?;
+        if !self.calls.empty() {
             return Err(WriteFailed::clean(CLIPBOARD_FAILED));
         }
         if self.fill(text, tag, formats) {
@@ -168,22 +183,25 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
         // Still in the same opening: nothing half-written is left for another program to see.
         Err(WriteFailed {
             error: CLIPBOARD_FAILED,
-            left_behind: !self.0.empty(),
+            left_behind: !self.calls.empty(),
         })
     }
 
-    fn clear_if(&self, tag: &CopyTag) -> ShellResult<bool> {
-        let format = self.0.register_format(TAG_FORMAT).ok_or(CLIPBOARD_FAILED)?;
-        let _open = self.open()?;
+    fn clear_if(&self, tag: &CopyTag, until: Option<Instant>) -> ShellResult<bool> {
+        let format = self
+            .calls
+            .register_format(TAG_FORMAT)
+            .ok_or(CLIPBOARD_FAILED)?;
+        let _open = self.open(until)?;
         // A read that fails is an error (tried again later), never taken for the tag being gone.
         let still_ours = self
-            .0
+            .calls
             .read_bytes(format)?
             .is_some_and(|held| is_tag(&held, tag));
         if !still_ours {
             return Ok(false);
         }
-        match self.0.empty() {
+        match self.calls.empty() {
             true => Ok(true),
             false => Err(CLIPBOARD_FAILED),
         }
@@ -310,17 +328,23 @@ pub trait Power: Send + Sync {
     fn keep_awake(&self, on: bool);
 }
 
-/// The time now, on the monotonic clock: when a long operation ended.
+/// The time now, on the monotonic clock (when a long operation ended), and the waits between clipboard tries.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
+    /// Waits `time`: a test's fake clock just moves on by it.
+    fn sleep(&self, time: Duration);
 }
 
-/// [`Instant::now`].
+/// [`Instant::now`] and [`thread::sleep`].
 pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
+    }
+
+    fn sleep(&self, time: Duration) {
+        thread::sleep(time);
     }
 }
 
@@ -433,7 +457,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
-    use crate::testing::FakeClipboard;
+    use crate::testing::{FakeClipboard, FakeClock};
 
     /// How long a test waits for the timer thread before it fails instead of hanging.
     const GIVE_UP: Duration = Duration::from_secs(60);
@@ -442,7 +466,10 @@ mod tests {
 
     fn fake_steps() -> (Arc<FakeClipboard>, ClipboardSteps<FakeClipboard>) {
         let fake = Arc::new(FakeClipboard::default());
-        (Arc::clone(&fake), ClipboardSteps(fake))
+        (
+            Arc::clone(&fake),
+            ClipboardSteps::new(fake, Arc::new(FakeClock::default())),
+        )
     }
 
     /// The real timer runs a job whose time has come while a later one, scheduled first, still waits. No timing
@@ -539,7 +566,7 @@ mod tests {
             let (fake, steps) = fake_steps();
             steps.write_secret("ours", &TAG).unwrap();
             fake.replace_tag(payload);
-            assert_eq!(steps.clear_if(&TAG), Ok(ours), "{payload:?}");
+            assert_eq!(steps.clear_if(&TAG, None), Ok(ours), "{payload:?}");
             assert_eq!(fake.text().is_none(), ours, "{payload:?}");
         }
     }
@@ -551,19 +578,23 @@ mod tests {
         let (fake, steps) = fake_steps();
         steps.write_secret("ours", &TAG).unwrap();
         fake.fail_next_read();
-        assert_eq!(steps.clear_if(&TAG), Err(CLIPBOARD_FAILED));
+        assert_eq!(steps.clear_if(&TAG, None), Err(CLIPBOARD_FAILED));
         assert_eq!(fake.text().as_deref(), Some("ours"));
-        assert_eq!(steps.clear_if(&TAG), Ok(true));
+        assert_eq!(steps.clear_if(&TAG, None), Ok(true));
     }
 
     /// Each opening is tried [`CLIPBOARD_TRIES`] times, [`CLIPBOARD_RETRY`] apart, then answers [`CLIPBOARD_BUSY`],
     /// with nothing written.
     #[test]
     fn busy_clipboard_answers_busy_after_ten_tries() {
-        let (fake, steps) = fake_steps();
+        let (fake, clock) = (
+            Arc::new(FakeClipboard::default()),
+            Arc::new(FakeClock::default()),
+        );
+        let steps = ClipboardSteps::new(Arc::clone(&fake), clock.clone());
         assert!(fake.user_copy("theirs"));
         fake.hold_open_elsewhere(true);
-        let began = Instant::now();
+        let began = clock.now();
         assert_eq!(
             steps.write_secret("ours", &TAG),
             Err(WriteFailed {
@@ -571,12 +602,13 @@ mod tests {
                 left_behind: false
             })
         );
-        assert!(
-            began.elapsed() >= CLIPBOARD_RETRY * (CLIPBOARD_TRIES - 1),
+        assert_eq!(
+            clock.now() - began,
+            CLIPBOARD_RETRY * (CLIPBOARD_TRIES - 1),
             "the tries were not spaced"
         );
         assert_eq!(fake.opens(), 10);
-        assert_eq!(steps.clear_if(&TAG), Err(CLIPBOARD_BUSY));
+        assert_eq!(steps.clear_if(&TAG, None), Err(CLIPBOARD_BUSY));
         assert_eq!(fake.opens(), 20);
         assert_eq!(fake.text().as_deref(), Some("theirs"));
 
@@ -587,15 +619,15 @@ mod tests {
         assert_eq!(fake.tag(), Some(TAG.to_vec()));
         assert_eq!(fake.formats(), EXCLUSION_FORMATS);
         assert!(!fake.is_open(), "the clipboard was left open");
-        assert_eq!(steps.clear_if(&OTHER_TAG), Ok(false));
+        assert_eq!(steps.clear_if(&OTHER_TAG, None), Ok(false));
         assert_eq!(
             fake.text().as_deref(),
             Some("ours"),
             "another tag cleared it"
         );
-        assert_eq!(steps.clear_if(&TAG), Ok(true));
+        assert_eq!(steps.clear_if(&TAG, None), Ok(true));
         assert_eq!(fake.text(), None);
-        assert_eq!(steps.clear_if(&TAG), Ok(false));
+        assert_eq!(steps.clear_if(&TAG, None), Ok(false));
     }
 
     /// Fix round 1 (1, 7): the write is one opening, the text last; the check and the clear are one opening, and
@@ -615,7 +647,7 @@ mod tests {
         fake.during_next_read(Box::new(move || {
             refused.send(!other.user_copy("theirs")).unwrap();
         }));
-        assert_eq!(steps.clear_if(&TAG), Ok(true));
+        assert_eq!(steps.clear_if(&TAG, None), Ok(true));
         assert!(
             was_refused.recv().unwrap(),
             "a copy got in between the check and the clear"
@@ -624,7 +656,7 @@ mod tests {
         assert_eq!(fake.text(), None);
         // Not ours: looked at, never touched.
         assert!(fake.user_copy("theirs"));
-        assert_eq!(steps.clear_if(&TAG), Ok(false));
+        assert_eq!(steps.clear_if(&TAG, None), Ok(false));
         assert_eq!(fake.take_events(), ["open", "read tag", "close"]);
         assert_eq!(fake.text().as_deref(), Some("theirs"));
     }
@@ -638,7 +670,7 @@ mod tests {
         fake.after_next_close(Box::new(move || assert!(other.user_copy("theirs"))));
         steps.write_secret("ours", &TAG).unwrap();
         assert_eq!(fake.text().as_deref(), Some("theirs"));
-        assert_eq!(steps.clear_if(&TAG), Ok(false));
+        assert_eq!(steps.clear_if(&TAG, None), Ok(false));
         assert_eq!(fake.text().as_deref(), Some("theirs"));
     }
 
@@ -679,8 +711,43 @@ mod tests {
         assert_eq!(fake.tag(), Some(TAG.to_vec()));
         assert!(!fake.is_open());
         // Cleared later by its tag.
-        assert_eq!(steps.clear_if(&TAG), Ok(true));
+        assert_eq!(steps.clear_if(&TAG, None), Ok(true));
         assert_eq!(fake.tag(), None);
+    }
+
+    /// Fix round 3 (1): with a deadline, no try at opening starts at or after it and no wait runs past it; once it
+    /// has come, there is no try at all.
+    #[test]
+    fn opening_never_starts_at_or_after_the_deadline() {
+        let (fake, clock) = (
+            Arc::new(FakeClipboard::default()),
+            Arc::new(FakeClock::default()),
+        );
+        fake.watch_clock(clock.clone());
+        let steps = ClipboardSteps::new(Arc::clone(&fake), clock.clone());
+        steps.write_secret("ours", &TAG).unwrap();
+        fake.hold_open_elsewhere(true);
+        let start = clock.now();
+        let deadline = start + Duration::from_millis(12);
+        fake.take_open_times();
+        assert_eq!(steps.clear_if(&TAG, Some(deadline)), Err(CLIPBOARD_BUSY));
+        let tried: Vec<Duration> = fake
+            .take_open_times()
+            .iter()
+            .map(|at| *at - start)
+            .collect();
+        let ms = Duration::from_millis;
+        assert_eq!(
+            tried,
+            [ms(0), ms(5), ms(10)],
+            "tries at or after the deadline"
+        );
+        assert_eq!(clock.now(), deadline, "waited past the deadline");
+
+        // Already past: not one try.
+        assert_eq!(steps.clear_if(&TAG, Some(deadline)), Err(CLIPBOARD_BUSY));
+        assert!(fake.take_open_times().is_empty());
+        assert_eq!(fake.text().as_deref(), Some("ours"));
     }
 
     /// A format Windows will not register: nothing is written, the clipboard is not even opened.
@@ -696,7 +763,7 @@ mod tests {
                 left_behind: false
             })
         );
-        assert_eq!(steps.clear_if(&TAG), Err(CLIPBOARD_FAILED));
+        assert_eq!(steps.clear_if(&TAG, None), Err(CLIPBOARD_FAILED));
         assert_eq!(fake.opens(), 0);
         assert_eq!(fake.text().as_deref(), Some("theirs"));
     }

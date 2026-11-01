@@ -7,7 +7,6 @@
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
@@ -15,7 +14,7 @@ use zeroize::Zeroizing;
 use crate::autolock::SHUTDOWN_WAIT;
 use crate::error::ShellResult;
 use crate::lock;
-use crate::os::{CLIPBOARD_FAILED, ClipboardBackend, Clock, CopyTag, Os, Timer};
+use crate::os::{CLIPBOARD_FAILED, CLIPBOARD_RETRY, ClipboardBackend, Clock, CopyTag, Os, Timer};
 use crate::session::{LockHook, LockReason, SessionId, Sessions};
 use crate::settings::SettingsStore;
 
@@ -48,11 +47,11 @@ struct Shared {
 impl Shared {
     /// One try at clearing the recorded copy, when `ours` picks it: emptied while its tag is still on the clipboard,
     /// left alone otherwise, and forgotten either way. `Some(copy_id)` when the clipboard could not be opened or
-    /// emptied: the copy stays recorded and needs another try.
-    fn try_clear(&self, ours: impl Fn(&Owned) -> bool) -> Option<u64> {
+    /// emptied (or `until` came first): the copy stays recorded and needs another try.
+    fn try_clear(&self, ours: impl Fn(&Owned) -> bool, until: Option<Instant>) -> Option<u64> {
         let mut owned = lock(&self.owned);
         let copy = owned.filter(|copy| ours(copy))?;
-        match self.backend.clear_if(&copy.tag) {
+        match self.backend.clear_if(&copy.tag, until) {
             Ok(_) => {
                 *owned = None;
                 None
@@ -63,7 +62,7 @@ impl Shared {
 
     /// Clears the copy `ours` picks, and keeps trying every [`CLEAR_RETRY`] on the timer until it is done.
     fn clear(self: &Arc<Self>, ours: impl Fn(&Owned) -> bool) {
-        if let Some(copy_id) = self.try_clear(ours) {
+        if let Some(copy_id) = self.try_clear(ours, None) {
             self.retry(copy_id);
         }
     }
@@ -83,21 +82,28 @@ impl Shared {
             .at(self.clock.now() + CLEAR_RETRY, Box::new(again));
     }
 
-    /// Tries to clear the copy `ours` picks, here and now, every [`CLEAR_RETRY`] (or whatever is left, if less) until
-    /// `deadline`, the app close's own: no timer runs once the app is gone. The last try may take the time that
-    /// remains. If the copy is still there at the deadline, a retry is left on the timer, for when the app does not
-    /// exit after all.
+    /// Tries to clear the copy `ours` picks, here and now, until `deadline`, the app close's own: no timer runs once
+    /// the app is gone. Nothing starts at or after the deadline and no wait runs past it, the openings' own tries
+    /// included (`clear_if` gets the deadline). Between tries: [`CLEAR_RETRY`] while more than that is left, then, in
+    /// the last stretch, the openings' short spacing, so a clipboard freed just before the deadline is still cleared.
+    /// If the copy is still there at the deadline, it stays recorded and a retry is left on the timer, for when the app
+    /// does not exit after all.
     fn clear_until(self: &Arc<Self>, ours: impl Fn(&Owned) -> bool, deadline: Instant) {
-        loop {
-            let Some(copy_id) = self.try_clear(&ours) else {
-                return;
-            };
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                self.retry(copy_id);
+        while self.clock.now() < deadline {
+            if self.try_clear(&ours, Some(deadline)).is_none() {
                 return;
             }
-            thread::sleep(left.min(CLEAR_RETRY));
+            let left = deadline.saturating_duration_since(self.clock.now());
+            self.clock.sleep(match left > CLEAR_RETRY {
+                true => CLEAR_RETRY,
+                false => CLIPBOARD_RETRY.min(left),
+            });
+        }
+        let still_recorded = lock(&self.owned)
+            .filter(|copy| ours(copy))
+            .map(|copy| copy.copy_id);
+        if let Some(copy_id) = still_recorded {
+            self.retry(copy_id);
         }
     }
 }
@@ -611,8 +617,9 @@ mod tests {
         assert_eq!(ts.shell.clipboard.owner(), None);
     }
 
-    /// Fix round 2 (3): the close-time clear stops at the close's own deadline, not two seconds after the hook began,
-    /// and leaves a retry behind (for an app that does not exit after all).
+    /// Fix round 2 (3), fix round 3 (1): the close-time clear keeps to the close's own deadline. No try at opening
+    /// starts at or after it, no wait runs past it, and the copy stays recorded with a retry left behind (for an app
+    /// that does not exit after all). Once the deadline has passed, there is no try at all. Fake clock: no real waits.
     #[test]
     fn close_clear_stops_at_the_close_deadline() {
         let ts = TestShell::new();
@@ -620,23 +627,55 @@ mod tests {
         let (s, g) = unlock(&ts, &family);
         copy(&ts, s, g, SECRET).unwrap();
         ts.clipboard.hold_open_elsewhere(true);
-        let deadline = Instant::now() + Duration::from_millis(300);
+        let deadline = ts.clock.now() + Duration::from_millis(300);
         ts.shell.autolock.set_close_deadline(deadline);
         let waiting = ts.timer.waiting();
+        ts.clipboard.take_open_times();
         ts.shell.sessions.lock_all(LockReason::AppClosing);
-        let over = Instant::now().saturating_duration_since(deadline);
-        // One last try (ten openings, about 50 ms) may run past it; two seconds would be the old, fresh budget.
+        let tries = ts.clipboard.take_open_times();
+        assert!(!tries.is_empty(), "never tried");
         assert!(
-            over < Duration::from_millis(700),
-            "ran {over:?} past the close's deadline"
+            tries.iter().all(|at| *at < deadline),
+            "a try at or after the deadline"
         );
+        assert_eq!(ts.clock.now(), deadline, "waited past the deadline");
         assert_eq!(ts.clipboard.text().as_deref(), Some(SECRET));
         assert_eq!(ts.shell.clipboard.owner(), Some(s));
         assert_eq!(ts.timer.waiting(), waiting + 1, "no retry left behind");
+
+        // The deadline already passed: not one try, and the retry is still left.
+        ts.shell.sessions.lock_all(LockReason::AppClosing);
+        assert!(
+            ts.clipboard.take_open_times().is_empty(),
+            "tried after the deadline"
+        );
+        assert_eq!(ts.shell.clipboard.owner(), Some(s));
+
         ts.clipboard.hold_open_elsewhere(false);
         let now = ts.clock.now();
         at(&ts, now, CLEAR_RETRY);
         assert_eq!(ts.clipboard.text(), None);
+    }
+
+    /// Fix round 3 (1): the clipboard is freed shortly before the close's deadline, after the first try found it
+    /// busy: short tries in the last stretch still clear the copy before the deadline. Fake clock: no real waits.
+    #[test]
+    fn clipboard_freed_just_before_the_close_deadline_is_cleared() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        copy(&ts, s, g, SECRET).unwrap();
+        let start = ts.clock.now();
+        let deadline = start + Duration::from_millis(200);
+        ts.shell.autolock.set_close_deadline(deadline);
+        // Busy through the first 20 tries (about the first 100 ms), free after.
+        ts.clipboard.hold_open_for(20);
+        ts.clipboard.take_open_times();
+        ts.shell.sessions.lock_all(LockReason::AppClosing);
+        assert_eq!(ts.clipboard.text(), None, "not cleared before the deadline");
+        assert_eq!(ts.shell.clipboard.owner(), None);
+        let last = *ts.clipboard.take_open_times().last().unwrap();
+        assert!(last < deadline, "cleared only at {:?}", last - start);
     }
 
     /// Fix round 1 (4): the write fails and so does its empty: the copy's tag may still be there, so the copy stays
