@@ -11,6 +11,7 @@ compile_error!("lockbox-desktop is Windows-only");
 compile_error!("release builds need `--features custom-protocol` (cargo tauri build adds it)");
 
 pub mod autolock;
+pub mod clipboard;
 pub mod commands;
 pub mod error;
 pub mod locations;

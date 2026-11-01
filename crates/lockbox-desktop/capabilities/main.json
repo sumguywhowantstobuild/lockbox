@@ -24,6 +24,7 @@
     "allow-list-items",
     "allow-get-item",
     "allow-reveal-password",
+    "allow-copy-field",
     "allow-new-item",
     "allow-update-item",
     "allow-trash-item",

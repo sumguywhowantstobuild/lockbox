@@ -7,6 +7,7 @@ use std::cell::{Cell, OnceCell};
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::mem::offset_of;
+use std::num::NonZeroU32;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -61,8 +62,8 @@ use windows_sys::core::PWSTR;
 
 use super::signals::{DeviceHeader, classify, wants_device_header};
 use super::{
-    Dialogs, DriveType, Env, IdleSource, KnownFolder, Launcher, Os, OsSignal, Power, SystemClock,
-    Volumes,
+    ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, IdleSource, KnownFolder, Launcher, Os,
+    OsSignal, Power, SystemClock, ThreadTimer, Volumes,
 };
 use crate::{lock, window};
 
@@ -115,7 +116,41 @@ impl Os {
             idle: Arc::new(WinIdle),
             power: Arc::new(WinPower { app }),
             clock: Arc::new(SystemClock),
+            clipboard: Arc::new(ClipboardSteps(Arc::new(WinClipboard))),
+            timer: Arc::new(ThreadTimer::default()),
         }
+    }
+}
+
+/// The clipboard's single steps through `clipboard-win` 5.4.3, which wraps each Windows call (no `unsafe` here).
+/// The clipboard is opened with no owner window, as `clipboard_win::Clipboard::new` does.
+pub struct WinClipboard;
+
+impl ClipboardCalls for WinClipboard {
+    type Opened = clipboard_win::Clipboard;
+
+    fn register_format(&self, name: &str) -> Option<NonZeroU32> {
+        clipboard_win::raw::register_format(name)
+    }
+
+    fn open(&self) -> Option<clipboard_win::Clipboard> {
+        clipboard_win::Clipboard::new().ok()
+    }
+
+    fn empty(&self) -> bool {
+        clipboard_win::raw::empty().is_ok()
+    }
+
+    fn set_text(&self, text: &str) -> bool {
+        clipboard_win::raw::set_string(text).is_ok()
+    }
+
+    fn set_dword_zero(&self, format: NonZeroU32) -> bool {
+        clipboard_win::raw::set_without_clear(format.get(), &0u32.to_ne_bytes()).is_ok()
+    }
+
+    fn seq_num(&self) -> Option<NonZeroU32> {
+        clipboard_win::raw::seq_num()
     }
 }
 
@@ -1680,5 +1715,103 @@ mod tests {
             ES_CONTINUOUS | ES_SYSTEM_REQUIRED,
             "still answers"
         );
+    }
+
+    use std::time::Instant;
+
+    use crate::os::{CLIPBOARD_BUSY, ClipboardBackend, EXCLUSION_FORMATS};
+
+    /// The real-clipboard tests take turns: the clipboard is one per Windows session.
+    static REAL_CLIPBOARD: Mutex<()> = Mutex::new(());
+
+    /// What the real-clipboard tests copy: a made-up value, never a real secret.
+    const SAMPLE: &str = "Lockbox clipboard test 7f3a";
+
+    fn real_clipboard() -> ClipboardSteps<WinClipboard> {
+        ClipboardSteps(Arc::new(WinClipboard))
+    }
+
+    /// The clipboard's text, read in an opening of its own.
+    fn clipboard_text() -> Option<String> {
+        clipboard_win::get_clipboard_string().ok()
+    }
+
+    #[test]
+    #[ignore = "touches the real clipboard; run in the hands-on check"]
+    fn real_clipboard_copy_sets_exclusion_formats() {
+        let _turn = lock(&REAL_CLIPBOARD);
+        let clipboard = real_clipboard();
+        let ours = clipboard.write_secret(SAMPLE).unwrap();
+        {
+            let _open = clipboard_win::Clipboard::new_attempts(10).unwrap();
+            for name in EXCLUSION_FORMATS {
+                let format = clipboard_win::raw::register_format(name).unwrap();
+                assert!(
+                    clipboard_win::raw::is_format_avail(format.get()),
+                    "{name} is not on the clipboard"
+                );
+                let mut value = Vec::new();
+                clipboard_win::raw::get_vec(format.get(), &mut value).unwrap();
+                assert_eq!(value, 0u32.to_ne_bytes(), "{name} is not a DWORD 0");
+            }
+            assert_eq!(
+                clipboard_win::raw::seq_num(),
+                Some(ours),
+                "the sequence number moved on"
+            );
+        }
+        assert_eq!(clipboard_text().as_deref(), Some(SAMPLE));
+        // Still Lockbox's copy: the clear empties it.
+        assert_eq!(clipboard.clear_if(ours), Ok(true));
+        assert_eq!(clipboard_text(), None);
+    }
+
+    #[test]
+    #[ignore = "touches the real clipboard; run in the hands-on check"]
+    fn real_clipboard_clear_checks_and_empties_in_one_opening() {
+        let _turn = lock(&REAL_CLIPBOARD);
+        let clipboard = real_clipboard();
+        let ours = clipboard.write_secret(SAMPLE).unwrap();
+        // Another thread copies something of its own between Lockbox's write and its clear.
+        thread::spawn(|| clipboard_win::set_clipboard_string("theirs").unwrap())
+            .join()
+            .unwrap();
+        assert_eq!(clipboard.clear_if(ours), Ok(false));
+        assert_eq!(clipboard_text().as_deref(), Some("theirs"));
+        // Lockbox's copy overwritten by its own next copy: the old number clears nothing either.
+        let newer = clipboard.write_secret(SAMPLE).unwrap();
+        assert_eq!(clipboard.clear_if(ours), Ok(false));
+        assert_eq!(clipboard_text().as_deref(), Some(SAMPLE));
+        assert_eq!(clipboard.clear_if(newer), Ok(true));
+        assert_eq!(clipboard_text(), None);
+    }
+
+    #[test]
+    #[ignore = "touches the real clipboard; run in the hands-on check"]
+    fn busy_clipboard_fails_fast() {
+        let _turn = lock(&REAL_CLIPBOARD);
+        clipboard_win::set_clipboard_string("theirs").unwrap();
+        let theirs = clipboard_win::raw::seq_num().unwrap();
+        // The holder opens it with a window of its own, as programs do: Windows lets a second opener with no window
+        // in while the first also has none (seen in the hands-on probe), so that would never be busy.
+        let (signal_thread, _signals) = started();
+        let window = window_of(&signal_thread);
+        let (opened, is_open) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let holder = thread::spawn(move || {
+            let _open = clipboard_win::Clipboard::new_for(window as HWND).unwrap();
+            opened.send(()).unwrap();
+            let _ = released.recv_timeout(Duration::from_secs(60));
+        });
+        is_open.recv_timeout(Duration::from_secs(60)).unwrap();
+        let clipboard = real_clipboard();
+        let began = Instant::now();
+        assert_eq!(clipboard.write_secret(SAMPLE), Err(CLIPBOARD_BUSY));
+        assert_eq!(clipboard.clear_if(theirs), Err(CLIPBOARD_BUSY));
+        let took = began.elapsed();
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert_eq!(clipboard_text().as_deref(), Some("theirs"));
     }
 }

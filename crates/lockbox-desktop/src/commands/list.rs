@@ -20,6 +20,7 @@ pub const COMMANDS: &[&str] = &[
     "list_items",
     "get_item",
     "reveal_password",
+    "copy_field",
     "new_item",
     "update_item",
     "trash_item",

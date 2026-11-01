@@ -1,5 +1,5 @@
 //! The app's state behind every command: plain Rust, so almost every rule is tested without a window. Later tasks add
-//! the clipboard, the output journal and the restore state.
+//! the output journal and the restore state.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
 use crate::autolock::AutoLock;
+use crate::clipboard::Clipboard;
 use crate::error::ShellResult;
 use crate::locations::{LocationCheck, check_location};
 use crate::lock;
@@ -33,6 +34,8 @@ pub const NOTICE_EVENT: &str = "lockbox://notice";
 pub struct Shell {
     pub sessions: Arc<Sessions>,
     pub settings: Arc<SettingsStore>,
+    /// Lockbox's clipboard copies, cleared after the delay, at a lock of their vault and at app close.
+    pub clipboard: Clipboard,
     /// Locks the vaults on idle, Windows' signals, vanished folders and app exit.
     pub autolock: AutoLock,
     pub registry: Registry,
@@ -58,10 +61,15 @@ impl Shell {
         forbidden.push(paths.root.clone());
         let sessions = Arc::new(Sessions::new(Arc::clone(&notifier))?);
         let settings = Arc::new(SettingsStore::load(paths.settings.clone()));
+        let clipboard = Clipboard::new(&os, Arc::clone(&settings));
+        // The first lock hook, before any other (the "Open" cleanup comes after it): a lock clears the clipboard
+        // before anything else of its hooks runs.
+        sessions.on_lock(clipboard.lock_hook());
         let autolock = AutoLock::new(Arc::clone(&sessions), Arc::clone(&settings), notifier, &os);
         Ok(Shell {
             sessions,
             settings,
+            clipboard,
             autolock,
             registry: Registry::new(paths.registry.clone(), Arc::clone(&os.volumes)),
             paths,

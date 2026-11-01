@@ -43,6 +43,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         items::list_items,
         items::get_item,
         items::reveal_password,
+        items::copy_field,
         items::new_item,
         items::update_item,
         items::trash_item,

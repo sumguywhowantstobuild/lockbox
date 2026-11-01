@@ -39,6 +39,9 @@ const NOT_A_LOGIN: ShellError = ShellError::InvalidInput {
     what: "not a login",
 };
 
+/// A link number past the login's links (`copy_field`).
+const NO_SUCH_LINK: ShellError = ShellError::InvalidInput { what: "link" };
+
 /// Tests only: the last step of a read that returns item data, after the vault work and before the answer.
 #[cfg(test)]
 const READ_DONE: &str = "shell.items.read_done";
@@ -128,6 +131,17 @@ pub enum NewKind {
     Login,
     Note,
     Collection,
+}
+
+/// The field `copy_field` copies: `"password"`, `"username"`, `"notes"`, or `{ "url": <index> }`, the index into the
+/// login's links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyField {
+    Password,
+    Username,
+    Url(u8),
+    Notes,
 }
 
 /// An item's user-editable fields, as the page sends them back. No `Debug`: it holds item content and maybe a
@@ -262,6 +276,41 @@ impl Shell {
             };
             read_done()?;
             Ok(password)
+        })
+    }
+
+    /// Copies one field of an item to the clipboard (spec §7.3), entirely in Rust: the value never crosses to the
+    /// page. Cleared after the clear delay, or when the session locks, while it is still on the clipboard.
+    pub fn copy_field(
+        &self,
+        session: SessionId,
+        generation: u64,
+        id: &str,
+        field: CopyField,
+    ) -> ShellResult<Tagged<()>> {
+        let id = item_id(id)?;
+        let value = self.sessions.read(session, generation, |vault, _| {
+            let item = items(&vault).item(&id)?;
+            let value = match (field, &item.kind) {
+                (CopyField::Notes, _) => item.notes.clone(),
+                (CopyField::Password, ItemKind::Login { password, .. }) => password.clone(),
+                (CopyField::Username, ItemKind::Login { username, .. }) => {
+                    Zeroizing::new(username.clone())
+                }
+                (CopyField::Url(index), ItemKind::Login { urls, .. }) => {
+                    let url = urls.get(usize::from(index)).ok_or(NO_SUCH_LINK)?;
+                    Zeroizing::new(url.clone())
+                }
+                _ => return Err(NOT_A_LOGIN),
+            };
+            Ok(value)
+        })?;
+        self.clipboard
+            .copy(&self.sessions, value.session, value.generation, value.data)?;
+        Ok(Tagged {
+            session,
+            generation,
+            data: (),
         })
     }
 
@@ -484,6 +533,15 @@ struct ItemArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CopyFieldArgs {
+    session: SessionId,
+    generation: u64,
+    id: String,
+    field: CopyField,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewItemArgs {
     session: SessionId,
     generation: u64,
@@ -562,6 +620,21 @@ pub(super) async fn reveal_password(
     } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.reveal_password(session, generation, &id)).await
+}
+
+#[tauri::command]
+pub(super) async fn copy_field(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<()>> {
+    let CopyFieldArgs {
+        session,
+        generation,
+        id,
+        field,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.copy_field(session, generation, &id, field)).await
 }
 
 #[tauri::command]
@@ -1586,6 +1659,118 @@ mod tests {
             .map(|orphan| orphan.file_id.clone())
             .collect();
         assert_eq!(left, [kept.to_hex()]);
+    }
+
+    /// Each field reaches the clipboard, and only the clipboard: the answer carries no value. A link index out of
+    /// range, a login field of a note and a foreign item are refused with fixed errors and nothing written.
+    #[test]
+    fn copy_field_copies_each_field() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        let copied = |field: CopyField| {
+            let answer = ts.shell.copy_field(s, g, &id, field).unwrap();
+            assert_eq!((answer.session, answer.generation), (s, g));
+            ts.clipboard.text()
+        };
+        assert_eq!(copied(CopyField::Password).as_deref(), Some(LOGIN_PW));
+        assert_eq!(
+            copied(CopyField::Username).as_deref(),
+            Some("ada@example.com")
+        );
+        assert_eq!(
+            copied(CopyField::Url(0)).as_deref(),
+            Some("https://bank.example")
+        );
+        assert_eq!(copied(CopyField::Notes).as_deref(), Some("a note"));
+        let json =
+            serde_json::to_string(&ts.shell.copy_field(s, g, &id, CopyField::Password).unwrap())
+                .unwrap();
+        assert!(!json.contains(LOGIN_PW), "the answer holds the password");
+
+        ts.clipboard.user_copy("theirs");
+        let opens = ts.clipboard.opens();
+        let note = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Plans".into(), None)
+            .unwrap()
+            .data;
+        let foreign = ItemId::random().to_hex();
+        let refused = [
+            (
+                id.as_str(),
+                CopyField::Url(1),
+                ShellError::InvalidInput { what: "link" },
+            ),
+            (
+                id.as_str(),
+                CopyField::Url(u8::MAX),
+                ShellError::InvalidInput { what: "link" },
+            ),
+            (note.as_str(), CopyField::Password, NOT_A_LOGIN),
+            (note.as_str(), CopyField::Url(0), NOT_A_LOGIN),
+            (
+                foreign.as_str(),
+                CopyField::Notes,
+                CoreError::NotFound.into(),
+            ),
+        ];
+        for (item, field, expected) in refused {
+            assert_eq!(
+                ts.shell.copy_field(s, g, item, field).err(),
+                Some(expected),
+                "{field:?}"
+            );
+        }
+        assert_eq!(ts.clipboard.text().as_deref(), Some("theirs"));
+        assert_eq!(
+            ts.clipboard.opens(),
+            opens,
+            "a refusal opened the clipboard"
+        );
+        // A note's notes are copied like a login's.
+        ts.shell.copy_field(s, g, &note, CopyField::Notes).unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some(""));
+
+        // A stale generation: `Locked`, nothing written.
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        ts.clipboard.user_copy("theirs");
+        assert_eq!(
+            ts.shell.copy_field(s, g, &id, CopyField::Password).err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(ts.clipboard.text().as_deref(), Some("theirs"));
+    }
+
+    #[test]
+    fn copy_field_request_is_strict() {
+        let body = |value: Value| InvokeBody::Json(value);
+        let id = "0".repeat(32);
+        for field in [
+            json!("password"),
+            json!("username"),
+            json!("notes"),
+            json!({ "url": 3 }),
+        ] {
+            let request = json!({ "session": 1, "generation": 1, "id": id, "field": field });
+            assert!(parse::<CopyFieldArgs>(&body(request)).is_ok(), "{field}");
+        }
+        for field in [
+            json!("title"),
+            json!({ "url": 256 }),
+            json!({ "url": -1 }),
+            json!("Password"),
+        ] {
+            let request = json!({ "session": 1, "generation": 1, "id": id, "field": field });
+            assert_eq!(
+                parse::<CopyFieldArgs>(&body(request)).err(),
+                Some(MALFORMED),
+                "{field}"
+            );
+        }
+        let extra =
+            json!({ "session": 1, "generation": 1, "id": id, "field": "password", "text": "x" });
+        assert_eq!(parse::<CopyFieldArgs>(&body(extra)).err(), Some(MALFORMED));
     }
 
     #[test]

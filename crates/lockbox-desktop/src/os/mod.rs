@@ -8,9 +8,16 @@ pub mod win;
 
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::num::NonZeroU32;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
+
+use crate::error::{CoreErrorView, ShellError, ShellResult};
+use crate::lock;
 
 /// The OS calls the shell makes, behind their traits.
 pub struct Os {
@@ -21,6 +28,196 @@ pub struct Os {
     pub idle: Arc<dyn IdleSource>,
     pub power: Arc<dyn Power>,
     pub clock: Arc<dyn Clock>,
+    pub clipboard: Arc<dyn ClipboardBackend>,
+    pub timer: Arc<dyn Timer>,
+}
+
+/// The clipboard as Lockbox uses it (spec §7.3). Each method is one clipboard opening: tried every
+/// [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times, then [`CLIPBOARD_BUSY`]. The clipboard is opened with no
+/// owner window, so a program that holds it open with no window of its own does not make it busy (Windows' rule).
+pub trait ClipboardBackend: Send + Sync {
+    /// Puts `text` on the clipboard, marked to stay out of clipboard history, cloud sync and clipboard monitors: the
+    /// clipboard's sequence number with Lockbox's copy on it. Nothing is written unless all three marks can be; a
+    /// failure after the clipboard was emptied empties it again, so a copy is never left without its marks.
+    fn write_secret(&self, text: &str) -> ShellResult<NonZeroU32>;
+    /// Empties the clipboard only while it still holds Lockbox's copy (its sequence number is still `ours`), checked
+    /// and emptied in the same opening: whether it did. Anything copied since is left alone.
+    fn clear_if(&self, ours: NonZeroU32) -> ShellResult<bool>;
+}
+
+/// Another program kept the clipboard open through every try.
+pub const CLIPBOARD_BUSY: ShellError = ShellError::Busy { what: "clipboard" };
+/// Windows refused a clipboard step. Fixed text only: never the clipboard's text or Windows' message.
+pub const CLIPBOARD_FAILED: ShellError = ShellError::Core(CoreErrorView {
+    kind: "io",
+    what: Some("clipboard"),
+    needed: None,
+    available: None,
+    max_file: None,
+    min: None,
+});
+/// How many times one opening is tried.
+pub const CLIPBOARD_TRIES: u32 = 10;
+/// The wait between two tries (Chromium's).
+pub const CLIPBOARD_RETRY: Duration = Duration::from_millis(5);
+/// The formats that keep a copy out of Windows' clipboard history (`CanIncludeInClipboardHistory`), out of cloud
+/// clipboard sync (`CanUploadToCloudClipboard`), and out of clipboard monitors that honour it
+/// (`ExcludeClipboardContentFromMonitorProcessing`), each set with a DWORD 0.
+pub const EXCLUSION_FORMATS: [&str; 3] = [
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",
+    "CanUploadToCloudClipboard",
+];
+
+/// The clipboard's single steps, as Windows offers them (`clipboard_win::raw`). [`ClipboardSteps`] puts them in
+/// order, so the order and its failure paths are the same for the real clipboard and the tests' fake.
+pub trait ClipboardCalls: Send + Sync {
+    /// The open clipboard: closed when dropped, on the thread that opened it.
+    type Opened;
+    /// The ID of the clipboard format `name` (`RegisterClipboardFormatW`); `None` if Windows refuses.
+    fn register_format(&self, name: &str) -> Option<NonZeroU32>;
+    /// One try at opening the clipboard; `None` while another program has it open.
+    fn open(&self) -> Option<Self::Opened>;
+    fn empty(&self) -> bool;
+    /// Sets the clipboard's text (it empties the clipboard first, as `raw::set_string` does).
+    fn set_text(&self, text: &str) -> bool;
+    /// Adds `format` with a DWORD 0, keeping what is already on the clipboard.
+    fn set_dword_zero(&self, format: NonZeroU32) -> bool;
+    /// The clipboard's sequence number (`GetClipboardSequenceNumber`); `None` without access.
+    fn seq_num(&self) -> Option<NonZeroU32>;
+}
+
+/// [`ClipboardBackend`] from single [`ClipboardCalls`] steps.
+pub struct ClipboardSteps<C>(pub Arc<C>);
+
+impl<C: ClipboardCalls> ClipboardSteps<C> {
+    /// One opening: tried every [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times.
+    fn open(&self) -> ShellResult<C::Opened> {
+        for tried in 1..=CLIPBOARD_TRIES {
+            if let Some(opened) = self.0.open() {
+                return Ok(opened);
+            }
+            if tried < CLIPBOARD_TRIES {
+                thread::sleep(CLIPBOARD_RETRY);
+            }
+        }
+        Err(CLIPBOARD_BUSY)
+    }
+
+    /// The text, then each exclusion format: false at the first step that fails.
+    fn fill(&self, text: &str, formats: [NonZeroU32; 3]) -> bool {
+        self.0.set_text(text)
+            && formats
+                .into_iter()
+                .all(|format| self.0.set_dword_zero(format))
+    }
+}
+
+impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
+    /// The sequence number is read right after the clipboard is closed, not while it is open: closing it after a
+    /// change adds the formats Windows derives from the text (`CF_TEXT`, `CF_OEMTEXT`, `CF_LOCALE`), each moving the
+    /// number on (+3 on Windows 11, seen in the hands-on probe), so a number read while open never matches again.
+    /// Another program copying in the instant between the close and the read would have its own copy cleared at the
+    /// delay; Lockbox's copy is gone either way.
+    fn write_secret(&self, text: &str) -> ShellResult<NonZeroU32> {
+        // Registered before anything is written: a copy is never on the clipboard without its marks.
+        let [Some(a), Some(b), Some(c)] =
+            EXCLUSION_FORMATS.map(|name| self.0.register_format(name))
+        else {
+            return Err(CLIPBOARD_FAILED);
+        };
+        {
+            let _open = self.open()?;
+            if !self.0.empty() {
+                return Err(CLIPBOARD_FAILED);
+            }
+            if !self.fill(text, [a, b, c]) {
+                // Never a copy left without all its marks. Best effort: the failure is answered either way.
+                self.0.empty();
+                return Err(CLIPBOARD_FAILED);
+            }
+        }
+        match self.0.seq_num() {
+            Some(seq) => Ok(seq),
+            None => {
+                // A copy whose number is unknown could never be cleared: take it off now, best effort.
+                if let Ok(_open) = self.open() {
+                    self.0.empty();
+                }
+                Err(CLIPBOARD_FAILED)
+            }
+        }
+    }
+
+    fn clear_if(&self, ours: NonZeroU32) -> ShellResult<bool> {
+        let _open = self.open()?;
+        if self.0.seq_num() != Some(ours) {
+            return Ok(false);
+        }
+        match self.0.empty() {
+            true => Ok(true),
+            false => Err(CLIPBOARD_FAILED),
+        }
+    }
+}
+
+/// Work a [`Timer`] runs later.
+pub type Job = Box<dyn FnOnce() + Send>;
+
+/// Runs work at a set time: the clipboard's clear after the delay (spec §7.3).
+pub trait Timer: Send + Sync {
+    /// Runs `job` once [`Instant::now`] reaches `when`, on the timer's own thread. An error when it cannot be
+    /// scheduled (the thread could not start).
+    fn at(&self, when: Instant, job: Job) -> io::Result<()>;
+}
+
+/// The real [`Timer`]: one thread, started on first use, that runs each job when its time comes, the earliest
+/// first. A job that panics is passed over; the thread carries on.
+#[derive(Default)]
+pub struct ThreadTimer {
+    queue: Mutex<Option<mpsc::Sender<(Instant, Job)>>>,
+}
+
+impl Timer for ThreadTimer {
+    fn at(&self, when: Instant, job: Job) -> io::Result<()> {
+        let mut queue = lock(&self.queue);
+        if queue.is_none() {
+            let (sender, jobs) = mpsc::channel();
+            thread::Builder::new()
+                .name("lockbox-timer".into())
+                .spawn(move || run_timer(jobs))?;
+            *queue = Some(sender);
+        }
+        match queue.as_ref().map(|sender| sender.send((when, job))) {
+            Some(Ok(())) => Ok(()),
+            _ => Err(io::Error::other("the timer stopped")),
+        }
+    }
+}
+
+/// The timer thread: waits for the earliest job's time or a new job, whichever comes first, then runs every job
+/// whose time has come. Ends when its [`ThreadTimer`] is dropped.
+fn run_timer(jobs: mpsc::Receiver<(Instant, Job)>) {
+    let mut waiting: Vec<(Instant, Job)> = Vec::new();
+    loop {
+        let received = match waiting.iter().map(|(when, _)| *when).min() {
+            None => jobs.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(next) => jobs.recv_timeout(next.saturating_duration_since(Instant::now())),
+        };
+        match received {
+            Ok(job) => waiting.push(job),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        let now = Instant::now();
+        let (mut due, later): (Vec<_>, Vec<_>) =
+            waiting.into_iter().partition(|(when, _)| *when <= now);
+        waiting = later;
+        due.sort_by_key(|(when, _)| *when);
+        for (_, job) in due {
+            let _ = catch_unwind(AssertUnwindSafe(job));
+        }
+    }
 }
 
 /// How long the user has left Windows alone (spec §7.4: idle means no keyboard or mouse input anywhere in Windows).
@@ -154,7 +351,105 @@ pub enum OsSignal {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+    use crate::testing::FakeClipboard;
+
+    /// How long a test waits for the timer thread before it fails instead of hanging.
+    const GIVE_UP: Duration = Duration::from_secs(60);
+
+    /// The real timer runs a job whose time has come while a later one, scheduled first, still waits. No timing
+    /// window: the near job is due at once, the far one an hour away.
+    #[test]
+    fn thread_timer_runs_due_jobs_first() {
+        let timer = ThreadTimer::default();
+        let far_ran = Arc::new(AtomicBool::new(false));
+        let far = Arc::clone(&far_ran);
+        timer
+            .at(
+                Instant::now() + Duration::from_secs(3600),
+                Box::new(move || far.store(true, Ordering::SeqCst)),
+            )
+            .unwrap();
+        let (ran, near_ran) = mpsc::channel();
+        timer
+            .at(Instant::now(), Box::new(move || ran.send(()).unwrap()))
+            .unwrap();
+        assert!(
+            near_ran.recv_timeout(GIVE_UP).is_ok(),
+            "the due job never ran"
+        );
+        assert!(!far_ran.load(Ordering::SeqCst), "the later job ran early");
+
+        // A job that panics is passed over: the next one still runs.
+        timer
+            .at(Instant::now(), Box::new(|| panic!("a job failed")))
+            .unwrap();
+        let (ran, after_panic) = mpsc::channel();
+        timer
+            .at(Instant::now(), Box::new(move || ran.send(()).unwrap()))
+            .unwrap();
+        assert!(
+            after_panic.recv_timeout(GIVE_UP).is_ok(),
+            "the timer stopped"
+        );
+    }
+
+    /// Each opening is tried [`CLIPBOARD_TRIES`] times, then answers [`CLIPBOARD_BUSY`], with nothing written.
+    #[test]
+    fn busy_clipboard_answers_busy_after_ten_tries() {
+        let fake = Arc::new(FakeClipboard::default());
+        let steps = ClipboardSteps(Arc::clone(&fake));
+        fake.user_copy("theirs");
+        fake.hold_open_elsewhere(true);
+        let theirs = fake.seq();
+        assert_eq!(steps.write_secret("ours"), Err(CLIPBOARD_BUSY));
+        assert_eq!(fake.opens(), 10);
+        assert_eq!(steps.clear_if(theirs), Err(CLIPBOARD_BUSY));
+        assert_eq!(fake.opens(), 20);
+        assert_eq!(fake.text().as_deref(), Some("theirs"));
+
+        // Free again: the write holds the text and all three marks, and clears only while it is still there.
+        fake.hold_open_elsewhere(false);
+        let ours = steps.write_secret("ours").unwrap();
+        assert_eq!(fake.text().as_deref(), Some("ours"));
+        assert_eq!(fake.formats(), EXCLUSION_FORMATS);
+        assert!(!fake.is_open(), "the clipboard was left open");
+        assert_eq!(steps.clear_if(ours), Ok(true));
+        assert_eq!(fake.text(), None);
+        assert_eq!(steps.clear_if(ours), Ok(false));
+    }
+
+    /// Closing the clipboard after a write adds the formats Windows derives from the text, which moves the sequence
+    /// number on: the number recorded is the one after the close, so the clear still finds the copy.
+    #[test]
+    fn sequence_is_read_after_the_close() {
+        let fake = Arc::new(FakeClipboard::default());
+        let steps = ClipboardSteps(Arc::clone(&fake));
+        let ours = steps.write_secret("ours").unwrap();
+        assert_eq!(ours, fake.seq());
+        assert_eq!(steps.clear_if(ours), Ok(true));
+        assert_eq!(fake.text(), None);
+
+        // No sequence number to be had: the copy could never be cleared by it, so it is taken off at once.
+        fake.hide_sequence();
+        assert_eq!(steps.write_secret("ours"), Err(CLIPBOARD_FAILED));
+        assert_eq!(fake.text(), None);
+        assert!(!fake.is_open(), "the clipboard was left open");
+    }
+
+    /// A format Windows will not register: nothing is written, the clipboard is not even opened.
+    #[test]
+    fn unregistered_format_writes_nothing() {
+        let fake = Arc::new(FakeClipboard::default());
+        fake.user_copy("theirs");
+        fake.refuse_registration();
+        let steps = ClipboardSteps(Arc::clone(&fake));
+        assert_eq!(steps.write_secret("ours"), Err(CLIPBOARD_FAILED));
+        assert_eq!(fake.opens(), 0);
+        assert_eq!(fake.text().as_deref(), Some("theirs"));
+    }
 
     /// Fix round 3 (H3): what `same_path` treats as one folder, and what it keeps apart. The registry, `Location`
     /// and `is_within` all rest on it, so a later "simplification" must not merge folders Windows keeps apart.

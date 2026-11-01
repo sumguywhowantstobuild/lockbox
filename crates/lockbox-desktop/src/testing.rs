@@ -1,10 +1,11 @@
-//! Tests only: fakes for the OS calls (`os::{Env, Volumes, Dialogs, Launcher, IdleSource, Power, Clock}`), a shell built
-//! on them inside a temp folder, and the lock that keeps key derivations off a timing test's CPU.
+//! Tests only: fakes for the OS calls (`os::{Env, Volumes, Dialogs, Launcher, IdleSource, Power, Clock, ClipboardCalls,
+//! Timer}`), a shell built on them inside a temp folder, and the lock that keeps key derivations off a timing test's CPU.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
+use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use std::{fs, io};
@@ -13,7 +14,8 @@ use lockbox_core::internals::fsio::testutil::TempDir;
 
 use crate::lock;
 use crate::os::{
-    Clock, Dialogs, DriveType, Env, IdleSource, KnownFolder, Launcher, Os, Power, Volumes,
+    ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS, Env, IdleSource,
+    Job, KnownFolder, Launcher, Os, Power, Timer, Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
@@ -125,6 +127,206 @@ impl Default for FakeClock {
 impl Clock for FakeClock {
     fn now(&self) -> Instant {
         *lock(&self.0)
+    }
+}
+
+/// The clipboard as the test sees it: its text, the formats added beside it, its sequence number (moved on by every
+/// change, as Windows does), and whether it is open.
+#[derive(Default)]
+struct Clip {
+    open: bool,
+    /// Changed in the current opening: closing it adds the text formats Windows derives from the text.
+    changed: bool,
+    /// The sequence number cannot be read.
+    no_sequence: bool,
+    /// Another program has it open: every try at opening fails.
+    held_elsewhere: bool,
+    seq: u32,
+    text: Option<String>,
+    /// The names of the formats added beside the text, in order.
+    formats: Vec<&'static str>,
+    /// The format added when this many are already there fails.
+    fail_format_at: Option<usize>,
+    refuse_registration: bool,
+}
+
+/// A clipboard in memory, driven through [`ClipboardSteps`](crate::os::ClipboardSteps) like the real one. Counts the
+/// tries at opening it.
+#[derive(Default)]
+pub struct FakeClipboard {
+    clip: Arc<Mutex<Clip>>,
+    opens: AtomicUsize,
+}
+
+/// The fake clipboard, open: closed when dropped.
+pub struct FakeOpened(Arc<Mutex<Clip>>);
+
+/// How many formats Windows adds when a clipboard holding text is closed after a change: `CF_TEXT`, `CF_OEMTEXT` and
+/// `CF_LOCALE`, each moving the sequence number on (seen on Windows 11 in the hands-on probe).
+const DERIVED_FORMATS: u32 = 3;
+
+impl Drop for FakeOpened {
+    fn drop(&mut self) {
+        let mut clip = lock(&self.0);
+        if std::mem::take(&mut clip.changed) && clip.text.is_some() {
+            clip.seq += DERIVED_FORMATS;
+        }
+        clip.open = false;
+    }
+}
+
+impl FakeClipboard {
+    /// The user (another program) copies `text`.
+    pub fn user_copy(&self, text: &str) {
+        let mut clip = lock(&self.clip);
+        clip.seq += 1;
+        clip.text = Some(text.to_owned());
+        clip.formats.clear();
+    }
+
+    /// From now on, while `held`, another program keeps the clipboard open.
+    pub fn hold_open_elsewhere(&self, held: bool) {
+        lock(&self.clip).held_elsewhere = held;
+    }
+
+    /// From now on, adding a format fails once `n` are already on the clipboard.
+    pub fn fail_format_at(&self, n: usize) {
+        lock(&self.clip).fail_format_at = Some(n);
+    }
+
+    /// From now on, the sequence number cannot be read.
+    pub fn hide_sequence(&self) {
+        lock(&self.clip).no_sequence = true;
+    }
+
+    /// From now on, Windows refuses to register clipboard formats.
+    pub fn refuse_registration(&self) {
+        lock(&self.clip).refuse_registration = true;
+    }
+
+    pub fn text(&self) -> Option<String> {
+        lock(&self.clip).text.clone()
+    }
+
+    pub fn formats(&self) -> Vec<&'static str> {
+        lock(&self.clip).formats.clone()
+    }
+
+    pub fn seq(&self) -> NonZeroU32 {
+        NonZeroU32::new(lock(&self.clip).seq).expect("the clipboard has changed at least once")
+    }
+
+    pub fn is_open(&self) -> bool {
+        lock(&self.clip).open
+    }
+
+    /// How many times opening it was tried.
+    pub fn opens(&self) -> usize {
+        self.opens.load(Ordering::SeqCst)
+    }
+}
+
+impl ClipboardCalls for FakeClipboard {
+    type Opened = FakeOpened;
+
+    fn register_format(&self, name: &str) -> Option<NonZeroU32> {
+        if lock(&self.clip).refuse_registration {
+            return None;
+        }
+        let at = EXCLUSION_FORMATS.iter().position(|known| *known == name)?;
+        NonZeroU32::new(0xC000 + u32::try_from(at).ok()?)
+    }
+
+    fn open(&self) -> Option<FakeOpened> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        let mut clip = lock(&self.clip);
+        if clip.open || clip.held_elsewhere {
+            return None;
+        }
+        clip.open = true;
+        Some(FakeOpened(Arc::clone(&self.clip)))
+    }
+
+    fn empty(&self) -> bool {
+        let mut clip = lock(&self.clip);
+        assert!(clip.open, "emptied while closed");
+        clip.changed = true;
+        clip.seq += 1;
+        clip.text = None;
+        clip.formats.clear();
+        true
+    }
+
+    fn set_text(&self, text: &str) -> bool {
+        let mut clip = lock(&self.clip);
+        assert!(clip.open, "written while closed");
+        clip.changed = true;
+        clip.seq += 2;
+        clip.text = Some(text.to_owned());
+        clip.formats.clear();
+        true
+    }
+
+    fn set_dword_zero(&self, format: NonZeroU32) -> bool {
+        let mut clip = lock(&self.clip);
+        assert!(clip.open, "written while closed");
+        if clip.fail_format_at == Some(clip.formats.len()) {
+            return false;
+        }
+        let name = EXCLUSION_FORMATS[(format.get() - 0xC000) as usize];
+        clip.changed = true;
+        clip.seq += 1;
+        clip.formats.push(name);
+        true
+    }
+
+    fn seq_num(&self) -> Option<NonZeroU32> {
+        let clip = lock(&self.clip);
+        NonZeroU32::new(clip.seq).filter(|_| !clip.no_sequence)
+    }
+}
+
+/// A timer that runs nothing by itself: the test runs the jobs whose time has come, with [`run_due`](Self::run_due).
+#[derive(Default)]
+pub struct FakeTimer {
+    jobs: Mutex<Vec<(Instant, Job)>>,
+    /// The next job cannot be scheduled.
+    fail_next: AtomicBool,
+}
+
+impl FakeTimer {
+    /// The next job cannot be scheduled, as if the timer thread could not start.
+    pub fn fail_next(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Runs, earliest first, every job due at `now`.
+    pub fn run_due(&self, now: Instant) {
+        let mut due: Vec<(Instant, Job)> = {
+            let mut jobs = lock(&self.jobs);
+            let (due, later) = jobs.drain(..).partition(|(when, _)| *when <= now);
+            *jobs = later;
+            due
+        };
+        due.sort_by_key(|(when, _)| *when);
+        for (_, job) in due {
+            job();
+        }
+    }
+
+    /// How many jobs wait.
+    pub fn waiting(&self) -> usize {
+        lock(&self.jobs).len()
+    }
+}
+
+impl Timer for FakeTimer {
+    fn at(&self, when: Instant, job: Job) -> io::Result<()> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other("no timer"));
+        }
+        lock(&self.jobs).push((when, job));
+        Ok(())
     }
 }
 
@@ -432,6 +634,8 @@ pub struct TestShell {
     pub idle: Arc<FakeIdle>,
     pub power: Arc<FakePower>,
     pub clock: Arc<FakeClock>,
+    pub clipboard: Arc<FakeClipboard>,
+    pub timer: Arc<FakeTimer>,
     /// The events the shell sent.
     pub events: Arc<Events>,
     /// Tauri's app-data folders, as the app passes them in.
@@ -455,6 +659,8 @@ impl TestShell {
         let idle = Arc::new(FakeIdle::default());
         let power = Arc::new(FakePower::default());
         let clock = Arc::new(FakeClock::default());
+        let clipboard = Arc::new(FakeClipboard::default());
+        let timer = Arc::new(FakeTimer::default());
         let events = Arc::new(Events::default());
         let app_dirs = vec![
             env.folder(KnownFolder::RoamingAppData)
@@ -471,6 +677,8 @@ impl TestShell {
             idle: idle.clone(),
             power: power.clone(),
             clock: clock.clone(),
+            clipboard: Arc::new(ClipboardSteps(clipboard.clone())),
+            timer: timer.clone(),
         };
         let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone())?);
         Ok(TestShell {
@@ -482,6 +690,8 @@ impl TestShell {
             idle,
             power,
             clock,
+            clipboard,
+            timer,
             events,
             app_dirs,
             temp,

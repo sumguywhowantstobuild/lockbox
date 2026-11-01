@@ -29,6 +29,9 @@ const TEST_LOGIN = {
 // The session the last create or unlock opened: "Add test login" adds to it.
 let testSession: { session: number; generation: number } | undefined;
 
+// The test login "Add test login" made last, with the session it was made in: "Copy test password" copies its password.
+let testLogin: { session: number; generation: number; id: string } | undefined;
+
 // What an opening command's answer means for the test page.
 function describe(answer: Opened<unknown>, done: string): string {
   if (answer === "Dismissed") return "Closed";
@@ -84,7 +87,16 @@ async function addTestLogin(): Promise<string> {
       urls: [TEST_LOGIN.url],
     },
   });
+  testLogin = { session, generation, id: created.data };
   return `Test login added (session ${String(session)})`;
+}
+
+// The test login's password onto the clipboard, copied in Rust: the password never reaches this page.
+async function copyTestPassword(): Promise<string> {
+  if (testLogin === undefined) return "No test login yet: add it first";
+  const { session, generation, id } = testLogin;
+  await call<null>("copy_field", { session, generation, id, field: "password" });
+  return `Test password copied (session ${String(session)}): paste it, then wait for the clear`;
 }
 
 // A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
@@ -187,8 +199,16 @@ export default function App() {
           >
             Add test login
           </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(copyTestPassword);
+            }}
+          >
+            Copy test password
+          </button>{" "}
           Creates &quot;{TEST_VAULT}&quot; in the default vaults folder, then unlocks it from the vault list; adds a
-          login to the vault last opened.
+          login to the vault last opened; copies that login&apos;s password to the clipboard.
           {vaultStatus !== undefined && <output> {vaultStatus}</output>}
         </li>
       </ul>
