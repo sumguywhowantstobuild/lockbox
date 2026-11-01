@@ -55,7 +55,8 @@ pub mod blob {
 pub mod fsio {
     pub(crate) use crate::fsio_impl::*;
     pub use crate::fsio_impl::{
-        atomic_write, remove_dir_all_retry, remove_file_retry, rename_file_no_replace,
+        atomic_write, is_destination_taken, remove_dir_all_retry, remove_file_retry,
+        rename_file_no_replace,
     };
 }
 

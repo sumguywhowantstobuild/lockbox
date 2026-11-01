@@ -17,13 +17,13 @@ use std::thread;
 use std::time::Duration;
 
 use lockbox_core::blob::OutputJournal;
-use lockbox_core::fsio::rename_file_no_replace;
+use lockbox_core::fsio::{is_destination_taken, rename_file_no_replace};
 use lockbox_core::{CoreError, Result as CoreResult};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
-use crate::os::{Volumes, same_path};
+use crate::os::{Volumes, same_path, win};
 use crate::paths::{StatePaths, StateVersion, read_state, write_state};
 use crate::session::{SessionId, Sessions};
 
@@ -43,6 +43,8 @@ const MAX_SET_ASIDE: u32 = 99;
 
 /// `FILE_ATTRIBUTE_REPARSE_POINT`: a link, a junction, a mount point or a cloud placeholder.
 const REPARSE_POINT: u32 = 0x400;
+/// `FILE_ATTRIBUTE_DIRECTORY`, which a junction to a folder has too.
+const DIRECTORY: u32 = 0x10;
 
 /// The sweep's delete attempts, as the engine retries its own: at most 10, while another program briefly holds the
 /// leftover (a sharing violation or access denied), waiting 20 ms and doubling, at most 1 s, between them.
@@ -238,8 +240,8 @@ impl Outputs {
     ///   known folder), or an engine temp (`.<16 lowercase hex>.lockbox-partial` or `.lockbox-backup-partial`) whose
     ///   folder, resolved, is the folder written down;
     /// - no folder on its way, from the drive or share down (the state folder and the folders above it included), is
-    ///   a link, a junction or any other reparse point;
-    /// - it is, by its own metadata, a plain folder or a plain file.
+    ///   a link, a junction or a mount point (a cloud-file folder, whose reparse point keeps it in place, passes);
+    /// - it is, by its own metadata, a plain folder or a plain file: no reparse point of any kind.
     ///
     /// Anything else is dropped from the journal and left on disk; an entry on a drive that is not connected, or that
     /// could not be removed, is kept for the next launch. A journal that cannot be read removes nothing and stays as
@@ -359,10 +361,7 @@ impl Outputs {
             }
             match rename_file_no_replace(&self.file, Path::new(&aside)) {
                 Ok(()) => return Ok(()),
-                // The engine's answer when something is already at that name.
-                Err(CoreError::InvalidInput {
-                    what: "destination exists",
-                }) => {}
+                Err(e) if is_destination_taken(&e) => {}
                 Err(e) => return Err(e.into()),
             }
         }
@@ -400,9 +399,10 @@ fn is_transient(e: &io::Error) -> bool {
     matches!(e.raw_os_error(), Some(32 | 5))
 }
 
-/// Checks each existing folder from below `root` down to `folder` with `symlink_metadata`: `Delete` when every one is
-/// a plain folder, `Drop` when one is a link, junction or other reparse point (or not a folder, or not there: nothing
-/// below it is either), `Keep` when one cannot be read.
+/// Checks each existing folder from below `root` down to `folder`: `Delete` when none leads elsewhere, `Drop` when one
+/// is a link, a junction or a mount point (a name-surrogate reparse point, its tag read from the folder itself:
+/// [`win::is_redirect`]) or is not a folder or not there (nothing below it is either), `Keep` when one cannot be read.
+/// A folder whose reparse point keeps it in place (a cloud-file folder such as OneDrive's) passes.
 fn no_link_below(root: &Path, folder: &Path) -> Checked {
     let Ok(rest) = folder.strip_prefix(root) else {
         return Checked::Drop;
@@ -410,10 +410,20 @@ fn no_link_below(root: &Path, folder: &Path) -> Checked {
     let mut at = root.to_path_buf();
     for part in rest.iter() {
         at.push(part);
-        match fs::symlink_metadata(&at) {
-            Ok(meta) if plain(&meta, true) => {}
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Checked::Keep,
-            _ => return Checked::Drop,
+        let meta = match fs::symlink_metadata(&at) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Checked::Drop,
+            Err(_) => return Checked::Keep,
+        };
+        if meta.file_attributes() & DIRECTORY == 0 {
+            return Checked::Drop;
+        }
+        if meta.file_attributes() & REPARSE_POINT != 0 {
+            match win::is_redirect(&at) {
+                Ok(false) => {}
+                Ok(true) => return Checked::Drop,
+                Err(_) => return Checked::Keep,
+            }
         }
     }
     Checked::Delete { folder: true }

@@ -167,8 +167,15 @@ pub(crate) fn sync_after_replace(to: &Path) -> Result<()> {
 
 /// A destination that is already taken.
 pub(crate) const DESTINATION_EXISTS: CoreError = CoreError::InvalidInput {
-    what: "destination exists",
+    what: DESTINATION_EXISTS_WHAT,
 };
+const DESTINATION_EXISTS_WHAT: &str = "destination exists";
+
+/// Whether `error` is the answer of a no-replace move ([`rename_file_no_replace`], [`rename_dir_no_replace`]) whose
+/// destination was already taken, so a caller can try another name.
+pub fn is_destination_taken(error: &CoreError) -> bool {
+    matches!(error, CoreError::InvalidInput { what } if *what == DESTINATION_EXISTS_WHAT)
+}
 
 /// Moves the file or folder `from` to `to`, which must not exist (`InvalidInput` if it does).
 pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
@@ -564,6 +571,24 @@ mod tests {
         exists(atomic_create(&link, b"x"));
         assert!(std::fs::symlink_metadata(&link).is_ok());
         assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    /// A no-replace move onto a taken name is told apart from every other failure.
+    #[test]
+    fn destination_taken_is_recognised() {
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"mine").unwrap();
+        std::fs::write(&to, b"theirs").unwrap();
+        let taken = rename_file_no_replace(&from, &to).unwrap_err();
+        assert!(is_destination_taken(&taken));
+        assert_eq!(std::fs::read(&to).unwrap(), b"theirs");
+        let missing = rename_file_no_replace(&dir.path().join("gone"), &dir.path().join("x"));
+        assert!(!is_destination_taken(&missing.unwrap_err()));
+        assert!(!is_destination_taken(&CoreError::InvalidInput {
+            what: "destination inside vault"
+        }));
+        assert!(!is_destination_taken(&CoreError::NotFound));
     }
 
     #[test]

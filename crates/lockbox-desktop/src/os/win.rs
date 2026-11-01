@@ -33,7 +33,10 @@ use windows_sys::Win32::Storage::CloudFilters::{
     CF_SYNC_ROOT_INFO_PROVIDER, CF_SYNC_ROOT_PROVIDER_INFO, CfGetSyncRootInfoByPath,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FileAttributeTagInfo, GetDriveTypeW, GetFileInformationByHandleEx,
+    GetVolumeInformationW, GetVolumePathNameW,
 };
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -1282,6 +1285,48 @@ fn test_refuses(registration: Registration) -> bool {
 }
 
 /// Test-only: waits at the hook's gate. It runs inside the window procedure, so it never panics.
+/// `IsReparseTagNameSurrogate`: the reparse tag's bit for "this names another file or folder".
+const NAME_SURROGATE: u32 = 0x2000_0000;
+
+/// Whether a file or folder with these attributes and reparse tag leads somewhere else: a name-surrogate reparse point
+/// (a symbolic link, a junction or a mount point). Other reparse points (cloud files such as OneDrive's
+/// Files-On-Demand, deduplication) keep the item where it is, so they do not.
+pub fn redirects(attributes: u32, reparse_tag: u32) -> bool {
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && reparse_tag & NAME_SURROGATE != 0
+}
+
+/// Whether `path` itself (never what it leads to) leads somewhere else ([`redirects`]): its attributes and reparse tag
+/// read from a handle opened on `path` itself (`FILE_FLAG_OPEN_REPARSE_POINT`; `FILE_FLAG_BACKUP_SEMANTICS` so a
+/// folder opens), asking only to read attributes and sharing everything.
+pub fn is_redirect(path: &Path) -> io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let mut info = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    // SAFETY: the handle stays open for as long as `file` lives, past this call; `info` is a writable
+    // `FILE_ATTRIBUTE_TAG_INFO`, the class asked for, and the size passed is its own.
+    let done = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileAttributeTagInfo,
+            (&raw mut info).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if done == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(redirects(info.FileAttributes, info.ReparseTag))
+}
+
 #[cfg(test)]
 fn wait_at_test_gate() {
     let _ = TEST_HOOK.try_with(|hook| {
@@ -1316,6 +1361,59 @@ mod tests {
 
     /// The deadline for every wait in these tests: a slow or stuck window fails a test instead of hanging it.
     const WAIT: Duration = Duration::from_secs(1);
+
+    /// Fix round 1 follow-up: only name-surrogate reparse points lead elsewhere. The tags are Windows' own
+    /// (`winnt.h`). A cloud-file folder cannot be made here without a registered sync provider, so its tag is checked
+    /// by value.
+    #[test]
+    fn only_name_surrogates_redirect() {
+        const REPARSE: u32 = FILE_ATTRIBUTE_REPARSE_POINT;
+        const DIRECTORY: u32 = 0x10;
+        for (tag, name) in [
+            (
+                0xA000_0003,
+                "IO_REPARSE_TAG_MOUNT_POINT (junction, mount point)",
+            ),
+            (0xA000_000C, "IO_REPARSE_TAG_SYMLINK"),
+            (0xA000_001D, "IO_REPARSE_TAG_LX_SYMLINK"),
+        ] {
+            assert!(redirects(REPARSE | DIRECTORY, tag), "{name}");
+        }
+        for (tag, name) in [
+            (0x9000_001A, "IO_REPARSE_TAG_CLOUD (OneDrive)"),
+            (0x9000_601A, "IO_REPARSE_TAG_CLOUD_6"),
+            (0x8000_0013, "IO_REPARSE_TAG_DEDUP"),
+            (0x8000_0017, "IO_REPARSE_TAG_WOF"),
+            (0x8000_001B, "IO_REPARSE_TAG_APPEXECLINK"),
+        ] {
+            assert!(!redirects(REPARSE | DIRECTORY, tag), "{name}");
+        }
+        // No reparse point at all: whatever the tag field holds, nothing redirects.
+        assert!(!redirects(DIRECTORY, 0xA000_0003));
+        assert!(!redirects(DIRECTORY, 0));
+    }
+
+    /// Fix round 1 follow-up: read from the disk, a junction leads elsewhere; a plain folder and a plain file do not.
+    #[test]
+    fn junction_is_a_redirect_on_disk() {
+        use lockbox_core::internals::fsio::testutil::{TempDir, make_dir_link};
+        let temp = TempDir::new();
+        let (folder, file, link) = (
+            temp.path().join("folder"),
+            temp.path().join("file.txt"),
+            temp.path().join("link"),
+        );
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(&file, b"x").unwrap();
+        make_dir_link(&link, &folder);
+        assert!(is_redirect(&link).unwrap());
+        assert!(!is_redirect(&folder).unwrap());
+        assert!(!is_redirect(&file).unwrap());
+        assert_eq!(
+            is_redirect(&temp.path().join("gone")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 
     /// Fix round 1 (F12): a dialog that moves the process's working directory (rfd's folder dialog drops
     /// `FOS_NOCHANGEDIR`) gets it moved back. Fix round 2 (G3): also when two dialogs overlap, the second starting
