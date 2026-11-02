@@ -375,11 +375,31 @@ async function answerRestoreQuestion(): Promise<string> {
   return describeRestore(await callPlain<Outcome<RestorePrepared>>("restore_prepare_confirm", { token, name }));
 }
 
+// Whether a refusal means Rust no longer has the restore: it was cancelled by a lock, is not there, or ended in a state
+// recovery handles (or the vault is on disk but not listed). Any other refusal (busy, the vault in use, an engine
+// error it kept the staged restore for) leaves it prepared, so the same ID can be retried or discarded.
+function endsRestore(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const refusal = error as { code?: string; kind?: string; what?: string };
+  return (
+    refusal.code === "cancelled" ||
+    refusal.code === "not_found" ||
+    (refusal.code === "core" && refusal.kind === "restore_pending") ||
+    (refusal.code === "invalid_input" && refusal.what === "vault not listed")
+  );
+}
+
 async function finishRestore(): Promise<string> {
   if (testRestore === undefined) return "No restore prepared: press Restore a backup first";
   const restore = testRestore;
+  let restored: Restored;
+  try {
+    restored = await callPlain<Restored>("restore_commit", { restore });
+  } catch (error) {
+    if (endsRestore(error)) testRestore = undefined;
+    throw error;
+  }
   testRestore = undefined;
-  const restored = await callPlain<Restored>("restore_commit", { restore });
   return `Restored (vault ${String(restored.vault)})${
     restored.before_restore ? ': the old vault is kept beside it; see "List pre-restore copies"' : ""
   }`;
@@ -388,8 +408,13 @@ async function finishRestore(): Promise<string> {
 async function cancelRestore(): Promise<string> {
   if (testRestore === undefined) return "No restore prepared";
   const restore = testRestore;
+  try {
+    await callPlain<null>("restore_discard", { restore });
+  } catch (error) {
+    if (endsRestore(error)) testRestore = undefined;
+    throw error;
+  }
   testRestore = undefined;
-  await callPlain<null>("restore_discard", { restore });
   return "Restore cancelled; nothing changed";
 }
 

@@ -1288,6 +1288,16 @@ impl Sessions {
         self.inner().unlocked_at(location).map(|entry| entry.id)
     }
 
+    /// Where the session `id` is, locked or not: a lock hook runs after the revoke, when [`locations`](Self::locations)
+    /// no longer lists the session.
+    pub(crate) fn location_of(&self, id: SessionId) -> Option<Location> {
+        self.inner()
+            .sessions
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.location.clone())
+    }
+
     /// Whether a session is unlocked at `location` or an open of it is under way, both read under the one sessions
     /// mutex: a folder deleted behind a check that missed an open in flight would pull it away from under it.
     pub(crate) fn in_use(&self, location: &Location) -> bool {

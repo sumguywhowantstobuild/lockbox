@@ -203,7 +203,7 @@ impl Shell {
     /// hold a vault or holds none. A folder a cloud provider syncs asks first (`Confirm::CloudFolder`);
     /// [`add_existing_vault_confirm`](Self::add_existing_vault_confirm) goes on from there.
     pub fn add_existing_vault(&self) -> ShellResult<Outcome<VaultEntry>> {
-        let Some(dir) = self.os.dialogs.pick_folder("Add an existing vault") else {
+        let Some(dir) = self.os.dialogs.pick_folder("Add an existing vault", None) else {
             return Ok(Outcome::Dismissed);
         };
         self.add_folder(&dir, false)
@@ -257,7 +257,7 @@ impl Shell {
             true => match self
                 .os
                 .dialogs
-                .pick_folder("Choose where to create the vault")
+                .pick_folder("Choose where to create the vault", None)
             {
                 Some(parent) => parent,
                 None => return Ok(Outcome::Dismissed),

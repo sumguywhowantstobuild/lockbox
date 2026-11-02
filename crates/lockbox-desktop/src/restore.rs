@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,9 +35,12 @@ use crate::error::{Confirm, Outcome, ShellError, ShellResult, VAULT_NOT_LISTED};
 use crate::lock;
 use crate::os::{same_name, same_path};
 use crate::outputs::is_real_folder_in;
+use crate::paths::default_vault_parent;
 use crate::pending::{PendingChoice, Token};
+#[cfg(test)]
+use crate::session::SessionId;
 use crate::session::{
-    Location, LockHook, LockReason, Notice, OpenStep, Opened, SessionId, SessionInfo, Tagged,
+    Location, LockHook, LockReason, Notice, OpenStep, Opened, SessionInfo, Sessions, Tagged,
 };
 use crate::shell::Shell;
 
@@ -262,27 +265,29 @@ pub enum RestoreState {
     Idle,
     /// Recovery or a dismissal is running: no restore starts meanwhile, and none runs recovery under a live one.
     Recovering,
-    /// The pickers are done and the backup is being unlocked and extracted: a long operation. `locked` lists the
-    /// sessions a user locked meanwhile, since which one is the destination is known only when `prepare` ends.
+    /// The pickers are done and the backup is being unlocked and extracted: a long operation. `locked` lists the places
+    /// of the sessions a user locked meanwhile, since which one is the destination is known only when `prepare` ends.
     Preparing {
         id: u32,
         cancel: CancelToken,
-        locked: Vec<SessionId>,
+        locked: Vec<Location>,
     },
     /// Extracted and checked, waiting for the user's yes. Not a long operation (spec §7.4 pauses the idle timer while
     /// one is running): an idle lock ends it like any lock of all vaults. `epoch` is the sessions' lock count then.
+    /// `destination` is the folder it replaces: a lock of any session at that place ends it, whenever that session was
+    /// unlocked.
     Prepared {
         id: u32,
         prepared: Box<PreparedRestore>,
         cancel: CancelToken,
-        destination: Option<SessionId>,
+        destination: Option<Location>,
         epoch: u64,
     },
     /// The swap is being made: a long operation. Once the engine writes `swapping` nothing cancels it.
     Committing {
         id: u32,
         cancel: CancelToken,
-        destination: Option<SessionId>,
+        destination: Option<Location>,
     },
 }
 
@@ -341,6 +346,8 @@ pub struct Restores {
     idle: Condvar,
     /// Tests only: how many times [`Shell::recover`] has run.
     recoveries: AtomicUsize,
+    #[cfg(test)]
+    test_hook: Mutex<Option<TestHook>>,
 }
 
 /// A cleanup worker, counted from before its thread runs until dropped: after its work, or unrun when its thread
@@ -406,6 +413,8 @@ impl Restores {
             workers: Mutex::default(),
             idle: Condvar::new(),
             recoveries: AtomicUsize::new(0),
+            #[cfg(test)]
+            test_hook: Mutex::default(),
         }
     }
 
@@ -456,11 +465,7 @@ impl Restores {
 
     /// The prepared restore `id`, taken out of the state, which becomes `Committing`. `NotFound`, `Cancelled` or `Busy`
     /// as [`Inner::not_prepared`] says.
-    fn begin_commit(
-        &self,
-        id: u32,
-        destination: Option<SessionId>,
-    ) -> ShellResult<(PreparedRestore, CancelToken, Option<SessionId>, u64)> {
+    fn begin_commit(&self, id: u32) -> ShellResult<Commit> {
         let mut inner = lock(&self.inner);
         if !matches!(&inner.state, RestoreState::Prepared { id: ours, .. } if *ours == id) {
             return Err(inner.not_prepared(id));
@@ -472,21 +477,41 @@ impl Restores {
             RestoreState::Prepared {
                 prepared,
                 cancel,
-                destination: at_prepare,
+                destination,
                 epoch,
                 ..
             } => {
                 inner.state = RestoreState::Committing {
                     id,
                     cancel: cancel.clone(),
-                    destination,
+                    destination: destination.clone(),
                 };
-                Ok((*prepared, cancel, at_prepare, epoch))
+                Ok(Commit {
+                    prepared: *prepared,
+                    cancel,
+                    destination,
+                    epoch,
+                })
             }
             other => {
                 inner.state = other;
                 Err(BUSY_RESTORE)
             }
+        }
+    }
+
+    /// The commit `id` failed in a way its recovery must settle: `Committing` goes straight to `Recovering` in this one
+    /// step, so no restore starts, and no other recovery or dismissal runs, between the failure and the end of the
+    /// recovery. The returned claim puts `Idle` back when it is dropped, after the recovery.
+    fn recovering_after_commit(&self, id: u32) -> Claim<'_> {
+        let mut inner = lock(&self.inner);
+        if matches!(&inner.state, RestoreState::Committing { id: ours, .. } if *ours == id) {
+            inner.state = RestoreState::Recovering;
+        }
+        Claim {
+            restores: self,
+            id: 0,
+            live: true,
         }
     }
 
@@ -516,50 +541,59 @@ impl Restores {
         }
     }
 
-    /// The commit `id` stopped before the swap began and the staged restore is intact: `Prepared` again, same ID. The
-    /// commit closed the destination session itself, so none is open there now: a retry looks it up again.
-    fn back_to_prepared(
-        &self,
-        id: u32,
-        prepared: PreparedRestore,
-        cancel: CancelToken,
-        epoch: u64,
-    ) {
+    /// The commit `id` stopped before the swap began and the staged restore is intact: `Prepared` again, same ID and
+    /// same destination (the place, whoever is unlocked there when the next lock comes).
+    fn back_to_prepared(&self, id: u32, commit: Commit) {
+        let Commit {
+            prepared,
+            cancel,
+            destination,
+            epoch,
+        } = commit;
         let mut inner = lock(&self.inner);
         inner.state = RestoreState::Prepared {
             id,
             prepared: Box::new(prepared),
             cancel,
-            destination: None,
+            destination,
             epoch,
         };
     }
 
     /// The lock hook (added in `Shell::new`, after the "Open" cleanup's): a restore that is not swapping ends with
-    /// the lock.
+    /// the lock. `sessions` is weak because the sessions hold this hook; it tells where a locked session was.
     /// - A lock of all vaults (`None`, any reason) cancels the token. In `Prepared` the restore also ends: the staged
     ///   restore is taken out and dropped on a worker.
-    /// - A lock of the destination session does the same, unless it is the restore's own (`LockReason::Restore`).
-    ///   While `Preparing`, which session is the destination is known only at the end: the lock is noted.
+    /// - A lock of a session at the destination (a place: whenever that session was unlocked) does the same, unless it
+    ///   is the restore's own (`LockReason::Restore`). While `Preparing`, the destination is known only at the end: the
+    ///   place is noted.
     /// - In `Committing` the hook only cancels the token: the engine ignores it once the swap starts.
-    pub fn lock_hook(self: &Arc<Self>) -> LockHook {
+    pub fn lock_hook(self: &Arc<Self>, sessions: Weak<Sessions>) -> LockHook {
         let restores = Arc::clone(self);
-        Box::new(move |session, reason| restores.locked(session, reason))
+        Box::new(move |session, reason| {
+            #[cfg(test)]
+            restores.run_test_hook(session, reason);
+            // Before the state mutex: a session call never runs while it is held.
+            let at = session.and_then(|session| sessions.upgrade()?.location_of(session));
+            restores.locked(session.map(|_| at), reason);
+        })
     }
 
-    fn locked(self: &Arc<Self>, session: Option<SessionId>, reason: LockReason) {
-        let ends = |destination: Option<SessionId>| match session {
+    /// `session`: `None` for a lock of all vaults, else the place of the session locked (itself `None` when the session
+    /// is not known).
+    fn locked(self: &Arc<Self>, session: Option<Option<Location>>, reason: LockReason) {
+        let ends = |destination: &Option<Location>| match &session {
             None => true,
-            Some(session) => reason != LockReason::Restore && destination == Some(session),
+            Some(at) => reason != LockReason::Restore && at.is_some() && at == destination,
         };
         let dropped = {
             let mut inner = lock(&self.inner);
             let id = match &mut inner.state {
                 RestoreState::Idle | RestoreState::Recovering => return,
                 RestoreState::Preparing { cancel, locked, .. } => {
-                    match session {
+                    match &session {
                         None => cancel.cancel(),
-                        Some(session) if reason != LockReason::Restore => locked.push(session),
+                        Some(Some(at)) if reason != LockReason::Restore => locked.push(at.clone()),
                         Some(_) => {}
                     }
                     return;
@@ -569,7 +603,7 @@ impl Restores {
                     destination,
                     ..
                 } => {
-                    if ends(*destination) {
+                    if ends(destination) {
                         cancel.cancel();
                     }
                     return;
@@ -580,7 +614,7 @@ impl Restores {
                     destination,
                     ..
                 } => {
-                    if !ends(*destination) {
+                    if !ends(destination) {
                         return;
                     }
                     cancel.cancel();
@@ -632,6 +666,33 @@ impl Restores {
     pub(crate) fn recoveries(&self) -> usize {
         self.recoveries.load(Ordering::SeqCst)
     }
+
+    /// Tests only: `hook` runs at the start of this hook for every lock, so a test can hold one lock's restore hook back
+    /// (the hooks of the locks that follow queue behind it).
+    #[cfg(test)]
+    pub(crate) fn before_hook(&self, hook: TestHook) {
+        *lock(&self.test_hook) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn run_test_hook(&self, session: Option<SessionId>, reason: LockReason) {
+        let hook = lock(&self.test_hook).clone();
+        if let Some(hook) = hook {
+            hook(session, reason);
+        }
+    }
+}
+
+/// Tests only: a step run at the start of the restore's lock hook.
+#[cfg(test)]
+pub(crate) type TestHook = Arc<dyn Fn(Option<SessionId>, LockReason) + Send + Sync>;
+
+/// A prepared restore taken out of the state to be committed, with what the commit needs of it.
+struct Commit {
+    prepared: PreparedRestore,
+    cancel: CancelToken,
+    destination: Option<Location>,
+    epoch: u64,
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -813,7 +874,15 @@ impl Shell {
         let Some(backup) = self.os.dialogs.pick_file("Restore a backup", Some(FILTER)) else {
             return Ok(Outcome::Dismissed);
         };
-        let Some(parent) = self.os.dialogs.pick_folder("Restore into this folder") else {
+        // The folder dialog opens in the vaults folder when there is one (`<Profile>\Lockbox Vaults`).
+        let vaults = default_vault_parent(self.os.env.as_ref())
+            .ok()
+            .filter(|dir| dir.is_dir());
+        let Some(parent) = self
+            .os
+            .dialogs
+            .pick_folder("Restore into this folder", vaults.as_deref())
+        else {
             return Ok(Outcome::Dismissed);
         };
         if self.locked_since(epoch) {
@@ -942,7 +1011,6 @@ impl Shell {
         };
         // The journal is written in the state folder, which a first-ever restore may find missing.
         fs::create_dir_all(&self.paths.root)?;
-        let open_before = self.sessions.locations();
 
         let prepared = PreparedRestore::prepare(
             &choice.backup,
@@ -1006,13 +1074,8 @@ impl Shell {
                 return Err(full);
             }
         }
-        let destination = location.as_ref().and_then(|l| self.sessions.find(l));
-        let destination_before = location.as_ref().and_then(|l| {
-            open_before
-                .iter()
-                .find(|(_, open)| open == l)
-                .map(|(session, _)| *session)
-        });
+        // The destination is the folder it replaces, whoever is unlocked there.
+        let destination = location;
 
         let registered = {
             let mut inner = lock(&self.restore.inner);
@@ -1020,8 +1083,10 @@ impl Shell {
                 RestoreState::Preparing {
                     id: ours, locked, ..
                 } if ours == id => {
-                    let destination_locked =
-                        destination_before.is_some_and(|session| locked.contains(&session));
+                    // A session at the destination that a user locked while the backup was extracted ends it.
+                    let destination_locked = destination
+                        .as_ref()
+                        .is_some_and(|place| locked.contains(place));
                     if cancel.is_cancelled() || destination_locked {
                         // A lock ended it while it ran (its hook cancelled the token, or the destination was locked).
                         inner.note_ended(id);
@@ -1074,39 +1139,33 @@ impl Shell {
     /// answers `Cancelled` (and the staged restore is gone); once the engine writes `swapping` nothing cancels it.
     ///
     /// By the engine's contract: `RestorePending` runs recovery at once (the notice is kept and sent; the answer is
-    /// that error). A restore the engine left intact (the vault is open elsewhere, a refused first rename, a journal
-    /// that could not be rewritten) goes back to `Prepared` with the same ID for a retry; any other error was settled
-    /// by the engine and the restore is dropped. After a swap the vault is put on the vault list
-    /// (`VAULT_NOT_LISTED` if that fails).
+    /// that error). Any other failure is asked of the engine: a restore it kept as it was
+    /// ([`PreparedRestore::can_retry`]: the vault is open elsewhere, a cancel, a refused first rename) goes back to
+    /// `Prepared` with the same ID for a retry, unless a lock came meanwhile; otherwise the engine settled it, the
+    /// restore is dropped, and recovery runs for any journal left. From a failed commit the state goes straight to
+    /// `Recovering` and stays there until recovery is over, so no other restore starts in between. After a swap the
+    /// vault is put on the vault list (`VAULT_NOT_LISTED` if that fails).
     pub fn restore_commit(&self, restore: u32) -> ShellResult<RestoredView> {
-        let location = {
-            let inner = lock(&self.restore.inner);
-            match &inner.state {
-                RestoreState::Prepared { id, prepared, .. } if *id == restore => {
-                    prepared.existing().map(Path::to_path_buf)
-                }
-                _ => return Err(inner.not_prepared(restore)),
-            }
-        };
-        let destination = location
-            .as_deref()
-            .and_then(|dir| Location::folder(dir).ok())
-            .and_then(|l| self.sessions.find(&l));
-        let (mut prepared, cancel, at_prepare, epoch) =
-            self.restore.begin_commit(restore, destination)?;
+        let Commit {
+            mut prepared,
+            cancel,
+            destination,
+            epoch,
+        } = self.restore.begin_commit(restore)?;
+        // The session open there now, whenever it was unlocked.
+        let session = destination
+            .as_ref()
+            .and_then(|place| self.sessions.find(place));
 
         let operation = self.autolock.begin(None, RESTORE, cancel.clone());
-        // A lock of all vaults whose hook has not run yet, or the destination locked by the user since `prepare`.
-        if cancel.is_cancelled()
-            || self.locked_since(epoch)
-            || (at_prepare.is_some() && destination.is_none())
-        {
+        // A lock of all vaults whose hook has not run yet.
+        if cancel.is_cancelled() || self.locked_since(epoch) {
             self.restore.end_commit(restore, true);
             drop(operation);
             drop(prepared);
             return Err(ShellError::Cancelled);
         }
-        if let Some(session) = destination {
+        if let Some(session) = session {
             self.sessions.lock(session, LockReason::Restore);
             if !self.sessions.release_wait(session, RELEASE_WAIT) {
                 // A lock that came meanwhile ends the restore; else it waits for another try.
@@ -1116,12 +1175,25 @@ impl Shell {
                     drop(prepared);
                     return Err(ShellError::Cancelled);
                 }
-                self.restore
-                    .back_to_prepared(restore, prepared, cancel, epoch);
+                let kept = Commit {
+                    prepared,
+                    cancel,
+                    destination,
+                    epoch,
+                };
+                self.restore.back_to_prepared(restore, kept);
                 return Err(ShellError::Busy {
                     what: "vault still finishing an operation",
                 });
             }
+        }
+        // A lock of all vaults that landed while the destination was released, whose hooks are still queued (so the
+        // token is not cancelled yet), must not slip through to the swap.
+        if cancel.is_cancelled() || self.locked_since(epoch) {
+            self.restore.end_commit(restore, true);
+            drop(operation);
+            drop(prepared);
+            return Err(ShellError::Cancelled);
         }
 
         let committed = prepared.commit(&cancel);
@@ -1136,14 +1208,6 @@ impl Shell {
                     before_restore: outcome.before_restore.is_some(),
                 })
             }
-            Err(CoreError::RestorePending) => {
-                self.restore.end_commit(restore, false);
-                drop(operation);
-                drop(prepared);
-                let notice = self.recover();
-                self.announce_restore(&notice);
-                Err(CoreError::RestorePending.into())
-            }
             Err(CoreError::Cancelled) => {
                 self.restore.end_commit(restore, true);
                 drop(operation);
@@ -1151,25 +1215,31 @@ impl Shell {
                 Err(ShellError::Cancelled)
             }
             Err(error) => {
-                let intact = matches!(
-                    inspect_restore_journal(&self.paths.journal),
-                    Ok(Some(view)) if view.step == JournalStep::Extracting && view.parent_present
-                );
-                // A lock that came during the commit ends the restore, as before the swap started.
-                if intact && !cancel.is_cancelled() && !self.locked_since(epoch) {
-                    self.restore
-                        .back_to_prepared(restore, prepared, cancel, epoch);
-                    drop(operation);
+                // The engine says whether it kept the restore as it was; a lock that came during the commit ends it.
+                if prepared.can_retry() {
+                    if !cancel.is_cancelled() && !self.locked_since(epoch) {
+                        let kept = Commit {
+                            prepared,
+                            cancel,
+                            destination,
+                            epoch,
+                        };
+                        self.restore.back_to_prepared(restore, kept);
+                        drop(operation);
+                    } else {
+                        self.restore.end_commit(restore, true);
+                        drop(operation);
+                        drop(prepared);
+                    }
                     return Err(error.into());
                 }
-                self.restore.end_commit(restore, intact);
+                // Settled by the engine, or left for recovery (`RestorePending`): `Committing` goes straight to
+                // `Recovering`, held until the recovery is over.
+                let _recovering = self.restore.recovering_after_commit(restore);
                 drop(operation);
                 drop(prepared);
-                if !intact {
-                    // The engine settled it; a journal it left that could not be acted on is told.
-                    let notice = self.recover();
-                    self.announce_restore(&notice);
-                }
+                let notice = self.recover();
+                self.announce_restore(&notice);
                 Err(error.into())
             }
         }
@@ -1194,13 +1264,14 @@ impl Shell {
     /// valid until the next listing, which replaces them.
     pub fn list_pre_restore(&self) -> Vec<PreRestoreEntry> {
         let mut found = Vec::new();
-        for (vault, dir) in self.registry.entries() {
-            for folder in pre_restore_folders(&dir) {
+        let registered = self.registry.entries();
+        for (vault, dir) in &registered {
+            for folder in pre_restore_folders(dir, &registered) {
                 if !found
                     .iter()
                     .any(|(_, other): &(u32, PathBuf)| same_path(other, &folder))
                 {
-                    found.push((vault, folder));
+                    found.push((*vault, folder));
                 }
             }
         }
@@ -1250,7 +1321,16 @@ impl Shell {
         let beside = folder
             .parent()
             .is_some_and(|other| same_path(other, parent));
-        if !beside || !is_pre_restore_name(folder_name, name) || !is_real_folder_in(parent, folder)
+        // A folder on the vault list is a live vault, not a pre-restore copy.
+        let live = self
+            .registry
+            .entries()
+            .iter()
+            .any(|(_, listed)| same_path(listed, folder));
+        if live
+            || !beside
+            || !is_pre_restore_name(folder_name, name)
+            || !is_real_folder_in(parent, folder)
         {
             return Err(gone);
         }
@@ -1313,11 +1393,17 @@ impl Shell {
                 session,
                 generation,
                 data: (info, _),
-            }) => Ok(Tagged {
-                session,
-                generation,
-                data: info,
-            }),
+            }) => match info.read_only {
+                true => Ok(Tagged {
+                    session,
+                    generation,
+                    data: info,
+                }),
+                // A writable session already at that place is a live vault, never handed out here.
+                false => Err(ShellError::InvalidInput {
+                    what: "not a pre-restore copy",
+                }),
+            },
             // The opening closure never asks.
             Outcome::Confirm(_) | Outcome::Dismissed => Err(ShellError::Cancelled),
         }
@@ -1326,7 +1412,7 @@ impl Shell {
 
 /// The pre-restore folders of the vault folder `dir`, sorted: real folders beside it, named for it, holding its vault
 /// ID. None when `dir`'s own header cannot be read (the ID to match is unknown).
-fn pre_restore_folders(dir: &Path) -> Vec<PathBuf> {
+fn pre_restore_folders(dir: &Path, registered: &[(u32, PathBuf)]) -> Vec<PathBuf> {
     let (Some(parent), Some(name)) = (dir.parent(), dir.file_name().and_then(OsStr::to_str)) else {
         return Vec::new();
     };
@@ -1345,6 +1431,8 @@ fn pre_restore_folders(dir: &Path) -> Vec<PathBuf> {
                 .is_some_and(|candidate| is_pre_restore_name(candidate, name))
         })
         .map(|entry| entry.path())
+        // A folder on the vault list is a live vault (the user added it), whatever its name.
+        .filter(|path| !registered.iter().any(|(_, listed)| same_path(listed, path)))
         .filter(|path| {
             is_real_folder_in(parent, path) && read_vault_id(path).is_ok_and(|id| id == live)
         })
@@ -1376,6 +1464,7 @@ fn is_pre_restore_name(candidate: &str, folder: &str) -> bool {
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+    use std::sync::mpsc;
 
     use lockbox_core::Vault;
     use lockbox_core::internals::fsio::failpoint;
@@ -2724,11 +2813,275 @@ mod tests {
         assert_eq!(titles(&ts, live, live_generation), ["old.pdf"]);
         assert_eq!(names(&aside), before, "nothing written in the folder");
         assert!(dir.is_dir());
-        // A listed ID that is a live vault is not possible: only listed pre-restore folders open.
+        // An ID never listed does not open.
         assert_eq!(
             heavy(|| ts.shell.open_pre_restore_read_only(77, password())).err(),
             Some(ShellError::NotFound)
         );
+    }
+
+    /// A `.before-restore` folder the user added to the vault list is a live vault: it is not listed any more, and an ID
+    /// listed before it was added neither opens nor deletes it, so no writable session ever comes back from these
+    /// commands.
+    #[test]
+    fn a_pre_restore_folder_on_the_vault_list_is_a_live_vault() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        restore_once(&ts, &backup, &parent);
+        let listed = ts.shell.list_pre_restore();
+        assert_eq!(listed.len(), 1);
+        let aside = parent.join(&listed[0].folder);
+
+        // The user adds it as a vault and unlocks it, writable.
+        ts.dialogs.answer(Some(aside.clone()));
+        let added = done(ts.shell.add_existing_vault().unwrap());
+        let (writable, _) = unlock(&ts, added.id);
+
+        assert!(
+            ts.shell.list_pre_restore().is_empty(),
+            "a live vault is not a copy"
+        );
+        let opened = heavy(|| {
+            ts.shell
+                .open_pre_restore_read_only(listed[0].id, password())
+        });
+        assert_eq!(opened.err(), Some(ShellError::NotFound));
+        assert_eq!(
+            ts.shell.delete_pre_restore(listed[0].id, true).err(),
+            Some(ShellError::NotFound)
+        );
+        assert!(aside.is_dir());
+        let sessions = ts.shell.sessions.list();
+        assert!(
+            sessions
+                .iter()
+                .filter(|info| info.session != writable)
+                .all(|info| info.session == s || info.read_only),
+            "no other session came back"
+        );
+    }
+
+    /// The folder dialog of a restore opens in the vaults folder when there is one; the others give it no start.
+    #[test]
+    fn restore_folder_picker_opens_in_the_vaults_folder() {
+        let ts = TestShell::new();
+        let vaults = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let a_backup = ts.folder("Backups").join("x.lockbox-backup");
+        let ask = || {
+            ts.dialogs.answer(Some(a_backup.clone()));
+            // The folder picker is closed: dismissed, after it was opened.
+            assert!(matches!(
+                ts.shell
+                    .restore_prepare(password(), DestinationArg::SameVault),
+                Ok(Outcome::Dismissed)
+            ));
+        };
+        ask();
+        assert!(!vaults.exists());
+        fs::create_dir_all(&vaults).unwrap();
+        ask();
+        assert_eq!(ts.dialogs.folder_starts(), [None, Some(vaults)]);
+
+        assert!(matches!(
+            ts.shell.add_existing_vault(),
+            Ok(Outcome::Dismissed)
+        ));
+        let created =
+            ts.shell
+                .create_vault("Family".into(), Zeroizing::new(TEST_PASSWORD.into()), true);
+        assert!(matches!(created, Ok(Outcome::Dismissed)));
+        assert_eq!(
+            ts.dialogs.folder_starts()[2..],
+            [None, None],
+            "the other folder dialogs give no start"
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Fix round 1.
+    // ------------------------------------------------------------------------------------------------------------
+
+    /// A failed commit goes straight from committing to recovering: while its recovery runs, no restore starts and no
+    /// other recovery or dismissal does (it would remove the other restore's staging folder).
+    #[test]
+    fn no_restore_starts_between_a_failed_commit_and_its_recovery() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        let view = prepared(&ts, &backup, &parent);
+
+        // `recover.under_lock` is reached by the engine's own recovery inside the commit (first) and then by the
+        // shell's (second): the second is the handoff.
+        let seen = Rc::new(RefCell::new(None));
+        let hits = Rc::new(Cell::new(0));
+        let (shell, dialogs, saw, counted) = (
+            Arc::clone(&ts.shell),
+            Arc::clone(&ts.dialogs),
+            Rc::clone(&seen),
+            Rc::clone(&hits),
+        );
+        failpoint::observe(
+            "recover.under_lock",
+            Box::new(move || {
+                counted.set(counted.get() + 1);
+                if counted.get() != 2 {
+                    return;
+                }
+                let opened = dialogs.opened();
+                let idle = shell.restore.is_idle();
+                // Without the rule the state would be Idle here and a recovery would wait for the journal lock the
+                // outer recovery holds: probe only when it is not, so the test fails instead of hanging.
+                let (prepare, retry, dismiss) = match idle {
+                    true => (None, None, None),
+                    false => (
+                        shell
+                            .restore_prepare(password(), DestinationArg::SameVault)
+                            .err(),
+                        shell.retry_restore_recovery().err(),
+                        shell.dismiss_restore(true).err(),
+                    ),
+                };
+                *saw.borrow_mut() =
+                    Some((idle, prepare, retry, dismiss, dialogs.opened() == opened));
+            }),
+        );
+        failpoint::arm("restore.after_move_existing");
+        failpoint::arm("recover.under_lock");
+        let error = ts.shell.restore_commit(view.restore).unwrap_err();
+        failpoint::disarm_all();
+
+        assert_eq!(error, restore_pending());
+        assert_eq!(hits.get(), 2, "the engine's recovery, then the shell's");
+        let (idle, prepare, retry, dismiss, no_picker) = seen.borrow_mut().take().unwrap();
+        assert!(!idle, "not Idle between the commit and its recovery");
+        assert_eq!((prepare, retry, dismiss), (BUSY, BUSY, BUSY));
+        assert!(no_picker);
+        assert!(ts.shell.restore.is_idle(), "and Idle once it is over");
+    }
+
+    /// The engine says whether a failed commit left the restore as it was, not the journal's text: with the journal
+    /// unreadable, a commit the engine kept stays `Prepared` with the same ID.
+    #[test]
+    fn failed_commit_the_engine_kept_stays_prepared_even_when_the_journal_cannot_be_read() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        let (outside, _) = heavy(|| Vault::unlock_with_password(&dir, TEST_PASSWORD)).unwrap();
+        let view = prepared(&ts, &backup, &parent);
+        let journal = ts.shell.paths.journal.clone();
+        let written = fs::read(&journal).unwrap();
+        fs::write(&journal, b"not readable as a journal").unwrap();
+
+        let refused = ts.shell.restore_commit(view.restore).err();
+        assert_eq!(refused, Some(CoreError::VaultInUse.into()));
+        assert!(!ts.shell.restore.is_idle(), "still prepared");
+        assert_eq!(staging_in(&parent).len(), 1, "the staged restore is kept");
+
+        // The same ID commits once the vault is closed and the journal is as it was.
+        drop(outside);
+        fs::write(&journal, written).unwrap();
+        assert!(
+            ts.shell
+                .restore_commit(view.restore)
+                .unwrap()
+                .before_restore
+        );
+    }
+
+    /// The destination is a place, not a session: a vault unlocked after `prepare` (or after a `Busy` retry) and then
+    /// locked by the user ends the restore.
+    #[test]
+    fn destination_unlocked_after_prepare_then_locked_cancels() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+
+        // Locked when prepared, unlocked, then locked by the user.
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        let view = prepared(&ts, &backup, &parent);
+        unlock(&ts, 1);
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        ended(&ts);
+        assert_eq!(ts.shell.restore_commit(view.restore).err(), CANCELLED);
+        assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
+
+        // Open when prepared; a command holds it past the wait (`Busy`); unlocked again, then locked by the user.
+        let (open, open_generation) = unlock(&ts, 1);
+        let view = prepared(&ts, &backup, &parent);
+        let answer = RefCell::new(None);
+        let _ = ts.shell.sessions.read(open, open_generation, |_, _| {
+            *answer.borrow_mut() = Some(ts.shell.restore_commit(view.restore));
+            Ok(())
+        });
+        assert!(matches!(
+            answer.into_inner().unwrap().err(),
+            Some(ShellError::Busy { .. })
+        ));
+        assert!(!ts.shell.restore.is_idle(), "kept for a retry");
+        unlock(&ts, 1);
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        ended(&ts);
+        assert_eq!(ts.shell.restore_commit(view.restore).err(), CANCELLED);
+        assert!(staging_in(&parent).is_empty() && dir.is_dir());
+    }
+
+    /// A lock of all vaults that lands while the commit waits for the destination, with its hooks still queued (so the
+    /// token is not cancelled yet), still ends the restore before the swap.
+    #[test]
+    fn a_lock_just_before_the_swap_cancels_it() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+        let _ = g;
+        let _ = s;
+        let view = prepared(&ts, &backup, &parent);
+
+        // The restore's own lock of the destination starts a lock of all vaults on another thread and waits for its
+        // revocation (the epoch moves); the hooks of that lock of all vaults are held back, the restore's first.
+        let weak = Arc::downgrade(&ts.shell);
+        let (open_gate, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        let locker = Arc::new(Mutex::new(None));
+        let held = Arc::clone(&locker);
+        ts.shell
+            .restore
+            .before_hook(Arc::new(move |session, reason| match (session, reason) {
+                (Some(_), LockReason::Restore) => {
+                    let shell = weak.upgrade().unwrap();
+                    let epoch = shell.sessions.epoch();
+                    let other = Arc::clone(&shell);
+                    *lock(&held) = Some(thread::spawn(move || {
+                        other.sessions.lock_all(LockReason::Manual)
+                    }));
+                    let start = Instant::now();
+                    while shell.sessions.epoch() == epoch {
+                        assert!(start.elapsed() < PATIENCE);
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                (None, LockReason::Manual) => {
+                    let _ = lock(&gate).recv_timeout(PATIENCE);
+                }
+                _ => {}
+            }));
+
+        let answer = ts.shell.restore_commit(view.restore).err();
+        open_gate.send(()).unwrap();
+        let locker = lock(&locker).take().unwrap();
+        locker.join().unwrap();
+
+        assert_eq!(answer, CANCELLED);
+        assert!(dir.is_dir(), "the vault was not swapped");
+        assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
+        assert_eq!(names(&parent).len(), 1, "no pre-restore folder was made");
     }
 
     /// The pages' answers keep their shapes.

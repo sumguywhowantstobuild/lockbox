@@ -359,6 +359,13 @@ impl PreparedRestore {
         self.existing.as_deref()
     }
 
+    /// Whether the restore is as it was before a failed [`commit`](Self::commit): still armed (its staging folder and
+    /// journal are as prepared) and not done, so another commit may be tried. `commit` returns early with exactly this
+    /// state when the vault is open, a cancel came first, or the first rename was refused.
+    pub fn can_retry(&self) -> bool {
+        self.armed && !self.finished
+    }
+
     /// Spec 6.8 steps 5 and 6: swaps the staged vault into place. Cancelling is checked once,
     /// before anything happens; once the swap has begun it is never cancelled.
     ///
@@ -1799,6 +1806,59 @@ pub(super) mod tests {
         s.assert_settled();
         s.assert_restored_at(&s.target);
         s.assert_old_at(&s.before(""));
+    }
+
+    /// `can_retry` says whether a failed commit left the restore as it was: true before a commit and after a refusal
+    /// before the swap (the vault is open, a cancel, a refused first rename); false once the swap began (an error that
+    /// recovery settled, or a disarmed restore) and after a commit that worked.
+    #[test]
+    fn can_retry_tells_which_failed_commits_kept_the_restore() {
+        let _reset = Cleanup;
+        let (s, vault) = Scene::replacing();
+        let mut p = s.prepare();
+        assert!(p.can_retry(), "as prepared");
+
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::VaultInUse)
+        ));
+        assert!(p.can_retry(), "the vault is open: nothing moved");
+        drop(vault);
+
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        assert!(matches!(p.commit(&cancelled), Err(CoreError::Cancelled)));
+        assert!(p.can_retry(), "cancelled before the swap");
+
+        failpoint::arm("restore.fail_move_existing");
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::Io(_))
+        ));
+        failpoint::disarm_all();
+        assert!(p.can_retry(), "a refused first rename");
+
+        p.commit(&CancelToken::new()).unwrap();
+        assert!(!p.can_retry(), "done");
+
+        // An error after the swap began is settled by recovery: not retryable.
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        failpoint::arm("restore.after_move_existing");
+        let result = p.commit(&CancelToken::new());
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert!(!p.can_retry(), "rolled back, the staged restore is gone");
+
+        // And one recovery could not settle.
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        failpoint::arm("restore.after_move_existing");
+        failpoint::arm("recover.under_lock");
+        let result = p.commit(&CancelToken::new());
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::RestorePending)));
+        assert!(!p.can_retry());
     }
 
     #[test]

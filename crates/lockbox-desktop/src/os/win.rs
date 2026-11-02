@@ -26,8 +26,9 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use windows_core::{BOOL, Interface};
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND,
-    LPARAM, LRESULT, LocalFree, MAX_PATH, TRUE, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, GetLastError,
+    GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, LocalFree, MAX_PATH, TRUE,
+    WPARAM,
 };
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 #[cfg(test)]
@@ -62,7 +63,7 @@ use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::Shell::{
     AssocIsDangerous, FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData,
@@ -689,6 +690,52 @@ fn wide_text(text: &OsStr) -> io::Result<Vec<u16>> {
     Ok(wide)
 }
 
+/// The name of the mutex that says a copy of the app runs in this sign-in: in the `Local\` namespace, so each sign-in has
+/// its own, and not the single-instance plugin's own name.
+const INSTANCE_NAME: &str = "Local\\io.github.sumguywhowantstobuild.lockbox.instance";
+
+/// A claim on being the app's one running copy: the mutex handle, closed when the guard drops (and by Windows when the
+/// process ends). Kept in the app's state for the life of the process.
+pub struct InstanceGuard(HANDLE);
+
+// SAFETY: the handle is only closed, once, by `Drop`; a mutex handle may be closed from any thread, and nothing else
+// uses it.
+unsafe impl Send for InstanceGuard {}
+// SAFETY: as above: there is no use of the handle through a shared reference at all.
+unsafe impl Sync for InstanceGuard {}
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        // SAFETY: the handle was returned by `CreateMutexW` and is closed only here.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Claims being the app's one running copy in this sign-in, before any launch work runs: the single-instance plugin
+/// falls through when its mutex exists but its window does not exist yet, so two copies can reach launch work, and the
+/// second would remove the first's staging folder. `None`: another copy has it. An error: Windows would not say.
+pub fn claim_instance() -> io::Result<Option<InstanceGuard>> {
+    claim(INSTANCE_NAME)
+}
+
+/// [`claim_instance`] for a mutex called `name` (tests use their own).
+fn claim(name: &str) -> io::Result<Option<InstanceGuard>> {
+    let name = wide_text(OsStr::new(name))?;
+    // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the call; no security attributes are passed
+    // and the mutex is not owned by this call.
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // Read at once, before anything else can change it: `CreateMutexW` of an existing mutex succeeds and sets
+    // `ERROR_ALREADY_EXISTS`.
+    // SAFETY: reads this thread's last error.
+    let exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    let guard = InstanceGuard(handle);
+    // The guard drops here for a mutex another copy holds: this handle closes, the other copy's stays.
+    Ok((!exists).then_some(guard))
+}
+
 /// The text a call wrote into `buffer`, up to its first NUL (or the whole buffer).
 fn text_in(buffer: &[u16]) -> OsString {
     let len = buffer
@@ -908,8 +955,17 @@ fn keeping_current_dir<T>(show: impl FnOnce() -> T) -> T {
 }
 
 impl<R: Runtime> Dialogs for WinDialogs<R> {
-    fn pick_folder(&self, title: &str) -> Option<PathBuf> {
-        keeping_current_dir(|| self.dialog(title).pick_folder())
+    /// With `start`, the dialog opens in that folder (rfd 0.17.2's `set_directory`, which its Windows backend applies to
+    /// the folder dialog with `SetFolder`, dropping a `\\?\` prefix).
+    fn pick_folder(&self, title: &str, start: Option<&Path>) -> Option<PathBuf> {
+        keeping_current_dir(|| {
+            let dialog = self.dialog(title);
+            match start {
+                Some(start) => dialog.set_directory(start),
+                None => dialog,
+            }
+            .pick_folder()
+        })
     }
 
     fn pick_file(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
@@ -2403,5 +2459,24 @@ mod tests {
         holder.join().unwrap();
         assert!(took < Duration::from_secs(1), "{took:?}");
         assert_eq!(clipboard_text().as_deref(), Some("theirs"));
+    }
+
+    /// One copy of the app per sign-in: the second claim of a name is refused (`None`), and the name is free again once
+    /// the first claim's guard drops. A claim of another name is independent. Names are the tests' own.
+    #[test]
+    fn instance_claim_is_refused_while_another_holds_it() {
+        let name = format!("Local\\lockbox-test-instance-{}", std::process::id());
+        let first = claim(&name).unwrap().expect("the first claim is granted");
+        assert!(claim(&name).unwrap().is_none(), "a second claim is refused");
+        assert!(claim(&name).unwrap().is_none(), "and again");
+        let other = claim(&format!("{name}-other")).unwrap();
+        assert!(other.is_some(), "another name is its own claim");
+        drop(first);
+        let again = claim(&name).unwrap();
+        assert!(again.is_some(), "free again once the guard is dropped");
+        // A name Windows cannot take is an error, not "someone else has it".
+        assert!(claim("Local\\bad\0name").is_err());
+        // The real name is a `Local\` one: per sign-in.
+        assert!(INSTANCE_NAME.starts_with("Local\\"));
     }
 }

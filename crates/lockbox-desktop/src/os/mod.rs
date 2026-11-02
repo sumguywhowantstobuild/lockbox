@@ -397,7 +397,8 @@ pub trait Volumes: Send + Sync {
 /// File dialogs, opened by Rust inside a command (spec §4.2): the path chosen never passes through the page. `None`
 /// when the user closed the dialog. Never called under a session or vault lock: a dialog waits for the user.
 pub trait Dialogs: Send + Sync {
-    fn pick_folder(&self, title: &str) -> Option<PathBuf>;
+    /// `start`: the folder the dialog opens in; `None` leaves it to Windows.
+    fn pick_folder(&self, title: &str, start: Option<&Path>) -> Option<PathBuf>;
     /// `filter`: a name and the extensions it shows, without dots.
     fn pick_file(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf>;
     fn save_file(

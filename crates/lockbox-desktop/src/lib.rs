@@ -50,6 +50,27 @@ pub fn run() {
         }))
         .invoke_handler(handler())
         .setup(|app| {
+            // First of all, before any launch work: the one copy of the app in this sign-in. The single-instance
+            // plugin falls through when its mutex exists but its window does not exist yet, so two copies can reach
+            // here, and the second one's launch work would remove the first one's staging folder and temps. Nothing
+            // has started in this copy, so it simply ends. Fail closed when Windows will not say.
+            match os::win::claim_instance() {
+                Err(_) => {
+                    return Err(
+                        "Lockbox will not run: it could not tell whether it is already running"
+                            .into(),
+                    );
+                }
+                Ok(None) => std::process::exit(0),
+                Ok(Some(running)) => {
+                    // For the life of the process: dropping the guard would let a second copy start.
+                    if !app.manage(running) {
+                        return Err(
+                            "Lockbox will not run: its running copy could not be kept".into()
+                        );
+                    }
+                }
+            }
             // Fail closed: never run without Windows' lock, sleep and drive notices (spec §7.4). Tauri ends the
             // process on a setup error (it panics with this message), before the event loop goes on to load and run
             // the app page. The app's state keeps the signal thread for as long as the app runs: dropping it would

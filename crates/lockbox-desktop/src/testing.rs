@@ -695,9 +695,16 @@ pub struct FakeDialogs {
     opened: AtomicUsize,
     /// Run once, inside the next dialog, before it answers: while the user would be choosing.
     on_open: Mutex<Option<Hook>>,
+    /// The start folder each folder dialog was given, in order.
+    starts: Mutex<Vec<Option<PathBuf>>>,
 }
 
 impl FakeDialogs {
+    /// The start folder each folder dialog was opened with (`None`: none given), in order.
+    pub fn folder_starts(&self) -> Vec<Option<PathBuf>> {
+        lock(&self.starts).clone()
+    }
+
     pub fn answer(&self, answer: Option<PathBuf>) {
         lock(&self.answers).push_back(answer);
     }
@@ -722,7 +729,8 @@ impl FakeDialogs {
 }
 
 impl Dialogs for FakeDialogs {
-    fn pick_folder(&self, _title: &str) -> Option<PathBuf> {
+    fn pick_folder(&self, _title: &str, start: Option<&Path>) -> Option<PathBuf> {
+        lock(&self.starts).push(start.map(Path::to_path_buf));
         self.next()
     }
 

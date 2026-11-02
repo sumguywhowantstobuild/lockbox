@@ -342,6 +342,62 @@ test("restore_buttons_ask_answer_finish_and_cancel", async () => {
   expect(invoke).toHaveBeenCalledWith("restore_discard", { restore: 7 });
 });
 
+test("a_refused_finish_keeps_the_restore_for_a_retry_and_a_discard", async () => {
+  invoke.mockReset();
+  let refusals = ["vault_in_use", "busy"];
+  invoke.mockImplementation((cmd: string, args: Record<string, unknown> | undefined) => {
+    if (cmd === "restore_commit") {
+      const kind = refusals.shift();
+      if (kind === "vault_in_use") {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        return Promise.reject({ code: "core", kind: "vault_in_use" });
+      }
+      if (kind === "busy") {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        return Promise.reject({ code: "busy", what: "vault still finishing an operation" });
+      }
+    }
+    return answerRestoreCommands(cmd, args);
+  });
+  render(<App />);
+  await screen.findByText("Lockbox 9.8.7");
+  fireEvent.click(screen.getByRole("button", { name: "Restore a backup" }));
+  await screen.findByText("restore beside it as", { exact: false });
+  fireEvent.click(screen.getByRole("button", { name: "Answer restore question" }));
+  await screen.findByText("Restore ready", { exact: false });
+
+  // Refused twice: Rust keeps the staged restore, so the same ID is sent again.
+  const finish = screen.getByRole("button", { name: "Finish restore" });
+  fireEvent.click(finish);
+  expect(await screen.findByText('"kind":"vault_in_use"', { exact: false })).toBeTruthy();
+  fireEvent.click(finish);
+  expect(await screen.findByText('"code":"busy"', { exact: false })).toBeTruthy();
+  fireEvent.click(finish);
+  expect(await screen.findByText("Restored (vault 3)", { exact: false })).toBeTruthy();
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === "restore_commit")).toEqual([
+    ["restore_commit", { restore: 7 }],
+    ["restore_commit", { restore: 7 }],
+    ["restore_commit", { restore: 7 }],
+  ]);
+
+  // A refusal that ends the restore forgets the ID; a refused discard keeps it.
+  refusals = [];
+  fireEvent.click(screen.getByRole("button", { name: "Restore a backup" }));
+  await screen.findByText("restore beside it as", { exact: false });
+  fireEvent.click(screen.getByRole("button", { name: "Answer restore question" }));
+  await screen.findByText("Restore ready", { exact: false });
+  invoke.mockImplementation((cmd: string, args: Record<string, unknown> | undefined) =>
+    cmd === "restore_commit"
+      ? // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        Promise.reject({ code: "cancelled" })
+      : answerRestoreCommands(cmd, args),
+  );
+  fireEvent.click(finish);
+  await screen.findByText('"code":"cancelled"', { exact: false });
+  fireEvent.click(finish);
+  expect(await screen.findByText("No restore prepared", { exact: false })).toBeTruthy();
+});
+
 // Answers the pre-restore buttons: one copy listed (ID 4), opened as session 8, deleted after asking.
 function answerPreRestoreCommands(cmd: string, args: { confirm?: boolean } | undefined): Promise<unknown> {
   switch (cmd) {
@@ -424,7 +480,8 @@ test("recovery_buttons_show_retry_and_dismiss_after_asking", async () => {
   invoke.mockReset();
   invoke.mockImplementation(answerRecoveryCommands);
   render(<App />);
-  expect(await screen.findByText("Launch notices:", { exact: false })).toBeTruthy();
+  // Only the launch notice Rust returned holds this: "Launch notices:" renders before the request completes.
+  expect(await screen.findByText('"state":"pending"', { exact: false })).toBeTruthy();
 
   fireEvent.click(screen.getByRole("button", { name: "Restore status" }));
   expect(

@@ -95,7 +95,7 @@ impl Shell {
         sessions.on_lock(open_folders.lock_hook(Arc::downgrade(&sessions)));
         // Then the restore's: a restore that is not swapping ends with a lock (it drops its staged restore on a worker).
         let restore = Arc::new(Restores::new());
-        sessions.on_lock(restore.lock_hook());
+        sessions.on_lock(restore.lock_hook(Arc::downgrade(&sessions)));
         Ok(Shell {
             sessions,
             settings,
