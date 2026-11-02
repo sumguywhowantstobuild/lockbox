@@ -121,11 +121,14 @@ pub enum LockReason {
 
 /// A notice for the UI, sent as `lockbox://notice` `{ kind, .. }`. The launch sweeps and restore recovery add their
 /// variants (Tasks 13 to 15).
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Notice {
     /// The launch sweep of the output journal: `{ "kind": "output_sweep", removed, kept, unreadable }`.
     OutputSweep(crate::outputs::SweepReport),
+    /// Opened copies another program still holds (spec §7.2), after a lock's cleanup or at launch:
+    /// `{ "kind": "open_cleanup", removed, still_open }`. The page offers `retry_open_cleanup`.
+    OpenCleanup(crate::open::RemoveReport),
 }
 
 /// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`).

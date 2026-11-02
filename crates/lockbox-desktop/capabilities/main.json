@@ -41,6 +41,8 @@
     "allow-add-file",
     "allow-attach-file",
     "allow-replace-file",
+    "allow-open-file",
+    "allow-retry-open-cleanup",
     "allow-reset-output-journal",
     "allow-generate-password",
     "allow-generate-passphrase",

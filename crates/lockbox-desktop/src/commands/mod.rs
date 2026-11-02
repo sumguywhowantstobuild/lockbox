@@ -61,6 +61,8 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         files::add_file,
         files::attach_file,
         files::replace_file,
+        files::open_file,
+        files::retry_open_cleanup,
         files::reset_output_journal,
         generator::generate_password,
         generator::generate_passphrase,
@@ -97,8 +99,8 @@ async fn app_info(request: Request<'_>) -> ShellResult<AppInfo> {
     })
 }
 
-/// What launch found that the page should show (the output sweep's counts): kept by the shell, since launch work runs
-/// before the page listens for `lockbox://notice`. The page asks once it has loaded.
+/// What launch found that the page should show (the output sweep's counts, opened copies it could not remove): kept by
+/// the shell, since launch work runs before the page listens for `lockbox://notice`. The page asks once it has loaded.
 #[tauri::command]
 async fn launch_notices(
     shell: tauri::State<'_, std::sync::Arc<crate::shell::Shell>>,

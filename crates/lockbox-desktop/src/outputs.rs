@@ -3,8 +3,8 @@
 //! leftovers of a crash or power cut are swept by strict rules, so a tampered journal never makes Lockbox delete
 //! anything it did not make.
 //!
-//! `{ "version": 1, "entries": ["<absolute path>", ..] }`: temp paths only, never an original file name (R5). Read
-//! and written like the other state files ([`read_state`], [`write_state`]), one change at a time.
+//! `{ "version": 1, "entries": ["<absolute path>", ..] }`: temp paths and "Open" folders only, never an original file
+//! name (R5). Read and written like the other state files ([`read_state`], [`write_state`]), one change at a time.
 
 use std::cell::RefCell;
 use std::ffi::OsStr;
@@ -48,7 +48,7 @@ const DIRECTORY: u32 = 0x10;
 
 /// The sweep's delete attempts, as the engine retries its own: at most 10, while another program briefly holds the
 /// leftover (a sharing violation or access denied), waiting 20 ms and doubling, at most 1 s, between them.
-const DELETE_TRIES: u32 = 10;
+pub(crate) const DELETE_TRIES: u32 = 10;
 const FIRST_WAIT: Duration = Duration::from_millis(20);
 const MAX_WAIT: Duration = Duration::from_secs(1);
 
@@ -72,8 +72,8 @@ struct JournalFile {
 /// lock, which is taken under a vault's lock (an export records while it reads its vault), never the other way round.
 pub struct Outputs {
     file: PathBuf,
-    /// The state folder's `open\` folder, where "Open" copies live (a later task makes them), as Lockbox computes it
-    /// from the known folder: never a resolved copy of a folder that may lead elsewhere.
+    /// The state folder's `open\` folder, where "Open" copies live ([`OpenFolders`](crate::open::OpenFolders)), as
+    /// Lockbox computes it from the known folder: never a resolved copy of a folder that may lead elsewhere.
     open: PathBuf,
     volumes: Arc<dyn Volumes>,
     edits: Mutex<()>,
@@ -217,10 +217,72 @@ impl Outputs {
         Ok(written)
     }
 
-    /// Forgets `written`, once its temp is gone. Never panics (the engine may call it while unwinding): when the
-    /// journal cannot be read or written, the entry stays, and the next launch's sweep finds nothing there and drops
-    /// it. Nothing is logged.
-    fn clear(&self, written: &Path) {
+    /// Writes the new "Open" folder `folder` down before it exists, spelled exactly as given: `open\<32 hex>` as
+    /// Lockbox computes it, never resolved, or the sweep would drop the entry. Any failure is returned, and then the
+    /// folder is never made.
+    pub(crate) fn record_open(&self, folder: &Path) -> ShellResult<()> {
+        let _edit = lock(&self.edits);
+        let mut entries = self.load()?;
+        entries.push(folder.to_path_buf());
+        self.save(entries)
+    }
+
+    /// Whether the sweep's rules could remove a folder in `open\`: its path is plain and no link leads to it.
+    pub(crate) fn open_folder_is_plain(&self) -> bool {
+        plain_root(&self.open)
+            .is_some_and(|root| matches!(no_link_below(&root, &self.open), Checked::Delete { .. }))
+    }
+
+    /// The folders directly inside `open\` that are certainly of Lockbox's making, by what is on disk and not by the
+    /// journal: each named exactly 32 lowercase hex and, by its own metadata, a plain folder. Files, other names and
+    /// links are not listed. None when `open\` is missing or a link leads to it. Each still passes the sweep's full
+    /// check before each delete ([`remove_open`](Self::remove_open)).
+    pub(crate) fn open_folders_on_disk(&self) -> Vec<PathBuf> {
+        if !self.open_folder_is_plain() {
+            return Vec::new();
+        }
+        let Ok(inside) = fs::read_dir(&self.open) else {
+            return Vec::new();
+        };
+        inside
+            .flatten()
+            .filter(|item| {
+                // A `DirEntry`'s metadata is the item's own on Windows, never what a link leads to.
+                item.file_name().to_str().is_some_and(is_open_name)
+                    && item.metadata().is_ok_and(|meta| plain(&meta, true))
+            })
+            .map(|item| self.open.join(item.file_name()))
+            .collect()
+    }
+
+    /// The "Open" folders the journal lists: after the launch sweep, those it could not remove yet.
+    pub(crate) fn open_entries(&self) -> Vec<PathBuf> {
+        let _edit = lock(&self.edits);
+        let mut entries = self.load().unwrap_or_default();
+        entries.retain(|entry| {
+            let name = entry.file_name().and_then(OsStr::to_str);
+            name.is_some_and(is_open_name) && entry.parent().is_some_and(|dir| self.is_open(dir))
+        });
+        entries
+    }
+
+    /// Removes the "Open" folder `folder` by the sweep's rules in at most `tries` attempts ([`DELETE_TRIES`] can take
+    /// seconds), and forgets it unless it is kept (it could not be removed yet, or its drive is not there): whether it
+    /// is done with. The journal's lock is not held meanwhile.
+    pub(crate) fn remove_open(&self, folder: &Path, tries: u32) -> bool {
+        match self.sweep_one(folder, tries) {
+            Swept::Kept => false,
+            Swept::Removed | Swept::Dropped => {
+                self.clear(folder);
+                true
+            }
+        }
+    }
+
+    /// Forgets `written`, once its temp or "Open" folder is gone. Never panics (the engine may call it while
+    /// unwinding): when the journal cannot be read or written, the entry stays, and the next launch's sweep finds
+    /// nothing there and drops it. Nothing is logged.
+    pub(crate) fn clear(&self, written: &Path) {
         let _edit = lock(&self.edits);
         let Ok(mut entries) = self.load() else {
             return;
@@ -260,7 +322,7 @@ impl Outputs {
         let mut report = SweepReport::default();
         let mut kept = Vec::new();
         for entry in entries {
-            match self.sweep_one(&entry) {
+            match self.sweep_one(&entry, DELETE_TRIES) {
                 Swept::Removed => report.removed += 1,
                 Swept::Kept => kept.push(entry),
                 Swept::Dropped => {}
@@ -274,9 +336,9 @@ impl Outputs {
 
     /// One entry of the sweep: every delete attempt, retries included, comes right after a full check of its own, so
     /// a folder swapped for a link between two attempts stops the next one.
-    fn sweep_one(&self, entry: &Path) -> Swept {
+    fn sweep_one(&self, entry: &Path, tries: u32) -> Swept {
         let mut wait = FIRST_WAIT;
-        for attempt in 1..=DELETE_TRIES {
+        for attempt in 1..=tries {
             let folder = match self.check(entry) {
                 Checked::Delete { folder } => folder,
                 Checked::Keep => return Swept::Kept,
@@ -285,7 +347,7 @@ impl Outputs {
             match delete_once(entry, folder) {
                 Ok(()) => return Swept::Removed,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Swept::Dropped,
-                Err(e) if attempt < DELETE_TRIES && is_transient(&e) => {
+                Err(e) if attempt < tries && is_transient(&e) => {
                     #[cfg(test)]
                     if let Some(hook) = lock(&self.hooks.on_retry).take() {
                         hook();
@@ -343,7 +405,8 @@ impl Outputs {
     }
 
     /// Sets a damaged journal aside, as `pending-outputs.json.damaged-<n>` (the first free `n` from 1 to 99), so
-    /// decrypted output works again; its leftovers are no longer swept. Each move never replaces anything (the
+    /// decrypted output works again; its temps are no longer swept (its "Open" folders are: each launch lists `open\`,
+    /// [`open_folders_on_disk`](Self::open_folders_on_disk)). Each move never replaces anything (the
     /// engine's no-replace move: one step, so a file that appears at that name is never overwritten); a name that is
     /// taken moves on to the next. A journal that reads fine (or none) is left as it is. `TooLarge` once all 99 names
     /// are taken.
@@ -380,24 +443,57 @@ enum Checked {
 }
 
 /// One delete attempt, without retrying: an "Open" folder and everything in it (std's removal does not follow links
-/// inside it and removes read-only files), or a temp, its read-only flag cleared first.
+/// inside it), or a temp, its read-only flag cleared first. A copy in the folder gets its flag back when the attempt
+/// fails: while a viewer holds it, it stays read-only.
 fn delete_once(entry: &Path, folder: bool) -> io::Result<()> {
     if folder {
-        return fs::remove_dir_all(entry);
+        let cleared = clear_read_only_inside(entry);
+        let removed = fs::remove_dir_all(entry);
+        if removed.is_err() {
+            for file in cleared {
+                let _ = set_read_only(&file, true);
+            }
+        }
+        return removed;
     }
-    let mut permissions = fs::symlink_metadata(entry)?.permissions();
-    if permissions.readonly() {
-        // On Windows this clears only the read-only attribute (the lint's worry is Unix modes).
-        #[allow(clippy::permissions_set_readonly_false)]
-        permissions.set_readonly(false);
-        fs::set_permissions(entry, permissions)?;
-    }
+    set_read_only(entry, false)?;
     fs::remove_file(entry)
 }
 
-/// Windows' sharing violation and access denied: another program holds the leftover for a moment.
+/// Clears the read-only flag of each plain file directly in `folder` (an opened copy): the files whose flag it cleared.
+fn clear_read_only_inside(folder: &Path) -> Vec<PathBuf> {
+    let Ok(inside) = fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    inside
+        .flatten()
+        .filter(|item| {
+            // A `DirEntry`'s metadata is the item's own on Windows: a link is never a plain file here.
+            item.metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().readonly())
+        })
+        .map(|item| item.path())
+        .filter(|file| set_read_only(file, false).is_ok())
+        .collect()
+}
+
+/// Sets `file`'s read-only flag as asked, when it is not so already.
+pub(crate) fn set_read_only(file: &Path, read_only: bool) -> io::Result<()> {
+    let mut permissions = fs::symlink_metadata(file)?.permissions();
+    if permissions.readonly() != read_only {
+        // On Windows this changes only the read-only attribute (the lint's worry is Unix modes).
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(read_only);
+        fs::set_permissions(file, permissions)?;
+    }
+    Ok(())
+}
+
+/// Windows' sharing violation and access denied, when another program holds the leftover for a moment, and folder not
+/// empty, when a file appeared in an "Open" folder during its removal (the temp of an open a lock has just cancelled,
+/// which is gone a moment later).
 fn is_transient(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(32 | 5))
+    matches!(e.raw_os_error(), Some(32 | 5 | 145))
 }
 
 /// Checks the drive or share `root` itself, then each folder below it down to `folder`: `Delete` when none leads
@@ -988,7 +1084,8 @@ mod tests {
     }
 
     /// Fix round 1: an "Open" folder named through `open\.\<32 hex>` (which `Path::components` would quietly turn
-    /// into `open\<32 hex>`) is dropped, and the folder stays.
+    /// into `open\<32 hex>`) is dropped by the journal's own sweep, and the folder stays. Then it is a real folder of
+    /// Lockbox's name that nothing lists: the launch's look at `open\` removes it, by its own spelling.
     #[test]
     fn sweep_drops_dotted_entries() {
         let ts = TestShell::new();
@@ -998,9 +1095,12 @@ mod tests {
         let spelled = paths.open.to_string_lossy().into_owned();
         write_journal(&ts, &[PathBuf::from(format!(r"{spelled}\.\{OPEN}"))]);
 
-        assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
+        assert_eq!(ts.shell.outputs.sweep(), SweepReport::default());
         assert!(open.is_dir());
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+
+        assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
+        assert!(!open.exists());
     }
 
     /// Fix round 1: every delete attempt checks the entry again. The leftover is held open, so the first attempt

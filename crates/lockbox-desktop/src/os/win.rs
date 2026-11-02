@@ -9,6 +9,7 @@ use std::io;
 use std::mem::offset_of;
 use std::num::NonZeroU32;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -25,18 +26,27 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use windows_core::{BOOL, Interface};
 use windows_sys::Win32::Foundation::{
-    ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, GlobalFree, HGLOBAL, HINSTANCE, HWND, LPARAM,
-    LRESULT, MAX_PATH, TRUE, WPARAM,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND,
+    LPARAM, LRESULT, LocalFree, MAX_PATH, TRUE, WPARAM,
 };
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+#[cfg(test)]
+use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
+};
 use windows_sys::Win32::Storage::CloudFilters::{
     CF_SYNC_ROOT_INFO_PROVIDER, CF_SYNC_ROOT_PROVIDER_INFO, CfGetSyncRootInfoByPath,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FileAttributeTagInfo, GetDriveTypeW, GetFileInformationByHandleEx,
-    GetVolumeInformationW, GetVolumePathNameW,
+    CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, GetDriveTypeW,
+    GetFileInformationByHandleEx, GetVolumeInformationW, GetVolumePathNameW,
 };
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -52,10 +62,11 @@ use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::Shell::{
-    FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData, KF_FLAG_DEFAULT,
-    SHGetKnownFolderPath, ShellExecuteW,
+    AssocIsDangerous, FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData,
+    KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME,
@@ -355,45 +366,264 @@ impl<R: Runtime> Power for WinPower<R> {
     }
 }
 
-/// Opens web links with `ShellExecuteW`, verb `open`: the user's default browser.
+/// Opens web links and decrypted copies with `ShellExecuteW`, verb `open`: the user's default browser or app.
 pub struct WinLauncher;
 
 impl Launcher for WinLauncher {
     fn open_url(&self, url: &tauri::Url) -> io::Result<()> {
-        let verb = wide_text(OsStr::new("open"))?;
         let link = wide_text(OsStr::new(url.as_str()))?;
-        // COM first, as `ShellExecuteW` asks of its caller (it may hand the link to a shell extension): the
-        // single-threaded apartment, which rfd's dialogs also use on these blocking-pool threads, undone below. A thread
-        // already in the multithreaded apartment (`RPC_E_CHANGED_MODE`, a failure) keeps it and is not undone.
-        // SAFETY: the reserved pointer is null and the flags are valid `COINIT` values.
-        let com = unsafe {
-            CoInitializeEx(
-                ptr::null(),
-                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
-            )
-        };
-        // SAFETY: `verb` and `link` are NUL-terminated UTF-16 strings that live through the call; no owner window,
-        // parameters or working directory (null), which the call accepts.
-        let result = unsafe {
-            ShellExecuteW(
-                ptr::null_mut(),
-                verb.as_ptr(),
-                link.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        if com >= 0 {
-            // SAFETY: balances the successful `CoInitializeEx` above (`S_OK` or `S_FALSE`) on this same thread.
-            unsafe { CoUninitialize() };
-        }
-        // Greater than 32 means it launched; the rest are error codes (only the kind crosses, never the link).
-        match result as isize > 32 {
+        match shell_open(&link, None) {
             true => Ok(()),
             false => Err(io::Error::other("link not opened")),
         }
     }
+
+    fn open_file(&self, file: &Path) -> io::Result<()> {
+        let Some(folder) = file.parent() else {
+            return Err(io::ErrorKind::InvalidInput.into());
+        };
+        let (file, folder) = (wide_path(file)?, wide_path(folder)?);
+        match shell_open(&file, Some(&folder)) {
+            true => Ok(()),
+            false => Err(io::Error::other("file not opened")),
+        }
+    }
+}
+
+/// `ShellExecuteW`, verb `open`, on `target`, with `directory` as the working directory if given (both NUL-terminated
+/// UTF-16): whether it launched. Only that crosses, never Windows' error code or the target.
+fn shell_open(target: &[u16], directory: Option<&[u16]>) -> bool {
+    let Ok(verb) = wide_text(OsStr::new("open")) else {
+        return false;
+    };
+    // COM first, as `ShellExecuteW` asks of its caller (it may hand the target to a shell extension): the
+    // single-threaded apartment, which rfd's dialogs also use on these blocking-pool threads, undone below. A thread
+    // already in the multithreaded apartment (`RPC_E_CHANGED_MODE`, a failure) keeps it and is not undone.
+    // SAFETY: the reserved pointer is null and the flags are valid `COINIT` values.
+    let com = unsafe {
+        CoInitializeEx(
+            ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        )
+    };
+    // SAFETY: `verb`, `target` and `directory` are NUL-terminated UTF-16 strings that live through the call; no owner
+    // window or parameters (null), and a null working directory when none is given, which the call accepts.
+    let result = unsafe {
+        ShellExecuteW(
+            ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            ptr::null(),
+            directory.map_or(ptr::null(), <[u16]>::as_ptr),
+            SW_SHOWNORMAL,
+        )
+    };
+    if com >= 0 {
+        // SAFETY: balances the successful `CoInitializeEx` above (`S_OK` or `S_FALSE`) on this same thread.
+        unsafe { CoUninitialize() };
+    }
+    // Greater than 32 means it launched; the rest are error codes.
+    result as isize > 32
+}
+
+/// Whether Windows rates the file type `extension` (with its dot) as dangerous to open (`AssocIsDangerous`). A type
+/// that cannot be asked about counts as dangerous.
+pub fn is_dangerous_type(extension: &str) -> bool {
+    let Ok(extension) = wide_text(OsStr::new(extension)) else {
+        return true;
+    };
+    // SAFETY: `extension` is a NUL-terminated UTF-16 string that lives through the call, which only reads it.
+    unsafe { AssocIsDangerous(extension.as_ptr()) != 0 }
+}
+
+/// The current user's SID, as text (`S-1-5-..`): the user of this process's token.
+fn current_user_sid() -> io::Result<OsString> {
+    let mut token: HANDLE = ptr::null_mut();
+    // SAFETY: the current process's pseudo handle needs no closing; `token` is a writable handle the call fills.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so `token` is a handle of ours to close, owned from here on.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut needed = 0;
+    // SAFETY: a null buffer of size 0 only asks for the size needed, written to `needed`; this first call fails by
+    // design, and the next call's result says whether the answer was usable.
+    unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    // In `usize`s, so the buffer is aligned for the `TOKEN_USER` at its start.
+    let mut buffer = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+    // SAFETY: `buffer` is writable and at least `needed` bytes long.
+    let read = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: on success the buffer starts with a `TOKEN_USER`, aligned as above; its SID pointer points further into
+    // the buffer, which outlives this use.
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    sid_text(user.User.Sid)
+}
+
+/// `sid` as text.
+fn sid_text(sid: PSID) -> io::Result<OsString> {
+    let mut text: PWSTR = ptr::null_mut();
+    // SAFETY: the callers pass a valid SID; `text` is a writable pointer the call fills with a buffer it allocates.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: on success `text` is a NUL-terminated UTF-16 string, read before it is freed below.
+    let sid = unsafe { wide_until_nul(text) };
+    // SAFETY: the call allocated the buffer with `LocalAlloc`, for the caller to free; nothing reads it afterwards.
+    unsafe { LocalFree(text.cast()) };
+    Ok(sid)
+}
+
+/// Makes the new folder `path` with permissions for the current user alone, from the moment it exists: a protected
+/// DACL (nothing inherited from above) with one entry, full access for the user, passed on to everything inside it
+/// (`D:P(A;OICI;FA;;;<SID>)`). Fails if anything is already at `path`.
+pub fn create_private_folder(path: &Path) -> io::Result<()> {
+    let folder = wide_path(path)?;
+    let mut sddl = OsString::from("D:P(A;OICI;FA;;;");
+    sddl.push(current_user_sid()?);
+    sddl.push(")");
+    let sddl = wide_text(&sddl)?;
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: `sddl` is a NUL-terminated UTF-16 string that lives through the call; `descriptor` is a writable pointer
+    // the call fills with a buffer it allocates; the size is not asked for (null).
+    let built = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            ptr::null_mut(),
+        )
+    };
+    if built == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    // SAFETY: `folder` is a NUL-terminated UTF-16 string, and `attributes` and the descriptor it points to are valid,
+    // all living through the call, which only reads them.
+    let made = unsafe { CreateDirectoryW(folder.as_ptr(), &attributes) };
+    // Read before the free below can change it.
+    let error = io::Error::last_os_error();
+    // SAFETY: the conversion allocated the descriptor with `LocalAlloc`, for the caller to free; nothing uses it now.
+    unsafe { LocalFree(descriptor) };
+    match made != 0 {
+        true => Ok(()),
+        false => Err(error),
+    }
+}
+
+/// Tests only: one entry of a DACL.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct AclEntry {
+    pub allow: bool,
+    pub flags: u32,
+    pub mask: u32,
+    pub sid: OsString,
+}
+
+/// Tests only: whether `path`'s DACL is protected, and its entries (`GetNamedSecurityInfoW`).
+#[cfg(test)]
+pub fn read_dacl(path: &Path) -> io::Result<(bool, Vec<AclEntry>)> {
+    use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
+        DACL_SECURITY_INFORMATION, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+        SE_DACL_PROTECTED,
+    };
+
+    /// `ACCESS_ALLOWED_ACE_TYPE` (WinNT.h): windows-sys keeps it under a feature pulled in for this number alone.
+    const ACCESS_ALLOWED: u8 = 0;
+
+    let name = wide_path(path)?;
+    let (mut dacl, mut descriptor): (*mut ACL, PSECURITY_DESCRIPTOR) =
+        (ptr::null_mut(), ptr::null_mut());
+    // SAFETY: `name` is a NUL-terminated UTF-16 string; `dacl` and `descriptor` are writable pointers the call fills;
+    // the parts not asked for are null.
+    let error = unsafe {
+        GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    let (mut control, mut revision) = (0, 0);
+    // SAFETY: `descriptor` is the descriptor the call above returned; both outputs are writable.
+    assert_ne!(
+        unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) },
+        0
+    );
+    let mut size = ACL_SIZE_INFORMATION {
+        AceCount: 0,
+        AclBytesInUse: 0,
+        AclBytesFree: 0,
+    };
+    // SAFETY: `dacl` points into `descriptor`, still live; `size` is the class's writable struct, of the size passed.
+    assert_ne!(
+        unsafe {
+            GetAclInformation(
+                dacl,
+                (&raw mut size).cast(),
+                size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        },
+        0
+    );
+    let mut entries = Vec::new();
+    for index in 0..size.AceCount {
+        let mut ace = ptr::null_mut();
+        // SAFETY: `index` is below the entry count just read; `ace` is a writable pointer the call fills.
+        assert_ne!(unsafe { GetAce(dacl, index, &mut ace) }, 0);
+        let ace = ace.cast::<ACCESS_ALLOWED_ACE>().cast_const();
+        // SAFETY: every entry starts with this layout (header, mask, then the SID at `SidStart`), and `dacl` is live.
+        entries.push(unsafe {
+            AclEntry {
+                allow: (*ace).Header.AceType == ACCESS_ALLOWED,
+                flags: u32::from((*ace).Header.AceFlags),
+                mask: (*ace).Mask,
+                sid: sid_text((&raw const (*ace).SidStart).cast_mut().cast())?,
+            }
+        });
+    }
+    // SAFETY: the call above allocated the descriptor with `LocalAlloc`, for the caller to free; nothing uses it now.
+    unsafe { LocalFree(descriptor) };
+    Ok((control & SE_DACL_PROTECTED != 0, entries))
+}
+
+/// Tests only: the current user's SID, as text.
+#[cfg(test)]
+pub fn test_user_sid() -> OsString {
+    current_user_sid().unwrap()
 }
 
 /// Environment variables from the process, known folders from `SHGetKnownFolderPath`.
@@ -1300,7 +1530,6 @@ pub fn redirects(attributes: u32, reparse_tag: u32) -> bool {
 /// folder opens), asking only to read attributes and sharing everything.
 pub fn is_redirect(path: &Path) -> io::Result<bool> {
     use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
 
     let file = std::fs::OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES)

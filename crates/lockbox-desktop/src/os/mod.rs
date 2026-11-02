@@ -414,6 +414,8 @@ pub trait Launcher: Send + Sync {
     /// Opens a web link in the default browser. `url` is already parsed and checked to be `http` or `https`; the
     /// launcher passes on its parsed form (`as_str()`), never the text it was parsed from.
     fn open_url(&self, url: &tauri::Url) -> io::Result<()>;
+    /// Opens the decrypted copy `file` with its default app, the file's own folder as the working directory.
+    fn open_file(&self, file: &Path) -> io::Result<()>;
 }
 
 /// Whether `a` and `b` name the same path as the file system compares names: component by component (so a trailing

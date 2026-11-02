@@ -11,8 +11,11 @@ export interface Tagged<T> {
   data: T;
 }
 
-/** A question the user answers before the command goes on. Each command that asks adds its variant. */
-export type Confirm = { CloudFolder: { token: string } } | { HeaderChanged: { token: string } };
+/**
+ * A question the user answers before the command goes on. Each command that asks adds its variant. `Executable` has
+ * no token: it is confirmed by sending `open_file` again with `confirmed_executable`.
+ */
+export type Confirm = { CloudFolder: { token: string } } | { HeaderChanged: { token: string } } | "Executable";
 
 /** The answer of a command that may ask first or open a dialog the user may close. */
 export type Outcome<T> = { Done: T } | { Confirm: Confirm } | "Dismissed";

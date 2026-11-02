@@ -1,10 +1,10 @@
-//! Files in a vault (spec §7.2, §4.1): adding or replacing a stored file, and Save a copy. Every path comes from a
-//! dialog Rust opens inside the command, outside every lock; the page sends IDs only.
+//! Files in a vault (spec §7.2, §4.1): adding or replacing a stored file, Save a copy and Open. Every path comes from a
+//! dialog Rust opens inside the command, outside every lock, or from the shell itself; the page sends IDs only.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use lockbox_core::blob::CancelToken;
+use lockbox_core::blob::{CancelToken, OutputJournal};
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::{CoreError, Result as CoreResult, Vault};
 use serde::Deserialize;
@@ -12,13 +12,15 @@ use tauri::State;
 use tauri::ipc::Request;
 
 use super::{NoArgs, args, blocking};
-use crate::error::{Outcome, ShellError, ShellResult};
+use crate::error::{Confirm, Outcome, ShellError, ShellResult};
+use crate::open::{RemoveReport, is_executable, safe_name};
 use crate::session::{SessionId, Tagged, VaultRef};
 use crate::shell::Shell;
 
 /// The long operations' names in `lockbox://busy`.
 const SAVE_COPY: &str = "save_copy";
 const IMPORT: &str = "import";
+const OPEN: &str = "open";
 
 impl Shell {
     /// Saves a decrypted copy of the stored file `file_id` of the item `id` where the user picks (spec §7.2). Refused
@@ -37,15 +39,8 @@ impl Shell {
     ) -> ShellResult<Tagged<Outcome<()>>> {
         let (id, file_id) = (ItemId::from_hex(id)?, FileId::from_hex(file_id)?);
         self.outputs.usable()?;
-        let name = self.sessions.read(session, generation, |vault, _| {
-            let item = match vault {
-                VaultRef::Writable(vault) => vault.get_item(&id)?,
-                VaultRef::ReadOnly(vault) => vault.get_item(&id)?,
-            };
-            let file = item.attachments.iter().find(|file| file.file_id == file_id);
-            Ok(file.ok_or(CoreError::NotFound)?.name.clone())
-        })?;
-        let Some(dest) = self.os.dialogs.save_file("Save a copy", &name.data, None) else {
+        let name = self.stored_name(session, generation, &id, &file_id)?;
+        let Some(dest) = self.os.dialogs.save_file("Save a copy", &name, None) else {
             return self.still_current(session, generation, Outcome::Dismissed);
         };
         let dest = self.output_destination(&dest)?;
@@ -55,16 +50,94 @@ impl Shell {
                     .autolock
                     .begin(Some(session), SAVE_COPY, cancel.clone());
                 let journal = self.outputs.for_call(&self.sessions, session, generation);
-                let saved = match vault {
-                    VaultRef::Writable(vault) => {
-                        vault.export_file(&id, &file_id, &dest, &journal, cancel)
-                    }
-                    VaultRef::ReadOnly(vault) => {
-                        vault.export_file(&id, &file_id, &dest, &journal, cancel)
-                    }
-                };
+                let saved = export(vault, &id, &file_id, &dest, &journal, cancel);
                 journal.finish(saved).map(Outcome::Done)
             })
+    }
+
+    /// Opens the stored file `file_id` of the item `id` with its default app (spec §7.2). Refused first while the
+    /// output journal is damaged. A type that can run code (judged on the safe name) answers
+    /// [`Confirm::Executable`] until `confirmed_executable`, before anything is decrypted. Then, in a long operation:
+    /// a new folder only the user can reach, written down in the journal first; the engine's export, which verifies the
+    /// whole stream before the copy gets its name; the internet mark and the read-only flag. The session's generation is
+    /// checked once more as the vault is let go, and the launch comes after that, under no lock, since it may wait for
+    /// Windows or the user (spec §7.4). Anything that stops the open before the launch, or a launch that fails, removes
+    /// the folder. A lock at any point answers `Locked`.
+    pub fn open_file(
+        &self,
+        session: SessionId,
+        generation: u64,
+        id: &str,
+        file_id: &str,
+        confirmed_executable: bool,
+    ) -> ShellResult<Tagged<Outcome<()>>> {
+        let (id, file_id) = (ItemId::from_hex(id)?, FileId::from_hex(file_id)?);
+        self.outputs.usable()?;
+        let name = safe_name(&self.stored_name(session, generation, &id, &file_id)?);
+        if !confirmed_executable && is_executable(&name) {
+            let ask = Outcome::Confirm(Confirm::Executable);
+            return self.still_current(session, generation, ask);
+        }
+        let mut made = None;
+        let copy = self
+            .sessions
+            .read_long(session, generation, |vault, cancel| {
+                let _operation = self.autolock.begin(Some(session), OPEN, cancel.clone());
+                // The app is closing: no new folder.
+                if cancel.is_cancelled() {
+                    return Err(ShellError::Cancelled);
+                }
+                let folder = self.open_folders.create(session)?;
+                let copy = folder.join(&name);
+                made = Some(folder);
+                let journal = self.outputs.for_call(&self.sessions, session, generation);
+                let exported = export(vault, &id, &file_id, &copy, &journal, cancel);
+                journal.finish(exported)?;
+                self.open_folders.seal(&copy)?;
+                Ok(copy)
+            });
+        let discard = || {
+            if let Some(folder) = &made {
+                self.open_folders.discard(folder);
+            }
+        };
+        let copy = match copy {
+            Ok(copy) => copy.data,
+            Err(error) => {
+                discard();
+                return Err(error);
+            }
+        };
+        let launched = self.os.launcher.open_file(&copy);
+        if launched.is_err() {
+            discard();
+        }
+        // A lock during the launch has removed the copy, and comes first in the answer (spec §7.4).
+        let answer = self.still_current(session, generation, Outcome::Done(()))?;
+        launched?;
+        Ok(answer)
+    }
+
+    /// The name of the stored file `file_id` of the item `id`.
+    fn stored_name(
+        &self,
+        session: SessionId,
+        generation: u64,
+        id: &ItemId,
+        file_id: &FileId,
+    ) -> ShellResult<String> {
+        let name = self.sessions.read(session, generation, |vault, _| {
+            let item = match vault {
+                VaultRef::Writable(vault) => vault.get_item(id)?,
+                VaultRef::ReadOnly(vault) => vault.get_item(id)?,
+            };
+            let file = item
+                .attachments
+                .iter()
+                .find(|file| file.file_id == *file_id);
+            Ok(file.ok_or(CoreError::NotFound)?.name.clone())
+        })?;
+        Ok(name.data)
     }
 
     /// Adds a file item, in `collection` or none, holding a file the user picks: the new item's ID.
@@ -171,6 +244,22 @@ impl Shell {
     }
 }
 
+/// The stored file's decrypted copy at `dest`, from either kind of session (the engine's export: verify fully, then
+/// publish).
+fn export(
+    vault: VaultRef<'_>,
+    id: &ItemId,
+    file_id: &FileId,
+    dest: &Path,
+    journal: &dyn OutputJournal,
+    cancel: &CancelToken,
+) -> CoreResult<()> {
+    match vault {
+        VaultRef::Writable(vault) => vault.export_file(id, file_id, dest, journal, cancel),
+        VaultRef::ReadOnly(vault) => vault.export_file(id, file_id, dest, journal, cancel),
+    }
+}
+
 /// `save_file_copy` and `replace_file`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -179,6 +268,17 @@ struct FileArgs {
     generation: u64,
     id: String,
     file_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenFile {
+    session: SessionId,
+    generation: u64,
+    id: String,
+    file_id: String,
+    /// The user said yes to [`Confirm::Executable`](crate::error::Confirm::Executable).
+    confirmed_executable: bool,
 }
 
 #[derive(Deserialize)]
@@ -256,7 +356,36 @@ pub(super) async fn replace_file(
     blocking(move || shell.replace_file(session, generation, &id, &file_id)).await
 }
 
-/// Sets a damaged output journal aside, so decrypted output works again (its leftovers are no longer swept).
+#[tauri::command]
+pub(super) async fn open_file(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<Outcome<()>>> {
+    let OpenFile {
+        session,
+        generation,
+        id,
+        file_id,
+        confirmed_executable,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.open_file(session, generation, &id, &file_id, confirmed_executable))
+        .await
+}
+
+/// Tries again to remove the opened copies a cleanup could not remove (spec §7.2's Retry): counts only.
+#[tauri::command]
+pub(super) async fn retry_open_cleanup(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<RemoveReport> {
+    let NoArgs {} = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || Ok(shell.open_folders.retry())).await
+}
+
+/// Sets a damaged output journal aside, so decrypted output works again (its temps are no longer swept; the next launch
+/// still finds its "Open" folders, by listing `open\`).
 #[tauri::command]
 pub(super) async fn reset_output_journal(
     shell: State<'_, Arc<Shell>>,
@@ -636,7 +765,10 @@ mod tests {
         );
         refuses_a_path::<AddFile>(json!({ "session": 1, "generation": 1, "collection": null }));
         refuses_a_path::<AttachFile>(json!({ "session": 1, "generation": 1, "id": id }));
-        // `reset_output_journal`.
+        refuses_a_path::<OpenFile>(json!({
+            "session": 1, "generation": 1, "id": id, "file_id": id, "confirmed_executable": false
+        }));
+        // `reset_output_journal` and `retry_open_cleanup`.
         refuses_a_path::<NoArgs>(json!({}));
     }
 }

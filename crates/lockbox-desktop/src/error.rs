@@ -150,6 +150,9 @@ pub enum Confirm {
     CloudFolder { token: Token },
     /// The vault's header was changed outside Lockbox (spec §5.2): accept it before the recovery goes on.
     HeaderChanged { token: Token },
+    /// The stored file is of a type that can run code (spec §7.2): open it anyway? Confirmed by sending `open_file`
+    /// again with `confirmed_executable`. Asked before anything is decrypted.
+    Executable,
 }
 
 #[cfg(test)]

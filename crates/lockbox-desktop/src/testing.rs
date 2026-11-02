@@ -740,12 +740,15 @@ impl Dialogs for FakeDialogs {
     }
 }
 
-/// A launcher that records each link it is given (its parsed form) instead of opening it.
+/// A launcher that records each link (its parsed form) and each file it is given instead of opening them.
 #[derive(Default)]
 pub struct FakeLauncher {
     opened: Mutex<Vec<String>>,
+    opened_files: Mutex<Vec<PathBuf>>,
     /// Run once, inside the next launch, before it returns.
     on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The next file launch fails.
+    fail_next_file: AtomicBool,
 }
 
 impl FakeLauncher {
@@ -753,20 +756,42 @@ impl FakeLauncher {
         lock(&self.opened).clone()
     }
 
-    /// Runs `hook` once, inside the next launch: while the link is being opened.
+    pub fn opened_files(&self) -> Vec<PathBuf> {
+        lock(&self.opened_files).clone()
+    }
+
+    /// Runs `hook` once, inside the next launch: while the link or file is being opened.
     pub fn during_next_open(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.on_open) = Some(hook);
+    }
+
+    /// The next file launch fails, as when no app takes the file's type.
+    pub fn fail_next_file(&self) {
+        self.fail_next_file.store(true, Ordering::SeqCst);
+    }
+
+    fn run_hook(&self) {
+        let hook = lock(&self.on_open).take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }
 
 impl Launcher for FakeLauncher {
     fn open_url(&self, url: &tauri::Url) -> io::Result<()> {
         lock(&self.opened).push(url.as_str().to_owned());
-        let hook = lock(&self.on_open).take();
-        if let Some(hook) = hook {
-            hook();
-        }
+        self.run_hook();
         Ok(())
+    }
+
+    fn open_file(&self, file: &Path) -> io::Result<()> {
+        lock(&self.opened_files).push(file.to_path_buf());
+        self.run_hook();
+        match self.fail_next_file.swap(false, Ordering::SeqCst) {
+            true => Err(io::Error::other("no app")),
+            false => Ok(()),
+        }
     }
 }
 

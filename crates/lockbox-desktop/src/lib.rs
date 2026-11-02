@@ -15,6 +15,7 @@ pub mod clipboard;
 pub mod commands;
 pub mod error;
 pub mod locations;
+pub mod open;
 mod os;
 pub mod outputs;
 pub mod paths;

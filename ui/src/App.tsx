@@ -32,8 +32,23 @@ let testSession: { session: number; generation: number } | undefined;
 // The test login "Add test login" made last, with the session it was made in: "Copy test password" copies its password.
 let testLogin: { session: number; generation: number; id: string } | undefined;
 
+// A stored file, with the session it was added in.
+interface StoredFile {
+  session: number;
+  generation: number;
+  id: string;
+  fileId: string;
+}
+
 // The file item "Add test file" made last, and its stored file: "Save a copy" saves that file.
-let testFile: { session: number; generation: number; id: string; fileId: string } | undefined;
+let testFile: StoredFile | undefined;
+
+// What the two "Open test" buttons open, each added once through the open dialog. A file whose open asked first is
+// confirmed by pressing its button again.
+const testOpens = {
+  PDF: { file: undefined as StoredFile | undefined, asked: false },
+  ".cmd": { file: undefined as StoredFile | undefined, asked: false },
+};
 
 // The part of `get_item`'s answer the test page reads: the stored files' IDs.
 interface ItemFiles {
@@ -108,8 +123,8 @@ async function copyTestPassword(): Promise<string> {
 }
 
 // A file picked in Rust's own open dialog, stored as a new file item in the open test vault: its path never reaches
-// this page.
-async function addTestFile(): Promise<string> {
+// this page. A string says why there is none.
+async function storePickedFile(): Promise<StoredFile | string> {
   if (testSession === undefined) return "No test vault open: create or unlock it first";
   const { session, generation } = testSession;
   const added = await call<Outcome<string>>("add_file", { session, generation, collection: null });
@@ -119,8 +134,47 @@ async function addTestFile(): Promise<string> {
   const item = await call<ItemFiles>("get_item", { session, generation, id });
   const fileId = item.data.summary.attachments[0]?.file_id;
   if (fileId === undefined) return "The new item holds no file";
-  testFile = { session, generation, id, fileId };
-  return `Test file added (session ${String(session)})`;
+  return { session, generation, id, fileId };
+}
+
+async function addTestFile(): Promise<string> {
+  const file = await storePickedFile();
+  if (typeof file === "string") return file;
+  testFile = file;
+  return `Test file added (session ${String(file.session)})`;
+}
+
+// Opens the file this button stored (picking it first, or again when the vault has been locked since). A type that can
+// run code asks first; pressing the button again says yes.
+async function openTestFile(kind: keyof typeof testOpens): Promise<string> {
+  const test = testOpens[kind];
+  const current = test.file?.session === testSession?.session && test.file?.generation === testSession?.generation;
+  if (test.file === undefined || !current) {
+    const file = await storePickedFile();
+    if (typeof file === "string") return file;
+    test.file = file;
+    test.asked = false;
+  }
+  const { session, generation, id, fileId } = test.file;
+  const opened = await call<Outcome<null>>("open_file", {
+    session,
+    generation,
+    id,
+    file_id: fileId,
+    confirmed_executable: test.asked,
+  });
+  if (opened.data !== "Dismissed" && "Confirm" in opened.data) {
+    test.asked = true;
+    return `Asked first: this file can run code. Press "Open test ${kind}" again to open it`;
+  }
+  test.asked = false;
+  return `Opened read-only (session ${String(session)}): it goes when the vault locks`;
+}
+
+// Tries again to remove the opened copies a viewer held when the vault locked.
+async function retryOpenCleanup(): Promise<string> {
+  const { removed, still_open } = await callPlain<{ removed: number; still_open: number }>("retry_open_cleanup");
+  return `Opened copies: ${String(removed)} removed, ${String(still_open)} still held`;
 }
 
 // A decrypted copy of the test file, where Rust's own save dialog says (Windows asks there before replacing a file).
@@ -267,9 +321,35 @@ export default function App() {
           >
             Save a copy
           </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(() => openTestFile("PDF"));
+            }}
+          >
+            Open test PDF
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(() => openTestFile(".cmd"));
+            }}
+          >
+            Open test .cmd
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(retryOpenCleanup);
+            }}
+          >
+            Retry opened copies
+          </button>{" "}
           Creates &quot;{TEST_VAULT}&quot; in the default vaults folder, then unlocks it from the vault list; adds a
           login to the vault last opened; copies that login&apos;s password to the clipboard; adds a file you pick to
-          that vault; saves a copy of that file where you choose.
+          that vault; saves a copy of that file where you choose; adds a PDF or a .cmd file you pick and opens it (the
+          .cmd asks first, and the same button again says yes); after a lock, tries again to remove opened copies a
+          viewer held, and says how many are left.
           {vaultStatus !== undefined && <output> {vaultStatus}</output>}
         </li>
       </ul>

@@ -489,7 +489,9 @@ authenticated.
   `.<16 hex>.lockbox-backup-partial`) and folders directly inside `open\` are deleted, and only when the recorded path
   has no link anywhere along it; any other entry is dropped from the journal and left on disk, and an entry on a drive
   that is not connected is kept for later. A damaged journal blocks new decrypted output until the user lets Lockbox set
-  it aside. Save a copy output, backups and vaults are never placed in Lockbox's own state folder
+  it aside. Each launch also lists `open\` itself, damaged journal or not, so no opened copy stays for good: a real
+  folder named exactly 32 lowercase hex that the journal does not list is removed by the same no-link rule, and
+  anything else there is left alone. Save a copy output, backups and vaults are never placed in Lockbox's own state folder
   (`%LOCALAPPDATA%\Lockbox\`); the only decrypted files there are "Open" files, in its `open\` folder (described below).
 - **Save a copy:** Rust opens the native save dialog (overwrite needs its confirmation). Lockbox decrypts into a hidden
   temp sibling `.<random>.lockbox-partial` (created with the hidden attribute), verifies the entire stream, then renames

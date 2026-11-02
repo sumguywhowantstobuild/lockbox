@@ -18,6 +18,7 @@ use crate::clipboard::Clipboard;
 use crate::error::{ShellError, ShellResult};
 use crate::locations::{LocationCheck, check_location, is_within};
 use crate::lock;
+use crate::open::{OpenFolders, RemoveReport};
 use crate::os::{KnownFolder, Os};
 use crate::outputs::{Outputs, SweepReport};
 use crate::paths::{StatePaths, state_paths};
@@ -42,13 +43,15 @@ pub struct Shell {
     pub autolock: AutoLock,
     pub registry: Registry,
     /// The output journal (spec §7.2): every temporary plaintext file, written down before it exists.
-    pub outputs: Outputs,
+    pub outputs: Arc<Outputs>,
+    /// The "Open" folders (spec §7.2), removed at a lock of their vault and at app close.
+    pub open_folders: Arc<OpenFolders>,
     pub paths: StatePaths,
     pub(crate) os: Os,
     /// Where the launch sweep's notice goes.
     notifier: Arc<dyn Notifier>,
-    /// The launch sweep's report, when it had anything to tell ([`launch_notices`](Self::launch_notices)).
-    launch_sweep: Mutex<Option<SweepReport>>,
+    /// What the launch work had to tell ([`launch_notices`](Self::launch_notices)).
+    launch_notices: Mutex<Vec<Notice>>,
     /// The folders no vault may be inside (spec §6.10): Tauri's app-data folders, the Roaming profile and the state
     /// folder.
     forbidden: Vec<PathBuf>,
@@ -69,28 +72,37 @@ impl Shell {
         forbidden.push(paths.root.clone());
         let sessions = Arc::new(Sessions::new(Arc::clone(&notifier))?);
         let settings = Arc::new(SettingsStore::load(paths.settings.clone()));
+        let outputs = Arc::new(Outputs::new(&paths, Arc::clone(&os.volumes)));
+        let open_folders = Arc::new(OpenFolders::new(
+            paths.open.clone(),
+            Arc::clone(&outputs),
+            Arc::clone(&notifier),
+        ));
         // The auto-lock adds no lock hook; the clipboard reads the close's deadline from it.
         let autolock = AutoLock::new(
             Arc::clone(&sessions),
             Arc::clone(&settings),
             Arc::clone(&notifier),
+            Arc::clone(&open_folders),
             &os,
         );
         let clipboard = Clipboard::new(&os, Arc::clone(&settings), autolock.close_deadline())?;
-        // The first lock hook, before any other (the "Open" cleanup comes after it): a lock clears the clipboard
-        // before anything else of its hooks runs.
+        // The first lock hook, before any other: a lock clears the clipboard before anything else of its hooks runs.
         sessions.on_lock(clipboard.lock_hook());
+        // Then the "Open" cleanup, which hands its deletes to a worker and returns at once.
+        sessions.on_lock(open_folders.lock_hook());
         Ok(Shell {
             sessions,
             settings,
             clipboard,
             autolock,
             registry: Registry::new(paths.registry.clone(), Arc::clone(&os.volumes)),
-            outputs: Outputs::new(&paths, Arc::clone(&os.volumes)),
+            outputs,
+            open_folders,
             paths,
             os,
             notifier,
-            launch_sweep: Mutex::default(),
+            launch_notices: Mutex::default(),
             forbidden,
             creating: Mutex::default(),
             #[cfg(test)]
@@ -126,20 +138,29 @@ impl Shell {
     /// Closing the app (the main window's close request, the app's exit, or Windows ending the session): locks every
     /// vault on a helper thread and cancels every long operation, then waits at most
     /// [`SHUTDOWN_WAIT`](crate::autolock::SHUTDOWN_WAIT) for the lock and its hooks (the clipboard clear and the "Open"
-    /// cleanup, which treat `None` as all) before the process may exit. It does no hook work of its own. Only the
-    /// first call does anything; later ones return at once.
+    /// cleanup, which treat `None` as all) before the process may exit. It does no hook work of its own. Every call,
+    /// the second included, waits the same way.
     pub fn shutdown(&self) {
         self.autolock.shutdown();
     }
 
     /// Launch work, in the app's `.setup` (never in a second copy of the app): sweeps the output journal's leftovers.
     /// When there was anything to tell, the report is kept for [`launch_notices`](Self::launch_notices) (launch work
-    /// runs before the page can listen) and also sent as `lockbox://notice` (`output_sweep`).
+    /// runs before the page can listen) and also sent as `lockbox://notice` (`output_sweep`). Then the leftovers in
+    /// `open\` that no journal entry lists; those and the "Open" folders the sweep could not remove go on the retry
+    /// list, told the same way (`open_cleanup`).
     pub fn sweep_outputs(&self) -> SweepReport {
+        let tell = |notice: Notice| {
+            self.notifier.notice(&notice);
+            lock(&self.launch_notices).push(notice);
+        };
         let report = self.outputs.sweep();
         if report != SweepReport::default() {
-            *lock(&self.launch_sweep) = Some(report);
-            self.notifier.notice(&Notice::OutputSweep(report));
+            tell(Notice::OutputSweep(report));
+        }
+        let open = self.open_folders.sweep_leftovers();
+        if open != RemoveReport::default() {
+            tell(Notice::OpenCleanup(open));
         }
         report
     }
@@ -147,10 +168,7 @@ impl Shell {
     /// What launch found that the page should show, asked by the page once it has loaded: each launch notice, counts
     /// and flags only. Kept, not used up, so a reloaded page shows it again.
     pub fn launch_notices(&self) -> Vec<Notice> {
-        lock(&self.launch_sweep)
-            .map(Notice::OutputSweep)
-            .into_iter()
-            .collect()
+        lock(&self.launch_notices).clone()
     }
 
     /// Where an output the user chose in a save dialog (Save a copy, a backup) goes: `dest` with its folder canonical

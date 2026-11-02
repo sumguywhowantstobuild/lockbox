@@ -75,6 +75,61 @@ test("no_test_vault_and_refusals_are_shown", async () => {
   ).toBeTruthy();
 });
 
+// A fresh test vault in session 9, where any stored file's type can be asked about: `.cmd` asks until confirmed.
+function answerOpenCommands(cmd: string, args: { confirmed_executable?: boolean } | undefined): Promise<unknown> {
+  switch (cmd) {
+    case "app_info":
+      return Promise.resolve({ version: "9.8.7" });
+    case "launch_notices":
+      return Promise.resolve([]);
+    case "create_vault":
+      return Promise.resolve({ Done: { session: 9, generation: 1, data: {} } });
+    case "add_file":
+      return Promise.resolve({ session: 9, generation: 1, data: { Done: "item-id" } });
+    case "get_item":
+      return Promise.resolve({
+        session: 9,
+        generation: 1,
+        data: { summary: { attachments: [{ file_id: "file-id" }] } },
+      });
+    case "open_file":
+      return Promise.resolve({
+        session: 9,
+        generation: 1,
+        data: args?.confirmed_executable === true ? { Done: null } : { Confirm: "Executable" },
+      });
+    case "retry_open_cleanup":
+      return Promise.resolve({ removed: 1, still_open: 2 });
+    default:
+      return Promise.reject(new Error(`unexpected command ${cmd}`));
+  }
+}
+
+test("open_test_buttons_add_a_file_then_ask_before_opening_it", async () => {
+  invoke.mockReset();
+  invoke.mockImplementation(answerOpenCommands);
+  render(<App />);
+  await screen.findByText("Lockbox 9.8.7");
+  fireEvent.click(screen.getByRole("button", { name: "Create test vault" }));
+  await screen.findByText("Created and unlocked (session 9)", { exact: false });
+
+  const open = screen.getByRole("button", { name: "Open test .cmd" });
+  fireEvent.click(open);
+  expect(await screen.findByText("Asked first: this file can run code", { exact: false })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("add_file", { session: 9, generation: 1, collection: null });
+  const asked = { session: 9, generation: 1, id: "item-id", file_id: "file-id", confirmed_executable: false };
+  expect(invoke).toHaveBeenCalledWith("open_file", asked);
+
+  fireEvent.click(open);
+  expect(await screen.findByText("Opened read-only (session 9)", { exact: false })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("open_file", { ...asked, confirmed_executable: true });
+  // The same file: nothing added a second time.
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === "add_file")).toHaveLength(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry opened copies" }));
+  expect(await screen.findByText("Opened copies: 1 removed, 2 still held", { exact: false })).toBeTruthy();
+});
+
 test("hands_on_probes_are_listed", async () => {
   invoke.mockResolvedValue({ version: "9.8.7" });
   render(<App />);

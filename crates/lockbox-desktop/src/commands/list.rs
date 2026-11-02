@@ -37,6 +37,8 @@ pub const COMMANDS: &[&str] = &[
     "add_file",
     "attach_file",
     "replace_file",
+    "open_file",
+    "retry_open_cleanup",
     "reset_output_journal",
     "generate_password",
     "generate_passphrase",
