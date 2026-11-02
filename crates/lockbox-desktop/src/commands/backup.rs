@@ -183,56 +183,72 @@ impl Shell {
     }
 
     /// Checks a backup the user picks, without restoring it (spec §6.7): the credential opens it, every entry and
-    /// file is read and checked. `Dismissed` when the dialog is closed, before the credential is looked at. It runs
-    /// as a long operation without a session; a lock of all vaults, or the app closing, while it runs drops its
-    /// answer (`Locked`), whatever it found. Writes nothing; a damaged output journal does not stop it.
+    /// file is read and checked. The lock epoch is read before the dialog, so a lock of all vaults while the picker
+    /// is open is not forgotten; a closed picker is still `Dismissed`, since it shows nothing. It runs as a long
+    /// operation without a session. A lock of all vaults, or the app closing, is looked for as the operation
+    /// begins (before the backup is read) and again after it has ended, its announcement included (a lock can land
+    /// there): `Locked`, whatever was found. Writes nothing; a damaged output journal does not stop it.
     pub fn test_backup(
         &self,
         credential: CredentialArg,
     ) -> ShellResult<Outcome<BackupSummaryView>> {
+        let epoch = self.sessions.epoch();
         let Some(backup) = self.os.dialogs.pick_file("Test a backup", Some(FILTER)) else {
             return Ok(Outcome::Dismissed);
         };
         let credential = credential.typed()?;
-        let epoch = self.sessions.epoch();
         let cancel = CancelToken::new();
-        let _operation = self.autolock.begin(None, TEST_BACKUP, cancel.clone());
-        let checked = verify_backup(&backup, credential.credential(), &cancel)
-            .map_err(ShellError::from)
-            .and_then(|found| {
-                let size_on_disk = fs::metadata(&backup)?.len();
-                Ok(BackupSummaryView {
-                    created_at: found.created_at,
-                    items: found.items,
-                    files: found.files,
-                    missing_files: found.missing_files,
-                    size_on_disk,
-                })
-            });
-        // Whatever it found, nothing is shown after a lock of all vaults or once the app is closing (spec §7.4).
-        if epoch != self.sessions.epoch() || self.sessions.closing_gate().load(Ordering::SeqCst) {
+        let operation = self.autolock.begin(None, TEST_BACKUP, cancel.clone());
+        // A lock before this point left `cancel` fresh and uncancelled: nothing is read.
+        if self.locked_since(epoch) {
+            return Err(ShellError::Locked);
+        }
+        let verified = verify_backup(&backup, credential.credential(), &cancel);
+        drop(credential);
+        let checked = verified.map_err(ShellError::from).and_then(|found| {
+            let size_on_disk = fs::metadata(&backup)?.len();
+            Ok(BackupSummaryView {
+                created_at: found.created_at,
+                items: found.items,
+                files: found.files,
+                missing_files: found.missing_files,
+                size_on_disk,
+            })
+        });
+        // Ending the operation announces on `lockbox://busy`, where a lock can land: the last check comes after it.
+        drop(operation);
+        if self.locked_since(epoch) {
             return Err(ShellError::Locked);
         }
         checked.map(Outcome::Done)
     }
 
+    /// Whether all vaults were locked since `epoch` was read, or the app is closing (spec §7.4).
+    fn locked_since(&self, epoch: u64) -> bool {
+        epoch != self.sessions.epoch() || self.sessions.closing_gate().load(Ordering::SeqCst)
+    }
+
     /// Opens a backup the user picks as a read-only session keyed by the backup's location (spec §6.9).
-    /// `Dismissed` when the dialog is closed, before anything else. A backup already open is answered as it is. A
-    /// lock of all vaults while it opens discards it (`Locked`).
+    /// `Dismissed` when the dialog is closed, before anything else. A backup already open is answered as it is. The
+    /// lock epoch is read before the dialog: a lock of all vaults while the picker is open, or while the backup
+    /// opens, answers `Locked` and opens nothing.
     pub fn open_backup_read_only(
         &self,
         credential: CredentialArg,
     ) -> ShellResult<Outcome<Tagged<SessionInfo>>> {
+        let epoch = self.sessions.epoch();
         let Some(backup) = self.os.dialogs.pick_file("Open a backup", Some(FILTER)) else {
             return Ok(Outcome::Dismissed);
         };
         let credential = credential.typed()?;
         let location = Location::backup(&backup)?;
-        let answer = self.sessions.open(Some(location.clone()), None, |cancel| {
-            let vault =
-                ReadOnlyVault::open_backup(location.path(), credential.credential(), cancel)?;
-            Ok(OpenStep::Session(location, Opened::ReadOnly(vault), ()))
-        })?;
+        let answer = self
+            .sessions
+            .open_since(epoch, Some(location.clone()), None, |cancel| {
+                let vault =
+                    ReadOnlyVault::open_backup(location.path(), credential.credential(), cancel)?;
+                Ok(OpenStep::Session(location, Opened::ReadOnly(vault), ()))
+            })?;
         match answer {
             Outcome::Done(Tagged {
                 session,
@@ -634,6 +650,75 @@ mod tests {
         ts.shell.sessions.shut();
         ts.dialogs.answer(Some(dest.clone()));
         assert_eq!(heavy(|| ts.shell.test_backup(password())).err(), LOCKED);
+    }
+
+    /// A lock of all vaults while the picker of "Test a backup" is open: `Locked`, and the backup was never read (a
+    /// credential that would be refused still answers `Locked`). A closed picker still answers `Dismissed`.
+    #[test]
+    fn lock_during_test_backup_picker() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let lock_in_picker = || {
+            let shell = Arc::clone(&ts.shell);
+            ts.dialogs.during_next_dialog(Box::new(move || {
+                shell.sessions.lock_all(LockReason::Manual)
+            }));
+        };
+        lock_in_picker();
+        ts.dialogs.answer(Some(dest.clone()));
+        let wrong = CredentialArg::Password(Zeroizing::new("another long password".into()));
+        assert_eq!(ts.shell.test_backup(wrong).err(), LOCKED);
+
+        lock_in_picker();
+        assert!(matches!(
+            ts.shell.test_backup(password()),
+            Ok(Outcome::Dismissed)
+        ));
+    }
+
+    /// A lock of all vaults in the announcement that ends the test (the `LongOp` dropping): `Locked`. The final
+    /// check must come after the operation is dropped.
+    #[test]
+    fn lock_as_test_backup_ends() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let (events, shell) = (Arc::clone(&ts.events), Arc::clone(&ts.shell));
+        // The first announcement is the start; the hook it leaves runs in the second, the end.
+        ts.events.during_next_busy(Box::new(move || {
+            events.during_next_busy(Box::new(move || {
+                shell.sessions.lock_all(LockReason::Manual)
+            }));
+        }));
+        ts.dialogs.answer(Some(dest));
+        assert_eq!(heavy(|| ts.shell.test_backup(password())).err(), LOCKED);
+        let busy = ts.events.busy();
+        assert_eq!(busy.last(), Some(&(None, vec![])), "the end was announced");
+    }
+
+    /// A lock of all vaults while the picker of "Open a backup" is open: `Locked`, and no session is opened.
+    #[test]
+    fn lock_during_open_backup_picker() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let shell = Arc::clone(&ts.shell);
+        ts.dialogs.during_next_dialog(Box::new(move || {
+            shell.sessions.lock_all(LockReason::Manual)
+        }));
+        ts.dialogs.answer(Some(dest));
+        assert_eq!(
+            heavy(|| ts.shell.open_backup_read_only(password())).err(),
+            LOCKED
+        );
+        let sessions = ts.shell.sessions.list();
+        assert_eq!(sessions.len(), 1, "only the vault is listed");
+        assert_eq!(sessions[0].session, s);
+        assert_eq!(sessions[0].state, SessionState::Locked);
     }
 
     /// A lock mid-backup: `Locked`, no temp left or recorded, and the backup file that was there is intact.

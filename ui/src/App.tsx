@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import { call, callPlain, open, type Opened, type Outcome } from "./bridge";
+import { call, callPair, callPlain, onLocked, open, type Opened, type Outcome } from "./bridge";
 import { useDroppedFileReachedPage } from "./dropProbe";
 
 interface AppInfo {
@@ -205,13 +205,6 @@ interface BackupFound {
   size_on_disk: number;
 }
 
-// `copy_item_to`'s answer: done, or the question about files the backup lacks. The bridge's `Confirm` type has no
-// such variant yet, so the page reads it as it is.
-type CopyAnswer =
-  | { Done: { id: string; left_out: string[] } }
-  | { Confirm: { MissingFiles: { names: string[] } } }
-  | "Dismissed";
-
 // The part of `list_items`'s answer the test page reads.
 interface ItemsListed {
   items: { id: string; kind: string; trashed: boolean }[];
@@ -271,18 +264,25 @@ async function copyItemOut(): Promise<string> {
   const listed = await call<ItemsListed>("list_items", { session: from, generation: fromGeneration });
   const item = listed.data.items.find((entry) => entry.kind !== "collection" && !entry.trashed);
   if (item === undefined) return "The backup holds no item to copy";
-  const copied = await call<CopyAnswer>("copy_item_to", {
-    from,
-    from_generation: fromGeneration,
-    id: item.id,
-    to,
-    to_generation: toGeneration,
-    skip_missing: copyAsked,
-  });
+  // Tagged with the vault; dropped too when the backup (the source) locked meanwhile.
+  const copied = await callPair<Outcome<{ id: string; left_out: string[] }>>(
+    "copy_item_to",
+    {
+      from,
+      from_generation: fromGeneration,
+      id: item.id,
+      to,
+      to_generation: toGeneration,
+      skip_missing: copyAsked,
+    },
+    { session: from, generation: fromGeneration },
+  );
   if (copied.data === "Dismissed") return "Closed";
   if ("Confirm" in copied.data) {
+    const { Confirm: question } = copied.data;
+    if (typeof question !== "object" || !("MissingFiles" in question)) return "Asked first";
     copyAsked = true;
-    return `Asked first: the backup lacks ${copied.data.Confirm.MissingFiles.names.join(", ")}. Press "Copy an item out" again to copy without them`;
+    return `Asked first: the backup lacks ${question.MissingFiles.names.join(", ")}. Press "Copy an item out" again to copy without them`;
   }
   copyAsked = false;
   const { left_out: leftOut } = copied.data.Done;
@@ -335,6 +335,25 @@ export default function App() {
         setLaunchNotices(failed(error));
       },
     );
+  }, []);
+
+  // A lock: what the page shows of vault data goes (a missing-files question names the user's files), and so does a
+  // session of the test page that locked, so its buttons say nothing is open.
+  useEffect(() => {
+    const listening = onLocked(({ session }) => {
+      setVaultStatus(undefined);
+      if (testSession?.session === session) testSession = undefined;
+      if (testBackup?.session === session) testBackup = undefined;
+      copyAsked = false;
+    });
+    return () => {
+      listening.then(
+        (unlisten) => {
+          unlisten();
+        },
+        () => undefined,
+      );
+    };
   }, []);
 
   useEffect(() => {

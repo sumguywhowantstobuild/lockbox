@@ -13,9 +13,15 @@ export interface Tagged<T> {
 
 /**
  * A question the user answers before the command goes on. Each command that asks adds its variant. `Executable` has
- * no token: it is confirmed by sending `open_file` again with `confirmed_executable`.
+ * no token: it is confirmed by sending `open_file` again with `confirmed_executable`. `MissingFiles` has none
+ * either: it is confirmed by sending `copy_item_to` again with `skip_missing`; its names are the user's own file
+ * names, vault data, so it only ever arrives in a tagged answer.
  */
-export type Confirm = { CloudFolder: { token: string } } | { HeaderChanged: { token: string } } | "Executable";
+export type Confirm =
+  | { CloudFolder: { token: string } }
+  | { HeaderChanged: { token: string } }
+  | "Executable"
+  | { MissingFiles: { names: string[] } };
 
 /** The answer of a command that may ask first or open a dialog the user may close. */
 export type Outcome<T> = { Done: T } | { Confirm: Confirm } | "Dismissed";
@@ -64,6 +70,23 @@ export function callPlain<T>(cmd: string, args?: InvokeArgs): Promise<T> {
 export async function call<T>(cmd: string, args?: InvokeArgs): Promise<Tagged<T>> {
   const answer = await invoke<Tagged<T>>(cmd, args);
   if (!isCurrent(answer)) throw new StaleAnswer();
+  return answer;
+}
+
+/** A session and the generation the page read it in. */
+export interface SessionRef {
+  session: number;
+  generation: number;
+}
+
+/**
+ * A command over two sessions (`copy_item_to`: out of a backup, into a vault): `Tagged<T>` for the session it is
+ * tagged with, and `other` is the second one. The answer is dropped ({@link StaleAnswer}) unless both are current, so
+ * a lock of only the source session drops it too.
+ */
+export async function callPair<T>(cmd: string, args: InvokeArgs, other: SessionRef): Promise<Tagged<T>> {
+  const answer = await invoke<Tagged<T>>(cmd, args);
+  if (!isCurrent(answer) || generations.get(other.session) !== other.generation) throw new StaleAnswer();
   return answer;
 }
 

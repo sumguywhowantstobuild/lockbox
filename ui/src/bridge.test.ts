@@ -36,6 +36,36 @@ test("accepts_response_with_current_generation", async () => {
   expect(invoke).toHaveBeenLastCalledWith("list_items", { session: 1, generation: 2 });
 });
 
+// A two-session command (a copy out of a backup into a vault): the answer is tagged with the destination, and is
+// dropped when only the source session locked meanwhile.
+test("call_pair_drops_the_answer_when_either_session_locked", async () => {
+  await bridge.onLocked();
+  const [, locked] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
+  await opened(5, 1); // the vault
+  await opened(6, 1); // the backup
+  const source = { session: 6, generation: 1 };
+  invoke.mockResolvedValueOnce(tagged(5, 1, "copied"));
+  await expect(bridge.callPair("copy_item_to", {}, source)).resolves.toEqual(tagged(5, 1, "copied"));
+
+  let answer: (value: unknown) => void = () => undefined;
+  invoke.mockReturnValueOnce(
+    new Promise((resolve) => {
+      answer = resolve;
+    }),
+  );
+  const copying = bridge.callPair("copy_item_to", {}, source);
+  locked({ payload: { session: 6, generation: 2, reason: "manual" } });
+  answer(tagged(5, 1, "names of the files left out"));
+  await expect(copying).rejects.toBeInstanceOf(bridge.StaleAnswer);
+
+  // The destination locking drops it through its own tag.
+  invoke.mockResolvedValueOnce(tagged(5, 1, "copied"));
+  locked({ payload: { session: 5, generation: 2, reason: "manual" } });
+  await expect(bridge.callPair("copy_item_to", {}, { session: 5, generation: 2 })).rejects.toBeInstanceOf(
+    bridge.StaleAnswer,
+  );
+});
+
 test("call_many_keeps_only_current_elements", async () => {
   await opened(1, 2);
   await opened(3, 5);

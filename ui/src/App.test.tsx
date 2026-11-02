@@ -220,6 +220,38 @@ test("backup_buttons_back_up_test_open_and_copy_out", async () => {
   expect(invoke).toHaveBeenCalledWith("copy_item_to", { ...asked, skip_missing: true });
 });
 
+// The handler the page registered for `event`.
+function listener(event: string): (event: { payload: unknown }) => void {
+  const calls = listen.mock.calls as unknown as [string, (event: { payload: unknown }) => void][];
+  const found = calls.find(([name]) => name === event)?.[1];
+  if (found === undefined) throw new Error(`the page does not listen for ${event}`);
+  return found;
+}
+
+test("a_lock_clears_the_question_naming_files_and_the_backup_session", async () => {
+  invoke.mockReset();
+  invoke.mockImplementation(answerBackupCommands);
+  listen.mockClear();
+  render(<App />);
+  await screen.findByText("Lockbox 9.8.7");
+  fireEvent.click(screen.getByRole("button", { name: "Create test vault" }));
+  await screen.findByText("Created and unlocked (session 5)", { exact: false });
+  fireEvent.click(screen.getByRole("button", { name: "Open backup read-only" }));
+  await screen.findByText("Backup opened read-only (session 6)", { exact: false });
+  fireEvent.click(screen.getByRole("button", { name: "Copy an item out" }));
+  expect(await screen.findByText("Asked first: the backup lacks scan.png, id.pdf", { exact: false })).toBeTruthy();
+
+  // The backup session locks: the names go, and the buttons say nothing is open.
+  act(() => {
+    listener("lockbox://locked")({ payload: { session: 6, generation: 2, reason: "manual" } });
+  });
+  expect(screen.queryByText("scan.png", { exact: false })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Copy an item out" }));
+  expect(await screen.findByText("No backup open", { exact: false })).toBeTruthy();
+  // The question was forgotten with it: the next copy would ask again, not copy without the files.
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === "copy_item_to")).toHaveLength(1);
+});
+
 test("backup_in_progress_is_shown_while_busy_says_so", async () => {
   invoke.mockReset();
   invoke.mockImplementation(answerBackupCommands);

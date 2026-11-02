@@ -763,7 +763,31 @@ impl Sessions {
         what: Option<&'static str>,
         open: impl FnOnce(&CancelToken) -> ShellResult<OpenStep<X>>,
     ) -> ShellResult<OpenAnswer<X>> {
-        self.open_with(what, |_| Ok((location, ())), |(), cancel| open(cancel))
+        self.open_with(
+            None,
+            what,
+            |_| Ok((location, ())),
+            |(), cancel| open(cancel),
+        )
+    }
+
+    /// Like [`open`](Self::open), for an open that follows a dialog: `epoch` is [`epoch`](Self::epoch) as read before
+    /// the dialog. It is compared with the current one under the sessions mutex, in the step that registers the open,
+    /// so a lock of all vaults since then is either seen here (`Locked`, `open` never runs) or sees the open under
+    /// way and discards what it makes.
+    pub fn open_since<X>(
+        &self,
+        epoch: u64,
+        location: Option<Location>,
+        what: Option<&'static str>,
+        open: impl FnOnce(&CancelToken) -> ShellResult<OpenStep<X>>,
+    ) -> ShellResult<OpenAnswer<X>> {
+        self.open_with(
+            Some(epoch),
+            what,
+            |_| Ok((location, ())),
+            |(), cancel| open(cancel),
+        )
     }
 
     /// Like [`open`](Self::open), for the user's yes to a question: the choice parked under `token` is taken in the
@@ -787,14 +811,16 @@ impl Sessions {
                 ShellError::NotFound
             })
         };
-        self.open_with(what, claim, open)
+        self.open_with(None, what, claim, open)
     }
 
     /// [`open`](Self::open) and [`open_choice`](Self::open_choice): `claim` runs under the sessions mutex, right
     /// before the open is registered, and gives the location and what `open` needs. The choices it puts aside, and
-    /// what it gave when `open` does not run, are dropped after that mutex is released.
+    /// what it gave when `open` does not run, are dropped after that mutex is released. With `since`, a lock of all
+    /// vaults after that epoch answers `Locked` before anything is claimed or run.
     fn open_with<C, X>(
         &self,
+        since: Option<u64>,
         what: Option<&'static str>,
         claim: impl FnOnce(&mut Vec<PendingChoice>) -> ShellResult<(Option<Location>, C)>,
         open: impl FnOnce(C, &CancelToken) -> ShellResult<OpenStep<X>>,
@@ -804,6 +830,9 @@ impl Sessions {
             let mut inner = self.inner();
             // The app is closing: nothing opens any more.
             if self.closing.load(Ordering::SeqCst) {
+                return Err(ShellError::Locked);
+            }
+            if since.is_some_and(|epoch| epoch != inner.epoch) {
                 return Err(ShellError::Locked);
             }
             match claim(&mut unused) {
@@ -1457,6 +1486,33 @@ mod tests {
             (answer.session, answer.generation, answer.data),
             (id, generation, 7)
         );
+    }
+
+    /// An open started with the epoch read before a dialog: a lock of all vaults since then answers `Locked` without
+    /// running the opening closure; with the epoch still current it runs as `open` does.
+    #[test]
+    fn open_since_a_stale_epoch_answers_locked_and_does_not_open() {
+        let (_, sessions) = sessions();
+        let ran = Cell::new(false);
+        let fails = |_: &CancelToken| {
+            ran.set(true);
+            Err::<OpenStep<()>, _>(ShellError::NotFound)
+        };
+        let epoch = sessions.epoch();
+        assert_eq!(
+            sessions.open_since(epoch, None, None, fails).err(),
+            Some(ShellError::NotFound)
+        );
+        assert!(ran.take(), "the current epoch runs the open");
+
+        sessions.lock_all(LockReason::Manual);
+        assert_ne!(sessions.epoch(), epoch);
+        assert_eq!(
+            sessions.open_since(epoch, None, None, fails).err(),
+            Some(ShellError::Locked)
+        );
+        assert!(!ran.take(), "a stale epoch never runs the open");
+        assert!(sessions.list().is_empty());
     }
 
     /// Fix round 4 (I1): an open that a lock overtakes and whose closure then fails answers `Locked`, whatever the
