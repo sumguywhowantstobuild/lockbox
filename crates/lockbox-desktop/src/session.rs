@@ -722,6 +722,12 @@ impl Sessions {
         Arc::clone(&self.closing)
     }
 
+    /// How many times all vaults have been locked (the app closing included). A long operation without a session
+    /// (testing a backup) reads it before its work and compares after: a lock of all vaults in between drops its answer.
+    pub(crate) fn epoch(&self) -> u64 {
+        self.inner().epoch
+    }
+
     /// Tests only: how many times a thread has had to wait for the sessions mutex.
     #[cfg(test)]
     pub(crate) fn inner_waits(&self) -> usize {

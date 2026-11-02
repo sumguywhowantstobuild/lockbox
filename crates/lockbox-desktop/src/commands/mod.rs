@@ -2,6 +2,7 @@
 //! request and parses it with [`args`] into a struct that refuses unknown fields.
 
 mod args;
+pub mod backup;
 pub mod files;
 mod generator;
 pub mod items;
@@ -64,6 +65,10 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         files::open_file,
         files::retry_open_cleanup,
         files::reset_output_journal,
+        backup::backup_vault,
+        backup::test_backup,
+        backup::open_backup_read_only,
+        backup::copy_item_to,
         generator::generate_password,
         generator::generate_passphrase,
         settings::get_settings,

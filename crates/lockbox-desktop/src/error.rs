@@ -153,6 +153,10 @@ pub enum Confirm {
     /// The stored file is of a type that can run code (spec §7.2): open it anyway? Confirmed by sending `open_file`
     /// again with `confirmed_executable`. Asked before anything is decrypted.
     Executable,
+    /// The item being copied out of a backup has attachments the backup does not hold (spec §6.9): the names of those
+    /// files, in the item's order, so the user can decide. Confirmed by sending `copy_item_to` again with
+    /// `skip_missing`. The names are the user's own data, shown and never put in an error.
+    MissingFiles { names: Vec<String> },
 }
 
 #[cfg(test)]

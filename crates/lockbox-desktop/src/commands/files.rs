@@ -222,7 +222,7 @@ impl Shell {
 
     /// `data` tagged with `generation`, once the session is checked to be still unlocked in it (spec §7.4): `Locked`
     /// otherwise.
-    fn still_current<T>(
+    pub(super) fn still_current<T>(
         &self,
         session: SessionId,
         generation: u64,

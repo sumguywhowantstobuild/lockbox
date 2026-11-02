@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { call, callPlain, open, type Opened, type Outcome } from "./bridge";
 import { useDroppedFileReachedPage } from "./dropProbe";
@@ -186,6 +187,108 @@ async function saveTestCopy(): Promise<string> {
   return `Copy saved (session ${String(session)})`;
 }
 
+// What the backup commands answer, as the test page reads them (the shell's `BackupView` and `BackupSummaryView`).
+interface BackupMade {
+  items: number;
+  files: number;
+  damaged_items: number;
+  damaged_files: number;
+  missing_files: number;
+  size_on_disk: number;
+}
+
+interface BackupFound {
+  created_at: string;
+  items: number;
+  files: number;
+  missing_files: number;
+  size_on_disk: number;
+}
+
+// `copy_item_to`'s answer: done, or the question about files the backup lacks. The bridge's `Confirm` type has no
+// such variant yet, so the page reads it as it is.
+type CopyAnswer =
+  | { Done: { id: string; left_out: string[] } }
+  | { Confirm: { MissingFiles: { names: string[] } } }
+  | "Dismissed";
+
+// The part of `list_items`'s answer the test page reads.
+interface ItemsListed {
+  items: { id: string; kind: string; trashed: boolean }[];
+}
+
+// The backup opened read-only last, and whether the last copy out asked about missing files (pressing the button
+// again says yes).
+let testBackup: { session: number; generation: number } | undefined;
+let copyAsked = false;
+
+// The test vault's backup, where Rust's save dialog says. The name must end in .lockbox-backup.
+async function backUpTestVault(): Promise<string> {
+  if (testSession === undefined) return "No test vault open: create or unlock it first";
+  const { session, generation } = testSession;
+  const made = await call<Outcome<BackupMade>>("backup_vault", { session, generation });
+  if (made.data === "Dismissed") return "Closed";
+  if (!("Done" in made.data)) return "Asked first";
+  const b = made.data.Done;
+  return (
+    `Backup made (session ${String(session)}): ${String(b.items)} items, ${String(b.files)} files; left out: ` +
+    `${String(b.damaged_items)} damaged items, ${String(b.damaged_files)} damaged files, ` +
+    `${String(b.missing_files)} missing files; ${String(b.size_on_disk)} bytes on disk`
+  );
+}
+
+// Checks a backup the test vault's password opens, without restoring it.
+async function testTheBackup(): Promise<string> {
+  const tested = await callPlain<Outcome<BackupFound>>("test_backup", {
+    credential: { password: TEST_VAULT_PASSWORD },
+  });
+  if (tested === "Dismissed") return "Closed";
+  if (!("Done" in tested)) return "Asked first";
+  const b = tested.Done;
+  return (
+    `Backup is good: made ${b.created_at}, ${String(b.items)} items, ${String(b.files)} files, ` +
+    `${String(b.missing_files)} files missing; ${String(b.size_on_disk)} bytes on disk`
+  );
+}
+
+// Opens a backup the test vault's password opens, as a read-only session of its own: "Copy an item out" copies from it.
+async function openBackupReadOnly(): Promise<string> {
+  const opened = await open<unknown>("open_backup_read_only", { credential: { password: TEST_VAULT_PASSWORD } });
+  if (opened === "Dismissed") return "Closed";
+  if ("Confirm" in opened) return "Asked first";
+  testBackup = { session: opened.session, generation: opened.generation };
+  copyAsked = false;
+  return `Backup opened read-only (session ${String(opened.session)})`;
+}
+
+// The backup's first item (not a collection, not in the trash) copied into the open test vault. A backup that lacks
+// some of its files asks first; pressing the button again copies it without them.
+async function copyItemOut(): Promise<string> {
+  if (testBackup === undefined) return "No backup open: open one read-only first";
+  if (testSession === undefined) return "No test vault open: create or unlock it first";
+  const { session: from, generation: fromGeneration } = testBackup;
+  const { session: to, generation: toGeneration } = testSession;
+  const listed = await call<ItemsListed>("list_items", { session: from, generation: fromGeneration });
+  const item = listed.data.items.find((entry) => entry.kind !== "collection" && !entry.trashed);
+  if (item === undefined) return "The backup holds no item to copy";
+  const copied = await call<CopyAnswer>("copy_item_to", {
+    from,
+    from_generation: fromGeneration,
+    id: item.id,
+    to,
+    to_generation: toGeneration,
+    skip_missing: copyAsked,
+  });
+  if (copied.data === "Dismissed") return "Closed";
+  if ("Confirm" in copied.data) {
+    copyAsked = true;
+    return `Asked first: the backup lacks ${copied.data.Confirm.MissingFiles.names.join(", ")}. Press "Copy an item out" again to copy without them`;
+  }
+  copyAsked = false;
+  const { left_out: leftOut } = copied.data.Done;
+  return `Item copied into session ${String(to)}; left out: ${leftOut.length === 0 ? "nothing" : leftOut.join(", ")}`;
+}
+
 // A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
 // `data:` link does not reliably start a download, so it could not show the rule failing).
 function downloadProbeFile(): void {
@@ -204,6 +307,8 @@ export default function App() {
   const [version, setVersion] = useState<string>();
   const [launchNotices, setLaunchNotices] = useState<string>();
   const [vaultStatus, setVaultStatus] = useState<string>();
+  // The sessions a backup is running for (`lockbox://busy` lists each session's running operations).
+  const [backingUp, setBackingUp] = useState<number[]>([]);
   const droppedFileReachedPage = useDroppedFileReachedPage();
 
   function run(step: () => Promise<string>): void {
@@ -230,6 +335,23 @@ export default function App() {
         setLaunchNotices(failed(error));
       },
     );
+  }, []);
+
+  useEffect(() => {
+    const listening = listen<{ session: number | null; operations: string[] }>("lockbox://busy", ({ payload }) => {
+      const { session, operations } = payload;
+      if (session === null) return;
+      const running = operations.includes("backup");
+      setBackingUp((now) => [...now.filter((other) => other !== session), ...(running ? [session] : [])]);
+    });
+    return () => {
+      listening.then(
+        (unlisten) => {
+          unlisten();
+        },
+        () => undefined,
+      );
+    };
   }, []);
 
   return (
@@ -345,6 +467,43 @@ export default function App() {
           >
             Retry opened copies
           </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(backUpTestVault);
+            }}
+          >
+            Back up test vault
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(testTheBackup);
+            }}
+          >
+            Test a backup
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(openBackupReadOnly);
+            }}
+          >
+            Open backup read-only
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(copyItemOut);
+            }}
+          >
+            Copy an item out
+          </button>{" "}
+          {backingUp.length > 0 && <strong>Backup in progress </strong>}
+          Backs up the test vault where you choose (a name ending in .lockbox-backup); checks a backup you pick with
+          the test vault&apos;s password; opens one you pick as a read-only vault; copies its first item into the vault
+          last opened (a backup that lacks some of the item&apos;s files asks first, and the same button again copies
+          without them).{" "}
           Creates &quot;{TEST_VAULT}&quot; in the default vaults folder, then unlocks it from the vault list; adds a
           login to the vault last opened; copies that login&apos;s password to the clipboard; adds a file you pick to
           that vault; saves a copy of that file where you choose; adds a PDF or a .cmd file you pick and opens it (the
