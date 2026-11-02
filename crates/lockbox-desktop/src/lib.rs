@@ -21,6 +21,7 @@ pub mod outputs;
 pub mod paths;
 pub mod pending;
 pub mod registry;
+pub mod restore;
 pub mod session;
 pub mod settings;
 pub mod shell;
@@ -75,12 +76,14 @@ pub fn run() {
                 os::Os::windows(app.handle().clone()),
                 app_dirs,
             )?);
+            // Launch work, here only: a second copy of the app exits before setup, so it never recovers or sweeps the
+            // first copy's folders. It comes before the shell is managed and before the window exists, so no command
+            // can answer before it has run: a half-done restore is settled first (spec §6.8), then the output journal's
+            // leftovers (spec §7.2), then the "Open" folders'.
+            shell.launch_work();
             if !app.manage(Arc::clone(&shell)) {
                 return Err("Lockbox will not run: its vault sessions could not be kept".into());
             }
-            // Launch work, here only: a second copy of the app exits before setup, so it never sweeps the first
-            // copy's temps. The output journal's leftovers first (spec §7.2).
-            shell.sweep_outputs();
             // Fail closed here too: never run without the auto-lock. Signals that came before this wait in the channel.
             route_signals(signals, Arc::clone(&shell))?;
             start_ticks(shell)?;

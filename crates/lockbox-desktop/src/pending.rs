@@ -85,6 +85,10 @@ pub enum PendingChoice {
     /// `add_existing_vault` of a folder a cloud provider syncs, waiting for the user's yes (`Confirm::CloudFolder`):
     /// the folder chosen (canonical), so the dialog is not shown again.
     AddVault { dir: PathBuf },
+    /// `restore_prepare` waiting for a yes (`Confirm::CloudFolder` or `Confirm::NewFolder`): the backup and parent
+    /// picked, and the credential typed, so the confirming command neither asks for files again nor lets another
+    /// backup in. Boxed: the variant is much larger than the others.
+    Restore(Box<crate::restore::RestoreChoice>),
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
     Test(Option<Box<lockbox_core::Vault>>),

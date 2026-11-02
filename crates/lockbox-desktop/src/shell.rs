@@ -1,5 +1,4 @@
-//! The app's state behind every command: plain Rust, so almost every rule is tested without a window. A later task
-//! adds the restore state.
+//! The app's state behind every command: plain Rust, so almost every rule is tested without a window.
 
 use std::fs;
 use std::io;
@@ -23,6 +22,7 @@ use crate::os::{KnownFolder, Os};
 use crate::outputs::{Outputs, SweepReport};
 use crate::paths::{StatePaths, state_paths};
 use crate::registry::Registry;
+use crate::restore::Restores;
 use crate::session::{LockReason, Notice, Notifier, SessionId, Sessions};
 use crate::settings::SettingsStore;
 use crate::window;
@@ -46,6 +46,8 @@ pub struct Shell {
     pub outputs: Arc<Outputs>,
     /// The "Open" folders (spec §7.2), removed at a lock of their vault and at app close.
     pub open_folders: Arc<OpenFolders>,
+    /// The one restore that may be alive (spec §6.8) and the pre-restore folders last listed.
+    pub restore: Arc<Restores>,
     pub paths: StatePaths,
     pub(crate) os: Os,
     /// Where the launch sweep's notice goes.
@@ -91,6 +93,9 @@ impl Shell {
         sessions.on_lock(clipboard.lock_hook());
         // Then the "Open" cleanup, which hands its deletes to a worker and returns at once.
         sessions.on_lock(open_folders.lock_hook(Arc::downgrade(&sessions)));
+        // Then the restore's: a restore that is not swapping ends with a lock (it drops its staged restore on a worker).
+        let restore = Arc::new(Restores::new());
+        sessions.on_lock(restore.lock_hook());
         Ok(Shell {
             sessions,
             settings,
@@ -99,6 +104,7 @@ impl Shell {
             registry: Registry::new(paths.registry.clone(), Arc::clone(&os.volumes)),
             outputs,
             open_folders,
+            restore,
             paths,
             os,
             notifier,
@@ -144,25 +150,34 @@ impl Shell {
         self.autolock.shutdown();
     }
 
-    /// Launch work, in the app's `.setup` (never in a second copy of the app): sweeps the output journal's leftovers.
+    /// Launch work after restore recovery ([`launch_work`](Self::launch_work)): sweeps the output journal's leftovers.
     /// When there was anything to tell, the report is kept for [`launch_notices`](Self::launch_notices) (launch work
     /// runs before the page can listen) and also sent as `lockbox://notice` (`output_sweep`). Then the leftovers in
     /// `open\` that no journal entry lists; those and the "Open" folders the sweep could not remove go on the retry
     /// list, told the same way (`open_cleanup`).
     pub fn sweep_outputs(&self) -> SweepReport {
-        let tell = |notice: Notice| {
-            self.notifier.notice(&notice);
-            lock(&self.launch_notices).push(notice);
-        };
         let report = self.outputs.sweep();
         if report != SweepReport::default() {
-            tell(Notice::OutputSweep(report));
+            self.tell(Notice::OutputSweep(report));
         }
         let open = self.open_folders.sweep_leftovers();
         if open != RemoveReport::default() {
-            tell(Notice::OpenCleanup(open));
+            self.tell(Notice::OpenCleanup(open));
         }
         report
+    }
+
+    /// Tells the page a launch finding: sent as `lockbox://notice`, and kept for
+    /// [`launch_notices`](Self::launch_notices), since the page cannot listen yet.
+    pub(crate) fn tell(&self, notice: Notice) {
+        self.notifier.notice(&notice);
+        lock(&self.launch_notices).push(notice);
+    }
+
+    /// Sends `notice` as `lockbox://notice` and keeps nothing: a finding of a running app, which the page asks for
+    /// again with its own command.
+    pub(crate) fn notify(&self, notice: &Notice) {
+        self.notifier.notice(notice);
     }
 
     /// What launch found that the page should show, asked by the page once it has loaded: each launch notice, counts

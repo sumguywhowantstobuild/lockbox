@@ -2,7 +2,7 @@
 //! copy an item out of one into an open vault. Every file comes from a dialog Rust opens inside the command, outside
 //! every lock; the page sends IDs and the typed credential only (§4.1).
 //!
-//! Restore is a later piece. Nothing here puts a path, a name or an item's content in an error (R5): the views and
+//! The restore commands are here too (their logic is in [`crate::restore`]). Nothing here puts a path, a name or an item's content in an error (R5): the views and
 //! [`Confirm::MissingFiles`] may carry the user's own file names, as the other results do.
 
 use std::fs;
@@ -19,9 +19,13 @@ use tauri::State;
 use tauri::ipc::Request;
 use zeroize::Zeroizing;
 
-use super::{args, blocking};
+use super::{NoArgs, args, blocking};
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
 use crate::open::safe_name;
+use crate::pending::Token;
+use crate::restore::{
+    DestinationArg, PreRestoreEntry, RestoreNotice, RestorePreparedView, RestoredView,
+};
 use crate::session::{Location, OpenStep, Opened, SessionId, SessionInfo, Tagged, VaultRef};
 use crate::shell::Shell;
 
@@ -31,8 +35,8 @@ const TEST_BACKUP: &str = "test_backup";
 const COPY_ITEM: &str = "copy_item";
 
 /// A backup file's extension, and the dialogs' filter for it (the extensions it shows, without dots).
-const EXTENSION: &str = ".lockbox-backup";
-const FILTER: (&str, &[&str]) = ("Lockbox backup", &["lockbox-backup"]);
+pub(crate) const EXTENSION: &str = ".lockbox-backup";
+pub(crate) const FILTER: (&str, &[&str]) = ("Lockbox backup", &["lockbox-backup"]);
 
 /// What a finished backup holds and left out (spec §6.7: the report counts each kind), and the file's size.
 #[derive(Debug, Serialize)]
@@ -101,13 +105,13 @@ pub enum CredentialArg {
 }
 
 /// A [`CredentialArg`] checked: the recovery key parsed (a typo or a wrong format is refused here).
-enum Typed {
+pub(crate) enum Typed {
     Password(Zeroizing<String>),
     Recovery(RecoverySecret),
 }
 
 impl CredentialArg {
-    fn typed(self) -> ShellResult<Typed> {
+    pub(crate) fn typed(self) -> ShellResult<Typed> {
         Ok(match self {
             CredentialArg::Password(password) => Typed::Password(password),
             CredentialArg::RecoveryKey(key) => Typed::Recovery(RecoverySecret::parse(&key)?),
@@ -116,7 +120,7 @@ impl CredentialArg {
 }
 
 impl Typed {
-    fn credential(&self) -> Credential<'_> {
+    pub(crate) fn credential(&self) -> Credential<'_> {
         match self {
             Typed::Password(password) => Credential::Password(password),
             Typed::Recovery(secret) => Credential::Recovery(secret),
@@ -224,7 +228,7 @@ impl Shell {
     }
 
     /// Whether all vaults were locked since `epoch` was read, or the app is closing (spec §7.4).
-    fn locked_since(&self, epoch: u64) -> bool {
+    pub(crate) fn locked_since(&self, epoch: u64) -> bool {
         epoch != self.sessions.epoch() || self.sessions.closing_gate().load(Ordering::SeqCst)
     }
 
@@ -388,6 +392,151 @@ pub(super) async fn copy_item_to(
         shell.copy_item_to(from, from_generation, &id, to, to_generation, skip_missing)
     })
     .await
+}
+
+/// `restore_prepare`: the backup's credential, and where the vault goes.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestorePrepare {
+    credential: CredentialArg,
+    destination: DestinationArg,
+}
+
+/// `restore_prepare_confirm`: the token of the question, and for a new folder its name.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestorePrepareConfirm {
+    token: Token,
+    name: Option<String>,
+}
+
+/// `restore_commit` and `restore_discard`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreArg {
+    restore: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DismissRestore {
+    confirm: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeletePreRestore {
+    id: u32,
+    confirm: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenPreRestore {
+    id: u32,
+    credential: CredentialArg,
+}
+
+#[tauri::command]
+pub(super) async fn restore_prepare(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Outcome<RestorePreparedView>> {
+    let RestorePrepare {
+        credential,
+        destination,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.restore_prepare(credential, destination)).await
+}
+
+#[tauri::command]
+pub(super) async fn restore_prepare_confirm(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Outcome<RestorePreparedView>> {
+    let RestorePrepareConfirm { token, name } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.restore_prepare_confirm(&token, name)).await
+}
+
+#[tauri::command]
+pub(super) async fn restore_commit(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<RestoredView> {
+    let RestoreArg { restore } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.restore_commit(restore)).await
+}
+
+#[tauri::command]
+pub(super) async fn restore_discard(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let RestoreArg { restore } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.restore_discard(restore)).await
+}
+
+#[tauri::command]
+pub(super) async fn restore_notice(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<RestoreNotice> {
+    let NoArgs {} = args(&request)?;
+    Ok(shell.restore_notice())
+}
+
+#[tauri::command]
+pub(super) async fn retry_restore_recovery(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<RestoreNotice> {
+    let NoArgs {} = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.retry_restore_recovery()).await
+}
+
+#[tauri::command]
+pub(super) async fn dismiss_restore(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Outcome<()>> {
+    let DismissRestore { confirm } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.dismiss_restore(confirm)).await
+}
+
+#[tauri::command]
+pub(super) async fn list_pre_restore(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Vec<PreRestoreEntry>> {
+    let NoArgs {} = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || Ok(shell.list_pre_restore())).await
+}
+
+#[tauri::command]
+pub(super) async fn delete_pre_restore(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Outcome<()>> {
+    let DeletePreRestore { id, confirm } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.delete_pre_restore(id, confirm)).await
+}
+
+#[tauri::command]
+pub(super) async fn open_pre_restore_read_only(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<SessionInfo>> {
+    let OpenPreRestore { id, credential } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.open_pre_restore_read_only(id, credential)).await
 }
 
 #[cfg(test)]
@@ -979,6 +1128,75 @@ mod tests {
             }),
             &|body| parse::<CopyItemTo>(&InvokeBody::Json(body)).is_ok(),
         );
+    }
+
+    /// The restore commands take IDs, tokens, flags, a credential and a destination name: never a path, and nothing
+    /// they do not name. A bad shape is the fixed malformed-request answer, which quotes nothing.
+    #[test]
+    fn restore_requests_are_strict() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        let password = json!({ "password": "pw" });
+        let refuses_a_path = |body: Value, parses: &dyn Fn(Value) -> bool| {
+            assert!(parses(body.clone()), "{body}");
+            let mut sneaked = body;
+            sneaked["path"] = json!("SENTINEL-7f3a");
+            assert!(!parses(sneaked));
+        };
+        refuses_a_path(
+            json!({ "credential": password, "destination": "same_vault" }),
+            &|body| parse::<RestorePrepare>(&InvokeBody::Json(body)).is_ok(),
+        );
+        refuses_a_path(
+            json!({ "credential": password, "destination": { "new_folder": "Clients (restored)" } }),
+            &|body| parse::<RestorePrepare>(&InvokeBody::Json(body)).is_ok(),
+        );
+        refuses_a_path(json!({ "token": hex, "name": null }), &|body| {
+            parse::<RestorePrepareConfirm>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(
+            json!({ "token": hex, "name": "Clients (restored)" }),
+            &|body| parse::<RestorePrepareConfirm>(&InvokeBody::Json(body)).is_ok(),
+        );
+        refuses_a_path(json!({ "restore": 4 }), &|body| {
+            parse::<RestoreArg>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "confirm": true }), &|body| {
+            parse::<DismissRestore>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "id": 2, "confirm": false }), &|body| {
+            parse::<DeletePreRestore>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "id": 2, "credential": password }), &|body| {
+            parse::<OpenPreRestore>(&InvokeBody::Json(body)).is_ok()
+        });
+        for bad in [
+            json!({ "credential": password, "destination": "elsewhere" }),
+            json!({ "credential": password, "destination": { "new_folder": 7 } }),
+            json!({ "credential": password, "destination": { "path": "SENTINEL-7f3a" } }),
+            json!({ "credential": password }),
+            json!({ "credential": password, "destination": "same_vault", "restore": 1 }),
+        ] {
+            let refused = parse::<RestorePrepare>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        // A token is exactly 32 lowercase hex characters, and the answer's name is text or nothing.
+        for bad in [
+            json!({ "token": "SENTINEL-7f3a", "name": null }),
+            json!({ "token": hex.to_uppercase(), "name": null }),
+            json!({ "token": hex, "name": 5 }),
+            json!({ "name": "x" }),
+        ] {
+            let refused = parse::<RestorePrepareConfirm>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        for bad in [
+            json!({ "restore": -1 }),
+            json!({ "restore": "4" }),
+            json!({}),
+        ] {
+            let refused = parse::<RestoreArg>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
     }
 
     fn wrong_password() -> ShellError {

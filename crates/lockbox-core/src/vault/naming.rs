@@ -47,7 +47,7 @@ pub(super) fn validate_name(name: &str) -> Result<()> {
 /// The folder a vault lives in: the name reduced to `[A-Za-z0-9 _-]`, then `-` and the
 /// first 8 hex characters of the ID, at most 64 characters in all. The exact name is
 /// kept in `vault.json`; the folder name only has to be safe and recognisable.
-pub(crate) fn folder_name(name: &str, id: &VaultId) -> String {
+pub fn folder_name(name: &str, id: &VaultId) -> String {
     let suffix = format!("-{}", &id.to_hex()[..SHORT_ID_CHARS]);
     let base: String = name
         .chars()

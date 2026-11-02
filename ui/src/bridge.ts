@@ -11,17 +11,50 @@ export interface Tagged<T> {
   data: T;
 }
 
+/** The folders a restore journal names, as the user's own paths (spec 6.8): shown so they can act, nothing else. */
+export interface JournalPaths {
+  step: "extracting" | "swapping";
+  staging: string;
+  target: string;
+  before_restore: string | null;
+}
+
+/**
+ * What restore recovery found (`restore_notice`, and `lockbox://notice` with `kind: "restore"`, which carries these
+ * fields beside the kind): at launch, or when a restore ends in a state the user must hear about.
+ */
+export type RestoreNotice =
+  | { state: "none" }
+  | { state: "recovered"; how: "staging_removed" | "rolled_back" | "finished" }
+  | { state: "drive_missing"; paths: JournalPaths }
+  | { state: "pending"; paths: JournalPaths }
+  | { state: "unclear"; journal: string; paths: JournalPaths | null };
+
+/** What dismissing a restore journal leaves behind, for the user to act on. */
+export interface Leaves {
+  staging: string | null;
+  before_restore: string | null;
+}
+
 /**
  * A question the user answers before the command goes on. Each command that asks adds its variant. `Executable` has
  * no token: it is confirmed by sending `open_file` again with `confirmed_executable`. `MissingFiles` has none
  * either: it is confirmed by sending `copy_item_to` again with `skip_missing`; its names are the user's own file
- * names, vault data, so it only ever arrives in a tagged answer.
+ * names, vault data, so it only ever arrives in a tagged answer. `NewFolder` is answered with
+ * `restore_prepare_confirm` (the token and the folder's name), `CloudFolder` of a restore with the same command and
+ * no name. `Dismissal` is confirmed by sending `dismiss_restore` again with `confirm`, `DeletePreRestore` by sending
+ * `delete_pre_restore` again with `confirm`. `Recovery` is not a question: a restore journal was found and recovery
+ * ran, and this is what it found.
  */
 export type Confirm =
   | { CloudFolder: { token: string } }
   | { HeaderChanged: { token: string } }
   | "Executable"
-  | { MissingFiles: { names: string[] } };
+  | { MissingFiles: { names: string[] } }
+  | { NewFolder: { suggested: string; token: string } }
+  | { Dismissal: { leaves: Leaves } }
+  | "DeletePreRestore"
+  | { Recovery: { notice: RestoreNotice } };
 
 /** The answer of a command that may ask first or open a dialog the user may close. */
 export type Outcome<T> = { Done: T } | { Confirm: Confirm } | "Dismissed";

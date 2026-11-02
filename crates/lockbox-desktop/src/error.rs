@@ -5,6 +5,7 @@ use lockbox_core::CoreError;
 use serde::Serialize;
 
 use crate::pending::Token;
+use crate::restore::{Leaves, RestoreNotice};
 
 /// A command's refusal, serialised as `{ "code": "<snake_case>", ... }` with fixed fields only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -157,6 +158,20 @@ pub enum Confirm {
     /// files, in the item's order, so the user can decide. Confirmed by sending `copy_item_to` again with
     /// `skip_missing`. The names are the user's own data, shown and never put in an error.
     MissingFiles { names: Vec<String> },
+    /// A restore cannot tell the vault folder at its destination is the same vault (both header copies unreadable),
+    /// and the default folder name is taken by it (spec §6.8): restore beside it in a new folder? `suggested` is
+    /// `<folder name> (restored)`, the user's own data, shown and never put in an error. Confirmed by sending
+    /// `restore_prepare_confirm` with the token and a folder name (the suggestion, or the user's own); the backup
+    /// picked, the parent and the credential wait in [`Pending`](crate::pending::Pending).
+    NewFolder { suggested: String, token: Token },
+    /// Dismissing a restore journal that recovery could not act on (spec §6.8): what the dismissal leaves behind, so
+    /// the user can act on it. Confirmed by sending `dismiss_restore` again with `confirm`.
+    Dismissal { leaves: Leaves },
+    /// Deleting a pre-restore folder is permanent. Confirmed by sending `delete_pre_restore` again with `confirm`.
+    DeletePreRestore,
+    /// Not a question: a restore journal was found, recovery ran and this is what it found. The page shows it, and
+    /// the user starts the restore again (`restore_prepare`) or decides what to do with a journal that stays.
+    Recovery { notice: RestoreNotice },
 }
 
 #[cfg(test)]

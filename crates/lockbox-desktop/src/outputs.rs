@@ -514,6 +514,13 @@ fn no_link_below(root: &Path, folder: &Path) -> Checked {
     no_link_on_the_way(&Disk, root, folder)
 }
 
+/// Whether `folder`, directly inside `parent`, is a real folder: neither it nor `parent` is a link, a junction or a
+/// mount point (a cloud placeholder is not one), by the sweep's own check ([`no_link_below`]). A restore's
+/// pre-restore listing and delete use it.
+pub(crate) fn is_real_folder_in(parent: &Path, folder: &Path) -> bool {
+    matches!(no_link_below(parent, folder), Checked::Delete { .. })
+}
+
 /// How the folders on an entry's way are read: from the disk ([`Disk`]), or by a test's fake (a drive or share root
 /// that is a link cannot be made without admin rights).
 trait FolderProbe {

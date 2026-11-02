@@ -129,6 +129,10 @@ pub enum Notice {
     /// Opened copies another program still holds (spec §7.2), after a lock's cleanup or at launch:
     /// `{ "kind": "open_cleanup", removed, still_open }`. The page offers `retry_open_cleanup`.
     OpenCleanup(crate::open::RemoveReport),
+    /// What a half-done or damaged restore left (spec §6.8), at launch and when a restore ends that way:
+    /// `{ "kind": "restore", "state": .. }` ([`RestoreNotice`](crate::restore::RestoreNotice)). It carries the user's
+    /// own folder paths, which they need to act on it; they appear in no error, log or `Debug`.
+    Restore(crate::restore::RestoreNotice),
 }
 
 /// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`).
@@ -1282,6 +1286,17 @@ impl Sessions {
     /// The unlocked session at `location`.
     pub fn find(&self, location: &Location) -> Option<SessionId> {
         self.inner().unlocked_at(location).map(|entry| entry.id)
+    }
+
+    /// Whether a session is unlocked at `location` or an open of it is under way, both read under the one sessions
+    /// mutex: a folder deleted behind a check that missed an open in flight would pull it away from under it.
+    pub(crate) fn in_use(&self, location: &Location) -> bool {
+        let inner = self.inner();
+        inner.unlocked_at(location).is_some()
+            || inner
+                .opening
+                .iter()
+                .any(|opening| opening.location.as_ref() == Some(location))
     }
 }
 

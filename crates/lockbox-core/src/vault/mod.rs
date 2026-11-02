@@ -35,7 +35,7 @@ use std::time::Duration;
 
 pub use backup::BackupReport;
 pub use journal::{JournalStep, JournalView, inspect_restore_journal};
-pub(crate) use naming::folder_name;
+pub use naming::folder_name;
 pub use naming::is_reserved_device_name;
 pub use readonly::{CopiedItem, ReadOnlyVault};
 pub use restore::{

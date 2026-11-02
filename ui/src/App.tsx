@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import { call, callPair, callPlain, onLocked, open, type Opened, type Outcome } from "./bridge";
+import { call, callPair, callPlain, onLocked, open, type Opened, type Outcome, type RestoreNotice } from "./bridge";
 import { useDroppedFileReachedPage } from "./dropProbe";
 
 interface AppInfo {
@@ -289,6 +289,168 @@ async function copyItemOut(): Promise<string> {
   return `Item copied into session ${String(to)}; left out: ${leftOut.length === 0 ? "nothing" : leftOut.join(", ")}`;
 }
 
+// What the restore commands answer, as the test page reads them (the shell's `RestorePreparedView`, `RestoredView` and
+// `PreRestoreEntry`).
+interface RestorePrepared {
+  restore: number;
+  name: string;
+  replaces_existing: boolean;
+}
+
+interface Restored {
+  vault: number;
+  before_restore: boolean;
+}
+
+interface PreRestoreEntry {
+  id: number;
+  vault: number;
+  name: string | null;
+  folder: string;
+}
+
+// The restore the last "Restore a backup" prepared, waiting for "Finish restore" or "Cancel restore"; the question it
+// asked (answered by "Answer restore question"); the pre-restore copies last listed; and whether the last delete or
+// dismissal asked first (pressing the button again says yes).
+let testRestore: number | undefined;
+let restoreQuestion: { token: string; name: string | null } | undefined;
+let preRestoreCopies: PreRestoreEntry[] = [];
+let deleteAsked = false;
+let dismissAsked = false;
+
+// What a notice says, in words for the test page. The paths are the user's own folders, shown so they can act.
+function describeNotice(notice: RestoreNotice): string {
+  switch (notice.state) {
+    case "none":
+      return "nothing to tell";
+    case "recovered":
+      return `recovered (${notice.how})`;
+    case "drive_missing":
+      return `the drive is not connected; ${notice.paths.target} cannot be checked`;
+    case "pending":
+      return `recovery is not finished (${notice.paths.step}) in ${notice.paths.target}; try again or dismiss`;
+    case "unclear":
+      return `the journal ${notice.journal} cannot be acted on; dismiss it${
+        notice.paths === null ? "" : ` (it names ${notice.paths.target})`
+      }`;
+  }
+}
+
+// What a restore_prepare or restore_prepare_confirm answer means for the test page.
+function describeRestore(answer: Outcome<RestorePrepared>): string {
+  restoreQuestion = undefined;
+  if (answer === "Dismissed") return "Closed";
+  if ("Confirm" in answer) {
+    const { Confirm: question } = answer;
+    if (typeof question === "object" && "NewFolder" in question) {
+      restoreQuestion = { token: question.NewFolder.token, name: question.NewFolder.suggested };
+      return `Asked first: the vault folder there cannot be read. Press "Answer restore question" to restore beside it as ${question.NewFolder.suggested}`;
+    }
+    if (typeof question === "object" && "CloudFolder" in question) {
+      restoreQuestion = { token: question.CloudFolder.token, name: null };
+      return 'Asked first: the folder is synced by a cloud provider. Press "Answer restore question" to go on';
+    }
+    if (typeof question === "object" && "Recovery" in question) {
+      return `A restore was left half-done; recovery ran: ${describeNotice(question.Recovery.notice)}. Press "Restore a backup" again to start`;
+    }
+    return "Asked first";
+  }
+  const { restore, name, replaces_existing: replaces } = answer.Done;
+  testRestore = restore;
+  return `Restore ready: ${name} ${replaces ? "replaces the vault there" : "is added as a new vault"}. Press "Finish restore" to swap it in, or "Cancel restore"`;
+}
+
+// Restores a backup (picked in Rust's dialogs, with the folder to restore into) with the test vault's password.
+async function restoreTestBackup(): Promise<string> {
+  const answer = await callPlain<Outcome<RestorePrepared>>("restore_prepare", {
+    credential: { password: TEST_VAULT_PASSWORD },
+    destination: "same_vault",
+  });
+  return describeRestore(answer);
+}
+
+async function answerRestoreQuestion(): Promise<string> {
+  if (restoreQuestion === undefined) return "No restore question to answer";
+  const { token, name } = restoreQuestion;
+  return describeRestore(await callPlain<Outcome<RestorePrepared>>("restore_prepare_confirm", { token, name }));
+}
+
+async function finishRestore(): Promise<string> {
+  if (testRestore === undefined) return "No restore prepared: press Restore a backup first";
+  const restore = testRestore;
+  testRestore = undefined;
+  const restored = await callPlain<Restored>("restore_commit", { restore });
+  return `Restored (vault ${String(restored.vault)})${
+    restored.before_restore ? ': the old vault is kept beside it; see "List pre-restore copies"' : ""
+  }`;
+}
+
+async function cancelRestore(): Promise<string> {
+  if (testRestore === undefined) return "No restore prepared";
+  const restore = testRestore;
+  testRestore = undefined;
+  await callPlain<null>("restore_discard", { restore });
+  return "Restore cancelled; nothing changed";
+}
+
+async function restoreStatus(): Promise<string> {
+  return `Restore status: ${describeNotice(await callPlain<RestoreNotice>("restore_notice"))}`;
+}
+
+async function retryRestoreRecovery(): Promise<string> {
+  return `Restore recovery: ${describeNotice(await callPlain<RestoreNotice>("retry_restore_recovery"))}`;
+}
+
+// Dismisses a restore journal recovery could not act on: asks first, with what is left behind; again says yes.
+async function dismissRestoreJournal(): Promise<string> {
+  const answer = await callPlain<Outcome<null>>("dismiss_restore", { confirm: dismissAsked });
+  if (answer !== "Dismissed" && "Confirm" in answer) {
+    dismissAsked = true;
+    const { Confirm: question } = answer;
+    const leaves = typeof question === "object" && "Dismissal" in question ? question.Dismissal.leaves : undefined;
+    return `Asked first: dismissing leaves ${leaves?.staging ?? "no staging folder"} and ${
+      leaves?.before_restore ?? "no pre-restore folder"
+    }. Press "Dismiss restore journal" again to dismiss`;
+  }
+  dismissAsked = false;
+  return "Restore journal dismissed (or there was none)";
+}
+
+async function listPreRestore(): Promise<string> {
+  preRestoreCopies = await callPlain<PreRestoreEntry[]>("list_pre_restore");
+  deleteAsked = false;
+  if (preRestoreCopies.length === 0) return "No pre-restore copies";
+  return `Pre-restore copies: ${preRestoreCopies.map((copy) => copy.folder).join(", ")}`;
+}
+
+// The first listed copy opened read-only (with the test vault's password), as the backup session "Copy an item out" uses.
+async function openPreRestore(): Promise<string> {
+  const copy = preRestoreCopies[0];
+  if (copy === undefined) return "No pre-restore copy listed: press List pre-restore copies first";
+  const opened = await open<unknown>("open_pre_restore_read_only", {
+    id: copy.id,
+    credential: { password: TEST_VAULT_PASSWORD },
+  });
+  if (opened === "Dismissed" || "Confirm" in opened) return "Asked first";
+  testBackup = { session: opened.session, generation: opened.generation };
+  copyAsked = false;
+  return `${copy.folder} opened read-only (session ${String(opened.session)})`;
+}
+
+// Deletes the first listed copy for good: asks first; pressing the button again says yes.
+async function deletePreRestore(): Promise<string> {
+  const copy = preRestoreCopies[0];
+  if (copy === undefined) return "No pre-restore copy listed: press List pre-restore copies first";
+  const answer = await callPlain<Outcome<null>>("delete_pre_restore", { id: copy.id, confirm: deleteAsked });
+  if (answer !== "Dismissed" && "Confirm" in answer) {
+    deleteAsked = true;
+    return `Asked first: delete ${copy.folder} for good? Press "Delete a pre-restore copy" again to delete it`;
+  }
+  deleteAsked = false;
+  preRestoreCopies = preRestoreCopies.slice(1);
+  return `${copy.folder} deleted`;
+}
+
 // A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
 // `data:` link does not reliably start a download, so it could not show the rule failing).
 function downloadProbeFile(): void {
@@ -309,6 +471,8 @@ export default function App() {
   const [vaultStatus, setVaultStatus] = useState<string>();
   // The sessions a backup is running for (`lockbox://busy` lists each session's running operations).
   const [backingUp, setBackingUp] = useState<number[]>([]);
+  // A restore is preparing or swapping (it has no session: `lockbox://busy` names it with a null one).
+  const [restoring, setRestoring] = useState(false);
   const droppedFileReachedPage = useDroppedFileReachedPage();
 
   function run(step: () => Promise<string>): void {
@@ -345,6 +509,10 @@ export default function App() {
       if (testSession?.session === session) testSession = undefined;
       if (testBackup?.session === session) testBackup = undefined;
       copyAsked = false;
+      // A lock may have dropped the questions waiting for a yes (a restore's, whose token a lock of all vaults drops).
+      restoreQuestion = undefined;
+      deleteAsked = false;
+      dismissAsked = false;
     });
     return () => {
       listening.then(
@@ -359,9 +527,28 @@ export default function App() {
   useEffect(() => {
     const listening = listen<{ session: number | null; operations: string[] }>("lockbox://busy", ({ payload }) => {
       const { session, operations } = payload;
-      if (session === null) return;
+      if (session === null) {
+        setRestoring(operations.includes("restore"));
+        return;
+      }
       const running = operations.includes("backup");
       setBackingUp((now) => [...now.filter((other) => other !== session), ...(running ? [session] : [])]);
+    });
+    return () => {
+      listening.then(
+        (unlisten) => {
+          unlisten();
+        },
+        () => undefined,
+      );
+    };
+  }, []);
+
+  // What a restore left that the user must hear about, while the app runs (launch's is in "Launch notices").
+  useEffect(() => {
+    const listening = listen<{ kind: string }>("lockbox://notice", ({ payload }) => {
+      if (payload.kind !== "restore") return;
+      setVaultStatus(`Restore notice: ${describeNotice(payload as unknown as RestoreNotice)}`);
     });
     return () => {
       listening.then(
@@ -523,6 +710,93 @@ export default function App() {
           the test vault&apos;s password; opens one you pick as a read-only vault; copies its first item into the vault
           last opened (a backup that lacks some of the item&apos;s files asks first, and the same button again copies
           without them).{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(restoreTestBackup);
+            }}
+          >
+            Restore a backup
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(answerRestoreQuestion);
+            }}
+          >
+            Answer restore question
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(finishRestore);
+            }}
+          >
+            Finish restore
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(cancelRestore);
+            }}
+          >
+            Cancel restore
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(restoreStatus);
+            }}
+          >
+            Restore status
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(retryRestoreRecovery);
+            }}
+          >
+            Retry restore recovery
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(dismissRestoreJournal);
+            }}
+          >
+            Dismiss restore journal
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(listPreRestore);
+            }}
+          >
+            List pre-restore copies
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(openPreRestore);
+            }}
+          >
+            Open a pre-restore copy
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              run(deletePreRestore);
+            }}
+          >
+            Delete a pre-restore copy
+          </button>{" "}
+          {restoring && <strong>Restore in progress </strong>}
+          Restores a backup you pick (with the folder to restore into) with the test vault&apos;s password: the vault
+          already there is kept beside it as a pre-restore copy, a question first (a cloud folder, a vault folder that
+          cannot be read) is answered with the second button, and nothing is swapped until Finish restore; lists the
+          pre-restore copies beside the vaults, opens the first read-only, and deletes it after asking; shows what
+          recovery of a half-done restore found, tries it again, and dismisses a journal it could not act on (asking
+          first, and the same button again says yes).{" "}
           Creates &quot;{TEST_VAULT}&quot; in the default vaults folder, then unlocks it from the vault list; adds a
           login to the vault last opened; copies that login&apos;s password to the clipboard; adds a file you pick to
           that vault; saves a copy of that file where you choose; adds a PDF or a .cmd file you pick and opens it (the
