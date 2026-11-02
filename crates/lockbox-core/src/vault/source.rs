@@ -443,9 +443,10 @@ pub(super) mod tests {
     pub(in crate::vault) const MIB: usize = 1 << 20;
 
     pub(in crate::vault) struct Fixture {
-        pub(in crate::vault) parent: TempDir,
         pub(in crate::vault) vault: Vault,
         pub(in crate::vault) recovery: RecoverySecret,
+        /// Kept last, so the vault is closed before the folder is removed.
+        pub(in crate::vault) parent: TempDir,
     }
 
     impl Fixture {

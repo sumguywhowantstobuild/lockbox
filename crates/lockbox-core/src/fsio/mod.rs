@@ -466,8 +466,34 @@ pub mod testutil {
     }
 
     impl Drop for TempDir {
+        /// A folder that cannot be removed fails the test: left unreported, it stays on disk for good. On Windows the
+        /// usual cause is a vault still open inside, so a `TempDir` must drop after the vaults in it. A test that is
+        /// already failing is left to report its own failure, because a second panic would abort the whole run.
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let wait = || std::thread::sleep(std::time::Duration::from_millis(100));
+            match remove_folder(&self.0, wait) {
+                Err(e) if !std::thread::panicking() => {
+                    panic!("test folder {} not removed: {e}", self.0.display())
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Removes `path` if it is still there, calling `wait` between attempts in case something holds a file for a
+    /// moment: a virus scan, or a thread the test did not wait for that still has a vault open (the desktop's folder
+    /// check). About five seconds in all, so that a busy machine does not fail a test that did nothing wrong.
+    pub(super) fn remove_folder(path: &Path, mut wait: impl FnMut()) -> std::io::Result<()> {
+        const ATTEMPTS: u32 = 50;
+        let mut attempt = 1;
+        loop {
+            match std::fs::remove_dir_all(path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) if attempt == ATTEMPTS => return Err(e),
+                Err(_) => wait(),
+                Ok(()) => return Ok(()),
+            }
+            attempt += 1;
         }
     }
 
@@ -1047,5 +1073,82 @@ mod tests {
         let (f, _path) = create_hidden_temp(dir.path(), ".tmp").unwrap();
         let attrs = f.metadata().unwrap().file_attributes();
         assert_ne!(attrs & 0x2, 0, "FILE_ATTRIBUTE_HIDDEN not set");
+    }
+
+    /// Opens `path` so that it cannot be deleted while the handle lives, as a vault's `.lock` is.
+    #[cfg(windows)]
+    fn hold_undeletable(path: &Path) -> File {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1 | 2);
+        options.open(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn temp_dir_fails_the_test_when_its_folder_stays() {
+        let dir = TempDir::new();
+        let path = dir.path().to_owned();
+        let held = hold_undeletable(&path.join("held"));
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(dir)));
+        drop(held);
+        fs::remove_dir_all(&path).unwrap();
+        let message = dropped.expect_err("the folder stayed and nothing was reported");
+        let message = message.downcast_ref::<String>().unwrap();
+        assert!(message.contains(&*path.to_string_lossy()), "{message}");
+    }
+
+    /// A panic during the first panic's unwinding would abort this test run instead of reaching here.
+    #[cfg(windows)]
+    #[test]
+    fn temp_dir_stays_quiet_when_the_test_is_already_failing() {
+        let dir = TempDir::new();
+        let path = dir.path().to_owned();
+        let held = hold_undeletable(&path.join("held"));
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _dir = dir;
+            panic!("the test's own failure");
+        }));
+        drop(held);
+        fs::remove_dir_all(&path).unwrap();
+        let message = failed.expect_err("the test panicked");
+        assert_eq!(
+            message.downcast_ref::<&str>(),
+            Some(&"the test's own failure")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_folder_tries_again_after_a_held_file_is_let_go() {
+        let dir = TempDir::new();
+        let mut held = Some(hold_undeletable(&dir.path().join("held")));
+        let mut waits = 0;
+        super::testutil::remove_folder(dir.path(), || {
+            waits += 1;
+            held = None;
+        })
+        .unwrap();
+        assert_eq!(waits, 1);
+        assert!(!dir.path().exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_folder_gives_up_with_the_error_after_its_attempts() {
+        let dir = TempDir::new();
+        let held = hold_undeletable(&dir.path().join("held"));
+        let mut waits = 0;
+        let result = super::testutil::remove_folder(dir.path(), || waits += 1);
+        assert!(result.is_err());
+        assert_eq!(waits, 49, "fifty attempts, a wait between each");
+        drop(held);
+    }
+
+    #[test]
+    fn temp_dir_accepts_a_folder_the_test_already_removed() {
+        let dir = TempDir::new();
+        fs::remove_dir_all(dir.path()).unwrap();
+        drop(dir);
     }
 }
