@@ -275,12 +275,14 @@ pub enum RestoreState {
     /// Extracted and checked, waiting for the user's yes. Not a long operation (spec §7.4 pauses the idle timer while
     /// one is running): an idle lock ends it like any lock of all vaults. `epoch` is the sessions' lock count then.
     /// `destination` is the folder it replaces: a lock of any session at that place ends it, whenever that session was
-    /// unlocked.
+    /// unlocked. `was_open`: a session was open there when it became `Prepared` (and none is known to have been closed
+    /// by the restore itself since), so a commit that finds none knows the user locked it, whatever the hook has done.
     Prepared {
         id: u32,
         prepared: Box<PreparedRestore>,
         cancel: CancelToken,
         destination: Option<Location>,
+        was_open: bool,
         epoch: u64,
     },
     /// The swap is being made: a long operation. Once the engine writes `swapping` nothing cancels it.
@@ -478,6 +480,7 @@ impl Restores {
                 prepared,
                 cancel,
                 destination,
+                was_open,
                 epoch,
                 ..
             } => {
@@ -490,6 +493,7 @@ impl Restores {
                     prepared: *prepared,
                     cancel,
                     destination,
+                    was_open,
                     epoch,
                 })
             }
@@ -542,12 +546,14 @@ impl Restores {
     }
 
     /// The commit `id` stopped before the swap began and the staged restore is intact: `Prepared` again, same ID and
-    /// same destination (the place, whoever is unlocked there when the next lock comes).
+    /// same destination (the place, whoever is unlocked there when the next lock comes). No session is recorded as open
+    /// there: if there was one, this commit closed it itself, which is not the user's lock.
     fn back_to_prepared(&self, id: u32, commit: Commit) {
         let Commit {
             prepared,
             cancel,
             destination,
+            was_open: _,
             epoch,
         } = commit;
         let mut inner = lock(&self.inner);
@@ -556,6 +562,7 @@ impl Restores {
             prepared: Box::new(prepared),
             cancel,
             destination,
+            was_open: false,
             epoch,
         };
     }
@@ -692,6 +699,7 @@ struct Commit {
     prepared: PreparedRestore,
     cancel: CancelToken,
     destination: Option<Location>,
+    was_open: bool,
     epoch: u64,
 }
 
@@ -1076,6 +1084,10 @@ impl Shell {
         }
         // The destination is the folder it replaces, whoever is unlocked there.
         let destination = location;
+        // Whether a session is open there now: a commit that finds none then knows the user locked it.
+        let was_open = destination
+            .as_ref()
+            .is_some_and(|place| self.sessions.find(place).is_some());
 
         let registered = {
             let mut inner = lock(&self.restore.inner);
@@ -1097,6 +1109,7 @@ impl Shell {
                             prepared: Box::new(prepared),
                             cancel: cancel.clone(),
                             destination,
+                            was_open,
                             epoch,
                         };
                         Ok(())
@@ -1150,6 +1163,7 @@ impl Shell {
             mut prepared,
             cancel,
             destination,
+            was_open,
             epoch,
         } = self.restore.begin_commit(restore)?;
         // The session open there now, whenever it was unlocked.
@@ -1158,8 +1172,9 @@ impl Shell {
             .and_then(|place| self.sessions.find(place));
 
         let operation = self.autolock.begin(None, RESTORE, cancel.clone());
-        // A lock of all vaults whose hook has not run yet.
-        if cancel.is_cancelled() || self.locked_since(epoch) {
+        // A lock of all vaults whose hook has not run yet; or the one session that was open at the destination locked by
+        // the user, whose hook is still queued (the token is not cancelled, and one session's lock leaves the epoch).
+        if cancel.is_cancelled() || self.locked_since(epoch) || (was_open && session.is_none()) {
             self.restore.end_commit(restore, true);
             drop(operation);
             drop(prepared);
@@ -1179,6 +1194,7 @@ impl Shell {
                     prepared,
                     cancel,
                     destination,
+                    was_open: false,
                     epoch,
                 };
                 self.restore.back_to_prepared(restore, kept);
@@ -1222,6 +1238,7 @@ impl Shell {
                             prepared,
                             cancel,
                             destination,
+                            was_open: false,
                             epoch,
                         };
                         self.restore.back_to_prepared(restore, kept);
@@ -2839,10 +2856,8 @@ mod tests {
         let added = done(ts.shell.add_existing_vault().unwrap());
         let (writable, _) = unlock(&ts, added.id);
 
-        assert!(
-            ts.shell.list_pre_restore().is_empty(),
-            "a live vault is not a copy"
-        );
+        // The ID from the listing taken before it was added, with no new listing in between: the commands themselves
+        // must see that the folder is a live vault.
         let opened = heavy(|| {
             ts.shell
                 .open_pre_restore_read_only(listed[0].id, password())
@@ -2853,6 +2868,10 @@ mod tests {
             Some(ShellError::NotFound)
         );
         assert!(aside.is_dir());
+        assert!(
+            ts.shell.list_pre_restore().is_empty(),
+            "and a new listing does not list it"
+        );
         let sessions = ts.shell.sessions.list();
         assert!(
             sessions
@@ -3082,6 +3101,50 @@ mod tests {
         assert!(dir.is_dir(), "the vault was not swapped");
         assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
         assert_eq!(names(&parent).len(), 1, "no pre-restore folder was made");
+    }
+
+    /// The destination was open when the restore became prepared, the user locks that one session, and its hook is still
+    /// queued behind another when the commit arrives: no session is found there, the token is not cancelled and the lock
+    /// of one session does not move the epoch, yet the restore must not go ahead.
+    #[test]
+    fn destination_lock_with_its_hook_still_queued_cancels() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+        let _ = g;
+        let view = prepared(&ts, &backup, &parent);
+
+        // The restore's hook is held back for the user's lock of the destination.
+        let (open_gate, gate) = mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        ts.shell
+            .restore
+            .before_hook(Arc::new(move |session, reason| {
+                if session.is_some() && reason == LockReason::Manual {
+                    let _ = lock(&gate).recv_timeout(PATIENCE);
+                }
+            }));
+
+        let answer = thread::scope(|scope| {
+            let locking = scope.spawn(|| ts.shell.sessions.lock(s, LockReason::Manual));
+            // Revoked at once (the session is locked); its hooks are what waits.
+            let start = Instant::now();
+            while ts.shell.sessions.list()[0].state != SessionState::Locked {
+                assert!(start.elapsed() < PATIENCE);
+                thread::sleep(Duration::from_millis(1));
+            }
+            let answer = ts.shell.restore_commit(view.restore).err();
+            open_gate.send(()).unwrap();
+            locking.join().unwrap();
+            answer
+        });
+
+        assert_eq!(answer, CANCELLED);
+        assert!(dir.is_dir(), "the vault was not swapped");
+        assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
+        assert_eq!(names(&parent).len(), 1, "no pre-restore folder was made");
+        assert!(ts.shell.restore.is_idle());
     }
 
     /// The pages' answers keep their shapes.

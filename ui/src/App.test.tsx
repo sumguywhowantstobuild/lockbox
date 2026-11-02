@@ -380,7 +380,19 @@ test("a_refused_finish_keeps_the_restore_for_a_retry_and_a_discard", async () =>
     ["restore_commit", { restore: 7 }],
   ]);
 
-  // A refusal that ends the restore forgets the ID; a refused discard keeps it.
+  // A refused finish followed by a discard: the ID is still there, so the discard goes through with it.
+  refusals = ["vault_in_use"];
+  fireEvent.click(screen.getByRole("button", { name: "Restore a backup" }));
+  await screen.findByText("restore beside it as", { exact: false });
+  fireEvent.click(screen.getByRole("button", { name: "Answer restore question" }));
+  await screen.findByText("Restore ready", { exact: false });
+  fireEvent.click(finish);
+  await screen.findByText('"kind":"vault_in_use"', { exact: false });
+  fireEvent.click(screen.getByRole("button", { name: "Cancel restore" }));
+  expect(await screen.findByText("Restore cancelled; nothing changed", { exact: false })).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("restore_discard", { restore: 7 });
+
+  // A refusal that ends the restore forgets the ID.
   refusals = [];
   fireEvent.click(screen.getByRole("button", { name: "Restore a backup" }));
   await screen.findByText("restore beside it as", { exact: false });
