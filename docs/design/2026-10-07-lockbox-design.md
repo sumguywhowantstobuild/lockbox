@@ -504,6 +504,9 @@ authenticated.
     similar) require an explicit confirmation before launch. "Executable types" are judged on the sanitised name (so
     `setup.exe.` counts), and also when Windows rates the type as dangerous.
   - The copy is marked **read-only. Edits are not saved back**; to update a stored file, use "Replace file".
+  - The copy carries Windows' **internet mark** (a `Zone.Identifier` stream with `ZoneId=3`), because a stored file's
+    original mark does not survive the vault: Office then blocks its macros, and Windows warns as it would for a
+    download. If the mark cannot be written, the file is not opened. To use macros in a stored file, use "Save a copy".
   - **Deletion is attempted** when the vault locks, when the app closes, and on the next launch; cleanup clears the
     read-only attribute first. Files held open by another app can't be deleted on Windows: Lockbox retries, shows
     "Couldn't remove N opened files. Close the app using them, then Retry," and retries on every launch until gone.
