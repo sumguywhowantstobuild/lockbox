@@ -233,6 +233,15 @@ impl Outputs {
             .is_some_and(|root| matches!(no_link_below(&root, &self.open), Checked::Delete { .. }))
     }
 
+    /// Whether a folder in `open\` keeps the permissions it is made with: only on NTFS, the file system vaults also
+    /// need. Elsewhere Windows may accept them and ignore them.
+    pub(crate) fn open_folder_keeps_permissions(&self) -> bool {
+        fs::canonicalize(&self.open)
+            .and_then(|open| self.volumes.volume_root(&open))
+            .and_then(|root| self.volumes.file_system(&root))
+            .is_ok_and(|file_system| file_system.eq_ignore_ascii_case("NTFS"))
+    }
+
     /// The folders directly inside `open\` that are certainly of Lockbox's making, by what is on disk and not by the
     /// journal: each named exactly 32 lowercase hex and, by its own metadata, a plain folder. Files, other names and
     /// links are not listed. None when `open\` is missing or a link leads to it. Each still passes the sweep's full

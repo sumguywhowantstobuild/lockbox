@@ -87,7 +87,7 @@ impl Shell {
                 if cancel.is_cancelled() {
                     return Err(ShellError::Cancelled);
                 }
-                let folder = self.open_folders.create(session)?;
+                let folder = self.open_folders.create(session, generation)?;
                 let copy = folder.join(&name);
                 made = Some(folder);
                 let journal = self.outputs.for_call(&self.sessions, session, generation);

@@ -4,14 +4,15 @@
 //!
 //! Each folder is written down in the output journal before it exists, so a crash leaves nothing the launch sweep does
 //! not find; the launch also looks in `open\` itself, for copies a damaged journal no longer lists. The list of folders
-//! is held only for changes to it, never across a file or journal call.
+//! is held only for changes to it, never across a file or journal call. Lock order: the list, then the sessions' own
+//! mutex (a cleanup reads which sessions are unlocked while it picks from the list).
 
 #[cfg(test)]
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::thread;
 use std::time::Instant;
 
@@ -23,7 +24,7 @@ use crate::error::{ShellError, ShellResult};
 use crate::lock;
 use crate::os::{same_name, win};
 use crate::outputs::{DELETE_TRIES, Outputs, set_read_only};
-use crate::session::{LockHook, Notice, Notifier, SessionId};
+use crate::session::{LockHook, Notice, Notifier, SessionId, Sessions};
 
 /// Longest name of an opened copy, in characters (spec §7.2: length capped).
 const MAX_NAME_CHARS: usize = 100;
@@ -153,10 +154,28 @@ pub struct RemoveReport {
 /// One "Open" folder.
 struct Folder {
     path: PathBuf,
-    /// The session the copy came from; `None`: left by an earlier run of the app.
-    session: Option<SessionId>,
+    /// The session the copy came from and its generation then, which is how long the copy may live; `None`: left by an
+    /// earlier run of the app.
+    owner: Option<(SessionId, u64)>,
     /// A cleanup could not remove it yet: [`retry`](OpenFolders::retry) tries it again.
     stuck: bool,
+}
+
+/// Picks the folders whose lifetime is over, by the sessions as they are now: every folder made in a generation that is
+/// no longer unlocked. A session keeps its ID when it unlocks again, so the generation is what tells a new copy from an
+/// old one. A folder from an earlier run has no owner left, so each lock and the app's close try it too (spec §7.2). With
+/// the sessions gone nothing is alive, so every folder is picked.
+fn ended(sessions: &Weak<Sessions>) -> impl Fn(&Folder) -> bool + use<> {
+    let unlocked: Option<Vec<(SessionId, u64)>> = sessions.upgrade().map(|sessions| {
+        let unlocked = sessions.unlocked().into_iter();
+        unlocked
+            .map(|(id, generation, _)| (id, generation))
+            .collect()
+    });
+    move |folder| match (&unlocked, &folder.owner) {
+        (Some(unlocked), Some(owner)) => !unlocked.contains(owner),
+        _ => true,
+    }
 }
 
 /// Tests only: a step a test acts at, with the path it is about to use.
@@ -171,21 +190,29 @@ pub struct OpenFolders {
     /// Every folder made and not yet known to be gone. A cleanup takes out what it removes, so no two work on one, and
     /// puts back what it could not.
     folders: Mutex<Vec<Folder>>,
-    /// How many cleanup workers are running, and their end.
-    workers: Mutex<usize>,
+    /// How many cleanups are under way, whatever started them, and their end ([`wait_idle`](Self::wait_idle)).
+    cleanups: Mutex<usize>,
     idle: Condvar,
     #[cfg(test)]
     steps: Mutex<HashMap<&'static str, StepHook>>,
 }
 
-/// Counts a cleanup worker as ended when dropped: after its work, also after a panic, or unrun when its thread could
-/// not start.
+/// One cleanup under way, from before its folders leave the list until dropped, also after a panic.
+struct Cleaning<'a>(&'a OpenFolders);
+
+impl Drop for Cleaning<'_> {
+    fn drop(&mut self) {
+        self.0.cleanup_ended();
+    }
+}
+
+/// A lock's cleanup worker, counted from before its thread runs until dropped: after its work, also after a panic, or
+/// unrun when its thread could not start.
 struct WorkerDone(Arc<OpenFolders>);
 
 impl Drop for WorkerDone {
     fn drop(&mut self) {
-        *lock(&self.0.workers) -= 1;
-        self.0.idle.notify_all();
+        self.0.cleanup_ended();
     }
 }
 
@@ -197,7 +224,7 @@ impl OpenFolders {
             outputs,
             notifier,
             folders: Mutex::default(),
-            workers: Mutex::default(),
+            cleanups: Mutex::default(),
             idle: Condvar::new(),
             #[cfg(test)]
             steps: Mutex::default(),
@@ -205,7 +232,8 @@ impl OpenFolders {
     }
 
     /// Tests only: runs `hook` once at `step`: `recorded` (the journal lists the folder; it does not exist yet),
-    /// `before_mark` (the copy has verified), `sealed` (the copy is marked and read-only).
+    /// `before_mark` (the copy has verified), `sealed` (the copy is marked and read-only), `cleanup_starts` (a lock's
+    /// cleanup worker has started and selected nothing yet; no path).
     #[cfg(test)]
     pub(crate) fn at_step(&self, step: &'static str, hook: StepHook) {
         lock(&self.steps).insert(step, hook);
@@ -220,16 +248,17 @@ impl OpenFolders {
         }
     }
 
-    /// Makes a new folder `open\<32 lowercase hex>` for a copy from `session`, for the current user alone
-    /// ([`win::create_private_folder`]), and lists it. The journal comes first: if it cannot be written, nothing is
-    /// made (spec §7.2). A lock from now on removes the folder; so does [`discard`](Self::discard).
+    /// Makes a new folder `open\<32 lowercase hex>` for a copy from `session` in `generation`, for the current user
+    /// alone ([`win::create_private_folder`]), and lists it. The journal comes first: if it cannot be written, nothing
+    /// is made (spec §7.2). The lock that ends that generation removes the folder; so does [`discard`](Self::discard).
     ///
     /// Refused (`InvalidInput { what: "open folder" }`) when a link leads to `open\` (a Local AppData moved to another
     /// drive by a junction, a share): every cleanup would then leave the copy on disk for good (the sweep's rule, which
-    /// removes nothing behind a link), so no plaintext goes there. Save a copy still works.
-    pub fn create(&self, session: SessionId) -> ShellResult<PathBuf> {
+    /// removes nothing behind a link), so no plaintext goes there. The same where the folder's permissions would not last
+    /// (not NTFS). Save a copy still works.
+    pub fn create(&self, session: SessionId, generation: u64) -> ShellResult<PathBuf> {
         fs::create_dir_all(&self.root)?;
-        if !self.outputs.open_folder_is_plain() {
+        if !self.outputs.open_folder_is_plain() || !self.outputs.open_folder_keeps_permissions() {
             return Err(ShellError::InvalidInput {
                 what: "open folder",
             });
@@ -244,7 +273,7 @@ impl OpenFolders {
         }
         lock(&self.folders).push(Folder {
             path: folder.clone(),
-            session: Some(session),
+            owner: Some((session, generation)),
             stuck: false,
         });
         Ok(folder)
@@ -264,14 +293,9 @@ impl OpenFolders {
         Ok(())
     }
 
-    /// Removes the folders of `session`, retrying while something holds them (seconds). Those it cannot remove stay
-    /// listed and in the journal, for a retry, the app's close or the next launch.
-    pub fn remove_for(&self, session: SessionId) -> RemoveReport {
-        self.remove(|folder| folder.session == Some(session))
-    }
-
-    /// Removes every folder, like [`remove_for`](Self::remove_for).
-    pub fn remove_all(&self) -> RemoveReport {
+    /// Tests only: removes every folder, as any cleanup does.
+    #[cfg(test)]
+    pub(crate) fn remove_all(&self) -> RemoveReport {
         self.remove(|_| true)
     }
 
@@ -281,9 +305,17 @@ impl OpenFolders {
         self.remove(|folder| folder.stuck)
     }
 
-    /// Removes the folder of an open that stopped, unless a lock's cleanup has it already.
+    /// Removes the folder of an open that stopped, unless a lock's cleanup has it already. A copy something holds stays
+    /// listed, and the page is told.
     pub fn discard(&self, folder: &Path) {
-        self.remove(|listed| listed.path == folder);
+        self.tell(self.remove(|listed| listed.path == folder));
+    }
+
+    /// Tells the page when opened copies are left for its Retry.
+    fn tell(&self, report: RemoveReport) {
+        if report.still_open > 0 {
+            self.notifier.notice(&Notice::OpenCleanup(report));
+        }
     }
 
     /// Launch work, after the journal's own sweep (spec §7.2): the folders the sweep kept go on the retry list as they
@@ -292,6 +324,7 @@ impl OpenFolders {
     /// delete, and put on the list if another app holds it. The journal itself is not needed, so a damaged one does
     /// not stop this; no entry is written, since the next launch finds a kept folder the same way.
     pub fn sweep_leftovers(&self) -> RemoveReport {
+        let _cleaning = self.cleaning();
         let kept = self.outputs.open_entries();
         let on_disk = self.outputs.open_folders_on_disk();
         let leftovers: Vec<Folder> = {
@@ -305,7 +338,7 @@ impl OpenFolders {
                 if !known(&folders, &path) {
                     folders.push(Folder {
                         path,
-                        session: None,
+                        owner: None,
                         stuck: true,
                     });
                 }
@@ -315,7 +348,7 @@ impl OpenFolders {
                 .filter(|path| !known(&folders, path))
                 .map(|path| Folder {
                     path,
-                    session: None,
+                    owner: None,
                     stuck: false,
                 })
                 .collect()
@@ -323,10 +356,30 @@ impl OpenFolders {
         self.remove_each(leftovers)
     }
 
+    /// Starts counting a cleanup, for [`wait_idle`](Self::wait_idle).
+    fn cleaning(&self) -> Cleaning<'_> {
+        *lock(&self.cleanups) += 1;
+        Cleaning(self)
+    }
+
+    fn cleanup_ended(&self) {
+        *lock(&self.cleanups) -= 1;
+        self.idle.notify_all();
+    }
+
     /// Takes the folders `which` picks out of the list and removes each.
     fn remove(&self, which: impl Fn(&Folder) -> bool) -> RemoveReport {
+        self.remove_picked(|| which)
+    }
+
+    /// [`remove`](Self::remove), with what picks the folders made while the list is held: nothing joins the list
+    /// between what it reads and the choice. Counted as a cleanup from before the folders leave the list, so a close
+    /// that finds them gone from it still waits for them.
+    fn remove_picked<P: Fn(&Folder) -> bool>(&self, pick: impl FnOnce() -> P) -> RemoveReport {
+        let _cleaning = self.cleaning();
         let taken: Vec<Folder> = {
             let mut folders = lock(&self.folders);
+            let which = pick();
             let (taken, kept) = std::mem::take(&mut *folders).into_iter().partition(&which);
             *folders = kept;
             taken
@@ -356,42 +409,45 @@ impl OpenFolders {
         }
     }
 
-    /// Waits for the cleanup workers still running, until `until`: whether none is left. A join could not stop at a
-    /// time, so each worker counts itself out instead.
+    /// Waits for the cleanups under way, whatever started them, until `until`: whether none is left. A join could not
+    /// stop at a time, so each counts itself out instead.
     pub fn wait_idle(&self, until: Instant) -> bool {
-        let workers = lock(&self.workers);
+        let cleanups = lock(&self.cleanups);
         let left = until.saturating_duration_since(Instant::now());
-        let (workers, _) = self
+        let (cleanups, _) = self
             .idle
-            .wait_timeout_while(workers, left, |workers| *workers > 0)
+            .wait_timeout_while(cleanups, left, |cleanups| *cleanups > 0)
             .unwrap_or_else(PoisonError::into_inner);
-        *workers == 0
+        *cleanups == 0
     }
 
-    /// The lock hook, after the clipboard's: a lock of one session removes its folders, a lock of all (`None`, app
-    /// close too) every folder. It only starts a worker and returns, since deletes retry for seconds and hooks run one
-    /// after the other on one thread. A worker that cannot start leaves its folders listed, for the next cleanup.
-    pub fn lock_hook(self: &Arc<Self>) -> LockHook {
+    /// The lock hook, after the clipboard's: a lock removes the folders whose lifetime is over ([`ended`]), which a lock
+    /// of all, app close included, makes of every folder of this run. It only starts a worker and returns, since deletes
+    /// retry for seconds and hooks run one after the other on one thread. A worker that cannot start leaves its folders
+    /// listed, for the next cleanup. `sessions` is weak because the sessions hold this hook: a strong one would keep them
+    /// and their vaults alive for good.
+    pub fn lock_hook(self: &Arc<Self>, sessions: Weak<Sessions>) -> LockHook {
         let folders = Arc::clone(self);
-        Box::new(move |only, _reason| folders.start_cleanup(only))
+        Box::new(move |_, _| folders.start_cleanup(&sessions))
     }
 
-    fn start_cleanup(self: &Arc<Self>, only: Option<SessionId>) {
-        let selected = move |folder: &Folder| only.is_none() || folder.session == only;
-        if !lock(&self.folders).iter().any(selected) {
-            return;
+    fn start_cleanup(self: &Arc<Self>, sessions: &Weak<Sessions>) {
+        {
+            let folders = lock(&self.folders);
+            if folders.is_empty() || !folders.iter().any(ended(sessions)) {
+                return;
+            }
         }
-        *lock(&self.workers) += 1;
+        *lock(&self.cleanups) += 1;
         let done = WorkerDone(Arc::clone(self));
-        let folders = Arc::clone(self);
+        let (folders, sessions) = (Arc::clone(self), Weak::clone(sessions));
         let _ = thread::Builder::new()
             .name("lockbox-open-cleanup".into())
             .spawn(move || {
                 let _done = done;
-                let report = folders.remove(selected);
-                if report.still_open > 0 {
-                    folders.notifier.notice(&Notice::OpenCleanup(report));
-                }
+                #[cfg(test)]
+                folders.step("cleanup_starts", Path::new(""));
+                folders.tell(folders.remove_picked(|| ended(&sessions)));
             });
     }
 }
@@ -412,7 +468,7 @@ mod tests {
     use crate::autolock::SHUTDOWN_WAIT;
     use crate::error::Outcome;
     use crate::session::{LockReason, Tagged};
-    use crate::testing::TestShell;
+    use crate::testing::{FakeVolume, LOCAL_NTFS, TEST_PASSWORD, TestShell, heavy};
 
     /// How long a test thread waits for another before it fails instead of hanging.
     const GIVE_UP: Duration = Duration::from_secs(60);
@@ -468,7 +524,7 @@ mod tests {
         }
     }
 
-    /// Waits for the cleanup workers, which a test expects to end.
+    /// Waits for the cleanups, which a test expects to end.
     fn cleaned(ts: &TestShell) {
         assert!(
             ts.shell.open_folders.wait_idle(Instant::now() + GIVE_UP),
@@ -794,6 +850,133 @@ mod tests {
         );
     }
 
+    /// Fix round 1: a cleanup that starts late, after its vault was unlocked again and another file opened, removes
+    /// the copy of the lock it came from and leaves the new one, which belongs to a later generation of that session.
+    #[test]
+    fn late_cleanup_leaves_a_copy_opened_since() {
+        let ts = TestShell::new();
+        let file = stored(&ts, "Family", "report.pdf");
+        let (s, _, id, file_id) = file.clone();
+        open(&ts, &file).unwrap();
+        let old_copy = opened_copy(&ts);
+        let (parked, is_parked) = mpsc::channel();
+        let (let_go, released) = mpsc::channel::<()>();
+        ts.shell.open_folders.at_step(
+            "cleanup_starts",
+            Box::new(move |_| {
+                parked.send(()).unwrap();
+                let _ = released.recv_timeout(GIVE_UP);
+            }),
+        );
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        is_parked.recv_timeout(GIVE_UP).expect("the cleanup began");
+
+        let registry_id = ts.shell.registry.entries()[0].0;
+        let password = zeroize::Zeroizing::new(TEST_PASSWORD.to_owned());
+        let unlocked = heavy(|| ts.shell.unlock_vault(registry_id, password)).unwrap();
+        assert_eq!(unlocked.session, s, "the same session ID");
+        let again = (s, unlocked.generation, id, file_id);
+        open(&ts, &again).unwrap();
+        let new_copy = opened_copy(&ts);
+        assert_ne!(new_copy, old_copy);
+
+        let_go.send(()).unwrap();
+        cleaned(&ts);
+        assert!(!old_copy.parent().unwrap().exists(), "the old one goes");
+        assert_eq!(fs::read(&new_copy).unwrap(), PDF, "the new one stays");
+        assert_eq!(ts.journal(), [new_copy.parent().unwrap().to_path_buf()]);
+
+        // Its own lock takes it.
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        cleaned(&ts);
+        assert_eq!(folders_on_disk(&ts), Vec::<String>::new());
+    }
+
+    /// Fix round 1: a Retry parked on a held folder counts as a cleanup: a close would wait for it. The folder is off
+    /// the list by then, so nothing else shows it is still being worked on.
+    #[test]
+    fn wait_idle_covers_a_retry() {
+        let ts = TestShell::new();
+        let file = stored(&ts, "Family", "report.pdf");
+        open(&ts, &file).unwrap();
+        let copy = opened_copy(&ts);
+        let held = hold(&copy);
+        assert_eq!(ts.shell.open_folders.remove_all().still_open, 1);
+
+        let (in_retry, retrying) = mpsc::channel();
+        let (let_go, released) = mpsc::channel::<()>();
+        ts.shell.outputs.on_retry(Box::new(move || {
+            in_retry.send(()).unwrap();
+            let _ = released.recv_timeout(GIVE_UP);
+            drop(held);
+        }));
+        let shell = Arc::clone(&ts.shell);
+        let retry = thread::spawn(move || shell.open_folders.retry());
+        retrying.recv_timeout(GIVE_UP).expect("the retry is held");
+        assert!(
+            !ts.shell.open_folders.wait_idle(Instant::now()),
+            "the parked retry counts"
+        );
+        let_go.send(()).unwrap();
+        cleaned(&ts);
+        assert_eq!(retry.join().unwrap().removed, 1);
+        assert!(!copy.parent().unwrap().exists());
+    }
+
+    /// Fix round 1: the same for the removal of an open that stopped.
+    #[test]
+    fn wait_idle_covers_a_discard() {
+        let ts = TestShell::new();
+        let file = stored(&ts, "Family", "report.pdf");
+        open(&ts, &file).unwrap();
+        let copy = opened_copy(&ts);
+        let held = hold(&copy);
+        let (in_retry, retrying) = mpsc::channel();
+        let (let_go, released) = mpsc::channel::<()>();
+        ts.shell.outputs.on_retry(Box::new(move || {
+            in_retry.send(()).unwrap();
+            let _ = released.recv_timeout(GIVE_UP);
+            drop(held);
+        }));
+        let shell = Arc::clone(&ts.shell);
+        let folder = copy.parent().unwrap().to_path_buf();
+        let discard = thread::spawn(move || shell.open_folders.discard(&folder));
+        retrying.recv_timeout(GIVE_UP).expect("the discard is held");
+        assert!(
+            !ts.shell.open_folders.wait_idle(Instant::now()),
+            "the parked discard counts"
+        );
+        let_go.send(()).unwrap();
+        cleaned(&ts);
+        discard.join().unwrap();
+        assert!(!copy.parent().unwrap().exists());
+    }
+
+    /// Fix round 1: a launch fails while something holds the copy: the page hears of it, and it goes on Retry.
+    #[test]
+    fn failed_launch_of_a_held_copy_is_reported() {
+        let ts = TestShell::new();
+        let file = stored(&ts, "Family", "report.pdf");
+        ts.launcher.fail_next_file();
+        let launcher = Arc::clone(&ts.launcher);
+        let (handle, holding) = mpsc::channel();
+        ts.launcher.during_next_open(Box::new(move || {
+            handle.send(hold(&launcher.opened_files()[0])).unwrap();
+        }));
+        let answer = open(&ts, &file);
+        assert!(matches!(answer, Err(ShellError::Core(view)) if view.kind == "io"));
+        assert_eq!(
+            ts.events.notices(),
+            [json!({ "kind": "open_cleanup", "removed": 0, "still_open": 1 })]
+        );
+        let copy = opened_copy(&ts);
+        assert!(copy.exists());
+        drop(holding.recv().unwrap());
+        assert_eq!(ts.shell.open_folders.retry().removed, 1);
+        assert_eq!(folders_on_disk(&ts), Vec::<String>::new());
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
     /// A lock removes the copies of its own vault only; the other vault's stay until it locks too.
     #[test]
     fn lock_removes_that_vaults_opened_files() {
@@ -817,7 +1000,9 @@ mod tests {
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
     }
 
-    /// App close removes every copy, within its own wait.
+    /// App close removes every copy. Fix round 1: a shutdown on a busy machine may return at its deadline with the work
+    /// still going, which is its right, so the test waits for that work itself: its hooks first (a hook after the "Open"
+    /// one says when), then the cleanup they started. Nothing but the shutdown starts a cleanup here.
     #[test]
     fn shutdown_removes_all_opened_files() {
         let ts = TestShell::new();
@@ -826,9 +1011,32 @@ mod tests {
         open(&ts, &family).unwrap();
         open(&ts, &work).unwrap();
         assert_eq!(folders_on_disk(&ts).len(), 2);
+        let (hooks_ran, hooks_done) = mpsc::channel();
+        ts.shell.sessions.on_lock(Box::new(move |_, _| {
+            let _ = hooks_ran.send(());
+        }));
         ts.shell.shutdown();
+        hooks_done.recv_timeout(GIVE_UP).unwrap();
+        cleaned(&ts);
         assert_eq!(folders_on_disk(&ts), Vec::<String>::new());
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// Fix round 1: with the sessions gone nothing is alive, so a cleanup picks every folder, an earlier run's too.
+    #[test]
+    fn cleanup_with_the_sessions_gone_removes_everything() {
+        let ts = TestShell::new();
+        let file = stored(&ts, "Family", "report.pdf");
+        open(&ts, &file).unwrap();
+        let (leftover, copy) = leftover_listed_by_nothing(&ts);
+        let held = hold(&copy);
+        ts.shell.open_folders.sweep_leftovers();
+        drop(held);
+        let hook = ts.shell.open_folders.lock_hook(Weak::new());
+        hook(None, LockReason::AppClosing);
+        cleaned(&ts);
+        assert!(!leftover.exists());
+        assert_eq!(folders_on_disk(&ts), Vec::<String>::new());
     }
 
     /// A cleanup parked in its retries for good: the shutdown waits for it, up to its one deadline and not past it.
@@ -1018,6 +1226,30 @@ mod tests {
         assert_eq!(folders_on_disk(&ts), Vec::<String>::new(), "nothing made");
     }
 
+    /// Fix round 2: where permissions do not last, a user-only folder cannot be promised, so no plaintext goes there.
+    #[test]
+    fn open_refused_where_permissions_do_not_last() {
+        let ts = TestShell::new();
+        let file = stored(&ts, "Family", "report.pdf");
+        fs::create_dir_all(&ts.shell.paths.open).unwrap();
+        ts.volumes.mount(
+            &ts.shell.paths.open,
+            FakeVolume {
+                file_system: "FAT32",
+                ..LOCAL_NTFS
+            },
+        );
+        assert_eq!(
+            open(&ts, &file).err(),
+            Some(ShellError::InvalidInput {
+                what: "open folder"
+            })
+        );
+        assert!(ts.launcher.opened_files().is_empty());
+        assert_eq!(folders_on_disk(&ts), Vec::<String>::new());
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
     /// A link on the way to `open\`: the sweep's rule would leave any copy there on disk for good, so none is made.
     #[test]
     fn open_refused_when_a_link_leads_to_the_open_folder() {
@@ -1082,14 +1314,17 @@ mod tests {
         assert_eq!(notices[1], told, "{notices}");
         assert!(ts.events.notices().contains(&told));
 
-        drop(held);
         assert_eq!(
             ts.shell.open_folders.retry(),
             RemoveReport {
-                removed: 1,
-                still_open: 0
+                removed: 0,
+                still_open: 1
             }
         );
+        drop(held);
+        // It has no owner left, so a lock tries it too (spec §7.2).
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        cleaned(&ts);
         assert!(!folder.exists());
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
     }
@@ -1097,7 +1332,7 @@ mod tests {
     const LEFTOVER: &str = "0123456789abcdef0123456789abcdef";
 
     /// A folder `open\<LEFTOVER>` holding a read-only copy, as an earlier run left it, listed nowhere.
-    fn leftover(ts: &TestShell) -> (PathBuf, PathBuf) {
+    fn leftover_listed_by_nothing(ts: &TestShell) -> (PathBuf, PathBuf) {
         let folder = ts.shell.paths.open.join(LEFTOVER);
         fs::create_dir_all(&folder).unwrap();
         let copy = folder.join("report.pdf");
@@ -1113,7 +1348,7 @@ mod tests {
     #[test]
     fn leftover_without_a_journal_entry_is_removed_at_launch() {
         let ts = TestShell::new();
-        let (folder, _) = leftover(&ts);
+        let (folder, _) = leftover_listed_by_nothing(&ts);
         assert_eq!(ts.shell.sweep_outputs(), Default::default());
         assert!(!folder.exists());
         assert!(ts.shell.paths.open.is_dir(), "`open\\` itself stays");
@@ -1130,7 +1365,7 @@ mod tests {
     fn leftover_is_removed_while_the_journal_is_damaged() {
         let ts = TestShell::new();
         let (s, g, id, file_id) = stored(&ts, "Family", "report.pdf");
-        let (folder, _) = leftover(&ts);
+        let (folder, _) = leftover_listed_by_nothing(&ts);
         fs::write(&ts.shell.paths.outputs, "not json").unwrap();
 
         assert!(ts.shell.sweep_outputs().unreadable);
@@ -1205,7 +1440,7 @@ mod tests {
     #[test]
     fn leftover_held_open_is_counted_and_retried() {
         let ts = TestShell::new();
-        let (folder, copy) = leftover(&ts);
+        let (folder, copy) = leftover_listed_by_nothing(&ts);
         let listed = ts.shell.paths.open.join("fedcba9876543210fedcba9876543210");
         fs::create_dir(&listed).unwrap();
         let listed_copy = listed.join("listed.pdf");

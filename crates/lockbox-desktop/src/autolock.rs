@@ -42,7 +42,7 @@ pub struct AutoLock {
     idle: Arc<dyn IdleSource>,
     operations: Arc<Operations>,
     closing: Arc<Closing>,
-    /// The "Open" folders, whose cleanup workers a close waits for after the hooks, within its deadline.
+    /// The "Open" folders, whose cleanups a close waits for after the hooks, within its deadline.
     open_folders: Arc<OpenFolders>,
     /// Set while a folder check runs: at most one at a time.
     probing: Arc<AtomicBool>,
@@ -440,11 +440,11 @@ impl AutoLock {
 
     /// Closing the app ([`Shell::shutdown`](crate::shell::Shell::shutdown)). The first call shuts the closing gates at
     /// once (no open and no long operation is admitted after it), then finishes on a helper thread: every long
-    /// operation cancelled, every vault revoked, then the hooks, then the "Open" cleanup workers they started. Every
-    /// call returns once every vault is revoked and the hooks and workers are done, or at [`SHUTDOWN_WAIT`] after it was
-    /// made, whichever comes first; the hooks and workers get no longer than the first call's deadline. If the helper
+    /// operation cancelled, every vault revoked, then the hooks, then the "Open" cleanups. Every
+    /// call returns once every vault is revoked and the hooks and cleanups are done, or at [`SHUTDOWN_WAIT`] after it was
+    /// made, whichever comes first; the hooks and cleanups get no longer than the first call's deadline. If the helper
     /// thread cannot start, the vaults are revoked here and the hooks run on the hook thread, waited for here until the
-    /// same deadline, and the workers too.
+    /// same deadline, and the cleanups too.
     pub(crate) fn shutdown(&self) {
         let deadline = Instant::now() + SHUTDOWN_WAIT;
         let mut first = false;

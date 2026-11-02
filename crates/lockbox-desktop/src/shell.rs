@@ -90,7 +90,7 @@ impl Shell {
         // The first lock hook, before any other: a lock clears the clipboard before anything else of its hooks runs.
         sessions.on_lock(clipboard.lock_hook());
         // Then the "Open" cleanup, which hands its deletes to a worker and returns at once.
-        sessions.on_lock(open_folders.lock_hook());
+        sessions.on_lock(open_folders.lock_hook(Arc::downgrade(&sessions)));
         Ok(Shell {
             sessions,
             settings,
