@@ -6,15 +6,17 @@
 
 use super::cleanup::ORPHANED_DIR;
 use super::files::FILES_DIR;
+use super::files::refuse_vault_folder;
 use super::folder_name;
 use super::items::ITEMS_DIR;
 use super::journal::{
     DAMAGED, IN_PROGRESS, JournalLock, JournalStep, PRE_RESTORE, RESTORE_JOURNAL_VERSION,
     RestoreJournal, check_staging_parent, create_journal, is_pre_restore_name, journal_exists,
-    lock_journal, new_staging_path, plain_absolute, read_journal, remove_journal_if_owner,
-    remove_own_journal, remove_staging, remove_staging_then_journal, validate_journal,
-    validate_journal_on_disk, write_journal,
+    lock_journal, new_staging_path, plain_absolute, read_checked_journal, read_journal,
+    remove_journal_if_owner, remove_own_journal, remove_staging, remove_staging_then_journal,
+    validate_journal, validate_journal_on_disk, write_journal,
 };
+use super::naming::{check_folder_name, check_path_room};
 use super::source::{
     VaultSource, attached_blobs, attached_refs, check_listed, check_opened, copy_blob,
     manifest_hashes, unlock_source,
@@ -33,7 +35,7 @@ use crate::lockfile::VaultLock;
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, ErrorKind};
+use std::io;
 use std::path::{Path, PathBuf};
 
 const BAD_PATH: CoreError = CoreError::InvalidInput {
@@ -42,6 +44,21 @@ const BAD_PATH: CoreError = CoreError::InvalidInput {
 const SEVERAL_COPIES: CoreError = CoreError::InvalidInput {
     what: "several copies of this vault",
 };
+const ALREADY_HERE: CoreError = CoreError::InvalidInput {
+    what: "vault already here",
+};
+
+/// Where a restore puts the vault, in the parent folder it is given (spec 6.8 step 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreDestination {
+    /// The folder of the same vault, which is replaced (its old copy kept as
+    /// `<folder>.before-restore`); without one, a new folder `<name>-<short id>`.
+    SameVault,
+    /// A new folder of this name, which must not exist yet, when no readable copy of the vault
+    /// is in the parent: for a vault folder whose two header copies are unreadable, so restore
+    /// cannot tell it is the same vault, and which it leaves untouched.
+    NewFolder(String),
+}
 
 /// A backup that is unlocked, checked and extracted into a hidden staging folder beside its
 /// destination, ready to be swapped in. Dropping it discards the staging folder.
@@ -125,9 +142,22 @@ fn find_existing(parent: &Path, id: &VaultId, cancel: &CancelToken) -> Result<Op
     Ok(found)
 }
 
+/// `parent/folder`, for a vault folder that does not exist yet: refused with "destination
+/// exists" if anything at all is at that name, a dangling link included (by
+/// `symlink_metadata`, which on Windows also finds a name that differs only in letter case). A
+/// new folder never replaces anything, and the swap's no-replace rename refuses again if
+/// something takes the name after this look.
+fn new_folder_target(parent: &Path, folder: &str) -> Result<PathBuf> {
+    let target = parent.join(folder);
+    if journal_exists(&target)? {
+        return Err(DESTINATION_EXISTS);
+    }
+    Ok(target)
+}
+
 /// Test hook: once an entry is written, closed and synced, flips one data byte of it, so the
 /// read-back that follows must catch it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 fn corrupt_if_armed(path: &Path) -> Result<()> {
     if crate::fsio::failpoint::check("restore.corrupt_extract").is_err() {
         crate::fsio::testutil::flip_byte(path, 0)?;
@@ -139,7 +169,10 @@ impl PreparedRestore {
     /// Spec 6.8 steps 1 to 4. Everything that can refuse does so before anything is written:
     /// no journal yet, the archive structure, the credential, the manifest MAC and every
     /// header and item hash, the header MAC, no damaged item, no unattached blob, free space,
-    /// and the destination. Only then is the journal written (before the staging folder
+    /// and the destination ([`RestoreDestination`]: a new folder is refused for a bad name,
+    /// checked first of all, for a path too long for Windows, inside a vault folder, while a
+    /// readable copy of the vault is in `parent`, and when anything at all is at that name).
+    /// Only then is the journal written (before the staging folder
     /// exists) and the backup extracted into `parent/.restore-<hex>`, each entry hashed
     /// against the manifest as it is written and again as it is read back from disk, each blob
     /// authenticated as it is written. Any error after the journal removes the staging folder,
@@ -150,9 +183,14 @@ impl PreparedRestore {
         archive: &Path,
         parent: &Path,
         credential: Credential,
+        destination: RestoreDestination,
         journal: &Path,
         cancel: &CancelToken,
     ) -> Result<PreparedRestore> {
+        // A bad name is refused before the archive is even opened (unlocking takes a second).
+        if let RestoreDestination::NewFolder(chosen) = &destination {
+            check_folder_name(chosen)?;
+        }
         // Anything at the journal path counts, a damaged or newer journal too: only recovery
         // reads it.
         if journal_exists(journal)? {
@@ -162,6 +200,13 @@ impl PreparedRestore {
         let parent = std::path::absolute(parent)?;
         if !plain_absolute(&parent) {
             return Err(BAD_PATH);
+        }
+        if let RestoreDestination::NewFolder(chosen) = &destination {
+            let target = parent.join(chosen);
+            // Every path the restored vault needs must fit Windows' limit, and a vault never
+            // goes inside another vault's folder (the damaged one's included).
+            check_path_room(&target, &new_staging_path(&parent))?;
+            refuse_vault_folder(&target)?;
         }
         let src = VaultSource::Archive(BackupArchive::open(archive, cancel)?);
         let opened = unlock_source(&src, &credential, cancel)?;
@@ -175,15 +220,19 @@ impl PreparedRestore {
 
         let (name, vault_id) = (opened.header.name.clone(), opened.header.vault_id);
         let existing = find_existing(&parent, &vault_id, cancel)?;
-        let target = match &existing {
-            Some(dir) => dir.clone(),
-            None => {
-                let target = parent.join(folder_name(&name, &vault_id));
-                match fs::symlink_metadata(&target) {
-                    Ok(_) => return Err(DESTINATION_EXISTS),
-                    Err(e) if e.kind() == ErrorKind::NotFound => target,
-                    Err(e) => return Err(e.into()),
-                }
+        let target = match (&destination, &existing) {
+            (RestoreDestination::SameVault, Some(dir)) => dir.clone(),
+            (RestoreDestination::SameVault, None) => {
+                let target = new_folder_target(&parent, &folder_name(&name, &vault_id))?;
+                // One click too deep in a folder picker would nest this copy inside the vault it was meant to replace.
+                refuse_vault_folder(&target)?;
+                target
+            }
+            // Two writable copies would make every later restore here refuse "several copies".
+            (RestoreDestination::NewFolder(_), Some(_)) => return Err(ALREADY_HERE),
+            (RestoreDestination::NewFolder(chosen), None) => {
+                check_folder_name(chosen)?;
+                new_folder_target(&parent, chosen)?
             }
         };
 
@@ -196,7 +245,7 @@ impl PreparedRestore {
             before_restore: None,
         };
         validate_journal(&entry)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.before_journal")?;
         {
             // The look at the journal path and the publish are one step for everybody who
@@ -205,7 +254,7 @@ impl PreparedRestore {
             if journal_exists(journal)? {
                 return Err(IN_PROGRESS);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("restore.under_lock")?;
             if let Err(e) = create_journal(journal, &entry) {
                 // An error reported after the journal landed leaves one that is ours; it goes.
@@ -217,7 +266,7 @@ impl PreparedRestore {
         // Until the folder exists it is not ours to remove: whatever is at that path stays, and
         // only this operation's journal goes.
         let created: Result<()> = (|| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("restore.before_staging")?;
             Ok(fs::create_dir(&staging)?)
         })();
@@ -279,7 +328,7 @@ impl PreparedRestore {
             }
             file.sync_all()?;
             drop(file); // The read-back below opens it again.
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             corrupt_if_armed(&path)?;
             let hash = copy_hashed(
                 &mut open_shared_read(&path)?,
@@ -288,7 +337,7 @@ impl PreparedRestore {
                 cancel,
             )?;
             check_listed(&listed, &e.name, hash)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("restore.after_entry")?;
         }
 
@@ -313,8 +362,16 @@ impl PreparedRestore {
         self.existing.as_deref()
     }
 
-    /// Spec 6.8 steps 5 and 6: swaps the staged vault into place. Cancelling is checked once,
-    /// before anything happens; once the swap has begun it is never cancelled.
+    /// Whether the restore is as it was before a failed [`commit`](Self::commit): still armed (its staging folder and
+    /// journal are as prepared) and not done, so another commit may be tried. `commit` returns early with exactly this
+    /// state when the vault is open, a cancel came first, or the first rename was refused.
+    pub fn can_retry(&self) -> bool {
+        self.armed && !self.finished
+    }
+
+    /// Spec 6.8 steps 5 and 6: swaps the staged vault into place. Cancelling is checked before
+    /// anything happens and again right before the journal says `swapping`; once the swap has
+    /// begun it is never cancelled.
     ///
     /// `VaultInUse` (the vault being replaced is open), a refused first rename and a journal
     /// that cannot be rewritten all leave the restore as it was, for a retry. Any other error
@@ -335,7 +392,7 @@ impl PreparedRestore {
         }
         cancel.check()?;
         let before = self.choose_before_restore()?;
-        let swapped = match self.swap_steps(before.clone()) {
+        let swapped = match self.swap_steps(before.clone(), cancel) {
             // Still armed, or refused before the swap began: the restore is as it was.
             Err(e) if self.armed || !self.swap_started => return Err(e),
             Err(e) => match recover_restore(&self.journal) {
@@ -444,7 +501,7 @@ impl PreparedRestore {
         before: Option<PathBuf>,
     ) -> Result<()> {
         self.own_journal(lock)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check(match step {
             JournalStep::Swapping => "restore.swap_under_lock",
             JournalStep::Extracting => "restore.revert_under_lock",
@@ -469,25 +526,34 @@ impl PreparedRestore {
     /// again if the first rename failed with nothing moved. A refused validation disarms it
     /// without recovery (`swap_started` stays off); any later error leaves it disarmed, and the
     /// caller runs recovery.
-    fn swap_steps(&mut self, before: Option<PathBuf>) -> Result<RestoreOutcome> {
+    fn swap_steps(
+        &mut self,
+        before: Option<PathBuf>,
+        cancel: &CancelToken,
+    ) -> Result<RestoreOutcome> {
         self.swap_started = false;
         let parent = parent_dir(&self.target).to_owned();
         let lock = lock_journal(&self.journal)?;
         // Step 2.
         self.check_before_swap(&lock)?;
+        #[cfg(any(test, feature = "test-internals"))]
+        crate::fsio::failpoint::check("restore.before_swapping")?;
+        // The last chance: choosing the pre-restore name and these checks can take seconds, and from `swapping` on a
+        // cancel no longer counts (spec 6.8).
+        cancel.check()?;
         self.rewrite_journal(&lock, JournalStep::Swapping, before.clone())?;
         self.armed = false;
         self.swap_started = true;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.after_journal")?;
 
         // Step 3.
         if let Some(b) = &before {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             let moved = crate::fsio::failpoint::check("restore.fail_move_existing")
                 .and_then(|()| rename_dir_no_replace(&self.target, b))
                 .and_then(|()| crate::fsio::failpoint::check("restore.fail_after_move_existing"));
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-internals")))]
             let moved = rename_dir_no_replace(&self.target, b);
             if let Err(e) = moved {
                 // A rename can report an error after it moved the folder. Only T still in place
@@ -515,15 +581,15 @@ impl PreparedRestore {
             }
         }
         // Reached with or without a vault to replace.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.after_move_existing")?;
 
         // Step 4.
         clear_hidden(&self.staging)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.fail_move_staging")?;
         rename_dir_no_replace(&self.staging, &self.target)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         {
             crate::fsio::failpoint::check("restore.fail_after_move_staging")?;
             crate::fsio::failpoint::check("restore.after_move_staging")?;
@@ -531,7 +597,7 @@ impl PreparedRestore {
 
         // Step 5.
         sync_dir(&parent)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.before_journal_done")?;
         remove_journal_if_owner(&lock, &self.journal, &self.staging)?;
         Ok(self.outcome(before))
@@ -563,11 +629,10 @@ impl PreparedRestore {
 pub fn recover_restore(journal: &Path) -> Result<Recovery> {
     // Held for the whole run, so no one publishes, replaces or removes the journal under it.
     let lock = lock_journal(journal)?;
-    let Some(j) = read_journal(journal)? else {
+    let Some(j) = read_checked_journal(&lock, journal)? else {
         return Ok(Recovery::NothingToDo);
     };
-    validate_journal_on_disk(&j)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("recover.under_lock")?;
     check_staging_parent(&j.staging)?;
 
@@ -587,10 +652,10 @@ pub fn recover_restore(journal: &Path) -> Result<Recovery> {
     };
     let done: Result<()> = (|| {
         if let Some(b) = move_back {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("recover.fail_rename")?;
             rename_dir_no_replace(b, target)?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-internals"))]
             crate::fsio::failpoint::check("recover.after_rename")?;
         }
         remove_staging(staging)?;
@@ -623,7 +688,7 @@ pub fn dismiss_restore_journal(journal: &Path) -> Result<()> {
         ) => {}
         Err(e) => return Err(e),
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("dismiss.before_delete")?;
     remove_file_retry(journal)
 }
@@ -708,7 +773,14 @@ pub(super) mod tests {
             credential: Credential,
             cancel: &CancelToken,
         ) -> Result<PreparedRestore> {
-            PreparedRestore::prepare(archive, self.parent(), credential, &self.journal(), cancel)
+            PreparedRestore::prepare(
+                archive,
+                self.parent(),
+                credential,
+                RestoreDestination::SameVault,
+                &self.journal(),
+                cancel,
+            )
         }
 
         /// Nothing was written: no folder in the parent, no journal.
@@ -1077,7 +1149,10 @@ pub(super) mod tests {
             Box::new(move || {
                 let cancel = CancelToken::new();
                 let credential = Credential::Password(PW);
-                let p = PreparedRestore::prepare(&archive, &parent, credential, &journal, &cancel);
+                let same = RestoreDestination::SameVault;
+                let p = PreparedRestore::prepare(
+                    &archive, &parent, credential, same, &journal, &cancel,
+                );
                 *slot.borrow_mut() = Some(p.unwrap());
             }),
         );
@@ -1189,8 +1264,14 @@ pub(super) mod tests {
         assert!(!plain_absolute(&odd));
 
         let credential = Credential::Password(PW);
-        let result =
-            PreparedRestore::prepare(&backup, &odd, credential, &d.journal(), &CancelToken::new());
+        let result = PreparedRestore::prepare(
+            &backup,
+            &odd,
+            credential,
+            RestoreDestination::SameVault,
+            &d.journal(),
+            &CancelToken::new(),
+        );
         match result {
             Err(e) => {
                 assert!(matches!(
@@ -1532,6 +1613,7 @@ pub(super) mod tests {
                 &self.backup,
                 self.parent(),
                 credential,
+                RestoreDestination::SameVault,
                 &self.journal(),
                 &cancel,
             )
@@ -1592,7 +1674,7 @@ pub(super) mod tests {
         let mut p = s.prepare();
         let before = p.choose_before_restore().unwrap();
         failpoint::arm(point);
-        let result = p.swap_steps(before);
+        let result = p.swap_steps(before, &CancelToken::new());
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))), "{point}");
         die(p, s);
@@ -1739,6 +1821,59 @@ pub(super) mod tests {
         s.assert_old_at(&s.before(""));
     }
 
+    /// `can_retry` says whether a failed commit left the restore as it was: true before a commit and after a refusal
+    /// before the swap (the vault is open, a cancel, a refused first rename); false once the swap began (an error that
+    /// recovery settled, or a disarmed restore) and after a commit that worked.
+    #[test]
+    fn can_retry_tells_which_failed_commits_kept_the_restore() {
+        let _reset = Cleanup;
+        let (s, vault) = Scene::replacing();
+        let mut p = s.prepare();
+        assert!(p.can_retry(), "as prepared");
+
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::VaultInUse)
+        ));
+        assert!(p.can_retry(), "the vault is open: nothing moved");
+        drop(vault);
+
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        assert!(matches!(p.commit(&cancelled), Err(CoreError::Cancelled)));
+        assert!(p.can_retry(), "cancelled before the swap");
+
+        failpoint::arm("restore.fail_move_existing");
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::Io(_))
+        ));
+        failpoint::disarm_all();
+        assert!(p.can_retry(), "a refused first rename");
+
+        p.commit(&CancelToken::new()).unwrap();
+        assert!(!p.can_retry(), "done");
+
+        // An error after the swap began is settled by recovery: not retryable.
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        failpoint::arm("restore.after_move_existing");
+        let result = p.commit(&CancelToken::new());
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert!(!p.can_retry(), "rolled back, the staged restore is gone");
+
+        // And one recovery could not settle.
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        failpoint::arm("restore.after_move_existing");
+        failpoint::arm("recover.under_lock");
+        let result = p.commit(&CancelToken::new());
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::RestorePending)));
+        assert!(!p.can_retry());
+    }
+
     #[test]
     fn locked_first_rename_keeps_restore() {
         let _reset = Cleanup;
@@ -1777,6 +1912,45 @@ pub(super) mod tests {
         let token = CancelToken::new();
         failpoint::arm_cancel("restore.after_move_existing", token.clone());
         p.commit(&token).unwrap();
+        s.assert_settled();
+        s.assert_restored_at(&s.target);
+    }
+
+    /// One click too deep in the folder picker: restoring "into" the live vault's own folder would nest a second copy
+    /// inside it, and leave the live vault as it was. Refused with nothing written.
+    #[test]
+    fn same_vault_restore_inside_a_vault_folder_refused() {
+        let _reset = Cleanup;
+        let (f, backup) = backed_up();
+        let live = f.vault.dir().to_owned();
+        let d = Dest::new();
+        let before = (listing(&live, &d.journal()), tree(&live));
+        let result = d.prepare_to(&backup, &live, RestoreDestination::SameVault);
+        assert!(matches!(
+            result,
+            Err(CoreError::InvalidInput {
+                what: "destination in a vault folder"
+            })
+        ));
+        assert!((listing(&live, &d.journal()), tree(&live)) == before);
+        assert_eq!(d.reached_journal.get(), 0);
+    }
+
+    /// The checks after the commit's first look at the token can take seconds (a held folder's retries); once the
+    /// journal says `swapping` a cancel no longer counts, so a Windows lock during them must stop the swap here.
+    #[test]
+    fn a_cancel_during_the_last_checks_stops_the_swap() {
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        let before = tree(s.parent());
+        let token = CancelToken::new();
+        failpoint::arm_cancel("restore.before_swapping", token.clone());
+        assert!(matches!(p.commit(&token), Err(CoreError::Cancelled)));
+        failpoint::disarm_all();
+        assert_eq!(tree(s.parent()), before);
+        assert_eq!(journal_step(&s.journal()).step, JournalStep::Extracting);
+        assert!(p.can_retry());
+        p.commit(&CancelToken::new()).unwrap();
         s.assert_settled();
         s.assert_restored_at(&s.target);
     }
@@ -2752,5 +2926,377 @@ pub(super) mod tests {
             assert_eq!(count.get(), 1, "{point}");
         }
         assert!(!lock_is_held(&journal));
+    }
+
+    // ---- Plan 3 Task 5: restore into a new folder the user names.
+
+    use crate::vault::naming::{check_folder_name, is_reserved_device_name};
+
+    const RESTORED: &str = "Family (restored)";
+
+    fn new_folder() -> RestoreDestination {
+        RestoreDestination::NewFolder(RESTORED.into())
+    }
+
+    /// The names in `parent` and in the journal's folder: a refusal that wrote nothing leaves
+    /// both as they were (no journal, no lock file, no staging folder).
+    fn listing(parent: &Path, journal: &Path) -> (Vec<String>, Vec<String>) {
+        (names(parent), names(parent_dir(journal)))
+    }
+
+    impl Dest {
+        /// A prepare into `parent` with `destination`, journaled at this destination's journal.
+        fn prepare_to(
+            &self,
+            archive: &Path,
+            parent: &Path,
+            destination: RestoreDestination,
+        ) -> Result<PreparedRestore> {
+            let credential = Credential::Password(PW);
+            let journal = self.journal();
+            PreparedRestore::prepare(
+                archive,
+                parent,
+                credential,
+                destination,
+                &journal,
+                &CancelToken::new(),
+            )
+        }
+    }
+
+    /// Both header copies of the vault are unreadable, so restore cannot tell its folder is that
+    /// vault: in place it stops at the taken name, and a new folder the user names restores
+    /// beside it, leaving the damaged folder byte for byte as it was.
+    #[test]
+    fn new_folder_restore_beside_unreadable_vault() {
+        let (f, backup) = backed_up();
+        let backup_titles = sorted_titles(&f.vault);
+        let Fixture { parent, vault, .. } = f;
+        let damaged = vault.dir().to_owned();
+        drop(vault);
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            fs::write(damaged.join(file), b"damaged in place").unwrap();
+        }
+        let damaged_before = tree(&damaged);
+        let d = Dest::new();
+        let before = listing(parent.path(), &d.journal());
+
+        let same = d.prepare_to(&backup, parent.path(), RestoreDestination::SameVault);
+        assert_eq!(invalid(same), "destination exists");
+        assert_eq!(listing(parent.path(), &d.journal()), before);
+        assert_eq!(d.reached_journal.get(), 0, "the journal write was reached");
+
+        let mut p = d.prepare_to(&backup, parent.path(), new_folder()).unwrap();
+        assert_eq!(p.existing(), None);
+        let restored = parent.path().join(RESTORED);
+        let journal = read_journal(&d.journal()).unwrap().unwrap();
+        assert_eq!(
+            (journal.target, journal.before_restore),
+            (restored.clone(), None)
+        );
+        let out = p.commit(&CancelToken::new()).unwrap();
+        assert_eq!(out.dir, restored);
+        assert_eq!(out.before_restore, None);
+        drop(p);
+        assert!(!d.journal().exists(), "journal left behind");
+        assert_eq!(titles(&restored), backup_titles);
+        assert!(
+            tree(&damaged) == damaged_before,
+            "the damaged folder changed"
+        );
+    }
+
+    /// A readable copy of the same vault in the parent (either header copy readable): a second
+    /// writable copy would make every later restore there refuse "several copies".
+    #[test]
+    fn new_folder_refused_beside_a_readable_copy() {
+        let (f, backup) = backed_up();
+        let Fixture { parent, vault, .. } = f;
+        let live = vault.dir().to_owned();
+        let d = Dest::new();
+        let check = |what: &str| {
+            let before = (listing(parent.path(), &d.journal()), tree(&live));
+            let result = d.prepare_to(&backup, parent.path(), new_folder());
+            assert_eq!(invalid(result), "vault already here", "{what}");
+            let after = (listing(parent.path(), &d.journal()), tree(&live));
+            assert!(after == before, "{what}: something was written");
+            assert_eq!(
+                d.reached_journal.get(),
+                0,
+                "{what}: the journal write was reached"
+            );
+        };
+        check("open vault");
+        drop(vault);
+        fs::write(live.join(HEADER_FILE), b"damaged in place").unwrap();
+        check("only the .bak readable");
+    }
+
+    /// Anything at the chosen name is refused before anything is written: a file, a folder, a
+    /// link, and on Windows a folder whose name differs only in letter case.
+    #[test]
+    fn new_folder_name_taken_refused_before_writing() {
+        let _reset = Cleanup;
+        let (_f, backup) = backed_up();
+        let outside = TempDir::new();
+        fs::write(outside.path().join("keep"), b"keep").unwrap();
+        type Plant<'a> = Box<dyn Fn(&Path) + 'a>;
+        let mut cases: Vec<(&str, Plant)> = vec![
+            (
+                "file",
+                Box::new(|p| fs::write(p.join(RESTORED), b"mine").unwrap()),
+            ),
+            (
+                "folder",
+                Box::new(|p| {
+                    fs::create_dir(p.join(RESTORED)).unwrap();
+                    fs::write(p.join(RESTORED).join("mine"), b"mine").unwrap();
+                }),
+            ),
+            (
+                "link",
+                Box::new(|p| make_dir_link(&p.join(RESTORED), outside.path())),
+            ),
+        ];
+        if cfg!(windows) {
+            cases.push((
+                "folder in other letter case",
+                Box::new(|p| fs::create_dir(p.join(RESTORED.to_uppercase())).unwrap()),
+            ));
+        }
+        for (what, plant) in cases {
+            let d = Dest::new();
+            plant(d.parent());
+            let before = (listing(d.parent(), &d.journal()), tree(d.parent()));
+            let result = d.prepare_to(&backup, d.parent(), new_folder());
+            assert_eq!(invalid(result), "destination exists", "{what}");
+            let after = (listing(d.parent(), &d.journal()), tree(d.parent()));
+            assert!(after == before, "{what}: something was written");
+            assert_eq!(
+                d.reached_journal.get(),
+                0,
+                "{what}: the journal write was reached"
+            );
+            failpoint::disarm_all();
+        }
+        assert_eq!(fs::read(outside.path().join("keep")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn check_folder_name_table() {
+        let (ascii_200, astral_200_units) = ("x".repeat(200), "𝒳".repeat(100));
+        for ok in [
+            "Family (restored)",
+            "Clients 2",
+            "a.b",
+            &ascii_200,
+            &astral_200_units,
+        ] {
+            assert!(check_folder_name(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "",
+            ".hidden",
+            "a/b",
+            "a\\b",
+            "..",
+            "x.",
+            "x ",
+            "CON",
+            "con.txt",
+            "LPT9",
+            "COM¹",
+            "conin$",
+            "a:b",
+            "ab:c",
+            "a*b",
+            "a?b",
+            "a\"b",
+            "a<b",
+            "a>b",
+            "a|b",
+            "nul.tar.gz",
+            "v.before-restore",
+            "v.BEFORE-RESTORE-2",
+            "\u{1}",
+            &"x".repeat(201),
+            &"𝒳".repeat(101),
+        ] {
+            assert!(
+                matches!(
+                    check_folder_name(bad),
+                    Err(CoreError::InvalidInput {
+                        what: "folder name"
+                    })
+                ),
+                "{bad:?}"
+            );
+        }
+        // The one copy of the reserved list: any case, the superscript forms, a whole name (only
+        // the part before the first `.` counts) and a stem with spaces after it (dropped before
+        // the match, so `NUL .txt` is refused too).
+        for reserved in [
+            "CON",
+            "prn",
+            "Aux",
+            "nul",
+            "CONIN$",
+            "Conout$",
+            "COM0",
+            "com9",
+            "LPT0",
+            "lpt9",
+            "COM²",
+            "LPT³",
+            "lpt¹",
+            "NUL ",
+            "nul.txt",
+            "NUL.tar.gz",
+            "nul .txt",
+        ] {
+            assert!(is_reserved_device_name(reserved), "{reserved:?}");
+        }
+        for not_reserved in [
+            "", "CONSOLE", "COM", "COM10", "LPT⁴", "NUL1", " NUL", "CON$", "a.nul", ".nul",
+        ] {
+            assert!(!is_reserved_device_name(not_reserved), "{not_reserved:?}");
+        }
+        assert!(check_folder_name("NUL .txt").is_err());
+    }
+
+    #[track_caller]
+    fn assert_folder_name_refused(result: Result<PreparedRestore>, what: &str) {
+        let error = error(result);
+        assert!(
+            matches!(
+                error,
+                CoreError::InvalidInput {
+                    what: "folder name"
+                }
+            ),
+            "{what}: {error:?}"
+        );
+    }
+
+    /// `prepare` applies the name rule, first of all: each bad name is refused with nothing
+    /// written, and even before the archive is opened (a missing archive is not reached).
+    #[test]
+    fn prepare_refuses_bad_folder_names_before_anything() {
+        let _reset = Cleanup;
+        let (_f, backup) = backed_up();
+        let long = "x".repeat(201);
+        for bad in [
+            "CON",
+            "nul.tar.gz",
+            "x.",
+            "x ",
+            ".hidden",
+            "v.before-restore",
+            "ab:c",
+            "D:x",
+            "a\\b",
+            &long,
+        ] {
+            let d = Dest::new();
+            let before = listing(d.parent(), &d.journal());
+            let destination = RestoreDestination::NewFolder(bad.into());
+            assert_folder_name_refused(d.prepare_to(&backup, d.parent(), destination), bad);
+            assert_eq!(listing(d.parent(), &d.journal()), before, "{bad:?}");
+            assert_eq!(
+                d.reached_journal.get(),
+                0,
+                "{bad:?}: the journal write was reached"
+            );
+            failpoint::disarm_all();
+        }
+        let d = Dest::new();
+        let missing = d.parent().join("no such backup.lockbox-backup");
+        let destination = RestoreDestination::NewFolder("CON".into());
+        assert_folder_name_refused(d.prepare_to(&missing, d.parent(), destination), "first");
+    }
+
+    /// A parent `units` UTF-16 units long, made of folders under `base`.
+    fn deep_parent(base: &Path, units: usize) -> PathBuf {
+        let len = |p: &Path| p.as_os_str().to_string_lossy().encode_utf16().count();
+        let mut dir = base.to_owned();
+        while len(&dir) < units {
+            // One separator and at most 60 characters, never leaving exactly one unit to fill.
+            let left = units - len(&dir);
+            let mut name = (left - 1).min(60);
+            if left - (name + 1) == 1 {
+                name -= 1;
+            }
+            dir.push("d".repeat(name));
+        }
+        assert_eq!(len(&dir), units, "cannot build the parent at that length");
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Every path the restored vault needs must fit Windows' 259 units: in a parent where a
+    /// name of `n` characters just fits, `n + 1` is refused with nothing written, and `n` is
+    /// restored and opens.
+    #[test]
+    fn new_folder_path_too_long_refused_before_writing() {
+        use crate::vault::naming::{DEEPEST_IN_VAULT_UNITS, MAX_PATH_UNITS};
+        let (f, backup) = backed_up();
+        let backup_titles = sorted_titles(&f.vault);
+        let d = Dest::new();
+        let fits = 45;
+        // parent + `\` + name + the deepest file = the limit exactly.
+        let parent = deep_parent(
+            d.parent(),
+            MAX_PATH_UNITS - DEEPEST_IN_VAULT_UNITS - 1 - fits,
+        );
+        let before = listing(&parent, &d.journal());
+        let too_long = RestoreDestination::NewFolder("n".repeat(fits + 1));
+        assert_folder_name_refused(d.prepare_to(&backup, &parent, too_long), "too long");
+        assert_eq!(listing(&parent, &d.journal()), before);
+        assert_eq!(d.reached_journal.get(), 0, "the journal write was reached");
+
+        let name = "n".repeat(fits);
+        let destination = RestoreDestination::NewFolder(name.clone());
+        let mut p = d.prepare_to(&backup, &parent, destination).unwrap();
+        let out = p.commit(&CancelToken::new()).unwrap();
+        drop(p);
+        assert_eq!(out.dir, parent.join(&name));
+        assert_eq!(titles(&out.dir), backup_titles);
+    }
+
+    /// A vault never goes inside a vault folder: not the damaged one it is restored beside, not
+    /// a live one. Refused with nothing written.
+    #[test]
+    fn new_folder_inside_a_vault_folder_refused() {
+        let _reset = Cleanup;
+        let (f, backup) = backed_up();
+        let live = f.vault.dir().to_owned();
+        let elsewhere = TempDir::new();
+        let damaged = plant_vault(&f, elsewhere.path(), "Family-damaged");
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            fs::write(damaged.join(file), b"damaged in place").unwrap();
+        }
+        for (what, inside) in [("damaged vault", &damaged), ("live vault", &live)] {
+            let d = Dest::new();
+            let before = (listing(inside, &d.journal()), tree(inside));
+            let result = d.prepare_to(&backup, inside, new_folder());
+            assert!(
+                matches!(
+                    result,
+                    Err(CoreError::InvalidInput {
+                        what: "destination in a vault folder"
+                    })
+                ),
+                "{what}"
+            );
+            let after = (listing(inside, &d.journal()), tree(inside));
+            assert!(after == before, "{what}: something was written");
+            assert_eq!(
+                d.reached_journal.get(),
+                0,
+                "{what}: the journal write was reached"
+            );
+            failpoint::disarm_all();
+        }
     }
 }

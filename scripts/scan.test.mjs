@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -89,6 +92,36 @@ test("missing Cargo.lock -> exit 2, dependencies would go unchecked", () => {
   const { code, out } = run({ LOCKBOX_CARGO_LOCK: "no/such/Cargo.lock" });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: osv-scanner needs Cargo\.lock, which is missing/);
+});
+
+test("osv_reads_ui_lockfile: osv-scanner is given ui/package-lock.json next to Cargo.lock", () => {
+  // A one-off osv stand-in that records the arguments it was called with, then behaves like the clean fake.
+  const dir = mkdtempSync(join(tmpdir(), "lockbox-scan-"));
+  try {
+    const argsFile = join(dir, "args.json");
+    const recorder = join(dir, "osv-recorder.mjs");
+    writeFileSync(
+      recorder,
+      `import { writeFileSync } from "node:fs";
+import { fake } from ${JSON.stringify(new URL("./fixtures/fake.mjs", import.meta.url).href)};
+writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+fake("OSV");
+`,
+    );
+    const { code } = run({ LOCKBOX_OSV: recorder });
+    assert.equal(code, 0);
+    const args = JSON.parse(readFileSync(argsFile, "utf8"));
+    const lockfiles = args.flatMap((a, i) => (a === "-L" ? [args[i + 1]] : []));
+    assert.deepEqual(lockfiles, ["Cargo.lock", "ui/package-lock.json"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("missing_ui_lockfile_fails: ui/package.json without its lockfile -> exit 2", () => {
+  const { code, out } = run({ LOCKBOX_UI_LOCK: "no/such/package-lock.json" });
+  assert.equal(code, 2);
+  assert.match(out, /INCOMPLETE: osv-scanner needs ui\/package-lock\.json, which is missing/);
 });
 
 test("semgrep scan errors -> exit 2, files it could not scan are not clean", () => {

@@ -49,6 +49,7 @@ pub struct BackupManifest {
 }
 
 impl BackupManifest {
+    #[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
     pub fn entry(&self, path: &str) -> Option<&ManifestEntry> {
         self.entries.iter().find(|e| e.path == path)
     }
@@ -83,7 +84,7 @@ fn manifest_hmac(
     for piece in mac_message(m).chunks(MAC_PIECE) {
         cancel.check()?;
         hmac.update(piece);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("manifest.mac_piece")?;
     }
     cancel.check()?;
@@ -91,6 +92,7 @@ fn manifest_hmac(
 }
 
 /// HMAC-SHA256 over [`mac_message`].
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn manifest_mac(m: &BackupManifest, vault_key: &Key32) -> [u8; 32] {
     // A token nobody holds is never cancelled, so this is the same signing without a way out.
     manifest_mac_cancellable(m, vault_key, &CancelToken::new())
@@ -110,6 +112,7 @@ pub(crate) fn manifest_mac_cancellable(
 }
 
 /// False if the manifest has no MAC or it does not match. The comparison is constant-time.
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn verify_manifest_mac(m: &BackupManifest, vault_key: &Key32) -> bool {
     verify_manifest_mac_cancellable(m, vault_key, &CancelToken::new()).unwrap_or(false)
 }
@@ -203,6 +206,18 @@ mod tests {
         field(&mut expected, &5u64.to_le_bytes());
         field(&mut expected, &[0x11; 32]);
         assert_eq!(mac_message(&sample()), expected);
+    }
+
+    /// The answer comes from outside this code (HKDF-SHA256 and HMAC-SHA256 in Node's crypto, over the message above),
+    /// so a changed key label or key derivation cannot pass: it would stop every existing backup opening.
+    #[test]
+    fn mac_known_answer() {
+        let expected: [u8; 32] = [
+            0x0c, 0x22, 0x06, 0x78, 0xb7, 0xfe, 0xcc, 0x58, 0x8a, 0xe5, 0x8b, 0x1d, 0xb8, 0xa4,
+            0x3d, 0x55, 0x00, 0xc8, 0x96, 0x6f, 0x36, 0xd9, 0xd0, 0x02, 0x68, 0x9f, 0xbc, 0x8d,
+            0xd3, 0x52, 0x7a, 0x70,
+        ];
+        assert_eq!(manifest_mac(&sample(), &key()), expected);
     }
 
     #[test]

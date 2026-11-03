@@ -31,10 +31,19 @@ Run the same checks CI runs:
 ```
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
 cargo test --locked
+cargo test -p lockbox-core --locked --features test-internals
+npm --prefix ui run lint
+npm --prefix ui test
+npm --prefix ui run build
+cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc
 node --test "scripts/*.test.mjs"
 node scripts/scan.mjs
 ```
+
+Install the UI's dependencies once with `npm ci --ignore-scripts` in `ui/`. The `custom-protocol` test run comes
+after `npm run build`, because the app embeds the built UI.
 
 `node scripts/scan.mjs` runs the security scanners (secrets, risky code, vulnerable dependencies); see
 [docs/SETUP.md](docs/SETUP.md#security-scan) for what it reports and how to handle a finding.

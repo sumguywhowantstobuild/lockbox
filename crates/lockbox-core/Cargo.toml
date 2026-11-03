@@ -30,3 +30,31 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 tempfile = "3.27.0"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[features]
+# Tests only, never in a build that ships: opens the private modules under
+# `lockbox_core::internals` and turns the failpoints on, for the integration tests below and the
+# desktop shell's tests.
+test-internals = []
+
+# The integration tests that build on private modules or test-only items run only with
+# `--features test-internals`.
+[[test]]
+name = "backup_large"
+required-features = ["test-internals"]
+
+[[test]]
+name = "files"
+required-features = ["test-internals"]
+
+[[test]]
+name = "large_file"
+required-features = ["test-internals"]
+
+[[test]]
+name = "properties"
+required-features = ["test-internals"]
+
+[[test]]
+name = "vault_lifecycle"
+required-features = ["test-internals"]

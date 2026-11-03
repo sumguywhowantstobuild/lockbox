@@ -1,11 +1,36 @@
 //! Vault names, folder names and the creation time. Pure functions, no file access.
 
+use super::journal::is_pre_restore_name;
 use crate::ids::VaultId;
 use crate::{CoreError, Result};
+use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Longest vault name accepted, in Unicode scalar values.
 const MAX_NAME_CHARS: usize = 200;
+/// Longest folder name the user may choose, in UTF-16 code units: what Windows counts in a
+/// path component, so a name it would refuse is refused before anything is written.
+const MAX_CHOSEN_FOLDER_UNITS: usize = 200;
+/// Characters Windows does not allow in a file or folder name.
+const FORBIDDEN_IN_NAME: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+/// Windows device names, matched in upper case. A file or folder of one of these names, with
+/// or without an extension, opens the device instead.
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM0", "COM1", "COM2", "COM3", "COM4",
+    "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²", "COM³", "LPT0", "LPT1", "LPT2", "LPT3",
+    "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²", "LPT³",
+];
+/// Longest path Lockbox's own Win32 calls take (`MoveFileExW` and the others in `fsio::windows`
+/// get no `\\?\` prefix, and the app declares no long-path support): `MAX_PATH`, 260 UTF-16
+/// units, less the terminating NUL.
+pub(crate) const MAX_PATH_UNITS: usize = 259;
+/// How far below a vault folder Lockbox later writes at most: `\files\orphaned\<32 hex>.blob`,
+/// a blob moved aside by cleanup (1 + 5 + 1 + 8 + 1 + 32 + 5 units). Every other path inside a
+/// vault is shorter (`\items\<32 hex>.item` is 44, a hidden temp `\items\.<16 hex>.tmp` is 28).
+pub(crate) const DEEPEST_IN_VAULT_UNITS: usize = 53;
+const BAD_FOLDER_NAME: CoreError = CoreError::InvalidInput {
+    what: "folder name",
+};
 /// Longest folder name produced: Windows tools cope badly with long paths.
 const MAX_FOLDER_CHARS: usize = 64;
 /// Characters of the vault ID appended to the folder name.
@@ -22,7 +47,7 @@ pub(super) fn validate_name(name: &str) -> Result<()> {
 /// The folder a vault lives in: the name reduced to `[A-Za-z0-9 _-]`, then `-` and the
 /// first 8 hex characters of the ID, at most 64 characters in all. The exact name is
 /// kept in `vault.json`; the folder name only has to be safe and recognisable.
-pub(crate) fn folder_name(name: &str, id: &VaultId) -> String {
+pub fn folder_name(name: &str, id: &VaultId) -> String {
     let suffix = format!("-{}", &id.to_hex()[..SHORT_ID_CHARS]);
     let base: String = name
         .chars()
@@ -32,6 +57,55 @@ pub(crate) fn folder_name(name: &str, id: &VaultId) -> String {
     // Windows silently drops trailing spaces from folder names.
     let base = base.trim_end_matches(' ');
     format!("{}{suffix}", if base.is_empty() { "Vault" } else { base })
+}
+
+/// Whether the name `stem` stands for a Windows device (`CON`, `PRN`, `AUX`, `NUL`, `CONIN$`,
+/// `CONOUT$`, `COM0`–`COM9`, `LPT0`–`LPT9`, and `COM¹`–`COM³`, `LPT¹`–`LPT³`), in any letter
+/// case. Only the part before the first `.` is matched, so a whole file name may be passed
+/// (`nul.txt` and `NUL.tar.gz` are `NUL`; for a stem this changes nothing). Spaces at the end of
+/// that part are dropped before the match, so `NUL .txt` counts too: refusing a name too many
+/// costs nothing. The one copy of the list: the folder-name check here and the shell's file
+/// names use it.
+pub fn is_reserved_device_name(stem: &str) -> bool {
+    let before_dot = stem.split('.').next().unwrap_or(stem);
+    let upper = before_dot.trim_end_matches(' ').to_uppercase();
+    RESERVED_DEVICE_NAMES.contains(&upper.as_str())
+}
+
+/// A folder name the user chose for a restore (spec 6.8 step 3), refused as "folder name"
+/// unless it is one plain path component that Windows keeps exactly as given and that no
+/// restore treats as its own: not empty; at most 200 UTF-16 units; not starting with `.` (so
+/// never `.`, `..`, hidden or a staging name); no `\ / : * ? " < > |` or control character; no
+/// trailing dot or space (Windows drops them); no device name before the first `.`; and no
+/// `.before-restore`, in any case (a pre-restore copy's name).
+pub(crate) fn check_folder_name(name: &str) -> Result<()> {
+    let one_component = matches!(
+        Path::new(name).components().collect::<Vec<_>>()[..],
+        [Component::Normal(n)] if n == name
+    );
+    let ok = one_component
+        && name.encode_utf16().count() <= MAX_CHOSEN_FOLDER_UNITS
+        && !name.starts_with('.')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || FORBIDDEN_IN_NAME.contains(&c))
+        && !name.ends_with(['.', ' '])
+        && !is_reserved_device_name(name)
+        && !is_pre_restore_name(name);
+    if ok { Ok(()) } else { Err(BAD_FOLDER_NAME) }
+}
+
+/// Refused as "folder name" unless every path a restore into `target` builds stays within
+/// [`MAX_PATH_UNITS`]: the restored vault's deepest file, [`DEEPEST_IN_VAULT_UNITS`] below
+/// `target`, and the same file below `staging`, where the vault is extracted first (a staging
+/// name is 41 characters, longer than a short folder name). Counted in UTF-16 units, as Windows
+/// counts.
+pub(crate) fn check_path_room(target: &Path, staging: &Path) -> Result<()> {
+    let units = |p: &Path| p.as_os_str().to_string_lossy().encode_utf16().count();
+    if units(target).max(units(staging)) + DEEPEST_IN_VAULT_UNITS > MAX_PATH_UNITS {
+        return Err(BAD_FOLDER_NAME);
+    }
+    Ok(())
 }
 
 /// Seconds since the Unix epoch.

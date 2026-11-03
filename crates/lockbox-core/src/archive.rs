@@ -156,7 +156,7 @@ fn read_pieces(
         cancel.check()?;
         read_full(file, piece, at, what)?;
         at = at.checked_add(piece.len() as u64).ok_or(damaged(what))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check(step)?;
     }
     Ok(())
@@ -645,7 +645,7 @@ pub(crate) fn copy_hashed(
         hash.update(&buf[..n]);
         dst.write_all(&buf[..n])?;
         left -= n as u64;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("copy.after_buffer")?;
     }
     if !at_end(src)? {

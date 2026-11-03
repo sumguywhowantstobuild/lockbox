@@ -73,14 +73,38 @@ pub fn check_space(needed: u64, file_bytes: u64, v: &VolumeInfo) -> Result<()> {
 /// Runs `op`, retrying while another program briefly holds the file (Windows errors
 /// 32 sharing violation and 5 access denied: antivirus, indexer, backup tools).
 /// Waits 20 ms, doubling, at most 1 s each, for up to 10 attempts. `sleep` is injected for tests.
-fn retry_with<T>(
-    mut op: impl FnMut() -> io::Result<T>,
+fn retry_with<T>(op: impl FnMut() -> io::Result<T>, sleep: impl FnMut(Duration)) -> io::Result<T> {
+    backoff(op, is_transient, sleep)
+}
+
+/// [`retry_with`] where each attempt runs inside `gate`, which gets `op` as one single attempt
+/// and may refuse it. The waits come between gate calls, never inside one. Whatever the gate
+/// returns is retried only if it is a transient I/O error (its own or the attempt's), so any
+/// other refusal stops the retries.
+fn retry_gated(
+    mut op: impl FnMut() -> io::Result<()>,
+    mut gate: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()>,
+    sleep: impl FnMut(Duration),
+) -> Result<()> {
+    backoff(
+        || gate(&mut || -> Result<()> { Ok(op()?) }),
+        |e| matches!(e, CoreError::Io(e) if is_transient(e)),
+        sleep,
+    )
+}
+
+/// The one retry loop: runs `op` until it succeeds, fails with an error `transient` does not
+/// accept, or has had [`MAX_ATTEMPTS`]; waits [`FIRST_WAIT`], doubling, at most [`MAX_WAIT`],
+/// before each new attempt.
+fn backoff<T, E>(
+    mut op: impl FnMut() -> std::result::Result<T, E>,
+    transient: impl Fn(&E) -> bool,
     mut sleep: impl FnMut(Duration),
-) -> io::Result<T> {
+) -> std::result::Result<T, E> {
     let mut wait = FIRST_WAIT;
     for attempt in 1.. {
         match op() {
-            Err(e) if attempt < MAX_ATTEMPTS && is_transient(&e) => {
+            Err(e) if attempt < MAX_ATTEMPTS && transient(&e) => {
                 sleep(wait);
                 wait = (wait * 2).min(MAX_WAIT);
             }
@@ -111,10 +135,54 @@ pub fn replace_file(from: &Path, to: &Path) -> Result<()> {
     Ok(retry(|| sys::replace_file(from, to))?)
 }
 
+/// The move half of [`replace_file`], for publishing an output: each attempt of the move runs
+/// through `gate` (the output journal's `publish`), and the waits between attempts come outside
+/// it. `renamed` runs inside the attempt the moment the move has succeeded, before control
+/// returns to the gate, so the caller knows the move happened even if the gate then fails or
+/// panics. A gate refusal or a non-transient error stops the retries and is returned; if
+/// `renamed` has not run, `to` is untouched. On success the move is done but not yet durable:
+/// call [`sync_after_replace`].
+pub(crate) fn rename_replace_gated(
+    from: &Path,
+    to: &Path,
+    gate: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()>,
+    mut renamed: impl FnMut(),
+) -> Result<()> {
+    let attempt = || -> io::Result<()> {
+        sys::rename_replace(from, to)?;
+        renamed();
+        Ok(())
+    };
+    let wait = |time| {
+        // Tests: the start of each wait between attempts, outside the gate. Only observers act
+        // here: a wait cannot fail, so an armed step is ignored.
+        #[cfg(any(test, feature = "test-internals"))]
+        let _ = failpoint::check("publish.retry_wait");
+        std::thread::sleep(time)
+    };
+    retry_gated(attempt, gate, wait)
+}
+
+/// The durability half of [`replace_file`], after a successful [`rename_replace_gated`] to
+/// `to`: flushes the folder where that is needed (not on Windows, where the move was
+/// write-through). An error here means `to` is already replaced, but durability is not confirmed.
+pub(crate) fn sync_after_replace(to: &Path) -> Result<()> {
+    #[cfg(any(test, feature = "test-internals"))]
+    failpoint::check("publish.after_rename")?;
+    Ok(sys::sync_after_replace(to)?)
+}
+
 /// A destination that is already taken.
 pub(crate) const DESTINATION_EXISTS: CoreError = CoreError::InvalidInput {
-    what: "destination exists",
+    what: DESTINATION_EXISTS_WHAT,
 };
+const DESTINATION_EXISTS_WHAT: &str = "destination exists";
+
+/// Whether `error` is the answer of a no-replace move ([`rename_file_no_replace`], [`rename_dir_no_replace`]) whose
+/// destination was already taken, so a caller can try another name.
+pub fn is_destination_taken(error: &CoreError) -> bool {
+    matches!(error, CoreError::InvalidInput { what } if *what == DESTINATION_EXISTS_WHAT)
+}
 
 /// Moves the file or folder `from` to `to`, which must not exist (`InvalidInput` if it does).
 pub fn rename_dir_no_replace(from: &Path, to: &Path) -> Result<()> {
@@ -131,7 +199,7 @@ pub fn rename_file_no_replace(from: &Path, to: &Path) -> Result<()> {
     retry(|| sys::rename_file_no_replace(from, to)).map_err(taken_or_io)?;
     // An error here is one reported after the file landed, as the portable version can (it
     // links first, then removes the source and syncs the folder).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     failpoint::check("publish.after_link")?;
     Ok(())
 }
@@ -263,6 +331,7 @@ pub fn create_hidden_temp(dir: &Path, suffix: &str) -> Result<(File, PathBuf)> {
 /// measured (everywhere but Windows), and on Windows if the system call fails. Only for the
 /// large-file test; not a stable API.
 #[doc(hidden)]
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn peak_memory_bytes() -> Option<u64> {
     sys::peak_memory_bytes()
 }
@@ -292,7 +361,7 @@ fn write_then_publish(
         file.sync_all()?;
         clear_hidden(&tmp)?;
         drop(file); // Windows cannot replace a file that is still open without delete sharing.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         failpoint::check("atomic_write.before_replace")?;
         publish(&tmp, target)
     })();
@@ -304,8 +373,8 @@ fn write_then_publish(
 
 /// Test hooks that make a named step fail, to prove the order of crash-safe writes.
 /// Thread-local, so parallel tests do not disturb each other.
-#[cfg(test)]
-pub(crate) mod failpoint {
+#[cfg(any(test, feature = "test-internals"))]
+pub mod failpoint {
     use crate::Result;
     use crate::blob::CancelToken;
     use std::cell::RefCell;
@@ -367,8 +436,8 @@ pub(crate) mod failpoint {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod testutil {
+#[cfg(any(test, feature = "test-internals"))]
+pub mod testutil {
     use std::path::{Path, PathBuf};
 
     /// A fresh folder under the system temp dir, deleted on drop.
@@ -390,9 +459,41 @@ pub(crate) mod testutil {
         }
     }
 
+    impl Default for TempDir {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl Drop for TempDir {
+        /// A folder that cannot be removed fails the test: left unreported, it stays on disk for good. On Windows the
+        /// usual cause is a vault still open inside, so a `TempDir` must drop after the vaults in it. A test that is
+        /// already failing is left to report its own failure, because a second panic would abort the whole run.
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let wait = || std::thread::sleep(std::time::Duration::from_millis(100));
+            match remove_folder(&self.0, wait) {
+                Err(e) if !std::thread::panicking() => {
+                    panic!("test folder {} not removed: {e}", self.0.display())
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Removes `path` if it is still there, calling `wait` between attempts in case something holds a file for a
+    /// moment: a virus scan, or a thread the test did not wait for that still has a vault open (the desktop's folder
+    /// check). About five seconds in all, so that a busy machine does not fail a test that did nothing wrong.
+    pub(super) fn remove_folder(path: &Path, mut wait: impl FnMut()) -> std::io::Result<()> {
+        const ATTEMPTS: u32 = 50;
+        let mut attempt = 1;
+        loop {
+            match std::fs::remove_dir_all(path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) if attempt == ATTEMPTS => return Err(e),
+                Err(_) => wait(),
+                Ok(()) => return Ok(()),
+            }
+            attempt += 1;
         }
     }
 
@@ -503,6 +604,74 @@ mod tests {
         exists(atomic_create(&link, b"x"));
         assert!(std::fs::symlink_metadata(&link).is_ok());
         assert!(tmp_files(dir.path()).is_empty());
+    }
+
+    /// Task 13 fix round 2: the step `publish.retry_wait` starts each wait between two publish
+    /// attempts, outside the gate (the shell's publish guard): after one gate call has returned and
+    /// before the next begins.
+    #[cfg(windows)]
+    #[test]
+    fn publish_retry_wait_is_outside_the_gate() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Disarm;
+        impl Drop for Disarm {
+            fn drop(&mut self) {
+                failpoint::disarm_all();
+            }
+        }
+        let _disarm = Disarm;
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::write(&to, b"old").unwrap();
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let waits = Rc::clone(&steps);
+        failpoint::observe(
+            "publish.retry_wait",
+            Box::new(move || waits.borrow_mut().push("wait")),
+        );
+        let mut calls = 0;
+        rename_replace_gated(
+            &from,
+            &to,
+            |attempt| {
+                calls += 1;
+                steps.borrow_mut().push("gate in");
+                // The first attempt meets a sharing violation, as when another program holds `to`.
+                let result = match calls {
+                    1 => Err(io::Error::from_raw_os_error(32).into()),
+                    _ => attempt(),
+                };
+                steps.borrow_mut().push("gate out");
+                result
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(
+            *steps.borrow(),
+            ["gate in", "gate out", "wait", "gate in", "gate out"]
+        );
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+    }
+
+    /// A no-replace move onto a taken name is told apart from every other failure.
+    #[test]
+    fn destination_taken_is_recognised() {
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"mine").unwrap();
+        std::fs::write(&to, b"theirs").unwrap();
+        let taken = rename_file_no_replace(&from, &to).unwrap_err();
+        assert!(is_destination_taken(&taken));
+        assert_eq!(std::fs::read(&to).unwrap(), b"theirs");
+        let missing = rename_file_no_replace(&dir.path().join("gone"), &dir.path().join("x"));
+        assert!(!is_destination_taken(&missing.unwrap_err()));
+        assert!(!is_destination_taken(&CoreError::InvalidInput {
+            what: "destination inside vault"
+        }));
+        assert!(!is_destination_taken(&CoreError::NotFound));
     }
 
     #[test]
@@ -651,6 +820,83 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(calls, 1);
+    }
+
+    /// Counts its gate calls and says whether one is running.
+    #[derive(Default)]
+    struct Gate {
+        calls: std::cell::Cell<u32>,
+        inside: std::cell::Cell<bool>,
+        refuse: bool,
+    }
+
+    impl crate::blob::OutputJournal for Gate {
+        fn record(&self, _temp: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn clear(&self, _temp: &Path) {}
+        fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+            self.calls.set(self.calls.get() + 1);
+            if self.refuse {
+                return Err(CoreError::Cancelled);
+            }
+            self.inside.set(true);
+            let result = attempt();
+            self.inside.set(false);
+            result
+        }
+    }
+
+    /// The rename fails with a sharing violation twice, then works: the journal's gate runs
+    /// once per attempt, and every wait comes between gate calls, never inside one.
+    #[test]
+    fn publish_called_once_per_attempt() {
+        use crate::blob::OutputJournal;
+        let journal = Gate::default();
+        let (mut renames, mut waits) = (0, 0);
+        let result = retry_gated(
+            || {
+                renames += 1;
+                match renames {
+                    1 | 2 => Err(std::io::Error::from_raw_os_error(32)),
+                    _ => Ok(()),
+                }
+            },
+            |attempt| journal.publish(attempt),
+            |_| {
+                assert!(!journal.inside.get(), "a wait inside publish");
+                waits += 1;
+            },
+        );
+        // On non-Windows, 32 is some other error and is not retried.
+        if cfg!(windows) {
+            result.unwrap();
+            assert_eq!((journal.calls.get(), renames, waits), (3, 3, 2));
+        } else {
+            assert!(matches!(result, Err(CoreError::Io(_))));
+            assert_eq!((journal.calls.get(), renames, waits), (1, 1, 0));
+        }
+    }
+
+    /// A gate's own refusal is not retried, and the rename never runs.
+    #[test]
+    fn publish_refusal_stops_the_retries() {
+        use crate::blob::OutputJournal;
+        let journal = Gate {
+            refuse: true,
+            ..Gate::default()
+        };
+        let mut renames = 0;
+        let result = retry_gated(
+            || {
+                renames += 1;
+                Ok(())
+            },
+            |attempt| journal.publish(attempt),
+            |_: Duration| panic!("must not wait"),
+        );
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!((journal.calls.get(), renames), (1, 0));
     }
 
     #[test]
@@ -827,5 +1073,82 @@ mod tests {
         let (f, _path) = create_hidden_temp(dir.path(), ".tmp").unwrap();
         let attrs = f.metadata().unwrap().file_attributes();
         assert_ne!(attrs & 0x2, 0, "FILE_ATTRIBUTE_HIDDEN not set");
+    }
+
+    /// Opens `path` so that it cannot be deleted while the handle lives, as a vault's `.lock` is.
+    #[cfg(windows)]
+    fn hold_undeletable(path: &Path) -> File {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1 | 2);
+        options.open(path).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn temp_dir_fails_the_test_when_its_folder_stays() {
+        let dir = TempDir::new();
+        let path = dir.path().to_owned();
+        let held = hold_undeletable(&path.join("held"));
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(dir)));
+        drop(held);
+        fs::remove_dir_all(&path).unwrap();
+        let message = dropped.expect_err("the folder stayed and nothing was reported");
+        let message = message.downcast_ref::<String>().unwrap();
+        assert!(message.contains(&*path.to_string_lossy()), "{message}");
+    }
+
+    /// A panic during the first panic's unwinding would abort this test run instead of reaching here.
+    #[cfg(windows)]
+    #[test]
+    fn temp_dir_stays_quiet_when_the_test_is_already_failing() {
+        let dir = TempDir::new();
+        let path = dir.path().to_owned();
+        let held = hold_undeletable(&path.join("held"));
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _dir = dir;
+            panic!("the test's own failure");
+        }));
+        drop(held);
+        fs::remove_dir_all(&path).unwrap();
+        let message = failed.expect_err("the test panicked");
+        assert_eq!(
+            message.downcast_ref::<&str>(),
+            Some(&"the test's own failure")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_folder_tries_again_after_a_held_file_is_let_go() {
+        let dir = TempDir::new();
+        let mut held = Some(hold_undeletable(&dir.path().join("held")));
+        let mut waits = 0;
+        super::testutil::remove_folder(dir.path(), || {
+            waits += 1;
+            held = None;
+        })
+        .unwrap();
+        assert_eq!(waits, 1);
+        assert!(!dir.path().exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_folder_gives_up_with_the_error_after_its_attempts() {
+        let dir = TempDir::new();
+        let held = hold_undeletable(&dir.path().join("held"));
+        let mut waits = 0;
+        let result = super::testutil::remove_folder(dir.path(), || waits += 1);
+        assert!(result.is_err());
+        assert_eq!(waits, 49, "fifty attempts, a wait between each");
+        drop(held);
+    }
+
+    #[test]
+    fn temp_dir_accepts_a_folder_the_test_already_removed() {
+        let dir = TempDir::new();
+        fs::remove_dir_all(dir.path()).unwrap();
+        drop(dir);
     }
 }

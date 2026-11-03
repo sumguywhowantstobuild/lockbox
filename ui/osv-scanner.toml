@@ -1,0 +1,9 @@
+# Known vulnerabilities in the UI's npm dependencies we accept for now, each with a reason and an expiry date.
+# osv-scanner reads this file for ui/package-lock.json (the root osv-scanner.toml covers Cargo.lock). When a date
+# passes, the scan fails again: re-check the advisory, then fix it or renew the entry with a new date. See
+# docs/SETUP.md "Security scan".
+
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2026-12-15
+reason = "minimatch 10.2.6 only via eslint 10 and typescript-eslint (lint-time dev tools, never shipped); the globs it reads are our own lint config; the fix (11.0.1) is a new major version eslint 10.14.0 does not yet accept (^10.2.6)"

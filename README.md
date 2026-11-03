@@ -12,14 +12,15 @@ documented and honest about its limits.
 
 ## What exists today
 
-Only the first two of five planned stages are built, and there is nothing to run yet. Together the five plans make up Phase
-1, the Windows app (see the [phases](docs/PRD.md#phases)).
+The first three of five planned stages are built. There are no real screens yet: you can build and run the desktop app,
+but it shows only a bare test page, one button per check. Together the five plans make up Phase 1, the Windows app (see
+the [phases](docs/PRD.md#phases)).
 
 | Plan | What it delivers | State |
 |---|---|---|
 | 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
-| 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built (not yet reviewed in a pull request) |
-| 3 | Desktop shell (built with Tauri, a toolkit for desktop apps): sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Not started |
+| 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built |
+| 3 | Desktop shell (built with Tauri, a toolkit for desktop apps), `crates/lockbox-desktop`: sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Built |
 | 4 | The user interface (clickable design mockups first) | Not started |
 | 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
 
@@ -30,27 +31,45 @@ over 4 GiB), tidy up after a crash, search items in memory and generate password
 an encrypted backup of a vault (one file, with a list of its contents that is checked on the way back), test a backup
 without restoring it, restore one (into a hidden folder first, with a record that lets a crash be finished or undone;
 the vault it replaces is kept as a `.before-restore` folder), open a backup or a `.before-restore` folder read-only,
-and copy single items out of it. It has no screens.
+and copy single items out of it.
+
+The desktop shell puts all of that behind a locked-down bridge: every command needs an explicit permission and is
+checked in Rust, the screens never see encryption keys or file contents, and they cannot hand Rust a file path. It locks vaults after 5 minutes idle (you can
+change this), when Windows locks or sleeps, when the app closes, and when a vault's drive goes away. It clears copied
+passwords from the clipboard after 30 seconds and keeps them out of Windows clipboard history. It saves and opens
+decrypted files only after checking them in full, and deletes leftovers at the next launch. It refuses unsupported
+vault locations and finishes or undoes a restore that a crash cut short.
 
 ## Build and test
 
-You need Windows (developed on Windows 11; the code also builds on Linux, where CI, the automatic checks GitHub runs,
-tests the non-Windows file code), Git, and Rust. The security scan and its self-tests also need Node.js. On Windows,
-Rust also needs Microsoft's C++ linker: Visual Studio 2022 Build Tools with "Desktop development with C++". Setup
-details and troubleshooting are in [docs/SETUP.md](docs/SETUP.md).
+You need Windows (developed on Windows 11; the core also builds on Linux, where CI, the automatic checks GitHub runs,
+tests the non-Windows file code; the desktop app is Windows-only), Git, Rust and Node.js. On Windows, Rust also needs
+Microsoft's C++ linker: Visual Studio 2022 Build Tools with "Desktop development with C++". Setup details and
+troubleshooting are in [docs/SETUP.md](docs/SETUP.md).
 
 ```
-rustup toolchain install     # installs the Rust version this project pins (1.99.0), from rust-toolchain.toml
-cargo test --locked          # the whole test suite; it runs real password hashing, so allow a minute or two
+rustup toolchain install     # installs the Rust version this project pins (1.99.1), from rust-toolchain.toml
+npm --prefix ui ci --ignore-scripts   # the UI's build tools, at the exact versions in ui/package-lock.json
+cargo test --locked          # most tests; it runs real password hashing, so allow a few minutes
+cargo test -p lockbox-core --locked --features test-internals   # every engine test, the internal ones too
 ```
+
+To run the app with its test page, use `cargo tauri dev` from `crates/lockbox-desktop` (the Tauri command-line tool is
+in [docs/SETUP.md](docs/SETUP.md#desktop-app-tauri)).
 
 The same checks that CI runs on every push:
 
 ```
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
 cargo test --locked
-node --test "scripts/*.test.mjs"   # the scanner's own tests (needs Node.js)
+cargo test -p lockbox-core --locked --features test-internals
+npm --prefix ui run lint
+npm --prefix ui test
+npm --prefix ui run build
+cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc   # after the UI build, which it embeds
+node --test "scripts/*.test.mjs"   # the scanner's own tests
 node scripts/scan.mjs        # security scan; needs gitleaks, semgrep and osv-scanner, see docs/SETUP.md
 ```
 
@@ -60,9 +79,9 @@ Three checks are slow, so they only run when asked (always in release mode, the 
 # 5 000 items: unlock and search must stay fast
 cargo test --release --locked -p lockbox-core --test search -- --ignored --nocapture
 # a file of 4 GiB + 1 byte goes in and out unchanged while memory stays flat
-cargo test --release --locked -p lockbox-core --test large_file -- --ignored --nocapture
+cargo test --release --locked -p lockbox-core --features test-internals --test large_file -- --ignored --nocapture
 # the same file goes through backup, test, restore and export, and comes out unchanged
-cargo test --release --locked -p lockbox-core --test backup_large -- --ignored --nocapture
+cargo test --release --locked -p lockbox-core --features test-internals --test backup_large -- --ignored --nocapture
 ```
 
 The large-file check writes about 12 GiB of temporary files and can take minutes. The backup check needs about 9 GiB
@@ -88,7 +107,7 @@ Their memory limits are only checked on Windows.
 | Document | What it is |
 |---|---|
 | [docs/PRD.md](docs/PRD.md) | What Lockbox is for: users, features, user stories, how success is measured |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | How the built core is organised, how data flows, and the rules the code keeps |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | How the built core and desktop shell are organised, how data flows, and the rules the code keeps |
 | [SECURITY.md](SECURITY.md) | Threat model, the encryption used, honest limits, how to report a vulnerability |
 | [Design spec](docs/design/2026-10-07-lockbox-design.md) | The full technical design: cryptography, file formats, error handling, tests |
 | [docs/SETUP.md](docs/SETUP.md) | Tools and setup steps, with troubleshooting |
@@ -97,5 +116,5 @@ Their memory limits are only checked on Windows.
 ## Licence
 
 Lockbox is released under the MIT licence; see [LICENSE](LICENSE). The password generator's word list comes from the
-Electronic Frontier Foundation under a Creative Commons licence; credit and details are in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Electronic Frontier Foundation under a Creative Commons licence, and the desktop app uses open-source libraries; credit
+and details are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

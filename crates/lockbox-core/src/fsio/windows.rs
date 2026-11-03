@@ -63,6 +63,18 @@ pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
     move_file(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
 }
 
+/// The move half of [`replace_file`]: here the whole of it, one `MoveFileExW` with
+/// `MOVEFILE_WRITE_THROUGH`.
+pub fn rename_replace(from: &Path, to: &Path) -> io::Result<()> {
+    replace_file(from, to)
+}
+
+/// The durability half of [`replace_file`]: nothing more to do here, the move itself was
+/// write-through.
+pub fn sync_after_replace(_to: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// Moves `from` to `to`; fails (`AlreadyExists`) rather than replace.
 pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     move_file(from, to, MOVEFILE_WRITE_THROUGH)
@@ -214,6 +226,7 @@ pub fn volume_info(dir: &Path) -> io::Result<VolumeInfo> {
 }
 
 /// The most memory this process has had in RAM at once (peak working set), in bytes.
+#[cfg_attr(not(any(test, feature = "test-internals")), allow(dead_code))]
 pub fn peak_memory_bytes() -> Option<u64> {
     let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
     let mut counters = PROCESS_MEMORY_COUNTERS {

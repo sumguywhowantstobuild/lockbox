@@ -1,12 +1,12 @@
-//! Vault lifecycle through the public API only: create, unlock, change password,
-//! regenerate recovery, and the header fallbacks. Every create and unlock runs a real
-//! ~1 s Argon2id derivation, so each test keeps its derivations to a minimum.
+//! Vault lifecycle through the public API (`internals` only to read and edit headers): create,
+//! unlock, change password, regenerate recovery, and the header fallbacks. Every create and
+//! unlock runs a real ~1 s Argon2id derivation, so each test keeps its derivations to a minimum.
 
-use lockbox_core::header::{
+use lockbox_core::internals::header::{
     HEADER_BACKUP, HEADER_FILE, VaultHeader, parse_header, serialize_header,
 };
+use lockbox_core::internals::slots::SlotType;
 use lockbox_core::recovery::RecoverySecret;
-use lockbox_core::slots::SlotType;
 use lockbox_core::{CoreError, Vault, read_vault_name};
 use std::fs;
 use std::path::{Path, PathBuf};

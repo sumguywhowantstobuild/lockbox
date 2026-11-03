@@ -53,17 +53,38 @@ impl CancelToken {
 }
 
 /// Where temporary plaintext files are written down before they exist, so a crash cannot
-/// leave one behind unnoticed (spec 7.2). Plan 3 provides the real journal.
+/// leave one behind unnoticed (spec 7.2), and the gate every rename that publishes an output (a
+/// decrypted copy or a backup) passes. Plan 3 provides the real journal.
 pub trait OutputJournal {
-    fn record(&self, temp: &Path);
+    /// Writes `temp` down before it exists. An error stops the output there: the temp is never
+    /// created, and `clear` is not called for it.
+    fn record(&self, temp: &Path) -> Result<()>;
+    /// Forgets `temp`, once it is gone: published, or removed after a failure. It may run while
+    /// a panic is unwinding; a panic from it is then contained, so the first panic reaches the
+    /// caller. Outside unwinding, a panic from it propagates.
     fn clear(&self, temp: &Path);
+    /// Runs one attempt of the rename that publishes the output: `attempt` tries the rename
+    /// once, without retrying, and nothing else (making the rename durable comes after, outside
+    /// this call). Called once per attempt; the engine waits between attempts outside this call.
+    /// A sharing violation or access denied (Windows) is retried; any other error, a refusal
+    /// from here included, stops the output. While the rename has not happened (a refusal, an
+    /// error, the last attempt failing, a panic), the destination is untouched and the temp is
+    /// removed, then cleared (it stays recorded if it cannot be removed). Once the rename has
+    /// happened, the destination is replaced and the temp is cleared, even if this call then
+    /// fails or panics, and nothing at the old temp path is removed; if making the rename durable
+    /// then fails, the output returns that error: published, durability not confirmed.
+    fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+        attempt()
+    }
 }
 
-/// A journal that remembers nothing.
+/// A journal that remembers nothing and never holds a rename back.
 pub struct NoJournal;
 
 impl OutputJournal for NoJournal {
-    fn record(&self, _temp: &Path) {}
+    fn record(&self, _temp: &Path) -> Result<()> {
+        Ok(())
+    }
     fn clear(&self, _temp: &Path) {}
 }
 
@@ -298,7 +319,7 @@ struct Tee<'a, R, W> {
     src: &'a mut R,
     dst: &'a mut W,
     hash: Sha256,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     read: u64,
 }
 
@@ -307,7 +328,7 @@ impl<R: Read, W: Write> Read for Tee<'_, R, W> {
         let n = self.src.read(buf)?;
         self.dst.write_all(&buf[..n])?;
         self.hash.update(&buf[..n]);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         {
             const STEP: u64 = CHUNK + TAG_LEN;
             let before = self.read;
@@ -335,7 +356,7 @@ pub fn authenticate_copy(
         src,
         dst,
         hash: Sha256::new(),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         read: 0,
     };
     decrypt_stream(

@@ -1,0 +1,76 @@
+[package]
+name = "lockbox-desktop"
+description = "Lockbox desktop app: the Tauri shell between the screens and the vault engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+lockbox-core = { path = "../lockbox-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# A clipboard copy's tag (spec §7.3): the OS random source, the engine's version.
+getrandom = "0.4"
+tauri = { version = "2.12.5", features = [] }
+tauri-plugin-single-instance = "2.5.4"
+# Typed passwords and the recovery key, wiped when dropped; `serde` so they parse from a request and the recovery
+# key crosses to the screen once.
+zeroize = { version = "1.9", features = ["serde"] }
+
+# WebView2's own controller, to turn off external file drops (`os::win`). The versions wry 0.57 already uses.
+[target.'cfg(windows)'.dependencies]
+# The clipboard (spec §7.3), called from Rust only (`os::win`): one opening per write or clear, its formats marking
+# a copy to stay out of clipboard history and cloud sync. No feature needed.
+clipboard-win = "5.4.3"
+# File dialogs, called from Rust only (`os::win`). Its Windows backend needs no feature.
+rfd = { version = "0.17.2", default-features = false }
+webview2-com = "0.39.1"
+windows-core = { version = "0.62", default-features = false }
+# The hidden window that hears Windows lock, sleep, sign-out, shutdown and drive removal (`os::win`): the engine's
+# version. `Win32_Graphics_Gdi` only because windows-sys gates `WNDCLASSW` and `RegisterClassW` behind it.
+# `Win32_Globalization`: `CompareStringOrdinal`, to compare vault paths as Windows does.
+# Where a vault may live (spec §6.10): `Win32_Storage_FileSystem` (drive type, file system, volume root),
+# `Win32_Storage_CloudFilters` (cloud sync roots), `Win32_UI_Shell` and `Win32_System_Com` (known folders, and freeing
+# the path Windows hands back).
+# Auto-lock (spec §7.4): `Win32_UI_Input_KeyboardAndMouse` (`GetLastInputInfo`) and `Win32_System_SystemInformation`
+# (`GetTickCount`), for idle time.
+# Clipboard text written by Rust itself, so a refused block is wiped (spec §7.3): `Win32_System_DataExchange`
+# (`SetClipboardData`) and `Win32_System_Memory` (global blocks).
+# "Open" (spec §7.2), the folder only the current user can reach: `Win32_Security` and `Win32_Security_Authorization`
+# (the token's user, the folder's permissions), `Win32_System_Threading` (`OpenProcessToken`). `AssocIsDangerous` is
+# under `Win32_UI_Shell`.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_CloudFilters",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dev-dependencies]
+# The engine's failpoints and test helpers, for the shell's tests only.
+lockbox-core = { path = "../lockbox-core", features = ["test-internals"] }
+tauri = { version = "2.12.5", features = ["test"] }
+
+[features]
+# Release builds: embed the built UI (`ui/dist`) and serve it from the app's own origin. Without it the window loads
+# the Vite dev server (`cargo tauri dev`).
+custom-protocol = ["tauri/custom-protocol"]

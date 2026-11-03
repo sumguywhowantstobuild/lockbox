@@ -4,14 +4,13 @@
 //! manifest, and only then renamed over the destination (spec 7.2, verify then publish).
 
 use super::Vault;
-use super::files::{FILES_DIR, attachments, blob_in, refuse_inside};
+use super::files::{FILES_DIR, OutputTemp, attachments, blob_in, refuse_inside};
 use super::naming::created_at_now;
 use super::source::{ENTRY_HASH, blob_name, item_name};
 use crate::archive::{ArchiveWriter, BackupArchive, copy_hashed};
 use crate::blob::{CancelToken, OutputJournal, authenticate_copy};
 use crate::fsio::{
-    check_space, clear_hidden, create_hidden_file, hidden_temp_path, open_shared_read, parent_dir,
-    read_retry, remove_file_retry, replace_file, volume_info,
+    check_space, clear_hidden, open_shared_read, parent_dir, read_retry, volume_info,
 };
 use crate::header::{
     HEADER_FILE, MAX_HEADER_BYTES, parse_header, serialize_header, verify_header_mac,
@@ -109,7 +108,7 @@ fn verify(temp: &Path, manifest: &BackupManifest, cancel: &CancelToken) -> Resul
 /// Test hook: once the temp is written and closed, flips one data byte inside it, so the
 /// re-read must catch it: in `vault.json` (`backup.corrupt_temp`) or in the first digit of the
 /// manifest's `created_at` (`backup.corrupt_manifest`), which leaves the manifest valid JSON.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 fn corrupt_if_armed(temp: &Path) -> Result<()> {
     use crate::fsio::failpoint;
     let header = failpoint::check("backup.corrupt_temp").is_err();
@@ -133,7 +132,10 @@ fn corrupt_if_armed(temp: &Path) -> Result<()> {
 impl Vault {
     /// Writes a backup of the open vault to `dest` (spec 6.7): built in a hidden temp beside
     /// it (recorded in `journal` before it exists), re-read and checked, then renamed over
-    /// `dest`. A failed or cancelled backup never touches an existing `dest`.
+    /// `dest`, each attempt of the rename passing the journal's gate. A backup that fails, is
+    /// cancelled or is refused before the rename never touches an existing `dest`. Once the
+    /// rename has happened `dest` holds the new backup; if making that durable then fails, the
+    /// error is returned as published, durability not confirmed.
     ///
     /// `&self` is deliberate: no vault write can run while a backup borrows the vault, so the
     /// snapshot is consistent. Refused while a header change awaits the user's OK, while the
@@ -159,37 +161,26 @@ impl Vault {
         let estimate = self.estimate(&blobs, cancel)?;
         check_space(estimate, estimate, &volume_info(folder)?)?;
 
-        let temp = hidden_temp_path(folder, ".lockbox-backup-partial");
-        journal.record(&temp);
-        // Owned only once this succeeds; if the name is taken, the other file is not ours to delete.
-        let file = match create_hidden_file(&temp) {
-            Ok(file) => file,
-            Err(error) => {
-                journal.clear(&temp);
-                return Err(error);
-            }
-        };
-        let published = (|| {
-            // Returns only after the writer and the file are dropped.
-            let (manifest, report) = self.write_archive(file, cancel)?;
-            #[cfg(test)]
-            corrupt_if_armed(&temp)?;
-            verify(&temp, &manifest, cancel)?;
-            // Windows keeps a file's attributes when it replaces another: unhide first.
-            clear_hidden(&temp)?;
-            #[cfg(test)]
-            crate::fsio::failpoint::check("backup.before_publish")?;
-            // Last chance to stop: once the rename starts, publication completes.
-            cancel.check()?;
-            replace_file(&temp, dest)?;
-            Ok(report)
-        })();
-        // Every handle on the temp is closed by now. Only a temp that is really gone leaves
-        // the journal; otherwise launch cleanup retries.
-        if published.is_ok() || remove_file_retry(&temp).is_ok() {
-            journal.clear(&temp);
-        }
-        published
+        // Every early return below, and a panic, leaves the clean-up to `temp`.
+        let mut temp = OutputTemp::create(
+            folder,
+            ".lockbox-backup-partial",
+            journal,
+            "backup.after_record",
+        )?;
+        // Returns only after the writer and the file are dropped.
+        let (manifest, report) = self.write_archive(temp.take_file(), cancel)?;
+        #[cfg(any(test, feature = "test-internals"))]
+        corrupt_if_armed(temp.path())?;
+        verify(temp.path(), &manifest, cancel)?;
+        // Windows keeps a file's attributes when it replaces another: unhide first.
+        clear_hidden(temp.path())?;
+        #[cfg(any(test, feature = "test-internals"))]
+        crate::fsio::failpoint::check("backup.before_publish")?;
+        // Last chance to cancel: from here only the journal's gate can still stop it.
+        cancel.check()?;
+        temp.publish(dest)?;
+        Ok(report)
     }
 
     fn refuse_backup(&self) -> Result<()> {
@@ -374,8 +365,9 @@ mod tests {
     struct Recorder(RefCell<Vec<(&'static str, PathBuf)>>);
 
     impl OutputJournal for Recorder {
-        fn record(&self, temp: &Path) {
+        fn record(&self, temp: &Path) -> Result<()> {
             self.0.borrow_mut().push(("record", temp.to_path_buf()));
+            Ok(())
         }
         fn clear(&self, temp: &Path) {
             self.0.borrow_mut().push(("clear", temp.to_path_buf()));

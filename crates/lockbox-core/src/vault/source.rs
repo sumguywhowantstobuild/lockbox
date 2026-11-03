@@ -17,7 +17,7 @@ use crate::manifest::verify_manifest_mac_cancellable;
 use crate::secret::Key32;
 use crate::{CoreError, Result};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -46,7 +46,7 @@ const DAMAGED_FILE: CoreError = CoreError::Damaged {
 const NO_HEADER: CoreError = CoreError::Damaged {
     what: "backup: no header",
 };
-const FILE_MISSING: CoreError = CoreError::Damaged {
+pub(super) const FILE_MISSING: CoreError = CoreError::Damaged {
     what: "file missing",
 };
 
@@ -157,12 +157,30 @@ impl VaultSource {
         }
     }
 
+    /// The attachments in `refs` whose blob this source does not have, in the order of `refs`:
+    /// those [`blob_ids`](Self::blob_ids) does not list (so, in a folder, a link named like a
+    /// blob is missing too, as for [`blob`](Self::blob)). Nothing is listed when `refs` is empty.
+    pub(super) fn missing_blobs(&self, refs: &[FileRef]) -> Result<Vec<FileId>> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let present: BTreeSet<FileId> = self.blob_ids()?.into_iter().collect();
+        Ok(refs
+            .iter()
+            .map(|r| r.file_id)
+            .filter(|id| !present.contains(id))
+            .collect())
+    }
+
     /// The stored blob (ciphertext) and its size. A blob that is not there is
-    /// `Damaged { "file missing" }`; so is a link named like one.
+    /// `Damaged { "file missing" }`; so is a link named like one. A folder's linked `files`
+    /// folder is refused, as [`blob_ids`](Self::blob_ids) refuses it; a missing one holds no blob.
     pub(super) fn blob(&self, id: &FileId) -> Result<(Box<dyn Read + Send>, u64)> {
         match self {
             Self::Folder(dir) => {
-                let path = blob_in(&dir.join(FILES_DIR), id);
+                let files = dir.join(FILES_DIR);
+                check_folder(&files)?;
+                let path = blob_in(&files, id);
                 match fs::symlink_metadata(&path) {
                     Ok(m) if m.is_file() => {}
                     Ok(_) => return Err(FILE_MISSING),
@@ -256,7 +274,7 @@ pub(super) fn unlock_source(
 
     let (mut items, mut damaged) = (BTreeMap::new(), Vec::new());
     for id in src.item_ids()? {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("source.item")?;
         cancel.check()?;
         let bytes = match src.item_bytes(&id) {
@@ -425,9 +443,10 @@ pub(super) mod tests {
     pub(in crate::vault) const MIB: usize = 1 << 20;
 
     pub(in crate::vault) struct Fixture {
-        pub(in crate::vault) parent: TempDir,
         pub(in crate::vault) vault: Vault,
         pub(in crate::vault) recovery: RecoverySecret,
+        /// Kept last, so the vault is closed before the folder is removed.
+        pub(in crate::vault) parent: TempDir,
     }
 
     impl Fixture {

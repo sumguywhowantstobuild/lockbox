@@ -34,13 +34,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use backup::BackupReport;
-pub(crate) use naming::folder_name;
-pub use readonly::ReadOnlyVault;
+pub use journal::{JournalStep, JournalView, inspect_restore_journal};
+pub use naming::folder_name;
+pub use naming::is_reserved_device_name;
+pub use readonly::{CopiedItem, ReadOnlyVault};
 pub use restore::{
-    PreparedRestore, Recovery, RestoreOutcome, dismiss_restore_journal, recover_restore,
+    PreparedRestore, Recovery, RestoreDestination, RestoreOutcome, dismiss_restore_journal,
+    recover_restore,
 };
 pub use source::{BackupSummary, verify_backup};
-pub use unlock::{Credential, read_vault_name};
+pub use unlock::{Credential, read_vault_id, read_vault_name};
 
 /// How long one password check should take on this machine.
 const KDF_TARGET: Duration = Duration::from_secs(1);
@@ -168,6 +171,8 @@ impl Vault {
     ) -> Result<CreatedVault> {
         validate_name(name)?;
         check_new_password(password)?;
+        // A vault never goes inside another vault's folder (a later restore over the outer one would carry it along).
+        files::refuse_vault_folder(&parent.join(folder_name(name, &id)))?;
 
         let vault_key = Key32::random();
         let params = Argon2Params::calibrate(KDF_TARGET);
@@ -212,7 +217,7 @@ impl Vault {
         fs::create_dir_all(staging.join("files").join("orphaned"))?;
         write_headers(&staging, &header)?;
         fsio::sync_dir(&staging)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-internals"))]
         fsio::failpoint::check("create.before_rename")?;
 
         // The final folder must not be hidden (Windows keeps a folder's attributes when it is renamed).
@@ -457,6 +462,28 @@ mod tests {
             .collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn create_inside_a_vault_folder_refused() {
+        let parent = TempDir::new();
+        let outer = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let before = names(outer.dir());
+        // A display name may hold separators: the folder's name is what counts.
+        for name in ["Nested", "AC/DC", "..\\up"] {
+            let nested = Vault::create(outer.dir(), name, PW);
+            assert!(
+                matches!(
+                    nested,
+                    Err(CoreError::InvalidInput {
+                        what: "destination in a vault folder"
+                    })
+                ),
+                "{name}"
+            );
+        }
+        assert_eq!(names(outer.dir()), before);
+        assert!(Vault::create(parent.path(), "AC/DC", PW).is_ok());
     }
 
     #[test]
