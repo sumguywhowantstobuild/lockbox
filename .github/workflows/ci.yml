@@ -32,8 +32,9 @@ jobs:
             # The desktop app is Windows-only; building it on Linux would need WebKitGTK for nothing.
             packages: --workspace --exclude lockbox-desktop
     runs-on: ${{ matrix.os }}
-    # The Windows run also builds the UI and a release build of the app.
-    timeout-minutes: 45
+    # The Windows run also builds the UI and a release build of the app. A pull request's first run has no cache
+    # (branch caches do not reach it) and compiles everything, which has run past 45 minutes.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
