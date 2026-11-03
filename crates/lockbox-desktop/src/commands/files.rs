@@ -743,6 +743,45 @@ mod tests {
         assert!(busy.contains(&(Some(s), vec!["save_copy"])), "{busy:?}");
     }
 
+    #[test]
+    fn foreign_file_id_refused() {
+        let ts = TestShell::new();
+        let (a, ga) = ts.open_vault("Family");
+        let (b, gb) = ts.open_vault("Work");
+        let add = |session, generation, name: &str| {
+            let path = ts.temp.path().join(name);
+            fs::write(&path, name).unwrap();
+            ts.dialogs.answer(Some(path));
+            match ts.shell.add_file(session, generation, None).unwrap().data {
+                Outcome::Done(id) => id,
+                _ => panic!("not done"),
+            }
+        };
+        let file_of = |session, generation, id: &str| {
+            let detail = ts.shell.get_item(session, generation, id).unwrap();
+            let detail = serde_json::to_value(detail).unwrap();
+            detail["data"]["summary"]["attachments"][0]["file_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let mine = add(a, ga, "mine.txt");
+        let theirs = add(b, gb, "theirs.txt");
+        let their_file = file_of(b, gb, &theirs);
+        let dialogs = ts.dialogs.opened();
+
+        let not_found = Some(ShellError::from(CoreError::NotFound));
+        // Another vault's item, and my item with another vault's file.
+        for id in [&theirs, &mine] {
+            let saved = ts.shell.save_file_copy(a, ga, id, &their_file);
+            assert_eq!(saved.err(), not_found);
+            let opened = ts.shell.open_file(a, ga, id, &their_file, false);
+            assert_eq!(opened.err(), not_found);
+        }
+        assert_eq!(ts.dialogs.opened(), dialogs, "no dialog before the check");
+        assert!(ts.launcher.opened().is_empty());
+    }
+
     fn refuses_a_path<T: serde::de::DeserializeOwned>(body: Value) {
         assert!(
             parse::<T>(&InvokeBody::Json(body.clone())).is_ok(),

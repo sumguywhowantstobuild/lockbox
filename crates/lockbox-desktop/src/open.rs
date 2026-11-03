@@ -620,6 +620,12 @@ mod tests {
 
     #[test]
     fn executable_types_table() {
+        // Spec §7.2's list, written out: the loop below reads the constant, so it would not miss one taken off it.
+        for extension in [
+            "exe", "bat", "cmd", "ps1", "vbs", "js", "hta", "lnk", "url", "msi", "scr",
+        ] {
+            assert!(EXECUTABLE_TYPES.contains(&extension), "{extension}");
+        }
         for extension in EXECUTABLE_TYPES {
             let upper = extension.to_uppercase();
             for name in [

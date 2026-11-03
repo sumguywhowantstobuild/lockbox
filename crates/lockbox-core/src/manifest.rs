@@ -208,6 +208,18 @@ mod tests {
         assert_eq!(mac_message(&sample()), expected);
     }
 
+    /// The answer comes from outside this code (HKDF-SHA256 and HMAC-SHA256 in Node's crypto, over the message above),
+    /// so a changed key label or key derivation cannot pass: it would stop every existing backup opening.
+    #[test]
+    fn mac_known_answer() {
+        let expected: [u8; 32] = [
+            0x0c, 0x22, 0x06, 0x78, 0xb7, 0xfe, 0xcc, 0x58, 0x8a, 0xe5, 0x8b, 0x1d, 0xb8, 0xa4,
+            0x3d, 0x55, 0x00, 0xc8, 0x96, 0x6f, 0x36, 0xd9, 0xd0, 0x02, 0x68, 0x9f, 0xbc, 0x8d,
+            0xd3, 0x52, 0x7a, 0x70,
+        ];
+        assert_eq!(manifest_mac(&sample(), &key()), expected);
+    }
+
     #[test]
     fn mac_round_trip_and_tamper() {
         let mut base = sample();

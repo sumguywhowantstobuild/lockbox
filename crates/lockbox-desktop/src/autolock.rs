@@ -859,6 +859,23 @@ mod tests {
     }
 
     #[test]
+    fn windows_ending_locks_all_and_refuses_new_work() {
+        // Signing out or shutting down: Windows may end the process right after the message.
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let backup = CancelToken::new();
+        let _backup = ts.shell.autolock.begin(None, "backup", backup.clone());
+
+        ts.shell.autolock.signal(OsSignal::Ending);
+        assert!(backup.is_cancelled());
+        assert_eq!(state(&ts, family), SessionState::Locked);
+        assert_eq!(locks(&ts), [(family, LockReason::AppClosing)]);
+        let late = CancelToken::new();
+        let _late = ts.shell.autolock.begin(None, "backup", late.clone());
+        assert!(late.is_cancelled());
+    }
+
+    #[test]
     fn shutdown_locks_and_runs_hooks() {
         // Hooks that return: every vault locked, every hook run with `None` (all), operations cancelled.
         let ts = TestShell::new();
