@@ -49,6 +49,9 @@ const DIRECTORY: u32 = 0x10;
 /// The sweep's delete attempts, as the engine retries its own: at most 10, while another program briefly holds the
 /// leftover (a sharing violation or access denied), waiting 20 ms and doubling, at most 1 s, between them.
 pub(crate) const DELETE_TRIES: u32 = 10;
+/// The launch sweep's tries for an "Open" folder (about 60 ms): it runs before the window, a viewer seldom lets go within
+/// seconds, and a folder that stays goes on Retry and is tried at every lock, close and launch.
+pub(crate) const LAUNCH_OPEN_TRIES: u32 = 3;
 const FIRST_WAIT: Duration = Duration::from_millis(20);
 const MAX_WAIT: Duration = Duration::from_secs(1);
 
@@ -331,7 +334,11 @@ impl Outputs {
         let mut report = SweepReport::default();
         let mut kept = Vec::new();
         for entry in entries {
-            match self.sweep_one(&entry, DELETE_TRIES) {
+            let tries = match entry.parent().is_some_and(|folder| self.is_open(folder)) {
+                true => LAUNCH_OPEN_TRIES,
+                false => DELETE_TRIES,
+            };
+            match self.sweep_one(&entry, tries) {
                 Swept::Removed => report.removed += 1,
                 Swept::Kept => kept.push(entry),
                 Swept::Dropped => {}

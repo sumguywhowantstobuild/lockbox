@@ -84,7 +84,8 @@ must give an error with fixed wording, never a panic.
 ## How data flows
 
 ### Create a vault (`Vault::create`)
-1. Check the name and the password length (spec 5.2). Make a random vault key and calibrate Argon2id to about 1 s.
+1. Check the name and the password length (spec 5.2), and that the parent is not inside a vault folder. Make a random
+   vault key and calibrate Argon2id to about 1 s.
 2. Derive the password key, make the recovery secret and derive its key. Wrap the vault key into two key slots
    (spec 5.2). Add the header MAC.
 3. Remove old `.creating-*` folders left by a crash. Build the whole vault in a hidden `.creating-<random>` folder in
@@ -144,7 +145,8 @@ must give an error with fixed wording, never a panic.
    blob belongs to an item, and the free space. Nothing is written yet.
 2. The destination in the chosen parent folder (`RestoreDestination`):
    - `SameVault`: the one real folder there whose header (either copy, read without the key) has the backup's vault
-     ID is replaced (several are refused); without one, a new folder `<name>-<short id>`.
+     ID is replaced (several are refused); without one, a new folder `<name>-<short id>`, refused if the parent is
+     inside a vault folder.
    - `NewFolder(name)`: for a vault folder whose two header copies are unreadable. Refused while a readable copy of
      the vault is in the parent ("vault already here"), for a name `check_folder_name` refuses ("folder name"), and,
      like every new folder, when anything at all is at that name ("destination exists"). The damaged folder is never
@@ -352,7 +354,8 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
    it is made, for display, and the generator's output is a new value, not a stored one. Spec 4.1.
 2. **Paths never come from the page.** Commands take IDs and values; Rust opens every dialog: `request_with_a_path_field_refused`
    (one each in `commands/vaults.rs`, `files.rs`, `backup.rs`), `restore_requests_are_strict`, `item_requests_refuse_unknown_fields`.
-   Paths go the other way in one place: a restore recovery notice shows the user's own folders so they can act on them.
+   Paths go the other way in one case: a restore that cannot finish (its notice, and the question before dismissing it)
+   shows the user's own folders so they can act on them.
 3. **Every command needs a permission, and the window has exactly the expected set.** `capability_grants_exactly_the_expected_set`,
    `granted_command_runs_in_main_window`, `every_listed_command_reaches_its_handler`, `other_window_is_refused`,
    `remote_origin_is_refused`, `plugin_commands_are_refused`. Spec 4.2.
@@ -371,7 +374,8 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
 9. **A lock during an unlock discards the vault.** `lock_during_unlock_discards_vault`, `open_since_a_stale_epoch_answers_locked_and_does_not_open`.
 10. **A long operation pauses the idle timer; Windows lock and sleep cancel it.** `long_operation_pauses_idle`,
     `idle_counts_from_end_of_long_operation`, `windows_lock_cancels_long_operations`, `sleep_locks_all`, `keep_awake_off_when_last_op_ends`.
-    A question waiting for an answer does not pause it: `prepared_restore_does_not_stop_idle_lock`.
+    A question waiting for an answer does not pause it: `prepared_restore_does_not_stop_idle_lock`. The page's "Lock all"
+    also cancels operations that have no session: `the_pages_lock_all_cancels_operations_without_a_session`.
 11. **Every way out locks every vault; shutdown waits for that at most 2 s, then the app goes on closing** (one exception:
     the helper thread refused, in the Lock flow above, can wait longer). A vault not yet revoked by then ends with the
     process. `shutdown_locks_and_runs_hooks`, `closing_refuses_new_work`, `shutdown_bound_holds_under_operation_contention`,
@@ -395,23 +399,28 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
     `open_refused_where_permissions_do_not_last`, `open_refused_when_a_link_leads_to_the_open_folder`.
 17. **No opened copy stays for good.** `lock_removes_that_vaults_opened_files`, `file_in_use_is_kept_and_retried`,
     `sweep_removes_a_copy_left_by_a_crash`, `leftover_is_removed_while_the_journal_is_damaged`,
-    `other_things_in_the_open_folder_are_left_alone`.
+    `other_things_in_the_open_folder_are_left_alone`. A held copy does not hold up the launch:
+    `launch_does_not_wait_out_held_copies`.
 18. **Locations are checked at create, add, unlock, recover and the restore parent.** `locations_refused_table`,
     `fixed_ntfs_accepted`, `link_into_a_forbidden_folder_refused`, `unlock_rechecks_location`, `recover_confirm_rechecks_location`,
     `add_existing_vault_checks_the_folder`, `restore_parent_location_checked`, `cloud_folder_needs_confirmation`. Output stays
-    out of the state folder: `save_into_state_folder_refused`. Spec 6.10.
+    out of the state folder: `save_into_state_folder_refused`. A new vault folder never goes inside another vault's folder (the engine's
+    `create_inside_a_vault_folder_refused`, `same_vault_restore_inside_a_vault_folder_refused`). Spec 6.10.
 19. **Launch work comes before any command, and one copy of the app runs it.** `launch_runs_recovery_before_anything`,
-    `instance_claim_is_refused_while_another_holds_it`. The order inside `.setup` needs a real window, so the hands-on list covers it.
+    `instance_claim_is_refused_while_another_holds_it`. No test fails if the order inside `.setup` changes, since that
+    needs a real window; the hands-on list checks the result (a leftover "Open" folder is gone by the time the window shows).
 20. **A restore's own lock of its destination goes on; any other cancels it until the swap starts.**
     `own_destination_lock_does_not_cancel`, `user_lock_of_destination_cancels_before_commit`,
     `destination_lock_with_its_hook_still_queued_cancels`, `a_lock_just_before_the_swap_cancels_it`,
-    `restore_closes_open_vault_first`, `lock_during_restore`, `no_restore_starts_between_a_failed_commit_and_its_recovery`. Spec 6.8.
+    `restore_closes_open_vault_first`, `lock_during_restore`, `no_restore_starts_between_a_failed_commit_and_its_recovery`,
+    and the engine's `a_cancel_during_the_last_checks_stops_the_swap`. Spec 6.8.
 21. **A question that keeps something for its answer is a one-time token, and a lock of all vaults ends it.** (A plain yes,
     such as an executable type or deleting a pre-restore copy, is a flag on the repeated request, which goes through the
     same checks.) `token_expires_after_five_minutes`, `create_vault_confirm_with_unknown_or_other_token_refused`,
     `lock_all_drops_everything_pending`, `ask_racing_lock_parks_nothing`.
 22. **Read-only sessions refuse every write.** `read_only_session_refuses_writes`, `read_only_session_refuses_every_edit`,
-    `sessions_for_backup_and_live_vault_coexist`. Spec 6.9.
+    `sessions_for_backup_and_live_vault_coexist`. A pre-restore copy whose header was changed opens and says so:
+    `pre_restore_copy_with_a_changed_header_says_so`. Spec 6.9.
 23. **Stored links open only for `http` and `https`, from Rust.** `only_http_and_https_urls_open`, `lock_during_link_launch_answers_locked`.
 24. **Errors carry fixed text and numbers only.** `core_errors_keep_their_numbers`, `malformed_request_answers_fixed_error`,
     `notice_json_is_flat_and_debug_hides_paths`. R5.

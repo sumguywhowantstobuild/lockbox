@@ -1,5 +1,7 @@
 //! What a command answers besides its result: a refusal ([`ShellError`]) or a question for the user first
-//! ([`Outcome`]). Every field is fixed text or a number: no path, name, secret or input ever crosses (spec §8, R5).
+//! ([`Outcome`]). A refusal's every field is fixed text or a number: no path, name, secret or input ever crosses (spec
+//! §8, R5). A question may name what it asks about, for the user to answer: file names, or the user's own folders when a
+//! restore cannot finish.
 
 use lockbox_core::CoreError;
 use serde::Serialize;

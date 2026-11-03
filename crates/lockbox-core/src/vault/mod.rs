@@ -171,6 +171,8 @@ impl Vault {
     ) -> Result<CreatedVault> {
         validate_name(name)?;
         check_new_password(password)?;
+        // A vault never goes inside another vault's folder (a later restore over the outer one would carry it along).
+        files::refuse_vault_folder(&parent.join(folder_name(name, &id)))?;
 
         let vault_key = Key32::random();
         let params = Argon2Params::calibrate(KDF_TARGET);
@@ -460,6 +462,28 @@ mod tests {
             .collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn create_inside_a_vault_folder_refused() {
+        let parent = TempDir::new();
+        let outer = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let before = names(outer.dir());
+        // A display name may hold separators: the folder's name is what counts.
+        for name in ["Nested", "AC/DC", "..\\up"] {
+            let nested = Vault::create(outer.dir(), name, PW);
+            assert!(
+                matches!(
+                    nested,
+                    Err(CoreError::InvalidInput {
+                        what: "destination in a vault folder"
+                    })
+                ),
+                "{name}"
+            );
+        }
+        assert_eq!(names(outer.dir()), before);
+        assert!(Vault::create(parent.path(), "AC/DC", PW).is_ok());
     }
 
     #[test]

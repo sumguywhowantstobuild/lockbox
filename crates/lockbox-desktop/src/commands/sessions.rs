@@ -49,7 +49,7 @@ pub(super) async fn lock_all(
     let NoArgs {} = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || {
-        shell.sessions.lock_all(LockReason::Manual);
+        shell.lock_all();
         Ok(())
     })
     .await

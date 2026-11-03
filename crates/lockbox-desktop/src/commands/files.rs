@@ -39,7 +39,8 @@ impl Shell {
     ) -> ShellResult<Tagged<Outcome<()>>> {
         let (id, file_id) = (ItemId::from_hex(id)?, FileId::from_hex(file_id)?);
         self.outputs.usable()?;
-        let name = self.stored_name(session, generation, &id, &file_id)?;
+        // Cleaned up as for "Open": the dialog would show a right-to-left mark's false extension as it is.
+        let name = safe_name(&self.stored_name(session, generation, &id, &file_id)?);
         let Some(dest) = self.os.dialogs.save_file("Save a copy", &name, None) else {
             return self.still_current(session, generation, Outcome::Dismissed);
         };
@@ -741,6 +742,21 @@ mod tests {
         let busy = ts.events.busy();
         assert!(busy.contains(&(Some(s), vec!["import"])), "{busy:?}");
         assert!(busy.contains(&(Some(s), vec!["save_copy"])), "{busy:?}");
+    }
+
+    /// A stored name is not trusted in a dialog either: a right-to-left mark would show a false extension there.
+    #[test]
+    fn save_dialog_suggests_the_cleaned_up_name() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let (id, file_id) = ts.stored_file(s, g, "invoice\u{202E}fdp.exe", b"x");
+        ts.dialogs.answer(None);
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id).unwrap();
+        assert!(matches!(saved.data, Outcome::Dismissed));
+        assert_eq!(
+            ts.dialogs.suggested().last().map(String::as_str),
+            Some("invoice_fdp.exe")
+        );
     }
 
     #[test]

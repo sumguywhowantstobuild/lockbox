@@ -253,6 +253,8 @@ impl Shell {
     ) -> ShellResult<Outcome<Tagged<CreatedView>>> {
         // Before the dialog and the cloud question: the user hears it first.
         check_new_password(&password)?;
+        // A lock of all vaults while the picker is open ends this create, as it does for the other pickers.
+        let epoch = self.sessions.epoch();
         let parent = match choose_folder {
             true => match self
                 .os
@@ -264,9 +266,11 @@ impl Shell {
             },
             false => default_vault_parent(self.os.env.as_ref())?,
         };
-        let answer = self.sessions.open(None, Some(VAULT_CREATED), |cancel| {
-            self.create_in(parent, name, password, false, cancel)
-        })?;
+        let answer = self
+            .sessions
+            .open_since(epoch, None, Some(VAULT_CREATED), |cancel| {
+                self.create_in(parent, name, password, false, cancel)
+            })?;
         created(answer)
     }
 
@@ -875,6 +879,23 @@ mod tests {
         let key = RecoverySecret::parse(&tagged.data.recovery_key).unwrap();
         assert!(heavy(|| Vault::unlock_with_recovery(&dir, &key)).is_ok());
         assert_eq!(ts.shell.registry.path(id), Some(dir));
+    }
+
+    /// A lock while the folder picker is open: the password typed before it makes no new unlocked vault after it.
+    #[test]
+    fn lock_during_the_folder_picker_creates_nothing() {
+        let ts = TestShell::new();
+        let parent = ts.vaults();
+        let shell = Arc::clone(&ts.shell);
+        ts.dialogs.during_next_dialog(Box::new(move || {
+            shell.sessions.lock_all(LockReason::Manual)
+        }));
+        ts.dialogs.answer(Some(parent.clone()));
+        let answer = ts.shell.create_vault("Family".into(), secret(PW), true);
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "nothing created");
+        assert!(ts.shell.registry.entries().is_empty());
+        assert!(ts.shell.sessions.list().is_empty());
     }
 
     #[test]

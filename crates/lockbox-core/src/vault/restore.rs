@@ -223,7 +223,10 @@ impl PreparedRestore {
         let target = match (&destination, &existing) {
             (RestoreDestination::SameVault, Some(dir)) => dir.clone(),
             (RestoreDestination::SameVault, None) => {
-                new_folder_target(&parent, &folder_name(&name, &vault_id))?
+                let target = new_folder_target(&parent, &folder_name(&name, &vault_id))?;
+                // One click too deep in a folder picker would nest this copy inside the vault it was meant to replace.
+                refuse_vault_folder(&target)?;
+                target
             }
             // Two writable copies would make every later restore here refuse "several copies".
             (RestoreDestination::NewFolder(_), Some(_)) => return Err(ALREADY_HERE),
@@ -366,8 +369,9 @@ impl PreparedRestore {
         self.armed && !self.finished
     }
 
-    /// Spec 6.8 steps 5 and 6: swaps the staged vault into place. Cancelling is checked once,
-    /// before anything happens; once the swap has begun it is never cancelled.
+    /// Spec 6.8 steps 5 and 6: swaps the staged vault into place. Cancelling is checked before
+    /// anything happens and again right before the journal says `swapping`; once the swap has
+    /// begun it is never cancelled.
     ///
     /// `VaultInUse` (the vault being replaced is open), a refused first rename and a journal
     /// that cannot be rewritten all leave the restore as it was, for a retry. Any other error
@@ -388,7 +392,7 @@ impl PreparedRestore {
         }
         cancel.check()?;
         let before = self.choose_before_restore()?;
-        let swapped = match self.swap_steps(before.clone()) {
+        let swapped = match self.swap_steps(before.clone(), cancel) {
             // Still armed, or refused before the swap began: the restore is as it was.
             Err(e) if self.armed || !self.swap_started => return Err(e),
             Err(e) => match recover_restore(&self.journal) {
@@ -522,12 +526,21 @@ impl PreparedRestore {
     /// again if the first rename failed with nothing moved. A refused validation disarms it
     /// without recovery (`swap_started` stays off); any later error leaves it disarmed, and the
     /// caller runs recovery.
-    fn swap_steps(&mut self, before: Option<PathBuf>) -> Result<RestoreOutcome> {
+    fn swap_steps(
+        &mut self,
+        before: Option<PathBuf>,
+        cancel: &CancelToken,
+    ) -> Result<RestoreOutcome> {
         self.swap_started = false;
         let parent = parent_dir(&self.target).to_owned();
         let lock = lock_journal(&self.journal)?;
         // Step 2.
         self.check_before_swap(&lock)?;
+        #[cfg(any(test, feature = "test-internals"))]
+        crate::fsio::failpoint::check("restore.before_swapping")?;
+        // The last chance: choosing the pre-restore name and these checks can take seconds, and from `swapping` on a
+        // cancel no longer counts (spec 6.8).
+        cancel.check()?;
         self.rewrite_journal(&lock, JournalStep::Swapping, before.clone())?;
         self.armed = false;
         self.swap_started = true;
@@ -1661,7 +1674,7 @@ pub(super) mod tests {
         let mut p = s.prepare();
         let before = p.choose_before_restore().unwrap();
         failpoint::arm(point);
-        let result = p.swap_steps(before);
+        let result = p.swap_steps(before, &CancelToken::new());
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))), "{point}");
         die(p, s);
@@ -1899,6 +1912,45 @@ pub(super) mod tests {
         let token = CancelToken::new();
         failpoint::arm_cancel("restore.after_move_existing", token.clone());
         p.commit(&token).unwrap();
+        s.assert_settled();
+        s.assert_restored_at(&s.target);
+    }
+
+    /// One click too deep in the folder picker: restoring "into" the live vault's own folder would nest a second copy
+    /// inside it, and leave the live vault as it was. Refused with nothing written.
+    #[test]
+    fn same_vault_restore_inside_a_vault_folder_refused() {
+        let _reset = Cleanup;
+        let (f, backup) = backed_up();
+        let live = f.vault.dir().to_owned();
+        let d = Dest::new();
+        let before = (listing(&live, &d.journal()), tree(&live));
+        let result = d.prepare_to(&backup, &live, RestoreDestination::SameVault);
+        assert!(matches!(
+            result,
+            Err(CoreError::InvalidInput {
+                what: "destination in a vault folder"
+            })
+        ));
+        assert!((listing(&live, &d.journal()), tree(&live)) == before);
+        assert_eq!(d.reached_journal.get(), 0);
+    }
+
+    /// The checks after the commit's first look at the token can take seconds (a held folder's retries); once the
+    /// journal says `swapping` a cancel no longer counts, so a Windows lock during them must stop the swap here.
+    #[test]
+    fn a_cancel_during_the_last_checks_stops_the_swap() {
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        let before = tree(s.parent());
+        let token = CancelToken::new();
+        failpoint::arm_cancel("restore.before_swapping", token.clone());
+        assert!(matches!(p.commit(&token), Err(CoreError::Cancelled)));
+        failpoint::disarm_all();
+        assert_eq!(tree(s.parent()), before);
+        assert_eq!(journal_step(&s.journal()).step, JournalStep::Extracting);
+        assert!(p.can_retry());
+        p.commit(&CancelToken::new()).unwrap();
         s.assert_settled();
         s.assert_restored_at(&s.target);
     }

@@ -533,7 +533,7 @@ pub(super) async fn delete_pre_restore(
 pub(super) async fn open_pre_restore_read_only(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
-) -> ShellResult<Tagged<SessionInfo>> {
+) -> ShellResult<Tagged<crate::restore::PreRestoreOpened>> {
     let OpenPreRestore { id, credential } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.open_pre_restore_read_only(id, credential)).await

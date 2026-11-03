@@ -756,6 +756,16 @@ pub struct RestorePreparedView {
     pub replaces_existing: bool,
 }
 
+/// A pre-restore copy, open read-only.
+#[derive(Serialize)]
+pub struct PreRestoreOpened {
+    #[serde(flatten)]
+    pub info: SessionInfo,
+    /// Its header's stamp does not match: its name or date was changed outside Lockbox (spec §5.2). The copy still
+    /// opens, since it may be the only one left; the screen warns.
+    pub header_changed: bool,
+}
+
 /// A restore done.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct RestoredView {
@@ -1392,29 +1402,34 @@ impl Shell {
         &self,
         id: u32,
         credential: CredentialArg,
-    ) -> ShellResult<Tagged<SessionInfo>> {
+    ) -> ShellResult<Tagged<PreRestoreOpened>> {
         let (vault, folder) = self.listed_pre_restore(id)?;
         let location = self.check_pre_restore(vault, &folder)?;
         let credential = credential.typed()?;
         let answer = self.sessions.open(Some(location.clone()), None, |cancel| {
             let opened =
                 ReadOnlyVault::open_folder(location.path(), credential.credential(), cancel)?;
+            let header_changed = !opened.header_mac_ok();
             Ok(OpenStep::Session(
                 location.clone(),
                 Opened::ReadOnly(opened),
-                (),
+                header_changed,
             ))
         })?;
         match answer {
             Outcome::Done(Tagged {
                 session,
                 generation,
-                data: (info, _),
+                data: (info, header_changed),
             }) => match info.read_only {
                 true => Ok(Tagged {
                     session,
                     generation,
-                    data: info,
+                    data: PreRestoreOpened {
+                        info,
+                        // `None`: open already, and the page heard it then.
+                        header_changed: header_changed.unwrap_or(false),
+                    },
                 }),
                 // A writable session already at that place is a live vault, never handed out here.
                 false => Err(ShellError::InvalidInput {
@@ -2720,7 +2735,7 @@ mod tests {
                     .open_pre_restore_read_only(listed[0].id, password())
             })
             .unwrap();
-            assert!(opened.data.read_only);
+            assert!(opened.data.info.read_only);
             (opened.session, opened.generation)
         };
         let busy = Some(ShellError::Busy {
@@ -2821,7 +2836,7 @@ mod tests {
                 .open_pre_restore_read_only(listed[0].id, password())
         })
         .unwrap();
-        assert!(old.data.read_only);
+        assert!(old.data.info.read_only);
         let (live, live_generation) = unlock(&ts, restored.vault);
         assert_eq!(
             titles(&ts, old.session, old.generation),
@@ -2835,6 +2850,32 @@ mod tests {
             heavy(|| ts.shell.open_pre_restore_read_only(77, password())).err(),
             Some(ShellError::NotFound)
         );
+    }
+
+    /// A pre-restore copy whose name was edited still opens (it may be the only copy left), and says so (R2).
+    #[test]
+    fn pre_restore_copy_with_a_changed_header_says_so() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        restore_once(&ts, &backup, &parent);
+        let listed = ts.shell.list_pre_restore();
+        let open = |id| heavy(|| ts.shell.open_pre_restore_read_only(id, password())).unwrap();
+        let clean = open(listed[0].id);
+        assert!(!clean.data.header_changed);
+        ts.shell.sessions.lock(clean.session, LockReason::Manual);
+        assert!(ts.shell.sessions.release_wait(clean.session, RELEASE_WAIT));
+
+        let header = parent.join(&listed[0].folder).join("vault.json");
+        let mut edited: serde_json::Value =
+            serde_json::from_slice(&fs::read(&header).unwrap()).unwrap();
+        edited["name"] = "Renamed".into();
+        fs::write(&header, edited.to_string()).unwrap();
+        let listed = ts.shell.list_pre_restore();
+        let changed = open(listed[0].id);
+        assert!(changed.data.header_changed);
+        assert!(changed.data.info.read_only);
     }
 
     /// A `.before-restore` folder the user added to the vault list is a live vault: it is not listed any more, and an ID

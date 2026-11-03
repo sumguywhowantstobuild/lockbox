@@ -93,8 +93,8 @@ trusted than Rust.
   answer with text built from what the page sent, so screens must never pass a secret to them; that text goes only back
   to the page.
 - **Paths.** Commands take IDs and values, never paths. Rust opens every file dialog, so a chosen path never comes from
-  the page. The one place paths go to the page is a restore recovery notice, which shows your own folders so you can act
-  on them. Stored links are opened from Rust, and only for `http` and `https`.
+  the page. Paths go to the page in one case only: a restore that cannot finish (its notice, and the question before
+  dismissing it) shows your own folders so you can act on them. Stored links are opened from Rust, and only for `http` and `https`.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
@@ -162,8 +162,9 @@ in the code with a `shortcut:` comment.
   nothing is delivered.
 - **IPC buffers are not wiped.** Typed passwords arrive and revealed values leave as JSON text inside Tauri's message
   buffers, which Lockbox does not own. The fields Rust parses them into are wiped when they are dropped; a password kept
-  for a question waiting for your answer lives until the answer, the five-minute limit or a lock of all vaults. *Accepted:*
-  wiping the buffers would mean replacing Tauri's transport.
+  for a question waiting for your answer lives until the answer, the five-minute limit or a lock of all vaults, and one
+  typed before a file or folder picker lives until that picker closes, even past a lock (nothing is done with it then).
+  *Accepted:* wiping the buffers would mean replacing Tauri's transport.
 - **Webview memory is not wiped.** Values typed or shown in the window live in WebView2's memory until the browser engine
   frees them. The screens clear their state at a lock, but that releases the text; it does not erase it. *Accepted:*
   no browser engine offers more. Keep the time a password is revealed short.
@@ -216,11 +217,23 @@ in the code with a `shortcut:` comment.
   real screens yet, and there is no release.
 - **No isolation frame.** Tauri's isolation pattern (a sandboxed frame that checks every IPC message) is not used. Plan 4
   decides, when the UI brings in third-party packages.
-- **Small windows we chose not to close.** A cancel arriving during the very last write of an item copy does not stop it, at
-  worst leaving a duplicate; deleting a `.before-restore` folder as you open it is decided by which comes first, after
-  you confirmed the delete; a failed keep-awake request is not retried, so sleep then locks and cancels the operation
-  (the safe side); a lock of the destination while a restore is still extracting ends it when extraction finishes, not
-  before. *Accepted:* none of these exposes a secret or loses data beyond what you confirmed.
+- **Small windows we chose not to close.**
+  - A lock arriving during the very last write of an item copy does not stop it. The page hears "locked", and the item is
+    in the destination vault as you asked, even if only the source vault locked; it can be read there while that vault
+    stays unlocked.
+  - A lock that lands between the last check and Windows opening a file: the viewer may still open, or finds the copy gone.
+  - Deleting a `.before-restore` folder as you open it is decided by which comes first, after you confirmed the delete.
+  - A failed keep-awake request is not retried, so sleep then locks and cancels the operation (the safe side).
+  - A lock of the destination while a restore is still extracting ends it when extraction finishes, not before.
+  - A destination vault unlocked after a restore was prepared, then locked in the instant you confirm: the restore goes
+    ahead, and the old vault is kept as its `.before-restore` folder.
+  - If Windows refuses the thread that removes "Open" copies at a lock, they stay until the next lock, close or launch,
+    with no message.
+
+  *Accepted:* in each the worst outcome is something you had already asked for, a delay, or a copy left in the private
+  "Open" folder until the next cleanup.
+- **A file dialog stays open across a lock.** Windows' dialogs cannot be closed from outside, so a save dialog already open
+  keeps showing the suggested file name after a lock. Nothing happens when it is answered: the command answers "locked".
 
 ### Memory and wiping
 
@@ -422,6 +435,9 @@ Lockbox defends.
   of dismissing, is the better way out: it moves the old vault back and removes the staging folder itself. Plan 4's
   dialog should offer it first. *Accepted:* dismissing is your confirmed way out of a restore that cannot finish, so
   it has to work without the drive, and the folder holds nothing the backup itself does not.
+- A new vault, and a restore that makes a new folder, are refused anywhere under a folder holding a file named
+  `vault.json` or `vault.json.bak`, so one is never nested inside another. An unrelated file of that name higher up (in
+  your profile folder, say) refuses them too. *Accepted:* rare, the error says why, and another folder gets round it.
 - A vault whose two header files are both unreadable cannot be restored in place. Restore cannot tell that its folder
   is that vault, so it makes a new folder; while the damaged one still has the name Lockbox gave it, that name is
   taken, and the restore stops ("destination exists") before writing anything. The restore dialog then offers a new

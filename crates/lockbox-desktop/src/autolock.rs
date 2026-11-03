@@ -430,6 +430,11 @@ impl AutoLock {
         }
     }
 
+    /// Cancels every long operation under way.
+    pub(crate) fn cancel_operations(&self) {
+        lock(&self.operations.running).cancel_all();
+    }
+
     /// Windows lock and sleep: cancels every long operation and revokes every vault in one step (no operation begins
     /// in between). The hooks are queued, not waited for: a blocked one must not stop the next signal.
     fn lock_now(&self, reason: LockReason) {
@@ -856,6 +861,22 @@ mod tests {
         assert_eq!(pending.len(), 1, "not expired yet");
         ts.shell.autolock.tick(expires);
         assert_eq!(pending.len(), 0, "dropped by the tick");
+    }
+
+    /// A test of a backup has no session: the page's "Lock all" has to reach it through the operations (it holds the
+    /// backup's key for as long as it runs).
+    #[test]
+    fn the_pages_lock_all_cancels_operations_without_a_session() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let test_backup = CancelToken::new();
+        let _running = ts
+            .shell
+            .autolock
+            .begin(None, "test_backup", test_backup.clone());
+        ts.shell.lock_all();
+        assert!(test_backup.is_cancelled());
+        assert_eq!(state(&ts, family), SessionState::Locked);
     }
 
     #[test]

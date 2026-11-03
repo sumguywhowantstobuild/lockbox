@@ -141,6 +141,17 @@ impl Shell {
         self.creating_waited.load(Ordering::SeqCst)
     }
 
+    /// The page's "Lock all": revokes every vault, then cancels every long operation, since testing a backup has no
+    /// session for the lock to reach and holds the backup's key while it runs; then waits for the hooks, so a slow hook
+    /// delays neither step. In this order: an operation that begins in between sees the lock in the sessions' epoch.
+    pub fn lock_all(&self) {
+        let hooks = self.sessions.revoke_all(LockReason::Manual);
+        self.autolock.cancel_operations();
+        if let Some(hooks) = hooks {
+            hooks.wait();
+        }
+    }
+
     /// Closing the app (the main window's close request, the app's exit, or Windows ending the session): locks every
     /// vault on a helper thread and cancels every long operation, then waits at most
     /// [`SHUTDOWN_WAIT`](crate::autolock::SHUTDOWN_WAIT) for the lock and its hooks (the clipboard clear and the "Open"

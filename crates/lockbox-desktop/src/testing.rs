@@ -697,6 +697,8 @@ pub struct FakeDialogs {
     on_open: Mutex<Option<Hook>>,
     /// The start folder each folder dialog was given, in order.
     starts: Mutex<Vec<Option<PathBuf>>>,
+    /// The name each save dialog suggested, in order.
+    suggested: Mutex<Vec<String>>,
 }
 
 impl FakeDialogs {
@@ -711,6 +713,10 @@ impl FakeDialogs {
 
     pub fn opened(&self) -> usize {
         self.opened.load(Ordering::SeqCst)
+    }
+
+    pub fn suggested(&self) -> Vec<String> {
+        lock(&self.suggested).clone()
     }
 
     /// Runs `hook` once, inside the next dialog, before it answers.
@@ -741,9 +747,10 @@ impl Dialogs for FakeDialogs {
     fn save_file(
         &self,
         _title: &str,
-        _suggested: &str,
+        suggested: &str,
         _filter: Option<(&str, &[&str])>,
     ) -> Option<PathBuf> {
+        lock(&self.suggested).push(suggested.to_owned());
         self.next()
     }
 }

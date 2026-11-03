@@ -23,7 +23,7 @@ use serde::Serialize;
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
 use crate::os::{same_name, win};
-use crate::outputs::{DELETE_TRIES, Outputs, set_read_only};
+use crate::outputs::{DELETE_TRIES, LAUNCH_OPEN_TRIES, Outputs, set_read_only};
 use crate::session::{LockHook, Notice, Notifier, SessionId, Sessions};
 
 /// Longest name of an opened copy, in characters (spec §7.2: length capped).
@@ -353,7 +353,7 @@ impl OpenFolders {
                 })
                 .collect()
         };
-        self.remove_each(leftovers)
+        self.remove_each(leftovers, LAUNCH_OPEN_TRIES)
     }
 
     /// Starts counting a cleanup, for [`wait_idle`](Self::wait_idle).
@@ -384,18 +384,19 @@ impl OpenFolders {
             *folders = kept;
             taken
         };
-        self.remove_each(taken)
+        self.remove_each(taken, DELETE_TRIES)
     }
 
     /// Removes each of `taken`, which are off the list: what is left goes back, stuck. One try for each comes first, so
-    /// that a folder another program holds does not use up the app close's time before the others get theirs.
-    fn remove_each(&self, taken: Vec<Folder>) -> RemoveReport {
+    /// that a folder another program holds does not use up the app close's time before the others get theirs. `tries`
+    /// is for the held ones.
+    fn remove_each(&self, taken: Vec<Folder>, tries: u32) -> RemoveReport {
         let (gone, held): (Vec<Folder>, Vec<Folder>) = taken
             .into_iter()
             .partition(|folder| self.outputs.remove_open(&folder.path, 1));
         let mut removed = gone.len();
         for mut folder in held {
-            if self.outputs.remove_open(&folder.path, DELETE_TRIES) {
+            if self.outputs.remove_open(&folder.path, tries) {
                 removed += 1;
             } else {
                 folder.stuck = true;
@@ -1297,6 +1298,43 @@ mod tests {
         assert_eq!((report.removed, report.kept), (1, 0));
         assert_eq!(folders_on_disk(&ts), Vec::<String>::new());
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// The launch runs before the window: copies a viewer holds wait for Retry and the next lock, close or launch, not
+    /// for the delete's whole retry schedule (about 4 s each), listed in the journal or not.
+    #[test]
+    fn launch_does_not_wait_out_held_copies() {
+        let ts = TestShell::new();
+        let paths = &ts.shell.paths;
+        let (mut folders, mut held) = (Vec::new(), Vec::new());
+        for name in [
+            "0123456789abcdef0123456789abcde0",
+            "0123456789abcdef0123456789abcde1",
+        ] {
+            let folder = paths.open.join(name);
+            fs::create_dir_all(&folder).unwrap();
+            let copy = folder.join("report.pdf");
+            fs::write(&copy, PDF).unwrap();
+            held.push(hold(&copy));
+            folders.push(folder);
+        }
+        let journal = json!({ "version": 1, "entries": folders });
+        fs::write(&paths.outputs, journal.to_string()).unwrap();
+        // One more that no journal entry lists (a damaged journal was set aside, say).
+        let unlisted = paths.open.join("0123456789abcdef0123456789abcde2");
+        fs::create_dir_all(&unlisted).unwrap();
+        fs::write(unlisted.join("report.pdf"), PDF).unwrap();
+        held.push(hold(&unlisted.join("report.pdf")));
+        folders.push(unlisted);
+
+        let started = Instant::now();
+        let report = ts.shell.sweep_outputs();
+        let took = started.elapsed();
+        assert_eq!((report.removed, report.kept), (0, 2));
+        assert!(took < Duration::from_secs(3), "the launch waited {took:?}");
+        drop(held);
+        ts.shell.open_folders.retry();
+        assert!(folders.iter().all(|folder| !folder.exists()));
     }
 
     /// A copy still held at launch: kept, reported through `launch_notices`, and on the retry list.
