@@ -1,24 +1,27 @@
 # Architecture
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
-restore and read-only vaults). The desktop shell and the UI come in later plans and are not here yet. The target design and the reasons behind it
-are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as "spec
-5.2" and so on.
+restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
+The real screens come in Plan 4: `ui/` holds only the bridge to Rust and a bare test page. The target design and the
+reasons behind it are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as
+"spec 5.2" and so on.
 
 The core is a library with no UI. It does all the encryption and holds every key. Its Rust API is internal to the app:
-the place where secrets must not cross is the IPC boundary (the bridge between the Rust core and the UI, built in Plan
-3).
+the place where keys and file contents must not cross is the IPC boundary (the bridge between the shell and the UI;
+[spec 4.1](docs/design/2026-10-07-lockbox-design.md#41-what-crosses-into-the-ui) lists what may).
 
 The public surface is what the shell uses, and nothing more:
 
 - from the crate root: `Vault`, `ReadOnlyVault`, `CoreError`, `Result`, `BackupReport`, `BackupSummary`,
   `CleanupReport`, `CreatedVault`, `Credential`, `JournalStep`, `JournalView`, `PreparedRestore`, `Recovery`,
   `RestoreDestination`, `RestoreOutcome`, `UnlockReport`, `dismiss_restore_journal`, `inspect_restore_journal`,
-  `is_reserved_device_name`, `read_vault_id`, `read_vault_name`, `recover_restore`, `verify_backup`, `version`;
+  `CopiedItem`, `folder_name`, `is_reserved_device_name`, `read_vault_id`, `read_vault_name`, `recover_restore`,
+  `verify_backup`, `version`;
 - `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef}`; `recovery::RecoverySecret`;
   `generator::{PasswordOptions, PassphraseOptions, generate_password, generate_passphrase}`;
-  `blob::{CancelToken, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::MIN_PASSWORD_CHARS`;
-  `fsio::{atomic_write, remove_file_retry, remove_dir_all_retry}` (the shell's state files and sweeps).
+  `blob::{CancelToken, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::{MIN_PASSWORD_CHARS, check_new_password}`;
+  `fsio::{atomic_write, is_destination_taken, remove_dir_all_retry, remove_file_retry, rename_file_no_replace}` (the
+  shell's state files and sweeps).
 
 `Item`, `ItemKind` and `FileRef` have no serde: an item is only ever written sealed, through crate-private wire types,
 so no code outside the engine can serialise one to the screen. A `FileRef`'s key, nonce prefix, blob version and chunk
@@ -31,7 +34,7 @@ code builds and is tested on Linux CI and can be reused for Android later.
 
 ## Code map
 
-Everything below is in `crates/lockbox-core/src/`. App code goes through `Vault`; the low-level modules are private
+Everything in this table is in `crates/lockbox-core/src/`. App code goes through `Vault`; the low-level modules are private
 (tests reach them through `internals`). A "blob" is one stored file, encrypted.
 
 | Module | Its one job |
@@ -251,6 +254,170 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
     same vault folders (and its own vault folder). A function that must not change a vault cannot be handed one that
     can. Spec 6.9.
 
+## The desktop shell
+
+`crates/lockbox-desktop` is the Tauri 2 app between the screens and the engine (spec 4). The commands are thin wrappers
+that parse their own request and call a plain-Rust `Shell`, so almost every rule is tested without a window. Every call
+to Windows sits behind a small trait in `os/mod.rs`; tests use the fakes in `testing.rs`. The crate builds only on
+Windows.
+
+### Code map
+
+Everything in this table is in `crates/lockbox-desktop/src/`.
+
+| Module | Its one job |
+|---|---|
+| `lib.rs` | Builds the app: the launch order, the signal and tick threads, locking on every way out |
+| `shell.rs` | `Shell`: owns everything below, runs the launch work, sends the page's events |
+| `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard; locking in two phases; the ordered lock-hook thread |
+| `autolock.rs` | The idle timer, long operations that pause it, Windows signals, and the shutdown with its 2 s bound |
+| `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
+| `outputs.rs` | The output journal (`pending-outputs.json`), the gate every decrypted file is published through, and the launch sweep |
+| `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries |
+| `restore.rs` | One restore at a time: its state machine, launch recovery, pre-restore copies and their checks |
+| `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
+| `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
+| `settings.rs` | The idle time and clipboard delay, with their bounds (`settings.json`) |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock |
+| `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
+| `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
+| `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
+| `window.rs` | The one window: what it may load, open, download or receive |
+| `commands/` | The `#[tauri::command]` wrappers. `list.rs` names every command; `args.rs` parses a request strictly |
+| `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock`, `Timer`, `ClipboardBackend`, `Volumes`, `Env`) and the shared clipboard steps |
+| `os/win.rs` | The real Windows calls, the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
+| `os/signals.rs` | Turns a window message into an `OsSignal` |
+| `testing.rs` | The fakes (test builds only) |
+
+Beside the code: `capabilities/main.json` (what the page may call), `tauri.conf.json` (the Content Security Policy and
+app settings), `tests/ipc.rs` (the bridge, through Tauri's own permission checks). In `ui/src/`: `bridge.ts`, the one
+place that calls Rust and drops stale answers; `dropGuard.ts`; `App.tsx`, the test page, which Plan 4 throws away.
+
+State lives in `%LOCALAPPDATA%\Lockbox\`: `vaults.json`, `settings.json`, `pending-outputs.json`,
+`restore-journal.json` and `open\`. Vaults default to `%USERPROFILE%\Lockbox Vaults\`.
+
+### How data flows
+
+**Launch** (the `.setup` hook in `lib.rs`). The single-instance plugin hands a second copy over to the first window. A
+named mutex then catches the case it misses, so a second copy never runs launch work. The signal window starts, and the
+app refuses to run without it. `Shell::launch_work` settles a half-done restore, sweeps the output journal, then sweeps
+`open\`. Only then is the shell made available to commands and the window built, and the app refuses to run if WebView2
+cannot confirm that external file drops are off.
+
+**Unlock** (`unlock_vault`). The page sends a registry ID and the password, never a path. The strict parser reads them
+into a wiped string. The session opens under its location, so a vault opens once. Inside: `check_location` on the folder,
+a check that it is still the listed one, then the engine's unlock. If a lock came during that second or so, the result
+is discarded and the vault's key is released (spec 7.4). The answer carries the session and generation, which the bridge
+remembers.
+
+**Lock** (`Sessions::lock`, `lock_all`, `revoke_some`). Two phases. First, the revocation: in one step every affected
+session's generation goes up and its state becomes `Locked` or `Unavailable`, and from this moment no command gets
+through. Each publish guard is then passed once, so an attempt that saw the old generation has finished. Operations are
+cancelled, the session lets go of the vault, a lock of all vaults also drops every pending token, and the page gets its
+`lockbox://locked` event. Second, the hooks are queued on one ordered thread: the clipboard's (with a short timeout), the
+"Open" folders' (its deletes run on a worker), then the restore's. The timer, the signal router and the folder check never
+wait for a hook; the page's lock commands and shutdown do, shutdown until its 2 s deadline. (If Windows refuses shutdown's
+helper thread, revocation runs inline and can wait past the deadline for one publish attempt.) The vault key goes when
+the last operation holding it finishes (spec 7.4's two guarantees).
+
+**Copy** (`copy_field`). The value never reaches the page. Rust reads the field, then in one clipboard opening, under
+the session's publish guard, which re-checks the generation: empties the clipboard, writes a 16-byte random tag, the
+three exclusion formats, and the text last. A failure before the clipboard is emptied leaves it as it was; a failure after
+empties it again in the same opening, and if that fails too the copy stays owned and the clear is retried. A timer clears
+it after the delay, and so does a lock, in one opening and only if that tag is still there, so a later copy of the user's
+own stays. A clear that finds the clipboard busy retries while the app runs. The answer re-checks the generation too.
+
+**Open** (`open_file`). The stored name goes through the allowlist. An executable type asks first, before anything is
+decrypted. Then in a long operation (the idle timer pauses): a new folder only this user can reach, recorded in the
+journal first; the engine's export, which checks the whole stream before the copy gets its name; the internet mark and
+the read-only flag. The generation is checked as the vault is let go, and the launch comes after that, under no lock,
+so a blocked "How do you want to open this?" dialog cannot delay locking. Copies go at the lock, at close and at launch;
+one a viewer still holds is reported and retried.
+
+**Restore** (`restore_prepare`, `restore_commit`). The pickers run first, then `check_location` on the parent, then
+the engine's `prepare` in a long operation. `Prepared` holds no long operation: a question waiting for the user does not
+keep every vault unlocked. `restore_commit` locks the vault open at the destination with `LockReason::Restore`, waits
+up to 10 s for it to let go, and commits. Any other lock of the destination ends a restore that is not swapping (matched
+by location, so it also catches a vault unlocked after `prepare`). Once the swap starts it finishes or rolls back by the
+journal, whatever locks. A commit the engine says cannot be retried goes straight to recovery. A stale journal at
+`restore_prepare` runs recovery and answers with its result.
+
+### Rules the shell must keep
+
+Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind this list are the fuller record.
+
+1. **Vault keys, file keys and file contents never cross to the page; a stored password only on "Reveal" or edit.** Core
+   `Item`s cannot be serialised, and the views hold no key, nonce or unrevealed password: `item_is_not_serialize`,
+   `views_never_carry_keys_or_unrevealed_password`, `reveal_returns_password_tagged`. The recovery key crosses once, when
+   it is made, for display, and the generator's output is a new value, not a stored one. Spec 4.1.
+2. **Paths never come from the page.** Commands take IDs and values; Rust opens every dialog: `request_with_a_path_field_refused`
+   (one each in `commands/vaults.rs`, `files.rs`, `backup.rs`), `restore_requests_are_strict`, `item_requests_refuse_unknown_fields`.
+   Paths go the other way in one place: a restore recovery notice shows the user's own folders so they can act on them.
+3. **Every command needs a permission, and the window has exactly the expected set.** `capability_grants_exactly_the_expected_set`,
+   `granted_command_runs_in_main_window`, `every_listed_command_reaches_its_handler`, `other_window_is_refused`,
+   `remote_origin_is_refused`, `plugin_commands_are_refused`. Spec 4.2.
+4. **A malformed request gets a fixed error, never the parser's text.** `malformed_request_answers_fixed_error`.
+5. **The window goes nowhere and takes nothing in.** Navigation, new windows, downloads, drops, the policy:
+   `navigation_allows_only_the_app`, `dev_server_refused_in_release`, `security_config_is_pinned`, and the window probes
+   in the hands-on list (no test runtime runs WebView2's callback).
+6. **An answer from before a lock is never delivered.** The backend checks the generation at the start and before it
+   returns; the bridge drops an answer with an old tag: `stale_generation_refused`, `result_after_lock_is_never_returned`,
+   `lock_during_search_and_reveal`, `search_all_skips_locked_sessions`, `ui/src/bridge.test.ts`. Spec 7.4.
+7. **Locking revokes first, and revocation and the automatic triggers never wait for a hook** (the page's lock commands
+   wait for theirs, after revoking). `lock_steps_run_in_spec_order`, `blocked_hook_never_delays_other_vaults`,
+   `blocked_hook_never_stalls_triggers`, `overlapping_locks_finish_in_turn`.
+8. **A lock waits for one publish attempt at most, never for its retries.** `lock_waits_only_for_one_publish_step`,
+   `lock_not_delayed_by_a_held_file`, and the engine's `publish_called_once_per_attempt`.
+9. **A lock during an unlock discards the vault.** `lock_during_unlock_discards_vault`, `open_since_a_stale_epoch_answers_locked_and_does_not_open`.
+10. **A long operation pauses the idle timer; Windows lock and sleep cancel it.** `long_operation_pauses_idle`,
+    `idle_counts_from_end_of_long_operation`, `windows_lock_cancels_long_operations`, `sleep_locks_all`, `keep_awake_off_when_last_op_ends`.
+    A question waiting for an answer does not pause it: `prepared_restore_does_not_stop_idle_lock`.
+11. **Every way out locks every vault; shutdown waits for that at most 2 s, then the app goes on closing** (one exception:
+    the helper thread refused, in the Lock flow above, can wait longer). A vault not yet revoked by then ends with the
+    process. `shutdown_locks_and_runs_hooks`, `closing_refuses_new_work`, `shutdown_bound_holds_under_operation_contention`,
+    `shutdown_without_helper_revokes_inline`, `shutdown_clears_our_copy`, `shutdown_removes_all_opened_files`. That Tauri's
+    exit events reach this code needs a real window, so the hands-on list covers it.
+12. **A vanished drive locks its vault as unavailable, never deleted.** `drive_gone_lock_marks_unavailable`,
+    `vanished_folder_locks_as_unavailable`, `drive_gone_revokes_every_vault_on_it_despite_a_blocked_hook`. Spec 6.10.
+13. **The clipboard is one opening, and fails closed.** `write_and_clear_are_each_one_opening`, `failed_exclusion_empties_clipboard`,
+    `failed_step_empties_in_the_same_opening`, `copy_after_lock_never_writes`, `copy_racing_lock_never_leaves_secret`. Only
+    our own tag is cleared: `user_copy_after_ours_is_kept`, `only_the_exact_tag_counts`, `later_copy_not_cleared_by_earlier_timer`. Spec 7.3.
+14. **A temp plaintext file is recorded before it exists, and the sweep deletes only what Lockbox made.**
+    `record_before_temp_exists`, `record_write_failure_stops_the_output`, `sweep_ignores_paths_it_did_not_make`,
+    `sweep_refuses_a_junctioned_higher_ancestor`, `sweep_rechecks_before_each_delete`, `damaged_journal_kept_and_reported`. Spec 7.2.
+15. **Nothing is launched before the whole file has verified, and the launch holds no lock.** The engine's
+    `export_verify_then_publish` pins the verification and the shell launches only on its success;
+    `opened_copy_is_read_only_and_launched_after_unlock`, `lock_between_decrypt_and_launch_stops_launch`,
+    `locking_is_not_delayed_by_a_blocked_launch`. No shell test opens a damaged file and checks that nothing launched.
+16. **An opened copy has a safe name, a user-only folder and the internet mark, or it does not open.** `safe_name_table`,
+    `rtl_override_name_sanitised_and_flagged`, `trailing_dot_executable_flagged`, `executable_needs_confirmation_first`,
+    `open_folder_acl_is_user_only`, `opened_copy_carries_the_internet_mark`, `mark_that_cannot_be_written_stops_the_open`,
+    `open_refused_where_permissions_do_not_last`, `open_refused_when_a_link_leads_to_the_open_folder`.
+17. **No opened copy stays for good.** `lock_removes_that_vaults_opened_files`, `file_in_use_is_kept_and_retried`,
+    `sweep_removes_a_copy_left_by_a_crash`, `leftover_is_removed_while_the_journal_is_damaged`,
+    `other_things_in_the_open_folder_are_left_alone`.
+18. **Locations are checked at create, add, unlock, recover and the restore parent.** `locations_refused_table`,
+    `fixed_ntfs_accepted`, `link_into_a_forbidden_folder_refused`, `unlock_rechecks_location`, `recover_confirm_rechecks_location`,
+    `add_existing_vault_checks_the_folder`, `restore_parent_location_checked`, `cloud_folder_needs_confirmation`. Output stays
+    out of the state folder: `save_into_state_folder_refused`. Spec 6.10.
+19. **Launch work comes before any command, and one copy of the app runs it.** `launch_runs_recovery_before_anything`,
+    `instance_claim_is_refused_while_another_holds_it`. The order inside `.setup` needs a real window, so the hands-on list covers it.
+20. **A restore's own lock of its destination goes on; any other cancels it until the swap starts.**
+    `own_destination_lock_does_not_cancel`, `user_lock_of_destination_cancels_before_commit`,
+    `destination_lock_with_its_hook_still_queued_cancels`, `a_lock_just_before_the_swap_cancels_it`,
+    `restore_closes_open_vault_first`, `lock_during_restore`, `no_restore_starts_between_a_failed_commit_and_its_recovery`. Spec 6.8.
+21. **A question that keeps something for its answer is a one-time token, and a lock of all vaults ends it.** (A plain yes,
+    such as an executable type or deleting a pre-restore copy, is a flag on the repeated request, which goes through the
+    same checks.) `token_expires_after_five_minutes`, `create_vault_confirm_with_unknown_or_other_token_refused`,
+    `lock_all_drops_everything_pending`, `ask_racing_lock_parks_nothing`.
+22. **Read-only sessions refuse every write.** `read_only_session_refuses_writes`, `read_only_session_refuses_every_edit`,
+    `sessions_for_backup_and_live_vault_coexist`. Spec 6.9.
+23. **Stored links open only for `http` and `https`, from Rust.** `only_http_and_https_urls_open`, `lock_during_link_launch_answers_locked`.
+24. **Errors carry fixed text and numbers only.** `core_errors_keep_their_numbers`, `malformed_request_answers_fixed_error`,
+    `notice_json_is_flat_and_debug_hides_paths`. R5.
+25. **`unsafe` only in `os::win`.** The crate root has `#![deny(unsafe_code)]`, which the compiler enforces; that one
+    module opts out, and each block carries a `// SAFETY:` comment.
+
 ## Where the "why" lives
 
 | Topic | Spec section |
@@ -263,5 +430,9 @@ secret, it is lost; the password still works.) Neither changes the vault key (sp
 | Folder layout, safe writes, header writes | [6.1–6.3](docs/design/2026-10-07-lockbox-design.md#61-layout) |
 | Multi-file changes and cleanup | [6.4](docs/design/2026-10-07-lockbox-design.md#64-multi-file-changes-and-cleanup) |
 | Rollback limit | [6.6](docs/design/2026-10-07-lockbox-design.md#66-rollback-and-deletion-v1-limit) |
+| What crosses to the page; command security | [4.1](docs/design/2026-10-07-lockbox-design.md#41-what-crosses-into-the-ui), [4.2](docs/design/2026-10-07-lockbox-design.md#42-tauri-command-security) |
+| Where a vault may live | [6.10](docs/design/2026-10-07-lockbox-design.md#610-locations-locking-and-filesystems) |
 | Saving decrypted files | [7.2](docs/design/2026-10-07-lockbox-design.md#72-decrypted-output-save-a-copy-and-open) |
+| Clipboard | [7.3](docs/design/2026-10-07-lockbox-design.md#73-clipboard) |
+| Locking | [7.4](docs/design/2026-10-07-lockbox-design.md#74-locking-concurrency-contract) |
 | Tests expected | [9](docs/design/2026-10-07-lockbox-design.md#9-testing-acceptance-criteria) |

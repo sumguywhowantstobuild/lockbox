@@ -10,3 +10,26 @@
 - Licence: Creative Commons Attribution 3.0 United States (CC BY 3.0 US), https://creativecommons.org/licenses/by/3.0/us/
 
 Used by the passphrase generator (`crates/lockbox-core/src/generator.rs`). The list is used as published; Lockbox does not modify it. This credit is required by the licence.
+
+## Libraries the desktop app uses directly
+
+Exact versions are pinned in `Cargo.lock` and `ui/package-lock.json`. The full licence texts of these libraries and of
+what they depend on ship with the installer (Plan 5); nothing is distributed before then.
+
+| Library | Version | Licence | Used for |
+|---|---|---|---|
+| `tauri`, `tauri-build` | 2.12.5, 2.7.4 | Apache-2.0 or MIT | The app toolkit |
+| `tauri-plugin-single-instance` | 2.5.4 | Apache-2.0 or MIT | One copy of the app |
+| `rfd` | 0.17.2 | MIT | File dialogs |
+| `clipboard-win` | 5.4.3 | BSL-1.0 | Opening and reading the clipboard |
+| `error-code` (through `clipboard-win`) | 3.4.0 | BSL-1.0 | Windows error codes |
+| `webview2-com` | 0.39.1 | MIT | Turning off WebView2's external file drop |
+| `windows-core`, `windows-sys` | 0.62.2, 0.61.2 | MIT or Apache-2.0 | Windows calls |
+| `getrandom` | 0.4.3 | MIT or Apache-2.0 | A clipboard copy's random tag |
+| `serde`, `serde_json` | 1.0.229, 1.0.151 | MIT or Apache-2.0 | Requests, answers and state files |
+| `zeroize` | 1.9.1 | Apache-2.0 or MIT | Wiping typed passwords |
+| `react`, `react-dom` | 19.3.1 | MIT | The page |
+| `@tauri-apps/api` | 2.12.4 | Apache-2.0 or MIT | The page's bridge to Rust |
+
+The UI's build and test tools (Vite, TypeScript, ESLint, Vitest and their helpers, listed in `ui/package.json`) do not
+ship with the app.

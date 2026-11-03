@@ -28,7 +28,7 @@ Never passwords or keys here, only where they're kept.
 | rustup | 1.29.1 | `winget install --id Rustlang.Rustup` | Installs and switches Rust versions |
 | Rust | 1.99.1 + rustfmt, clippy | `rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy` | The language of the Lockbox core; pinned so every machine builds the same |
 
-Check: a test program builds and runs (`cargo new hello && cargo run`). `~/.cargo/bin` must be on the user PATH;
+Check: a test program builds and runs, outside this repo (`cargo new hello && cargo run --manifest-path hello/Cargo.toml`). `~/.cargo/bin` must be on the user PATH;
 terminals opened before the install need restarting to see `cargo`.
 
 ### Desktop app (Tauri)
@@ -45,9 +45,15 @@ terminals opened before the install need restarting to see `cargo`.
   `tauri.conf.json`) and opens the window on it. The port is fixed (`strictPort`): the window may only show the app's
   own origin and, in dev builds, `http://localhost:5173`.
 - **Release configuration:** build the UI first (`npm --prefix ui run build`; the app embeds `ui/dist` at compile
-  time), then `cargo build -p lockbox-desktop --release --locked --features custom-protocol`. The bridge tests that
-  only exist in that configuration run with `cargo test -p lockbox-desktop --locked --features custom-protocol --test
-  ipc`.
+  time), then `cargo build -p lockbox-desktop --release --locked --features custom-protocol`. The program is
+  `target\release\lockbox-desktop.exe`, and it has no console. A release build without `custom-protocol` stops at
+  compile time, because it would load the dev server. The bridge tests that only exist in that configuration run with
+  `cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc`.
+- **Debug builds** print each Windows signal to the console, for checking the signal window by hand.
+- **App state** is in `%LOCALAPPDATA%\Lockbox\` (the vault list, settings, journals, opened copies), and vaults default
+  to `%USERPROFILE%\Lockbox Vaults\`. Test against test vaults only: a debug and a release build share both folders.
+- **Real-clipboard checks:** the tests that touch the real clipboard are ignored by default. Run them with
+  `cargo test -p lockbox-desktop clipboard -- --ignored`, with nothing else using the clipboard meanwhile.
 - Tauri writes generated schemas to `crates/lockbox-desktop/gen/` on every build; it is git-ignored.
 
 ## Workspace and CI
