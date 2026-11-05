@@ -545,6 +545,41 @@ test("restore_in_progress_and_notices_are_shown_while_events_say_so", async () =
   expect(screen.getByText("Restore notice: recovered (finished)", { exact: false })).toBeTruthy();
 });
 
+test("shortcut_probe_buttons_show_a_length_and_whether_the_clipboard_was_cleared", async () => {
+  invoke.mockReset();
+  const answers = { length: 0, cleared: false };
+  invoke.mockImplementation((cmd: string) => {
+    switch (cmd) {
+      case "app_info":
+        return Promise.resolve({ version: "9.8.7" });
+      case "launch_notices":
+        return Promise.resolve([]);
+      case "probe_capture_length":
+        return Promise.resolve(answers.length);
+      case "probe_clear_captured":
+        return Promise.resolve(answers.cleared);
+      default:
+        return Promise.reject(new Error(`unexpected command ${cmd}`));
+    }
+  });
+  render(<App />);
+  await screen.findByText("Lockbox 9.8.7");
+
+  fireEvent.click(screen.getByRole("button", { name: "Check shortcut capture" }));
+  expect(await screen.findByText("The shortcut has captured nothing", { exact: false })).toBeTruthy();
+  answers.length = 17;
+  fireEvent.click(screen.getByRole("button", { name: "Check shortcut capture" }));
+  expect(await screen.findByText("The shortcut captured 17 bytes of text")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("probe_capture_length", undefined);
+
+  fireEvent.click(screen.getByRole("button", { name: "Clear shortcut capture" }));
+  expect(await screen.findByText("Clipboard not cleared", { exact: false })).toBeTruthy();
+  answers.cleared = true;
+  fireEvent.click(screen.getByRole("button", { name: "Clear shortcut capture" }));
+  expect(await screen.findByText("Clipboard cleared: it still held the captured text")).toBeTruthy();
+  expect(invoke).toHaveBeenCalledWith("probe_clear_captured", undefined);
+});
+
 test("hands_on_probes_are_listed", async () => {
   invoke.mockResolvedValue({ version: "9.8.7" });
   render(<App />);

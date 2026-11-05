@@ -7,6 +7,7 @@ pub mod files;
 mod generator;
 pub mod items;
 mod list;
+mod probe;
 mod sessions;
 mod settings;
 pub mod vaults;
@@ -82,7 +83,9 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         generator::generate_password,
         generator::generate_passphrase,
         settings::get_settings,
-        settings::set_settings
+        settings::set_settings,
+        probe::probe_capture_length,
+        probe::probe_clear_captured
     ]
 }
 

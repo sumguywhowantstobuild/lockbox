@@ -3,11 +3,15 @@
 
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_VOLUME, PBT_APMSUSPEND, WM_DEVICECHANGE, WM_ENDSESSION,
-    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT,
-    WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
+    WM_HOTKEY, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WTS_CONSOLE_DISCONNECT,
+    WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK, WTS_SESSION_LOGOFF,
 };
 
 use super::OsSignal;
+
+/// The two IDs the save shortcut is registered under, one at a time: a new shortcut is registered under the unused ID
+/// before the old one is released, so a refused change leaves the old shortcut working.
+pub const HOTKEY_IDS: [i32; 2] = [1, 2];
 
 /// The part of a `WM_DEVICECHANGE` message's `DEV_BROADCAST_HDR` that [`classify`] reads; `os::win` copies it out
 /// of the message (and `unitmask` out of `DEV_BROADCAST_VOLUME`, 0 for other device kinds).
@@ -27,7 +31,8 @@ pub fn wants_device_header(msg: u32, wparam: usize) -> bool {
 ///
 /// Locking the session, signing out, a switch to another user (this session loses the console) and a remote-desktop
 /// disconnect are all [`OsSignal::SessionLocked`]; sleep and hibernate are [`OsSignal::Suspending`]; a sign-out or
-/// shutdown that goes ahead is [`OsSignal::Ending`]; a volume that went away is [`OsSignal::DriveRemoved`].
+/// shutdown that goes ahead is [`OsSignal::Ending`]; a volume that went away is [`OsSignal::DriveRemoved`]; a press of
+/// the save shortcut (not a lock signal) is [`OsSignal::SaveShortcut`].
 pub fn classify(msg: u32, wparam: usize, header: Option<DeviceHeader>) -> Option<OsSignal> {
     if wants_device_header(msg, wparam) {
         return match header {
@@ -41,6 +46,11 @@ pub fn classify(msg: u32, wparam: usize, header: Option<DeviceHeader>) -> Option
     // `WM_ENDSESSION`'s wparam is a BOOL: any non-zero value means the session is ending.
     if msg == WM_ENDSESSION {
         return (wparam != 0).then_some(OsSignal::Ending);
+    }
+    // A press of the save shortcut: `WM_HOTKEY`'s wparam is the ID it was registered under.
+    if msg == WM_HOTKEY {
+        let ours = i32::try_from(wparam).is_ok_and(|id| HOTKEY_IDS.contains(&id));
+        return ours.then_some(OsSignal::SaveShortcut);
     }
     // Session and power codes are 32-bit; a wparam with higher bits set is neither.
     let code = u32::try_from(wparam).ok()?;
@@ -59,7 +69,7 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_PORT, DBT_DEVTYP_VOLUME,
         PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, WM_DEVICECHANGE,
-        WM_ENDSESSION, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_WTSSESSION_CHANGE,
+        WM_ENDSESSION, WM_HOTKEY, WM_POWERBROADCAST, WM_QUERYENDSESSION, WM_WTSSESSION_CHANGE,
         WTS_CONSOLE_CONNECT, WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOCK,
         WTS_SESSION_LOGOFF, WTS_SESSION_LOGON, WTS_SESSION_UNLOCK,
     };
@@ -113,6 +123,14 @@ mod tests {
             // DBT_DEVNODES_CHANGED, neither a signal).
             (WM_POWERBROADCAST, WTS_SESSION_LOCK, None, None),
             (WM_DEVICECHANGE, WTS_SESSION_LOCK, volume(0b100), None),
+            // The save shortcut, under either of its two IDs; any other ID is not ours. The ID means something only with
+            // `WM_HOTKEY`.
+            (WM_HOTKEY, 1, None, Some(SaveShortcut)),
+            (WM_HOTKEY, 2, None, Some(SaveShortcut)),
+            (WM_HOTKEY, 0, None, None),
+            (WM_HOTKEY, 3, None, None),
+            (WM_POWERBROADCAST, 1, None, None),
+            (WM_WTSSESSION_CHANGE, 1, None, None),
         ];
         for &(msg, wparam, header, expected) in cases {
             let wparam = usize::try_from(wparam).expect("u32 fits in usize on Windows");
@@ -133,6 +151,7 @@ mod tests {
             (WM_WTSSESSION_CHANGE, WTS_SESSION_LOCK),
             (WM_POWERBROADCAST, PBT_APMSUSPEND),
             (WM_DEVICECHANGE, DBT_DEVICEREMOVECOMPLETE),
+            (WM_HOTKEY, 1),
         ] {
             let wparam = high | usize::try_from(code).expect("u32 fits in usize");
             assert_eq!(

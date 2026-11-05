@@ -17,7 +17,7 @@ The public surface is what the shell uses, and nothing more:
   `RestoreDestination`, `RestoreOutcome`, `UnlockReport`, `dismiss_restore_journal`, `inspect_restore_journal`,
   `CopiedItem`, `folder_name`, `is_reserved_device_name`, `read_vault_id`, `read_vault_name`, `recover_restore`,
   `verify_backup`, `version`;
-- `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef}`; `recovery::RecoverySecret`;
+- `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef, MAX_ITEM_JSON}`; `recovery::RecoverySecret`;
   `generator::{PasswordOptions, PassphraseOptions, generate_password, generate_passphrase}`;
   `blob::{CancelToken, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::{MIN_PASSWORD_CHARS, check_new_password}`;
   `fsio::{atomic_write, is_destination_taken, remove_dir_all_retry, remove_file_retry, rename_file_no_replace}` (the

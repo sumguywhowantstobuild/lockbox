@@ -61,6 +61,8 @@
     "allow-generate-password",
     "allow-generate-passphrase",
     "allow-get-settings",
-    "allow-set-settings"
+    "allow-set-settings",
+    "allow-probe-capture-length",
+    "allow-probe-clear-captured"
   ]
 }

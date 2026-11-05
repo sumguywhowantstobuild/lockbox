@@ -81,6 +81,11 @@ pub fn run() {
                     "Lockbox will not run: it could not listen for Windows lock and sleep".into(),
                 );
             };
+            // The save shortcut, on the same window. If another program has the keys, the app runs without it (a later
+            // task tells the person); it is a convenience, not a protection, so it does not fail closed.
+            let _shortcut = signal_thread.set_hotkey(Some(os::Shortcut::default()));
+            #[cfg(debug_assertions)]
+            eprintln!("Lockbox debug: save shortcut {_shortcut:?}");
             // `manage` refuses (and drops, which closes the window) a second value of the same type.
             if !app.manage(signal_thread) {
                 return Err(
@@ -150,16 +155,33 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Hands each Windows signal to the auto-lock, on a thread of its own: never on the signal window's thread, which
-/// must not wait. Debug builds also print each signal on standard error, one line each, for the hands-on check: the
-/// signal's name and, for a drive, its drive-letter mask; nothing else.
+/// must not wait. A press of the save shortcut is not a lock signal: it goes to the shell on a second thread, because
+/// reading the clipboard can wait for another program, and a lock signal behind it must not. Debug builds also print
+/// each signal on standard error, one line each, for the hands-on check: the signal's name and, for a drive, its
+/// drive-letter mask; nothing else.
 fn route_signals(signals: mpsc::Receiver<os::OsSignal>, shell: Arc<Shell>) -> io::Result<()> {
+    let (presses, pressed) = mpsc::channel::<()>();
+    let reader = Arc::clone(&shell);
+    thread::Builder::new()
+        .name("lockbox-save-shortcut".into())
+        .spawn(move || {
+            for () in pressed {
+                reader.save_shortcut_pressed();
+            }
+        })?;
     thread::Builder::new()
         .name("lockbox-signal-route".into())
         .spawn(move || {
             for signal in signals {
                 #[cfg(debug_assertions)]
                 eprintln!("Lockbox debug: Windows signal {signal:?}");
-                shell.autolock.signal(signal);
+                match signal {
+                    // The reader thread ends with the router's, which drops `presses`.
+                    os::OsSignal::SaveShortcut => {
+                        let _ = presses.send(());
+                    }
+                    lock_signal => shell.autolock.signal(lock_signal),
+                }
             }
             #[cfg(debug_assertions)]
             eprintln!("Lockbox debug: Windows signals stopped");
@@ -178,4 +200,70 @@ fn start_ticks(shell: Arc<Shell>) -> io::Result<()> {
             }
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::os::OsSignal;
+    use crate::testing::TestShell;
+
+    /// How long a test waits before it fails instead of hanging.
+    const GIVE_UP: Duration = Duration::from_secs(30);
+    const COPIED: &str = "Pw-0123456789-xyz";
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let began = Instant::now();
+        while !done() {
+            assert!(began.elapsed() < GIVE_UP, "{what}");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// A press of the shortcut, as the signal window sends it, ends in the shell: counted, and the clipboard read into
+    /// its slot. A lock signal still reaches the auto-lock. And a press whose clipboard read is stuck (another program
+    /// is slow to hand over its data) does not hold up a lock signal behind it.
+    #[test]
+    fn hotkey_signal_reaches_the_router() {
+        let ts = TestShell::new();
+        let (sink, signals) = mpsc::channel();
+        route_signals(signals, Arc::clone(&ts.shell)).unwrap();
+
+        assert!(ts.clipboard.user_copy(COPIED));
+        sink.send(OsSignal::SaveShortcut).unwrap();
+        wait_until("the press never reached the shell", || {
+            ts.shell.shortcut_presses() == 1 && ts.shell.probe_capture_length() == COPIED.len()
+        });
+
+        let (session, _) = ts.open_vault("Family");
+        sink.send(OsSignal::SessionLocked).unwrap();
+        wait_until("the lock signal never reached the auto-lock", || {
+            ts.events.locked().iter().any(|locked| locked.0 == session)
+        });
+        assert_eq!(ts.shell.shortcut_presses(), 1, "a lock counted as a press");
+
+        // The read of the next press waits inside the clipboard until the test lets it go.
+        let (reached, at_read) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        ts.clipboard.during_next_read(Box::new(move || {
+            reached.send(()).unwrap();
+            // Longer than the test waits for the lock, so a held-up lock fails there, not here.
+            let _ = released.recv_timeout(GIVE_UP * 2);
+        }));
+        assert!(ts.clipboard.user_copy("a second, longer text"));
+        sink.send(OsSignal::SaveShortcut).unwrap();
+        at_read.recv_timeout(GIVE_UP).expect("the read never began");
+        let (session, _) = ts.open_vault("Work");
+        sink.send(OsSignal::SessionLocked).unwrap();
+        wait_until("a stuck read held up the lock signal", || {
+            ts.events.locked().iter().any(|locked| locked.0 == session)
+        });
+        assert_eq!(ts.shell.shortcut_presses(), 2);
+        release.send(()).unwrap();
+        wait_until("the stuck read never finished", || {
+            ts.shell.probe_capture_length() == "a second, longer text".len()
+        });
+    }
 }

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use lockbox_core::internals::fsio::testutil::TempDir;
+use zeroize::Zeroizing;
 
 use crate::error::ShellResult;
 use crate::lock;
@@ -163,14 +164,17 @@ struct Clip {
     /// Counts the coming empties down: the one reaching zero fails.
     fail_empty_in: Option<usize>,
     refuse_registration: bool,
-    /// Each step, in order: `open`, `close`, `empty`, `set tag`, `set mark`, `set text`, `read tag`.
+    /// Each step, in order: `open`, `close`, `empty`, `set tag`, `set mark`, `set text`, `read tag`, `text size`,
+    /// `read text`.
     events: Vec<&'static str>,
     /// Run once, right after the next close, with the clipboard free again.
     after_close: Option<Hook>,
     /// Run once, inside the next read of the tag, with the clipboard still open.
     during_read: Option<Hook>,
-    /// The next read of the tag fails, though the tag is there.
+    /// The next read of the tag, or look at the text's size, fails, though what it reads is there.
     fail_read: bool,
+    /// Something that is not text is on the clipboard (a picture, a list of files).
+    non_text: bool,
 }
 
 /// The format IDs the fake hands out: the exclusion formats from `0xC000`, the tag's format at [`FAKE_TAG_FORMAT`].
@@ -217,7 +221,26 @@ impl FakeClipboard {
         clip.text = Some(text.to_owned());
         clip.tag = None;
         clip.formats.clear();
+        clip.non_text = false;
         true
+    }
+
+    /// The user (another program) copies something that is not text. Refused while the clipboard is open (false).
+    pub fn user_copy_non_text(&self) -> bool {
+        let mut clip = lock(&self.clip);
+        if clip.open {
+            return false;
+        }
+        clip.text = None;
+        clip.tag = None;
+        clip.formats.clear();
+        clip.non_text = true;
+        true
+    }
+
+    /// Whether something that is not text is on the clipboard.
+    pub fn has_non_text(&self) -> bool {
+        lock(&self.clip).non_text
     }
 
     /// From now on, while `held`, another program keeps the clipboard open.
@@ -354,6 +377,7 @@ impl ClipboardCalls for FakeClipboard {
         clip.text = None;
         clip.tag = None;
         clip.formats.clear();
+        clip.non_text = false;
         true
     }
 
@@ -402,6 +426,33 @@ impl ClipboardCalls for FakeClipboard {
             true => Err(CLIPBOARD_FAILED),
             false => Ok(held),
         }
+    }
+
+    fn text_size(&self) -> ShellResult<Option<usize>> {
+        let mut clip = lock(&self.clip);
+        assert!(clip.open, "looked at while closed");
+        clip.events.push("text size");
+        if std::mem::take(&mut clip.fail_read) {
+            return Err(CLIPBOARD_FAILED);
+        }
+        // UTF-16 units and the terminator, two bytes each, as Windows holds it.
+        Ok(clip
+            .text
+            .as_ref()
+            .map(|text| (text.encode_utf16().count() + 1) * 2))
+    }
+
+    fn copy_text(&self) -> ShellResult<Option<Zeroizing<String>>> {
+        let (text, hook) = {
+            let mut clip = lock(&self.clip);
+            assert!(clip.open, "read while closed");
+            clip.events.push("read text");
+            (clip.text.clone(), clip.during_read.take())
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(text.map(Zeroizing::new))
     }
 }
 

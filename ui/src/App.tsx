@@ -478,6 +478,22 @@ async function deletePreRestore(): Promise<string> {
   return `${copy.folder} deleted`;
 }
 
+// The save shortcut's probes (they go with this page in Task 5). Rust keeps what a press of the shortcut read in one wiped
+// slot; the page learns only its length, never the text.
+async function checkShortcutCapture(): Promise<string> {
+  const length = await callPlain<number>("probe_capture_length");
+  if (length === 0) return "The shortcut has captured nothing (no text on the clipboard, or too much)";
+  return `The shortcut captured ${String(length)} bytes of text`;
+}
+
+// Empties the clipboard only if it still holds what the shortcut captured, then forgets the capture.
+async function clearShortcutCapture(): Promise<string> {
+  const cleared = await callPlain<boolean>("probe_clear_captured");
+  return cleared
+    ? "Clipboard cleared: it still held the captured text"
+    : "Clipboard not cleared: it held something else, or nothing was captured";
+}
+
 // A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
 // `data:` link does not reliably start a download, so it could not show the rule failing).
 function downloadProbeFile(): void {
@@ -509,11 +525,18 @@ function TestPage() {
   const [backingUp, setBackingUp] = useState<number[]>([]);
   // A restore is preparing or swapping (it has no session: `lockbox://busy` names it with a null one).
   const [restoring, setRestoring] = useState(false);
+  const [shortcutStatus, setShortcutStatus] = useState<string>();
   const droppedFileReachedPage = useDroppedFileReachedPage();
 
   function run(step: () => Promise<string>): void {
     step().then(setVaultStatus, (error: unknown) => {
       setVaultStatus(failed(error));
+    });
+  }
+
+  function runShortcutProbe(step: () => Promise<string>): void {
+    step().then(setShortcutStatus, (error: unknown) => {
+      setShortcutStatus(failed(error));
     });
   }
 
@@ -839,6 +862,28 @@ function TestPage() {
           .cmd asks first, and the same button again says yes); after a lock, tries again to remove opened copies a
           viewer held, and says how many are left.
           {vaultStatus !== undefined && <output> {vaultStatus}</output>}
+        </li>
+        <li>
+          <button
+            type="button"
+            onClick={() => {
+              runShortcutProbe(checkShortcutCapture);
+            }}
+          >
+            Check shortcut capture
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              runShortcutProbe(clearShortcutCapture);
+            }}
+          >
+            Clear shortcut capture
+          </button>{" "}
+          Copy some text in another app, press Ctrl+Shift+L (Lockbox hidden, minimised or behind another app), then press
+          &quot;Check shortcut capture&quot;: it passes when it gives that text&apos;s length in bytes. &quot;Clear
+          shortcut capture&quot; empties the clipboard only if it still holds that text.
+          {shortcutStatus !== undefined && <output> {shortcutStatus}</output>}
         </li>
       </ul>
       <PartsProbe />

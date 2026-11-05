@@ -64,7 +64,7 @@ pub mod fsio {
 /// sealed.
 pub mod item {
     pub(crate) use crate::item_impl::*;
-    pub use crate::item_impl::{FileRef, Item, ItemKind};
+    pub use crate::item_impl::{FileRef, Item, ItemKind, MAX_ITEM_JSON};
 }
 
 /// Password rules.

@@ -427,6 +427,8 @@ impl AutoLock {
                 }
             }
             OsSignal::Ending => self.shutdown(),
+            // Not a lock signal: the router hands it to the shell, so nothing here is asked to do anything.
+            OsSignal::SaveShortcut => {}
         }
     }
 

@@ -19,16 +19,16 @@ use std::time::Duration;
 use std::{ptr, slice};
 
 use tauri::{AppHandle, Manager, Runtime};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, ICoreWebView2Controller4,
 };
 use windows_core::{BOOL, Interface};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, GetLastError,
-    GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, LocalFree, MAX_PATH, TRUE,
-    WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, ERROR_INSUFFICIENT_BUFFER,
+    ERROR_MORE_DATA, GetLastError, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT,
+    LocalFree, MAX_PATH, TRUE, WPARAM,
 };
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 #[cfg(test)]
@@ -52,9 +52,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
-use windows_sys::Win32::System::DataExchange::SetClipboardData;
+use windows_sys::Win32::System::DataExchange::{GetClipboardData, SetClipboardData};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED, HPOWERNOTIFY, RegisterSuspendResumeNotification,
     SetThreadExecutionState, UnregisterSuspendResumeNotification,
@@ -64,7 +64,10 @@ use windows_sys::Win32::System::RemoteDesktop::{
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetLastInputInfo, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
+    UnregisterHotKey,
+};
 use windows_sys::Win32::UI::Shell::{
     AssocIsDangerous, FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData,
     KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
@@ -73,15 +76,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME,
     DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_SHOWNORMAL,
-    SendMessageTimeoutW, UnregisterClassW, WM_APP, WM_CLOSE, WM_DESTROY, WM_NULL, WNDCLASSW,
-    WS_OVERLAPPED,
+    SendMessageTimeoutW, UnregisterClassW, WM_APP, WM_CLOSE, WM_DESTROY, WM_HOTKEY, WM_NULL,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 use windows_sys::core::PWSTR;
 
-use super::signals::{DeviceHeader, classify, wants_device_header};
+use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
-    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, IdleSource,
-    KnownFolder, Launcher, Os, OsSignal, Power, SystemClock, ThreadTimer, Volumes,
+    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, HotkeyTaken,
+    IdleSource, KnownFolder, Launcher, Os, OsSignal, Power, Shortcut, SystemClock, ThreadTimer,
+    Volumes,
 };
 use crate::error::ShellResult;
 use crate::{lock, window};
@@ -230,6 +234,83 @@ impl ClipboardCalls for WinClipboard {
         clipboard_win::raw::get_vec(format.get(), &mut held).map_err(|_| CLIPBOARD_FAILED)?;
         Ok(Some(held))
     }
+
+    fn text_size(&self) -> ShellResult<Option<usize>> {
+        #[cfg(test)]
+        clipboard_step("text size");
+        // `Ok(None)` only when Windows says there is no text (it also offers text for plain ANSI and OEM text).
+        if !clipboard_win::raw::is_format_avail(CF_UNICODETEXT) {
+            return Ok(None);
+        }
+        // SAFETY: only inside an opening on this thread (`ClipboardSteps`); the handle is the clipboard's own block,
+        // read here for its size only and never freed or kept. Windows says the handle is good only until the
+        // clipboard is emptied or closed. Lockbox's own threads cannot do either meanwhile (`ClipboardSteps` gives
+        // one opening at a time), and a program with an owner window is refused by Windows while this opening is
+        // open. A third program that also opens with no owner window is let in by Windows, and could empty the
+        // clipboard: Lockbox cannot stop that.
+        let block = unsafe { GetClipboardData(CF_UNICODETEXT) };
+        if block.is_null() {
+            return Err(CLIPBOARD_FAILED);
+        }
+        // SAFETY: `block` is the global block the call above returned, good for as long as the clipboard is neither
+        // emptied nor closed (see above for who can and cannot do that during this opening).
+        match unsafe { GlobalSize(block) } {
+            0 => Err(CLIPBOARD_FAILED),
+            size => Ok(Some(size)),
+        }
+    }
+
+    fn copy_text(&self) -> ShellResult<Option<Zeroizing<String>>> {
+        #[cfg(test)]
+        clipboard_step("read text");
+        if !clipboard_win::raw::is_format_avail(CF_UNICODETEXT) {
+            return Ok(None);
+        }
+        // SAFETY: as in `text_size`.
+        let block = unsafe { GetClipboardData(CF_UNICODETEXT) };
+        if block.is_null() {
+            return Err(CLIPBOARD_FAILED);
+        }
+        // SAFETY: as in `text_size`.
+        let size = unsafe { GlobalSize(block) };
+        // SAFETY: `block` is the clipboard's global block, valid as described in `text_size`; locked here and unlocked
+        // below, before anything else.
+        let at = unsafe { GlobalLock(block) }.cast::<u16>().cast_const();
+        if at.is_null() || size == 0 {
+            if !at.is_null() {
+                // SAFETY: undoes the lock just taken.
+                unsafe { GlobalUnlock(block) };
+            }
+            return Err(CLIPBOARD_FAILED);
+        }
+        // Read unit by unit straight from the block (no alignment assumed, and no copy of the units): the text is
+        // built once, in a string made the right size first, so it never moves and leaves an unwiped part behind.
+        let units = (0..size / size_of::<u16>()).map(|index| {
+            // SAFETY: the block is locked and `size` bytes long, so the `size / 2` units from `at` are readable, and
+            // `index` is below that. The block stays as long as the clipboard is neither emptied nor closed, which
+            // Lockbox's own threads and programs with an owner window cannot do during this opening; a third program
+            // opening with no owner window could (see `text_size`).
+            unsafe { at.add(index).read_unaligned() }
+        });
+        let text = utf8_from_utf16(units);
+        // SAFETY: undoes the lock taken above; `at` is not used after it.
+        unsafe { GlobalUnlock(block) };
+        Ok(Some(text))
+    }
+}
+
+/// The text in `units` (UTF-16) up to its first NUL, as UTF-8. The string is made exactly as long as the text first, so
+/// it never grows (a growing string leaves its old, unwiped buffer behind), and it is wiped when dropped. A unit that
+/// is half of a surrogate pair with no other half becomes U+FFFD.
+fn utf8_from_utf16(units: impl Iterator<Item = u16> + Clone) -> Zeroizing<String> {
+    let units = units.take_while(|&unit| unit != 0);
+    let letters = |units| {
+        char::decode_utf16(units).map(|letter| letter.unwrap_or(char::REPLACEMENT_CHARACTER))
+    };
+    let len = letters(units.clone()).map(char::len_utf8).sum();
+    let mut text = Zeroizing::new(String::with_capacity(len));
+    text.extend(letters(units));
+    text
 }
 
 /// A movable, zero-filled global block (`GHND`), locked from its allocation until it is given to the clipboard or
@@ -992,6 +1073,14 @@ impl<R: Runtime> Dialogs for WinDialogs<R> {
 /// answers with the thread's previous execution state.
 const KEEP_AWAKE: u32 = WM_APP + 1;
 
+/// Sent by [`SignalThread::set_hotkey`]: the window registers the shortcut the owner last asked for
+/// ([`Shared::hotkey`]) and answers 0, or the error code Windows gave.
+const SET_HOTKEY: u32 = WM_APP + 3;
+
+/// How long [`SignalThread::set_hotkey`] waits for the window's answer, in milliseconds (as `SendMessageTimeoutW`
+/// takes it).
+const HOTKEY_WAIT_MS: u32 = 1_000;
+
 /// How long `Drop` waits for the window to take its close request, in milliseconds (as `SendMessageTimeoutW` takes
 /// it), and then again for the window's thread to end.
 const STOP_WAIT_MS: u32 = 1_000;
@@ -1017,6 +1106,9 @@ struct Shared {
     /// send that times out). `Drop` never sets it before that send, so its own request cannot leave the window's
     /// thread out of the loop and waiting for the slot lock that `Drop` holds while it sends.
     stopping: AtomicBool,
+    /// The save shortcut the owner last asked for ([`SignalThread::set_hotkey`]); the window reads it when it gets
+    /// [`SET_HOTKEY`]. A leaf lock: nothing is called while it is held.
+    hotkey: Mutex<Option<Shortcut>>,
 }
 
 /// What the window procedure needs: where signals go, and what the window shares with its owner.
@@ -1032,6 +1124,8 @@ thread_local! {
     static SESSION_NOTICE: Cell<bool> = const { Cell::new(false) };
     /// The window's suspend-and-resume registration (0: none), undone just before it is destroyed.
     static POWER_NOTICE: Cell<HPOWERNOTIFY> = const { Cell::new(0) };
+    /// The save shortcut as registered with Windows, if it is; undone just before the window is destroyed.
+    static HOTKEY: Cell<Option<Registered>> = const { Cell::new(None) };
 }
 
 /// The thread that owns Lockbox's hidden signal window ([`spawn`]). Only dropping it closes the window or undoes its
@@ -1064,6 +1158,7 @@ pub fn spawn(sink: Sender<OsSignal>) -> io::Result<SignalThread> {
         window: Mutex::new(0),
         close_asked: AtomicBool::new(false),
         stopping: AtomicBool::new(false),
+        hotkey: Mutex::new(None),
     });
     let context = Context {
         sink,
@@ -1111,6 +1206,135 @@ impl SignalThread {
             unsafe { PostMessageW(*window as HWND, KEEP_AWAKE, usize::from(on), 0) };
         }
     }
+}
+
+impl SignalThread {
+    /// Registers `shortcut` as the save shortcut system-wide (`None`: releases it), replacing the one registered
+    /// before. `RegisterHotKey` ties the shortcut to the thread that calls it, and the press comes back to that
+    /// thread's window, so the request is sent to the window and made on its own thread, and the answer comes back
+    /// here. A shortcut Windows refuses leaves the one registered before working. [`HotkeyTaken::Taken`] only when
+    /// Windows says the keys are registered already; any other refusal, and a window that does not answer in time, is
+    /// [`HotkeyTaken::NotSet`].
+    pub fn set_hotkey(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken> {
+        // Held across the send, as `Drop` does: the window's thread clears the handle under this lock before it
+        // destroys the window, and it takes no lock while it handles the request. It also makes two changes take turns.
+        let window = lock(&self.shared.window);
+        if *window == 0 {
+            return Err(HotkeyTaken::NotSet);
+        }
+        // The message carries nothing: the window reads the request from here, so a message from another program can
+        // only ask again for what was asked last.
+        let before = std::mem::replace(&mut *lock(&self.shared.hotkey), shortcut);
+        let mut answer = 0;
+        // SAFETY: the message carries no pointers, and `answer` is writable. The handle is live for the whole call:
+        // the window's thread clears the slot, under the lock held here, before it destroys the window.
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                *window as HWND,
+                SET_HOTKEY,
+                0,
+                0,
+                SMTO_BLOCK | SMTO_ABORTIFHUNG,
+                HOTKEY_WAIT_MS,
+                &mut answer,
+            )
+        } != 0;
+        if !sent {
+            // The window did not take the request in time: what it would find if it took it later is what it had.
+            *lock(&self.shared.hotkey) = before;
+            return Err(HotkeyTaken::NotSet);
+        }
+        hotkey_answer(answer)
+    }
+}
+
+/// What the window answered to [`SET_HOTKEY`]: 0 for done, else the Win32 error code `RegisterHotKey` gave.
+fn hotkey_answer(answer: usize) -> Result<(), HotkeyTaken> {
+    match u32::try_from(answer) {
+        Ok(0) => Ok(()),
+        Ok(ERROR_HOTKEY_ALREADY_REGISTERED) => Err(HotkeyTaken::Taken),
+        _ => Err(HotkeyTaken::NotSet),
+    }
+}
+
+/// What the save shortcut is registered as on the window's thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Registered {
+    id: i32,
+    shortcut: Shortcut,
+}
+
+/// The `RegisterHotKey` modifiers for `shortcut`. `MOD_NOREPEAT`: holding the keys down presses once, not many times.
+fn hotkey_modifiers(shortcut: Shortcut) -> u32 {
+    [
+        (shortcut.ctrl, MOD_CONTROL),
+        (shortcut.shift, MOD_SHIFT),
+        (shortcut.alt, MOD_ALT),
+    ]
+    .into_iter()
+    .filter(|(held, _)| *held)
+    .fold(MOD_NOREPEAT, |all, (_, modifier)| all | modifier)
+}
+
+/// `WM_HOTKEY`: whether `id` is the ID the save shortcut is registered under right now. Anything else, from another
+/// program or from a shortcut released a moment ago, is not a press.
+fn is_registered_hotkey(id: WPARAM) -> bool {
+    HOTKEY
+        .try_with(|registered| registered.get())
+        .ok()
+        .flatten()
+        .is_some_and(|registered| i32::try_from(id) == Ok(registered.id))
+}
+
+/// [`SET_HOTKEY`], on the window's thread: makes the shortcut asked for the registered one. The new keys are
+/// registered under the ID the old ones do not use, and only then are the old ones released, so a refusal leaves the
+/// old shortcut as it was. Returns 0, or the error code Windows gave.
+fn apply_hotkey(window: HWND) -> LRESULT {
+    let wanted = CONTEXT
+        .try_with(|context| {
+            context
+                .get()
+                .and_then(|context| *lock(&context.shared.hotkey))
+        })
+        .ok()
+        .flatten();
+    let current = HOTKEY.get();
+    if current.map(|registered| registered.shortcut) == wanted {
+        return 0;
+    }
+    let new = match wanted {
+        None => None,
+        Some(shortcut) => {
+            let Some(id) = HOTKEY_IDS
+                .into_iter()
+                .find(|id| Some(*id) != current.map(|registered| registered.id))
+            else {
+                return 1;
+            };
+            // SAFETY: `window` is this thread's live window; the ID, modifiers and key are plain numbers.
+            let registered = unsafe {
+                RegisterHotKey(
+                    window,
+                    id,
+                    hotkey_modifiers(shortcut),
+                    u32::from(shortcut.key),
+                )
+            } != 0;
+            if !registered {
+                // Read at once, before anything else can change it. A failure with no code is still a failure.
+                // SAFETY: reads this thread's last error.
+                let code = unsafe { GetLastError() };
+                return code.max(1) as LRESULT;
+            }
+            Some(Registered { id, shortcut })
+        }
+    };
+    if let Some(old) = current {
+        // SAFETY: `old` is this thread's registration for this window, released once (replaced below).
+        unsafe { UnregisterHotKey(window, old.id) };
+    }
+    HOTKEY.set(new);
+    0
 }
 
 impl Drop for SignalThread {
@@ -1319,6 +1543,9 @@ unsafe extern "system" fn window_procedure(
 ) -> LRESULT {
     match msg {
         KEEP_AWAKE => return set_keep_awake(wparam != 0),
+        SET_HOTKEY => return apply_hotkey(window),
+        // A press only under the ID the shortcut is registered with now; another program can post any message here.
+        WM_HOTKEY if !is_registered_hotkey(wparam) => return 0,
         WM_CLOSE => {
             take_close_request();
             return 0;
@@ -1402,8 +1629,12 @@ fn destroy_window(window: HWND) {
     unsafe { DestroyWindow(window) };
 }
 
-/// Undoes whichever of the window's session and suspend registrations were made.
+/// Undoes whichever of the window's session, suspend and shortcut registrations were made.
 fn stop_notices(window: HWND) {
+    if let Some(registered) = HOTKEY.replace(None) {
+        // SAFETY: `registered` is this thread's registration for this window, undone once (it was replaced by `None`).
+        unsafe { UnregisterHotKey(window, registered.id) };
+    }
     if SESSION_NOTICE.replace(false) {
         // SAFETY: `window` is the live window that registered, on its own thread.
         let undone = unsafe { WTSUnRegisterSessionNotification(window) } != 0;
@@ -1638,8 +1869,8 @@ mod tests {
         DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_PORT, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR,
         DEV_BROADCAST_VOLUME, GA_PARENT, GetAncestor, GetClassInfoW, GetDesktopWindow,
         GetWindowThreadProcessId, IsWindow, IsWindowVisible, PBT_APMSUSPEND, PostMessageW,
-        PostThreadMessageW, SendMessageW, WM_CLOSE, WM_DESTROY, WM_DEVICECHANGE, WM_NULL,
-        WM_POWERBROADCAST, WM_QUIT, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK,
+        PostThreadMessageW, SendMessageW, WM_CLOSE, WM_DESTROY, WM_DEVICECHANGE, WM_HOTKEY,
+        WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK,
     };
 
     use super::*;
@@ -2263,6 +2494,145 @@ mod tests {
         );
     }
 
+    /// Ctrl+Alt+Shift with a function key beyond F12 (`n` 1 to 12 is F13 to F24): keys no program has a use for. Each
+    /// test takes its own, so tests running side by side never meet.
+    fn combo(n: u16) -> Shortcut {
+        Shortcut {
+            ctrl: true,
+            shift: true,
+            alt: true,
+            key: 0x7B + n,
+        }
+    }
+
+    /// The signal a press of the shortcut makes, as Windows sends it: `WM_HOTKEY` with the shortcut's ID.
+    fn press(window: usize, id: i32) {
+        send(window, WM_HOTKEY, id as usize);
+    }
+
+    /// Nothing is waiting in `signals`: a suspend notice posted now is the next thing it hears.
+    fn assert_no_signal(window: usize, signals: &Receiver<OsSignal>) {
+        flush(window, signals);
+    }
+
+    /// Windows' own answer to a second window asking for keys that are registered: seen live, two windows of this
+    /// process, so "taken" is what Windows said and not what a stand-in said. (Windows also answers it for keys it
+    /// keeps for itself, such as F12 alone, seen live while building this.)
+    #[test]
+    fn hotkey_taken_is_reported() {
+        let (first, _first_signals) = started();
+        let (second, _second_signals) = started();
+        let shortcut = combo(1);
+        assert_eq!(first.set_hotkey(Some(shortcut)), Ok(()));
+        assert_eq!(second.set_hotkey(Some(shortcut)), Err(HotkeyTaken::Taken));
+        // The same keys again from the window that holds them change nothing, and are not "taken".
+        assert_eq!(first.set_hotkey(Some(shortcut)), Ok(()));
+        // Released, they are free for the other window.
+        assert_eq!(first.set_hotkey(None), Ok(()));
+        assert_eq!(second.set_hotkey(Some(shortcut)), Ok(()));
+    }
+
+    /// The error codes, as Microsoft documents them (`winerror.h`): 1409 is `ERROR_HOTKEY_ALREADY_REGISTERED`, the
+    /// only one that means taken; 87 is `ERROR_INVALID_PARAMETER`, 1400 `ERROR_INVALID_WINDOW_HANDLE`, and 1419
+    /// `ERROR_HOTKEY_NOT_REGISTERED`.
+    #[test]
+    fn only_already_registered_means_taken() {
+        assert_eq!(hotkey_answer(0), Ok(()));
+        assert_eq!(hotkey_answer(1409), Err(HotkeyTaken::Taken));
+        for other in [87, 1400, 1419, 5, 1] {
+            assert_eq!(hotkey_answer(other), Err(HotkeyTaken::NotSet), "{other}");
+        }
+        // A code beyond a Win32 error's size is nothing Windows said about this.
+        assert_eq!(hotkey_answer(usize::MAX), Err(HotkeyTaken::NotSet));
+    }
+
+    /// A press of the registered shortcut reaches the sink as `SaveShortcut`; the same message under an ID that is
+    /// not registered, or with nothing registered, does not (another program can post any message to the window).
+    #[test]
+    fn registered_hotkey_message_reaches_the_sink() {
+        let (signal_thread, signals) = started();
+        let window = window_of(&signal_thread);
+        let [first, second] = HOTKEY_IDS;
+
+        press(window, first);
+        assert_no_signal(window, &signals);
+
+        assert_eq!(signal_thread.set_hotkey(Some(combo(2))), Ok(()));
+        press(window, second);
+        assert_no_signal(window, &signals);
+        press(window, first);
+        assert_eq!(signals.try_recv(), Ok(OsSignal::SaveShortcut));
+        assert_no_signal(window, &signals);
+
+        // A change moves the shortcut to the other ID: the old ID is nothing now.
+        assert_eq!(signal_thread.set_hotkey(Some(combo(3))), Ok(()));
+        press(window, first);
+        assert_no_signal(window, &signals);
+        press(window, second);
+        assert_eq!(signals.try_recv(), Ok(OsSignal::SaveShortcut));
+
+        // Cleared: no ID is accepted.
+        assert_eq!(signal_thread.set_hotkey(None), Ok(()));
+        for id in HOTKEY_IDS {
+            press(window, id);
+        }
+        assert_no_signal(window, &signals);
+    }
+
+    /// A change Windows refuses leaves the old shortcut working: still registered (a second window cannot take its
+    /// keys), still heard. A change that goes through frees the old keys.
+    #[test]
+    fn a_refused_change_keeps_the_old_shortcut() {
+        let (first, first_signals) = started();
+        let (second, _second_signals) = started();
+        let window = window_of(&first);
+        let (old, new) = (combo(4), combo(5));
+        assert_eq!(first.set_hotkey(Some(old)), Ok(()));
+        assert_eq!(second.set_hotkey(Some(new)), Ok(()));
+
+        assert_eq!(first.set_hotkey(Some(new)), Err(HotkeyTaken::Taken));
+        assert_eq!(second.set_hotkey(Some(old)), Err(HotkeyTaken::Taken));
+        press(window, HOTKEY_IDS[0]);
+        assert_eq!(first_signals.try_recv(), Ok(OsSignal::SaveShortcut));
+        assert_no_signal(window, &first_signals);
+
+        assert_eq!(first.set_hotkey(Some(combo(6))), Ok(()));
+        assert_eq!(second.set_hotkey(Some(old)), Ok(()));
+    }
+
+    /// A window that does not answer in time is not "taken", and the change it never made is not made later either.
+    #[test]
+    fn a_window_that_does_not_answer_is_not_reported_as_taken() {
+        let (_seen, gate) = gated();
+        let (signal_thread, signals) = started();
+        let window = window_of(&signal_thread);
+        let (other, _other_signals) = started();
+        let shortcut = combo(8);
+        gate.hold(window);
+        assert_eq!(
+            signal_thread.set_hotkey(Some(shortcut)),
+            Err(HotkeyTaken::NotSet)
+        );
+        let _ = gate.open.send(());
+        flush(window, &signals);
+        // Nothing was registered by the late message: another window gets the keys.
+        assert_eq!(other.set_hotkey(Some(shortcut)), Ok(()));
+        press(window, HOTKEY_IDS[0]);
+        assert_no_signal(window, &signals);
+    }
+
+    /// Closing the window releases the shortcut: another window can take its keys at once.
+    #[test]
+    fn hotkey_is_released_when_the_window_closes() {
+        let (first, _first_signals) = started();
+        let (second, _second_signals) = started();
+        let shortcut = combo(7);
+        assert_eq!(first.set_hotkey(Some(shortcut)), Ok(()));
+        assert_eq!(second.set_hotkey(Some(shortcut)), Err(HotkeyTaken::Taken));
+        drop_within(first, WAIT);
+        assert_eq!(second.set_hotkey(Some(shortcut)), Ok(()));
+    }
+
     use std::time::Instant;
 
     use crate::os::{CLIPBOARD_BUSY, ClipboardBackend, CopyTag, WriteFailed};
@@ -2305,6 +2675,101 @@ mod tests {
             Some(vec![0; 16]),
             "the tag block was not wiped"
         );
+    }
+
+    /// The text from a block of UTF-16 is the same text in UTF-8, in a string made exactly its size (so it never grew,
+    /// and left no unwiped buffer behind); it ends at the first NUL; a half of a surrogate pair alone is U+FFFD.
+    #[test]
+    fn utf16_text_becomes_exactly_sized_utf8() {
+        let units = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+        let mut with_nul = units("ab");
+        with_nul.extend([0, u16::from(b'c')]);
+        let table: [(Vec<u16>, &str); 8] = [
+            (units(""), ""),
+            (units("Pw-0123"), "Pw-0123"),
+            (
+                units("Pw-\u{e9}\u{4e2d}\u{1F600}-7f3a"),
+                "Pw-\u{e9}\u{4e2d}\u{1F600}-7f3a",
+            ),
+            (with_nul, "ab"),
+            (vec![0xD83D], "\u{FFFD}"),
+            (vec![0xDE00, u16::from(b'x')], "\u{FFFD}x"),
+            (vec![u16::from(b'x'), 0xD83D, u16::from(b'y')], "x\u{FFFD}y"),
+            (vec![u16::from(b'x'), 0xD83D], "x\u{FFFD}"),
+        ];
+        for (units, expected) in table {
+            let text = utf8_from_utf16(units.iter().copied());
+            assert_eq!(text.as_str(), expected, "{units:x?}");
+            assert_eq!(text.capacity(), text.len(), "{units:x?} grew");
+        }
+    }
+
+    #[test]
+    #[ignore = "touches the real clipboard; run in the hands-on check"]
+    fn real_clipboard_reads_text_in_one_opening_and_clears_only_a_match() {
+        use lockbox_core::item::MAX_ITEM_JSON;
+
+        let _turn = lock(&REAL_CLIPBOARD);
+        let clipboard = real_clipboard();
+        let unicode = "Pw-\u{e9}\u{4e2d}\u{1F600}-7f3a";
+        for sample in [SAMPLE, unicode] {
+            clipboard_win::set_clipboard_string(sample).unwrap();
+            CLIPBOARD_STEPS.take();
+            let read = clipboard.read_text(None).unwrap();
+            assert_eq!(read.as_ref().map(|text| text.as_str()), Some(sample));
+            assert_eq!(
+                CLIPBOARD_STEPS.take(),
+                ["open", "text size", "read text", "close"],
+                "the read is not one opening"
+            );
+            assert_eq!(
+                clipboard_text().as_deref(),
+                Some(sample),
+                "the read changed it"
+            );
+            assert_eq!(clipboard.clear_if_text("something else", None), Ok(false));
+            assert_eq!(
+                clipboard.clear_if_text(&format!("{sample} "), None),
+                Ok(false)
+            );
+            assert_eq!(
+                clipboard_text().as_deref(),
+                Some(sample),
+                "a mismatch cleared it"
+            );
+            CLIPBOARD_STEPS.take();
+            assert_eq!(clipboard.clear_if_text(sample, None), Ok(true));
+            assert_eq!(
+                CLIPBOARD_STEPS.take(),
+                ["open", "text size", "read text", "empty", "close"],
+                "the check and the clear are not one opening"
+            );
+            assert_eq!(clipboard_text(), None);
+        }
+
+        // No text at all: nothing to read, nothing to clear.
+        {
+            let _open = clipboard_win::Clipboard::new_attempts(10).unwrap();
+            clipboard_win::raw::empty().unwrap();
+        }
+        assert_eq!(clipboard.read_text(None), Ok(None));
+        assert_eq!(clipboard.clear_if_text(SAMPLE, None), Ok(false));
+
+        // Over the limit: refused, and left on the clipboard.
+        let large = "a".repeat(MAX_ITEM_JSON + 1);
+        clipboard_win::set_clipboard_string(&large).unwrap();
+        assert_eq!(
+            clipboard.read_text(None),
+            Err(crate::os::CLIPBOARD_TOO_LARGE)
+        );
+        assert_eq!(clipboard.clear_if_text(SAMPLE, None), Ok(false));
+        assert_eq!(clipboard_text().map(|text| text.len()), Some(large.len()));
+        let exact = "a".repeat(MAX_ITEM_JSON);
+        clipboard_win::set_clipboard_string(&exact).unwrap();
+        let read = clipboard.read_text(None).unwrap().unwrap();
+        assert_eq!(read.len(), MAX_ITEM_JSON);
+        assert_eq!(clipboard.clear_if_text(&exact, None), Ok(true));
+        assert_eq!(clipboard_text(), None);
     }
 
     #[test]
@@ -2371,6 +2836,12 @@ mod tests {
                 step();
             }
             held
+        }
+        fn text_size(&self) -> ShellResult<Option<usize>> {
+            WinClipboard.text_size()
+        }
+        fn copy_text(&self) -> ShellResult<Option<Zeroizing<String>>> {
+            WinClipboard.copy_text()
         }
     }
 

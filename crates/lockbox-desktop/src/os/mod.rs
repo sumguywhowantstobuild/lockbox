@@ -12,9 +12,12 @@ use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use lockbox_core::item::MAX_ITEM_JSON;
+use zeroize::Zeroizing;
 
 use crate::error::{CoreErrorView, ShellError, ShellResult};
 use crate::lock;
@@ -38,7 +41,8 @@ pub type CopyTag = [u8; 16];
 
 /// The clipboard as Lockbox uses it (spec §7.3). Each method is one clipboard opening: tried every
 /// [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times, then [`CLIPBOARD_BUSY`]. The clipboard is opened with no
-/// owner window, so a program that holds it open with no window of its own does not make it busy (Windows' rule).
+/// owner window, so a program that holds it open with no window of its own does not make it busy (Windows' rule);
+/// Lockbox's own openings take turns ([`ClipboardSteps`]), so none overlaps another.
 pub trait ClipboardBackend: Send + Sync {
     /// Puts `text` on the clipboard with `tag` in [`TAG_FORMAT`] and the three [`EXCLUSION_FORMATS`] that keep it out
     /// of clipboard history, cloud sync and clipboard monitors, all in one opening. The text goes last, so it is never
@@ -49,6 +53,14 @@ pub trait ClipboardBackend: Send + Sync {
     /// whether it did. Anything copied since (which empties the clipboard, tag included) is left alone. With
     /// `until` (the app close's deadline), no try at opening starts at or after it and no wait runs past it.
     fn clear_if(&self, tag: &CopyTag, until: Option<Instant>) -> ShellResult<bool>;
+    /// The clipboard's text, read in one opening (tried as for [`clear_if`](Self::clear_if), with `until` the same).
+    /// `Ok(None)` when it holds no text. The size of the text's block is checked before any of it is copied into
+    /// memory: over [`MAX_CLIPBOARD_BLOCK`], or over [`MAX_ITEM_JSON`] bytes once read as UTF-8, is `TooLarge`.
+    fn read_text(&self, until: Option<Instant>) -> ShellResult<Option<Zeroizing<String>>>;
+    /// Empties the clipboard only while its text is exactly `expected`, read and emptied in the same opening: whether
+    /// it did. Anything else (other text, no text, text too large to be `expected`) is left alone. This is for a
+    /// value Lockbox did not copy itself, so it has no tag to check.
+    fn clear_if_text(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool>;
 }
 
 /// A write that failed.
@@ -81,6 +93,13 @@ pub const CLIPBOARD_FAILED: ShellError = ShellError::Core(CoreErrorView {
     max_file: None,
     min: None,
 });
+/// The clipboard holds more text than an item can (the engine's [`MAX_ITEM_JSON`]). Fixed text only: never the text.
+pub const CLIPBOARD_TOO_LARGE: ShellError = ShellError::TooLarge {
+    what: "clipboard text",
+};
+/// The largest text block [`ClipboardBackend::read_text`] copies: room for [`MAX_ITEM_JSON`] UTF-16 units and the
+/// terminator. A text of fewer units can still be longer once it is UTF-8, which the read checks after the copy.
+pub const MAX_CLIPBOARD_BLOCK: usize = (MAX_ITEM_JSON + 1) * size_of::<u16>();
 /// How many times one opening is tried.
 pub const CLIPBOARD_TRIES: u32 = 10;
 /// The wait between two tries (Chromium's).
@@ -114,28 +133,61 @@ pub trait ClipboardCalls: Send + Sync {
     /// What `format` holds on the clipboard: `Ok(None)` only when it is confirmed not there, an error when it is there
     /// (or may be) but could not be read.
     fn read_bytes(&self, format: NonZeroU32) -> ShellResult<Option<Vec<u8>>>;
+    /// The size in bytes of the text block on the clipboard (`CF_UNICODETEXT`), its terminator included, without
+    /// copying any of it: `Ok(None)` only when the clipboard is confirmed to hold no text, an error when it holds
+    /// some (or may) that could not be looked at.
+    fn text_size(&self) -> ShellResult<Option<usize>>;
+    /// Copies the text out of the clipboard, up to its first NUL. Called only after [`text_size`](Self::text_size)
+    /// found the block small enough. Whatever buffer holds the text on the way is wiped; `Ok(None)` as for `text_size`.
+    fn copy_text(&self) -> ShellResult<Option<Zeroizing<String>>>;
 }
 
 /// [`ClipboardBackend`] from single [`ClipboardCalls`] steps, waiting between tries on `clock`.
 pub struct ClipboardSteps<C> {
     calls: Arc<C>,
     clock: Arc<dyn Clock>,
+    /// Held for as long as one of Lockbox's own openings is: Windows lets a second opener with no owner window in
+    /// while the first is open, so Lockbox's threads (the timer's clear, a lock hook, a copy, the save shortcut's read)
+    /// take turns here instead.
+    turn: Mutex<()>,
+}
+
+/// An open clipboard and the turn that goes with it. The clipboard is closed first (fields drop in order), then the
+/// turn is given back.
+struct Opening<'a, O> {
+    _opened: O,
+    _turn: MutexGuard<'a, ()>,
 }
 
 impl<C: ClipboardCalls> ClipboardSteps<C> {
     pub fn new(calls: Arc<C>, clock: Arc<dyn Clock>) -> ClipboardSteps<C> {
-        ClipboardSteps { calls, clock }
+        ClipboardSteps {
+            calls,
+            clock,
+            turn: Mutex::new(()),
+        }
     }
 
-    /// One opening: tried every [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times. With `until`, no try starts
-    /// at or after it and no wait runs past it: [`CLIPBOARD_BUSY`] once it has come.
-    fn open(&self, until: Option<Instant>) -> ShellResult<C::Opened> {
+    /// One opening: tried every [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times. A try needs the turn (so one
+    /// of Lockbox's own openings under way makes it fail, like a program holding the clipboard) and then Windows' open.
+    /// With `until`, no try starts at or after it and no wait runs past it: [`CLIPBOARD_BUSY`] once it has come.
+    fn open(&self, until: Option<Instant>) -> ShellResult<Opening<'_, C::Opened>> {
         for tried in 1..=CLIPBOARD_TRIES {
             if until.is_some_and(|until| self.clock.now() >= until) {
                 return Err(CLIPBOARD_BUSY);
             }
-            if let Some(opened) = self.calls.open() {
-                return Ok(opened);
+            let turn = match self.turn.try_lock() {
+                Ok(turn) => Some(turn),
+                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => None,
+            };
+            if let Some(turn) = turn
+                && let Some(opened) = self.calls.open()
+            {
+                return Ok(Opening {
+                    _opened: opened,
+                    _turn: turn,
+                });
             }
             if tried < CLIPBOARD_TRIES {
                 let left = until.map_or(CLIPBOARD_RETRY, |until| {
@@ -199,6 +251,47 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
             .read_bytes(format)?
             .is_some_and(|held| is_tag(&held, tag));
         if !still_ours {
+            return Ok(false);
+        }
+        match self.calls.empty() {
+            true => Ok(true),
+            false => Err(CLIPBOARD_FAILED),
+        }
+    }
+
+    fn read_text(&self, until: Option<Instant>) -> ShellResult<Option<Zeroizing<String>>> {
+        let _open = self.open(until)?;
+        // The size first: a block over the limit is never copied.
+        let Some(size) = self.calls.text_size()? else {
+            return Ok(None);
+        };
+        if size > MAX_CLIPBOARD_BLOCK {
+            return Err(CLIPBOARD_TOO_LARGE);
+        }
+        let Some(text) = self.calls.copy_text()? else {
+            return Ok(None);
+        };
+        // Fewer UTF-16 units can still be more UTF-8 bytes; the copy is wiped as it goes.
+        if text.len() > MAX_ITEM_JSON {
+            return Err(CLIPBOARD_TOO_LARGE);
+        }
+        Ok(Some(text))
+    }
+
+    fn clear_if_text(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool> {
+        let _open = self.open(until)?;
+        // A block over the limit cannot be `expected` (a value that came from the clipboard in the first place), so it
+        // is neither copied nor cleared. No text at all is no match.
+        let Some(size) = self.calls.text_size()? else {
+            return Ok(false);
+        };
+        if size > MAX_CLIPBOARD_BLOCK {
+            return Ok(false);
+        }
+        let Some(text) = self.calls.copy_text()? else {
+            return Ok(false);
+        };
+        if *text != *expected {
             return Ok(false);
         }
         match self.calls.empty() {
@@ -453,6 +546,40 @@ pub enum OsSignal {
     DriveRemoved { mask: u32 },
     /// Windows is signing out or shutting down, and may end the process as soon as the window has the message.
     Ending,
+    /// The save shortcut was pressed (`WM_HOTKEY`). Not a lock signal: the router hands it to the shell.
+    SaveShortcut,
+}
+
+/// The save shortcut: modifier keys and a Windows virtual-key code (`RegisterHotKey`'s `vk`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shortcut {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub key: u16,
+}
+
+impl Default for Shortcut {
+    /// Ctrl+Shift+L.
+    fn default() -> Shortcut {
+        Shortcut {
+            ctrl: true,
+            shift: true,
+            alt: false,
+            key: u16::from(b'L'),
+        }
+    }
+}
+
+/// Why [`SignalThread::set_hotkey`](win::SignalThread::set_hotkey) did not set the shortcut. Only Windows' own
+/// "already registered" answer is [`Taken`](Self::Taken); every other failure is [`NotSet`](Self::NotSet), so a
+/// shortcut is never called taken for a reason that is not that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyTaken {
+    /// Another program has registered the same keys (`ERROR_HOTKEY_ALREADY_REGISTERED`).
+    Taken,
+    /// Windows refused for another reason, or the window did not answer.
+    NotSet,
 }
 
 #[cfg(test)]
@@ -769,6 +896,225 @@ mod tests {
         assert_eq!(steps.clear_if(&TAG, None), Err(CLIPBOARD_FAILED));
         assert_eq!(fake.opens(), 0);
         assert_eq!(fake.text().as_deref(), Some("theirs"));
+    }
+
+    /// A made-up text, never a real secret.
+    const COPIED: &str = "Pw-0123456789-xyz";
+
+    /// The read is one opening: opened, the text's size looked at, the text copied, closed. Nothing else.
+    #[test]
+    fn read_text_opens_once() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy(COPIED));
+        let read = steps.read_text(None).unwrap();
+        assert_eq!(read.as_deref().map(String::as_str), Some(COPIED));
+        assert_eq!(fake.opens(), 1);
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"]
+        );
+        assert!(!fake.is_open(), "the clipboard was left open");
+        // Reading changes nothing on the clipboard.
+        assert_eq!(fake.text().as_deref(), Some(COPIED));
+    }
+
+    /// An empty clipboard and one holding something that is not text both answer `None`, and the text is never read.
+    #[test]
+    fn read_text_is_none_for_non_text() {
+        let (fake, steps) = fake_steps();
+        assert_eq!(steps.read_text(None), Ok(None));
+        assert_eq!(fake.take_events(), ["open", "text size", "close"]);
+        assert!(fake.user_copy_non_text());
+        assert_eq!(steps.read_text(None), Ok(None));
+        assert_eq!(fake.take_events(), ["open", "text size", "close"]);
+        assert!(fake.has_non_text(), "the read touched what it found");
+    }
+
+    /// The size is checked before any of the text is copied: a text one unit over the limit is refused with no copy
+    /// step at all, and one exactly at the limit is read. The refusal holds nothing of the text.
+    #[test]
+    fn read_text_checks_size_before_copying() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy(&"a".repeat(MAX_ITEM_JSON + 1)));
+        let refused = steps.read_text(None);
+        assert_eq!(refused, Err(CLIPBOARD_TOO_LARGE));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "close"],
+            "the text was copied before its size was checked"
+        );
+        assert_eq!(
+            serde_json::to_value(CLIPBOARD_TOO_LARGE).unwrap(),
+            serde_json::json!({ "code": "too_large", "what": "clipboard text" })
+        );
+
+        assert!(fake.user_copy(&"a".repeat(MAX_ITEM_JSON)));
+        let read = steps.read_text(None).unwrap().unwrap();
+        assert_eq!(read.len(), MAX_ITEM_JSON);
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"]
+        );
+
+        // Fewer UTF-16 units than the limit, more UTF-8 bytes (two each): copied, then refused, and not kept.
+        assert!(fake.user_copy(&"é".repeat(MAX_ITEM_JSON / 2 + 1)));
+        assert_eq!(steps.read_text(None), Err(CLIPBOARD_TOO_LARGE));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"]
+        );
+    }
+
+    /// A text that cannot be looked at is an error, never the same as no text; nothing is cleared on it.
+    #[test]
+    fn unreadable_text_is_an_error_not_none() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy(COPIED));
+        fake.fail_next_read();
+        assert_eq!(steps.read_text(None), Err(CLIPBOARD_FAILED));
+        fake.fail_next_read();
+        assert_eq!(steps.clear_if_text(COPIED, None), Err(CLIPBOARD_FAILED));
+        assert_eq!(fake.text().as_deref(), Some(COPIED));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(true));
+    }
+
+    /// Only a text equal to the expected one is cleared: not a longer or shorter one, not another case, not the same
+    /// letters with something added, not something that is not text, not a text too large to be the expected one.
+    #[test]
+    fn clear_if_text_clears_only_a_match() {
+        let (fake, steps) = fake_steps();
+        for other in [
+            "Pw-0123456789-xy",
+            "Pw-0123456789-xyz ",
+            "pw-0123456789-xyz",
+            "Pw-0123456789-xyZ",
+            "",
+        ] {
+            assert!(fake.user_copy(other));
+            assert_eq!(steps.clear_if_text(COPIED, None), Ok(false), "{other:?}");
+            assert_eq!(fake.text().as_deref(), Some(other), "{other:?} was cleared");
+        }
+        assert!(fake.user_copy_non_text());
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert!(
+            fake.has_non_text(),
+            "something that is not text was cleared"
+        );
+        assert_eq!(steps.clear_if_text("", None), Ok(false));
+        assert!(fake.has_non_text());
+
+        // A text too large to be the expected one is not even copied.
+        assert!(fake.user_copy(&"a".repeat(MAX_ITEM_JSON + 1)));
+        fake.take_events();
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert_eq!(fake.take_events(), ["open", "text size", "close"]);
+        assert!(fake.text().is_some(), "a large text was cleared");
+
+        // The match, and only that: cleared, and the copy that comes after it is left alone.
+        assert!(fake.user_copy(COPIED));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(true));
+        assert_eq!(fake.text(), None);
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert!(fake.user_copy("newer"));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert_eq!(fake.text().as_deref(), Some("newer"));
+    }
+
+    /// The check and the clear share one opening, and a copy by another program in between is refused until the clear
+    /// is done; a mismatch empties nothing; an empty that fails is an error and leaves the text.
+    #[test]
+    fn clear_if_text_is_one_opening() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy(COPIED));
+        let other = Arc::clone(&fake);
+        let (refused, was_refused) = mpsc::channel();
+        fake.during_next_read(Box::new(move || {
+            refused.send(!other.user_copy("theirs")).unwrap();
+        }));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(true));
+        assert!(
+            was_refused.recv().unwrap(),
+            "a copy got in between the check and the clear"
+        );
+        assert_eq!(fake.opens(), 1);
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "empty", "close"]
+        );
+        assert_eq!(fake.text(), None);
+
+        assert!(fake.user_copy("theirs"));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"],
+            "a text that did not match was emptied"
+        );
+
+        assert!(fake.user_copy(COPIED));
+        fake.fail_empty_at(0);
+        assert_eq!(steps.clear_if_text(COPIED, None), Err(CLIPBOARD_FAILED));
+        assert_eq!(fake.text().as_deref(), Some(COPIED));
+        assert!(!fake.is_open(), "the clipboard was left open");
+    }
+
+    /// Windows lets a second opener with no owner window in while the first is open, so Lockbox's own threads take
+    /// turns: an opening tried from inside another (the save shortcut's read landing in the middle of a clear or a
+    /// copy) is busy, whichever calls are involved, and the outer opening is not disturbed.
+    #[test]
+    fn a_second_opening_from_inside_one_is_busy() {
+        let fake = Arc::new(FakeClipboard::default());
+        let steps = Arc::new(ClipboardSteps::new(
+            Arc::clone(&fake),
+            Arc::new(FakeClock::default()),
+        ));
+        steps.write_secret("ours", &TAG).unwrap();
+        let (inner, answers) = mpsc::channel();
+        let again = Arc::clone(&steps);
+        fake.during_next_read(Box::new(move || {
+            inner.send(again.read_text(None).err()).unwrap();
+            inner.send(again.clear_if_text("ours", None).err()).unwrap();
+            inner.send(again.clear_if(&TAG, None).err()).unwrap();
+            inner
+                .send(
+                    again
+                        .write_secret("theirs", &OTHER_TAG)
+                        .err()
+                        .map(|failed| failed.error),
+                )
+                .unwrap();
+        }));
+        assert_eq!(steps.clear_if_text("ours", None), Ok(true));
+        let answers: Vec<_> = answers.try_iter().collect();
+        assert_eq!(answers, [Some(CLIPBOARD_BUSY); 4]);
+        assert_eq!(fake.text(), None, "the inner calls disturbed the clear");
+        assert!(!fake.is_open());
+        // The turn is given back with the clipboard: the next opening is not busy.
+        assert_eq!(steps.read_text(None), Ok(None));
+    }
+
+    /// Both reads keep to a deadline as the tag's clear does, and a busy clipboard is `Busy` after ten tries.
+    #[test]
+    fn text_reads_try_ten_times_and_keep_to_the_deadline() {
+        let (fake, clock) = (
+            Arc::new(FakeClipboard::default()),
+            Arc::new(FakeClock::default()),
+        );
+        let steps = ClipboardSteps::new(Arc::clone(&fake), clock.clone());
+        assert!(fake.user_copy(COPIED));
+        fake.hold_open_elsewhere(true);
+        assert_eq!(steps.read_text(None), Err(CLIPBOARD_BUSY));
+        assert_eq!(steps.clear_if_text(COPIED, None), Err(CLIPBOARD_BUSY));
+        assert_eq!(fake.opens(), 20);
+
+        // A deadline that has come: not one try.
+        let past = clock.now();
+        assert_eq!(steps.read_text(Some(past)), Err(CLIPBOARD_BUSY));
+        assert_eq!(steps.clear_if_text(COPIED, Some(past)), Err(CLIPBOARD_BUSY));
+        assert_eq!(fake.opens(), 20, "tried at or after the deadline");
+
+        fake.hold_open_elsewhere(false);
+        assert_eq!(fake.text().as_deref(), Some(COPIED));
     }
 
     /// Fix round 3 (H3): what `same_path` treats as one folder, and what it keeps apart. The registry, `Location`

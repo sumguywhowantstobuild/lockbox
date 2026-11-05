@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::TryLockError;
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
+use zeroize::Zeroizing;
 
 use crate::autolock::AutoLock;
 use crate::clipboard::Clipboard;
@@ -59,6 +61,12 @@ pub struct Shell {
     forbidden: Vec<PathBuf>,
     /// One vault creation or addition at a time ([`creating`](Self::creating)).
     creating: Mutex<()>,
+    /// How many times the save shortcut has been pressed.
+    shortcut_presses: AtomicU64,
+    /// The text the last press of the save shortcut read, in the one slot that holds it; wiped when replaced, cleared
+    /// and at shutdown. Only a probe reads it (its length), until the capture slot replaces it. A leaf lock: never held
+    /// across a clipboard call or any other lock.
+    probe_captured: Mutex<Option<Zeroizing<String>>>,
     /// Tests only: how many times a creation or addition had to wait for another.
     #[cfg(test)]
     creating_waited: AtomicUsize,
@@ -111,9 +119,47 @@ impl Shell {
             launch_notices: Mutex::default(),
             forbidden,
             creating: Mutex::default(),
+            shortcut_presses: AtomicU64::new(0),
+            probe_captured: Mutex::default(),
             #[cfg(test)]
             creating_waited: AtomicUsize::new(0),
         })
+    }
+
+    /// The save shortcut was pressed: counts the press and reads the clipboard once, into the probe's slot, replacing
+    /// (and wiping) what was there. A clipboard with no text, too large a text, or one that cannot be read leaves the
+    /// slot empty. Nothing is logged or sent to the page. Runs on its own thread (the clipboard may be held by another
+    /// program), never the signal window's.
+    pub fn save_shortcut_pressed(&self) {
+        self.shortcut_presses.fetch_add(1, Ordering::SeqCst);
+        // Whatever goes wrong, the slot ends up empty rather than holding an earlier press's text.
+        let read = self.os.clipboard.read_text(None).ok().flatten();
+        *lock(&self.probe_captured) = read;
+    }
+
+    /// How many times the save shortcut has been pressed.
+    pub fn shortcut_presses(&self) -> u64 {
+        self.shortcut_presses.load(Ordering::SeqCst)
+    }
+
+    /// The length in bytes of the text in the probe's slot; 0 when it is empty.
+    pub fn probe_capture_length(&self) -> usize {
+        lock(&self.probe_captured)
+            .as_ref()
+            .map_or(0, |text| text.len())
+    }
+
+    /// Empties the clipboard if it still holds the text in the probe's slot, and empties the slot either way: whether
+    /// the clipboard was cleared.
+    pub fn probe_clear_captured(&self) -> bool {
+        // Taken out first, so the lock is not held across the clipboard, and wiped when it goes out of scope here.
+        let Some(captured) = lock(&self.probe_captured).take() else {
+            return false;
+        };
+        self.os
+            .clipboard
+            .clear_if_text(&captured, None)
+            .unwrap_or(false)
     }
 
     /// Held from the vault list's room check to the new vault's place on it (a create), or from a folder's check to
@@ -158,6 +204,8 @@ impl Shell {
     /// cleanup, which treat `None` as all) before the process may exit. It does no hook work of its own. Every call,
     /// the second included, waits the same way.
     pub fn shutdown(&self) {
+        // The probe's slot first: it needs no wait, and nothing may keep it past the close.
+        drop(lock(&self.probe_captured).take());
         self.autolock.shutdown();
     }
 
@@ -280,5 +328,110 @@ impl<R: Runtime> Notifier for Events<R> {
 
     fn notice(&self, notice: &Notice) {
         self.emit(NOTICE_EVENT, notice);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lockbox_core::item::MAX_ITEM_JSON;
+
+    use crate::testing::TestShell;
+
+    /// A made-up text, never a real secret.
+    const COPIED: &str = "Pw-0123456789-xyz";
+
+    /// Each press counts and reads the clipboard once into the one slot: a second press replaces the first's text
+    /// (the length is the new text's, not both), and a press that finds no text, or too much, leaves the slot empty.
+    #[test]
+    fn a_press_reads_once_into_the_one_slot() {
+        let ts = TestShell::new();
+        assert_eq!(ts.shell.probe_capture_length(), 0);
+        assert!(ts.clipboard.user_copy(COPIED));
+        ts.shell.save_shortcut_pressed();
+        assert_eq!(ts.shell.shortcut_presses(), 1);
+        assert_eq!(ts.shell.probe_capture_length(), COPIED.len());
+        assert_eq!(ts.clipboard.opens(), 1, "more than one opening");
+
+        assert!(ts.clipboard.user_copy("short"));
+        ts.shell.save_shortcut_pressed();
+        assert_eq!(ts.shell.probe_capture_length(), "short".len());
+
+        assert!(ts.clipboard.user_copy_non_text());
+        ts.shell.save_shortcut_pressed();
+        assert_eq!(ts.shell.probe_capture_length(), 0, "an old text was kept");
+
+        assert!(ts.clipboard.user_copy(COPIED));
+        ts.shell.save_shortcut_pressed();
+        assert!(ts.clipboard.user_copy(&"a".repeat(MAX_ITEM_JSON + 1)));
+        ts.shell.save_shortcut_pressed();
+        assert_eq!(ts.shell.probe_capture_length(), 0, "a large text was kept");
+
+        assert_eq!(ts.shell.shortcut_presses(), 5);
+        // Reading never changes the clipboard.
+        assert!(ts.clipboard.text().is_some());
+    }
+
+    /// A press that cannot open the clipboard leaves the slot empty too, not the earlier text.
+    #[test]
+    fn a_press_on_a_busy_clipboard_leaves_the_slot_empty() {
+        let ts = TestShell::new();
+        assert!(ts.clipboard.user_copy(COPIED));
+        ts.shell.save_shortcut_pressed();
+        assert_eq!(ts.shell.probe_capture_length(), COPIED.len());
+        ts.clipboard.hold_open_elsewhere(true);
+        ts.shell.save_shortcut_pressed();
+        assert_eq!(ts.shell.probe_capture_length(), 0);
+    }
+
+    /// The clear takes the clipboard only while it holds the text that press read, never "the newest": a text copied
+    /// after the press is left alone, and the slot is empty afterwards either way.
+    #[test]
+    fn probe_clear_clears_only_what_it_read() {
+        let ts = TestShell::new();
+        assert!(!ts.shell.probe_clear_captured(), "nothing captured");
+
+        assert!(ts.clipboard.user_copy(COPIED));
+        ts.shell.save_shortcut_pressed();
+        assert!(ts.shell.probe_clear_captured());
+        assert_eq!(ts.clipboard.text(), None);
+        assert_eq!(ts.shell.probe_capture_length(), 0);
+
+        assert!(ts.clipboard.user_copy(COPIED));
+        ts.shell.save_shortcut_pressed();
+        assert!(ts.clipboard.user_copy("copied later"));
+        assert!(!ts.shell.probe_clear_captured());
+        assert_eq!(ts.clipboard.text().as_deref(), Some("copied later"));
+        assert_eq!(ts.shell.probe_capture_length(), 0);
+
+        // The text is the same again, but the slot was emptied: a second clear has nothing to go by.
+        assert!(ts.clipboard.user_copy(COPIED));
+        assert!(!ts.shell.probe_clear_captured());
+        assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+    }
+
+    /// A clear that cannot open the clipboard says no, and still empties the slot.
+    #[test]
+    fn probe_clear_on_a_busy_clipboard_says_no() {
+        let ts = TestShell::new();
+        assert!(ts.clipboard.user_copy(COPIED));
+        ts.shell.save_shortcut_pressed();
+        ts.clipboard.hold_open_elsewhere(true);
+        assert!(!ts.shell.probe_clear_captured());
+        assert_eq!(ts.shell.probe_capture_length(), 0);
+        ts.clipboard.hold_open_elsewhere(false);
+        assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+    }
+
+    /// Closing the app empties the slot.
+    #[test]
+    fn shutdown_empties_the_slot() {
+        let ts = TestShell::new();
+        assert!(ts.clipboard.user_copy(COPIED));
+        ts.shell.save_shortcut_pressed();
+        assert_eq!(ts.shell.probe_capture_length(), COPIED.len());
+        ts.shell.shutdown();
+        assert_eq!(ts.shell.probe_capture_length(), 0);
+        // What was on the clipboard is not Lockbox's to clear.
+        assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
     }
 }
