@@ -63,6 +63,8 @@
     "allow-get-settings",
     "allow-set-settings",
     "allow-probe-capture-length",
-    "allow-probe-clear-captured"
+    "allow-probe-clear-captured",
+    "allow-probe-print-pdf",
+    "allow-probe-set-capture"
   ]
 }

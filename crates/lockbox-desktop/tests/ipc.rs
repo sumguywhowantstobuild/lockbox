@@ -84,7 +84,8 @@ fn granted_command_runs_in_main_window() {
 
 /// Each listed command passes the ACL and reaches its handler (fix round 1: `add_existing_vault_confirm` was added).
 /// This test app keeps no shell state, so a command that needs it stops at Tauri's "state not managed" answer:
-/// past the ACL, inside the handler. The generator needs none: its own request check refuses the empty body.
+/// past the ACL, inside the handler. The generator needs none: its own request check refuses the empty body. Nor does
+/// `probe_set_capture`, which needs the window and one boolean; the test after this one sends it that.
 #[test]
 fn every_listed_command_reaches_its_handler() {
     let app = app();
@@ -94,9 +95,73 @@ fn every_listed_command_reaches_its_handler() {
         match invoke(&main, APP_ORIGIN, cmd, InvokeBody::Json(json!({}))) {
             Ok(_) => assert_eq!(*cmd, "app_info"),
             Err(Value::String(answer)) if answer.contains("state not managed") => {}
-            Err(answer) if cmd.starts_with("generate_") && answer == malformed => {}
+            Err(answer)
+                if (cmd.starts_with("generate_") || *cmd == "probe_set_capture")
+                    && answer == malformed => {}
             other => panic!("{cmd} did not reach its handler: {other:?}"),
         }
+    }
+}
+
+/// The print probe is granted to the main window only, and a call with a form passes the ACL and reaches its handler
+/// (which stops at the shell state this test app does not keep). The form's own check is a unit test in
+/// `commands/probe.rs`, since the state is resolved before the body is read.
+#[test]
+fn probe_print_pdf_is_granted_to_the_main_window_only() {
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "other", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the other window builds");
+    for form in [
+        "new_plain",
+        "new_long",
+        "existing_plain",
+        "existing_hidden",
+        "new_then_hide",
+        "in_hidden_folder",
+    ] {
+        let body = InvokeBody::Json(json!({ "form": form }));
+        match invoke(&main, APP_ORIGIN, "probe_print_pdf", body.clone()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{form} did not reach the handler: {answer:?}"),
+        }
+        assert_refused_by_acl(
+            "probe_print_pdf",
+            invoke(&other, APP_ORIGIN, "probe_print_pdf", body),
+        );
+    }
+}
+
+/// The capture probe takes exactly one boolean, `on`, and asks the main window; anything else is the fixed
+/// malformed-request answer.
+#[test]
+fn probe_set_capture_takes_one_boolean() {
+    let app = app();
+    let main = main_webview(&app);
+    for on in [true, false] {
+        let answer = invoke(
+            &main,
+            APP_ORIGIN,
+            "probe_set_capture",
+            InvokeBody::Json(json!({ "on": on })),
+        );
+        assert_eq!(answer, Ok(Value::Null), "on: {on}");
+    }
+    let malformed = json!({ "code": "invalid_input", "what": "request" });
+    for body in [
+        json!({}),
+        json!({ "on": "yes" }),
+        json!({ "on": true, "path": "C:\\x" }),
+        json!(true),
+    ] {
+        let answer = invoke(
+            &main,
+            APP_ORIGIN,
+            "probe_set_capture",
+            InvokeBody::Json(body.clone()),
+        );
+        assert_eq!(answer, Err(malformed.clone()), "{body}");
     }
 }
 

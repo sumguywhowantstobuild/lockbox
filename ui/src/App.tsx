@@ -4,6 +4,7 @@ import { call, callPair, callPlain, onLocked, open, type Opened, type Outcome, t
 import { useDroppedFileReachedPage } from "./dropProbe";
 import { LockboxParts } from "./parts/LockboxParts";
 import { PartsProbe } from "./probes/PartsProbe";
+import "./styles/print.css";
 
 interface AppInfo {
   version: string;
@@ -494,6 +495,87 @@ async function clearShortcutCapture(): Promise<string> {
     : "Clipboard not cleared: it held something else, or nothing was captured";
 }
 
+// The print and capture probes (they go with this page in Task 5). Rust opens the save box, makes a temp file of the
+// form asked for beside the place chosen and prints the marked element on this page into it; the page sends only the
+// form's name and gets back no path, only one of these fixed answers.
+const PRINT_FORMS = [
+  "new_plain",
+  "new_long",
+  "existing_plain",
+  "existing_hidden",
+  "new_then_hide",
+  "in_hidden_folder",
+] as const;
+
+type PrintForm = (typeof PRINT_FORMS)[number];
+
+type PrintProbeAnswer = {
+  form: PrintForm;
+  // What of its own the run left behind: a temp file (and whether it is hidden), a hidden folder.
+  left: { file_hidden: boolean | null; folder: boolean };
+} & (
+  | { result: "dismissed" | "destination_exists" | "busy" | "no_answer" }
+  | { result: "refused"; step: string }
+  | { result: "not_started" | "not_written"; code: number }
+  | { result: "printed"; size: number; temp_hidden: boolean; hid_after: boolean | null }
+);
+
+// A Windows error code the way Windows people write it: eight hex digits.
+function hresult(code: number): string {
+  return `0x${(code >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function describeOutcome(answer: PrintProbeAnswer): string {
+  switch (answer.result) {
+    case "dismissed":
+      return "Print closed: nothing was made";
+    case "destination_exists":
+      return "Print refused: that place already holds a file, and nothing was written over it";
+    case "busy":
+      return "Print refused: a print is already running";
+    case "no_answer":
+      return "The print gave no answer in time";
+    case "refused":
+      return `Print refused at the step: ${answer.step}`;
+    case "not_started":
+      return `WebView2 did not start the print (code ${hresult(answer.code)})`;
+    case "not_written":
+      return `The print ended without a file (code ${hresult(answer.code)})`;
+    case "printed": {
+      const hid = answer.hid_after === null ? "" : `; hiding it afterwards ${answer.hid_after ? "worked" : "failed"}`;
+      return (
+        `PDF written: ${String(answer.size)} bytes. The temp file was ${answer.temp_hidden ? "hidden" : "visible"} ` +
+        `when the print ended${hid}`
+      );
+    }
+  }
+}
+
+// What the run left in the user's folder: a temp file (hidden or visible) and the hidden folder it made, or nothing.
+function describeLeft(left: PrintProbeAnswer["left"]): string {
+  const parts = [
+    ...(left.file_hidden === null ? [] : [`a ${left.file_hidden ? "hidden" : "visible"} temp file`]),
+    ...(left.folder ? ["its hidden folder"] : []),
+  ];
+  return parts.length === 0 ? "nothing of the probe's is left behind" : `left behind: ${parts.join(" and ")}`;
+}
+
+// The form is named first, then the real outcome and what stayed.
+function describePrint(answer: PrintProbeAnswer): string {
+  return `[${answer.form}] ${describeOutcome(answer)}; ${describeLeft(answer.left)}`;
+}
+
+async function printTestPage(form: PrintForm): Promise<string> {
+  return describePrint(await callPlain<PrintProbeAnswer>("probe_print_pdf", { form }));
+}
+
+// Asks Rust to keep the window out of screen captures, or to let it be captured. Windows' own answer is not available to
+// Rust either, so the check is a screenshot.
+async function setCaptureProtection(on: boolean): Promise<string> {
+  await callPlain<null>("probe_set_capture", { on });
+  return `Asked for capture protection ${on ? "on" : "off"}: take a screenshot to see whether Windows obeyed`;
+}
+
 // A same-origin `blob:` download, which WebView2 saves straight to Downloads unless the window refuses it (a
 // `data:` link does not reliably start a download, so it could not show the rule failing).
 function downloadProbeFile(): void {
@@ -526,6 +608,10 @@ function TestPage() {
   // A restore is preparing or swapping (it has no session: `lockbox://busy` names it with a null one).
   const [restoring, setRestoring] = useState(false);
   const [shortcutStatus, setShortcutStatus] = useState<string>();
+  const [printStatus, setPrintStatus] = useState<string>();
+  const [captureStatus, setCaptureStatus] = useState<string>();
+  // The last few key chords (a modifier or an F-key held) the page was given: whether Ctrl+F reaches the page.
+  const [keysSeen, setKeysSeen] = useState<string[]>([]);
   const droppedFileReachedPage = useDroppedFileReachedPage();
 
   function run(step: () => Promise<string>): void {
@@ -539,6 +625,41 @@ function TestPage() {
       setShortcutStatus(failed(error));
     });
   }
+
+  function runPrintProbe(step: () => Promise<string>): void {
+    setPrintStatus("Waiting for the save box and the print…");
+    step().then(setPrintStatus, (error: unknown) => {
+      setPrintStatus(failed(error));
+    });
+  }
+
+  function runCaptureProbe(step: () => Promise<string>): void {
+    step().then(setCaptureStatus, (error: unknown) => {
+      setCaptureStatus(failed(error));
+    });
+  }
+
+  // Hands-on probe for the browser keys (they go with this page in Task 5). Plain letters are never recorded.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return;
+      if (!event.ctrlKey && !event.altKey && !event.metaKey && !/^F\d+$/.test(event.key)) return;
+      const chord = [
+        event.ctrlKey && "Ctrl",
+        event.shiftKey && "Shift",
+        event.altKey && "Alt",
+        event.metaKey && "Win",
+        event.key.length === 1 ? event.key.toUpperCase() : event.key,
+      ]
+        .filter((part) => part !== false)
+        .join("+");
+      setKeysSeen((now) => [...now.slice(-7), chord]);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
 
   useEffect(() => {
     callPlain<AppInfo>("app_info").then(
@@ -885,7 +1006,55 @@ function TestPage() {
           shortcut capture&quot; empties the clipboard only if it still holds that text.
           {shortcutStatus !== undefined && <output> {shortcutStatus}</output>}
         </li>
+        <li>
+          {PRINT_FORMS.map((form) => (
+            <span key={form}>
+              <button
+                type="button"
+                onClick={() => {
+                  runPrintProbe(() => printTestPage(form));
+                }}
+              >
+                Print {form}
+              </button>{" "}
+            </span>
+          ))}
+          Each button opens a save box (pick a file name that does not exist yet) and prints the one line under this list
+          through a temp file of that form made beside it: new or already there, plain or \\?\ path, hidden or not, or
+          inside a hidden folder (new_then_hide hides it only after the print). It passes when the PDF holds that line
+          and nothing else of this page. The answer names the form, how it ended (with the code on a failure) and what
+          was left behind.
+          {printStatus !== undefined && <output> {printStatus}</output>}
+        </li>
+        <li>
+          <button
+            type="button"
+            onClick={() => {
+              runCaptureProbe(() => setCaptureProtection(false));
+            }}
+          >
+            Capture protection off
+          </button>{" "}
+          <button
+            type="button"
+            onClick={() => {
+              runCaptureProbe(() => setCaptureProtection(true));
+            }}
+          >
+            Capture protection on
+          </button>{" "}
+          Lockbox starts with capture protection on. Take a screenshot with each setting (Snipping Tool, and Magnifier
+          running): with it on, this window should be left out or blank in the picture; with it off, it should show.
+          {captureStatus !== undefined && <output> {captureStatus}</output>}
+        </li>
+        <li>
+          Browser keys: press Ctrl+P, F12, Ctrl+Shift+I, F5, Ctrl+R, Ctrl+U and right-click on this page. It passes when
+          nothing opens or reloads. Then press Ctrl+F: the keys the page was given are listed here (a key held with Ctrl,
+          Alt or Win, or an F-key; never a plain letter).
+          <output> {keysSeen.length === 0 ? "none yet" : keysSeen.join(", ")}</output>
+        </li>
       </ul>
+      <p data-print-only>Lockbox print probe: this line is the only thing on the printed page.</p>
       <PartsProbe />
     </main>
   );

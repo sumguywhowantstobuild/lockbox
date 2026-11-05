@@ -17,7 +17,8 @@ use crate::error::ShellResult;
 use crate::lock;
 use crate::os::{
     CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS,
-    Env, IdleSource, Job, KnownFolder, Launcher, Os, Power, TAG_FORMAT, Timer, Volumes,
+    Env, IdleSource, Job, KnownFolder, Launcher, Os, Power, PrintCalls, PrintDone, PrintFailed,
+    PrintSteps, TAG_FORMAT, Timer, Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
@@ -861,6 +862,103 @@ impl Launcher for FakeLauncher {
     }
 }
 
+/// What a fake print job found at its path when it began.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedPrint {
+    pub path: PathBuf,
+    /// The file was already there (WebView2 writes over the path it is given).
+    pub existed: bool,
+    /// ...and was hidden.
+    pub hidden: bool,
+    /// Its folder was hidden.
+    pub folder_hidden: bool,
+}
+
+/// The printing call as the test sees it: records each job, holds its `done` until the test ends the job, and can
+/// refuse to begin one.
+#[derive(Default)]
+pub struct FakePrintCalls {
+    started: Mutex<Vec<StartedPrint>>,
+    /// Jobs begun and not ended, oldest first, each with its path.
+    waiting: Mutex<VecDeque<(PathBuf, PrintDone)>>,
+    /// The next `start` refuses with this.
+    refuse_next: Mutex<Option<PrintFailed>>,
+    /// What a job that ends well leaves in its file (it opens the file that is there and writes over it, as WebView2
+    /// does); `None` writes nothing.
+    pdf: Mutex<Option<Vec<u8>>>,
+}
+
+impl FakePrintCalls {
+    pub fn started(&self) -> Vec<StartedPrint> {
+        lock(&self.started).clone()
+    }
+
+    /// The next job is refused when it starts.
+    pub fn refuse_next(&self, failed: PrintFailed) {
+        *lock(&self.refuse_next) = Some(failed);
+    }
+
+    /// A job that ends well writes `bytes` over its file first.
+    pub fn write_on_success(&self, bytes: &[u8]) {
+        *lock(&self.pdf) = Some(bytes.to_vec());
+    }
+
+    /// Ends the oldest running job with `result`; false when none runs.
+    pub fn finish(&self, result: Result<(), PrintFailed>) -> bool {
+        let Some((path, done)) = lock(&self.waiting).pop_front() else {
+            return false;
+        };
+        if result.is_ok()
+            && let Some(pdf) = lock(&self.pdf).clone()
+        {
+            // Writes over the file that is there (truncating it), or makes the file when there is none.
+            let mut file = match fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .unwrap(),
+                Err(error) => panic!("the fake print could not open its file: {error}"),
+            };
+            io::Write::write_all(&mut file, &pdf).unwrap();
+        }
+        done(result);
+        true
+    }
+
+    /// The webview goes away: every running job is dropped without an answer.
+    pub fn drop_running_jobs(&self) {
+        lock(&self.waiting).clear();
+    }
+}
+
+impl PrintCalls for FakePrintCalls {
+    fn start(&self, path: &Path, done: PrintDone) -> Result<(), PrintFailed> {
+        let hidden = |path: Option<&Path>| {
+            path.and_then(|path| fs::symlink_metadata(path).ok())
+                .is_some_and(|meta| {
+                    std::os::windows::fs::MetadataExt::file_attributes(&meta) & 0x2 != 0
+                })
+        };
+        lock(&self.started).push(StartedPrint {
+            path: path.to_path_buf(),
+            existed: fs::symlink_metadata(path).is_ok(),
+            hidden: hidden(Some(path)),
+            folder_hidden: hidden(path.parent()),
+        });
+        if let Some(failed) = lock(&self.refuse_next).take() {
+            return Err(failed);
+        }
+        lock(&self.waiting).push_back((path.to_path_buf(), done));
+        Ok(())
+    }
+}
+
 /// A shell on fake OS calls, inside its own temp folder: the known folders in `profile`, `local` and `roaming`, and
 /// a `vaults` folder for the test's own vaults.
 pub struct TestShell {
@@ -874,6 +972,7 @@ pub struct TestShell {
     pub clock: Arc<FakeClock>,
     pub clipboard: Arc<FakeClipboard>,
     pub timer: Arc<FakeTimer>,
+    pub print: Arc<FakePrintCalls>,
     /// The events the shell sent.
     pub events: Arc<Events>,
     /// Tauri's app-data folders, as the app passes them in.
@@ -900,6 +999,7 @@ impl TestShell {
         let clipboard = Arc::new(FakeClipboard::default());
         clipboard.watch_clock(clock.clone());
         let timer = Arc::new(FakeTimer::default());
+        let print = Arc::new(FakePrintCalls::default());
         let events = Arc::new(Events::default());
         let app_dirs = vec![
             env.folder(KnownFolder::RoamingAppData)
@@ -918,6 +1018,7 @@ impl TestShell {
             clock: clock.clone(),
             clipboard: Arc::new(ClipboardSteps::new(clipboard.clone(), clock.clone())),
             timer: timer.clone(),
+            printer: Arc::new(PrintSteps::new(print.clone())),
         };
         let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone())?);
         Ok(TestShell {
@@ -931,6 +1032,7 @@ impl TestShell {
             clock,
             clipboard,
             timer,
+            print,
             events,
             app_dirs,
             temp,

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import App from "./App";
@@ -578,6 +579,167 @@ test("shortcut_probe_buttons_show_a_length_and_whether_the_clipboard_was_cleared
   fireEvent.click(screen.getByRole("button", { name: "Clear shortcut capture" }));
   expect(await screen.findByText("Clipboard cleared: it still held the captured text")).toBeTruthy();
   expect(invoke).toHaveBeenCalledWith("probe_clear_captured", undefined);
+});
+
+test("print_probe_button_says_how_the_print_ended", async () => {
+  invoke.mockReset();
+  let answer: unknown = { result: "dismissed" };
+  invoke.mockImplementation((cmd: string) => {
+    switch (cmd) {
+      case "app_info":
+        return Promise.resolve({ version: "9.8.7" });
+      case "launch_notices":
+        return Promise.resolve([]);
+      case "probe_print_pdf":
+        return Promise.resolve(answer);
+      default:
+        return Promise.reject(new Error(`unexpected command ${cmd}`));
+    }
+  });
+  render(<App />);
+  await screen.findByText("Lockbox 9.8.7");
+
+  const nothingLeft = { file_hidden: null, folder: false };
+  const cases: [string, unknown, string][] = [
+    ["new_plain", { result: "dismissed", left: nothingLeft }, "Print closed: nothing was made; nothing of the probe's is left behind"],
+    [
+      "new_long",
+      { result: "destination_exists", left: nothingLeft },
+      "Print refused: that place already holds a file, and nothing was written over it; nothing of the probe's is left behind",
+    ],
+    ["existing_plain", { result: "refused", step: "temp", left: nothingLeft }, "Print refused at the step: temp; nothing of the probe's is left behind"],
+    ["existing_hidden", { result: "busy", left: nothingLeft }, "Print refused: a print is already running; nothing of the probe's is left behind"],
+    [
+      "existing_hidden",
+      { result: "not_started", code: -2147024891, left: { file_hidden: true, folder: false } },
+      "WebView2 did not start the print (code 0x80070005); left behind: a hidden temp file",
+    ],
+    [
+      "new_plain",
+      { result: "not_written", code: 0, left: nothingLeft },
+      "The print ended without a file (code 0x00000000); nothing of the probe's is left behind",
+    ],
+    [
+      "in_hidden_folder",
+      { result: "no_answer", left: { file_hidden: false, folder: true } },
+      "The print gave no answer in time; left behind: a visible temp file and its hidden folder",
+    ],
+    [
+      "in_hidden_folder",
+      { result: "no_answer", left: { file_hidden: null, folder: true } },
+      "The print gave no answer in time; left behind: its hidden folder",
+    ],
+    [
+      "new_long",
+      { result: "printed", size: 1234, temp_hidden: true, hid_after: null, left: nothingLeft },
+      "PDF written: 1234 bytes. The temp file was hidden when the print ended; nothing of the probe's is left behind",
+    ],
+    [
+      "new_then_hide",
+      { result: "printed", size: 9, temp_hidden: false, hid_after: true, left: nothingLeft },
+      "PDF written: 9 bytes. The temp file was visible when the print ended; hiding it afterwards worked; nothing of the probe's is left behind",
+    ],
+    [
+      "new_then_hide",
+      { result: "printed", size: 9, temp_hidden: false, hid_after: false, left: { file_hidden: false, folder: false } },
+      "PDF written: 9 bytes. The temp file was visible when the print ended; hiding it afterwards failed; left behind: a visible temp file",
+    ],
+  ];
+  for (const [form, rustAnswer, shown] of cases) {
+    answer = { form, ...(rustAnswer as object) };
+    invoke.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: `Print ${form}` }));
+    // The whole line, so the form named and every part of the outcome and of what was left must be right.
+    expect(await screen.findByText(`[${form}] ${shown}`)).toBeTruthy();
+    // The page sends only the form's name: Rust picks the place and the temp file, and no path comes back.
+    expect(invoke).toHaveBeenCalledWith("probe_print_pdf", { form });
+  }
+});
+
+test("print_probe_has_one_button_for_each_form", async () => {
+  invoke.mockReset();
+  invoke.mockResolvedValue({ version: "9.8.7" });
+  render(<App />);
+  await screen.findByText("Lockbox 9.8.7");
+  const labels = screen.getAllByRole("button").map((button) => button.textContent);
+  expect(labels.filter((label) => label.startsWith("Print "))).toEqual([
+    "Print new_plain",
+    "Print new_long",
+    "Print existing_plain",
+    "Print existing_hidden",
+    "Print new_then_hide",
+    "Print in_hidden_folder",
+  ]);
+});
+
+test("capture_probe_buttons_ask_for_protection_on_and_off", async () => {
+  invoke.mockReset();
+  invoke.mockImplementation((cmd: string) => {
+    switch (cmd) {
+      case "app_info":
+        return Promise.resolve({ version: "9.8.7" });
+      case "launch_notices":
+        return Promise.resolve([]);
+      case "probe_set_capture":
+        return Promise.resolve(null);
+      default:
+        return Promise.reject(new Error(`unexpected command ${cmd}`));
+    }
+  });
+  render(<App />);
+  await screen.findByText("Lockbox 9.8.7");
+
+  fireEvent.click(screen.getByRole("button", { name: "Capture protection off" }));
+  expect(await screen.findByText("Asked for capture protection off", { exact: false })).toBeTruthy();
+  expect(invoke).toHaveBeenLastCalledWith("probe_set_capture", { on: false });
+  fireEvent.click(screen.getByRole("button", { name: "Capture protection on" }));
+  expect(await screen.findByText("Asked for capture protection on", { exact: false })).toBeTruthy();
+  expect(invoke).toHaveBeenLastCalledWith("probe_set_capture", { on: true });
+});
+
+test("key_probe_lists_chords_but_never_plain_letters", async () => {
+  invoke.mockReset();
+  invoke.mockResolvedValue({ version: "9.8.7" });
+  render(<App />);
+  await screen.findByText("Lockbox 9.8.7");
+  expect(screen.getByText("none yet", { exact: false })).toBeTruthy();
+
+  fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+  fireEvent.keyDown(window, { key: "I", ctrlKey: true, shiftKey: true });
+  fireEvent.keyDown(window, { key: "F12" });
+  fireEvent.keyDown(window, { key: "Control", ctrlKey: true });
+  fireEvent.keyDown(window, { key: "x" });
+  fireEvent.keyDown(window, { key: "Enter" });
+  // The whole list, so a plain letter or a lone modifier added to it fails here.
+  expect(await screen.findByText("Ctrl+F, Ctrl+Shift+I, F12")).toBeTruthy();
+  expect(screen.queryByText("none yet", { exact: false })).toBeNull();
+});
+
+// The built style sheets, found by name only (the glob loads nothing).
+const builtCss = Object.keys(import.meta.glob("../dist/assets/*.css"));
+
+test("print_style_shows_only_the_marked_element", () => {
+  invoke.mockReset();
+  invoke.mockResolvedValue({ version: "9.8.7" });
+  render(<App />);
+  // One marked element, with the words that should be the only thing on the printed page.
+  const marked = document.querySelectorAll("[data-print-only]");
+  expect(marked.length).toBe(1);
+  expect(marked[0]?.textContent).toContain("only thing on the printed page");
+  // A real style sheet (the policy allows no `<style>` element): all of its rules sit inside `@media print`.
+  // The path is held in a variable: Vite rewrites `new URL("literal", import.meta.url)` into a served address.
+  const printSheet = "./styles/print.css";
+  const source = readFileSync(new URL(printSheet, import.meta.url), "utf8");
+  const printBlock = /@media\s+print\s*\{([\s\S]*)\}\s*$/.exec(source.trim())?.[1] ?? "";
+  expect(printBlock, "every rule of print.css is inside @media print").not.toBe("");
+  expect(printBlock).toContain("display: none");
+  expect(printBlock).toContain("[data-print-only]");
+  expect(source.replace(/@media\s+print\s*\{[\s\S]*\}\s*$/, "").replace(/\/\*[\s\S]*?\*\//g, "").trim()).toBe("");
+  // And it reaches the built page.
+  const built = builtCss.map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n");
+  expect(builtCss.length, "No built style sheet found in ui/dist/assets: run `npm run build` in ui/ first.").toBeGreaterThan(0);
+  expect(built).toMatch(/@media\s+print/);
+  expect(built).toContain("data-print-only");
 });
 
 test("hands_on_probes_are_listed", async () => {

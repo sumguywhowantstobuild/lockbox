@@ -85,7 +85,9 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         settings::get_settings,
         settings::set_settings,
         probe::probe_capture_length,
-        probe::probe_clear_captured
+        probe::probe_clear_captured,
+        probe::probe_print_pdf,
+        probe::probe_set_capture
     ]
 }
 

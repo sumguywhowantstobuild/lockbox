@@ -11,6 +11,7 @@ use std::num::NonZeroU32;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -22,9 +23,11 @@ use tauri::{AppHandle, Manager, Runtime};
 use zeroize::{Zeroize, Zeroizing};
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Controller, ICoreWebView2Controller4,
+    ICoreWebView2_7, ICoreWebView2Controller, ICoreWebView2Controller4, ICoreWebView2PrintSettings,
+    ICoreWebView2Settings3,
 };
-use windows_core::{BOOL, Interface};
+use webview2_com::PrintToPdfCompletedHandler;
+use windows_core::{BOOL, Interface, PCWSTR};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, ERROR_INSUFFICIENT_BUFFER,
     ERROR_MORE_DATA, GetLastError, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT,
@@ -44,10 +47,11 @@ use windows_sys::Win32::Storage::CloudFilters::{
     CF_SYNC_ROOT_INFO_PROVIDER, CF_SYNC_ROOT_PROVIDER_INFO, CfGetSyncRootInfoByPath,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    CreateDirectoryW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, GetDriveTypeW,
-    GetFileInformationByHandleEx, GetVolumeInformationW, GetVolumePathNameW,
+    GetFileAttributesW, GetFileInformationByHandleEx, GetVolumeInformationW, GetVolumePathNameW,
+    INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
 };
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -84,8 +88,8 @@ use windows_sys::core::PWSTR;
 use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
     CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, HotkeyTaken,
-    IdleSource, KnownFolder, Launcher, Os, OsSignal, Power, Shortcut, SystemClock, ThreadTimer,
-    Volumes,
+    IdleSource, KnownFolder, Launcher, Os, OsSignal, Power, PrintCalls, PrintDone, PrintFailed,
+    PrintSteps, Shortcut, SystemClock, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
 use crate::{lock, window};
@@ -116,6 +120,128 @@ pub fn turn_off_external_drop(controller: &ICoreWebView2Controller) -> bool {
     confirmed && !allowed.as_bool()
 }
 
+/// Turns off WebView2's browser accelerator keys (Ctrl+P, F12, Ctrl+Shift+I, F5, Ctrl+R, Ctrl+U and the rest) and its
+/// default context menu, then reads both settings back. Returns `true` only when WebView2 confirms both are off.
+///
+/// Wry's defaults leave both on (`browser_accelerator_keys` and `default_context_menus` are true "as WebView2's
+/// default"), and Tauri 2.12.5 offers no setting for either, so they are turned off here, after the window exists
+/// (security risk 3: Ctrl+P on a revealed password would reach the print spooler).
+pub fn turn_off_browser_keys(controller: &ICoreWebView2Controller) -> bool {
+    // SAFETY: `controller` is a live COM interface that Tauri hands us on the thread that owns the webview
+    // (`with_webview`); the getter only returns a new reference to the webview it owns.
+    let Ok(webview) = (unsafe { controller.CoreWebView2() }) else {
+        return false;
+    };
+    // SAFETY: as above, on the webview just obtained.
+    let Ok(settings) = (unsafe { webview.Settings() }) else {
+        return false;
+    };
+    // A WebView2 runtime too old for `ICoreWebView2Settings3` cannot turn the keys off: that counts as failure.
+    let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() else {
+        return false;
+    };
+    let (mut menus, mut keys) = (BOOL::from(true), BOOL::from(true));
+    // SAFETY: `settings` and `settings3` are live COM interfaces on the thread that owns the webview. The four calls
+    // are plain property accessors; `menus` and `keys` are valid, writable `BOOL`s for the getters.
+    let confirmed = unsafe {
+        settings.SetAreDefaultContextMenusEnabled(false).is_ok()
+            && settings3.SetAreBrowserAcceleratorKeysEnabled(false).is_ok()
+            && settings.AreDefaultContextMenusEnabled(&mut menus).is_ok()
+            && settings3
+                .AreBrowserAcceleratorKeysEnabled(&mut keys)
+                .is_ok()
+    };
+    confirmed && !menus.as_bool() && !keys.as_bool()
+}
+
+/// The real printer's call: WebView2's own print-to-PDF of the main window's page (`ICoreWebView2_7::PrintToPdf`), with
+/// its default print settings.
+pub struct WinPrint<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> PrintCalls for WinPrint<R> {
+    fn start(&self, path: &Path, done: PrintDone) -> Result<(), PrintFailed> {
+        let not_started = PrintFailed::NotStarted { code: 0 };
+        let wide = wide_path(path).map_err(|_| not_started)?;
+        let window = self
+            .app
+            .get_webview_window(window::MAIN)
+            .ok_or(not_started)?;
+        // WebView2 is called on the thread that owns it. If the call cannot be queued, the closure (and `done` in it) is
+        // dropped, and the caller is told by this return instead.
+        window
+            .with_webview(move |webview| print_page(&webview.controller(), &wide, done))
+            .map_err(|_| not_started)
+    }
+}
+
+/// Starts the print on the webview's own thread and hands `done` to WebView2's completion handler, or, when the call
+/// is refused, calls it with why.
+fn print_page(controller: &ICoreWebView2Controller, path: &[u16], done: PrintDone) {
+    // Whichever of the handler and the refusal below comes first takes it.
+    let done = Rc::new(Cell::new(Some(done)));
+    let started = (|| {
+        // SAFETY: `controller` is a live COM interface on the thread that owns the webview (`with_webview`).
+        let webview = unsafe { controller.CoreWebView2() }?;
+        let webview = webview.cast::<ICoreWebView2_7>()?;
+        let handler = {
+            let done = Rc::clone(&done);
+            PrintToPdfCompletedHandler::create(Box::new(move |error, successful| {
+                if let Some(done) = done.take() {
+                    done(print_answer(error, successful));
+                }
+                Ok(())
+            }))
+        };
+        // SAFETY: `path` is a NUL-terminated UTF-16 string (from `wide_path`) that outlives the call; `handler` is a
+        // live COM object, which WebView2 holds its own reference to for as long as it needs it; no print settings
+        // are given, which WebView2 reads as its defaults.
+        unsafe {
+            webview.PrintToPdf(
+                PCWSTR(path.as_ptr()),
+                None::<&ICoreWebView2PrintSettings>,
+                &handler,
+            )
+        }
+    })();
+    if let Err(error) = started
+        && let Some(done) = done.take()
+    {
+        done(Err(PrintFailed::NotStarted {
+            code: error.code().0,
+        }));
+    }
+}
+
+/// How a finished print job ended, from what WebView2's completion handler was given: a PDF only when there was no
+/// error and WebView2 says it succeeded. The `HRESULT` is kept as a number.
+fn print_answer(error: windows_core::Result<()>, successful: bool) -> Result<(), PrintFailed> {
+    match error {
+        Err(error) => Err(PrintFailed::NotWritten {
+            code: error.code().0,
+        }),
+        Ok(()) if !successful => Err(PrintFailed::NotWritten { code: 0 }),
+        Ok(()) => Ok(()),
+    }
+}
+
+/// Adds the hidden attribute to the file or folder at `path`; every other attribute stays. For the print probe only
+/// (it goes in Task 5).
+pub fn set_hidden(path: &Path) -> io::Result<()> {
+    let wide = wide_path(path)?;
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 path; the call only reads it.
+    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the same `wide` path; the new attributes are passed by value.
+    if unsafe { SetFileAttributesW(wide.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Whether `a` and `b` are equal as Windows compares file names: ordinal, ignoring case (`CompareStringOrdinal`,
 /// which uppercases each UTF-16 unit with the system's table, the same per-unit rule NTFS applies to names).
 pub fn equal_ignoring_case(a: &OsStr, b: &OsStr) -> bool {
@@ -135,6 +261,7 @@ impl Os {
             volumes: Arc::new(WinVolumes),
             env: Arc::new(WinEnv),
             dialogs: Arc::new(WinDialogs { app: app.clone() }),
+            printer: Arc::new(PrintSteps::new(Arc::new(WinPrint { app: app.clone() }))),
             launcher: Arc::new(WinLauncher),
             idle: Arc::new(WinIdle),
             power: Arc::new(WinPower { app }),
@@ -1877,6 +2004,64 @@ mod tests {
 
     /// The deadline for every wait in these tests: a slow or stuck window fails a test instead of hanging it.
     const WAIT: Duration = Duration::from_secs(1);
+
+    /// The hidden attribute is added to a file or a folder and nothing else changes (the read-only attribute and the
+    /// content stay); a path that is not there is an error.
+    #[test]
+    fn set_hidden_adds_only_the_hidden_attribute() {
+        use std::os::windows::fs::MetadataExt;
+
+        use lockbox_core::internals::fsio::testutil::TempDir;
+        let temp = TempDir::new();
+        let file = temp.path().join("file.txt");
+        std::fs::write(&file, b"content").unwrap();
+        let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions).unwrap();
+        let folder = temp.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+
+        let before = std::fs::metadata(&file).unwrap().file_attributes();
+        assert_eq!(before & FILE_ATTRIBUTE_HIDDEN, 0);
+        set_hidden(&file).unwrap();
+        set_hidden(&folder).unwrap();
+        let after = std::fs::metadata(&file).unwrap().file_attributes();
+        assert_eq!(after, before | FILE_ATTRIBUTE_HIDDEN);
+        assert_ne!(
+            std::fs::metadata(&folder).unwrap().file_attributes() & FILE_ATTRIBUTE_HIDDEN,
+            0
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"content");
+        assert!(set_hidden(&temp.path().join("missing")).is_err());
+
+        // The temp folder cannot remove a read-only file.
+        let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&file, permissions).unwrap();
+    }
+
+    /// What WebView2's completion handler is given becomes a fixed answer: only "no error and successful" is a PDF.
+    /// The `HRESULT` it carries is kept, as a number.
+    #[test]
+    fn print_answer_is_a_pdf_only_when_webview2_says_so() {
+        const ACCESS_DENIED: i32 = 0x8007_0005_u32 as i32;
+        assert_eq!(print_answer(Ok(()), true), Ok(()));
+        assert_eq!(
+            print_answer(Ok(()), false),
+            Err(PrintFailed::NotWritten { code: 0 })
+        );
+        for successful in [true, false] {
+            let refused = windows_core::Error::from(windows_core::HRESULT(ACCESS_DENIED));
+            assert_eq!(
+                print_answer(Err(refused), successful),
+                Err(PrintFailed::NotWritten {
+                    code: ACCESS_DENIED
+                }),
+                "successful: {successful}"
+            );
+        }
+    }
 
     /// Fix round 1 follow-up: only name-surrogate reparse points lead elsewhere. The tags are Windows' own
     /// (`winnt.h`). A cloud-file folder cannot be made here without a registered sync provider, so its tag is checked

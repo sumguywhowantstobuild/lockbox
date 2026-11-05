@@ -1,16 +1,20 @@
 //! The app's state behind every command: plain Rust, so almost every rule is tested without a window.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::TryLockError;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
-use serde::Serialize;
+use lockbox_core::fsio::remove_file_retry;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 use zeroize::Zeroizing;
 
@@ -20,7 +24,7 @@ use crate::error::{ShellError, ShellResult};
 use crate::locations::{LocationCheck, check_location, is_within};
 use crate::lock;
 use crate::open::{OpenFolders, RemoveReport};
-use crate::os::{KnownFolder, Os};
+use crate::os::{KnownFolder, Os, PrintFailed, Printer};
 use crate::outputs::{Outputs, SweepReport};
 use crate::paths::{StatePaths, state_paths};
 use crate::registry::Registry;
@@ -160,6 +164,19 @@ impl Shell {
             .clipboard
             .clear_if_text(&captured, None)
             .unwrap_or(false)
+    }
+
+    /// Prints the test page's marked element to a PDF at a place chosen in Rust's save dialog, through a temp file in
+    /// the `form` the page asked for (see [`probe_print_to`]). Slow: it waits for a dialog and for the print.
+    pub fn probe_print_pdf(&self, form: PrintForm) -> ProbePrintAnswer {
+        let Some(dest) = self.os.dialogs.save_file(
+            "Print the test page to PDF",
+            "lockbox-print-probe.pdf",
+            Some(("PDF", &["pdf"])),
+        ) else {
+            return ProbePrintAnswer::nothing_made(form, ProbePrinted::Dismissed);
+        };
+        probe_print_to(self.os.printer.as_ref(), &dest, form, PROBE_PRINT_WAIT)
     }
 
     /// Held from the vault list's room check to the new vault's place on it (a create), or from a folder's check to
@@ -331,10 +348,244 @@ impl<R: Runtime> Notifier for Events<R> {
     }
 }
 
+/// How long [`Shell::probe_print_pdf`] waits for the print to end.
+const PROBE_PRINT_WAIT: Duration = Duration::from_secs(60);
+
+/// How the print probe ended. Fixed words and numbers only: never a path (the page never receives one).
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ProbePrinted {
+    /// The save dialog was closed: nothing was made.
+    Dismissed,
+    /// Something already exists at the chosen place: nothing was made, nothing was written over.
+    DestinationExists,
+    /// A step before or after the print failed: `step` says which.
+    Refused { step: &'static str },
+    /// A print job of Lockbox's own is still running.
+    Busy,
+    /// WebView2 refused to start the job; `code` is its `HRESULT`.
+    NotStarted { code: i32 },
+    /// The job ended without a file; `code` is the `HRESULT` it gave (0 for none).
+    NotWritten { code: i32 },
+    /// No answer in time. Whatever the run made is left beside the chosen place, since WebView2 may still write it.
+    NoAnswer,
+    /// The PDF is at the chosen place. `temp_hidden`: the temp file had the hidden attribute when the print ended.
+    /// `hid_after`: for the form that hides it only afterwards, whether that worked; `None` for every other form.
+    Printed {
+        size: u64,
+        temp_hidden: bool,
+        hid_after: Option<bool>,
+    },
+}
+
+/// What of its own a probe run left behind. Nothing, unless a removal failed or the print gave no answer.
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Left {
+    /// A temp file is still there; whether it is hidden.
+    pub file_hidden: Option<bool>,
+    /// The hidden folder the run made is still there.
+    pub folder: bool,
+}
+
+/// The form of temp file the print probe hands WebView2, one button for each (hands-on only: this and the probe go in
+/// Task 5). It decides only the path and the file behind it; the page sends this word and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrintForm {
+    /// A name that does not exist yet, beside the destination, as the dialog gave it; WebView2 creates the file.
+    NewPlain,
+    /// The same, named by a `\\?\` path.
+    NewLong,
+    /// An empty temp made first, not hidden, named by a `\\?\` path.
+    ExistingPlain,
+    /// An empty hidden temp made first, named by a `\\?\` path.
+    ExistingHidden,
+    /// A new name, `\\?\` path, WebView2 creates the file; the probe hides it only after the print answers.
+    NewThenHide,
+    /// A new hidden folder beside the destination, and a new not-hidden temp name inside it, `\\?\` path.
+    InHiddenFolder,
+}
+
+/// What the print probe answers: the form it ran, how it ended, and what of its own it left behind.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct ProbePrintAnswer {
+    pub form: PrintForm,
+    #[serde(flatten)]
+    pub result: ProbePrinted,
+    pub left: Left,
+}
+
+impl ProbePrintAnswer {
+    fn nothing_made(form: PrintForm, result: ProbePrinted) -> ProbePrintAnswer {
+        ProbePrintAnswer {
+            form,
+            result,
+            left: Left::default(),
+        }
+    }
+}
+
+/// What a run made besides the PDF.
+struct Made {
+    temp: PathBuf,
+    /// The hidden folder the temp is in, when the run made one.
+    folder: Option<PathBuf>,
+}
+
+/// A random 16-hex-character name part, as the engine names its own temps.
+fn random_name() -> Option<String> {
+    let mut random = [0u8; 8];
+    getrandom::fill(&mut random).ok()?;
+    Some(random.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Makes what `form` needs beside `dest`, or says which step failed (and leaves nothing it made).
+fn make_temp(form: PrintForm, dest: &Path) -> Result<Made, &'static str> {
+    let folder = match form {
+        PrintForm::NewPlain => dest.parent().map(Path::to_path_buf),
+        // `canonicalize` gives the `\\?\` form of the folder.
+        _ => dest
+            .parent()
+            .and_then(|folder| fs::canonicalize(folder).ok()),
+    }
+    .ok_or("folder")?;
+    let (first, second) = (random_name().ok_or("name")?, random_name().ok_or("name")?);
+    // The temp's name, as the engine names its own: a dot, 16 hex characters, `.tmp`.
+    let temp_name = format!(".{first}.tmp");
+    match form {
+        PrintForm::NewPlain | PrintForm::NewLong | PrintForm::NewThenHide => Ok(Made {
+            temp: folder.join(temp_name),
+            folder: None,
+        }),
+        PrintForm::ExistingPlain | PrintForm::ExistingHidden => {
+            let temp = folder.join(temp_name);
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            if form == PrintForm::ExistingHidden {
+                options.attributes(FILE_ATTRIBUTE_HIDDEN);
+            }
+            options.open(&temp).map_err(|_| "temp")?;
+            Ok(Made { temp, folder: None })
+        }
+        PrintForm::InHiddenFolder => {
+            let hidden = folder.join(format!(".{second}"));
+            fs::create_dir(&hidden).map_err(|_| "folder")?;
+            if crate::os::win::set_hidden(&hidden).is_err() {
+                // Empty and just made: `remove_dir` takes nothing else.
+                let _ = fs::remove_dir(&hidden);
+                return Err("folder");
+            }
+            Ok(Made {
+                temp: hidden.join(temp_name),
+                folder: Some(hidden),
+            })
+        }
+    }
+}
+
+/// What of `made` is still there.
+fn inspect(made: &Made) -> Left {
+    Left {
+        file_hidden: fs::metadata(&made.temp)
+            .ok()
+            .map(|meta| meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0),
+        folder: made
+            .folder
+            .as_ref()
+            .is_some_and(|folder| fs::symlink_metadata(folder).is_ok()),
+    }
+}
+
+/// Removes what the run made, and only that: the temp file, then the folder if the run made one (`remove_dir`, so a
+/// folder with anything else in it stays). Says what is left.
+fn clean_up(made: &Made) -> Left {
+    let _ = remove_file_retry(&made.temp);
+    if let Some(folder) = &made.folder {
+        let _ = fs::remove_dir(folder);
+    }
+    inspect(made)
+}
+
+/// Prints the page to a PDF that ends up at `dest`, through a temp file in the `form` asked for. Nothing is ever written
+/// over: a `dest` that exists is refused before anything is made, and the last step makes `dest` new or fails. The only
+/// things removed are the temp file and the folder this run made.
+pub(crate) fn probe_print_to(
+    printer: &dyn Printer,
+    dest: &Path,
+    form: PrintForm,
+    wait: Duration,
+) -> ProbePrintAnswer {
+    let reply = |result, left| ProbePrintAnswer { form, result, left };
+    let nothing = |result| ProbePrintAnswer::nothing_made(form, result);
+    // Anything at the place (a file, a folder, a dangling link) refuses it, before anything is made.
+    match fs::symlink_metadata(dest) {
+        Ok(_) => return nothing(ProbePrinted::DestinationExists),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return nothing(ProbePrinted::Refused {
+                step: "destination",
+            });
+        }
+    }
+    let made = match make_temp(form, dest) {
+        Ok(made) => made,
+        Err(step) => return nothing(ProbePrinted::Refused { step }),
+    };
+
+    match printer.print_to_pdf(&made.temp).recv_timeout(wait) {
+        Ok(Ok(())) => {}
+        // WebView2 may still be writing the file: it stays.
+        Err(RecvTimeoutError::Timeout) => return reply(ProbePrinted::NoAnswer, inspect(&made)),
+        failed => {
+            let result = match failed {
+                Ok(Err(PrintFailed::Busy)) => ProbePrinted::Busy,
+                Ok(Err(PrintFailed::NotStarted { code })) => ProbePrinted::NotStarted { code },
+                Ok(Err(PrintFailed::NotWritten { code })) => ProbePrinted::NotWritten { code },
+                // The webview went away before it answered.
+                _ => ProbePrinted::NotWritten { code: 0 },
+            };
+            return reply(result, clean_up(&made));
+        }
+    }
+
+    let Ok(written) = fs::metadata(&made.temp) else {
+        return reply(ProbePrinted::Refused { step: "read" }, clean_up(&made));
+    };
+    let temp_hidden = written.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0;
+    let hid_after =
+        (form == PrintForm::NewThenHide).then(|| crate::os::win::set_hidden(&made.temp).is_ok());
+    // A new file, or nothing: `create_new` never opens one that is there, so nothing is written over.
+    let copied = File::open(&made.temp).and_then(|mut from| {
+        let mut to = OpenOptions::new().write(true).create_new(true).open(dest)?;
+        io::copy(&mut from, &mut to)?;
+        to.sync_all()
+    });
+    let left = clean_up(&made);
+    let result = match copied {
+        Ok(()) => ProbePrinted::Printed {
+            size: written.len(),
+            temp_hidden,
+            hid_after,
+        },
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            ProbePrinted::DestinationExists
+        }
+        Err(_) => ProbePrinted::Refused { step: "publish" },
+    };
+    reply(result, left)
+}
+
+/// `FILE_ATTRIBUTE_HIDDEN`.
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+    use std::{fs, thread};
+
     use lockbox_core::item::MAX_ITEM_JSON;
 
+    use super::*;
     use crate::testing::TestShell;
 
     /// A made-up text, never a real secret.
@@ -420,6 +671,355 @@ mod tests {
         assert_eq!(ts.shell.probe_capture_length(), 0);
         ts.clipboard.hold_open_elsewhere(false);
         assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+    }
+
+    /// A made-up PDF, never a real document.
+    const PDF: &[u8] = b"%PDF-1.4 print probe test bytes";
+
+    /// The names in `dir`, sorted, hidden ones included.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `path` with the `\\?\` prefix a canonical path carries taken off: the form a dialog hands back.
+    fn plain(path: &Path) -> PathBuf {
+        PathBuf::from(path.to_str().unwrap().trim_start_matches(r"\\?\"))
+    }
+
+    /// Runs the probe on its own thread, as a command does, lets the one print job it starts end with `outcome`, and
+    /// gives the probe's answer.
+    fn probe_until(
+        ts: &TestShell,
+        form: PrintForm,
+        outcome: Result<(), PrintFailed>,
+    ) -> ProbePrintAnswer {
+        let shell = Arc::clone(&ts.shell);
+        let probe = thread::spawn(move || shell.probe_print_pdf(form));
+        wait_for_print(ts);
+        assert!(ts.print.finish(outcome));
+        probe.join().unwrap()
+    }
+
+    fn wait_for_print(ts: &TestShell) {
+        let began = Instant::now();
+        while ts.print.started().is_empty() {
+            assert!(began.elapsed() < Duration::from_secs(30), "no print began");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    const FORMS: [PrintForm; 6] = [
+        PrintForm::NewPlain,
+        PrintForm::NewLong,
+        PrintForm::ExistingPlain,
+        PrintForm::ExistingHidden,
+        PrintForm::NewThenHide,
+        PrintForm::InHiddenFolder,
+    ];
+
+    fn is_long(path: &Path) -> bool {
+        path.to_str().unwrap().starts_with(r"\\?\")
+    }
+
+    fn hidden(path: &Path) -> bool {
+        fs::metadata(path).unwrap().file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
+    }
+
+    /// A closed dialog makes nothing, whatever the form.
+    #[test]
+    fn probe_print_dialog_closed_creates_nothing() {
+        for form in FORMS {
+            let ts = TestShell::new();
+            let out = ts.folder("out");
+            ts.dialogs.answer(None);
+            let answer = ts.shell.probe_print_pdf(form);
+            assert_eq!(
+                answer,
+                ProbePrintAnswer::nothing_made(form, ProbePrinted::Dismissed)
+            );
+            assert!(ts.print.started().is_empty());
+            assert!(names(&out).is_empty());
+        }
+    }
+
+    /// A place that is already taken is refused before anything is made, and what is there is left as it was.
+    #[test]
+    fn probe_print_refuses_an_existing_destination() {
+        for form in FORMS {
+            let ts = TestShell::new();
+            let out = ts.folder("out");
+            let dest = out.join("mine.pdf");
+            fs::write(&dest, b"keep me").unwrap();
+            ts.dialogs.answer(Some(dest.clone()));
+            assert_eq!(
+                ts.shell.probe_print_pdf(form),
+                ProbePrintAnswer::nothing_made(form, ProbePrinted::DestinationExists)
+            );
+            assert!(ts.print.started().is_empty(), "{form:?} printed anyway");
+            assert_eq!(fs::read(&dest).unwrap(), b"keep me");
+            assert_eq!(names(&out), ["mine.pdf"], "{form:?} left something");
+        }
+    }
+
+    /// Each form hands the printer the path it names, and what is there when the print begins is what it names:
+    /// plain or `\\?\`, a file already there or not, hidden or not, in a hidden folder or beside the destination. Then
+    /// the PDF is at the destination, everything the run made is gone, and nothing else in the folder was touched.
+    #[test]
+    fn probe_print_each_form_hands_webview2_the_path_it_names() {
+        for form in FORMS {
+            let ts = TestShell::new();
+            let out = ts.folder("out");
+            fs::write(out.join("neighbour.pdf"), b"theirs").unwrap();
+            fs::write(out.join(".dot-neighbour"), b"theirs too").unwrap();
+            fs::create_dir(out.join("neighbour-folder")).unwrap();
+            ts.print.write_on_success(PDF);
+            let dest = plain(&out).join("probe.pdf");
+            assert!(!is_long(&dest));
+            ts.dialogs.answer(Some(dest.clone()));
+
+            let answer = probe_until(&ts, form, Ok(()));
+
+            let [job] = <[_; 1]>::try_from(ts.print.started()).unwrap();
+            let name = job.path.file_name().unwrap().to_str().unwrap();
+            assert!(name.starts_with('.') && name.ends_with(".tmp"), "{name}");
+            let (long, existed, was_hidden, in_hidden_folder, hid_after) = match form {
+                PrintForm::NewPlain => (false, false, false, false, None),
+                PrintForm::NewLong => (true, false, false, false, None),
+                PrintForm::ExistingPlain => (true, true, false, false, None),
+                PrintForm::ExistingHidden => (true, true, true, false, None),
+                PrintForm::NewThenHide => (true, false, false, false, Some(true)),
+                PrintForm::InHiddenFolder => (true, false, false, true, None),
+            };
+            assert_eq!(is_long(&job.path), long, "{form:?}: {job:?}");
+            assert_eq!(job.existed, existed, "{form:?}: {job:?}");
+            assert_eq!(job.hidden, was_hidden, "{form:?}: {job:?}");
+            assert_eq!(job.folder_hidden, in_hidden_folder, "{form:?}: {job:?}");
+            let beside = if in_hidden_folder {
+                job.path.parent().unwrap().parent().unwrap()
+            } else {
+                job.path.parent().unwrap()
+            };
+            assert!(
+                crate::os::same_path(beside, &out) || crate::os::same_path(beside, &plain(&out)),
+                "{form:?}: not beside the destination: {job:?}"
+            );
+
+            assert_eq!(
+                answer,
+                ProbePrintAnswer {
+                    form,
+                    result: ProbePrinted::Printed {
+                        size: PDF.len() as u64,
+                        // What the file looked like when the print ended: hidden only where it was made hidden.
+                        temp_hidden: was_hidden,
+                        hid_after,
+                    },
+                    left: Left::default(),
+                }
+            );
+            assert_eq!(fs::read(&dest).unwrap(), PDF);
+            assert!(!hidden(&dest), "{form:?}: the PDF was left hidden");
+            assert_eq!(
+                names(&out),
+                [
+                    ".dot-neighbour",
+                    "neighbour-folder",
+                    "neighbour.pdf",
+                    "probe.pdf"
+                ],
+                "{form:?}"
+            );
+            assert_eq!(fs::read(out.join("neighbour.pdf")).unwrap(), b"theirs");
+            assert_eq!(fs::read(out.join(".dot-neighbour")).unwrap(), b"theirs too");
+        }
+    }
+
+    /// A print that says it succeeded but left no file (the forms where WebView2 is to create the file) is reported
+    /// as refused at the step "read", nothing is made at the destination, and the hidden folder the run made is gone.
+    #[test]
+    fn probe_print_success_without_a_file_is_refused_at_read() {
+        for form in [
+            PrintForm::NewPlain,
+            PrintForm::NewLong,
+            PrintForm::NewThenHide,
+            PrintForm::InHiddenFolder,
+        ] {
+            let ts = TestShell::new();
+            let out = ts.folder("out");
+            ts.dialogs.answer(Some(out.join("probe.pdf")));
+            // The fake writes nothing here.
+            let answer = probe_until(&ts, form, Ok(()));
+            assert_eq!(
+                answer,
+                ProbePrintAnswer::nothing_made(form, ProbePrinted::Refused { step: "read" }),
+                "{form:?}"
+            );
+            assert!(names(&out).is_empty(), "{form:?}");
+        }
+    }
+
+    /// A destination that appears while the print runs is never written over, in any form: the last step makes the
+    /// file new or fails, and what the run made is still cleaned up.
+    #[test]
+    fn probe_print_never_overwrites_a_destination_that_appears_meanwhile() {
+        for form in FORMS {
+            let ts = TestShell::new();
+            let out = ts.folder("out");
+            let dest = out.join("probe.pdf");
+            ts.print.write_on_success(PDF);
+            ts.dialogs.answer(Some(dest.clone()));
+
+            let shell = Arc::clone(&ts.shell);
+            let probe = thread::spawn(move || shell.probe_print_pdf(form));
+            wait_for_print(&ts);
+            fs::write(&dest, b"theirs, made meanwhile").unwrap();
+            assert!(ts.print.finish(Ok(())));
+
+            assert_eq!(
+                probe.join().unwrap(),
+                ProbePrintAnswer::nothing_made(form, ProbePrinted::DestinationExists),
+                "{form:?}"
+            );
+            assert_eq!(fs::read(&dest).unwrap(), b"theirs, made meanwhile");
+            assert_eq!(names(&out), ["probe.pdf"], "{form:?}: something was left");
+        }
+    }
+
+    /// Every way the print can fail is reported as it is, in every form, with nothing at the destination and only
+    /// what the run made removed: the files and folders beside it stay.
+    #[test]
+    fn probe_print_failure_removes_only_what_it_made() {
+        for form in FORMS {
+            let ts = TestShell::new();
+            let out = ts.folder("out");
+            fs::write(out.join("neighbour.pdf"), b"theirs").unwrap();
+            fs::write(out.join(".dot-neighbour.tmp"), b"theirs too").unwrap();
+            fs::create_dir(out.join(".dot-folder")).unwrap();
+            let before = names(&out);
+            let dest = out.join("probe.pdf");
+            let gone = |result| ProbePrintAnswer::nothing_made(form, result);
+
+            ts.dialogs.answer(Some(dest.clone()));
+            let ended = PrintFailed::NotWritten { code: 5 };
+            assert_eq!(
+                probe_until(&ts, form, Err(ended)),
+                gone(ProbePrinted::NotWritten { code: 5 })
+            );
+            assert_eq!(names(&out), before, "{form:?}");
+
+            // WebView2 refuses to begin.
+            ts.dialogs.answer(Some(dest.clone()));
+            ts.print.refuse_next(PrintFailed::NotStarted { code: -2 });
+            assert_eq!(
+                ts.shell.probe_print_pdf(form),
+                gone(ProbePrinted::NotStarted { code: -2 })
+            );
+            assert_eq!(names(&out), before, "{form:?}");
+
+            // A job of Lockbox's own is still running.
+            let _running = ts.shell.os.printer.print_to_pdf(Path::new("other.pdf"));
+            ts.dialogs.answer(Some(dest.clone()));
+            assert_eq!(ts.shell.probe_print_pdf(form), gone(ProbePrinted::Busy));
+            assert_eq!(names(&out), before, "{form:?}");
+            assert_eq!(fs::read(out.join("neighbour.pdf")).unwrap(), b"theirs");
+            assert_eq!(
+                fs::read(out.join(".dot-neighbour.tmp")).unwrap(),
+                b"theirs too"
+            );
+        }
+    }
+
+    /// The hidden folder is removed only if the run's temp was all that was in it: a file somebody else put there
+    /// stays, and so does the folder, and the answer says so. Nothing is emptied.
+    #[test]
+    fn probe_print_hidden_folder_is_never_emptied_of_other_files() {
+        let ts = TestShell::new();
+        let out = ts.folder("out");
+        ts.dialogs.answer(Some(out.join("probe.pdf")));
+        let shell = Arc::clone(&ts.shell);
+        let probe = thread::spawn(move || shell.probe_print_pdf(PrintForm::InHiddenFolder));
+        wait_for_print(&ts);
+        let folder = ts.print.started()[0].path.parent().unwrap().to_path_buf();
+        fs::write(folder.join("stranger.txt"), b"not ours").unwrap();
+        assert!(ts.print.finish(Err(PrintFailed::NotWritten { code: 0 })));
+
+        let answer = probe.join().unwrap();
+        assert_eq!(answer.result, ProbePrinted::NotWritten { code: 0 });
+        assert_eq!(
+            answer.left,
+            Left {
+                file_hidden: None,
+                folder: true
+            }
+        );
+        assert_eq!(fs::read(folder.join("stranger.txt")).unwrap(), b"not ours");
+    }
+
+    /// With no answer what the run made stays (WebView2 may still be writing it), and the answer says what and
+    /// whether it is hidden; nothing is made at the destination.
+    #[test]
+    fn probe_print_no_answer_leaves_what_it_made() {
+        let table = [
+            (PrintForm::NewPlain, None, false),
+            (PrintForm::NewLong, None, false),
+            (PrintForm::ExistingPlain, Some(false), false),
+            (PrintForm::ExistingHidden, Some(true), false),
+            (PrintForm::NewThenHide, None, false),
+            (PrintForm::InHiddenFolder, None, true),
+        ];
+        for (form, file_hidden, folder) in table {
+            let ts = TestShell::new();
+            let out = ts.folder("out");
+            let answer = probe_print_to(
+                ts.shell.os.printer.as_ref(),
+                &out.join("probe.pdf"),
+                form,
+                Duration::from_millis(30),
+            );
+            assert_eq!(answer.result, ProbePrinted::NoAnswer, "{form:?}");
+            assert_eq!(
+                answer.left,
+                Left {
+                    file_hidden,
+                    folder
+                },
+                "{form:?}"
+            );
+            assert!(!out.join("probe.pdf").exists(), "{form:?}");
+        }
+    }
+
+    /// The answer's words, as the page reads them: the form named, the result's own fields, and what was left.
+    #[test]
+    fn probe_print_answer_has_the_shape_the_page_reads() {
+        let answer = ProbePrintAnswer {
+            form: PrintForm::InHiddenFolder,
+            result: ProbePrinted::Printed {
+                size: 5,
+                temp_hidden: false,
+                hid_after: None,
+            },
+            left: Left {
+                file_hidden: Some(true),
+                folder: false,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(answer).unwrap(),
+            serde_json::json!({
+                "form": "in_hidden_folder",
+                "result": "printed",
+                "size": 5,
+                "temp_hidden": false,
+                "hid_after": null,
+                "left": { "file_hidden": true, "folder": false },
+            })
+        );
     }
 
     /// Closing the app empties the slot.

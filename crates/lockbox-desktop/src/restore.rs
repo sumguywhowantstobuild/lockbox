@@ -1505,7 +1505,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
-    use crate::os::{ClipboardSteps, Clock, DriveType, KnownFolder, Os, OsSignal};
+    use crate::os::{ClipboardSteps, Clock, DriveType, KnownFolder, Os, OsSignal, PrintSteps};
     use crate::session::SessionState;
     use crate::testing::{FakeVolume, TEST_PASSWORD, TestShell, heavy};
 
@@ -1640,6 +1640,7 @@ mod tests {
             clock: ts.clock.clone(),
             clipboard: Arc::new(ClipboardSteps::new(ts.clipboard.clone(), ts.clock.clone())),
             timer: ts.timer.clone(),
+            printer: Arc::new(PrintSteps::new(ts.print.clone())),
         };
         Arc::new(Shell::new(ts.events.clone(), os, ts.app_dirs.clone()).unwrap())
     }

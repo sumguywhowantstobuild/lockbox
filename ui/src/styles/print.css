@@ -1,0 +1,10 @@
+/* What the page prints: only the element marked `data-print-only`. Printing is WebView2's print-to-PDF from Rust, never
+   the page's own Ctrl+P (the browser's keys are off). Every rule sits inside `@media print`, so the screen is untouched.
+
+   Hidden: every element in the body that is not the marked one, does not hold it and is not inside it. An element that
+   holds the marked one has none of its own text, so none shows beside it. */
+@media print {
+  body *:not([data-print-only]):not(:has([data-print-only])):not([data-print-only] *) {
+    display: none;
+  }
+}

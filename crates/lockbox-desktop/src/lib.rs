@@ -114,12 +114,22 @@ pub fn run() {
             route_signals(signals, Arc::clone(&shell))?;
             start_ticks(shell)?;
 
-            window::main_window(app.handle())?;
-            // Fail closed as well: never run with files droppable into the page.
-            if !window::external_drop_is_off() {
-                return Err(
-                    "Lockbox will not run: its window could not turn off file drops".into(),
-                );
+            // The window is built hidden and shown only once its protections are in place. Fail closed as well: never
+            // run with files droppable into the page, or with the browser's keys and menu (Ctrl+P, F12, the context
+            // menu) able to reach a revealed secret. The window stays hidden when either is not confirmed.
+            let window = window::main_window(app.handle())?;
+            if window::show_main_window(&window).is_err() {
+                return Err(match (
+                    window::external_drop_is_off(),
+                    window::browser_keys_are_off(),
+                ) {
+                    (false, _) => "Lockbox will not run: its window could not turn off file drops",
+                    (_, false) => {
+                        "Lockbox will not run: its window could not turn off the browser's keys and menu"
+                    }
+                    (true, true) => "Lockbox will not run: its window could not be shown",
+                }
+                .into());
             }
             Ok(())
         })

@@ -11,6 +11,7 @@ use std::io;
 use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
@@ -33,6 +34,7 @@ pub struct Os {
     pub clock: Arc<dyn Clock>,
     pub clipboard: Arc<dyn ClipboardBackend>,
     pub timer: Arc<dyn Timer>,
+    pub printer: Arc<dyn Printer>,
 }
 
 /// A copy's own tag (spec §7.3): 16 random bytes from the OS, written beside the copy in [`TAG_FORMAT`]. Not secret
@@ -307,6 +309,89 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
 fn is_tag(held: &[u8], tag: &CopyTag) -> bool {
     held.split_at_checked(tag.len())
         .is_some_and(|(head, rest)| head == tag && rest.iter().all(|&byte| byte == 0))
+}
+
+/// A print job that did not leave a PDF. Fixed shapes and numbers only: never the path or what was on the page (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintFailed {
+    /// A job of Lockbox's own is still running; WebView2 was not asked. (Microsoft's reference says a second job at
+    /// once fails; Lockbox answers before it gets that far.)
+    Busy,
+    /// WebView2 was not asked, or refused to start the job. `code` is the `HRESULT` it gave; 0 when there was no
+    /// window to ask.
+    NotStarted { code: i32 },
+    /// The job began and ended without a file. `code` is the `HRESULT` the completion gave; 0 when it gave none and
+    /// only said it had not succeeded, or when the answer never came.
+    NotWritten { code: i32 },
+}
+
+/// What a print job tells when it ends, called once. Dropped without being called when the webview goes first.
+pub type PrintDone = Box<dyn FnOnce(Result<(), PrintFailed>) + Send>;
+
+/// Printing the app's page to a PDF, so the shell can print without a window and tests can use a fake. One job at a
+/// time.
+pub trait Printer: Send + Sync {
+    /// Prints the main window's page to the PDF file at `path`. WebView2 writes straight over the path it is given.
+    /// The one answer comes on the receiver; a receiver that finds its sender gone has had no answer (the webview
+    /// went first). While a job runs, another is refused at once with [`PrintFailed::Busy`].
+    fn print_to_pdf(&self, path: &Path) -> mpsc::Receiver<Result<(), PrintFailed>>;
+}
+
+/// The printing call itself, as Windows offers it. [`PrintSteps`] puts the one-at-a-time rule around it, so the rule is
+/// the same for the real printer and the tests' fake.
+pub trait PrintCalls: Send + Sync {
+    /// Begins a job for `path` and returns. `done` is called once with how it ended, from any thread. On an `Err`
+    /// the job never began and `done` is not called.
+    fn start(&self, path: &Path, done: PrintDone) -> Result<(), PrintFailed>;
+}
+
+/// [`Printer`] from a [`PrintCalls`]: one job at a time.
+pub struct PrintSteps<C> {
+    calls: Arc<C>,
+    running: Arc<AtomicBool>,
+}
+
+/// Held by a running job (inside its `done`): gives the printer back when the job ends, or when `done` is dropped
+/// without being called.
+struct Running(Arc<AtomicBool>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl<C: PrintCalls> PrintSteps<C> {
+    pub fn new(calls: Arc<C>) -> PrintSteps<C> {
+        PrintSteps {
+            calls,
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl<C: PrintCalls> Printer for PrintSteps<C> {
+    fn print_to_pdf(&self, path: &Path) -> mpsc::Receiver<Result<(), PrintFailed>> {
+        let (answer, answers) = mpsc::channel();
+        // Taking the flag is the whole check: a second caller finds it taken.
+        if self.running.swap(true, Ordering::SeqCst) {
+            let _ = answer.send(Err(PrintFailed::Busy));
+            return answers;
+        }
+        let running = Running(Arc::clone(&self.running));
+        let ends = answer.clone();
+        let done: PrintDone = Box::new(move |result| {
+            // Given back first: whoever reads the answer may start the next job at once.
+            drop(running);
+            let _ = ends.send(result);
+        });
+        // On an `Err` the job never began and `done` was dropped (which gave the printer back): the refusal is the
+        // answer. A `done` dropped later without being called leaves the receiver with no answer.
+        if let Err(failed) = self.calls.start(path, done) {
+            let _ = answer.send(Err(failed));
+        }
+        answers
+    }
 }
 
 /// Work a [`Timer`] runs later.
@@ -585,9 +670,10 @@ pub enum HotkeyTaken {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::TryRecvError;
 
     use super::*;
-    use crate::testing::{FakeClipboard, FakeClock};
+    use crate::testing::{FakeClipboard, FakeClock, FakePrintCalls};
 
     /// How long a test waits for the timer thread before it fails instead of hanging.
     const GIVE_UP: Duration = Duration::from_secs(60);
@@ -1115,6 +1201,78 @@ mod tests {
 
         fake.hold_open_elsewhere(false);
         assert_eq!(fake.text().as_deref(), Some(COPIED));
+    }
+
+    fn fake_printer() -> (Arc<FakePrintCalls>, PrintSteps<FakePrintCalls>) {
+        let fake = Arc::new(FakePrintCalls::default());
+        (Arc::clone(&fake), PrintSteps::new(fake))
+    }
+
+    fn started_paths(fake: &FakePrintCalls) -> Vec<PathBuf> {
+        fake.started().into_iter().map(|job| job.path).collect()
+    }
+
+    /// WebView2 takes one print job at a time (Microsoft's reference says a second fails). While one runs, another is
+    /// refused at once, without WebView2 being asked, however often it is tried; the refusal frees nothing; once the
+    /// first ends, the next one starts.
+    #[test]
+    fn print_to_pdf_refuses_a_second_job_while_one_runs() {
+        let (fake, printer) = fake_printer();
+        let first = printer.print_to_pdf(Path::new("first.pdf"));
+        assert_eq!(first.try_recv(), Err(TryRecvError::Empty), "answered early");
+
+        for name in ["second.pdf", "third.pdf"] {
+            let refused = printer.print_to_pdf(Path::new(name));
+            assert_eq!(refused.try_recv(), Ok(Err(PrintFailed::Busy)), "{name}");
+        }
+        assert_eq!(started_paths(&fake), [PathBuf::from("first.pdf")]);
+
+        assert!(fake.finish(Ok(())));
+        assert_eq!(first.try_recv(), Ok(Ok(())));
+        assert!(!fake.finish(Ok(())), "a refused job was started");
+
+        let after = printer.print_to_pdf(Path::new("after.pdf"));
+        assert_eq!(after.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(
+            started_paths(&fake),
+            [PathBuf::from("first.pdf"), PathBuf::from("after.pdf")]
+        );
+    }
+
+    /// A job that WebView2 refuses to start, one that ends without a file, and one whose webview goes away before
+    /// it answers are each reported (the last as a receiver with no answer), and each gives the printer back.
+    #[test]
+    fn print_failure_is_reported() {
+        let (fake, printer) = fake_printer();
+        let access_denied = 0x8007_0005_u32 as i32;
+
+        fake.refuse_next(PrintFailed::NotStarted {
+            code: access_denied,
+        });
+        let refused = printer.print_to_pdf(Path::new("a.pdf"));
+        assert_eq!(
+            refused.try_recv(),
+            Ok(Err(PrintFailed::NotStarted {
+                code: access_denied
+            }))
+        );
+
+        let failed = printer.print_to_pdf(Path::new("b.pdf"));
+        assert_eq!(failed.try_recv(), Err(TryRecvError::Empty));
+        let ended = PrintFailed::NotWritten { code: 7 };
+        assert!(fake.finish(Err(ended)));
+        assert_eq!(failed.try_recv(), Ok(Err(ended)));
+
+        let gone = printer.print_to_pdf(Path::new("c.pdf"));
+        fake.drop_running_jobs();
+        assert_eq!(gone.try_recv(), Err(TryRecvError::Disconnected));
+
+        let free = printer.print_to_pdf(Path::new("d.pdf"));
+        assert_eq!(free.try_recv(), Err(TryRecvError::Empty), "still busy");
+        assert_eq!(
+            started_paths(&fake),
+            ["a.pdf", "b.pdf", "c.pdf", "d.pdf"].map(PathBuf::from)
+        );
     }
 
     /// Fix round 3 (H3): what `same_path` treats as one folder, and what it keeps apart. The registry, `Location`
