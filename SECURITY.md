@@ -73,7 +73,7 @@ bare test page until then.
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. Recovery-key printing comes with the screens (Plan 4) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. Recovery-key printing, an export and a saved `.env` come with the screens (Plan 4) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) comes with the screens (Plan 4); today's test page and the bridge drop stale answers |
 | R7 Documented limits | This file |
@@ -485,6 +485,25 @@ everything they do (the wording of warnings, recovery-key printing, clearing wha
 tests on the running app, and the installer. Today's bare test page exposes selected checks; the shell's other commands
 exist with no button yet. Unlocking a vault can still write to it (header repair and cleanup); to look at a vault or a backup without writing,
 open it read-only.
+
+**Limits that come with the screens** ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)). None of this exists
+yet; each moves up to the sections above as it's built.
+
+- **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
+  that value: it compares what's on the clipboard, and drops it if it's different. The value waits in one wiped
+  slot in Rust until it's saved or the slot empties. Clearing it afterwards may not reach a copy Windows clipboard history already
+  took, because a value copied from another app usually carries none of Lockbox's marks. This is tested at build.
+- **An export, a saved `.env` and files saved out are readable by anyone who gets them.** They aren't encrypted. An export or a
+  `.env` warns first, and saving a folder's files says so in the folder picker. Lockbox can't protect them or delete them afterwards. Deleting one may leave it in the Recycle Bin, on an SSD, or in a
+  cloud provider's version history.
+- **Staying out of screen capture isn't a guarantee.** It asks Windows to leave Lockbox's window out of screenshots, recordings,
+  screen sharing and Recall. Microsoft says there's no guarantee, and a camera can always get round it.
+- **Earlier passwords stay in old backups.** They're encrypted like everything else, and dropping one from a login doesn't remove
+  it from a backup already made.
+- **Asking for the current password slows someone at an unlocked PC.** It isn't protection against malware (spec 5.6), and there's
+  no lockout.
+- **File names in search.** The search index will hold attached file names, so they join the titles and usernames under "Titles,
+  usernames, URLs and attached file names are not wiped".
 
 ## How this is checked
 
