@@ -15,7 +15,7 @@ use lockbox_desktop::window::{allowed_navigation, main_window};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder};
-use tauri::utils::config::{Csp, FrontendDist};
+use tauri::utils::config::{Csp, FrontendDist, PatternKind};
 use tauri::webview::InvokeRequest;
 use tauri::{App, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -232,6 +232,13 @@ fn security_config_is_pinned() {
     assert_eq!(compiled.app.security.csp, Some(Csp::Policy(CSP.into())));
     assert!(!compiled.app.with_global_tauri);
     assert!(compiled.app.security.freeze_prototype);
+    assert_eq!(
+        compiled.app.security.pattern,
+        PatternKind::Brownfield,
+        "Tauri's isolation pattern is off by decision (2026-11-05): its sandboxed frame is reported to hang \
+         every call on Windows (tauri-apps/tauri issue 16219) and its hook cannot tell the app's calls from a bad \
+         package's"
+    );
     assert!(compiled.app.windows.is_empty());
     assert!(compiled.app.security.capabilities.is_empty());
     assert_eq!(

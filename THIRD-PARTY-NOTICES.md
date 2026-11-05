@@ -30,6 +30,8 @@ what they depend on ship with the installer (Plan 5); nothing is distributed bef
 | `zeroize` | 1.9.1 | Apache-2.0 or MIT | Wiping typed passwords |
 | `react`, `react-dom` | 19.3.1 | MIT | The page |
 | `@tauri-apps/api` | 2.12.4 | Apache-2.0 or MIT | The page's bridge to Rust |
+| `@base-ui/react` | 1.9.0 | MIT | Behaviour and accessibility of dialogs, menus, lists and forms |
+| `@fontsource-variable/geist`, `@fontsource-variable/geist-mono` | 5.3.0 | OFL-1.1 | The Geist and Geist Mono typefaces, bundled so no font is fetched |
 
 The UI's build and test tools (Vite, TypeScript, ESLint, Vitest and their helpers, listed in `ui/package.json`) do not
 ship with the app.

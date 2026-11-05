@@ -2,6 +2,8 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { call, callPair, callPlain, onLocked, open, type Opened, type Outcome, type RestoreNotice } from "./bridge";
 import { useDroppedFileReachedPage } from "./dropProbe";
+import { LockboxParts } from "./parts/LockboxParts";
+import { PartsProbe } from "./probes/PartsProbe";
 
 interface AppInfo {
   version: string;
@@ -489,8 +491,17 @@ function downloadProbeFile(): void {
   }, 10_000);
 }
 
-// A bare test page: the real screens come in Plan 4. Each hands-on check gets a probe here, with what "passes" means.
+// The whole app sits inside the parts provider, so every part follows the page's content policy.
 export default function App() {
+  return (
+    <LockboxParts>
+      <TestPage />
+    </LockboxParts>
+  );
+}
+
+// A bare test page: the real screens come in Plan 4. Each hands-on check gets a probe here, with what "passes" means.
+function TestPage() {
   const [version, setVersion] = useState<string>();
   const [launchNotices, setLaunchNotices] = useState<string>();
   const [vaultStatus, setVaultStatus] = useState<string>();
@@ -830,6 +841,7 @@ export default function App() {
           {vaultStatus !== undefined && <output> {vaultStatus}</output>}
         </li>
       </ul>
+      <PartsProbe />
     </main>
   );
 }

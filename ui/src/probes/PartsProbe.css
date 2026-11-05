@@ -1,0 +1,54 @@
+/* The parts probe's own look: just enough to use the parts by hand. The real styles come with the real screens. */
+
+.probe-geist {
+  font-family: "Geist Variable", system-ui, sans-serif;
+}
+
+.probe-mono {
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+}
+
+.probe-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 30%);
+}
+
+.probe-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 24rem;
+  padding: 1rem;
+  border: 1px solid CanvasText;
+  background: Canvas;
+  color: CanvasText;
+}
+
+.probe-layer {
+  z-index: 10;
+}
+
+.probe-popup {
+  padding: 0.25rem;
+  border: 1px solid CanvasText;
+  background: Canvas;
+  color: CanvasText;
+}
+
+.probe-popup [data-highlighted] {
+  background: Highlight;
+  color: HighlightText;
+}
+
+.probe-scroll {
+  width: 16rem;
+  height: 6rem;
+  border: 1px solid CanvasText;
+}
+
+.probe-scroll-viewport {
+  width: 100%;
+  height: 100%;
+}
