@@ -10,6 +10,7 @@ export function PasswordField({
   value,
   onChange,
   error,
+  rule,
   autoFocus = false,
 }: {
   label: string;
@@ -17,6 +18,8 @@ export function PasswordField({
   onChange: (value: string) => void;
   /** The words for a refusal, shown under the box; `null` for none. */
   error?: string | null;
+  /** A rule the password has to meet ("At least 12 characters."), shown under the box before anything is typed. */
+  rule?: string;
   autoFocus?: boolean;
 }) {
   const id = useId();
@@ -27,7 +30,8 @@ export function PasswordField({
   };
   const hint = `${id}-caps`;
   const problem = `${id}-error`;
-  const described = [capsLock ? hint : null, error ? problem : null].filter(Boolean).join(" ");
+  const ruleId = `${id}-rule`;
+  const described = [capsLock ? hint : null, error ? problem : null, rule ? ruleId : null].filter(Boolean).join(" ");
   return (
     <div>
       <label htmlFor={id}>{label}</label>
@@ -50,6 +54,11 @@ export function PasswordField({
       {error ? (
         <p className="err" id={problem} role="alert">
           {error}
+        </p>
+      ) : null}
+      {rule ? (
+        <p className="fu-hint" id={ruleId}>
+          {rule}
         </p>
       ) : null}
       {capsLock ? (

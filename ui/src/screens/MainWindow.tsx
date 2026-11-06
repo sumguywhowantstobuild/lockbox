@@ -12,6 +12,7 @@ import {
   type SessionData,
 } from "../store";
 import { ItemList } from "./ItemList";
+import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
 
@@ -107,6 +108,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               <p className="note" aria-busy="true">
                 Opening…
               </p>
+            ) : everything.length === 0 && data.folder === null && needle === "" ? (
+              <Ready />
             ) : inView.length === 0 ? (
               <div className="grp lempty">
                 <p className="le-t">

@@ -60,7 +60,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `fsio/mod.rs` | Safe file operations: `atomic_write` (all or nothing), `replace_file`, `rename_dir_no_replace`, retries, hidden temps, space checks |
 | `fsio/windows.rs` | The Win32 calls. The only place `unsafe` is allowed |
 | `fsio/portable.rs` | The same small surface for non-Windows systems |
-| `vault/mod.rs` | `Vault`: create, change password, regenerate recovery key, accept a changed header, search |
+| `vault/mod.rs` | `Vault`: create (`create_with_id` when the caller must know the folder first), change password, regenerate recovery key, accept a changed header, search |
 | `vault/unlock.rs` | Opening a vault: header fallback and repair |
 | `vault/items.rs` | Items in an open vault: add, edit, trash, restore, collections |
 | `vault/files.rs` | Files in an open vault: import, replace, save a decrypted copy, purge |
@@ -281,6 +281,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
 | `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
 | `settings.rs` | The idle time and clipboard delay, with their bounds (`settings.json`) |
+| `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and the last backup |
 | `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
@@ -298,7 +299,7 @@ place that calls Rust and drops stale answers; `api.ts`, the typed commands the 
 keeps of each unlocked vault, wiped by a lock; `messages.ts`, the fixed words for every refusal; `dropGuard.ts`; `App.tsx`
 and `screens/`, the screens.
 
-State lives in `%LOCALAPPDATA%\Lockbox\`: `vaults.json`, `settings.json`, `pending-outputs.json`,
+State lives in `%LOCALAPPDATA%\Lockbox\`: `vaults.json`, `settings.json`, `vault-state.json`, `pending-outputs.json`,
 `restore-journal.json` and `open\`. Vaults default to `%USERPROFILE%\Lockbox Vaults\`.
 
 ### How data flows

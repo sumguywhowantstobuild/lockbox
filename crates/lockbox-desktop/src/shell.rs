@@ -26,6 +26,7 @@ use crate::registry::Registry;
 use crate::restore::Restores;
 use crate::session::{LockReason, Notice, Notifier, SessionId, Sessions};
 use crate::settings::SettingsStore;
+use crate::vault_state::VaultStateStore;
 use crate::window;
 
 /// A session locked: `{ session, generation, reason }`.
@@ -43,6 +44,8 @@ pub struct Shell {
     /// Locks the vaults on idle, Windows' signals, vanished folders and app exit.
     pub autolock: AutoLock,
     pub registry: Registry,
+    /// What is noted about each vault folder: the "recovery key not confirmed" mark, the last backup.
+    pub vault_state: VaultStateStore,
     /// The output journal (spec §7.2): every temporary plaintext file, written down before it exists.
     pub outputs: Arc<Outputs>,
     /// The "Open" folders (spec §7.2), removed at a lock of their vault and at app close.
@@ -106,6 +109,7 @@ impl Shell {
             clipboard,
             autolock,
             registry: Registry::new(paths.registry.clone(), Arc::clone(&os.volumes)),
+            vault_state: VaultStateStore::new(paths.vault_state.clone()),
             outputs,
             open_folders,
             restore,

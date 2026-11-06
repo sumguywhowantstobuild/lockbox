@@ -346,6 +346,30 @@ test("a_locked_vault_is_named_in_a_line", async () => {
 });
 
 test("an_empty_vault_says_so", async () => {
-  await unlocked([{ id: 7, name: "My vault", items: [] }]);
+  const { container } = await unlocked([{ id: 7, name: "My vault", items: [] }]);
+  // 21g: what it is, and what to do first. Nothing here leads to a screen a later task builds.
+  expect(screen.getByText("Your vault is empty")).toBeTruthy();
+  expect(screen.getByText("What to do first: add a login, or a key, a note or a file.")).toBeTruthy();
+  expect(within(screen.getByRole("main")).queryByRole("button")).toBeNull();
+  await expectNoAxe(container);
+});
+
+// Folders in the side menu, or something in the trash: "Your vault is empty" would be untrue.
+test("a_vault_with_only_folders_is_not_called_empty", async () => {
+  await unlocked([{ id: 7, name: "My vault", items: [{ id: FOLDER, kind: "collection", title: "Agency support agent" }] }]);
   expect(screen.getByText("Nothing in this vault yet.")).toBeTruthy();
+  expect(screen.queryByText("Your vault is empty")).toBeNull();
+});
+
+test("a_vault_with_only_trash_is_not_called_empty", async () => {
+  await unlocked([{ id: 8, name: "Trash only", items: [{ id: itemId(9), kind: "login", title: "Gone", trashed: true }] }]);
+  expect(screen.getByText("Nothing in this vault yet.")).toBeTruthy();
+  expect(screen.queryByText("Your vault is empty")).toBeNull();
+});
+
+test("an_empty_folder_says_so_in_its_own_words", async () => {
+  await unlocked([{ id: 7, name: "My vault", items: [{ id: FOLDER, kind: "collection", title: "Agency support agent" }] }]);
+  fireEvent.click(screen.getByRole("button", { name: /^Agency support agent/ }));
+  expect(await screen.findByText("Nothing in Agency support agent yet.")).toBeTruthy();
+  expect(screen.queryByText("Your vault is empty")).toBeNull();
 });

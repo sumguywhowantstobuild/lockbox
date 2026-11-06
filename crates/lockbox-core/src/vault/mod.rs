@@ -163,7 +163,11 @@ impl Vault {
         Self::create_with_id(parent, name, password, VaultId::random())
     }
 
-    fn create_with_id(
+    /// Like [`create`](Self::create), with the vault's ID chosen by the caller. The ID decides the folder's name
+    /// ([`folder_name`]), so a caller can write down where the vault will be (the shell's "recovery key not
+    /// confirmed" mark) before it exists. Use a fresh [`VaultId::random`]: the ID is bound into the vault's key slots,
+    /// and two different vaults should not share one.
+    pub fn create_with_id(
         parent: &Path,
         name: &str,
         password: &str,

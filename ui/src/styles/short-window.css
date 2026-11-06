@@ -22,6 +22,19 @@
     margin-top: 10px;
   }
 
+  .fu {
+    gap: 10px;
+  }
+
+  .fu-key {
+    padding: 10px 14px;
+    font-size: 16px;
+  }
+
+  .lnk {
+    height: 32px;
+  }
+
   .inp,
   .prim {
     height: 36px;

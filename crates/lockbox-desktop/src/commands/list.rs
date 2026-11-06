@@ -17,6 +17,7 @@ pub const COMMANDS: &[&str] = &[
     "recover_vault_confirm",
     "change_password",
     "regenerate_recovery",
+    "recovery_confirmed",
     "accept_header",
     "list_items",
     "get_item",

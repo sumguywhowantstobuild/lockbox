@@ -47,9 +47,14 @@ export const MESSAGES: Record<string, Words> = {
   },
   "code:invalid_input:vault not listed": {
     title: "Your new vault is on disk but couldn't be added to the list.",
-    body: "Use Add existing vault folder, then make a new recovery key.",
+    body: "Use “I already have a vault” on the first screen to add it.",
   },
   "code:invalid_input:password is empty": { title: "Type the password first.", body: "" },
+  // The shell writes a "not confirmed" note before it makes a recovery key, and makes none when it can't.
+  "code:too_large:vault state": {
+    title: "Lockbox couldn't save a note it needs before making the key, so it made none.",
+    body: "Try again.",
+  },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   "code:core": GENERIC,
 
@@ -192,8 +197,14 @@ export const KNOWN_WHATS: readonly string[] = [
   "vault list",
   "vault name",
   "vault not listed",
+  "vault state",
   "vault still finishing an operation",
 ];
+
+/** A message as one line of text, for a screen that shows it in one place. */
+export function messageText(message: Pick<Message, "title" | "body">): string {
+  return message.body === "" ? message.title : `${message.title} ${message.body}`;
+}
 
 /** The numbers a refusal can carry, by the name the shell gives them. */
 const NUMBER_FIELDS = ["needed", "available", "max_file", "min"] as const;

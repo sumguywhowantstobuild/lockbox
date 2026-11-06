@@ -196,10 +196,11 @@ in the code with a `shortcut:` comment.
   same no-link rule. The check runs again before each delete attempt, but it is a check followed by a delete, not one step:
   a program already running as you could swap something in between, and only a victim carrying one of those names could be hit.
   *Accepted:* such a program can already delete your files.
-- **State files can be edited by code running as you.** `vaults.json`, `settings.json` and `pending-outputs.json` in
-  `%LOCALAPPDATA%\Lockbox\` are not authenticated, only size-capped and strictly parsed. Such a program could add a vault
-  to the list, raise the idle time or clipboard delay to their limits (a value out of range gives the defaults), or
-  empty the output journal so a leftover stays. They hold no secrets. *Accepted:* the same reasoning as the restore
+- **State files can be edited by code running as you.** `vaults.json`, `settings.json`, `vault-state.json` and
+  `pending-outputs.json` in `%LOCALAPPDATA%\Lockbox\` are not authenticated, only size-capped and strictly parsed. Such a
+  program could add a vault to the list, raise the idle time or clipboard delay to their limits (a value out of range
+  gives the defaults), remove a vault's "recovery key not confirmed" note (a damaged `vault-state.json` also reads as
+  having none), or empty the output journal so a leftover stays. They hold no secrets. *Accepted:* the same reasoning as the restore
   journal (see "Someone who can already write inside your vault folder").
 - **Cloud folders.** A vault in a OneDrive, Google Drive or Dropbox folder is not refused. The shell asks first when one is
   created or added, and reports it at each unlock for the screen to warn (Plan 4; the screens do not show that warning
@@ -317,7 +318,11 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **A new recovery key can be lost if the process dies right after writing it.** If Lockbox is killed after both header
   files are written but before the caller shows the new recovery key, the old key no longer works and the new one was
   never seen (the password still works and a new recovery key can be made). *Accepted:* a very narrow window, the same
-  kind as the "Concurrent vault creation in one folder" case below.
+  kind as the "Concurrent vault creation in one folder" case below. The app narrows it: before it makes a key (a new
+  vault's, or a new one for an open vault) it writes "recovery key not confirmed" for that vault's folder in
+  `vault-state.json`, and makes no key if that note cannot be saved; the note is cleared only once the person has typed
+  part of the key back. If the app closes or the vault locks first, the next unlock makes a new key before anything
+  else. Someone who can edit that file can remove the note (see "State files can be edited").
 - **A foreign `.bak` can take over an unreadable `vault.json`.** If `vault.json` is missing or unparseable and the `.bak` is from
   a different vault that has the same password, it unlocks and repairs `vault.json`; the items then show as damaged.
   *Accepted:* the original header was already unreadable and it needs the same password.

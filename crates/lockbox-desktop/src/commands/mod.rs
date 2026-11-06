@@ -42,6 +42,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         vaults::recover_vault_confirm,
         vaults::change_password,
         vaults::regenerate_recovery,
+        vaults::recovery_confirmed,
         vaults::accept_header,
         items::list_items,
         items::get_item,

@@ -228,6 +228,16 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
           check(`main button, ${state}, on ${name}`, c(fill), surface, 3);
         }
       }
+      // The first-use screens: the recovery key's box (its edge against the plate, its words on the card), the quiet
+      // link-buttons (words on the plate at rest, hovered and pressed) and a field in error (its edge against the plate).
+      check("recovery key box edge on the plate", c("--edge"), ground, 3);
+      check("recovery key words on their box", c("--ink"), card, 4.5);
+      for (const [state, tint] of [["rest", ground], ["hover", over(c("--hov"), ground)], ["pressed", over(c("--prs"), ground)]] as const) {
+        check(`link-button words, ${state}`, c("--ink"), tint, 4.5);
+      }
+      check("link-button words, disabled", c("--ink2"), ground, 4.5);
+      check("field in error, edge on the plate", c("--danger"), ground, 3);
+      check("field in error, edge on the card", c("--danger"), card, 3);
       // The switch: its off track against the card, its knob against both tracks, and its on track against the card.
       check("switch, off track on the card", c("--switch-off"), card, 3);
       check("switch, knob on the off track", c("--switch-knob"), c("--switch-off"), 3);

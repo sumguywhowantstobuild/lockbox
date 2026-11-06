@@ -28,6 +28,8 @@ export interface FakeVault {
   password?: string;
   readOnly?: boolean;
   items?: FakeItem[];
+  /** The "recovery key not confirmed" mark the shell keeps for the vault's folder. */
+  unconfirmed?: boolean;
 }
 
 interface Live {
@@ -39,6 +41,20 @@ interface Live {
 export const MALFORMED = { code: "invalid_input", what: "request" };
 export const WRONG_PASSWORD = { code: "core", kind: "wrong_password" };
 export const LOCKED = { code: "locked" };
+/** What the shell sends when it cannot write the mark first (`write_state(…, "vault state")`, `TooLarge`). */
+export const VAULT_STATE_REFUSED = { code: "too_large", what: "vault state" };
+
+const SYMBOLS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** A recovery key in the engine's display form (13 groups of 4 symbols, dashes between), different for each `n`. */
+export function fakeKey(n: number): string {
+  const groups: string[] = [];
+  for (let i = 0; i < 13; i += 1) {
+    const at = (value: number) => SYMBOLS.charAt(value % 32);
+    groups.push(at(n * 7 + i * 3) + at(i * 5 + 1) + at(n + i) + at(i * 11 + n * 13 + 2));
+  }
+  return groups.join("-");
+}
 
 export function itemId(n: number): string {
   return n.toString(16).padStart(32, "0");
@@ -109,6 +125,18 @@ export interface FakeShell {
   sessionOf(vaultId: number): Live | undefined;
   /** Holds every `list_items` answer until `release` is called, to lock while one is in flight. */
   holdListItems(): () => void;
+  /** The recovery key last made for the vault (by creating it or by `regenerate_recovery`), as the shell showed it. */
+  keyOf(vaultId: number): string | undefined;
+  /** Whether the vault carries the "not confirmed" mark. */
+  unconfirmed(vaultId: number): boolean;
+  /** The next create or add-existing asks about a cloud folder first, as the shell does. */
+  cloudNext(): void;
+  /** The next create or new key finds the mark can't be written: nothing is made, the shell refuses. */
+  refuseMarkNext(): void;
+  /** The next folder picker (create with `choose_folder`, add existing) is closed without a choice. */
+  dismissPickerNext(): void;
+  /** The vault the next `add_existing_vault` finds in the folder the person picks. */
+  offerExisting(vault: FakeVault): void;
 }
 
 let sessionRange = 0;
@@ -146,6 +174,15 @@ export function installFakeShell(
   let held: (() => void)[] | undefined;
   const calls: FakeShell["calls"] = [];
   const copied: FakeShell["copied"] = [];
+  const keys = new Map<FakeVault, string>();
+  let keysMade = 0;
+  let cloud = false;
+  let refuseMark = false;
+  let dismissPicker = false;
+  let existing: FakeVault | undefined;
+  let nextToken = 0;
+  const pendingCreates = new Map<string, { name: string; password: string }>();
+  const pendingAdds = new Set<string>();
 
   listen.mockImplementation((event: string, handler: (event: { payload: unknown }) => void) => {
     calls.push({ cmd: `listen:${event}`, args: undefined });
@@ -170,6 +207,67 @@ export function installFakeShell(
 
   const tagged = (session: number, generation: number, data: unknown) => ({ session, generation, data });
 
+  /** Opens (or opens again) the vault's session and moves its generation on, as an unlock does. */
+  const openSession = (vault: FakeVault): [number, Live] => {
+    let entry = [...live.entries()].find(([session]) => sessionVault.get(session) === vault);
+    if (entry === undefined) {
+      nextSession += 1;
+      entry = [nextSession, { session: nextSession, generation: 0, unlocked: false }];
+      live.set(nextSession, entry[1]);
+      sessionVault.set(nextSession, vault);
+    }
+    const [session, state] = entry;
+    state.unlocked = true;
+    state.generation += 1;
+    return [session, state];
+  };
+
+  const infoOf = (vault: FakeVault, session: number, generation: number) => ({
+    session,
+    generation,
+    name: vault.name ?? "",
+    read_only: vault.readOnly ?? false,
+    state: "unlocked",
+  });
+
+  const makeKey = (vault: FakeVault): string => {
+    keysMade += 1;
+    const key = fakeKey(keysMade);
+    keys.set(vault, key);
+    return key;
+  };
+
+  /** A create that goes through: the mark is written first, then the vault is made, listed and unlocked. */
+  const created = (name: string, password: string): unknown => {
+    if (refuseMark) {
+      refuseMark = false;
+      return refuse(VAULT_STATE_REFUSED);
+    }
+    const vault: FakeVault = {
+      id: Math.max(0, ...vaults.map((v) => v.id)) + 1,
+      name,
+      password,
+      items: [],
+      unconfirmed: true,
+    };
+    vaults.push(vault);
+    const [session, state] = openSession(vault);
+    return {
+      Done: tagged(session, state.generation, {
+        info: infoOf(vault, session, state.generation),
+        recovery_key: makeKey(vault),
+      }),
+    };
+  };
+
+  const added = (): unknown => {
+    const vault = existing;
+    if (vault === undefined) return refuse({ code: "not_found" });
+    existing = undefined;
+    vaults.push(vault);
+    return { Done: { id: vault.id, name: vault.name, available: true } };
+  };
+
   const answer = (cmd: string, args: unknown): unknown => {
     switch (cmd) {
       case "list_vaults":
@@ -183,24 +281,9 @@ export function installFakeShell(
         const vault = vaults.find((v) => v.id === id);
         if (vault === undefined) return refuse({ code: "not_found" });
         if (password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
-        let entry = [...live.entries()].find(([session]) => sessionVault.get(session) === vault);
-        if (entry === undefined) {
-          nextSession += 1;
-          entry = [nextSession, { session: nextSession, generation: 0, unlocked: false }];
-          live.set(nextSession, entry[1]);
-          sessionVault.set(nextSession, vault);
-        }
-        const [session, state] = entry;
-        state.unlocked = true;
-        state.generation += 1;
+        const [session, state] = openSession(vault);
         return tagged(session, state.generation, {
-          info: {
-            session,
-            generation: state.generation,
-            name: vault.name ?? "",
-            read_only: vault.readOnly ?? false,
-            state: "unlocked",
-          },
+          info: infoOf(vault, session, state.generation),
           used_backup_header: false,
           header_mac_mismatch: false,
           header_repair_failed: false,
@@ -215,7 +298,76 @@ export function installFakeShell(
             failed: 0,
           },
           cloud: null,
+          // Worked out on every answer, as the shell does: a writable vault with the mark, never a read-only copy.
+          recovery_unconfirmed: (vault.unconfirmed ?? false) && !(vault.readOnly ?? false),
         });
+      }
+      case "create_vault": {
+        const { name, password, choose_folder } = exactly(args, ["name", "password", "choose_folder"]) as {
+          name: string;
+          password: string;
+          choose_folder: boolean;
+        };
+        if (Array.from(password.normalize("NFC")).length < 12) return refuse({ code: "core", kind: "password_too_short", min: 12 });
+        if (choose_folder && dismissPicker) {
+          dismissPicker = false;
+          return "Dismissed";
+        }
+        if (cloud) {
+          cloud = false;
+          nextToken += 1;
+          const token = `create-token-${String(nextToken)}`;
+          pendingCreates.set(token, { name, password });
+          return { Confirm: { CloudFolder: { token } } };
+        }
+        return created(name, password);
+      }
+      case "create_vault_confirm": {
+        const { token } = exactly(args, ["token"]) as { token: string };
+        const pending = pendingCreates.get(token);
+        if (pending === undefined) return refuse({ code: "not_found" });
+        pendingCreates.delete(token);
+        return created(pending.name, pending.password);
+      }
+      case "add_existing_vault": {
+        exactly(args ?? {}, []);
+        if (dismissPicker) {
+          dismissPicker = false;
+          return "Dismissed";
+        }
+        if (existing === undefined) return refuse({ code: "invalid_input", what: "not a vault folder" });
+        if (cloud) {
+          cloud = false;
+          nextToken += 1;
+          const token = `add-token-${String(nextToken)}`;
+          pendingAdds.add(token);
+          return { Confirm: { CloudFolder: { token } } };
+        }
+        return added();
+      }
+      case "add_existing_vault_confirm": {
+        const { token } = exactly(args, ["token"]) as { token: string };
+        if (!pendingAdds.delete(token)) return refuse({ code: "not_found" });
+        return added();
+      }
+      case "regenerate_recovery": {
+        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The mark goes first; when it can't be written no key is made.
+        if (refuseMark) {
+          refuseMark = false;
+          return refuse(VAULT_STATE_REFUSED);
+        }
+        vault.unconfirmed = true;
+        return tagged(session, generation, makeKey(vault));
+      }
+      case "recovery_confirmed": {
+        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        vault.unconfirmed = false;
+        return tagged(session, generation, null);
       }
       case "list_items": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
@@ -295,6 +447,23 @@ export function installFakeShell(
         held = undefined;
         for (const release of waiting) release();
       };
+    },
+    keyOf: (vaultId) => {
+      const vault = vaults.find((v) => v.id === vaultId);
+      return vault === undefined ? undefined : keys.get(vault);
+    },
+    unconfirmed: (vaultId) => vaults.find((v) => v.id === vaultId)?.unconfirmed ?? false,
+    cloudNext: () => {
+      cloud = true;
+    },
+    refuseMarkNext: () => {
+      refuseMark = true;
+    },
+    dismissPickerNext: () => {
+      dismissPicker = true;
+    },
+    offerExisting: (vault) => {
+      existing = vault;
     },
   };
 }

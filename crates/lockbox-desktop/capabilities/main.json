@@ -21,6 +21,7 @@
     "allow-recover-vault-confirm",
     "allow-change-password",
     "allow-regenerate-recovery",
+    "allow-recovery-confirmed",
     "allow-accept-header",
     "allow-list-items",
     "allow-get-item",

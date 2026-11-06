@@ -81,6 +81,26 @@ test("wrong_password_has_the_designs_words", () => {
   expect(messageFor({ code: "core", kind: "wrong_password" })).toEqual({ title: "Wrong password.", body: "" });
 });
 
+test("a_vault_state_refusal_has_words_of_its_own", () => {
+  // The shell could not write the "not confirmed" mark, so it made no key (and, for a new vault, no vault).
+  const words = messageFor({ code: "too_large", what: "vault state" });
+  expect(words).toEqual({
+    title: "Lockbox couldn't save a note it needs before making the key, so it made none.",
+    body: "Try again.",
+  });
+  expect(KNOWN_WHATS).toContain("vault state");
+  // The same note failing as a disk error reads as the disk error it is.
+  expect(messageFor({ code: "core", kind: "io" }).title).toBe(MESSAGES["core:io"]?.title);
+});
+
+test("a_vault_made_but_not_listed_points_at_the_first_screens_words", () => {
+  const words = messageFor({ code: "invalid_input", what: "vault not listed" });
+  expect(words.title).toBe("Your new vault is on disk but couldn't be added to the list.");
+  expect(words.body).toContain("I already have a vault");
+  // The new key is made automatically at the next unlock.
+  expect(words.body).not.toMatch(/recovery key/i);
+});
+
 test("no_message_contains_raw_error_text", () => {
   const SENTINEL = "SENTINEL-7f3a C:\\Users\\secret";
   const errors: unknown[] = [

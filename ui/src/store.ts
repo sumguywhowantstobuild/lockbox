@@ -1,5 +1,6 @@
 // What the page keeps of each unlocked vault: its item list, the item open in the panel, values the person asked to
-// see, text typed into a form, and the message about the last copy. Nothing else. A lock wipes the lot at once: the
+// see, text typed into a form, the message about the last copy, and a recovery key being shown or typed back (with what
+// was typed of it). Nothing else. A lock wipes the lot at once: the
 // store listens for `lockbox://locked` before any command is sent, and a lock event drops the vault's whole record
 // (`dropSession`). An answer that comes back for a vault that has locked since is dropped without a word (it is the
 // expected outcome of a lock, not an error): the bridge refuses it with `StaleAnswer`, and so does this file when the
@@ -15,6 +16,21 @@ export interface OpenItem {
   /** The shell's refusal, when it would not give the item. */
   error: unknown;
 }
+
+/**
+ * Where a vault is in its recovery key step (21c, 21d, 21f), or `null` when it is not in one. The key is held here, like
+ * the rest of a session's data, so a lock of any kind drops it with the session: nothing of it outlives the unlock it
+ * was made in. Whatever the lock cuts short, the shell's "not confirmed" mark makes the next unlock start again.
+ */
+export type RecoveryStep =
+  /** A new key has been asked for (an unlock found the mark) and has not come yet. */
+  | { phase: "making" }
+  /** The shell would not make the key (it could not write its mark first); the person can ask again. */
+  | { phase: "failed"; error: unknown }
+  /** The key on screen, to be saved. `unfinished` is the key of an earlier step that never finished (21f). */
+  | { phase: "show"; key: string; unfinished: boolean }
+  /** The key hidden, two of its groups (by position, from 0) to be typed back. */
+  | { phase: "typeback"; key: string; unfinished: boolean; groups: readonly [number, number] };
 
 /** One unlocked vault. */
 export interface SessionData {
@@ -35,6 +51,8 @@ export interface SessionData {
   reveals: Record<string, string>;
   /** Text typed and not saved, by name. */
   forms: Record<string, string>;
+  /** The recovery key step this vault is in, or `null`. */
+  recovery: RecoveryStep | null;
 }
 
 /** The message about the last copy (or the refusal of one), and the vault that made it. */
@@ -55,9 +73,13 @@ export interface StoreState {
 /** The page's own refusal for a lock listener that could not be set up; `messages.ts` has its words. */
 const LISTENER_FAILED = { code: "page", kind: "lock_listener" };
 
+function refusedWith(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === code;
+}
+
 /** Whether the shell refused as locked: the vault is locked and the page missed the event that said so. */
 function refusedAsLocked(error: unknown): boolean {
-  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "locked";
+  return refusedWith(error, "locked");
 }
 
 const EMPTY: StoreState = { vaults: null, startError: null, sessions: [], toast: null };
@@ -144,7 +166,22 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
     throw error;
   }
   const { info } = answer.data;
-  const record: SessionData = {
+  // The recovery key of this vault was made and never typed back: the page goes straight to a new one (21f), before it
+  // shows anything of the vault. A read-only copy never does (the shell says false for it).
+  const unfinished = answer.data.recovery_unconfirmed && !info.read_only;
+  const record = newRecord(answer, vaultId, info, unfinished ? { phase: "making" } : null);
+  set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+  if (unfinished) void makeNewKey(record.session);
+  return loadItems(record);
+}
+
+function newRecord(
+  answer: { session: number; generation: number },
+  vaultId: number,
+  info: { name: string; read_only: boolean },
+  recovery: RecoveryStep | null,
+): SessionData {
+  return {
     session: answer.session,
     generation: answer.generation,
     vaultId,
@@ -156,9 +193,169 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
     folder: null,
     reveals: {},
     forms: {},
+    recovery,
   };
+}
+
+/** The page's own refusal for an answer it did not expect; `messages.ts` gives it the generic words. */
+const UNEXPECTED = { code: "page", kind: "unexpected_answer" };
+
+/** The vault list again, from the shell: after a vault was created or added. `null` when it could not be read. */
+export async function refreshVaults(): Promise<VaultEntry[] | null> {
+  try {
+    const list = await api.listVaults();
+    set({ ...state, vaults: list, startError: null });
+    return list;
+  } catch (error) {
+    set({ ...state, startError: error });
+    return null;
+  }
+}
+
+/** What a create, or an add of an existing vault, came to. */
+export type SetupResult =
+  | "done"
+  /** The vault locked, or the PC did, before the answer was read: nothing to say. */
+  | "stale"
+  /** The person closed the folder picker. */
+  | "dismissed"
+  /** A cloud-synced folder: nothing is done until the person says yes, with this token. */
+  | { confirm: string };
+
+/** Pulls the token out of a cloud-folder question, or refuses any other question (none is expected here). */
+function cloudToken(question: api.Confirm): string {
+  if (typeof question === "object" && "CloudFolder" in question) return question.CloudFolder.token;
+  // eslint-disable-next-line @typescript-eslint/only-throw-error -- a refusal is a plain object, as the shell's are
+  throw UNEXPECTED;
+}
+
+/**
+ * Creates a vault and opens it on its recovery key. The vault is unlocked and marked "not confirmed" by the shell
+ * before this answers; its key is on the page only here, in its session's record. If a lock overtook the answer, the
+ * record is never made, and the vault list is read again so the lock screen offers the vault.
+ */
+export function createVault(name: string, password: string, chooseFolder: boolean): Promise<SetupResult> {
+  return finishCreate(() => api.createVault(name, password, chooseFolder));
+}
+
+/** The person's yes to creating the vault in a cloud-synced folder. */
+export function confirmCreateVault(token: string): Promise<SetupResult> {
+  return finishCreate(() => api.createVaultConfirm(token));
+}
+
+async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Promise<SetupResult> {
+  let answer;
+  try {
+    answer = await run();
+  } catch (error) {
+    // The vault may have been made all the same (a lock after it, or a list that wouldn't take it): read the list again.
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) await refreshVaults();
+    if (error instanceof api.StaleAnswer) return "stale";
+    // A lock that ended the create before anything was made (the picker was open when Windows locked): no vault exists
+    // and the person did nothing wrong, so there is nothing to say.
+    if (refusedAsLocked(error)) return "stale";
+    throw error;
+  }
+  if (answer === "Dismissed") return "dismissed";
+  if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
+  const before = new Set((state.vaults ?? []).map((vault) => vault.id));
+  const { info, recovery_key } = answer.data;
+  // The vault's place on the list is not known until the list is read again; the record stands in the meantime.
+  const record = newRecord(answer, -1, info, { phase: "show", key: recovery_key, unfinished: false });
   set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
-  return loadItems(record);
+  void loadItems(record);
+  const list = await refreshVaults();
+  const added = (list ?? []).filter((vault) => !before.has(vault.id));
+  const made = added.at(-1);
+  if (made !== undefined) update(record.session, (entry) => ({ ...entry, vaultId: made.id }));
+  return "done";
+}
+
+/** Adds a vault folder the person picks (21a's "I already have a vault"). */
+export async function addExistingVault(): Promise<SetupResult> {
+  return finishAdd(() => api.addExistingVault());
+}
+
+export function confirmAddExistingVault(token: string): Promise<SetupResult> {
+  return finishAdd(() => api.addExistingVaultConfirm(token));
+}
+
+async function finishAdd(run: () => Promise<api.Outcome<VaultEntry>>): Promise<SetupResult> {
+  const answer = await run();
+  if (answer === "Dismissed") return "dismissed";
+  if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
+  await refreshVaults();
+  return "done";
+}
+
+/**
+ * Asks the shell for a new recovery key for the unlocked vault and puts it on screen, shown once more (21f). No password
+ * is asked. A refusal (the shell could not write its mark first, and so made no key) is kept for the screen to say,
+ * with a way to ask again; a vault that locked meanwhile gets nothing.
+ */
+export async function makeNewKey(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const { generation } = entry;
+  update(session, (current) => ({ ...current, recovery: { phase: "making" } }));
+  try {
+    const answer = await api.regenerateRecovery({ session, generation });
+    if (!stillOpen(session, generation)) return;
+    update(session, (current) => ({ ...current, recovery: { phase: "show", key: answer.data, unfinished: true } }));
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+    update(session, (current) => ({ ...current, recovery: { phase: "failed", error } }));
+  }
+}
+
+const GROUP_BOXES = ["recovery-group-1", "recovery-group-2"] as const;
+
+/** Hides the key and asks for two of its groups, `groups` by position from 0. */
+export function startTypeBack(session: number, groups: readonly [number, number]): void {
+  update(session, (entry) => {
+    if (entry.recovery?.phase !== "show") return entry;
+    const forms = { ...entry.forms, [GROUP_BOXES[0]]: "", [GROUP_BOXES[1]]: "" };
+    return { ...entry, forms, recovery: { ...entry.recovery, phase: "typeback", groups } };
+  });
+}
+
+/** Shows the key again; what was typed of it is dropped. */
+export function showKeyAgain(session: number): void {
+  update(session, (entry) => {
+    if (entry.recovery?.phase !== "typeback") return entry;
+    const forms = { ...entry.forms, [GROUP_BOXES[0]]: "", [GROUP_BOXES[1]]: "" };
+    const { key, unfinished } = entry.recovery;
+    return { ...entry, forms, recovery: { phase: "show", key, unfinished } };
+  });
+}
+
+/** The names of the two boxes the typed-back groups go in. */
+export function groupBoxName(slot: 0 | 1): string {
+  return GROUP_BOXES[slot];
+}
+
+/**
+ * The groups matched: tells the shell, which clears its mark, and only then lets the key go. The key and what was typed
+ * of it are dropped on success. A refusal is thrown for the screen to say, and the step stays.
+ */
+export async function confirmRecovery(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return;
+  const { generation } = entry;
+  try {
+    await api.recoveryConfirmed({ session, generation });
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+    throw error;
+  }
+  if (!stillOpen(session, generation)) return;
+  update(session, (current) => ({
+    ...current,
+    recovery: null,
+    forms: { ...current.forms, [GROUP_BOXES[0]]: "", [GROUP_BOXES[1]]: "" },
+  }));
 }
 
 async function loadItems(record: SessionData): Promise<"opened" | "stale"> {

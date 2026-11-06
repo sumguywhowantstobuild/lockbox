@@ -10,7 +10,7 @@
     border: 1px solid CanvasText !important;
   }
 
-  .app :is(.grp, .panel, .pal, .menu, .toast, .chip) {
+  .app :is(.grp, .panel, .pal, .menu, .toast, .chip, .fu-key) {
     border: 1px solid CanvasText !important;
   }
 

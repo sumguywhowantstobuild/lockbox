@@ -233,6 +233,110 @@
   font-size: 13px;
 }
 
+/* ---- First use and the recovery key ---- */
+
+/* The steps on the lock screen's light side: a column of the heading, the fields and the buttons. */
+.fu {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.fu label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.fu-step {
+  margin: 0;
+  color: var(--ink2);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.fu-sub {
+  margin: -4px 0 0;
+  color: var(--ink2);
+}
+
+.fu-sub.strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.fu-hint {
+  margin: 6px 0 0;
+  color: var(--ink2);
+  font-size: 13px;
+}
+
+.fu-where {
+  margin: 0;
+}
+
+.fu-lose {
+  margin: 0;
+  font-weight: 500;
+}
+
+.fu-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+}
+
+/* The key, shown once: large, in the fixed-width face, breaking at its dashes. */
+.fu-key {
+  margin: 0;
+  padding: 16px 18px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* A quiet button that reads as a link: the second way out of a step. */
+.lnk {
+  height: 36px;
+  padding: 0 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.lnk:hover {
+  background: var(--hov);
+}
+
+.lnk:active {
+  background: var(--prs);
+}
+
+.lnk[disabled] {
+  color: var(--ink2);
+  cursor: not-allowed;
+}
+
+.lnk[disabled]:hover {
+  background: transparent;
+}
+
+.inp[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
 /* ---- The window ---- */
 
 .win {
@@ -1041,6 +1145,11 @@
   font-weight: 600;
   letter-spacing: -0.008em;
   overflow-wrap: anywhere;
+}
+
+.le-b {
+  margin-top: 6px;
+  color: var(--ink2);
 }
 
 /* ---- The panel from the right ---- */

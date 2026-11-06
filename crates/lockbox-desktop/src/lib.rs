@@ -27,6 +27,7 @@ pub mod settings;
 pub mod shell;
 #[cfg(test)]
 mod testing;
+pub mod vault_state;
 pub mod views;
 pub mod window;
 
