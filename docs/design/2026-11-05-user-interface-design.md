@@ -1,6 +1,6 @@
 # User interface (Plan 4): design
 
-**Date:** 2026-11-05 · **Author:** Ariel Maningas · **Status:** approved by Ariel, 2026-11-05; results of the first build checks added 2026-11-06 ([Results of the risky checks](#results-of-the-risky-checks))
+**Date:** 2026-11-05 · **Author:** Ariel Maningas · **Status:** approved by Ariel, 2026-11-05; results of the first build checks added 2026-11-06 ([Results of the risky checks](#results-of-the-risky-checks)), and two changes from Task 5's hands-on and review (the vault mark, what the page does when a lock event is lost)
 
 The product side is in the [PRD](../PRD.md); the engine, vault format and security rules are in the
 [design spec](2026-10-07-lockbox-design.md), cited here as "spec 7.3" and so on. This document is what the screens do and
@@ -191,6 +191,12 @@ Tray icon, save shortcut and close button arrive at the shell, not the page.
 - **Vault colour:** each vault has one, shown on the main button, the selected row and the vault mark. Three accents are
   drawn, each with light and dark values: Work `#14663F` / `#4FD08A`, Home `#4E2FA8` / `#B49CF5`, a read-only old copy
   `#7A5A00` / `#F2C14E`. No gradients (Ariel: they looked unprofessional for strangers).
+- **Vault mark:** each vault's line mark has its own number of points, from its place on the vault list (3, 5, 6, 7 and
+  on; 4 stays the read-only copy's), while the colours take turns, Work then Home. So two vaults of one colour still look
+  different (Ariel, 2026-11-06, at the first hands-on: the first and third vault looked alike). The small mark beside a
+  name is drawn in its vault's colour (a contrast theme's text colour under one), with a line thick enough to stay clear
+  at 36 pixels. On the lock screen every vault takes its place's look, since whether it's a read-only copy is known only
+  once it's open; the amber look appears then.
 - **Item details** open in a side panel, not a third column. Forms and rarer jobs use the same panel. Restore, first-time
   setup and forgot password are full-screen steps, since they start from places with no main window.
 - **Lock screen (Ariel, 2026-11-04, "stick with the current design"):** split, a dark side with the line pattern and "Your
@@ -386,7 +392,11 @@ fails if an error has no entry. Anything unknown gets a generic message. This ke
 
 **Locks win.** The store drops a session's data, revealed values and search results on its `locked` event. Forms in progress
 go too: a half-typed item is lost at auto-lock, with no warning (accepted, Ariel, 2026-11-04). The bridge already discards
-answers from an old generation. Every screen with an answer in flight has to handle that without showing an error.
+answers from an old generation. Every screen with an answer in flight has to handle that without showing an error. The
+page doesn't rely on the event alone: once Lock all is answered, it drops every session it held when Lock all was pressed, and a "locked" refusal
+drops that session instead of showing an error over its data. If the page can't listen for locks at all, it opens no vault
+and says "Lockbox can't listen for locks, so it won't open a vault." with "Close Lockbox and open it again." (my call,
+2026-11-06, from Task 5's review).
 
 **Corrections the pictures need in the build** (from the checks of 2026-11-05):
 - **Dialogs hold focus.** In the mockups, Tab reaches the screen behind a dialog. In the app it can't, and focus returns to
