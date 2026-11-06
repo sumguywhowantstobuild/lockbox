@@ -65,8 +65,8 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 ## Where each requirement stands today
 
-The Rust core (Plans 1 and 2) and the desktop shell (Plan 3) exist. The real screens come in Plan 4; the app shows a
-bare test page until then.
+The Rust core (Plans 1 and 2) and the desktop shell (Plan 3) exist. The real screens come in Plan 4 and have begun: the
+lock screen and the item list exist, and the rest follow task by task.
 
 | Requirement | State |
 |---|---|
@@ -75,7 +75,7 @@ bare test page until then.
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
 | R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. Recovery-key printing, an export and a saved `.env` come with the screens (Plan 4) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
-| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) comes with the screens (Plan 4); today's test page and the bridge drop stale answers |
+| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) has begun with the first screens (Plan 4): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values and typed text at its lock event |
 | R7 Documented limits | This file |
 
 ## How the app is locked down
@@ -202,8 +202,8 @@ in the code with a `shortcut:` comment.
   empty the output journal so a leftover stays. They hold no secrets. *Accepted:* the same reasoning as the restore
   journal (see "Someone who can already write inside your vault folder").
 - **Cloud folders.** A vault in a OneDrive, Google Drive or Dropbox folder is not refused. The shell asks first when one is
-  created or added, and reports it at each unlock for the screen to warn (Plan 4; the test page does not show that
-  one). They are found by asking Windows about sync roots, then by each provider's known location,
+  created or added, and reports it at each unlock for the screen to warn (Plan 4; the screens do not show that warning
+  yet). They are found by asking Windows about sync roots, then by each provider's known location,
   so a provider that does neither goes unnoticed. Syncing can leave conflicting copies of vault files, and old versions on
   the provider's servers. *Accepted:* v1 does not support these folders, and the warning says so.
 - **A USB hard drive that reports as fixed is accepted** (the checks use what Windows reports). Unplugging it locks its
@@ -493,10 +493,10 @@ Lockbox defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the real screens and
-everything they do (the wording of warnings, recovery-key printing, clearing what is shown at a lock), the end-to-end
-tests on the running app, and the installer. Today's bare test page exposes selected checks; the shell's other commands
-exist with no button yet. Unlocking a vault can still write to it (header repair and cleanup); to look at a vault or a backup without writing,
+These are described in the spec but do not exist, so nothing here should be relied on yet: most of the real screens and
+what they do (the wording of warnings, recovery-key printing), the end-to-end tests on the running app, and the
+installer. The first screens (unlock, the item list, copying a password) are built, and the page clears what it shows at
+a lock; the shell's other commands exist with no button yet. Unlocking a vault can still write to it (header repair and cleanup); to look at a vault or a backup without writing,
 open it read-only.
 
 **Limits that come with the screens** ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)). None of this exists

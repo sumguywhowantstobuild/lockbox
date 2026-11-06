@@ -659,6 +659,8 @@ impl Default for Shortcut {
 /// Why [`SignalThread::set_hotkey`](win::SignalThread::set_hotkey) did not set the shortcut. Only Windows' own
 /// "already registered" answer is [`Taken`](Self::Taken); every other failure is [`NotSet`](Self::NotSet), so a
 /// shortcut is never called taken for a reason that is not that.
+// Nothing registers the shortcut yet: the save box's task must, and until then only the tests call `set_hotkey`.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyTaken {
     /// Another program has registered the same keys (`ERROR_HOTKEY_ALREADY_REGISTERED`).

@@ -226,8 +226,10 @@ fn print_answer(error: windows_core::Result<()>, successful: bool) -> Result<(),
     }
 }
 
-/// Adds the hidden attribute to the file or folder at `path`; every other attribute stays. For the print probe only
-/// (it goes in Task 5).
+/// Adds the hidden attribute to the file or folder at `path`; every other attribute stays. The recovery key's PDF is
+/// printed into a new hidden folder (the design's results table: WebView2 refuses an existing hidden file), which this
+/// hides; nothing calls it until that task, and only its test does now.
+#[allow(dead_code)]
 pub fn set_hidden(path: &Path) -> io::Result<()> {
     let wide = wide_path(path)?;
     // SAFETY: `wide` is a live NUL-terminated UTF-16 path; the call only reads it.
@@ -1206,6 +1208,8 @@ const SET_HOTKEY: u32 = WM_APP + 3;
 
 /// How long [`SignalThread::set_hotkey`] waits for the window's answer, in milliseconds (as `SendMessageTimeoutW`
 /// takes it).
+// Used by `set_hotkey`, which nothing calls until the save box registers the shortcut.
+#[allow(dead_code)]
 const HOTKEY_WAIT_MS: u32 = 1_000;
 
 /// How long `Drop` waits for the window to take its close request, in milliseconds (as `SendMessageTimeoutW` takes
@@ -1342,6 +1346,8 @@ impl SignalThread {
     /// here. A shortcut Windows refuses leaves the one registered before working. [`HotkeyTaken::Taken`] only when
     /// Windows says the keys are registered already; any other refusal, and a window that does not answer in time, is
     /// [`HotkeyTaken::NotSet`].
+    // Nothing registers the shortcut yet: the save box's task must, and until then only the tests call this.
+    #[allow(dead_code)]
     pub fn set_hotkey(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken> {
         // Held across the send, as `Drop` does: the window's thread clears the handle under this lock before it
         // destroys the window, and it takes no lock while it handles the request. It also makes two changes take turns.
@@ -1376,6 +1382,8 @@ impl SignalThread {
 }
 
 /// What the window answered to [`SET_HOTKEY`]: 0 for done, else the Win32 error code `RegisterHotKey` gave.
+// Used by `set_hotkey`, which nothing calls until the save box registers the shortcut.
+#[allow(dead_code)]
 fn hotkey_answer(answer: usize) -> Result<(), HotkeyTaken> {
     match u32::try_from(answer) {
         Ok(0) => Ok(()),

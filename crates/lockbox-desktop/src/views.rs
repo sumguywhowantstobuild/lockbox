@@ -42,6 +42,10 @@ pub struct ItemSummary {
     /// The ID of the collection the item is in.
     pub collection: Option<String>,
     pub trashed: bool,
+    /// When the item was made and when it last changed: RFC 3339, UTC, whole seconds, as the engine keeps them. The
+    /// page says "changed 2 days ago" from the second, and later sorts by it.
+    pub created_at: String,
+    pub modified_at: String,
     pub attachments: Vec<FileView>,
 }
 
@@ -60,6 +64,8 @@ impl ItemSummary {
             username,
             collection: item.collection.as_ref().map(ItemId::to_hex),
             trashed: item.trashed_at.is_some(),
+            created_at: item.created_at.clone(),
+            modified_at: item.modified_at.clone(),
             attachments: item.attachments.iter().map(FileView::of).collect(),
         }
     }

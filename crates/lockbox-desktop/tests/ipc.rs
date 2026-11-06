@@ -2,9 +2,9 @@
 //! The app is built from the real `tauri.conf.json` and `capabilities/main.json`, so the real ACL applies.
 //!
 //! The test runtime (`MockRuntime`) ignores the window's webview settings. Navigation, downloads and dropped files
-//! are checked by the hands-on probes on the test page. The popup probe checks only the outcome: wry refuses new
-//! windows even without Tauri's handler. Autofill and the in-private profile cannot be observed from the page; they
-//! are covered only by review of `window::main_window`.
+//! were checked by hand on a release build (the hands-on probes of Plan 4A's first tasks, since removed). A popup's
+//! outcome is the only thing observable: wry refuses new windows even without Tauri's handler. Autofill and the
+//! in-private profile cannot be observed from the page; they are covered only by review of `window::main_window`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -84,8 +84,7 @@ fn granted_command_runs_in_main_window() {
 
 /// Each listed command passes the ACL and reaches its handler (fix round 1: `add_existing_vault_confirm` was added).
 /// This test app keeps no shell state, so a command that needs it stops at Tauri's "state not managed" answer:
-/// past the ACL, inside the handler. The generator needs none: its own request check refuses the empty body. Nor does
-/// `probe_set_capture`, which needs the window and one boolean; the test after this one sends it that.
+/// past the ACL, inside the handler. The generator needs none: its own request check refuses the empty body.
 #[test]
 fn every_listed_command_reaches_its_handler() {
     let app = app();
@@ -95,74 +94,40 @@ fn every_listed_command_reaches_its_handler() {
         match invoke(&main, APP_ORIGIN, cmd, InvokeBody::Json(json!({}))) {
             Ok(_) => assert_eq!(*cmd, "app_info"),
             Err(Value::String(answer)) if answer.contains("state not managed") => {}
-            Err(answer)
-                if (cmd.starts_with("generate_") || *cmd == "probe_set_capture")
-                    && answer == malformed => {}
+            Err(answer) if cmd.starts_with("generate_") && answer == malformed => {}
             other => panic!("{cmd} did not reach its handler: {other:?}"),
         }
     }
 }
 
-/// The print probe is granted to the main window only, and a call with a form passes the ACL and reaches its handler
-/// (which stops at the shell state this test app does not keep). The form's own check is a unit test in
-/// `commands/probe.rs`, since the state is resolved before the body is read.
+/// The hands-on probes of Plan 4A's first tasks are gone from what ships: not in the list of commands, not granted to
+/// the window, not in the invoke handler, and no source file of theirs. (The word is built from two pieces so this
+/// file does not match itself.)
 #[test]
-fn probe_print_pdf_is_granted_to_the_main_window_only() {
-    let app = app();
-    let main = main_webview(&app);
-    let other = WebviewWindowBuilder::new(&app, "other", WebviewUrl::App("index.html".into()))
-        .build()
-        .expect("the other window builds");
-    for form in [
-        "new_plain",
-        "new_long",
-        "existing_plain",
-        "existing_hidden",
-        "new_then_hide",
-        "in_hidden_folder",
-    ] {
-        let body = InvokeBody::Json(json!({ "form": form }));
-        match invoke(&main, APP_ORIGIN, "probe_print_pdf", body.clone()) {
-            Err(Value::String(answer)) if answer.contains("state not managed") => {}
-            answer => panic!("{form} did not reach the handler: {answer:?}"),
-        }
-        assert_refused_by_acl(
-            "probe_print_pdf",
-            invoke(&other, APP_ORIGIN, "probe_print_pdf", body),
-        );
-    }
-}
-
-/// The capture probe takes exactly one boolean, `on`, and asks the main window; anything else is the fixed
-/// malformed-request answer.
-#[test]
-fn probe_set_capture_takes_one_boolean() {
-    let app = app();
-    let main = main_webview(&app);
-    for on in [true, false] {
-        let answer = invoke(
-            &main,
-            APP_ORIGIN,
-            "probe_set_capture",
-            InvokeBody::Json(json!({ "on": on })),
-        );
-        assert_eq!(answer, Ok(Value::Null), "on: {on}");
-    }
-    let malformed = json!({ "code": "invalid_input", "what": "request" });
-    for body in [
-        json!({}),
-        json!({ "on": "yes" }),
-        json!({ "on": true, "path": "C:\\x" }),
-        json!(true),
-    ] {
-        let answer = invoke(
-            &main,
-            APP_ORIGIN,
-            "probe_set_capture",
-            InvokeBody::Json(body.clone()),
-        );
-        assert_eq!(answer, Err(malformed.clone()), "{body}");
-    }
+fn no_probe_command_ships() {
+    let word = ["pro", "be"].concat();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("commands");
+    assert!(
+        !COMMANDS.iter().any(|cmd| cmd.contains(&word)),
+        "a probe command is in COMMANDS"
+    );
+    let capability = read_json("capabilities/main.json").to_string();
+    assert!(
+        !capability.contains(&word),
+        "a probe is granted to the window"
+    );
+    let handler = std::fs::read_to_string(source.join("mod.rs")).expect("commands/mod.rs exists");
+    assert!(!handler.contains(&word), "a probe is in the invoke handler");
+    let files: Vec<String> = std::fs::read_dir(&source)
+        .expect("commands/ exists")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !files.iter().any(|name| name.contains(&word)),
+        "a probe source file is left: {files:?}"
+    );
 }
 
 #[test]

@@ -898,7 +898,9 @@ impl FakePrintCalls {
         *lock(&self.refuse_next) = Some(failed);
     }
 
-    /// A job that ends well writes `bytes` over its file first.
+    /// A job that ends well writes `bytes` over its file first. Used by the tests of the recovery key's PDF; only the
+    /// probe's tests used it before, and they are gone.
+    #[allow(dead_code)]
     pub fn write_on_success(&self, bytes: &[u8]) {
         *lock(&self.pdf) = Some(bytes.to_vec());
     }

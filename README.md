@@ -12,8 +12,9 @@ documented and honest about its limits.
 
 ## What exists today
 
-The first three of five planned stages are built. There are no real screens yet: you can build and run the desktop app,
-but it shows only a bare test page, one button per check. Together the five plans make up Phase 1, the Windows app (see
+The first three of five planned stages are built, and the screens of the fourth have begun: you can build and run the
+desktop app, unlock a vault, see its items and copy a password. Setting up a vault, adding items and the rest are still to
+come. Together the five plans make up Phase 1, the Windows app (see
 the [phases](docs/PRD.md#phases)).
 
 | Plan | What it delivers | State |
@@ -54,7 +55,7 @@ cargo test --locked          # most tests; it runs real password hashing, so all
 cargo test -p lockbox-core --locked --features test-internals   # every engine test, the internal ones too
 ```
 
-To run the app with its test page, use `cargo tauri dev` from `crates/lockbox-desktop` (the Tauri command-line tool is
+To run the app, use `cargo tauri dev` from `crates/lockbox-desktop` (the Tauri command-line tool is
 in [docs/SETUP.md](docs/SETUP.md#desktop-app-tauri)).
 
 The same checks that CI runs on every push:

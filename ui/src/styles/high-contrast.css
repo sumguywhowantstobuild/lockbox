@@ -1,0 +1,72 @@
+/* What the screens need in Windows' high contrast mode, which removes backgrounds and shadows and picks all the colours
+   itself. Without this, buttons and fields are bare words, cards and dialogs have no edge, the selected row looks like
+   any other, and the small marks vanish. It applies only while high contrast is on, so nothing changes otherwise. It uses
+   Windows' own colour names, so it follows whichever contrast theme is chosen. From the approved style sheet, with the
+   class names of the real parts. */
+
+@media (forced-colors: active) {
+  /* What had only a background or a shadow gets a real edge. */
+  .app :is(.pill, .prim, .rbtn, .tb2, .ib, .fin, .inp, .finp, .vbtn, .nav.on, .lrow.on) {
+    border: 1px solid CanvasText !important;
+  }
+
+  .app :is(.grp, .panel, .pal, .menu, .toast, .chip) {
+    border: 1px solid CanvasText !important;
+  }
+
+  /* The main button stays the one that stands out. */
+  .app :is(.prim, .pill.t) {
+    forced-color-adjust: none !important;
+    background: ButtonText !important;
+    color: ButtonFace !important;
+  }
+
+  .app :is(.prim, .pill.t) * {
+    color: inherit !important;
+  }
+
+  .app .prim:disabled {
+    background: Canvas !important;
+    color: GrayText !important;
+    border-color: GrayText !important;
+  }
+
+  /* What is selected uses Windows' own highlight. */
+  .app :is(.nav.on, .lrow.on, .mi[data-highlighted]) {
+    forced-color-adjust: none !important;
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+
+  .app :is(.nav.on, .lrow.on, .mi[data-highlighted]) * {
+    color: inherit !important;
+  }
+
+  .app .lrow.on .ktile,
+  .app .nav.on .ptile {
+    background: none !important;
+    box-shadow: none !important;
+  }
+
+  .app .nav.on::before,
+  .app .lrow.on::after {
+    background: HighlightText !important;
+  }
+
+  .app .vbtn.on {
+    border: 3px solid Highlight !important;
+  }
+
+  /* Marks drawn in a fixed colour would disappear on a dark or a light contrast theme. */
+  .app :is(.vmini, .rose, .vprint) path {
+    stroke: CanvasText !important;
+  }
+
+  .app .ki {
+    stroke: CanvasText !important;
+  }
+
+  .app .lrow.on .ki {
+    stroke: HighlightText !important;
+  }
+}

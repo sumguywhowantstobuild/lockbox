@@ -24,6 +24,11 @@ pub fn allowed_navigation(url: &Url) -> bool {
         .any(|allowed| Url::parse(allowed).is_ok_and(|allowed| allowed.origin() == url.origin()))
 }
 
+/// The size the window opens at, in logical pixels (width, height): the design's 1280 by 800.
+pub const WINDOW_SIZE: (f64, f64) = (1280.0, 800.0);
+/// The size below which the window cannot be made: the design's 960 by 460, so a 200% screen still fits it.
+pub const MIN_WINDOW_SIZE: (f64, f64) = (960.0, 460.0);
+
 /// Set once WebView2 has confirmed that the main window refuses files dropped from outside the app.
 static EXTERNAL_DROP_OFF: AtomicBool = AtomicBool::new(false);
 
@@ -41,6 +46,8 @@ static EXTERNAL_DROP_OFF: AtomicBool = AtomicBool::new(false);
 pub fn main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
     WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
         .title("Lockbox")
+        .inner_size(WINDOW_SIZE.0, WINDOW_SIZE.1)
+        .min_inner_size(MIN_WINDOW_SIZE.0, MIN_WINDOW_SIZE.1)
         .visible(false)
         .on_navigation(allowed_navigation)
         .on_new_window(|_url, _features| NewWindowResponse::Deny)
@@ -188,6 +195,15 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    /// The design: the window opens at 1280 by 800 and cannot go below 960 by 460 (so a 200% screen still fits). The
+    /// real window's size is checked by hand: the test runtime keeps no window size.
+    #[test]
+    fn window_size_constants_match_the_design() {
+        assert_eq!(WINDOW_SIZE, (1280.0, 800.0));
+        assert_eq!(MIN_WINDOW_SIZE, (960.0, 460.0));
+        assert!(WINDOW_SIZE.0 >= MIN_WINDOW_SIZE.0 && WINDOW_SIZE.1 >= MIN_WINDOW_SIZE.1);
+    }
 
     /// A window that records each step in the order it was taken, and answers as the test says.
     struct FakeSteps {

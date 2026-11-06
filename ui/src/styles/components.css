@@ -1,0 +1,1518 @@
+/* The parts and screens of the first working path, from the approved screens' style sheet (the neutral look, the flat
+   side menu, each vault's own accent). Everything the pictures wrote into the page as style attributes is a class here.
+   The colours are variables from tokens.css; the small-window rules are in short-window.css and the high contrast block
+   in high-contrast.css. */
+
+/* ---- The lock screen ---- */
+
+.lock {
+  display: flex;
+  flex-wrap: wrap;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.field {
+  position: relative;
+  overflow: hidden;
+  flex: 999 1 500px;
+  min-height: 320px;
+  padding: 40px;
+  background: var(--field);
+  color: var(--field-ink);
+}
+
+.field :focus-visible {
+  outline-color: var(--field-ink);
+}
+
+.rose {
+  position: absolute;
+  right: -120px;
+  bottom: -140px;
+  width: 760px;
+  height: 760px;
+  opacity: 0.5;
+}
+
+.rose path {
+  fill: none;
+  stroke: var(--field-ink);
+  stroke-width: 0.22;
+}
+
+.mark {
+  position: relative;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.say {
+  position: absolute;
+  left: 40px;
+  bottom: 64px;
+  max-width: 440px;
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.2;
+  font-weight: 500;
+}
+
+.plate {
+  position: relative;
+  flex: 1 1 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  justify-content: center;
+  padding: 56px 48px;
+  background: var(--ground);
+  color: var(--ink);
+}
+
+.plate h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
+
+.plate form label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.plate form {
+  display: flex;
+  flex-direction: column;
+}
+
+.vlist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.vbtn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  text-align: left;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.vbtn:hover {
+  background: var(--hov);
+}
+
+.vbtn:active {
+  background: var(--prs);
+}
+
+.vbtn.on {
+  padding: 9px 11px;
+  border: 2px solid var(--ink);
+}
+
+.vbtn:has(:focus-visible) {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.vbtn.off {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.vradio {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.vmini {
+  width: 36px;
+  height: 36px;
+  flex: none;
+}
+
+/* 36px for 200 units: 8.3 units is a line of about a pixel and a half. */
+.vmini path {
+  fill: none;
+  stroke: var(--v);
+  stroke-width: 8.3;
+}
+
+.vbtn b {
+  display: block;
+  font-weight: 600;
+}
+
+.vbtn small {
+  display: block;
+  color: var(--ink2);
+  font-size: 12px;
+}
+
+.inp {
+  display: block;
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+}
+
+.lacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.prim {
+  height: 42px;
+  padding: 0 20px;
+  background: var(--ink);
+  color: var(--ground);
+  border: 0;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.prim:hover {
+  background: var(--ink2);
+}
+
+.prim:active {
+  transform: scale(0.97);
+}
+
+.prim[disabled] {
+  background: var(--line);
+  color: var(--ink2);
+  cursor: not-allowed;
+}
+
+.prim[disabled]:active {
+  transform: none;
+}
+
+.err {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.note {
+  margin: 6px 0 0;
+  color: var(--ink2);
+  font-size: 13px;
+}
+
+/* ---- The window ---- */
+
+.win {
+  --gut: clamp(20px, 2.6vw, 36px);
+  --pw: clamp(340px, 30vw, 420px);
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ground);
+  color: var(--ink);
+}
+
+.win :focus-visible {
+  outline: 2px solid var(--v);
+  outline-offset: 2px;
+}
+
+.win ::selection {
+  background: var(--sel);
+  color: var(--ink);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px rgba(var(--sh), 0.34);
+}
+
+/* The side menu: which vault, its folders, and Lock all. */
+
+.rail {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 clamp(212px, 18vw, 252px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--rail);
+  border-right: 1px solid var(--line);
+}
+
+.rtop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 8px 8px 4px;
+}
+
+.vhead {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+}
+
+.vprint {
+  width: 32px;
+  height: 32px;
+  flex: none;
+}
+
+.vprint path {
+  fill: none;
+  stroke: var(--v);
+  stroke-width: 5.4;
+}
+
+.vname {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+}
+
+.vname b {
+  display: block;
+  font-size: 15px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vname .chip {
+  margin-top: 3px;
+}
+
+.rside {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  color: var(--ink2);
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.rside:hover {
+  background: var(--hov);
+}
+
+.rside:active {
+  transform: scale(0.97);
+}
+
+.rside .i {
+  width: 17px;
+  height: 17px;
+}
+
+.projs {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 8px 8px;
+}
+
+.nav {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  margin-top: 1px;
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.nav:hover {
+  background: var(--hov);
+}
+
+.nav:active {
+  transform: scale(0.97);
+}
+
+.nav.on {
+  background: var(--sel);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* The mark of the one chosen: a bar at its edge, so it does not rest on a tint alone. */
+.nav.on::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--add);
+}
+
+.nt {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nn {
+  flex: none;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+
+.rlab {
+  margin: 12px 0 2px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink2);
+}
+
+.ptile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: none;
+  color: var(--ink2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.t0 {
+  --tc: var(--t0);
+}
+
+.t1 {
+  --tc: var(--t1);
+}
+
+.t2 {
+  --tc: var(--t2);
+}
+
+.t3 {
+  --tc: var(--t3);
+}
+
+.t4 {
+  --tc: var(--t4);
+}
+
+.rfoot {
+  flex: none;
+  padding: 4px 8px 10px;
+}
+
+.rbtns {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.rbtn {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  background: var(--card);
+  border: 0;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.rbtn:hover {
+  background: var(--hov);
+}
+
+.rbtn:active {
+  transform: scale(0.97);
+}
+
+/* The side menu closed to icons. */
+
+.rail.closed {
+  flex: 0 0 60px;
+}
+
+.rail.closed :is(.nt, .nn, .rlab) {
+  display: none;
+}
+
+/* The vault's name is hidden from the eye but not from a screen reader. */
+.rail.closed .vname {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.rail.closed .rtop {
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 8px 8px;
+}
+
+.rail.closed .vhead {
+  flex: none;
+  justify-content: center;
+  width: 100%;
+  padding: 4px 0;
+}
+
+.rail.closed .projs {
+  padding: 0 8px 8px;
+}
+
+.rail.closed .nav {
+  justify-content: center;
+  padding: 0;
+  height: 40px;
+  margin-top: 3px;
+}
+
+.rail.closed .ptile {
+  background: rgba(var(--tc), 0.15);
+  color: color-mix(in srgb, rgb(var(--tc)) var(--tile-mix), var(--ink));
+  box-shadow: inset 0 0 0 0.5px rgba(var(--tc), 0.28);
+  border-radius: 7px;
+}
+
+.rail.closed .rbtns {
+  flex-direction: column;
+  margin-top: 6px;
+}
+
+.rail.closed .rbtn {
+  font-size: 0;
+  gap: 0;
+  height: 40px;
+  padding: 0;
+  flex: none;
+  background: none;
+  box-shadow: none;
+}
+
+/* ---- The right side: the toolbar, the list, and the panel ---- */
+
+.stage {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  timeline-scope: --l;
+}
+
+.mainpane {
+  position: absolute;
+  inset: 0;
+}
+
+.tb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 56px;
+  padding: 0 var(--gut);
+}
+
+.tb::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--ground) 76%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  backdrop-filter: blur(20px) saturate(1.8);
+  box-shadow: 0 1px 0 var(--line);
+  opacity: 0;
+  animation: appear linear both;
+  animation-timeline: --l;
+  animation-range: 0 12px;
+}
+
+.tb-t {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  animation: appear linear both;
+  animation-timeline: --l;
+  animation-range: 8px 36px;
+}
+
+@keyframes appear {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@supports not (animation-timeline: scroll()) {
+  .tb::before {
+    opacity: 1;
+  }
+}
+
+.fil {
+  position: relative;
+  flex: 0 1 clamp(120px, 14vw, 172px);
+  min-width: 96px;
+}
+
+.fil > .i {
+  position: absolute;
+  left: 9px;
+  top: 7px;
+  color: var(--ink2);
+  pointer-events: none;
+}
+
+.fin {
+  width: 100%;
+  height: 30px;
+  padding: 0 28px 0 30px;
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 13px;
+  appearance: none;
+  transition:
+    background-color 0.2s var(--ease),
+    box-shadow 0.2s var(--ease);
+}
+
+.fin::-webkit-search-cancel-button {
+  display: none;
+}
+
+.fin::placeholder {
+  color: var(--ink2);
+  opacity: 1;
+}
+
+.fin:hover {
+  background: var(--hov);
+}
+
+.fin:focus {
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px rgba(var(--sh), 0.34);
+}
+
+.win .fin:focus-visible {
+  outline-offset: 0;
+}
+
+.fx {
+  position: absolute;
+  right: 5px;
+  top: 5px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: rgba(var(--sh), 0.1);
+  border: 0;
+  border-radius: 50%;
+  color: var(--ink2);
+  cursor: pointer;
+}
+
+.fx:hover {
+  background: rgba(var(--sh), 0.18);
+}
+
+.fx:active {
+  background: rgba(var(--sh), 0.26);
+}
+
+.fx .i {
+  width: 12px;
+  height: 12px;
+}
+
+.ib {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.ib:hover {
+  background: var(--hov);
+}
+
+.ib:active {
+  transform: scale(0.97);
+}
+
+/* The list. */
+
+.lscroll {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-timeline: --l block;
+  padding: 56px var(--gut) 28px;
+  transition: right 0.28s var(--ease);
+}
+
+.stage.open .lscroll {
+  right: calc(var(--pw) + 8px);
+  padding-right: 20px;
+}
+
+.big {
+  margin: 6px 0 20px;
+  font-size: 36px;
+  line-height: 1.15;
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+.lnote {
+  max-width: 62ch;
+  margin: -10px 0 16px;
+  font-size: 13.5px;
+  color: var(--ink2);
+}
+
+.sech {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 22px 2px 8px;
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.3;
+  font-weight: 400;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink2);
+}
+
+.lgroups > section:first-child .sech {
+  margin-top: 4px;
+}
+
+.grp {
+  position: relative;
+  margin: 0;
+  background: var(--card);
+  border-radius: 16px;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 1px 2px rgba(0, 0, 0, 0.03),
+    0 18px 32px -28px var(--lift);
+}
+
+.lgrp {
+  padding: 4px;
+  list-style: none;
+}
+
+.lrow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 50px;
+  border-radius: 10px;
+  scroll-margin-top: 60px;
+  scroll-margin-bottom: 12px;
+  transition: background-color 0.2s var(--ease);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 50px;
+}
+
+.lrow + .lrow::before {
+  content: "";
+  position: absolute;
+  left: 54px;
+  right: 12px;
+  top: 0;
+  height: 1px;
+  background: var(--line);
+}
+
+.lrow:hover::before,
+.lrow.on::before,
+.lrow:hover + .lrow::before,
+.lrow.on + .lrow::before {
+  opacity: 0;
+}
+
+.lrow:hover {
+  background-color: var(--hov);
+}
+
+.lrow:has(.rgo:active) {
+  background-color: var(--prs);
+}
+
+.lrow.on,
+.lrow.on:hover {
+  background-color: var(--row-on);
+}
+
+/* The mark of the one open: a bar at its edge, so it does not rest on a tint alone. */
+.lrow.on::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--add);
+}
+
+.rgo {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 50px;
+  padding: 0 8px 0 12px;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.win .rgo:focus-visible {
+  outline-offset: -2px;
+}
+
+.ktile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: rgba(var(--tc), 0.15);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 0.5px rgba(var(--tc), 0.28);
+}
+
+.ki {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: none;
+  stroke: var(--v);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rn {
+  flex: 5 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rname {
+  min-width: 0;
+  font-size: 14.5px;
+  line-height: 1.3;
+  font-weight: 500;
+  letter-spacing: -0.006em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rclip {
+  width: 13px;
+  height: 13px;
+  color: var(--ink2);
+}
+
+.rdet {
+  flex: 4 1 0;
+  min-width: 0;
+  font-size: 13.5px;
+  line-height: 1.3;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage.open .rdet {
+  display: none;
+}
+
+.rfold {
+  flex: 0 0 132px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage.open .rfold {
+  display: none;
+}
+
+.cslot {
+  flex: none;
+  width: 76px;
+  display: flex;
+  justify-content: flex-end;
+  padding-right: 6px;
+}
+
+.cpy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  color: var(--ink2);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.cpy:hover {
+  background: var(--prs);
+  color: var(--v);
+}
+
+.cpy:active {
+  transform: scale(0.97);
+}
+
+.lempty {
+  padding: 26px 24px 28px;
+}
+
+.lempty p {
+  margin: 0;
+}
+
+.le-t {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  overflow-wrap: anywhere;
+}
+
+/* ---- The panel from the right ---- */
+
+.panel {
+  position: absolute;
+  z-index: 10;
+  top: 60px;
+  right: 8px;
+  bottom: 8px;
+  width: var(--pw);
+  display: flex;
+  flex-direction: column;
+  border-radius: 18px;
+  background-color: var(--paper);
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 24px 48px -28px var(--lift);
+  animation: slide 0.28s var(--ease) both;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(calc(100% + 16px));
+  }
+
+  to {
+    transform: none;
+  }
+}
+
+.ptop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  padding: 12px 12px 4px 20px;
+}
+
+.pico {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+}
+
+.pscroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 6px 20px 24px;
+}
+
+.ptitle {
+  min-width: 0;
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.024em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+.psub {
+  margin: 5px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink2);
+  overflow-wrap: anywhere;
+}
+
+.gp {
+  margin-top: 18px;
+}
+
+.fld {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 10px 10px 10px 14px;
+}
+
+.fld.col {
+  display: block;
+  padding: 12px 12px 12px 14px;
+}
+
+.fld + .fld::before,
+.frow + .frow::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: var(--line);
+}
+
+.fv {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fl {
+  display: block;
+  font-size: 12.5px;
+  line-height: 1.3;
+  font-weight: 500;
+  color: var(--ink2);
+}
+
+.fval {
+  display: block;
+  margin-top: 2px;
+  font-size: 14.5px;
+  line-height: 1.35;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  overflow-wrap: anywhere;
+}
+
+.fnote {
+  display: block;
+  margin-top: 2px;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.sec {
+  display: block;
+  margin-top: 3px;
+  font-size: 16px;
+  line-height: 1.4;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.sec.hid {
+  letter-spacing: 0.09em;
+}
+
+.fact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 12px;
+  background: rgba(var(--sh), 0.07);
+  border: 0;
+  border-radius: 15px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.pill:hover {
+  background: rgba(var(--sh), 0.13);
+}
+
+.pill:active {
+  transform: scale(0.97);
+  background: rgba(var(--sh), 0.18);
+}
+
+.pill .i {
+  width: 15px;
+  height: 15px;
+}
+
+.pill.t {
+  background: var(--add);
+  color: var(--addi);
+  font-weight: 600;
+}
+
+.pill.t:hover {
+  background: var(--addh);
+}
+
+.pill.t:active {
+  background: var(--addp);
+}
+
+.pill.cp {
+  min-width: 112px;
+}
+
+.frow {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  padding: 12px 12px 12px 14px;
+}
+
+.ftile {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(var(--tc), 0.15);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.fmeta {
+  flex: 1 1 120px;
+  min-width: 0;
+  display: block;
+}
+
+.fmeta b {
+  display: block;
+  font-size: 14px;
+  line-height: 1.3;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.fmeta small {
+  display: block;
+  margin-top: 1px;
+  font-size: 12.5px;
+  color: var(--ink2);
+}
+
+/* ---- Floating parts: dialogs, menus, lists ---- */
+
+.layer {
+  z-index: 50;
+}
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(var(--sh), 0.24);
+}
+
+.mode-dark .scrim {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.pal {
+  position: fixed;
+  z-index: 41;
+  top: 120px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 640px;
+  max-width: calc(100% - 32px);
+  background: var(--card);
+  border-radius: 18px;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 32px 80px -20px var(--lift);
+  overflow: hidden;
+}
+
+.pal.sm {
+  width: 480px;
+}
+
+.dlg {
+  padding: 22px 24px 18px;
+}
+
+.dlg h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.dlg p {
+  margin: 8px 0 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink2);
+}
+
+.dbtns {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.menu {
+  padding: 5px;
+  background: var(--card);
+  border-radius: 14px;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 20px 48px -14px var(--lift);
+}
+
+.mi {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mi:hover,
+.mi[data-highlighted] {
+  background: var(--hov);
+}
+
+.mi:active {
+  background: var(--prs);
+}
+
+.mi.dng {
+  color: var(--danger);
+}
+
+.flab {
+  display: block;
+  margin: 16px 0 5px 2px;
+  font-size: 12.5px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--ink2);
+}
+
+.finp {
+  display: block;
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  background: var(--card);
+  border: 0;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--edge);
+  font-size: 14px;
+}
+
+.finp:hover {
+  box-shadow: inset 0 0 0 1px var(--ink2);
+}
+
+/* ---- The message at the foot ---- */
+
+.tstack {
+  position: absolute;
+  left: 50%;
+  bottom: 52px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: calc(100% - 44px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.live:empty {
+  display: none;
+}
+
+.toast {
+  position: relative;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  padding: 9px 10px 9px 16px;
+  overflow: hidden;
+  background-color: var(--toast);
+  color: var(--toast-ink);
+  border-radius: 14px;
+  font-size: 13.5px;
+  font-weight: 500;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 16px 36px -12px var(--lift);
+  animation: rise 0.24s var(--ease) both;
+}
+
+.tc {
+  color: rgba(255, 255, 255, 0.86);
+  white-space: nowrap;
+}
+
+.tn {
+  font-weight: 600;
+  color: var(--toast-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.tb2 {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  min-width: 26px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.14);
+  border: 0;
+  border-radius: 13px;
+  color: var(--toast-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tb2:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.tb2 .i {
+  width: 12px;
+  height: 12px;
+}
+
+.app .toast :focus-visible {
+  outline: 2px solid var(--toast-ink);
+  outline-offset: 1px;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

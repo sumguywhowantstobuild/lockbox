@@ -2,7 +2,8 @@
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
 restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
-The real screens come in Plan 4: `ui/` holds only the bridge to Rust and a bare test page. The target design and the
+The real screens come in Plan 4, and have begun: `ui/` has the bridge to Rust, the lock screen and the main window (unlock,
+the item list, copying a password); creating a vault, adding items and the rest come in later tasks. The target design and the
 reasons behind it are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as
 "spec 5.2" and so on.
 
@@ -293,7 +294,9 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 
 Beside the code: `capabilities/main.json` (what the page may call), `tauri.conf.json` (the Content Security Policy and
 app settings), `tests/ipc.rs` (the bridge, through Tauri's own permission checks). In `ui/src/`: `bridge.ts`, the one
-place that calls Rust and drops stale answers; `dropGuard.ts`; `App.tsx`, the test page, which Plan 4 throws away.
+place that calls Rust and drops stale answers; `api.ts`, the typed commands the screens use; `store.ts`, what the page
+keeps of each unlocked vault, wiped by a lock; `messages.ts`, the fixed words for every refusal; `dropGuard.ts`; `App.tsx`
+and `screens/`, the screens.
 
 State lives in `%LOCALAPPDATA%\Lockbox\`: `vaults.json`, `settings.json`, `pending-outputs.json`,
 `restore-journal.json` and `open\`. Vaults default to `%USERPROFILE%\Lockbox Vaults\`.

@@ -58,9 +58,4 @@ pub const COMMANDS: &[&str] = &[
     "generate_passphrase",
     "get_settings",
     "set_settings",
-    // Hands-on probes for the save shortcut, print-to-PDF and capture protection; they go in Task 5 with the test page.
-    "probe_capture_length",
-    "probe_clear_captured",
-    "probe_print_pdf",
-    "probe_set_capture",
 ];

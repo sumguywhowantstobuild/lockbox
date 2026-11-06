@@ -942,10 +942,13 @@ mod tests {
         for json in [&list, &detail, &found] {
             assert_clean(&json.to_string(), &[&key]);
         }
-        // Every field and value, whatever a secret's encoding would be: an added field fails here.
+        // Every field and value, whatever a secret's encoding would be: an added field fails here. The two dates are
+        // the item's own, read back from the list (`summary_carries_dates` pins what they are).
+        let item_dates = &list["data"]["items"][0];
         let summary = json!({
             "id": id, "kind": "login", "title": "Bank", "username": "ada@example.com", "collection": null,
             "trashed": false,
+            "created_at": item_dates["created_at"], "modified_at": item_dates["modified_at"],
             "attachments": [{
                 "file_id": file_id.to_hex(), "name": "statement.pdf", "length": 9,
                 "media_type": "application/octet-stream",
@@ -1007,6 +1010,7 @@ mod tests {
         let expected = json!({
             "id": "07".repeat(16), "kind": "login", "title": "Bank", "username": "ada", "collection": null,
             "trashed": false,
+            "created_at": "2026-10-29T00:00:00Z", "modified_at": "2026-10-29T00:00:00Z",
             "attachments": [{
                 "file_id": "09".repeat(16), "name": "statement.pdf", "length": 9,
                 "media_type": "application/pdf",
@@ -1024,6 +1028,58 @@ mod tests {
             list,
             json!({ "items": [expected], "damaged": ["07".repeat(16)] })
         );
+    }
+
+    /// The list, a single item and a search carry the item's two dates, as the engine keeps them (RFC 3339, UTC, whole
+    /// seconds), so the page can say when an item changed.
+    #[test]
+    fn summary_carries_dates() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        let item_id = ItemId::from_hex(&id).unwrap();
+        let (created, modified) = ts
+            .shell
+            .sessions
+            .read(s, g, |vault, _| {
+                let item = items(&vault).item(&item_id)?;
+                Ok((item.created_at.clone(), item.modified_at.clone()))
+            })
+            .unwrap()
+            .data;
+        assert!(created.ends_with('Z') && modified.ends_with('Z'));
+        assert!(created <= modified);
+
+        let list = serde_json::to_value(ts.shell.list_items(s, g).unwrap()).unwrap();
+        let detail = serde_json::to_value(ts.shell.get_item(s, g, &id).unwrap()).unwrap();
+        let found = serde_json::to_value(ts.shell.search_all("Bank").unwrap()).unwrap();
+        for summary in [
+            &list["data"]["items"][0],
+            &detail["data"]["summary"],
+            &found["hits"][0]["data"][0],
+        ] {
+            assert_eq!(summary["created_at"], json!(created));
+            assert_eq!(summary["modified_at"], json!(modified));
+        }
+
+        // A hand-built item: the view copies both strings as they are.
+        let item = Item {
+            id: ItemId([7; 16]),
+            kind: ItemKind::Note,
+            title: "Diary".into(),
+            notes: secret(""),
+            collection: None,
+            attachments: Vec::new(),
+            revision: 1,
+            created_at: "2026-01-02T03:04:05Z".into(),
+            modified_at: "2026-02-03T04:05:06Z".into(),
+            trashed_at: None,
+            purging: false,
+            retired_blobs: Vec::new(),
+        };
+        let summary = serde_json::to_value(ItemSummary::of(&item)).unwrap();
+        assert_eq!(summary["created_at"], "2026-01-02T03:04:05Z");
+        assert_eq!(summary["modified_at"], "2026-02-03T04:05:06Z");
     }
 
     #[test]

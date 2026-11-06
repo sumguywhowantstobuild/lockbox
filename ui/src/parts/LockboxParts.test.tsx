@@ -4,11 +4,10 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Menu } from "@base-ui/react/menu";
 import { ScrollArea } from "@base-ui/react/scroll-area";
 import { Select } from "@base-ui/react/select";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import type { ReactNode } from "react";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { PartsProbe } from "../probes/PartsProbe";
+import { afterEach, beforeEach, expect, test } from "vitest";
 import { LockboxParts } from "./LockboxParts";
 
 // Vitest globals are off, so Testing Library does not unmount between tests by itself.
@@ -148,77 +147,6 @@ test("scroll_area_and_select_work_with_style_elements_off", () => {
   fireEvent.pointerDown(option);
   fireEvent.click(option);
   expect(screen.getByRole("combobox", { name: "Probe select" }).textContent).toBe("Gala");
-});
-
-// A browser's `securitypolicyviolation` event. The field names and values are copied from one live capture in Edge
-// (the engine behind WebView2) of a `<style>` element refused by `style-src 'self'`: the event is aimed at the element,
-// bubbles up to the window, and carries `effectiveDirective: "style-src-elem"`, `blockedURI: "inline"`, `sourceFile`,
-// `lineNumber`, `columnNumber`, `disposition: "enforce"` and an empty `sample`. jsdom has no
-// `SecurityPolicyViolationEvent`, so the fields go onto a plain event.
-function violation(fields: { effectiveDirective: string; blockedURI: string; sourceFile: string; lineNumber: number }): Event {
-  return Object.assign(new Event("securitypolicyviolation", { bubbles: true }), {
-    violatedDirective: fields.effectiveDirective,
-    disposition: "enforce",
-    sample: "",
-    columnNumber: 1,
-    ...fields,
-  });
-}
-
-test("probe_lists_policy_violations", () => {
-  render(<PartsProbe />);
-  expect(screen.getByText("Policy violations: 0")).toBeTruthy();
-  expect(screen.queryByRole("list", { name: "Policy violation list" })).toBeNull();
-
-  // One aimed at the window (what a browser sends when no element is involved), one at an element, which bubbles up.
-  act(() => {
-    window.dispatchEvent(
-      violation({
-        effectiveDirective: "style-src-elem",
-        blockedURI: "inline",
-        sourceFile: "http://tauri.localhost/assets/index.js",
-        lineNumber: 12,
-      }),
-    );
-    document.body.dispatchEvent(
-      violation({
-        effectiveDirective: "font-src",
-        blockedURI: "data",
-        sourceFile: "http://tauri.localhost/assets/index.css",
-        lineNumber: 3,
-      }),
-    );
-  });
-  expect(screen.getByText("Policy violations: 2")).toBeTruthy();
-  const entries = within(screen.getByRole("list", { name: "Policy violation list" })).getAllByRole("listitem");
-  expect(entries).toHaveLength(2);
-  expect(entries[0]?.textContent).toContain("style-src-elem");
-  expect(entries[0]?.textContent).toContain("inline");
-  expect(entries[0]?.textContent).toContain("index.js:12");
-  expect(entries[1]?.textContent).toContain("font-src");
-  expect(entries[1]?.textContent).toContain("data");
-
-  fireEvent.click(screen.getByRole("button", { name: "Clear violations" }));
-  expect(screen.getByText("Policy violations: 0")).toBeTruthy();
-});
-
-test("cause_a_test_violation_adds_a_style_element_and_takes_it_away", () => {
-  // The probe's positive control: in the real window the policy refuses this element and the list shows it, which
-  // proves the listener works before a "zero violations" result is believed. jsdom enforces no policy, so here only
-  // the element is checked.
-  vi.useFakeTimers();
-  try {
-    render(<PartsProbe />);
-    expect(styleElements()).toBe(0);
-    fireEvent.click(screen.getByRole("button", { name: "Cause a test violation" }));
-    expect(styleElements()).toBe(1);
-    act(() => {
-      vi.runAllTimers();
-    });
-    expect(styleElements()).toBe(0);
-  } finally {
-    vi.useRealTimers();
-  }
 });
 
 // The built style sheets and fonts, found by name only (the glob loads nothing). It finds none until `npm run build`
