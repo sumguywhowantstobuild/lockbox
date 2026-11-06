@@ -118,6 +118,7 @@ export function CreateVault({ onBack }: { onBack: () => void }) {
           label="Password"
           value={password}
           rule="At least 12 characters."
+          minimum={MIN_PASSWORD}
           error={problems.password}
           onChange={(next) => {
             setPassword(next);

@@ -152,6 +152,10 @@ fn copy_error(error: &CoreError) -> CoreError {
         CoreError::WrongPassword => CoreError::WrongPassword,
         CoreError::RecoveryKeyTypo => CoreError::RecoveryKeyTypo,
         CoreError::InvalidRecoveryKey => CoreError::InvalidRecoveryKey,
+        CoreError::RecoveryKeyWord { position } => CoreError::RecoveryKeyWord {
+            position: *position,
+        },
+        CoreError::RecoveryKeyCount { found } => CoreError::RecoveryKeyCount { found: *found },
         CoreError::Damaged { what } => CoreError::Damaged { what },
         CoreError::PasswordTooShort { min } => CoreError::PasswordTooShort { min: *min },
         CoreError::NotEnoughSpace { needed, available } => CoreError::NotEnoughSpace {

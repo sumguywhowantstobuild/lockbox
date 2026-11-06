@@ -67,6 +67,10 @@ export const MESSAGES: Record<string, Words> = {
   "core:wrong_password": { title: "Wrong password.", body: "" },
   "core:recovery_key_typo": { title: "That recovery key has a typing mistake.", body: "Check it against the one you saved." },
   "core:invalid_recovery_key": { title: "That isn't a recovery key for Lockbox.", body: "" },
+  // These two say a number of their own, filled in from the refusal's: `{position}` and `{found}`, and `{s}`, which is
+  // an "s" unless `found` is 1.
+  "core:recovery_key_word": { title: "Word {position} isn't a recovery key word.", body: "Check it against the key you saved." },
+  "core:recovery_key_count": { title: "That's {found} word{s}; a recovery key has 24.", body: "Check none are missing or doubled." },
   "core:damaged": DAMAGED,
   "core:password_too_short": { title: "That password is too short.", body: "" },
   "core:not_enough_space": { title: "There isn't enough room on that drive.", body: "" },
@@ -168,7 +172,6 @@ export const KNOWN_WHATS: readonly string[] = [
   "output journal",
   "password",
   "password is empty",
-  "recovery key",
   "removable drive",
   "request",
   "restore",
@@ -207,7 +210,24 @@ export function messageText(message: Pick<Message, "title" | "body">): string {
 }
 
 /** The numbers a refusal can carry, by the name the shell gives them. */
-const NUMBER_FIELDS = ["needed", "available", "max_file", "min"] as const;
+const NUMBER_FIELDS = ["needed", "available", "max_file", "min", "position", "found"] as const;
+
+/** Fills a table entry's number places from the refusal's numbers; `undefined` when one it needs did not come as a whole number. */
+function filled(words: Words, numbers: Record<string, number>): Words | undefined {
+  const whole = (name: string): number | undefined => {
+    const value = numbers[name];
+    return value !== undefined && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  };
+  const text = `${words.title}\n${words.body}`;
+  // `{s}` follows `found`, so it needs it too.
+  const needs = [...text.matchAll(/\{(position|found|s)\}/g)].map((match) => (match[1] === "s" ? "found" : (match[1] ?? "")));
+  if (needs.some((name) => whole(name) === undefined)) return undefined;
+  const fill = (part: string) =>
+    part.replace(/\{(position|found|s)\}/g, (_, name: string) =>
+      name === "s" ? (whole("found") === 1 ? "" : "s") : String(whole(name)),
+    );
+  return { title: fill(words.title), body: fill(words.body) };
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -241,5 +261,8 @@ export function messageFor(error: unknown): Message {
     const value = error[field];
     if (typeof value === "number" && Number.isFinite(value)) numbers[field] = value;
   }
-  return Object.keys(numbers).length > 0 ? { ...words, numbers } : { ...words };
+  // A message with a number's place in it needs that number as a whole number: without it, it is the generic message.
+  const said = filled(words, numbers);
+  if (said === undefined) return { ...GENERIC };
+  return Object.keys(numbers).length > 0 ? { ...said, numbers } : { ...said };
 }

@@ -421,8 +421,9 @@ Lockbox defends.
   password back (spec 5.3). *Accepted:* a backup has to open with the credentials it was made with, and changing them
   does not change the vault key; full revocation needs "Rotate vault key" (v1.1). Delete backups you no longer want
   reachable.
-- **Some recovery-key typos are not caught.** The 4-bit check catches a mistyped symbol about 15 times in 16 (the test
-  requires at least 14 in 16); the rest simply fail to unlock. *Accepted:* a short check keeps the key easy to type.
+- **Some recovery-key typos are not caught.** The 8-bit check catches a wrong but listed word 255 times in 256 (the test
+  requires at least 250 in 256); the rest simply fail to unlock. A word whose first four letters match no listed word,
+  and a wrong count, are always caught. *Accepted:* a short check keeps the key easy to write down.
 - **Guess cost can end up below the 1-second target.** Calibration times each size once, so a noisy PC can pick
   settings that are cheaper than intended, but never below the minimum (64 MiB, 3 passes). A password change keeps the
   vault's existing settings rather than calibrating again. *Accepted:* the floor is the guarantee; the target is a goal.

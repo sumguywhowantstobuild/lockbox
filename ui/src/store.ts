@@ -1,6 +1,6 @@
 // What the page keeps of each unlocked vault: its item list, the item open in the panel, values the person asked to
-// see, text typed into a form, the message about the last copy, and a recovery key being shown or typed back (with what
-// was typed of it). Nothing else. A lock wipes the lot at once: the
+// see, text typed into a form, the message about the last copy, and a recovery key being shown or picked back (with the
+// questions asked of it). Nothing else. A lock wipes the lot at once: the
 // store listens for `lockbox://locked` before any command is sent, and a lock event drops the vault's whole record
 // (`dropSession`). An answer that comes back for a vault that has locked since is dropped without a word (it is the
 // expected outcome of a lock, not an error): the bridge refuses it with `StaleAnswer`, and so does this file when the
@@ -8,6 +8,7 @@
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
 import type { CopyableField, ItemDetail, ItemSummary, VaultEntry } from "./api";
+import type { Ask } from "./screens/setup/keyWords";
 
 /** The item open in the panel: its summary row's id, and what the shell said of it once it has. */
 export interface OpenItem {
@@ -27,10 +28,13 @@ export type RecoveryStep =
   | { phase: "making" }
   /** The shell would not make the key (it could not write its mark first); the person can ask again. */
   | { phase: "failed"; error: unknown }
-  /** The key on screen, to be saved. `unfinished` is the key of an earlier step that never finished (21f). */
-  | { phase: "show"; key: string; unfinished: boolean }
-  /** The key hidden, two of its groups (by position, from 0) to be typed back. */
-  | { phase: "typeback"; key: string; unfinished: boolean; groups: readonly [number, number] };
+  /**
+   * The key on screen, to be saved. `unfinished` is the key of an earlier step that never finished (21f); `missed` is
+   * that a wrong pick brought the person back here.
+   */
+  | { phase: "show"; key: string; unfinished: boolean; missed: boolean }
+  /** The key hidden, and three words to pick, one question at a time: `at` (from 0) is the one now asked. */
+  | { phase: "pick"; key: string; unfinished: boolean; asks: readonly Ask[]; at: number };
 
 /** One unlocked vault. */
 export interface SessionData {
@@ -166,7 +170,7 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
     throw error;
   }
   const { info } = answer.data;
-  // The recovery key of this vault was made and never typed back: the page goes straight to a new one (21f), before it
+  // The recovery key of this vault was made and never confirmed by picking: the page goes straight to a new one (21f), before it
   // shows anything of the vault. A read-only copy never does (the shell says false for it).
   const unfinished = answer.data.recovery_unconfirmed && !info.read_only;
   const record = newRecord(answer, vaultId, info, unfinished ? { phase: "making" } : null);
@@ -261,7 +265,12 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
   const before = new Set((state.vaults ?? []).map((vault) => vault.id));
   const { info, recovery_key } = answer.data;
   // The vault's place on the list is not known until the list is read again; the record stands in the meantime.
-  const record = newRecord(answer, -1, info, { phase: "show", key: recovery_key, unfinished: false });
+  const record = newRecord(answer, -1, info, {
+    phase: "show",
+    key: recovery_key,
+    unfinished: false,
+    missed: false,
+  });
   set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
   void loadItems(record);
   const list = await refreshVaults();
@@ -301,7 +310,10 @@ export async function makeNewKey(session: number): Promise<void> {
   try {
     const answer = await api.regenerateRecovery({ session, generation });
     if (!stillOpen(session, generation)) return;
-    update(session, (current) => ({ ...current, recovery: { phase: "show", key: answer.data, unfinished: true } }));
+    update(session, (current) => ({
+      ...current,
+      recovery: { phase: "show", key: answer.data, unfinished: true, missed: false },
+    }));
   } catch (error) {
     if (refusedAsLocked(error)) dropSession(session);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
@@ -309,35 +321,44 @@ export async function makeNewKey(session: number): Promise<void> {
   }
 }
 
-const GROUP_BOXES = ["recovery-group-1", "recovery-group-2"] as const;
-
-/** Hides the key and asks for two of its groups, `groups` by position from 0. */
-export function startTypeBack(session: number, groups: readonly [number, number]): void {
+/** Hides the key and asks the first of `asks`, three words to pick (made by the screen, from the key's own words). */
+export function startPicking(session: number, asks: readonly Ask[]): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "show") return entry;
-    const forms = { ...entry.forms, [GROUP_BOXES[0]]: "", [GROUP_BOXES[1]]: "" };
-    return { ...entry, forms, recovery: { ...entry.recovery, phase: "typeback", groups } };
+    const { key, unfinished } = entry.recovery;
+    return { ...entry, recovery: { phase: "pick", key, unfinished, asks, at: 0 } };
   });
 }
 
-/** Shows the key again; what was typed of it is dropped. */
+/** A right pick on question `at` that is not the last: on to the next. A second click on the same question does nothing. */
+export function nextQuestion(session: number, at: number): void {
+  update(session, (entry) => {
+    if (entry.recovery?.phase !== "pick" || entry.recovery.at !== at) return entry;
+    return { ...entry, recovery: { ...entry.recovery, at: at + 1 } };
+  });
+}
+
+/** A wrong pick on question `at`: the key is shown again, with a note that says so, to start over with new words. */
+export function missedPick(session: number, at: number): void {
+  update(session, (entry) => {
+    if (entry.recovery?.phase !== "pick" || entry.recovery.at !== at) return entry;
+    const { key, unfinished } = entry.recovery;
+    return { ...entry, recovery: { phase: "show", key, unfinished, missed: true } };
+  });
+}
+
+/** Shows the key again, with no note: the questions are dropped, and new ones are made when the person goes on. */
 export function showKeyAgain(session: number): void {
   update(session, (entry) => {
-    if (entry.recovery?.phase !== "typeback") return entry;
-    const forms = { ...entry.forms, [GROUP_BOXES[0]]: "", [GROUP_BOXES[1]]: "" };
+    if (entry.recovery?.phase !== "pick") return entry;
     const { key, unfinished } = entry.recovery;
-    return { ...entry, forms, recovery: { phase: "show", key, unfinished } };
+    return { ...entry, recovery: { phase: "show", key, unfinished, missed: false } };
   });
-}
-
-/** The names of the two boxes the typed-back groups go in. */
-export function groupBoxName(slot: 0 | 1): string {
-  return GROUP_BOXES[slot];
 }
 
 /**
- * The groups matched: tells the shell, which clears its mark, and only then lets the key go. The key and what was typed
- * of it are dropped on success. A refusal is thrown for the screen to say, and the step stays.
+ * The three words were right: tells the shell, which clears its mark, and only then lets the key go. The key and the
+ * questions are dropped on success. A refusal is thrown for the screen to say, and the step stays.
  */
 export async function confirmRecovery(session: number): Promise<void> {
   const entry = sessionOf(session);
@@ -351,11 +372,7 @@ export async function confirmRecovery(session: number): Promise<void> {
     throw error;
   }
   if (!stillOpen(session, generation)) return;
-  update(session, (current) => ({
-    ...current,
-    recovery: null,
-    forms: { ...current.forms, [GROUP_BOXES[0]]: "", [GROUP_BOXES[1]]: "" },
-  }));
+  update(session, (current) => ({ ...current, recovery: null }));
 }
 
 async function loadItems(record: SessionData): Promise<"opened" | "stale"> {

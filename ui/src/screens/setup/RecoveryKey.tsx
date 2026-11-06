@@ -1,11 +1,21 @@
 import { messageFor, messageText } from "../../messages";
-import { makeNewKey, startTypeBack, type SessionData } from "../../store";
+import { makeNewKey, startPicking, type SessionData } from "../../store";
 import { Frame, SAY_KEY } from "./Frame";
-import { groupsOf, pickGroups } from "./keyGroups";
+import { asksFor, wordsOf } from "./keyWords";
 
 /**
- * The recovery key step (21c for a new vault, 21f for one whose earlier step never finished): the key, shown for as long
- * as the vault stays unlocked, and what losing it means. It is the store's, so any lock takes it off the screen and the
+ * Puts focus on the heading when it appears after a wrong pick: the button that had focus went with the questions, and
+ * without this the next Tab would start from the top of the page. (One function for good, so a later render of the screen
+ * does not take focus again.)
+ */
+function focusWhenShown(heading: HTMLHeadingElement | null): void {
+  heading?.focus();
+}
+
+/**
+ * The recovery key step (21c for a new vault, 21f for one whose earlier step never finished): the key as 24 numbered
+ * words in two columns, headed as what it is (a Lockbox key, not a crypto wallet phrase), shown for as long as the vault
+ * stays unlocked, and what losing it means. It is the store's, so any lock takes it off the screen and the
  * next unlock makes a new one. Saving it as a PDF or printing it comes with a later task, so nothing here offers either.
  * Also the screens before the key arrives (21f asks the shell for a new one) and after the shell would not make it.
  */
@@ -47,18 +57,43 @@ export function RecoveryKey({ data }: { data: SessionData }) {
   }
 
   if (step.phase !== "show") return null;
-  const { key, unfinished } = step;
+  const { key, unfinished, missed } = step;
+  const words = wordsOf(key);
+  const half = Math.ceil(words.length / 2);
+  // Two columns, 1 to 12 and 13 to 24, so the words can be copied by hand in order. Each word is its own element, and
+  // the key is in no attribute (a title, a label), so it is read out and selected as the words it is.
+  const column = (from: number, to: number) => (
+    <ol className="fu-col">
+      {words.slice(from, to).map((word, place) => (
+        <li key={from + place}>
+          <span className="fu-n">{from + place + 1}</span>
+          <span className="fu-w">{word}</span>
+        </li>
+      ))}
+    </ol>
+  );
   return (
     <Frame say={SAY_KEY}>
       {unfinished ? null : <p className="fu-step">Step 2 of 2</p>}
-      <h1>{unfinished ? "Finish your recovery key" : "Save your recovery key"}</h1>
+      <h1 tabIndex={missed ? -1 : undefined} ref={missed ? focusWhenShown : undefined}>
+        {unfinished ? "Finish your recovery key" : "Save your recovery key"}
+      </h1>
       {unfinished ? (
         <p className="fu-sub">
           Last time this step didn&apos;t finish, so that key may not have been saved. This is a new one, and the old one no
           longer works.
         </p>
       ) : null}
-      <p className="fu-key m">{key}</p>
+      {missed ? (
+        <p className="err" role="alert">
+          That wasn&apos;t the right word, so here is your key again. Look it over, then go on to try three new words.
+        </p>
+      ) : null}
+      <h2 className="fu-kind">Lockbox recovery key, not a crypto wallet phrase</h2>
+      <div className="fu-key m">
+        {column(0, half)}
+        {column(half, words.length)}
+      </div>
       <p className="fu-lose">If you lose both your password and this key, nobody can get your data back.</p>
       <p className="fu-hint">
         Don&apos;t keep the saved key on this PC. Writing it down by hand is fine. Screenshots won&apos;t work, because
@@ -69,7 +104,7 @@ export function RecoveryKey({ data }: { data: SessionData }) {
           type="button"
           className="prim"
           onClick={() => {
-            startTypeBack(data.session, pickGroups(groupsOf(key).length));
+            startPicking(data.session, asksFor(key));
           }}
         >
           Continue

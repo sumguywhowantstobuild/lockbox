@@ -48,6 +48,10 @@ export function ListIcon() {
   return <Drawing d="M5 7h14M5 12h14M5 17h14" />;
 }
 
+export function CheckIcon() {
+  return <Drawing d="M5 12.5l4.5 4.5L19 7.5" />;
+}
+
 export function CloseIcon() {
   return <Drawing d="M6 6l12 12M18 6L6 18" />;
 }

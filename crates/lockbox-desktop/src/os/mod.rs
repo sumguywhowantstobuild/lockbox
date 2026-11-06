@@ -94,6 +94,8 @@ pub const CLIPBOARD_FAILED: ShellError = ShellError::Core(CoreErrorView {
     available: None,
     max_file: None,
     min: None,
+    position: None,
+    found: None,
 });
 /// The clipboard holds more text than an item can (the engine's [`MAX_ITEM_JSON`]). Fixed text only: never the text.
 pub const CLIPBOARD_TOO_LARGE: ShellError = ShellError::TooLarge {

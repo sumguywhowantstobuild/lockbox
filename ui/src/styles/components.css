@@ -272,6 +272,18 @@
   font-size: 13px;
 }
 
+/* A rule that is met: a check mark in the vault's colour, and the words in the ordinary text colour. */
+.fu-hint.ok {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--ink);
+}
+
+.fu-hint.ok .i {
+  color: var(--v);
+}
+
 .fu-where {
   margin: 0;
 }
@@ -288,18 +300,98 @@
   align-items: center;
 }
 
-/* The key, shown once: large, in the fixed-width face, breaking at its dashes. */
+/* What the key is: said above the words, so it is not mistaken for a crypto wallet's phrase. */
+.fu-kind {
+  margin: 0 0 -6px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+/* The key, shown once: its 24 words in the fixed-width face, numbered down two columns (1 to 12, then 13 to 24). */
 .fu-key {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 20px;
   margin: 0;
-  padding: 16px 18px;
+  padding: 14px 18px;
   background: var(--card);
   border: 1px solid var(--edge);
   border-radius: 12px;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 500;
-  letter-spacing: 0.04em;
-  line-height: 1.6;
+  line-height: 1.55;
+}
+
+.fu-col {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fu-col li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+/* The number is as wide as "24" so the words line up, and quieter than the word. */
+.fu-n {
+  flex: 0 0 2ch;
+  color: var(--ink2);
+  text-align: right;
+  font-weight: 400;
+}
+
+.fu-w {
+  min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* One question of the check: the number asked, and four words to pick from, two by two. */
+.fu-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fu-q {
+  margin: 0;
+  font-weight: 500;
+}
+
+.fu-pick {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.fu-pick button {
+  height: 44px;
+  padding: 0 12px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s var(--ease);
+}
+
+.fu-pick button:hover {
+  background: var(--hov);
+}
+
+.fu-pick button:active {
+  background: var(--prs);
+}
+
+.fu-pick button[disabled] {
+  color: var(--ink2);
+  cursor: not-allowed;
 }
 
 /* A quiet button that reads as a link: the second way out of a step. */

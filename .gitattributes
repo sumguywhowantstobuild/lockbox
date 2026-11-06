@@ -3,3 +3,7 @@
 
 # The EFF wordlist must stay byte-for-byte as published (see THIRD-PARTY-NOTICES.md).
 crates/lockbox-core/wordlists/eff_large_wordlist.txt -text
+
+# The BIP39 English list must stay byte-for-byte as published, with LF endings (see THIRD-PARTY-NOTICES.md): the
+# recovery key's words and a test's SHA-256 pin depend on it.
+crates/lockbox-core/src/wordlist/english.txt -text

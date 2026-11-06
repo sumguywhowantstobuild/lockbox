@@ -44,16 +44,32 @@ export const LOCKED = { code: "locked" };
 /** What the shell sends when it cannot write the mark first (`write_state(…, "vault state")`, `TooLarge`). */
 export const VAULT_STATE_REFUSED = { code: "too_large", what: "vault state" };
 
-const SYMBOLS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/**
+ * Made-up stand-ins for the engine's word list: 64 lowercase words, none of them a word the screens use themselves
+ * (so a test can tell a key word on the page from the page's own words). The engine's real list is 2,048 words.
+ */
+export const FAKE_WORDS: readonly string[] = [
+  "amber", "badger", "basalt", "beacon", "birch", "cactus", "cedar", "cobalt",
+  "copper", "coral", "dagger", "daisy", "ember", "falcon", "fennel", "flint",
+  "garnet", "ginger", "glacier", "harbor", "hazel", "indigo", "ivory", "jasper",
+  "jungle", "kernel", "lagoon", "lantern", "lemon", "magnet", "maple", "marble",
+  "meadow", "nectar", "nickel", "nutmeg", "olive", "onyx", "orchid", "otter",
+  "pebble", "pepper", "plum", "quartz", "quiver", "raven", "ribbon", "saddle",
+  "sapphire", "sorrel", "tangent", "thistle", "timber", "topaz", "tundra", "umber",
+  "velvet", "violet", "walnut", "willow", "yarrow", "zephyr", "zinnia", "zircon",
+];
 
-/** A recovery key in the engine's display form (13 groups of 4 symbols, dashes between), different for each `n`. */
+/**
+ * A recovery key in the shell's display form (24 lowercase words, single spaces, no numbers), different for each `n`.
+ * Its words are distinct, so a test that needs a repeated word builds its own.
+ */
 export function fakeKey(n: number): string {
-  const groups: string[] = [];
-  for (let i = 0; i < 13; i += 1) {
-    const at = (value: number) => SYMBOLS.charAt(value % 32);
-    groups.push(at(n * 7 + i * 3) + at(i * 5 + 1) + at(n + i) + at(i * 11 + n * 13 + 2));
+  const words: string[] = [];
+  for (let i = 0; i < 24; i += 1) {
+    // 24 steps of 5 round a list of 64 never meet themselves (5 and 64 share no factor); `n` moves where it starts.
+    words.push(FAKE_WORDS[(n * 11 + i * 5) % FAKE_WORDS.length] ?? "");
   }
-  return groups.join("-");
+  return words.join(" ");
 }
 
 export function itemId(n: number): string {
@@ -133,6 +149,8 @@ export interface FakeShell {
   cloudNext(): void;
   /** The next create or new key finds the mark can't be written: nothing is made, the shell refuses. */
   refuseMarkNext(): void;
+  /** The next key the shell makes is this one (a test of a key with a repeated word needs one the fake would not make). */
+  nextKeyIs(key: string): void;
   /** The next folder picker (create with `choose_folder`, add existing) is closed without a choice. */
   dismissPickerNext(): void;
   /** The vault the next `add_existing_vault` finds in the folder the person picks. */
@@ -176,6 +194,7 @@ export function installFakeShell(
   const copied: FakeShell["copied"] = [];
   const keys = new Map<FakeVault, string>();
   let keysMade = 0;
+  let chosenKey: string | undefined;
   let cloud = false;
   let refuseMark = false;
   let dismissPicker = false;
@@ -232,7 +251,8 @@ export function installFakeShell(
 
   const makeKey = (vault: FakeVault): string => {
     keysMade += 1;
-    const key = fakeKey(keysMade);
+    const key = chosenKey ?? fakeKey(keysMade);
+    chosenKey = undefined;
     keys.set(vault, key);
     return key;
   };
@@ -458,6 +478,9 @@ export function installFakeShell(
     },
     refuseMarkNext: () => {
       refuseMark = true;
+    },
+    nextKeyIs: (key) => {
+      chosenKey = key;
     },
     dismissPickerNext: () => {
       dismissPicker = true;

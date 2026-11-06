@@ -7,8 +7,8 @@ import { vaultLook } from "./parts/Pattern";
 import { LockScreen } from "./screens/LockScreen";
 import { MainWindow } from "./screens/MainWindow";
 import { FirstRun } from "./screens/setup/FirstRun";
+import { PickWords } from "./screens/setup/PickWords";
 import { RecoveryKey } from "./screens/setup/RecoveryKey";
-import { TypeBack } from "./screens/setup/TypeBack";
 import { startStore, useSessions, useStartError, useVaults } from "./store";
 import { useMode } from "./theme";
 import "./styles/tokens.css";
@@ -20,7 +20,7 @@ import "./styles/print.css";
 
 /**
  * The whole app: first-time setup while there is no vault, the lock screen while none is open, the main window of the
- * vault opened last when one is, and its recovery key step instead of that while the key has not been typed back. The
+ * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. The
  * store starts listening for locks before anything asks the shell for anything. Light or dark follows Windows.
  */
 export default function App() {
@@ -44,7 +44,7 @@ export default function App() {
   if (active !== undefined) {
     // A vault whose recovery key was not typed back yet shows that step and nothing of the vault (21c, 21d, 21f).
     if (active.recovery === null) screen = <MainWindow data={active} look={look} />;
-    else if (active.recovery.phase === "typeback") screen = <TypeBack data={active} />;
+    else if (active.recovery.phase === "pick") screen = <PickWords data={active} />;
     else screen = <RecoveryKey data={active} />;
   } else if (vaults !== null && vaults.length === 0 && startError === null) {
     // No vault at all: first-time setup (21a).

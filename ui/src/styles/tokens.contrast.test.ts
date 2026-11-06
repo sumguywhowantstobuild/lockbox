@@ -231,6 +231,9 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       // The first-use screens: the recovery key's box (its edge against the plate, its words on the card), the quiet
       // link-buttons (words on the plate at rest, hovered and pressed) and a field in error (its edge against the plate).
       check("recovery key box edge on the plate", c("--edge"), ground, 3);
+      // The create form's password rule once it is met: the check mark in the vault's colour on the plate (its words are
+      // the ordinary text colour, measured above).
+      check("password rule's met check mark on the plate", c("--v"), ground, 3);
       check("recovery key words on their box", c("--ink"), card, 4.5);
       for (const [state, tint] of [["rest", ground], ["hover", over(c("--hov"), ground)], ["pressed", over(c("--prs"), ground)]] as const) {
         check(`link-button words, ${state}`, c("--ink"), tint, 4.5);

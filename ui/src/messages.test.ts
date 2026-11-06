@@ -50,10 +50,11 @@ test("every_shell_error_has_a_message", () => {
     if (what !== undefined) expect(KNOWN_WHATS, id).toContain(what);
   }
 
-  // Every message is words: a title, and a body that may be empty.
+  // Every message is words: a title, and a body that may be empty. The only braces are a number's place, `{position}`.
   for (const [id, message] of Object.entries(MESSAGES)) {
     expect(message.title.length, id).toBeGreaterThan(0);
-    expect(`${message.title} ${message.body}`, id).not.toMatch(/[{}[\]]|undefined|null|\\/);
+    const bare = `${message.title} ${message.body}`.replace(/\{(?:position|found|s)\}/g, "1");
+    expect(bare, id).not.toMatch(/[{}[\]]|undefined|null|\\/);
   }
 });
 
@@ -91,6 +92,37 @@ test("a_vault_state_refusal_has_words_of_its_own", () => {
   expect(KNOWN_WHATS).toContain("vault state");
   // The same note failing as a disk error reads as the disk error it is.
   expect(messageFor({ code: "core", kind: "io" }).title).toBe(MESSAGES["core:io"]?.title);
+});
+
+test("word_and_count_refusals_have_words", () => {
+  // Task 6b's two refusals, exactly as the shell sends them (the contract's JSON), said with their numbers.
+  const word = messageFor({ code: "core", kind: "recovery_key_word", position: 7 });
+  expect(word.title).toBe("Word 7 isn't a recovery key word.");
+  expect(word.body).toBe("Check it against the key you saved.");
+  expect(word.numbers).toEqual({ position: 7 });
+  const count = messageFor({ code: "core", kind: "recovery_key_count", found: 23 });
+  expect(count.title).toBe("That's 23 words; a recovery key has 24.");
+  expect(count.body).toBe("Check none are missing or doubled.");
+  expect(count.numbers).toEqual({ found: 23 });
+  // One word is one word.
+  expect(messageFor({ code: "core", kind: "recovery_key_count", found: 1 }).title).toBe("That's 1 word; a recovery key has 24.");
+  expect(messageFor({ code: "core", kind: "recovery_key_count", found: 0 }).title).toBe("That's 0 words; a recovery key has 24.");
+
+  // The numbers are numbers: anything else, or no number, is the generic message and carries none of the shell's text.
+  const SENTINEL = "SENTINEL-4c1d C:\\Users\\secret";
+  for (const bad of [SENTINEL, "7", -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, null, undefined, { nested: 7 }]) {
+    for (const [kind, field] of [
+      ["recovery_key_word", "position"],
+      ["recovery_key_count", "found"],
+    ] as const) {
+      const message = messageFor({ code: "core", kind, [field]: bad });
+      expect(message.title, `${kind} ${JSON.stringify(bad)}`).toBe(GENERIC.title);
+      expect(JSON.stringify(message)).not.toContain("SENTINEL");
+    }
+  }
+  // The old kinds are as they were.
+  expect(messageFor({ code: "core", kind: "recovery_key_typo" }).title).toBe("That recovery key has a typing mistake.");
+  expect(messageFor({ code: "core", kind: "invalid_recovery_key" }).title).toBe("That isn't a recovery key for Lockbox.");
 });
 
 test("a_vault_made_but_not_listed_points_at_the_first_screens_words", () => {
