@@ -129,8 +129,11 @@ it (IDs, the extra context each encryption is bound to, base64). Exact versions 
   text typed on different keyboards unlocks the same vault.
 - **Vault key:** 256 random bits from the operating system (`getrandom`), made once per vault. It is stored only
   wrapped (encrypted) in two **key slots**, one opened by the password key and one by the recovery key.
-- **Recovery key:** 256 random bits plus a 4-bit typo check, shown as 52 characters. The key is derived from it with
-  HKDF-SHA256 (a standard way to derive keys from a secret), crates `hkdf` and `sha2`.
+- **Recovery key:** 256 random bits, shown as 24 words from the BIP39 English list, with an 8-bit typo check. The key
+  is derived from it with HKDF-SHA256 (a standard way to derive keys from a secret), crates `hkdf` and `sha2`. The
+  earlier 52-character form is no longer accepted; it was never released. The 24 words look like a crypto wallet's
+  recovery phrase, which malware and scams hunt for, so every screen and PDF that shows it is headed "Lockbox recovery
+  key, not a crypto wallet phrase". Keep a saved copy off this PC.
 - **Encryption:** XChaCha20-Poly1305 (encryption that also detects tampering), crate `chacha20poly1305`. Key slots
   and items use it directly with a fresh random 24-byte nonce (a one-time value) each time.
 - **Files:** each stored file has its own random key, kept inside its encrypted item. File contents are encrypted in

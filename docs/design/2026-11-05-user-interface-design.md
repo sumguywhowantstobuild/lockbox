@@ -168,7 +168,7 @@ each screen that links to them loses that link.
   list comes in only if that measure fails (my call: lowest cost, and better for screen readers).
 - **Fonts: Geist and Geist Mono, bundled** through `@fontsource-variable/geist` and `geist-mono` (5.3, OFL-1.1). The
   policy allows fonts only from the app itself, and there's no network at run time.
-- **Recovery key PDF: WebView2's print-to-PDF** with a print style sheet that shows only the key and its words. The bindings
+- **Recovery key PDF: WebView2's print-to-PDF** with a print style sheet that shows only the key's heading ("Lockbox recovery key, not a crypto wallet phrase", spec 5.2), its 24 numbered words and the words around them. The bindings
   are already in the shell, the page already draws the key, and a PDF library isn't needed (my call; Microsoft's reference
   says a second print job at the same time fails at once, so the button waits for the first).
 - **Accessibility checks: `axe-core` called directly** (4.14, MPL-2.0, test only). `vitest-axe` hasn't been updated since
@@ -359,7 +359,7 @@ for the vault's name. Moments with their own screen in a task (10d, 10e, 1c, 2c,
 | Restore refused, wrong drive | A vault can't live on a removable, FAT32 or network drive. Choose a folder on this PC. | OK |
 | All old-copy names used | There are too many older copies of this vault. Delete some, then restore again. | Older copies, Cancel |
 | Nowhere to copy to | Unlock a vault first, so there's somewhere to copy this to. | OK |
-| Vault made but not listed | Your new vault is on disk but couldn't be added to the list. Use Add existing vault folder, then make a new recovery key. | OK |
+| Vault made but not listed | Your new vault is on disk but couldn't be added to the list. Use "I already have a vault" on the first screen to add it. (Its new recovery key is made at its first unlock, 21f.) | OK |
 
 **New behind these:** today's code has no "no" answer to Ask 3. Lock this vault uses the lock that already exists, and the
 question comes back at the next unlock. The vault-list reset for Ask 12 doesn't exist yet either. The shell has to say which
@@ -374,12 +374,23 @@ be known).
 Set out in tasks 21 and 29, since this is where a person can lose everything.
 
 - The vault is already written when the key appears, so nothing on this screen may be the only record that it happened. A
-  per-vault mark is written first and cleared only once part of it has been typed back. **First, so a crash can't get between
+  per-vault mark is written first and cleared only once the key has been confirmed. **First, so a crash can't get between
   them:** for a new vault, the shell chooses its ID, writes the mark, then creates it (the engine's `create_with_id` already
   takes one, and gives the folder's location); for a new key, the mark goes before the header changes. If the mark can't be
   written, no key is made. A mark left by a failed attempt costs one extra key at worst. If the mark is still there at the next unlock of a writable, live vault, Lockbox says so and makes a new key straight
   away (21f). A read-only copy with the same ID is never touched.
-- The key is hidden while two random groups of it are typed back, so typing proves something.
+- The key is 24 numbered words (spec 5.2), shown in two columns so they can be copied by hand in order (Ariel,
+  2026-11-06, at Task 6's hands-on: the earlier 13 groups of letters were confusing and typing two back was frustrating).
+- To confirm, the key is hidden and three different word numbers are picked at random. For each, four words are offered
+  in random order: the right one and three different words from the key's other places (skipping any that equal the
+  right word or each other, since a key can repeat a word; picked with the platform's secure random source), so passing needs each word's number, not just a memory of having seen it. A wrong pick says so,
+  shows the words again, and starts over with three new numbers. This proves the written copy without typing, as wallets
+  confirm a recovery phrase (standard). With no retry on the same choices, a guess passes 1 time in 64 per round, and
+  each wrong guess shows the key again: the check is against a mistake, not an attacker, who has the unlocked vault at
+  this point anyway.
+- Words are only shown and picked here, never typed, so this screen has no text field. Every field where a recovery key is
+  typed in (forgot password, restore, test a backup, open a backup read-only, a vault moved to a new computer; 4B and 4C)
+  turns off spellcheck, autocorrect, auto-capitalisation and autocomplete, with a test.
 - It says plainly that losing both means nobody can get the data back, advises against keeping the saved key on this PC,
   and says writing it down by hand is fine and screenshots won't work.
 - The idle timer doesn't pause on this screen, and any lock wipes it. This is why the mark exists: a lock costs one more
@@ -585,7 +596,7 @@ wrong:* a cloud-synced folder warns; removable, FAT32 or network is refused. Sho
 two with the same name apart.
 
 **21. First-time setup.** First screen: create a vault, or "I already have a vault or a backup". Name (not encrypted, so no secrets
-in it) and password twice. The recovery key: see [First use](#first-use-and-the-recovery-key). Type two random groups back. Then
+in it) and password twice. The recovery key: see [First use](#first-use-and-the-recovery-key). Pick the right word for three random word numbers. Then
 the empty vault, with "what to do first".
 
 **22. Back up.** From Settings or the reminder. Choose where; it says to keep it on another drive. Progress; closing asks first.
@@ -619,7 +630,7 @@ another vault or an old one says "This key doesn't open My vault."; no key says 
 with details they still have.
 
 **29. New recovery key.** Current password. It says the old key stops working here, but old backups still need it. See it once, print
-or save, type part back. Offered a fresh backup.
+or save, confirm it by picking words. Offered a fresh backup.
 
 **30. Add back or remove.** Add existing vault folder on the lock screen. *If wrong:* a folder that isn't a vault says so; a vault
 whose folder or drive is gone shows as unavailable, with Try again and Remove from list on its row.

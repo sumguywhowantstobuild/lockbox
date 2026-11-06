@@ -48,7 +48,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `serde_b64.rs` | Base64 for binary fields in JSON (non-secret fields only) |
 | `secret.rs` | `Key32`, a key that wipes itself and never prints; the one OS random source; the one HKDF helper (HKDF makes new keys from a secret) |
 | `kdf.rs` | Password to key with Argon2id (a slow, memory-hungry password hash); accepted settings; calibration; the 12-character minimum |
-| `recovery.rs` | The recovery secret: generate, 52-symbol display, parse with typo check, derive its key |
+| `recovery.rs` | The recovery secret: generate, 24-word display, parse with typo check, derive its key |
 | `aead.rs` | The one XChaCha20-Poly1305 call (encryption that also detects tampering) for whole buffers: key slots and items |
 | `slots.rs` | Key slots: wrap and unwrap the vault key under the password key or the recovery key |
 | `header.rs` | `vault.json` and its `.bak`: strict parse, header MAC (a tamper-evident stamp), writing both copies in order |

@@ -1,6 +1,6 @@
 # Lockbox — Design Spec
 
-**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 7 (2026-11-05, the [user interface design](2026-11-05-user-interface-design.md); revision 6 was Plan 3's decisions, 2026-10-27). What revision 7 adds is designed, and comes with Plan 4's build; 7.2 and 7.3 carry the results of Plan 4's first checks (2026-11-06).
+**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 7 (2026-11-05, the [user interface design](2026-11-05-user-interface-design.md); revision 6 was Plan 3's decisions, 2026-10-27). What revision 7 adds is designed, and comes with Plan 4's build; 7.2 and 7.3 carry the results of Plan 4's first checks (2026-11-06). 5.2 shows the recovery secret as 24 words (2026-11-06, Ariel; the derivation and the vault format are unchanged).
 
 ## 1. Purpose
 
@@ -141,9 +141,31 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
   - **Accepted when reading** (vault.json is attacker-controlled before unlock): memory 64 MiB–1 GiB, iterations 3–10,
     parallelism 4–16, salt exactly 16 bytes. Out-of-bounds values are refused **before** any derivation.
   - Calibration output always lies inside the read bounds (tested).
-- **Recovery secret:** 256 random bits plus a 4-bit checksum (the first 4 bits of SHA-256 of the secret), shown as 52
-  Crockford base32 characters in 13 groups of 4. Input ignores spaces, dashes and case, and maps O→0 and I/L→1. A typo
-  is reported as "That recovery key has a typo" (caught 15 times in 16) before any unwrap attempt.
+- **Recovery secret:** 256 random bits, shown as 24 numbered words from the BIP39 English word list (2,048 words, the
+  list crypto wallets use): the secret plus an 8-bit checksum (the first 8 bits of SHA-256 of the secret), cut into 24
+  pieces of 11 bits, one word each. This is BIP39's encoding of the secret only; BIP39's seed step (PBKDF2) isn't used,
+  so the key below is derived exactly as before. (Ariel, 2026-11-06: the earlier 52 characters in 13 groups were
+  confusing to write down.)
+  - **Reading it back:** the text is lowercased with ASCII rules only (no Unicode folding). Separators are any run of
+    spaces, tabs, line breaks, commas or periods. A token of only digits, or digits followed by `.` or `)`, is a word
+    number and is dropped. Every other token must match one word exactly on its first four letters, or the whole word
+    when the word is shorter than four (`act` matches only "act", never "action"); the first four letters are unique in
+    the list. Exactly 24 words are needed. A token that matches no word is reported with its position ("Word 7 isn't a
+    recovery key word"), a wrong count says how many were found, and a checksum mismatch is "That recovery key has a
+    typo" (a wrong but listed word is caught 255 times in 256), all before any unwrap attempt.
+  - **Only this form:** the earlier 52-character form isn't accepted. No release has shipped, so no one holds such a key,
+    and accepting both would make reading riskier (a group like `0000` looks like numbering) (my call, 2026-11-06; if a
+    vault made with a development build holds real data, keep its password, or make a new key from the open vault).
+  - **The list:** the file stored is Trezor's `python-mnemonic` copy of the BIP39 English list
+    (`src/mnemonic/wordlist/english.txt`, MIT, whose notice is the one kept), the same list `bitcoin/bips` publishes;
+    the test pins its SHA-256, and the build checks that the two copies match when the file is added. It is kept in the core with a third-party notice, pinned by its SHA-256 in a test that
+    also checks its shape (2,048 sorted, lowercase, unique words; unique first four letters). The encoding is the core's
+    own few lines over `sha2`, checked against BIP39's published test vectors, rather than a new crate (my call:
+    rust-bitcoin's `bip39`, CC0, would work, but its decoding returns an unwiped buffer, it has no first-four-letters
+    reading, and a password manager's core takes on as few dependencies as it can).
+  - **Not a wallet phrase:** 24 such words look like a crypto wallet's recovery phrase, which malware and scams hunt for.
+    Every screen and the PDF that show it are headed "Lockbox recovery key, not a crypto wallet phrase", and
+    `SECURITY.md` says so.
   **Recovery key** = HKDF-SHA256(ikm = secret, salt = recovery-slot salt (16 random bytes),
   info = `"lockbox recovery key v1"`) → 32 bytes.
 - **Key slots** in `vault.json`: `{type: "password"|"recovery", slot_version, salt, [kdf params], nonce: 24 random
@@ -606,6 +628,8 @@ combination, among them Bitwarden's browser extension, which fills a login with 
 |---|---|
 | Wrong password | "Wrong password." (after also trying `.bak`, 6.3). No lockout (5.6). |
 | Recovery key typo | "That recovery key has a typo" (checksum, 5.2). |
+| Recovery key word not in the list | "Word 7 isn't a recovery key word" (5.2). The core's refusal carries the word's position, a number only. |
+| Recovery key with the wrong count | "That's 23 words; a recovery key has 24" (5.2). The core's refusal carries the count, a number only. |
 | Out-of-bounds Argon2 parameters or oversized header | Refused before derivation: "This vault file is damaged or not a Lockbox vault." |
 | Header MAC mismatch | Warning after unlock; header rewritten only with the user's OK (5.2). |
 | Damaged/tampered item | That item shows as damaged and is refused; the rest of the vault works; offer restore or open a backup read-only. |

@@ -80,7 +80,7 @@ path.
 - **Quick search** with Ctrl+K or Ctrl+F across unlocked vaults, with quick actions. It also finds attached files by
   name and can open one.
 - **Recovery key** per vault, shown once at creation; **Regenerate recovery key**. Each can be printed or saved as a PDF,
-  and a few characters are typed back to continue. If that step never finished, the next unlock says so and makes a new
+  and three of its words are picked to continue. If that step never finished, the next unlock says so and makes a new
   key.
 - **Change password** (with the warning in spec 5.3). Changing the password, making a new recovery key, and export each
   ask for the current password first.
@@ -182,7 +182,7 @@ engine (Plan 1), not in the spec. Plan 3 is the desktop shell, and Plan 4 the UI
 | Opening a big vault | 5 000 items: unlock under 3 s (not counting the roughly 1 s password check), search under 50 ms, release build | Plan 1 | `five_thousand_items_fast` (run on purpose, see the [README](../README.md#build-and-test)) |
 | Big files | A file of 4 GiB + 1 byte goes in and comes out with the same SHA-256 (a fingerprint of its contents), and memory stays flat (peak under 200 MB) | [Scope](#scope) (256 GiB limit) and spec 9 (a multi-GB local test before release); the 4 GiB size and 200 MB limit are from Plan 1 | `large_file_round_trip_4_gib` and `backup_restore_over_4_gib` (both run on purpose) |
 | Cost of guessing a password | Each guess costs one Argon2id run (a deliberately slow password-to-key step) of at least 64 MiB, 3 iterations, parallelism 4, calibrated to about 1 s | Spec R3 and 5.2 | Unit tests on the settings and their bounds |
-| Typos in the recovery key | A mistyped recovery key is caught about 15 times in 16, before any unlock attempt | Spec 5.2 | Test in the core's recovery module (it requires at least 14 in 16) |
+| Typos in the recovery key | A word whose first four letters match no word in the list is always caught (a slip after the fourth letter still reads as the intended word), and a wrong but listed word about 255 times in 256, before any unlock attempt | Spec 5.2 | Tests in the core's recovery module (at least 250 in 256) |
 | Auto-lock and clipboard defaults | Lock after 5 minutes idle; clear the clipboard after 30 seconds | [Screens](#screens) (Settings) | `settings_bounds_table` (the defaults and their limits), `locks_after_idle_setting` and `clears_after_delay_when_still_ours` (Plan 3) |
 | Backups of any size | An archive over 4 GiB backs up and restores (ZIP64 is the zip format for archives that big) | Spec 9 | `backup_restore_over_4_gib` (run on purpose): a 4 GiB + 1 byte file through backup, test, restore and export; the other backup and restore tests are in the core (Plan 2) |
 | Every screen, for everyone | Works by keyboard alone and with a screen reader; no automated accessibility failures; usable in Windows high contrast; nothing cut off in a 1093×534 window | [Scope](#scope) (For everyone) | Automated accessibility checks on every screen in CI; a written walk-through with NVDA (a free screen reader) and in high contrast before each release |
@@ -202,7 +202,7 @@ reviews cite them by number:
 
 | Screen | Contents |
 |---|---|
-| First run | Create a first vault, or "I already have a vault or a backup". Name and password, then the recovery key: print it or save it as a PDF, then type part of it back to continue. Then an empty vault with "what to do first". |
+| First run | Create a first vault, or "I already have a vault or a backup". Name and password, then the recovery key: print it or save it as a PDF, then pick three of its words to continue. Then an empty vault with "what to do first". |
 | Lock screen | Known vaults (from the registry and `vault.json` names); pick one, enter its password. Vaults unlock independently. "Forgot password?", "Restore a backup" and "Add existing vault folder". |
 | Main window | A side menu that closes to icons (vault strip from two vaults, search, All items, folders, Generator, Trash, Lock all) · item list (show one kind, sort) with one Add button always in the same place · item details in a side panel (copy/reveal, attached files: Open / Save a copy / Replace file) · a folder's `.env` in and out · leftover files (the spec's orphaned files) when any are found. Read-only vaults labelled. |
 | Save box | Opened by the shortcut, in the main window: the copied value hidden, the vault, the name, the folder, Save. A pasted `.env` shows one row per key. |
