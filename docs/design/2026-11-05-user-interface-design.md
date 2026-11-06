@@ -1,6 +1,6 @@
 # User interface (Plan 4): design
 
-**Date:** 2026-11-05 · **Author:** Ariel Maningas · **Status:** approved by Ariel, 2026-11-05
+**Date:** 2026-11-05 · **Author:** Ariel Maningas · **Status:** approved by Ariel, 2026-11-05; results of the first build checks added 2026-11-06 ([Results of the risky checks](#results-of-the-risky-checks))
 
 The product side is in the [PRD](../PRD.md); the engine, vault format and security rules are in the
 [design spec](2026-10-07-lockbox-design.md), cited here as "spec 7.3" and so on. This document is what the screens do and
@@ -139,7 +139,7 @@ passwords, keys, decryption or authenticity checks, or deletes user data, so a b
 | **Save all of a folder's files** (9f) | Small to medium, high risk | The folder picker and the verified save for each file exist, and progress and a stop are built for other jobs anyway. New: going through the files, the names, and the summary. See [below](#saving-all-of-a-folders-files-task-9) | Save a copy, one file at a time. Export leaves stored files out, so a person leaving could only save them singly or restore a backup | **Keep.** First picked to wait, then changed once it was drawn and checked against the code: it's cheaper than sized, it never overwrites a file, and it serves the promise that nobody is trapped |
 | **Attached file names in search, and opening a file from search** (9g) | Small | Names added to the search index, the result says which file matched, and Open uses the existing command with its existing questions. The page already receives these names | Find the item first, then open the file | **Keep.** Nearly free, and files are the product's difference |
 | **Start with Windows** (31a) | Small | A registry value, a start with no window, launch notices held until the window opens, and the setting reading the true state. Tauri's uninstaller already removes the `Run` entry (read in its installer script by the review of 2026-11-04) | Lockbox must be opened before the shortcut works, and the app says so | **Keep.** The save shortcut is a v1 promise, and this makes it dependable |
-| **Staying out of screen capture** (31a) | Small to build, plus a real-PC test | `set_content_protected` exists in Tauri 2.12.5 and sets `WDA_EXCLUDEFROMCAPTURE` (read in the source). A setting, applied before the window shows. The test is whether it blanks Lockbox in Magnifier, Quick Assist or remote desktop | Screens capture like any app, and the guide says what Recall can capture | **Keep, and decide its default after the test.** Off by default if it blanks Magnifier, since "for everyone" outranks it |
+| **Staying out of screen capture** (31a) | Small to build, plus a real-PC test | `set_content_protected` exists in Tauri 2.12.5 and sets `WDA_EXCLUDEFROMCAPTURE` (read in the source). A setting, applied before the window shows. The test is whether it blanks Lockbox in Magnifier, Quick Assist or remote desktop | Screens capture like any app, and the guide says what Recall can capture | **Keep, and decide its default after the test.** Off by default if it blanks Magnifier, since "for everyone" outranks it. **Tested: on by default.** Magnifier shows Lockbox in all three views, judged by eye; Quick Assist and remote desktop are still to test before release, and the default is weighed again if either blanks Lockbox ([results](#results-of-the-risky-checks)) |
 | **Generator with every vault locked** (16b) | Small, high risk | The generate commands already need no vault. Copying from the generator doesn't exist at all yet, so v1 needs a copy owned by the unlocked vault on screen either way. This adds only a copy with no owner, cleared by its timer, Lock all or closing | The generator's link on the lock screen goes, and it needs an unlocked vault. The generator's Copy still works | **Wait for v1.1.** Rare, and it's the one change to the clipboard's ownership rule |
 
 Delete a vault and the generator with every vault locked go to v1.1. Screens 16b and 18e stay in the notes for later, and
@@ -154,7 +154,7 @@ each screen that links to them loses that link.
 | C | Parts for the screens | The candidates above | **Base UI**, since it's the one with a documented way to stop style tags, if it passes the first build task, screen reader included. Otherwise React Aria Components |
 | D | The save shortcut | Plugin, or `RegisterHotKey` directly | **Directly**: no new dependency, the hidden window already exists, and the failure Windows returns is exactly what 31b needs to say |
 | E | Start with Windows | Plugin, or the `Run` value directly | **Directly**: a few lines, and no new dependency for it |
-| F | The default shortcut | Ctrl+Shift+L, as drawn, or another | **Ctrl+Shift+L for now.** Bitwarden's browser extension uses it too, as far as the author recalls. A Windows-wide shortcut would take it from them, so check this at build and change it if so |
+| F | The default shortcut | Ctrl+Shift+L, as drawn, or another | **Ctrl+Shift+L for now.** Bitwarden's browser extension uses it too, as far as the author recalls. A Windows-wide shortcut would take it from them, so check this at build and change it if so. **Checked, and kept (Ariel, 2026-11-05: "seems easier for me").** It is taken: Bitwarden's extension manifest sets its login fill to Ctrl+Shift+L, and Lockbox got the press with Chrome in front. While Lockbox runs, Bitwarden's fill, Word's bulleted list, VS Code's select all occurrences and Edge's paste and go lose it; Settings can change it (31a) |
 | G | How Plan 4 is split | See [Building it in order](#building-it-in-order) | **Three plans** |
 
 ### Decided without needing a question
@@ -237,8 +237,8 @@ The reverse check of 2026-11-04 compared the tasks with the 57 commands. All of 
 | Addition | How |
 |---|---|
 | **Save shortcut** | Registered on the hidden window. A press reads the clipboard once, in Rust, into a single wiped slot, and tells the page only that a value is waiting. See below |
-| **Clipboard clear for a value Lockbox didn't copy** | Reads the clipboard and clears it only if it still holds the same text, in one opening. The wording doesn't promise more: Windows clipboard history may keep it, and that's tested at build (spec 7.3 changes) |
-| **One way to write a readable file** | An export, a saved `.env` and a recovery key PDF all follow Save a copy's rules (spec 7.2, 7.4): Rust picks the destination, the existing cloud check and vault-folder refusal run on it, the file goes to a journaled hidden temp file beside it, and it's renamed into place only if the session's generation is still current. An existing file is untouched until then. WebView2 writes its PDF straight over the path it's given, so it's given the temp path; a lock while it runs means the result is discarded |
+| **Clipboard clear for a value Lockbox didn't copy** | Reads the clipboard and clears it only if it still holds the same text, in one opening. The wording doesn't promise more: Windows clipboard history keeps it (tested on 2026-11-05), so 8a says the value may still be in clipboard history (spec 7.3) |
+| **One way to write a readable file** | An export, a saved `.env` and a recovery key PDF all follow Save a copy's rules (spec 7.2, 7.4): Rust picks the destination, the existing cloud check and vault-folder refusal run on it, the file goes to a journaled temp file beside it (for the PDF, a new file inside a new hidden folder there, since WebView2 refuses an existing hidden file), and it's renamed into place only if the session's generation is still current. An existing file is untouched until then. WebView2 writes its PDF straight over the path it's given, so it's given the temp path; a lock while it runs means the result is discarded |
 | **Export** | Rust writes the CSV. Earlier passwords and files are left out. The result names any item whose password, key value or note has a line break, since another app's importer may change those: Bitwarden's turns every line ending into a plain line feed before reading the file (read in its source). The test file includes them. The vault itself is unaffected |
 | **`.env` in and out** | Paste goes page to Rust, like a typed password, and comes back as rows with names only. Copy out and save as a file happen in Rust |
 | **Copy from the generator** | A new command takes the generated value from the page, like a typed password, and copies it in Rust with the same marks and timer, owned by the unlocked vault on screen. Without it there's no way to copy an unsaved password. The page's own clipboard can't be used: it skips the marks that keep values out of Win+V |
@@ -437,6 +437,21 @@ answers from an old generation. Every screen with an answer in flight has to han
 - Win+V after a clear: whether history keeps a value Lockbox didn't copy.
 - The save shortcut from a hidden window, and print-to-PDF in the app's private browsing mode.
 
+### Results of the risky checks
+
+Run on this PC (Windows 11 Home) on the release build, 2026-11-05 and 2026-11-06, in the first build checks.
+
+| Check | Result | What it changes |
+|---|---|---|
+| Base UI under the real policy | Dialog, menu, combobox, list, select and form: zero policy violations; dialog focus held and returned; keyboard works; fonts show | Decision C stands: **Base UI kept** |
+| Isolation frame | Not used (Ariel, 2026-11-05, against Tauri's own advice): its frame runs scripts only, a reported bug hangs every call on Windows (read, not run), and it can't tell the app's calls from a bad package's on the same page. Exact versions, install scripts off and the lockfile in the dependency scan instead, pinned by a test | `SECURITY.md` says so |
+| NVDA | Announces each part with its name and role: the dialog with its description, fields, buttons, the list with its count, the form landmark, the required field, the combobox. Read in NVDA's Speech Viewer. On closing the dialog it reads the page heading before the button, though focus lands on the button | Nothing; the full pass stays before release |
+| Win+V after a clear | A value copied from Notepad stays in clipboard history after Lockbox clears it | 8a's words: the clipboard is cleared, but clipboard history may still have it |
+| The default shortcut | Ctrl+Shift+L works hidden, minimised and behind other apps, and takes the key from them (decision F) | Kept by Ariel; Settings can change it |
+| Capture protection | Screenshots and Snipping Tool leave Lockbox out. Magnifier shows it in Full screen, Docked and Lens, by eye (a screenshot of Magnifier loses it too, so only a person can judge). Quick Assist and remote desktop not tested | **On by default.** Screen 21c's "screenshots won't work" stays, and changes only when the setting is off. Quick Assist and remote desktop join the pre-release checks; if either blanks Lockbox there, the default is weighed again |
+| Browser keys | Ctrl+P, F12, Ctrl+Shift+I, F5, Ctrl+R, Ctrl+U and right-click open nothing. Ctrl+F reaches the page, with no find bar. Copy and paste work in fields | Search can use Ctrl+F as drawn |
+| Print to the real temp form | WebView2 refuses an existing hidden file (no error, no file). A new file, a new `\\?\` path, an existing visible file, a new file hidden afterwards and a new file in a new hidden folder all work | The recovery key PDF is printed to a new file inside a new hidden folder beside the destination, then moved into place. While it's written, and after a crash until the next launch's sweep, it isn't shown in Explorer by default; it's hidden, not protected |
+
 **Each task's checks:**
 - **Rust:** tests first, as for Plans 1 to 3. Every new command is refused with a stale generation, a foreign ID, or on a
   read-only session. Old-format items still open. Property tests on the `.env` parser: random input never panics and never
@@ -455,7 +470,7 @@ answers from an old generation. Every screen with an answer in flight has to han
 - **By eye:** each plan compares its screens with the approved ones side by side, in light, dark and high contrast. Windows'
   real window, since a test browser hides things like its scrollbars.
 - **Before release:** NVDA through the daily tasks; "make text bigger"; Windows 10, if it stays supported; the USB unplug
-  check from the pre-release list.
+  check from the pre-release list; capture protection in Quick Assist and remote desktop, which needs a second PC.
 
 **Known gap:** tests can't prove what another program keeps (clipboard history, a cloud provider's versions). The wording
 says so instead.

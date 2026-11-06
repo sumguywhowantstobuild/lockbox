@@ -1,6 +1,6 @@
 # Lockbox — Design Spec
 
-**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 7 (2026-11-05, the [user interface design](2026-11-05-user-interface-design.md); revision 6 was Plan 3's decisions, 2026-10-27). What revision 7 adds is designed, and comes with Plan 4's build.
+**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 7 (2026-11-05, the [user interface design](2026-11-05-user-interface-design.md); revision 6 was Plan 3's decisions, 2026-10-27). What revision 7 adds is designed, and comes with Plan 4's build; 7.2 and 7.3 carry the results of Plan 4's first checks (2026-11-06).
 
 ## 1. Purpose
 
@@ -514,7 +514,8 @@ authenticated.
 - **An export, a saved `.env` and a recovery key PDF** follow Save a copy's rules: Rust picks the destination, a vault
   folder or Lockbox's state folder is refused, a cloud-synced folder warns first, the file goes to a journaled hidden temp
   file beside it, and it's renamed into place only if the session's generation is still current. An existing file is
-  untouched until then. A lock while WebView2 writes the PDF means the result is discarded.
+  untouched until then. A lock while WebView2 writes the PDF means the result is discarded. For the PDF, the temp is a new
+  file inside a new hidden folder there, since WebView2 refuses an existing hidden file (tested on 2026-11-06).
 - **Open:**
   - Decrypts into `%LOCALAPPDATA%\Lockbox\open\<random>\`, a folder whose permissions are restricted to the current
     Windows user, and launches the file with its default app **only after the full stream has verified.**
@@ -555,7 +556,12 @@ Unlocking a vault doesn't empty it.
 
 **Clearing a value Lockbox didn't copy:** the save box offers it. Only if the person asks, in one clipboard opening, Lockbox
 reads the text to compare it, and clears it only if it's still the same. A different value it reads there is dropped at once. A value copied from another app usually carries no exclusion formats, so Windows clipboard
-history may keep it; the wording doesn't promise otherwise, and this is tested at build.
+history may keep it, and the wording doesn't promise otherwise. Tested on 2026-11-05: after the clear, the value copied
+from Notepad was still in Win+V.
+
+The shortcut is registered Windows-wide on the hidden window, so it works with Lockbox minimised, hidden or behind another
+app (tested on 2026-11-05). The default is Ctrl+Shift+L (Ariel's pick). While Lockbox runs, other apps lose that key
+combination, among them Bitwarden's browser extension, which fills a login with it; Settings can change it.
 
 ### 7.4 Locking (concurrency contract)
 - **Idle** means no keyboard or mouse input anywhere in Windows for the configured minutes. **While a long operation the

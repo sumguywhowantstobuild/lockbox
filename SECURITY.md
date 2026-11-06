@@ -212,11 +212,24 @@ in the code with a `shortcut:` comment.
   the parent folder is present, not that it is the same disk. *Accepted:* rare, and recovery's checks on names and folders still hold.
 - **Windows' lock signals are tested on one PC.** It has S3 sleep only; Modern Standby is on the pre-release list for
   another laptop. *Accepted for now:* the app is not released.
-- **Printing and browser shortcuts.** Ctrl+P on a revealed password could reach the print spooler, and WebView2's context
-  menus and shortcuts are still at their defaults, until the screens are built. Plan 4 turns off what is left. *Accepted for now:* there are no
-  real screens yet, and there is no release.
-- **No isolation frame.** Tauri's isolation pattern (a sandboxed frame that checks every IPC message) is not used. Plan 4
-  decides, when the UI brings in third-party packages.
+- **Browser shortcuts and menus are off, but only as far as WebView2 offers.** The window is built hidden, and shows only
+  after WebView2 confirms its browser keys and default context menu are off; if it can't confirm, Lockbox stops. Tested on
+  2026-11-06: Ctrl+P, F12, Ctrl+Shift+I, F5, Ctrl+R, Ctrl+U and right-click open nothing, while Ctrl+F, copy and paste still
+  reach the page. Lockbox prints only through its own code (the recovery key, once its screen exists), and anything printed
+  can pass through the print spooler (see above). *Accepted:* this is WebView2's documented switch; there is no stronger one.
+- **Staying out of screen capture isn't a guarantee.** At every start Lockbox asks Windows to leave its window out of
+  screenshots, recordings, screen sharing and Recall (`WDA_EXCLUDEFROMCAPTURE`), before the window shows. Tested on
+  2026-11-06: screenshots and Snipping Tool leave Lockbox out, and Magnifier still shows it in Full screen,
+  Docked and Lens, judged by eye, since a screenshot of Magnifier loses Lockbox too. Not tested yet: Quick Assist and remote
+  desktop (pre-release list). If asking fails, the window still shows. Microsoft says there's no guarantee, and a camera can
+  always get round it. *Accepted:* this is the strongest request Windows offers; a setting to turn it off comes with the
+  Settings screen.
+- **No isolation frame.** Tauri's isolation pattern (a sandboxed frame that checks every IPC message) is not used (Ariel's
+  pick, 2026-11-05, against Tauri's own advice). Tauri 2.12.5's frame runs scripts only, with no same-origin access, and
+  a reported bug hangs every call on Windows; its check also can't tell the app's own calls from a bad package's on the
+  same page. Instead: exact versions, install scripts off, the lockfile in the dependency scan, and no packages beyond
+  the reviewed ones. A test pins the setting. *Accepted:* a compromised package in the page could send commands the page
+  can send; keys never leave Rust.
 - **Small windows we chose not to close.**
   - A lock arriving during the very last write of an item copy does not stop it. The page hears "locked", and the item is
     in the destination vault as you asked, even if only the source vault locked; it can be read there while that vault
@@ -492,12 +505,11 @@ yet; each moves up to the sections above as it's built.
 - **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
   that value: it compares what's on the clipboard, and drops it if it's different. The value waits in one wiped
   slot in Rust until it's saved or the slot empties. Clearing it afterwards may not reach a copy Windows clipboard history already
-  took, because a value copied from another app usually carries none of Lockbox's marks. This is tested at build.
+  took, because a value copied from another app usually carries none of Lockbox's marks. Tested on 2026-11-05: a value copied
+  from Notepad stayed in Win+V after the clear, so clear it from Win+V too (Win+V, then the entry's menu).
 - **An export, a saved `.env` and files saved out are readable by anyone who gets them.** They aren't encrypted. An export or a
   `.env` warns first, and saving a folder's files says so in the folder picker. Lockbox can't protect them or delete them afterwards. Deleting one may leave it in the Recycle Bin, on an SSD, or in a
   cloud provider's version history.
-- **Staying out of screen capture isn't a guarantee.** It asks Windows to leave Lockbox's window out of screenshots, recordings,
-  screen sharing and Recall. Microsoft says there's no guarantee, and a camera can always get round it.
 - **Earlier passwords stay in old backups.** They're encrypted like everything else, and dropping one from a login doesn't remove
   it from a backup already made.
 - **Asking for the current password slows someone at an unlocked PC.** It isn't protection against malware (spec 5.6), and there's
