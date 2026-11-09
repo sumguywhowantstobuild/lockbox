@@ -53,6 +53,10 @@
   .pal {
     top: 48px;
   }
+
+  .pal.find {
+    max-height: calc(100% - 72px);
+  }
 }
 
 @media (max-width: 1000px) {

@@ -1,7 +1,18 @@
 // The one place the screens reach the shell: a typed function for each command they use, over `bridge.ts`, which drops
 // an answer from a vault that has locked since. A screen imports this, never `@tauri-apps/api` or the bridge itself.
 // Every refusal comes out as the plain object the shell sent (see `messages.ts`); a stale answer as `StaleAnswer`.
-import { call, callPlain, open, type Opened, type Outcome, type PageNotice, type SessionRef, type Tagged } from "./bridge";
+import {
+  call,
+  callMany,
+  callPlain,
+  open,
+  type Opened,
+  type Outcome,
+  type PageNotice,
+  type SearchResults,
+  type SessionRef,
+  type Tagged,
+} from "./bridge";
 
 export { onLocked, onNotice, StaleAnswer } from "./bridge";
 export type { Confirm, Opened, Outcome, PageNotice, SessionRef, Tagged } from "./bridge";
@@ -83,6 +94,11 @@ export interface ItemSummary {
   username: string | null;
   collection: string | null;
   trashed: boolean;
+  /**
+   * The host of a login's first website (`support.example.com`), and nothing else of the address; `null` when there is
+   * none, or the shell would not open it (only `http` and `https` open). Whether to offer "Open site" is this being set.
+   */
+  site: string | null;
   created_at: string;
   modified_at: string;
   attachments: FileView[];
@@ -280,6 +296,24 @@ export function getItem(vault: SessionRef, id: string): Promise<Tagged<ItemDetai
 /** Puts a field of the item on the clipboard, in Rust, and clears it after the settings' delay. */
 export function copyField(vault: SessionRef, id: string, field: CopyableField): Promise<Tagged<null>> {
   return call<null>("copy_field", { session: vault.session, generation: vault.generation, id, field });
+}
+
+/**
+ * Searches every unlocked vault for `query` (title, username, website, folder name): one answer per vault searched, each
+ * tagged with the generation it was read in, and the sessions that were busy with a long change (their results are
+ * missing). A vault that locked meanwhile is in neither, and an answer from before a lock is dropped here. The query
+ * is at most 256 characters; an empty one is not worth asking.
+ */
+export function searchAll(query: string): Promise<SearchResults<ItemSummary[]>> {
+  return callMany<ItemSummary[]>("search_all", { query });
+}
+
+/**
+ * Opens the login's website number `index` in the default browser, from Rust: only an `http` or `https` one opens
+ * (`invalid_input`, `what: "link type"` otherwise), and the page never holds the address to open.
+ */
+export function openUrl(vault: SessionRef, id: string, index: number): Promise<Tagged<null>> {
+  return call<null>("open_url", { session: vault.session, generation: vault.generation, id, index });
 }
 
 /** Locks every vault, then clears the clipboard of what Lockbox put there. */

@@ -15,6 +15,7 @@ import { DetailsChangedAsk, LostOutputsAsk, VaultBanners } from "./Asks";
 import { ItemList } from "./ItemList";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
+import { SearchPanel } from "./SearchPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
 
 const FILTER = "filter";
@@ -29,8 +30,8 @@ function lockedLine(names: readonly string[]): string | null {
 
 /**
  * The main window of an unlocked vault: the side menu, the toolbar with its filter, the list of items (all of them, or
- * one folder's) and, when one is picked, its details in the panel. A failed or stale answer never reaches this far as
- * an error: a vault that locked is simply no longer here.
+ * one folder's) and, when one is picked, its details in the panel; and the search, which Ctrl+F and Ctrl+K open over it.
+ * A failed or stale answer never reaches this far as an error: a vault that locked is simply no longer here.
  */
 export function MainWindow({ data, look }: { data: SessionData; look: VaultLook }) {
   const vaults = useVaults();
@@ -158,6 +159,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         )}
         <ToastStack />
       </div>
+      <SearchPanel />
     </div>
   );
 }

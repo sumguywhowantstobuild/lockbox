@@ -20,7 +20,7 @@ use super::{args, blocking};
 use crate::error::{ShellError, ShellResult};
 use crate::session::{SessionId, SessionState, Tagged, VaultRef};
 use crate::shell::Shell;
-use crate::views::{ItemDetail, ItemList, ItemSummary, OrphanView, SearchResults};
+use crate::views::{ItemDetail, ItemList, ItemSummary, OrphanView, SearchResults, web_url};
 
 /// The page's limits (`TooLarge`), in bytes; the engine's own 1 MiB item cap stays behind them.
 const MAX_TITLE: usize = 1024;
@@ -229,10 +229,7 @@ impl ItemEdit {
 /// A stored link the launcher may open: parsed, and only `http` or `https` (spec §4.2). Anything else, a link that
 /// does not parse among them, is refused as `"link type"`.
 fn web_link(stored: &str) -> ShellResult<Url> {
-    match Url::parse(stored) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(url),
-        _ => Err(ShellError::InvalidInput { what: "link type" }),
-    }
+    web_url(stored).ok_or(ShellError::InvalidInput { what: "link type" })
 }
 
 impl Shell {
@@ -947,7 +944,7 @@ mod tests {
         let item_dates = &list["data"]["items"][0];
         let summary = json!({
             "id": id, "kind": "login", "title": "Bank", "username": "ada@example.com", "collection": null,
-            "trashed": false,
+            "trashed": false, "site": "bank.example",
             "created_at": item_dates["created_at"], "modified_at": item_dates["modified_at"],
             "attachments": [{
                 "file_id": file_id.to_hex(), "name": "statement.pdf", "length": 9,
@@ -1009,7 +1006,7 @@ mod tests {
         }
         let expected = json!({
             "id": "07".repeat(16), "kind": "login", "title": "Bank", "username": "ada", "collection": null,
-            "trashed": false,
+            "trashed": false, "site": "bank.example",
             "created_at": "2026-10-29T00:00:00Z", "modified_at": "2026-10-29T00:00:00Z",
             "attachments": [{
                 "file_id": "09".repeat(16), "name": "statement.pdf", "length": 9,

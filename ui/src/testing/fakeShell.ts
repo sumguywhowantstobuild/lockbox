@@ -45,6 +45,8 @@ export interface FakeVault {
   leftover?: number;
   /** A newer Lockbox made this vault: unlock is refused as `unsupported_version`. */
   newer?: boolean;
+  /** A long change holds the vault past the short wait: a search reports it in `busy` and gives none of its items. */
+  busy?: boolean;
 }
 
 interface Live {
@@ -148,6 +150,27 @@ export function sampleItems(): FakeItem[] {
   ];
 }
 
+/**
+ * What the shell's `ItemSummary.site` holds (`views.rs`): the host of a login's first website and nothing else of the
+ * address, or null when there is none, it does not parse, or it is not an `http` or `https` one.
+ */
+function siteOf(item: FakeItem): string | null {
+  const first = item.kind === "login" ? item.urls?.[0] : undefined;
+  return first === undefined ? null : siteOfUrl(first);
+}
+
+/** The most one vault gives a search (`SEARCH_LIMIT` in `commands/items.rs`). */
+export const SEARCH_LIMIT = 100;
+
+function siteOfUrl(stored: string): string | null {
+  try {
+    const url = new URL(stored);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.hostname : null;
+  } catch {
+    return null;
+  }
+}
+
 function summary(item: FakeItem) {
   return {
     id: item.id,
@@ -156,6 +179,7 @@ function summary(item: FakeItem) {
     username: item.kind === "login" ? (item.username ?? "") : null,
     collection: item.collection ?? null,
     trashed: item.trashed ?? false,
+    site: siteOf(item),
     created_at: "2026-08-01T09:00:00Z",
     modified_at: item.modified_at ?? "2026-08-01T09:00:00Z",
     attachments: item.attachments ?? [],
@@ -225,6 +249,15 @@ export interface FakeShell {
   markCloseExplained(): void;
   /** A notice sent as `lockbox://notice` only, never kept for `launch_notices` (`first_close` is only ever an event). */
   sendEvent(notice: object): void;
+  /** Every `open_url` that reached the shell, as it was sent (a link the shell refused is not here). */
+  opened: Record<string, unknown>[];
+  /**
+   * Holds every `search_all` answer until `release` is called (newest first): what was found is read when the search
+   * arrives, as the shell reads it, so a lock in between leaves answers tagged with the generation from before it.
+   */
+  holdSearch(): () => void;
+  /** Makes a vault busy (or not) from now on, as a long change on it does: its search answer is `busy`. */
+  setBusy(vaultId: number, busy: boolean): void;
 }
 
 let sessionRange = 0;
@@ -273,6 +306,8 @@ export function installFakeShell(
   let held: (() => void)[] | undefined;
   const calls: FakeShell["calls"] = [];
   const copied: FakeShell["copied"] = [];
+  const opened: FakeShell["opened"] = [];
+  let heldSearch: (() => void)[] | undefined;
   const keys = new Map<FakeVault, string>();
   let keysMade = 0;
   let chosenKey: string | undefined;
@@ -590,6 +625,55 @@ export function installFakeShell(
         copied.push(sent);
         return tagged(sent.session, sent.generation, null);
       }
+      case "search_all": {
+        const { query } = exactly(args, ["query"]) as { query: unknown };
+        if (typeof query !== "string") return refuse(MALFORMED);
+        if (Array.from(query).length > 256) return refuse({ code: "too_large", what: "search" });
+        const needle = query.trim().toLowerCase();
+        const hits: unknown[] = [];
+        const busy: number[] = [];
+        for (const [session, entry] of live) {
+          const vault = sessionVault.get(session);
+          if (!entry.unlocked || vault === undefined) continue;
+          if (vault.busy ?? false) {
+            busy.push(session);
+            continue;
+          }
+          const all = vault.items ?? [];
+          const folderTitle = (item: FakeItem) => all.find((other) => other.id === item.collection)?.title ?? "";
+          // The engine's index: a live item's title, a login's username and links, and its folder's title.
+          // At most `SEARCH_LIMIT` come back from a vault, of every kind (`commands/items.rs`), whatever the page shows.
+          const found =
+            needle === ""
+              ? []
+              : all
+                  .filter(
+                    (item) =>
+                      !(item.trashed ?? false) &&
+                      [item.title, item.username ?? "", ...(item.urls ?? []), folderTitle(item)].some((text) =>
+                        text.toLowerCase().includes(needle),
+                      ),
+                  )
+                  .slice(0, SEARCH_LIMIT);
+          hits.push(tagged(session, entry.generation, found.map(summary)));
+        }
+        return { hits, busy };
+      }
+      case "open_url": {
+        const sent = exactly(args, ["session", "generation", "id", "index"]) as {
+          session: number;
+          generation: number;
+          id: string;
+          index: number;
+        };
+        const item = vaultFor(sent.session, sent.generation).items?.find((i) => i.id === sent.id);
+        const link = item?.kind === "login" ? item.urls?.[sent.index] : undefined;
+        if (link === undefined) return refuse({ code: "not_found" });
+        // Only an `http` or `https` link that parses opens (`web_link`); like the shell's parser, `URL` trims the ends.
+        if (siteOfUrl(link) === null) return refuse({ code: "invalid_input", what: "link type" });
+        opened.push(sent);
+        return tagged(sent.session, sent.generation, null);
+      }
       case "close_explained_ok":
         exactly(args ?? {}, []);
         closeExplainedCalls += 1;
@@ -638,6 +722,14 @@ export function installFakeShell(
       }
       if (cmd === "list_items" && held !== undefined) {
         const release = held;
+        return new Promise((resolve) => {
+          release.push(() => {
+            resolve(result);
+          });
+        });
+      }
+      if (cmd === "search_all" && heldSearch !== undefined) {
+        const release = heldSearch;
         return new Promise((resolve) => {
           release.push(() => {
             resolve(result);
@@ -747,6 +839,20 @@ export function installFakeShell(
     },
     sendEvent: (notice) => {
       emit("lockbox://notice", notice);
+    },
+    opened,
+    holdSearch: () => {
+      const waiting: (() => void)[] = [];
+      heldSearch = waiting;
+      return () => {
+        heldSearch = undefined;
+        // The newest answer first: a late answer to an older search comes after a newer one, as it can on a busy shell.
+        for (const release of [...waiting].reverse()) release();
+      };
+    },
+    setBusy: (vaultId, busy) => {
+      const vault = vaults.find((v) => v.id === vaultId);
+      if (vault !== undefined) vault.busy = busy;
     },
   };
 }

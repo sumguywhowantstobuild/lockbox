@@ -102,10 +102,13 @@ test("selecting_shows_details_with_password_hidden", async () => {
     generation: live?.generation,
     id: itemId(1),
   });
-  // Nothing from a later task: no Move, Edit, trash, attach.
-  for (const words of [/^Move/, /^Edit/, /trash/i, /attach/i, /^Open/]) {
+  // Nothing from a later task: no Move, Edit, trash, attach. The one Open is the website's (Task 10), through `open_url`.
+  for (const words of [/^Move/, /^Edit/, /trash/i, /attach/i]) {
     expect(within(panel).queryByRole("button", { name: words })).toBeNull();
   }
+  expect(within(panel).getAllByRole("button", { name: /^Open/ }).map((button) => button.getAttribute("aria-label"))).toEqual([
+    "Open support.example.com",
+  ]);
   await expectNoAxe(container);
 
   // Closing the panel puts the list back and drops the item.

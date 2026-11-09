@@ -4,14 +4,37 @@ import { changedText, formatBytes } from "../format";
 import { messageFor } from "../messages";
 import { CopyIcon, KindIcon } from "../parts/Icon";
 import { Panel } from "../parts/Panel";
-import { copyField, type SessionData } from "../store";
+import { copyField, openSite, type SessionData } from "../store";
 
 const KIND_WORD: Record<ItemKind, string> = { login: "Login", note: "Note", file: "File", collection: "Folder" };
 const KIND_TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", collection: "t4" };
 
-/** A website as it is shown: without its scheme or a trailing slash. */
-function shown(url: string): string {
-  return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
+/**
+ * A stored website as an address the shell would open: it parses, and it is `http` or `https` (the shell's own rule, which
+ * `URL` shares, ends trimmed included). `null` otherwise.
+ */
+function webUrl(stored: string): URL | null {
+  try {
+    const url = new URL(stored);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A website as it is shown: its host and path, without the scheme, a trailing slash, or what must not be copied about
+ * (a login in front of the host, the query and the fragment, which can hold a password or a token).
+ */
+function shown(stored: string): string {
+  const url = webUrl(stored);
+  if (url !== null) return `${url.host}${url.pathname}`.replace(/\/$/, "");
+  return stored
+    .trim()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+    .replace(/^[^/?#]*@/, "")
+    .replace(/[?#].*$/, "")
+    .replace(/\/$/, "");
 }
 
 function Field({ label, children, action }: { label: string; children: ReactNode; action?: ReactNode }) {
@@ -84,8 +107,27 @@ function LoginFields({ data, summary, detail }: { data: SessionData; summary: It
       {detail !== null && detail.urls.length > 0 ? (
         <section className="gp">
           <div className="grp">
-            {detail.urls.map((url) => (
-              <Field key={url} label="Website">
+            {detail.urls.map((url, index) => (
+              <Field
+                key={`${String(index)}:${url}`}
+                label="Website"
+                action={
+                  // Only an address the shell would open gets the button; the shell opens it by its number, not by this
+                  // text. The button is named by the host alone: a label must never hold a login, a path or a query.
+                  webUrl(url) !== null ? (
+                    <button
+                      type="button"
+                      className="pill"
+                      aria-label={`Open ${webUrl(url)?.hostname ?? ""}`}
+                      onClick={() => {
+                        void openSite(data.session, summary.id, index);
+                      }}
+                    >
+                      Open
+                    </button>
+                  ) : undefined
+                }
+              >
                 <span className="fval">{shown(url)}</span>
               </Field>
             ))}

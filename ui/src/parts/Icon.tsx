@@ -60,6 +60,15 @@ export function FilterIcon() {
   return <Drawing d="M4 7h16M7.5 12h9M10.5 17h3" />;
 }
 
+export function SearchIcon() {
+  return (
+    <svg className="i" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="11" cy="11" r="7" />
+      <path d="M20 20l-3.8-3.8" />
+    </svg>
+  );
+}
+
 export function LockIcon() {
   return (
     <svg className="i" viewBox="0 0 24 24" aria-hidden="true">

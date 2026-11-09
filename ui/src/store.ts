@@ -1,7 +1,8 @@
 // What the page keeps of each unlocked vault: its item list, the item open in the panel, values the person asked to
 // see, text typed into a form, the message about the last copy, and a recovery key being shown or picked back (with the
 // questions asked of it), and what its unlock found that is still to be answered (the app's questions, `SessionAsks`).
-// Beside the sessions, only what launch told and a refusal for the lock screen. Nothing else. A lock wipes the lot at once: the
+// Beside the sessions, only what launch told, a refusal for the lock screen, and the one search (what is typed and what
+// each vault found, which a lock takes away vault by vault). Nothing else. A lock wipes the lot at once: the
 // store listens for `lockbox://locked` before any command is sent, and a lock event drops the vault's whole record
 // (`dropSession`). An answer that comes back for a vault that has locked since is dropped without a word (it is the
 // expected outcome of a lock, not an error): the bridge refuses it with `StaleAnswer`, and so does this file when the
@@ -120,17 +121,43 @@ export type Toast =
   | { kind: "copied"; session: number; text: string; seconds: number; endsAt: number }
   | { kind: "failed"; session: number | null; error: unknown };
 
+/** What one vault answered to the search: its items, tagged with the generation they were read in. */
+export interface SearchHits {
+  session: number;
+  generation: number;
+  items: ItemSummary[];
+}
+
+/**
+ * The one search (Ctrl+F, Ctrl+K), while it is open: what is typed (it is not a secret, but it never goes in a URL or a
+ * log), what each unlocked vault found, the vaults that were busy, and the refusal of the last copy or open from it. It
+ * is across vaults, so it lives here rather than in a session's record; a lock takes that vault's part away at once
+ * (`dropSession`), and the last lock closes it.
+ */
+export interface SearchState {
+  query: string;
+  /** The word the shell last answered for, or `null` before any answer (and for a blank one): "Nothing for ..." says it. */
+  answered: string | null;
+  hits: SearchHits[];
+  /** The sessions that were busy with a long change when asked: their results are missing. */
+  busy: number[];
+  /** The shell's refusal of the last search, copy or open from the search, to say in words. */
+  error: unknown;
+}
+
 export interface StoreState {
   /** `null` until the vault list has come. */
   vaults: VaultEntry[] | null;
   /** The shell's refusal, when the vault list could not be read. */
   startError: unknown;
-  /** The unlocked vaults, in the order they were unlocked. */
+  /** The unlocked vaults, in the order they were unlocked (the last is the one on screen). */
   sessions: SessionData[];
   toast: Toast | null;
   notices: Notices;
   /** A refusal to say on the lock screen, since the vault it was about has locked (Ask 16); `null` for none. */
   lockNote: unknown;
+  /** The search, or `null` while it is closed. */
+  search: SearchState | null;
 }
 
 /** The page's own refusal for a lock listener that could not be set up; `messages.ts` has its words. */
@@ -152,11 +179,14 @@ const EMPTY: StoreState = {
   toast: null,
   notices: { lostOutputs: false, restoreFinished: false, firstClose: false },
   lockNote: null,
+  search: null,
 };
 
 let state: StoreState = EMPTY;
 const listeners = new Set<() => void>();
 let started: Promise<void> | undefined;
+/** Which search is the latest asked (and 0 more each time the search closes): an older answer is dropped. */
+let searchRun = 0;
 
 function set(next: StoreState): void {
   state = next;
@@ -216,10 +246,22 @@ export function startStore(): Promise<void> {
 export function dropSession(session: number): void {
   const toast = state.toast;
   const keepToast = toast === null || toast.session !== session;
+  const sessions = state.sessions.filter((entry) => entry.session !== session);
+  const search = state.search;
+  // The search goes with the last vault, and a vault's results with the vault: nothing said, no error.
+  if (sessions.length === 0) searchRun += 1;
   set({
     ...state,
-    sessions: state.sessions.filter((entry) => entry.session !== session),
+    sessions,
     toast: keepToast ? toast : null,
+    search:
+      search === null || sessions.length === 0
+        ? null
+        : {
+            ...search,
+            hits: search.hits.filter((found) => found.session !== session),
+            busy: search.busy.filter((busy) => busy !== session),
+          },
   });
 }
 
@@ -789,18 +831,21 @@ export function selectFolder(session: number, folder: string | null): void {
   update(session, (entry) => ({ ...entry, folder, openItem: null }));
 }
 
+/** How a copy or an open ended: it worked, the vault locked meanwhile (nothing to say), or the shell's refusal. */
+type Done = "done" | "stale" | { failed: unknown };
+
 /**
- * Asks the shell to put a field of the item on the clipboard (it never reaches the page) and tells the person when it
- * will be cleared. A vault that locked meanwhile gets no message.
+ * Asks the shell to put a field of the item on the clipboard (it never reaches the page) and, once it has, tells the
+ * person when it will be cleared. The shell's refusal comes back for the caller to say where it fits.
  */
-export async function copyField(session: number, id: string, field: CopyableField): Promise<void> {
+async function copyAndTell(session: number, id: string, field: CopyableField): Promise<Done> {
   const entry = sessionOf(session);
-  if (entry === undefined) return;
+  if (entry === undefined) return "stale";
   const { generation } = entry;
   try {
     const { clipboard_seconds } = await api.getSettings();
     await api.copyField({ session, generation }, id, field);
-    if (!stillOpen(session, generation)) return;
+    if (!stillOpen(session, generation)) return "stale";
     set({
       ...state,
       toast: {
@@ -811,11 +856,111 @@ export async function copyField(session: number, id: string, field: CopyableFiel
         endsAt: Date.now() + clipboard_seconds * 1000,
       },
     });
+    return "done";
   } catch (error) {
     if (refusedAsLocked(error)) dropSession(session);
-    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
-    set({ ...state, toast: { kind: "failed", session, error } });
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    return { failed: error };
   }
+}
+
+/**
+ * Asks the shell to put a field of the item on the clipboard (it never reaches the page) and tells the person when it
+ * will be cleared. A vault that locked meanwhile gets no message.
+ */
+export async function copyField(session: number, id: string, field: CopyableField): Promise<void> {
+  const done = await copyAndTell(session, id, field);
+  if (typeof done === "object") set({ ...state, toast: { kind: "failed", session, error: done.failed } });
+}
+
+/** Opens the login's website number `index` through the shell, which opens only an `http` or `https` one. */
+async function openAndTell(session: number, id: string, index: number): Promise<Done> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "stale";
+  const { generation } = entry;
+  try {
+    await api.openUrl({ session, generation }, id, index);
+    return stillOpen(session, generation) ? "done" : "stale";
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    return { failed: error };
+  }
+}
+
+/** "Open" beside a website on the login's details: a refusal is said as a message. */
+export async function openSite(session: number, id: string, index: number): Promise<void> {
+  const done = await openAndTell(session, id, index);
+  if (typeof done === "object") set({ ...state, toast: { kind: "failed", session, error: done.failed } });
+}
+
+/** Opens the search (Ctrl+F, Ctrl+K): the one search, empty. It does nothing when there is no vault open, or one is open already. */
+export function openSearch(): void {
+  if (state.search !== null || state.sessions.length === 0) return;
+  searchRun += 1;
+  set({ ...state, search: { query: "", answered: null, hits: [], busy: [], error: null } });
+}
+
+/** Closes the search and forgets what was typed and found; an answer still on its way is dropped. */
+export function closeSearch(): void {
+  searchRun += 1;
+  if (state.search !== null) set({ ...state, search: null });
+}
+
+/**
+ * Types in the search: what each unlocked vault finds comes back through the shell, and only the latest question's
+ * answer is kept. A vault that locked meanwhile is left out with nothing said. Nothing is asked for a blank word.
+ */
+export async function setSearchQuery(query: string): Promise<void> {
+  const current = state.search;
+  if (current === null) return;
+  searchRun += 1;
+  const run = searchRun;
+  const blank = query.trim() === "";
+  set({ ...state, search: { ...current, query, error: null, ...(blank ? { answered: null, hits: [], busy: [] } : {}) } });
+  if (blank) return;
+  try {
+    const answer = await api.searchAll(query);
+    if (run !== searchRun || state.search === null) return;
+    // Only the vaults still open as they were read: a lock on the way takes that vault's results away, with no error.
+    const hits = answer.hits
+      .filter((found) => stillOpen(found.session, found.generation))
+      .map((found) => ({ session: found.session, generation: found.generation, items: found.data }));
+    const busy = answer.busy.filter((session) => sessionOf(session) !== undefined);
+    set({ ...state, search: { ...state.search, answered: query, hits, busy, error: null } });
+  } catch (error) {
+    if (run !== searchRun || state.search === null) return;
+    set({ ...state, search: { ...state.search, answered: null, hits: [], busy: [], error } });
+  }
+}
+
+function sayInSearch(error: unknown): void {
+  if (state.search !== null) set({ ...state, search: { ...state.search, error } });
+}
+
+/** Puts the vault on screen (the one opened last is shown) and opens the item in its panel, closing the search. */
+export function showResult(session: number, id: string): void {
+  const entry = sessionOf(session);
+  if (entry === undefined) return;
+  set({ ...state, sessions: [...state.sessions.filter((other) => other.session !== session), entry] });
+  closeSearch();
+  void selectItem(session, id);
+}
+
+/**
+ * Copy from a search result: the copy is made by the shell, then the search steps aside and the login opens behind it
+ * with the message about the copy and its clear time. A refusal is said in the search, which stays.
+ */
+export async function copyFromSearch(session: number, id: string, field: CopyableField): Promise<void> {
+  const done = await copyAndTell(session, id, field);
+  if (done === "done") showResult(session, id);
+  else if (typeof done === "object") sayInSearch(done.failed);
+}
+
+/** "Open site" on a search result: the login's first website, opened by the shell. A refusal is said in the search. */
+export async function openFromSearch(session: number, id: string): Promise<void> {
+  const done = await openAndTell(session, id, 0);
+  if (typeof done === "object") sayInSearch(done.failed);
 }
 
 /** Takes the message away. */
@@ -865,6 +1010,11 @@ export function useLockNote(): unknown {
   return useSelect((current) => current.lockNote);
 }
 
+/** The search, or `null` while it is closed. */
+export function useSearch(): SearchState | null {
+  return useSelect((current) => current.search);
+}
+
 /** The vault's item list, or `null` while it is on its way or when the vault is not unlocked. */
 export function useItems(session: number): ItemSummary[] | null {
   return useSelect((current) => current.sessions.find((entry) => entry.session === session)?.items ?? null);
@@ -889,6 +1039,7 @@ export function resetStoreForTests(): void {
   started = undefined;
   noticesStarted = undefined;
   confirmingClose = false;
+  searchRun = 0;
   state = EMPTY;
   for (const notify of listeners) notify();
 }

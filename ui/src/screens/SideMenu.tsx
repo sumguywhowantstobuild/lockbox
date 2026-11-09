@@ -1,9 +1,17 @@
 import { useState } from "react";
 import type { ItemSummary } from "../api";
-import { ListIcon, LockIcon, SideMenuIcon } from "../parts/Icon";
+import { ListIcon, LockIcon, SearchIcon, SideMenuIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
 import { VaultMark, type VaultLook } from "../parts/Pattern";
-import { lockEverything, lockOneVault, selectFolder, useSessions, useVaults, type SessionData } from "../store";
+import {
+  lockEverything,
+  lockOneVault,
+  openSearch,
+  selectFolder,
+  useSessions,
+  useVaults,
+  type SessionData,
+} from "../store";
 
 /** A folder of the open vault, with how many items are in it. */
 export interface FolderEntry {
@@ -17,7 +25,7 @@ const TILES = ["t0", "t1", "t2", "t3", "t4"];
 
 /**
  * The side menu: which vault is open (its name opens the vault menu: each vault and whether it is open, and Lock for this
- * one), All items, the folders (to read, not to change), and Lock all. It closes to a strip of icons; then each icon
+ * one), Search, All items, the folders (to read, not to change), and Lock all. It closes to a strip of icons; then each icon
  * carries its name for a screen reader, and for a hint when the pointer rests on it.
  */
 export function SideMenu({
@@ -79,6 +87,19 @@ export function SideMenu({
           <SideMenuIcon />
         </button>
       </div>
+      <button
+        type="button"
+        className="srch"
+        aria-keyshortcuts="Control+F Control+K"
+        {...named("Search")}
+        onClick={openSearch}
+      >
+        <SearchIcon />
+        <span className="nt">Search</span>
+        <kbd className="kc" aria-hidden="true">
+          Ctrl+F
+        </kbd>
+      </button>
       <div className="projs">
         <button
           type="button"

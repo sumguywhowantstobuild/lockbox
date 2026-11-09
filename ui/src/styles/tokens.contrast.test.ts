@@ -298,6 +298,37 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("switch, knob on the off track", c("--switch-knob"), c("--switch-off"), 3);
       check("switch, knob on the on track", c("--switch-knob"), c("--add"), 3);
       check("switch, on track on the card", c("--add"), card, 3);
+      // Search. Its button in the side menu: words at rest, hovered and pressed (the tints over the side menu), its key cap
+      // (quiet words on the ground), and the same button's focus ring (the side menu's ring, measured above).
+      for (const [state, fill] of [["rest", rail], ["hover", hoveredNav], ["pressed", pressedNav]] as const) {
+        check(`search button words, ${state}`, c("--ink2"), fill, 4.5);
+      }
+      check("key cap words on the ground", c("--ink2"), ground, 4.5);
+      // The box over the window, on the card: what is typed, its placeholder, the line under it that marks where focus is,
+      // and the key cap beside it.
+      check("search box words on the card", c("--ink"), card, 4.5);
+      check("search box placeholder on the card", c("--ink2"), card, 4.5);
+      check("search box focus line on the card", c("--v"), card, 3);
+      check("search icon on the card", c("--ink2"), card, 3);
+      // A result at rest, with the pointer on it and with focus in it (the tint over the card): its title and its quiet
+      // detail line are measured above as text on those tints. Its buttons are the quiet pill, translucent, laid over the
+      // row as it looks then; the focus ring on a result is the ordinary one.
+      const resultRows: [string, Rgba][] = [["at rest", card], ["with the pointer on it", hoveredRow]];
+      for (const [row, surface] of resultRows) {
+        for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+          const pill = over([...rgbOf("--sh"), alpha] as Rgba, surface);
+          check(`search result button words, ${state}, on a result ${row}`, c("--ink"), pill, 4.5);
+        }
+        check(`focus ring on a result ${row}`, c("--ink"), surface, 3);
+      }
+      // The foot of the box (Lock all and Close) is on the ground, under the results.
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`search foot button words, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, ground), 4.5);
+      }
+      check("focus ring on the search foot", c("--ink"), ground, 3);
+      // What it says when nothing is found, which vaults were busy, and a refusal, all on the card (the pairs above).
+      check("search sentences on the card", c("--ink2"), card, 4.5);
+      check("search refusal on the card", c("--danger"), card, 4.5);
     }
   }
 

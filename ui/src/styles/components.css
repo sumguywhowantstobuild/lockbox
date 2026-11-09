@@ -1944,6 +1944,243 @@
   text-align: left;
 }
 
+/* ---- Search: its button in the side menu, and the box that opens over the window ---- */
+
+/* The key cap that names a shortcut: quiet words on the ground, with a thin edge. */
+.kc {
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--ground);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink2);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.srch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  margin: 0 8px 4px;
+  padding: 0 6px 0 10px;
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  color: var(--ink2);
+  text-align: left;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.srch:hover {
+  background: var(--hov);
+}
+
+.srch:active {
+  background: var(--prs);
+  transform: scale(0.97);
+}
+
+.rail.closed .srch {
+  justify-content: center;
+  width: 44px;
+  margin: 0 8px 4px;
+  padding: 0;
+}
+
+.rail.closed .kc {
+  display: none;
+}
+
+/* The box: it is as tall as its answers, up to what the window leaves, and scrolls inside. */
+.pal.find {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100% - 144px);
+}
+
+.stop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 18px;
+  box-shadow: 0 1px 0 var(--line);
+  transition: box-shadow 0.2s var(--ease);
+}
+
+.stop:focus-within {
+  box-shadow: 0 2px 0 var(--v);
+}
+
+.stop .i {
+  width: 19px;
+  height: 19px;
+  color: var(--ink2);
+}
+
+.pin {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 56px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.pin::placeholder {
+  color: var(--ink2);
+  opacity: 1;
+}
+
+/* The line under the box is the focus mark here, so the ring is not drawn as well. */
+.pal .pin:focus-visible {
+  outline: none;
+}
+
+.hlist {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.hlist ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.res {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 0;
+  border-radius: 12px;
+  transition: background-color 0.2s var(--ease);
+}
+
+.res:hover,
+.res:focus-within {
+  background: var(--hov);
+}
+
+.hgo {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 6px 8px 10px;
+  background: none;
+  border: 0;
+  border-radius: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hgo:active {
+  transform: scale(0.99);
+}
+
+.hmeta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+}
+
+.ht {
+  display: block;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hd {
+  display: block;
+  margin-top: 1px;
+  font-size: 12.5px;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A result's buttons show on the first one, the one the pointer is on, and the one with focus in it. */
+.ra {
+  flex: none;
+  display: flex;
+  gap: 5px;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease);
+}
+
+.res:hover .ra,
+.res:focus-within .ra,
+.res.first .ra {
+  opacity: 1;
+}
+
+.ra .pill {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+.hempty {
+  padding: 22px 18px 24px;
+  text-align: center;
+}
+
+.hempty b {
+  display: block;
+  font-size: 14.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.hempty span {
+  display: block;
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--ink2);
+}
+
+/* What is missing from the answers: a busy vault, said above the results. */
+.snote {
+  margin: 0;
+  padding: 8px 18px 0;
+  font-size: 13px;
+  color: var(--ink2);
+}
+
+.serr {
+  margin: 0;
+  padding: 8px 18px 0;
+}
+
+.sfoot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px;
+  background: var(--ground);
+}
+
 @keyframes rise {
   from {
     opacity: 0;

@@ -6,6 +6,7 @@
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::item::{FileRef, Item, ItemKind};
 use serde::Serialize;
+use tauri::Url;
 use zeroize::Zeroizing;
 
 use crate::session::{SessionId, Tagged};
@@ -42,6 +43,10 @@ pub struct ItemSummary {
     /// The ID of the collection the item is in.
     pub collection: Option<String>,
     pub trashed: bool,
+    /// The host of a login's first website, for a search result to say where the login is for: nothing else of the
+    /// address (no scheme, port, login, path or query). `None` when there is no website, it does not parse, or it is
+    /// not an `http` or `https` one, which is exactly when `open_url` would not open link 0.
+    pub site: Option<String>,
     /// When the item was made and when it last changed: RFC 3339, UTC, whole seconds, as the engine keeps them. The
     /// page says "changed 2 days ago" from the second, and later sorts by it.
     pub created_at: String,
@@ -49,13 +54,26 @@ pub struct ItemSummary {
     pub attachments: Vec<FileView>,
 }
 
+/// A stored website as a link the shell would open: only `http` and `https` ones parse to one (spec §4.2).
+pub fn web_url(stored: &str) -> Option<Url> {
+    Url::parse(stored)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+}
+
 impl ItemSummary {
     pub fn of(item: &Item) -> ItemSummary {
-        let (kind, username) = match &item.kind {
-            ItemKind::Login { username, .. } => ("login", Some(username.clone())),
-            ItemKind::Note => ("note", None),
-            ItemKind::File => ("file", None),
-            ItemKind::Collection => ("collection", None),
+        let (kind, username, site) = match &item.kind {
+            ItemKind::Login { username, urls, .. } => {
+                let site = urls
+                    .first()
+                    .and_then(|first| web_url(first))
+                    .and_then(|url| url.host_str().map(str::to_owned));
+                ("login", Some(username.clone()), site)
+            }
+            ItemKind::Note => ("note", None, None),
+            ItemKind::File => ("file", None, None),
+            ItemKind::Collection => ("collection", None, None),
         };
         ItemSummary {
             id: item.id.to_hex(),
@@ -64,6 +82,7 @@ impl ItemSummary {
             username,
             collection: item.collection.as_ref().map(ItemId::to_hex),
             trashed: item.trashed_at.is_some(),
+            site,
             created_at: item.created_at.clone(),
             modified_at: item.modified_at.clone(),
             attachments: item.attachments.iter().map(FileView::of).collect(),
@@ -153,5 +172,121 @@ impl OrphanView {
             file_id: file_id.to_hex(),
             length: *length,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn secret(text: &str) -> Zeroizing<String> {
+        Zeroizing::new(text.to_owned())
+    }
+
+    fn item(kind: ItemKind) -> Item {
+        Item {
+            id: ItemId([7; 16]),
+            kind,
+            title: "Bank".into(),
+            notes: secret(""),
+            collection: None,
+            attachments: Vec::new(),
+            revision: 1,
+            created_at: "2026-10-29T00:00:00Z".into(),
+            modified_at: "2026-10-29T00:00:00Z".into(),
+            trashed_at: None,
+            purging: false,
+            retired_blobs: Vec::new(),
+        }
+    }
+
+    fn login(urls: &[&str]) -> Item {
+        item(ItemKind::Login {
+            username: "ada".into(),
+            password: secret("Pw-0123456789-xyz"),
+            urls: urls.iter().map(|url| (*url).to_owned()).collect(),
+        })
+    }
+
+    /// The summary's `site`, as the page gets it: the field must be there (null, not missing).
+    fn site(item: &Item) -> Value {
+        let summary = serde_json::to_value(ItemSummary::of(item)).unwrap();
+        let fields = summary.as_object().unwrap();
+        assert!(fields.contains_key("site"), "the summary has no site field");
+        fields["site"].clone()
+    }
+
+    /// A login's summary carries the host of its first website, and nothing of the rest of the address: no scheme, no
+    /// port, no login in front of the host, no path, no query, no fragment.
+    #[test]
+    fn site_is_the_host_and_nothing_after_it() {
+        for (stored, host) in [
+            ("https://support.example.com", "support.example.com"),
+            ("http://support.example.com/", "support.example.com"),
+            (
+                "https://Support.Example.COM/a/b?token=abc#part",
+                "support.example.com",
+            ),
+            (
+                "https://support.example.com:8443/admin",
+                "support.example.com",
+            ),
+            (
+                "https://ada:hunter2@support.example.com/",
+                "support.example.com",
+            ),
+            ("https://192.168.0.1/login", "192.168.0.1"),
+        ] {
+            assert_eq!(site(&login(&[stored])), json!(host), "{stored}");
+        }
+        // Only the first website counts: the page opens link number 0, so a host from a later one would not open.
+        assert_eq!(
+            site(&login(&["https://one.example", "https://two.example"])),
+            json!("one.example")
+        );
+        // Nothing but the host reaches the page in the summary: no path, query, port or password.
+        let summary = serde_json::to_value(ItemSummary::of(&login(&[
+            "https://ada:hunter2@support.example.com:8443/a/b?token=abc#part",
+        ])))
+        .unwrap()
+        .to_string();
+        for leaked in ["hunter2", "token", "8443", "/a/b", "part", "https://"] {
+            assert!(!summary.contains(leaked), "the summary holds {leaked}");
+        }
+    }
+
+    #[test]
+    fn no_site_when_no_url() {
+        assert_eq!(site(&login(&[])), Value::Null);
+        for kind in [ItemKind::Note, ItemKind::File, ItemKind::Collection] {
+            assert_eq!(site(&item(kind)), Value::Null);
+        }
+    }
+
+    /// An address that does not parse, or that the shell would not open (only `http` and `https` open), gives none; so
+    /// does a first website like that even when a later one is fine.
+    #[test]
+    fn a_url_that_does_not_parse_gives_none() {
+        for stored in [
+            "",
+            "support.example.com",
+            "not a url",
+            "https://",
+            "https://exa mple.com",
+            "javascript:alert(1)",
+            "mailto:ada@example.com",
+            "ftp://files.example.com",
+            "file:///C:/x",
+            r"\\server\share",
+            r"C:\x.exe",
+            "ms-settings:",
+        ] {
+            assert_eq!(site(&login(&[stored])), Value::Null, "{stored}");
+        }
+        assert_eq!(
+            site(&login(&["not a url", "https://two.example"])),
+            Value::Null
+        );
     }
 }
