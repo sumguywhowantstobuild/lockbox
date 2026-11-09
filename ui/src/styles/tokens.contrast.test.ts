@@ -279,6 +279,20 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("banner edge on the screen", c("--edge"), ground, 3);
       check("field in error, edge on the plate", c("--danger"), ground, 3);
       check("field in error, edge on the card", c("--danger"), card, 3);
+      // The vault menu (5a): the vault's name as a button on the side menu (at rest, hovered, pressed, and its focus ring
+      // against the side menu), and in the menu each vault's name and its state words (Unlocked, Locked), which are the
+      // only mark of the state, on the card the menu is drawn on; its one action at rest, highlighted and pressed.
+      for (const [state, fill] of [["rest", rail], ["hover", hoveredNav], ["pressed", pressedNav]] as const) {
+        check(`vault button words, ${state}`, c("--ink"), fill, 4.5);
+      }
+      check("vault button focus ring on the side menu", c("--ink"), rail, 3);
+      check("vault menu name words on the card", c("--ink"), card, 4.5);
+      check("vault menu state words on the card", c("--ink2"), card, 4.5);
+      for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`vault menu action words, ${state}`, c("--ink"), fill, 4.5);
+      }
+      // 5b: its Got it is the panel's main pill, measured above; its words are on the card like any dialog's.
+      check("first-close message words on the card", c("--ink2"), card, 4.5);
       // The switch: its off track against the card, its knob against both tracks, and its on track against the card.
       check("switch, off track on the card", c("--switch-off"), card, 3);
       check("switch, knob on the off track", c("--switch-knob"), c("--switch-off"), 3);

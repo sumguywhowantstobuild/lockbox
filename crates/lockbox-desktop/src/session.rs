@@ -110,11 +110,15 @@ pub enum VaultRef<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LockReason {
+    /// A person's own lock: a vault's or Lock all, from the page or the tray, and the window's close button (the app
+    /// keeps running, so the lock hooks must act as they do for any lock: the clipboard's retries stay with its timer).
     Manual,
     Idle,
     WindowsLocked,
     Sleep,
     DriveGone,
+    /// The app is ending (Quit, or Windows signing out or shutting down): the hooks finish their work before the process
+    /// goes, and no vault opens again.
     AppClosing,
     Restore,
 }
@@ -133,6 +137,11 @@ pub enum Notice {
     /// `{ "kind": "restore", "state": .. }` ([`RestoreNotice`](crate::restore::RestoreNotice)). It carries the user's
     /// own folder paths, which they need to act on it; they appear in no error, log or `Debug`.
     Restore(crate::restore::RestoreNotice),
+    /// The window's close button (spec 7.4, screen 5b): `{ "kind": "first_close", "explain": true }` when every vault
+    /// is locked and the window stayed visible for the first-close explanation, `explain: false` once it is done (its
+    /// button, or a second close) and the window hides. An event only: never kept by the shell or listed by
+    /// `launch_notices`, since a reloaded page must not show it again.
+    FirstClose { explain: bool },
 }
 
 /// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`).
@@ -690,6 +699,9 @@ pub struct Sessions {
     /// The closing gate, set for good when the app starts closing ([`shut`](Self::shut)): read where opens register
     /// and publish, and (shared through [`closing_gate`](Self::closing_gate)) where long operations register.
     closing: Arc<AtomicBool>,
+    /// The window-hidden gate ([`seal`](Self::seal)): shut when the window is sent to the tray, lifted when it shows
+    /// again. Read with the closing gate where opens register and publish.
+    sealed: AtomicBool,
     pending: Pending,
     /// Tests only: how many lock calls found `transitions` held and had to wait their turn, so a test can tell that a
     /// second lock is really waiting for the first, not merely late.
@@ -712,6 +724,7 @@ impl Sessions {
             notifier,
             hooks: Hooks { list, queue },
             closing: Arc::default(),
+            sealed: AtomicBool::new(false),
             pending: Pending::default(),
             #[cfg(test)]
             locks_waited: Default::default(),
@@ -832,8 +845,8 @@ impl Sessions {
         let mut unused = Vec::new();
         let started = {
             let mut inner = self.inner();
-            // The app is closing: nothing opens any more.
-            if self.closing.load(Ordering::SeqCst) {
+            // The app is closing, or its window is hidden: nothing opens.
+            if self.refusing_opens() {
                 return Err(ShellError::Locked);
             }
             if since.is_some_and(|epoch| epoch != inner.epoch) {
@@ -877,8 +890,9 @@ impl Sessions {
         let turn = lock(&self.transitions);
         let mut inner = self.inner();
         opening.finish(&mut inner);
-        // A lock of all vaults since the open started, or the app closing (whose lock may not have run yet).
-        if inner.epoch != epoch || self.closing.load(Ordering::SeqCst) {
+        // A lock of all vaults since the open started, or the app closing (whose lock may not have run yet), or the
+        // window hidden since (sealed before the lock that hides it).
+        if inner.epoch != epoch || self.refusing_opens() {
             // A discarded vault closes after both locks are released.
             drop(inner);
             drop(turn);
@@ -1102,6 +1116,23 @@ impl Sessions {
     /// at once; [`close`](Self::close) then revokes everything.
     pub(crate) fn shut(&self) {
         self.closing.store(true, Ordering::SeqCst);
+    }
+
+    /// Shuts the window-hidden gate: from now on no open registers or publishes (`Locked`, what it made is discarded),
+    /// until [`unseal`](Self::unseal). The window's close seals it before its lock, so a vault opened after the lock
+    /// began, in the wait for its hooks or later, never survives the hide; one published before the seal is locked by
+    /// the lock that follows. Takes no lock. Unlike [`shut`](Self::shut) it is lifted again.
+    pub(crate) fn seal(&self) {
+        self.sealed.store(true, Ordering::SeqCst);
+    }
+
+    /// Lifts the gate [`seal`](Self::seal) shut: the window is shown again.
+    pub(crate) fn unseal(&self) {
+        self.sealed.store(false, Ordering::SeqCst);
+    }
+
+    fn refusing_opens(&self) -> bool {
+        self.closing.load(Ordering::SeqCst) || self.sealed.load(Ordering::SeqCst)
     }
 
     /// The app is closing: shuts the gate and revokes every session, for good. Its hooks are queued like any lock's;
@@ -1511,6 +1542,71 @@ mod tests {
             (answer.session, answer.generation, answer.data),
             (id, generation, 7)
         );
+    }
+
+    /// The window-hidden gate: sealed, no open starts and none publishes (`Locked`, whatever it made is discarded), until
+    /// it is lifted. Unlike the closing gate it is lifted again, when the window shows.
+    #[test]
+    fn a_sealed_gate_refuses_opens_until_it_is_lifted() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let ran = Cell::new(false);
+        let fails = |_: &CancelToken| {
+            ran.set(true);
+            Err::<OpenStep<()>, _>(ShellError::NotFound)
+        };
+        sessions.seal();
+        assert_eq!(
+            sessions.open(None, None, fails).err(),
+            Some(ShellError::Locked)
+        );
+        assert!(!ran.take(), "a sealed gate runs no open");
+
+        sessions.unseal();
+        assert_eq!(
+            sessions.open(None, None, fails).err(),
+            Some(ShellError::NotFound)
+        );
+        assert!(ran.take(), "a lifted gate runs the open");
+        let (id, generation, _) = open_writable(&sessions, parent.path());
+        assert!(sessions.read(id, generation, |_, _| Ok(())).is_ok());
+    }
+
+    /// A seal that comes while the one-second password check runs: the vault it makes is discarded and the answer is
+    /// `Locked`, as for a lock; nothing is left unlocked or holding the folder.
+    #[test]
+    fn seal_during_unlock_discards_vault() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let dir = create_closed(parent.path());
+        let location = Location::folder(&dir).unwrap();
+        let (unlocked, sealed) = (Meet::default(), Meet::default());
+        let answer = thread::scope(|s| {
+            let opening = s.spawn(|| {
+                sessions.open(Some(location.clone()), None, |_| {
+                    let vault = unlock(&dir)?;
+                    unlocked.wait();
+                    sealed.wait();
+                    Ok(OpenStep::Session(
+                        location.clone(),
+                        Opened::Writable(vault),
+                        (),
+                    ))
+                })
+            });
+            unlocked.wait();
+            sessions.seal();
+            sealed.wait();
+            opening.join().unwrap()
+        });
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert!(
+            sessions
+                .list()
+                .iter()
+                .all(|info| info.state != SessionState::Unlocked)
+        );
+        assert!(is_free(&dir), "the discarded vault released its .lock");
     }
 
     /// An open started with the epoch read before a dialog: a lock of all vaults since then answers `Locked` without

@@ -37,6 +37,16 @@ pub struct Os {
     pub clipboard: Arc<dyn ClipboardBackend>,
     pub timer: Arc<dyn Timer>,
     pub printer: Arc<dyn Printer>,
+    pub window: Arc<dyn MainWindow>,
+}
+
+/// The app's one window, as the shell sends it to the tray. Looked up at each call: the window is built after the
+/// shell. Showing it again is not here: it goes through [`window::bring_to_front`](crate::window::bring_to_front),
+/// which puts the window's protections in place before it shows.
+pub trait MainWindow: Send + Sync {
+    /// Hides the window, which keeps running in the tray. Best effort: a window that cannot be hidden stays on screen,
+    /// already locked.
+    fn hide(&self);
 }
 
 /// A copy's own tag (spec §7.3): 16 random bytes from the OS, written beside the copy in [`TAG_FORMAT`]. Not secret

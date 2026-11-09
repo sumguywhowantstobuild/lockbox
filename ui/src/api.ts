@@ -210,6 +210,16 @@ export async function resetOutputJournal(): Promise<void> {
 }
 
 /**
+ * 5b's button, after the first close: the shell saves that the explanation was seen, so later closes hide the window at
+ * once, sends `first_close` with `explain: false`, and hides the window. Every vault is already locked by then. When the
+ * settings file can't be written, the shell still remembers it for this run and hides the window: a note seen once is not
+ * worth an error, and it shows again only after Lockbox restarts. So this never refuses.
+ */
+export async function closeExplainedOk(): Promise<void> {
+  await callPlain<null>("close_explained_ok", {});
+}
+
+/**
  * Where a readable file was saved, to show the person: the folder that holds it, as their own path. For showing only;
  * no command takes it back.
  */

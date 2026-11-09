@@ -10,6 +10,7 @@
     "allow-list-sessions",
     "allow-lock-vault",
     "allow-lock-all",
+    "allow-close-explained-ok",
     "allow-list-vaults",
     "allow-add-existing-vault",
     "allow-add-existing-vault-confirm",

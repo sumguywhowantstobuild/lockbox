@@ -1641,6 +1641,7 @@ mod tests {
             clipboard: Arc::new(ClipboardSteps::new(ts.clipboard.clone(), ts.clock.clone())),
             timer: ts.timer.clone(),
             printer: Arc::new(PrintSteps::new(ts.print.clone())),
+            window: ts.window.clone(),
         };
         Arc::new(Shell::new(ts.events.clone(), os, ts.app_dirs.clone()).unwrap())
     }

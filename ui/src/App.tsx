@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { LockboxParts } from "./parts/LockboxParts";
 import { PortalContainerProvider } from "./parts/Portal";
 import { vaultLook } from "./parts/Pattern";
+import { FirstClose } from "./screens/FirstClose";
 import { LockScreen } from "./screens/LockScreen";
 import { MainWindow } from "./screens/MainWindow";
 import { FirstRun } from "./screens/setup/FirstRun";
@@ -21,7 +22,8 @@ import "./styles/print.css";
 /**
  * The whole app: first-time setup while there is no vault, the lock screen while none is open, the main window of the
  * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. The
- * store starts listening for locks before anything asks the shell for anything. Light or dark follows Windows.
+ * store starts listening for locks before anything asks the shell for anything. The first close of the window is explained
+ * over whichever of these is up (5b). Light or dark follows Windows.
  */
 export default function App() {
   const mode = useMode();
@@ -59,6 +61,7 @@ export default function App() {
       <PortalContainerProvider value={root ?? undefined}>
         <div ref={setRoot} className={`app mode-${mode} v-${look.accent}`}>
           {screen}
+          <FirstClose />
         </div>
       </PortalContainerProvider>
     </LockboxParts>

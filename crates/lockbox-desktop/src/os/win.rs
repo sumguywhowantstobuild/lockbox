@@ -95,8 +95,8 @@ use windows_sys::core::PWSTR;
 use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
     CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, HotkeyTaken,
-    IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher, Os, OsSignal,
-    PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, Shortcut,
+    IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher, MainWindow, Os,
+    OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, Shortcut,
     SystemClock, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
@@ -523,6 +523,7 @@ impl Os {
             printer: Arc::new(PrintSteps::new(Arc::new(WinPrint { app: app.clone() }))),
             launcher: Arc::new(WinLauncher),
             idle: Arc::new(WinIdle),
+            window: Arc::new(WinMainWindow { app: app.clone() }),
             power: Arc::new(WinPower { app }),
             clock: Arc::new(SystemClock),
             clipboard: Arc::new(ClipboardSteps::new(
@@ -830,6 +831,19 @@ impl<R: Runtime> Power for WinPower<R> {
     fn keep_awake(&self, on: bool) {
         if let Some(signal_thread) = self.app.try_state::<SignalThread>() {
             signal_thread.keep_awake(on);
+        }
+    }
+}
+
+/// The main window, hidden to the tray by Tauri's own call (no `unsafe` here).
+pub struct WinMainWindow<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> MainWindow for WinMainWindow<R> {
+    fn hide(&self) {
+        if let Some(main) = self.app.get_webview_window(window::MAIN) {
+            let _ = main.hide();
         }
     }
 }

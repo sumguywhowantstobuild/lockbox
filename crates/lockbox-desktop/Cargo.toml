@@ -13,7 +13,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # A clipboard copy's tag (spec §7.3): the OS random source, the engine's version.
 getrandom = "0.4"
-tauri = { version = "2.12.5", features = [] }
+# `tray-icon`: the icon by the clock, where the window hides to (`tray`).
+tauri = { version = "2.12.5", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.5.4"
 # Typed passwords and the recovery key, wiped when dropped; `serde` so they parse from a request and the recovery
 # key crosses to the screen once.

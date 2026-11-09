@@ -585,6 +585,28 @@
   padding: 7px 8px;
 }
 
+/* The vault's name as the button that opens the vault menu. */
+.vsw {
+  min-width: 0;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.vsw:hover {
+  background: var(--hov);
+}
+
+.vsw:active {
+  background: var(--prs);
+}
+
 .vprint {
   width: 32px;
   height: 32px;
@@ -1685,6 +1707,54 @@
 
 .mi.dng {
   color: var(--danger);
+}
+
+/* A menu that opens with lines saying how things stand (the vault menu: each vault, and Unlocked or Locked). */
+.menu.mwide {
+  display: flex;
+  flex-direction: column;
+  min-width: 240px;
+  /* Never taller than the room the window leaves it (Base UI sets this on the positioner): the lines scroll, not the action. */
+  max-height: var(--available-height, 60vh);
+}
+
+.mscroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.menu.mwide > :is(.mline, [role="group"]) {
+  flex: none;
+}
+
+.mnote {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.mnote .mt {
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mnote .ms {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--ink2);
+}
+
+.mline {
+  margin: 5px 6px;
+  border-top: 1px solid var(--line);
 }
 
 .flab {

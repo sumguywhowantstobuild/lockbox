@@ -19,7 +19,8 @@ export function Dialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: string;
-  description?: string;
+  /** One sentence or paragraph, or a list of paragraphs: a screen reader reads them all as the dialog's description. */
+  description?: string | readonly string[];
   initialFocus?: RefObject<HTMLElement | null>;
   children?: ReactNode;
 }) {
@@ -30,7 +31,16 @@ export function Dialog({
         <BaseDialog.Backdrop className="scrim" />
         <BaseDialog.Popup className="pal sm dlg" initialFocus={initialFocus}>
           <BaseDialog.Title>{title}</BaseDialog.Title>
-          {description === undefined ? null : <BaseDialog.Description>{description}</BaseDialog.Description>}
+          {description === undefined ? null : typeof description === "string" ? (
+            <BaseDialog.Description>{description}</BaseDialog.Description>
+          ) : (
+            // Several paragraphs: the description is the box that holds them (a paragraph can't hold paragraphs).
+            <BaseDialog.Description render={<div />}>
+              {description.map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+            </BaseDialog.Description>
+          )}
           <div className="dbtns">{children}</div>
         </BaseDialog.Popup>
       </BaseDialog.Portal>

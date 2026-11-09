@@ -33,11 +33,15 @@ export type RestoreNotice =
 /**
  * What launch, or a running app, has to tell (`launch_notices`, and `lockbox://notice`): flat objects tagged `kind`, with
  * counts and flags only. The output sweep's `unreadable` is true when the record of opened files could not be read.
+ * `first_close` comes only as an event, never from `launch_notices`: `explain: true` when the window was closed for the
+ * first time (every vault is locked and the window stayed visible: show 5b), `explain: false` once the explanation is
+ * done, by 5b's button (`closeExplainedOk`) or by a second close while it showed (the window hides either way).
  */
 export type PageNotice =
   | { kind: "output_sweep"; removed: number; kept: number; unreadable: boolean }
   | { kind: "open_cleanup"; removed: number; still_open: number }
-  | ({ kind: "restore" } & RestoreNotice);
+  | ({ kind: "restore" } & RestoreNotice)
+  | { kind: "first_close"; explain: boolean };
 
 /** What dismissing a restore journal leaves behind, for the user to act on. */
 export interface Leaves {

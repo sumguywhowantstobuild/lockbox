@@ -7,10 +7,12 @@ import {
   getForm,
   getReveal,
   lockEverything,
+  lockOneVault,
   openedItems,
   resetStoreForTests,
   selectItem,
   setForm,
+  startNotices,
   startStore,
   unlock,
 } from "./store";
@@ -236,4 +238,103 @@ test("a_lock_listener_that_cannot_be_set_up_says_so_and_sends_no_command", async
   // Asked again, it does not try a second time and does not hang.
   await startStore();
   expect(invoke).not.toHaveBeenCalled();
+});
+
+test("lock_one_vault_drops_it_even_if_no_lock_event_comes", async () => {
+  const { session } = await opened();
+  addReveal(session, "a", "first-secret");
+  // The shell locks and answers, but the event never reaches the page.
+  answerWith("lock_vault", () => Promise.resolve(null));
+  await lockOneVault(session);
+  expect(debugState().sessions).toEqual([]);
+  expect(JSON.stringify(debugState())).not.toContain("first-secret");
+  expect(debugState().toast).toBeNull();
+});
+
+test("lock_one_vault_leaves_the_other_open", async () => {
+  shell = installFakeShell(invoke, listen, [
+    { id: 7, name: "My vault", items: sampleItems() },
+    { id: 8, name: "Home", items: sampleItems() },
+  ]);
+  await startStore();
+  await unlock(7, PASSWORD);
+  await unlock(8, PASSWORD);
+  const first = shell.sessionOf(7);
+  const second = shell.sessionOf(8);
+  if (first === undefined || second === undefined) throw new Error("not open");
+  await lockOneVault(first.session);
+  expect(debugState().sessions.map((entry) => entry.vaultId)).toEqual([8]);
+  expect(shell.sessionOf(8)?.unlocked).toBe(true);
+});
+
+test("an_old_lock_answer_does_not_close_the_vault_unlocked_again", async () => {
+  const { session } = await opened();
+  const real = invoke.getMockImplementation();
+  if (real === undefined) throw new Error("no fake shell");
+  let answerNow: () => void = () => undefined;
+  // The lock's own answer is slow: the event came first, and the vault was unlocked again before the answer arrived.
+  invoke.mockImplementation((cmd: string, args?: unknown) =>
+    cmd === "lock_vault"
+      ? new Promise((resolve) => {
+          answerNow = () => {
+            resolve(null);
+          };
+        })
+      : (real(cmd, args) as Promise<unknown>),
+  );
+  const locking = lockOneVault(session);
+  act(() => {
+    shell.lock(session);
+  });
+  expect(debugState().sessions).toEqual([]);
+  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  expect(debugState().sessions).toHaveLength(1);
+  answerNow();
+  await locking;
+  // The new session is the one the person has now; the late answer is about the old one.
+  expect(debugState().sessions).toHaveLength(1);
+  expect(openedItems(session)?.length).toBeGreaterThan(0);
+});
+
+test("a_lock_the_shell_refuses_is_said_and_the_vault_stays", async () => {
+  const { session } = await opened();
+  // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+  answerWith("lock_vault", () => Promise.reject({ code: "core", kind: "io" }));
+  await lockOneVault(session);
+  expect(debugState().sessions).toHaveLength(1);
+  expect(debugState().toast).toMatchObject({ kind: "failed", session });
+});
+
+test("a_lock_refused_as_locked_drops_the_vault_and_says_nothing", async () => {
+  const { session } = await opened();
+  answerWith("lock_vault", refusedAsLocked);
+  await lockOneVault(session);
+  expect(debugState().sessions).toEqual([]);
+  expect(debugState().toast).toBeNull();
+});
+
+test("first_close_notice_sets_and_clears_5b_and_is_never_asked_for_at_launch", async () => {
+  await startStore();
+  // Launch has nothing for it: `first_close` is only ever an event.
+  await startNotices();
+  expect(debugState().notices.firstClose).toBe(false);
+  expect(shell.calls.filter((call) => call.cmd === "launch_notices")).toHaveLength(1);
+  act(() => {
+    shell.sendEvent({ kind: "first_close", explain: true });
+  });
+  expect(debugState().notices.firstClose).toBe(true);
+  // Something else arriving does not take it away.
+  act(() => {
+    shell.sendEvent({ kind: "output_sweep", removed: 0, kept: 0, unreadable: false });
+  });
+  expect(debugState().notices.firstClose).toBe(true);
+  // A notice that isn't a yes or a no changes nothing.
+  act(() => {
+    shell.sendEvent({ kind: "first_close", explain: "yes" });
+  });
+  expect(debugState().notices.firstClose).toBe(true);
+  act(() => {
+    shell.sendEvent({ kind: "first_close", explain: false });
+  });
+  expect(debugState().notices.firstClose).toBe(false);
 });

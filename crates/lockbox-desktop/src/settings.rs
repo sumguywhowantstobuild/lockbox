@@ -1,9 +1,12 @@
 //! The user's settings (spec §7.4): the auto-lock idle time and the clipboard clear delay, in `settings.json` in the
-//! state folder: `{ "version": 1, "idle_minutes": <1..=60>, "clipboard_seconds": <10..=300> }`.
+//! state folder: `{ "version": 1, "idle_minutes": <1..=60>, "clipboard_seconds": <10..=300>, "close_explained": <bool> }`.
+//! The last is the shell's own note that the first close's explanation was seen; the page never reads or sets it, and a
+//! file without it (from before it existed) loads with `false`.
 
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -62,20 +65,25 @@ impl Settings {
     }
 }
 
+/// The file as written. `close_explained` is the shell's own note (the first close's explanation was seen): the page's
+/// [`Settings`] never carry it, and a file from before it existed loads with `false`.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsFile {
     version: StateVersion,
     idle_minutes: u8,
     clipboard_seconds: u16,
+    #[serde(default)]
+    close_explained: bool,
 }
 
-impl From<Settings> for SettingsFile {
-    fn from(settings: Settings) -> Self {
+impl SettingsFile {
+    fn new(settings: Settings, close_explained: bool) -> Self {
         SettingsFile {
             version: StateVersion,
             idle_minutes: settings.idle_minutes,
             clipboard_seconds: settings.clipboard_seconds,
+            close_explained,
         }
     }
 }
@@ -85,6 +93,8 @@ pub struct SettingsStore {
     file: PathBuf,
     /// Held only to copy the settings in or out: the auto-lock's tick reads it and must never wait for the disk.
     current: Mutex<Settings>,
+    /// Whether the first close's explanation was seen: kept for this run even when it could not be saved.
+    close_explained: AtomicBool,
     /// Held while a change is saved and put in effect, so two changes land in the file in the order they take effect.
     saving: Mutex<()>,
     /// Tests only: run once, inside the next save, before the file is written.
@@ -100,14 +110,19 @@ impl SettingsStore {
         let saved = read_state::<SettingsFile>(&file, WHAT)
             .ok()
             .flatten()
-            .map(|saved| Settings {
-                idle_minutes: saved.idle_minutes,
-                clipboard_seconds: saved.clipboard_seconds,
+            .map(|saved| {
+                let settings = Settings {
+                    idle_minutes: saved.idle_minutes,
+                    clipboard_seconds: saved.clipboard_seconds,
+                };
+                (settings, saved.close_explained)
             })
-            .filter(|saved| saved.check().is_ok());
+            .filter(|(settings, _)| settings.check().is_ok());
+        let (settings, close_explained) = saved.unwrap_or_default();
         SettingsStore {
             file,
-            current: Mutex::new(saved.unwrap_or_default()),
+            current: Mutex::new(settings),
+            close_explained: AtomicBool::new(close_explained),
             saving: Mutex::default(),
             #[cfg(test)]
             on_save: Mutex::default(),
@@ -125,9 +140,23 @@ impl SettingsStore {
         let _saving = lock(&self.saving);
         #[cfg(test)]
         self.run_on_save();
-        write_state(&self.file, &SettingsFile::from(settings), WHAT)?;
+        let explained = self.close_explained.load(Ordering::SeqCst);
+        write_state(&self.file, &SettingsFile::new(settings, explained), WHAT)?;
         *lock(&self.current) = settings;
         Ok(())
+    }
+
+    /// Whether the first close's explanation was seen (saved, or only remembered for this run).
+    pub fn close_explained(&self) -> bool {
+        self.close_explained.load(Ordering::SeqCst)
+    }
+
+    /// Notes that the first close's explanation was seen and saves it with the other settings. Taken for this run
+    /// even when the file cannot be written: the error is only for the caller to log, never to show.
+    pub fn mark_close_explained(&self) -> ShellResult<()> {
+        let _saving = lock(&self.saving);
+        self.close_explained.store(true, Ordering::SeqCst);
+        write_state(&self.file, &SettingsFile::new(self.get(), true), WHAT)
     }
 
     /// Tests only: runs `hook` once, inside the next save, before the file is written.
@@ -206,7 +235,12 @@ mod tests {
         let saved: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
         assert_eq!(
             saved,
-            serde_json::json!({ "version": 1, "idle_minutes": 1, "clipboard_seconds": 300 })
+            serde_json::json!({
+                "version": 1,
+                "idle_minutes": 1,
+                "clipboard_seconds": 300,
+                "close_explained": false
+            })
         );
         assert_eq!(SettingsStore::load(file.clone()).get(), chosen);
 
@@ -226,5 +260,102 @@ mod tests {
             );
             assert_eq!(fs::read_to_string(&file).unwrap(), damaged);
         }
+    }
+
+    fn saved(file: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(file).unwrap()).unwrap()
+    }
+
+    /// A settings file from before `close_explained` existed loads as it did, with the note at `false`; the next save
+    /// (a change of the page's settings) writes the field out, still `false`.
+    #[test]
+    fn old_settings_file_still_loads() {
+        let temp = TempDir::new();
+        let file = temp.path().join("settings.json");
+        fs::write(
+            &file,
+            r#"{ "version": 1, "idle_minutes": 7, "clipboard_seconds": 45 }"#,
+        )
+        .unwrap();
+        let store = SettingsStore::load(file.clone());
+        assert_eq!(
+            store.get(),
+            Settings {
+                idle_minutes: 7,
+                clipboard_seconds: 45
+            }
+        );
+        assert!(!store.close_explained());
+
+        store.set(store.get()).unwrap();
+        assert_eq!(saved(&file)["close_explained"], false);
+        assert!(!SettingsStore::load(file).close_explained());
+    }
+
+    /// The note is saved in the settings file beside the page's settings, kept by every later save of them, read back by
+    /// the next launch, and never part of the page's own `Settings`.
+    #[test]
+    fn close_explained_is_saved_with_the_settings_and_kept() {
+        let temp = TempDir::new();
+        let file = temp.path().join("Lockbox").join("settings.json");
+        let store = SettingsStore::load(file.clone());
+        assert!(!store.close_explained());
+
+        store.mark_close_explained().unwrap();
+        assert!(store.close_explained());
+        assert_eq!(
+            saved(&file),
+            serde_json::json!({
+                "version": 1,
+                "idle_minutes": 5,
+                "clipboard_seconds": 30,
+                "close_explained": true
+            })
+        );
+        assert!(SettingsStore::load(file.clone()).close_explained());
+
+        // A change of the page's settings keeps it.
+        let chosen = Settings {
+            idle_minutes: 2,
+            clipboard_seconds: 60,
+        };
+        store.set(chosen).unwrap();
+        assert!(store.close_explained());
+        assert_eq!(saved(&file)["close_explained"], true);
+        let again = SettingsStore::load(file);
+        assert_eq!((again.get(), again.close_explained()), (chosen, true));
+
+        // The page's shape has no such field.
+        let page = serde_json::to_value(chosen).unwrap();
+        assert_eq!(
+            page,
+            serde_json::json!({ "idle_minutes": 2, "clipboard_seconds": 60 })
+        );
+        assert!(
+            serde_json::from_value::<Settings>(serde_json::json!({
+                "idle_minutes": 2,
+                "clipboard_seconds": 60,
+                "close_explained": true
+            }))
+            .is_err()
+        );
+    }
+
+    /// A file that cannot be written: the note is still taken for this run, the settings in effect do not change, and
+    /// the error is handed back for the caller to log.
+    #[test]
+    fn close_explained_is_remembered_when_the_file_cannot_be_written() {
+        let temp = TempDir::new();
+        let blocker = temp.path().join("blocker");
+        fs::write(&blocker, "a file where a folder is needed").unwrap();
+        let file = blocker.join("settings.json");
+        let store = SettingsStore::load(file.clone());
+
+        assert!(store.mark_close_explained().is_err());
+        assert!(store.close_explained(), "not remembered for this run");
+        assert_eq!(store.get(), Settings::default());
+        assert!(!file.exists());
+        // The next launch has not seen it.
+        assert!(!SettingsStore::load(file).close_explained());
     }
 }

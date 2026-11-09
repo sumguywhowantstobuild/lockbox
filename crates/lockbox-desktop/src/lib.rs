@@ -27,6 +27,7 @@ pub mod settings;
 pub mod shell;
 #[cfg(test)]
 mod testing;
+pub mod tray;
 pub mod vault_state;
 pub mod views;
 pub mod window;
@@ -37,7 +38,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::Instant;
 use std::{io, thread};
 
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, CloseRequestApi, Manager, RunEvent, Runtime, WindowEvent};
 
 use crate::shell::{Events, Shell};
 
@@ -113,6 +114,12 @@ pub fn run() {
             route_signals(signals, Arc::clone(&shell))?;
             start_ticks(shell)?;
 
+            // The icon by the clock, where the window hides to: fail closed, since a hidden window with no icon could
+            // never be reached again.
+            if tray::build(app.handle()).is_err() {
+                return Err("Lockbox will not run: its icon by the clock could not be made".into());
+            }
+
             // The window is built hidden and shown only once its protections are in place. Fail closed as well: never
             // run with files droppable into the page, or with the browser's keys and menu (Ctrl+P, F12, the context
             // menu) able to reach a revealed secret. The window stays hidden when either is not confirmed.
@@ -135,23 +142,51 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("the Lockbox app could not start");
 
-    // Every way out locks every vault before the process ends: closing the main window, the exit request that follows,
-    // and the loop's end. Windows signing out or shutting down (`WM_ENDSESSION`) reaches the app only as `Exit`: tao
-    // 0.37.2 sends it, then calls `process::exit` as soon as this callback returns. Each call returns once every vault
-    // is revoked (later calls at once), or after `autolock::SHUTDOWN_WAIT` at most.
-    app.run(|app, event| match event {
+    app.run(on_run_event);
+}
+
+/// What the app does with each event of its run. The window's close button never ends the app (it locks every vault
+/// and hides the window to the tray: [`close_requested`]); the tray's Quit does ([`tray::quit`]). Every way out locks
+/// every vault before the process ends: Quit, the exit request that follows it, and the loop's end. Windows signing out
+/// or shutting down (`WM_ENDSESSION`) reaches the app only as `Exit`: tao 0.37.2 sends it, then calls `process::exit`
+/// as soon as this callback returns. Each [`shutdown`] call returns once every vault is revoked (later calls at once),
+/// or after `autolock::SHUTDOWN_WAIT` at most.
+fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
+    match event {
         RunEvent::WindowEvent {
             label,
-            event: WindowEvent::CloseRequested { .. },
+            event: WindowEvent::CloseRequested { api, .. },
             ..
-        } if label == window::MAIN => shutdown(app),
+        } if label == window::MAIN => close_requested(app, &api),
         RunEvent::ExitRequested { .. } | RunEvent::Exit => shutdown(app),
         _ => {}
-    });
+    }
+}
+
+/// What a close request lets the handler do to the window's close.
+trait PreventClose {
+    fn prevent_close(&self);
+}
+
+impl PreventClose for CloseRequestApi {
+    fn prevent_close(&self) {
+        CloseRequestApi::prevent_close(self);
+    }
+}
+
+/// The main window's close button: the window is not closed (so the app keeps running, and the save shortcut with it),
+/// and [`Shell::close_window`] locks every vault and hides the window, off the event loop's thread. With no shell (a
+/// failed start) the close is left alone, so the app can still end.
+fn close_requested<R: Runtime>(app: &AppHandle<R>, api: &impl PreventClose) {
+    let Some(shell) = app.try_state::<Arc<Shell>>() else {
+        return;
+    };
+    api.prevent_close();
+    shell.run_in_background(Shell::close_window);
 }
 
 /// [`Shell::shutdown`], when the shell was made (a failed setup ends the app before there is one).
-fn shutdown(app: &AppHandle) {
+fn shutdown<R: Runtime>(app: &AppHandle<R>) {
     if let Some(shell) = app.try_state::<Arc<Shell>>() {
         shell.shutdown();
     }
@@ -213,10 +248,15 @@ fn start_ticks(shell: Arc<Shell>) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    use tauri::App;
+    use tauri::test::{MockRuntime, mock_builder, mock_context, noop_assets};
 
     use super::*;
     use crate::os::OsSignal;
+    use crate::session::{LockReason, SessionState};
     use crate::testing::TestShell;
 
     /// How long a test waits before it fails instead of hanging.
@@ -229,6 +269,113 @@ mod tests {
             assert!(began.elapsed() < GIVE_UP, "{what}");
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// A close request's answer, recorded.
+    #[derive(Default)]
+    struct FakeClose(AtomicBool);
+
+    impl PreventClose for FakeClose {
+        fn prevent_close(&self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl FakeClose {
+        fn prevented(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    /// A test app (no window, no webview) that keeps `ts`'s shell, as the real one does.
+    fn app_with(ts: &TestShell) -> App<MockRuntime> {
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("the mock app builds");
+        assert!(app.manage(Arc::clone(&ts.shell)));
+        app
+    }
+
+    fn state_of(ts: &TestShell, session: crate::session::SessionId) -> SessionState {
+        ts.shell
+            .sessions
+            .list()
+            .iter()
+            .find(|s| s.session == session)
+            .expect("the session is listed")
+            .state
+    }
+
+    /// Windows ending the session (and the app's own exit) still runs the shutdown: every vault locks as an app close,
+    /// through the run's own event handler (`Exit` is the only event a sign-out or shutdown brings) and through the
+    /// signal router (`Ending`). An event that is neither locks nothing.
+    #[test]
+    fn windows_ending_still_runs_shutdown() {
+        let ts = TestShell::new();
+        let (family, _) = ts.open_vault("Family");
+        let app = app_with(&ts);
+
+        on_run_event(app.handle(), RunEvent::Ready);
+        assert_eq!(state_of(&ts, family), SessionState::Unlocked);
+
+        on_run_event(app.handle(), RunEvent::Exit);
+        assert_eq!(state_of(&ts, family), SessionState::Locked);
+        assert_eq!(
+            ts.events.locked().iter().map(|l| l.2).collect::<Vec<_>>(),
+            [LockReason::AppClosing]
+        );
+
+        let ts = TestShell::new();
+        let (session, _) = ts.open_vault("Family");
+        let (sink, signals) = mpsc::channel();
+        route_signals(signals, Arc::clone(&ts.shell)).unwrap();
+        sink.send(OsSignal::Ending).unwrap();
+        wait_until("Windows ending never reached the shutdown", || {
+            ts.events.locked().iter().any(|l| l.0 == session)
+        });
+        assert_eq!(
+            ts.events.locked().iter().map(|l| l.2).collect::<Vec<_>>(),
+            [LockReason::AppClosing]
+        );
+    }
+
+    /// The window's close button is stopped from closing the window, and what runs instead locks every vault off the
+    /// event loop's thread. It is not an exit: the shell's closing gate stays open. Without a shell (a failed start) the
+    /// close is left alone, so the app can still end.
+    #[test]
+    fn close_request_is_prevented_and_leaves_the_app_running() {
+        let ts = TestShell::new();
+        let (family, _) = ts.open_vault("Family");
+        let app = app_with(&ts);
+
+        let api = FakeClose::default();
+        close_requested(app.handle(), &api);
+        assert!(api.prevented(), "the window was left to close");
+        wait_until("the close never locked", || {
+            state_of(&ts, family) == SessionState::Locked
+        });
+        assert_eq!(
+            ts.events.locked().iter().map(|l| l.2).collect::<Vec<_>>(),
+            [LockReason::Manual]
+        );
+        // The close's thread holds the shell until it is done: the managed copy and the test's are the other two.
+        wait_until("the close never finished", || {
+            Arc::strong_count(&ts.shell) == 2
+        });
+        let (again, _) = ts.open_vault("Again");
+        assert_eq!(state_of(&ts, again), SessionState::Unlocked);
+        // The test app keeps the shell alive past this test: no vault is left open in the folder that is removed.
+        ts.shell.lock_all();
+
+        let bare = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("the mock app builds");
+        let api = FakeClose::default();
+        close_requested(bare.handle(), &api);
+        assert!(
+            !api.prevented(),
+            "a close was stopped with no shell to lock"
+        );
     }
 
     /// A press of the shortcut, as the signal window sends it, ends in the shell: counted, and nothing is read or kept.

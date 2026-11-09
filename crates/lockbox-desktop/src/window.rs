@@ -1,11 +1,14 @@
 //! The one app window. Every rule about what the webview may load, open, download or receive is set here, in
 //! [`main_window`] (spec §4.2).
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
+
+use crate::shell::Shell;
 
 /// The window's label; the capability grants Lockbox's commands to this window only.
 pub const MAIN: &str = "main";
@@ -83,6 +86,10 @@ pub trait WindowSteps {
     /// Turns off the browser's keys and its context menu; true only when WebView2 confirmed it.
     fn turn_off_browser_keys(&self) -> bool;
     fn show(&self) -> tauri::Result<()>;
+    /// Restores the window from the taskbar when it was minimized. Best effort.
+    fn unminimize(&self);
+    /// Gives the window the keyboard focus. Best effort.
+    fn focus(&self);
 }
 
 /// The window was left hidden: a protection that must hold did not, or it could not be shown.
@@ -155,6 +162,14 @@ impl<R: Runtime> WindowSteps for RealSteps<'_, R> {
     fn show(&self) -> tauri::Result<()> {
         self.window.show()
     }
+
+    fn unminimize(&self) {
+        let _ = self.window.unminimize();
+    }
+
+    fn focus(&self) {
+        let _ = self.window.set_focus();
+    }
 }
 
 /// Runs `turn_off` on the window's WebView2 controller and keeps what it confirmed in `confirmed`. Starts as "not
@@ -180,21 +195,48 @@ pub fn browser_keys_are_off() -> bool {
     BROWSER_KEYS_OFF.load(Ordering::SeqCst)
 }
 
-/// Brings the main window to the front (a second copy of the app was started).
+/// Shows the main window again and brings it forward: a second copy of the app was started, or "Open Lockbox" was chosen
+/// in the tray. The same steps as the first show ([`show_when_locked_down`]), so the window's protections are confirmed
+/// again before it can be seen: a window that stays hidden is not shown, restored or focused.
+///
+/// Once the window shows, `shell` is told ([`Shell::window_shown`]): the gate that refused every unlock while the window
+/// was hidden is lifted. A window that stays hidden keeps it shut.
+pub fn bring_forward(
+    steps: &impl WindowSteps,
+    capture_protected: bool,
+    shell: &Shell,
+) -> Result<(), StayedHidden> {
+    show_when_locked_down(steps, capture_protected)?;
+    shell.window_shown();
+    steps.unminimize();
+    steps.focus();
+    Ok(())
+}
+
+/// [`bring_forward`] on the real window (the one way back from the tray, for the second launch and "Open Lockbox").
+/// Call it on the main thread, as [`show_main_window`] must be. Nothing happens when the window is gone, or when it
+/// stays hidden (the person can still Quit from the tray).
 pub fn bring_to_front<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window(MAIN) {
-        // Best effort: if the window is closing there is nothing to bring forward.
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+    // No shell (a failed start): no window to bring back either.
+    let (Some(window), Some(shell)) = (app.get_webview_window(MAIN), app.try_state::<Arc<Shell>>())
+    else {
+        return;
+    };
+    let _ = bring_forward(
+        &RealSteps { window: &window },
+        CAPTURE_PROTECTED_AT_START,
+        &shell,
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
 
+    use zeroize::Zeroizing;
+
     use super::*;
+    use crate::testing::{TEST_PASSWORD, TestShell, heavy};
 
     /// The design: the window opens at 1280 by 800 and cannot go below 960 by 460 (so a 200% screen still fits). The
     /// real window's size is checked by hand: the test runtime keeps no window size.
@@ -262,6 +304,107 @@ mod tests {
                 false => Err(std::io::Error::other("no window").into()),
             }
         }
+
+        fn unminimize(&self) {
+            self.note("unminimize");
+        }
+
+        fn focus(&self) {
+            self.note("focus");
+        }
+    }
+
+    /// A second launch, and the tray's "Open Lockbox", bring a hidden window back through the same steps as the first
+    /// show: capture protection, no file drops and no browser keys first, and only then the show, the restore from the
+    /// taskbar and the focus.
+    #[test]
+    fn second_launch_shows_the_hidden_window() {
+        let steps = FakeSteps::default();
+        let ts = TestShell::new();
+        assert_eq!(bring_forward(&steps, true, &ts.shell), Ok(()));
+        assert_eq!(
+            steps.events(),
+            [
+                "capture true",
+                "drop off",
+                "keys off",
+                "show",
+                "unminimize",
+                "focus"
+            ]
+        );
+    }
+
+    /// A window whose protections cannot be confirmed stays hidden when asked for again: nothing is shown, restored or
+    /// focused.
+    #[test]
+    fn second_launch_never_shows_a_window_whose_protections_are_unconfirmed() {
+        let ts = TestShell::new();
+        for (drop_off, keys_off, shows) in [
+            (false, true, true),
+            (true, false, true),
+            (false, false, true),
+            (true, true, false),
+        ] {
+            let steps = FakeSteps {
+                drop_off,
+                keys_off,
+                shows,
+                ..FakeSteps::default()
+            };
+            assert_eq!(bring_forward(&steps, true, &ts.shell), Err(StayedHidden));
+            let events = steps.events();
+            for after in ["unminimize", "focus"] {
+                assert!(
+                    !events.iter().any(|event| event == after),
+                    "{after} after a refusal: {events:?}"
+                );
+            }
+            if !(drop_off && keys_off) {
+                assert!(!events.iter().any(|event| event == "show"), "{events:?}");
+            }
+        }
+    }
+
+    /// While the window is hidden no unlock is accepted. Showing it again (Open Lockbox, a second launch) lifts that
+    /// once the window is shown, and not before: a window that stays hidden keeps refusing.
+    #[test]
+    fn showing_the_window_again_lifts_the_refusal_of_unlocks() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.shell.close_window();
+        assert_eq!(ts.window.hides(), 1);
+        let refused = |name: &str| {
+            let password = Zeroizing::new(TEST_PASSWORD.to_owned());
+            heavy(|| ts.shell.create_vault(name.into(), password, false)).is_err()
+        };
+        assert!(refused("Hidden"), "a vault opened with the window hidden");
+
+        let stays_hidden = FakeSteps {
+            keys_off: false,
+            ..FakeSteps::default()
+        };
+        assert_eq!(
+            bring_forward(&stays_hidden, true, &ts.shell),
+            Err(StayedHidden)
+        );
+        assert!(
+            refused("Still hidden"),
+            "lifted by a window that stayed hidden"
+        );
+
+        assert_eq!(
+            bring_forward(&FakeSteps::default(), true, &ts.shell),
+            Ok(())
+        );
+        let (session, _) = ts.open_vault("Shown");
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .any(|s| s.session == session && s.state == crate::session::SessionState::Unlocked)
+        );
     }
 
     fn position(events: &[String], event: &str) -> usize {

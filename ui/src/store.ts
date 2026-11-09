@@ -83,6 +83,11 @@ export interface Notices {
   lostOutputs: boolean;
   /** A restore was finished at launch (the words say to unlock with the password from when the backup was made). */
   restoreFinished: boolean;
+  /**
+   * The window was closed for the first time: every vault is locked, the window stayed, and 5b says why Lockbox is still
+   * running. It is only ever heard as an event (never at launch), and it goes with the shell's `explain: false`.
+   */
+  firstClose: boolean;
 }
 
 /** One unlocked vault. */
@@ -145,7 +150,7 @@ const EMPTY: StoreState = {
   startError: null,
   sessions: [],
   toast: null,
-  notices: { lostOutputs: false, restoreFinished: false },
+  notices: { lostOutputs: false, restoreFinished: false, firstClose: false },
   lockNote: null,
 };
 
@@ -643,6 +648,30 @@ export async function lockThisVault(session: number): Promise<void> {
   if (stillOpen(session, generation)) dropSession(session);
 }
 
+/**
+ * Locks one vault, from the vault menu: the lock that already exists, for this vault alone. Its event drops the record;
+ * if the event was lost on the way, the shell's answer that it has locked drops it. An answer that comes late, after the
+ * lock's event cleared this session and the vault was unlocked again, belongs to the old generation and touches nothing of
+ * the new session. A refusal is said as a message, and the vault stays; a refusal as locked means it is locked already.
+ */
+export async function lockOneVault(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return;
+  const { generation } = entry;
+  try {
+    await api.lockVault(session);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+    if (refusedAsLocked(error)) {
+      dropSession(session);
+      return;
+    }
+    set({ ...state, toast: { kind: "failed", session, error } });
+    return;
+  }
+  if (stillOpen(session, generation)) dropSession(session);
+}
+
 /** Closes one of an unlock's banners. It comes back at the next unlock if the shell still has it to report. */
 export function closeBanner(session: number, banner: Banner): void {
   updateAsks(session, (asks) => (asks.closed.includes(banner) ? asks : { ...asks, closed: [...asks.closed, banner] }));
@@ -654,7 +683,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Takes in what launch, or a running app, tells. Only the kinds that have a question in 4A change anything: the record of
- * opened files that could not be read (Ask 11), and a restore finished at launch. The shell keeps its launch notices
+ * opened files that could not be read (Ask 11), a restore finished at launch, and the first close (5b). The shell keeps its launch notices
  * and may send one again as an event, so the latest of each kind replaces the one before.
  */
 function takeNotice(notice: unknown): void {
@@ -666,6 +695,29 @@ function takeNotice(notice: unknown): void {
       ...state,
       notices: { ...state.notices, restoreFinished: notice.state === "recovered" && notice.how === "finished" },
     });
+  } else if (notice.kind === "first_close" && typeof notice.explain === "boolean") {
+    set({ ...state, notices: { ...state.notices, firstClose: notice.explain } });
+  }
+}
+
+let confirmingClose = false;
+
+/**
+ * 5b's "Got it": the shell keeps that the explanation was seen and hides the window. The message goes with the shell's own
+ * `explain: false`, and on the answer too, in case that event was lost. A second press before the answer does nothing. The
+ * command never refuses; if the call fails all the same (the bridge itself), the message stays so the button can be pressed
+ * again, and nothing is said of why.
+ */
+export async function confirmFirstClose(): Promise<void> {
+  if (confirmingClose) return;
+  confirmingClose = true;
+  try {
+    await api.closeExplainedOk();
+    set({ ...state, notices: { ...state.notices, firstClose: false } });
+  } catch {
+    // The message stays.
+  } finally {
+    confirmingClose = false;
   }
 }
 
@@ -836,6 +888,7 @@ export function debugState(): StoreState {
 export function resetStoreForTests(): void {
   started = undefined;
   noticesStarted = undefined;
+  confirmingClose = false;
   state = EMPTY;
   for (const notify of listeners) notify();
 }

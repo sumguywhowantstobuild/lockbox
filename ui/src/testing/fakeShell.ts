@@ -211,6 +211,20 @@ export interface FakeShell {
   tell(notice: object): void;
   /** How many times `reset_output_journal` reached the shell. */
   outputJournalResets(): number;
+  /**
+   * The window's close button, as the shell handles it: every vault locks (reason `manual`, since the app keeps running),
+   * then the first time the window stays and `first_close` `{ explain: true }` is sent; a close while that explanation
+   * shows counts as its button; once it has been explained, the window just hides and nothing is sent.
+   */
+  closeWindow(): void;
+  /** Whether the window is hidden to the tray (a close after the explanation, or the explanation's button). */
+  windowHidden(): boolean;
+  /** How many times `close_explained_ok` reached the shell. */
+  closeExplainedCalls(): number;
+  /** The shell has already shown 5b in an earlier run: the next close hides at once. */
+  markCloseExplained(): void;
+  /** A notice sent as `lockbox://notice` only, never kept for `launch_notices` (`first_close` is only ever an event). */
+  sendEvent(notice: object): void;
 }
 
 let sessionRange = 0;
@@ -245,6 +259,11 @@ export function installFakeShell(
   };
   let launchNotices: object[] = [];
   let outputResets = 0;
+  // The settings file's `close_explained` (which the page never sees), whether 5b is showing, and where the window is.
+  let closeExplained = false;
+  let explaining = false;
+  let hidden = false;
+  let closeExplainedCalls = 0;
   const live = new Map<number, Live>();
   const sessionVault = new Map<number, FakeVault>();
   // A fresh range of session numbers for each fake, because the bridge remembers every session's generation for the
@@ -288,6 +307,14 @@ export function installFakeShell(
     entry.unlocked = false;
     entry.generation += 1;
     emit("lockbox://locked", { session, generation: entry.generation, reason });
+  };
+
+  /** 5b's button, or a second close while it shows: the flag is kept, `explain: false` is sent, the window hides. */
+  const explained = (): void => {
+    closeExplained = true;
+    explaining = false;
+    hidden = true;
+    emit("lockbox://notice", { kind: "first_close", explain: false });
   };
 
   const vaultFor = (session: number, generation: number): FakeVault => {
@@ -563,6 +590,11 @@ export function installFakeShell(
         copied.push(sent);
         return tagged(sent.session, sent.generation, null);
       }
+      case "close_explained_ok":
+        exactly(args ?? {}, []);
+        closeExplainedCalls += 1;
+        explained();
+        return null;
       case "lock_vault": {
         const { session } = exactly(args, ["session"]) as { session: number };
         lock(session);
@@ -697,5 +729,24 @@ export function installFakeShell(
       emit("lockbox://notice", notice);
     },
     outputJournalResets: () => outputResets,
+    closeWindow: () => {
+      for (const session of [...live.keys()]) lock(session);
+      if (explaining) {
+        explained();
+      } else if (closeExplained) {
+        hidden = true;
+      } else {
+        explaining = true;
+        emit("lockbox://notice", { kind: "first_close", explain: true });
+      }
+    },
+    windowHidden: () => hidden,
+    closeExplainedCalls: () => closeExplainedCalls,
+    markCloseExplained: () => {
+      closeExplained = true;
+    },
+    sendEvent: (notice) => {
+      emit("lockbox://notice", notice);
+    },
   };
 }

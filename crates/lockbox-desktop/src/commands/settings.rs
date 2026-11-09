@@ -54,6 +54,8 @@ mod tests {
         for malformed in [
             json!({ "idle_minutes": 5 }),
             json!({ "idle_minutes": 5, "clipboard_seconds": 30, "path": "C:\\" }),
+            // The first-close note lives in the settings file only: the page can neither read nor set it.
+            json!({ "idle_minutes": 5, "clipboard_seconds": 30, "close_explained": true }),
             json!({ "idle_minutes": 256, "clipboard_seconds": 30 }),
             json!({ "idle_minutes": -1, "clipboard_seconds": 30 }),
             json!({ "idle_minutes": 5, "clipboard_seconds": 70000 }),

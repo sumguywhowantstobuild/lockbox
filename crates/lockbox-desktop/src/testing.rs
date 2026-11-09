@@ -18,9 +18,9 @@ use crate::error::ShellResult;
 use crate::lock;
 use crate::os::{
     CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS,
-    Env, IdleSource, InstalledPrinter, InstalledPrinters, Job, KnownFolder, Launcher, Os,
-    PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, TAG_FORMAT, Timer,
-    Volumes,
+    Env, IdleSource, InstalledPrinter, InstalledPrinters, Job, KnownFolder, Launcher, MainWindow,
+    Os, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, TAG_FORMAT,
+    Timer, Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
@@ -104,6 +104,35 @@ impl FakeIdle {
 impl IdleSource for FakeIdle {
     fn since_last_input(&self) -> Duration {
         *lock(&self.0)
+    }
+}
+
+/// The main window: counts the hides, and can run a step inside the next one.
+#[derive(Default)]
+pub struct FakeWindow {
+    hides: AtomicUsize,
+    on_hide: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl FakeWindow {
+    /// How many times the shell hid the window.
+    pub fn hides(&self) -> usize {
+        self.hides.load(Ordering::SeqCst)
+    }
+
+    /// Runs `hook` once, inside the next hide, before it is counted: what it sees is what the shell had done by then.
+    pub fn during_next_hide(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_hide) = Some(Box::new(hook));
+    }
+}
+
+impl MainWindow for FakeWindow {
+    fn hide(&self) {
+        let hook = lock(&self.on_hide).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.hides.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -1134,6 +1163,7 @@ pub struct TestShell {
     pub clipboard: Arc<FakeClipboard>,
     pub timer: Arc<FakeTimer>,
     pub print: Arc<FakePrintCalls>,
+    pub window: Arc<FakeWindow>,
     /// The events the shell sent.
     pub events: Arc<Events>,
     /// Tauri's app-data folders, as the app passes them in.
@@ -1161,6 +1191,7 @@ impl TestShell {
         clipboard.watch_clock(clock.clone());
         let timer = Arc::new(FakeTimer::default());
         let print = Arc::new(FakePrintCalls::default());
+        let window = Arc::new(FakeWindow::default());
         let events = Arc::new(Events::default());
         let app_dirs = vec![
             env.folder(KnownFolder::RoamingAppData)
@@ -1180,6 +1211,7 @@ impl TestShell {
             clipboard: Arc::new(ClipboardSteps::new(clipboard.clone(), clock.clone())),
             timer: timer.clone(),
             printer: Arc::new(PrintSteps::new(print.clone())),
+            window: window.clone(),
         };
         let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone())?);
         Ok(TestShell {
@@ -1194,6 +1226,7 @@ impl TestShell {
             clipboard,
             timer,
             print,
+            window,
             events,
             app_dirs,
             temp,

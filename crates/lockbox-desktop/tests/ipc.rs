@@ -170,6 +170,35 @@ fn list_printers_command_is_listed() {
     assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
 }
 
+/// `close_explained_ok` (5b's button) is listed, granted to the main window and reaches its handler from it; another
+/// window and a remote origin are refused by the ACL, before the handler. It takes no session and no generation, so the
+/// stale-generation, foreign-ID and read-only refusals do not apply to it (its own tests are in `commands::sessions`).
+#[test]
+fn close_explained_ok_is_granted_to_the_main_window_only() {
+    let cmd = "close_explained_ok";
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(granted.contains(&"allow-close-explained-ok"));
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({}));
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
 /// The commands that write a readable file or print the recovery key (Task 7) are listed, granted to the main window and
 /// reach their handler from it; another window and a remote origin are refused by the ACL, before the handler. The page
 /// sends no path and no key to any of them: their bodies are a session and a generation (and a printer's name, for
