@@ -19,14 +19,17 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{ptr, slice};
 
+use lockbox_core::blob::CancelToken;
 use tauri::{AppHandle, Manager, Runtime};
 use zeroize::{Zeroize, Zeroizing};
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2_7, ICoreWebView2Controller, ICoreWebView2Controller4, ICoreWebView2PrintSettings,
+    COREWEBVIEW2_PRINT_STATUS, COREWEBVIEW2_PRINT_STATUS_SUCCEEDED, ICoreWebView2_2,
+    ICoreWebView2_7, ICoreWebView2_16, ICoreWebView2Controller, ICoreWebView2Controller4,
+    ICoreWebView2Environment6, ICoreWebView2PrintSettings, ICoreWebView2PrintSettings2,
     ICoreWebView2Settings3,
 };
-use webview2_com::PrintToPdfCompletedHandler;
+use webview2_com::{PrintCompletedHandler, PrintToPdfCompletedHandler};
 use windows_core::{BOOL, Interface, PCWSTR};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, ERROR_INSUFFICIENT_BUFFER,
@@ -34,6 +37,10 @@ use windows_sys::Win32::Foundation::{
     LocalFree, MAX_PATH, TRUE, WPARAM,
 };
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+use windows_sys::Win32::Graphics::Printing::{
+    EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+    PRINTER_INFO_2W,
+};
 #[cfg(test)]
 use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
 use windows_sys::Win32::Security::Authorization::{
@@ -88,8 +95,9 @@ use windows_sys::core::PWSTR;
 use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
     CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, HotkeyTaken,
-    IdleSource, KnownFolder, Launcher, Os, OsSignal, Power, PrintCalls, PrintDone, PrintFailed,
-    PrintSteps, Shortcut, SystemClock, ThreadTimer, Volumes,
+    IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher, Os, OsSignal,
+    PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, Shortcut,
+    SystemClock, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
 use crate::{lock, window};
@@ -161,7 +169,7 @@ pub struct WinPrint<R: Runtime> {
 }
 
 impl<R: Runtime> PrintCalls for WinPrint<R> {
-    fn start(&self, path: &Path, done: PrintDone) -> Result<(), PrintFailed> {
+    fn start(&self, path: &Path, cancel: CancelToken, done: PrintDone) -> Result<(), PrintFailed> {
         let not_started = PrintFailed::NotStarted { code: 0 };
         let wide = wide_path(path).map_err(|_| not_started)?;
         let window = self
@@ -171,14 +179,260 @@ impl<R: Runtime> PrintCalls for WinPrint<R> {
         // WebView2 is called on the thread that owns it. If the call cannot be queued, the closure (and `done` in it) is
         // dropped, and the caller is told by this return instead.
         window
-            .with_webview(move |webview| print_page(&webview.controller(), &wide, done))
+            .with_webview(move |webview| print_page(&webview.controller(), &wide, &cancel, done))
             .map_err(|_| not_started)
     }
+
+    fn start_on_printer(
+        &self,
+        printer: &str,
+        cancel: CancelToken,
+        done: PrintDone,
+    ) -> Result<(), PrintFailed> {
+        let not_started = PrintFailed::NotStarted { code: 0 };
+        let wide = wide_text(OsStr::new(printer)).map_err(|_| not_started)?;
+        let window = self
+            .app
+            .get_webview_window(window::MAIN)
+            .ok_or(not_started)?;
+        // As for `start`: on the webview's own thread, and a call that cannot be queued drops `done` and is told by this
+        // return instead.
+        window
+            .with_webview(move |webview| {
+                print_page_to_printer(&webview.controller(), &wide, &cancel, done)
+            })
+            .map_err(|_| not_started)
+    }
+
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters> {
+        installed_printers()
+    }
+}
+
+/// Prints the page straight to the printer named `printer` (a NUL-terminated UTF-16 name) on the webview's own thread:
+/// print settings made by the webview's environment (`ICoreWebView2Environment6::CreatePrintSettings`), named for the
+/// printer (`ICoreWebView2PrintSettings2::SetPrinterName`) with backgrounds off, handed to `ICoreWebView2_16::Print`,
+/// which opens no Windows window. `done` goes to WebView2's completion handler or, when the call is refused, is called
+/// with why.
+fn print_page_to_printer(
+    controller: &ICoreWebView2Controller,
+    printer: &[u16],
+    cancel: &CancelToken,
+    done: PrintDone,
+) {
+    // Whichever of the handler and the refusal below comes first takes it.
+    let done = Rc::new(Cell::new(Some(done)));
+    let started = (|| -> windows_core::Result<()> {
+        // SAFETY: `controller` is a live COM interface on the thread that owns the webview (`with_webview`).
+        let webview = unsafe { controller.CoreWebView2() }?;
+        // SAFETY: `webview` is a live COM interface on that same thread; the getter returns a new reference.
+        let environment = unsafe { webview.cast::<ICoreWebView2_2>()?.Environment() }?;
+        // SAFETY: `environment` is a live COM interface on that thread; the call returns new print settings.
+        let settings = unsafe {
+            environment
+                .cast::<ICoreWebView2Environment6>()?
+                .CreatePrintSettings()
+        }?;
+        let named = settings.cast::<ICoreWebView2PrintSettings2>()?;
+        // SAFETY: `printer` is a NUL-terminated UTF-16 string (from `wide_text`) that outlives the call, which copies
+        // it; both settings are live COM interfaces of the one settings object, on the webview's thread.
+        unsafe {
+            named.SetPrinterName(PCWSTR(printer.as_ptr()))?;
+            settings.SetShouldPrintBackgrounds(false)?;
+        }
+        let handler = {
+            let done = Rc::clone(&done);
+            PrintCompletedHandler::create(Box::new(move |error, status| {
+                if let Some(done) = done.take() {
+                    done(printer_job_answer(error, status));
+                }
+                Ok(())
+            }))
+        };
+        let webview = webview.cast::<ICoreWebView2_16>()?;
+        // The last look before WebView2 is asked: a session that locked while this was queued is not printed.
+        if revoked(cancel, &done) {
+            return Ok(());
+        }
+        // SAFETY: `webview` and `settings` are live COM interfaces on the webview's thread; `handler` is a live COM
+        // object, which WebView2 holds its own reference to for as long as it needs it.
+        unsafe { webview.Print(&settings, &handler) }
+    })();
+    if let Err(error) = started
+        && let Some(done) = done.take()
+    {
+        done(Err(PrintFailed::NotStarted {
+            code: error.code().0,
+        }));
+    }
+}
+
+/// The check that stands right before WebView2's `Print` or `PrintToPdf`, on the webview's thread: when `cancel` is
+/// cancelled (the session locked while the job was queued), the job ends here with [`PrintFailed::Revoked`] through the
+/// `done` it holds and `true` is returned, so WebView2 is never called. A submitted print cannot be recalled, so this is
+/// the last point where a lock still stops one.
+fn revoked(cancel: &CancelToken, done: &Rc<Cell<Option<PrintDone>>>) -> bool {
+    if !cancel.is_cancelled() {
+        return false;
+    }
+    if let Some(done) = done.take() {
+        done(Err(PrintFailed::Revoked));
+    }
+    true
+}
+
+/// How a print to a printer ended, from what WebView2's completion handler was given: sent only when there was no
+/// error and the status is "succeeded". "Printer unavailable" and every other status are the same answer (the shell
+/// tells the person one thing for all of them), with the `HRESULT` kept as a number when there was one.
+fn printer_job_answer(
+    error: windows_core::Result<()>,
+    status: COREWEBVIEW2_PRINT_STATUS,
+) -> Result<(), PrintFailed> {
+    match error {
+        Err(error) => Err(PrintFailed::NotWritten {
+            code: error.code().0,
+        }),
+        Ok(()) if status != COREWEBVIEW2_PRINT_STATUS_SUCCEEDED => {
+            Err(PrintFailed::NotWritten { code: 0 })
+        }
+        Ok(()) => Ok(()),
+    }
+}
+
+/// The printers Windows has for this user (`EnumPrintersW` at level 2, the local ones and the connections) and its
+/// default (`GetDefaultPrinterW`). A name that is not valid UTF-16 cannot go to the page and back, so its printer is
+/// left out. Fixed errors only: never a name or Windows' message.
+fn installed_printers() -> ShellResult<InstalledPrinters> {
+    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+    // The bytes of the answer, in `u64`s so the structures in them are 8-aligned. A printer added between the two calls
+    // makes the first size too small: asked again, a few times.
+    let mut buffer: Vec<u64> = Vec::new();
+    for _ in 0..4 {
+        let capacity = buffer.len() * size_of::<u64>();
+        let Ok(capacity_u32) = u32::try_from(capacity) else {
+            return Err(PRINTERS_UNREADABLE);
+        };
+        let (mut needed, mut returned) = (0u32, 0u32);
+        let target = if capacity == 0 {
+            ptr::null_mut()
+        } else {
+            buffer.as_mut_ptr().cast::<u8>()
+        };
+        // SAFETY: `target` is null with a size of 0, or points to `capacity` writable bytes (the buffer, 8-aligned) that
+        // outlive the call; `needed` and `returned` are writable; no name is given, so the local ones are listed.
+        let done = unsafe {
+            EnumPrintersW(
+                flags,
+                ptr::null(),
+                2,
+                target,
+                capacity_u32,
+                &mut needed,
+                &mut returned,
+            )
+        };
+        if done != 0 {
+            // SAFETY: the buffer's `capacity` bytes are initialised (zero-filled, then written by Windows), and the view
+            // ends where the buffer does.
+            let bytes = unsafe { slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), capacity) };
+            return Ok(InstalledPrinters {
+                printers: printers_in(bytes, returned as usize)?,
+                default: default_printer(),
+            });
+        }
+        // SAFETY: reads the calling thread's last error, straight after the call that failed.
+        if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+            return Err(PRINTERS_UNREADABLE);
+        }
+        buffer = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
+    }
+    Err(PRINTERS_UNREADABLE)
+}
+
+/// The `count` `PRINTER_INFO_2W` structures at the start of `bytes` (8-aligned, as `EnumPrintersW` filled them), with
+/// the strings they point to, which lie later in the same bytes. A pointer outside `bytes`, or a string with no
+/// terminator before the end, is `PRINTERS_UNREADABLE`: nothing is read from beyond what Windows filled in.
+fn printers_in(bytes: &[u8], count: usize) -> ShellResult<Vec<InstalledPrinter>> {
+    let size = size_of::<PRINTER_INFO_2W>();
+    if count
+        .checked_mul(size)
+        .is_none_or(|total| total > bytes.len())
+    {
+        return Err(PRINTERS_UNREADABLE);
+    }
+    let base = bytes.as_ptr() as usize;
+    // A string at `pointer`: empty for NULL, else the UTF-16 units up to the terminator, all inside `bytes`.
+    let text_at = |pointer: *mut u16| -> ShellResult<Vec<u16>> {
+        if pointer.is_null() {
+            return Ok(Vec::new());
+        }
+        let start = (pointer as usize)
+            .checked_sub(base)
+            .filter(|start| start % align_of::<u16>() == 0 && *start < bytes.len())
+            .ok_or(PRINTERS_UNREADABLE)?;
+        let (pairs, _) = bytes[start..].as_chunks::<{ size_of::<u16>() }>();
+        let units: Vec<u16> = pairs
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
+            .take_while(|&unit| unit != 0)
+            .collect();
+        // Ended by a terminator, not by the end of the bytes.
+        let end = start + (units.len() + 1) * size_of::<u16>();
+        if end > bytes.len() {
+            return Err(PRINTERS_UNREADABLE);
+        }
+        Ok(units)
+    };
+    let mut printers = Vec::with_capacity(count);
+    for index in 0..count {
+        // SAFETY: the check above makes `count * size` bytes of `bytes` readable; the bytes start 8-aligned (a `Vec<u64>`
+        // in the caller), as `PRINTER_INFO_2W` needs, and every field is plain data that Windows filled in.
+        let info = unsafe {
+            bytes
+                .as_ptr()
+                .add(index * size)
+                .cast::<PRINTER_INFO_2W>()
+                .read()
+        };
+        let Ok(name) = String::from_utf16(&text_at(info.pPrinterName)?) else {
+            continue;
+        };
+        printers.push(InstalledPrinter {
+            name,
+            port: String::from_utf16_lossy(&text_at(info.pPortName)?),
+            driver: String::from_utf16_lossy(&text_at(info.pDriverName)?),
+            attributes: info.Attributes,
+        });
+    }
+    Ok(printers)
+}
+
+/// The name of the default printer (`GetDefaultPrinterW`), or `None` when there is none or Windows will not say.
+fn default_printer() -> Option<String> {
+    let mut len = 0u32;
+    // SAFETY: a null buffer with a length of 0 only asks for the size, which is written to `len`, a writable `u32`.
+    let asked = unsafe { GetDefaultPrinterW(ptr::null_mut(), &mut len) };
+    // SAFETY: reads the calling thread's last error, straight after the call.
+    if asked != 0 || len == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return None;
+    }
+    let mut buffer = vec![0u16; len as usize];
+    // SAFETY: `buffer` has `len` writable UTF-16 units, and `len` says so.
+    if unsafe { GetDefaultPrinterW(buffer.as_mut_ptr(), &mut len) } == 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|&unit| unit == 0)?;
+    String::from_utf16(&buffer[..end]).ok()
 }
 
 /// Starts the print on the webview's own thread and hands `done` to WebView2's completion handler, or, when the call
 /// is refused, calls it with why.
-fn print_page(controller: &ICoreWebView2Controller, path: &[u16], done: PrintDone) {
+fn print_page(
+    controller: &ICoreWebView2Controller,
+    path: &[u16],
+    cancel: &CancelToken,
+    done: PrintDone,
+) {
     // Whichever of the handler and the refusal below comes first takes it.
     let done = Rc::new(Cell::new(Some(done)));
     let started = (|| {
@@ -194,6 +448,10 @@ fn print_page(controller: &ICoreWebView2Controller, path: &[u16], done: PrintDon
                 Ok(())
             }))
         };
+        // The last look before WebView2 is asked: a session that locked while this was queued is not printed.
+        if revoked(cancel, &done) {
+            return Ok(());
+        }
         // SAFETY: `path` is a NUL-terminated UTF-16 string (from `wide_path`) that outlives the call; `handler` is a
         // live COM object, which WebView2 holds its own reference to for as long as it needs it; no print settings
         // are given, which WebView2 reads as its defaults.
@@ -228,8 +486,7 @@ fn print_answer(error: windows_core::Result<()>, successful: bool) -> Result<(),
 
 /// Adds the hidden attribute to the file or folder at `path`; every other attribute stays. The recovery key's PDF is
 /// printed into a new hidden folder (the design's results table: WebView2 refuses an existing hidden file), which this
-/// hides; nothing calls it until that task, and only its test does now.
-#[allow(dead_code)]
+/// hides.
 pub fn set_hidden(path: &Path) -> io::Result<()> {
     let wide = wide_path(path)?;
     // SAFETY: `wide` is a live NUL-terminated UTF-16 path; the call only reads it.
@@ -2069,6 +2326,147 @@ mod tests {
                 "successful: {successful}"
             );
         }
+    }
+
+    /// What WebView2's print completion is given becomes a fixed answer: only "no error and succeeded" is a job the
+    /// printer took; "printer unavailable" and any other status are not, and an `HRESULT` is kept as a number.
+    #[test]
+    fn printer_job_answer_is_sent_only_when_webview2_says_so() {
+        const ACCESS_DENIED: i32 = 0x8007_0005_u32 as i32;
+        let status = COREWEBVIEW2_PRINT_STATUS;
+        assert_eq!(printer_job_answer(Ok(()), status(0)), Ok(()));
+        for unsuccessful in [status(1), status(2), status(99)] {
+            assert_eq!(
+                printer_job_answer(Ok(()), unsuccessful),
+                Err(PrintFailed::NotWritten { code: 0 })
+            );
+        }
+        let refused = windows_core::Error::from(windows_core::HRESULT(ACCESS_DENIED));
+        assert_eq!(
+            printer_job_answer(Err(refused), status(0)),
+            Err(PrintFailed::NotWritten {
+                code: ACCESS_DENIED
+            })
+        );
+    }
+
+    /// The check before WebView2's call: a live token lets the job go on (its `done` is untouched); a cancelled one
+    /// ends it with `Revoked` through that `done`, once, and says so, so the caller never reaches WebView2.
+    #[test]
+    fn a_cancelled_token_ends_the_job_before_webview2_is_called() {
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let job = |answers: &Arc<Mutex<Vec<Result<(), PrintFailed>>>>| {
+            let answers = Arc::clone(answers);
+            let done: PrintDone = Box::new(move |result| lock(&answers).push(result));
+            Rc::new(Cell::new(Some(done)))
+        };
+        let cancel = CancelToken::new();
+        let live = job(&answers);
+        assert!(!revoked(&cancel, &live));
+        assert!(lock(&answers).is_empty());
+        assert!(live.take().is_some(), "still there for WebView2's handler");
+
+        cancel.cancel();
+        let stopped = job(&answers);
+        assert!(revoked(&cancel, &stopped));
+        assert_eq!(*lock(&answers), [Err(PrintFailed::Revoked)]);
+        assert!(stopped.take().is_none(), "answered once");
+    }
+
+    /// A buffer as `EnumPrintersW` fills it: the structures first, the strings after them, all inside the bytes.
+    /// `strings` gives each printer's (name, port, driver); `attributes` its attributes.
+    fn printer_bytes(strings: &[(&str, &str, &str)], attributes: &[u32]) -> Vec<u64> {
+        let size = size_of::<PRINTER_INFO_2W>();
+        let mut text: Vec<u16> = Vec::new();
+        let mut at = Vec::new();
+        for (name, port, driver) in strings {
+            let mut place = |value: &str| {
+                let start = text.len();
+                text.extend(value.encode_utf16());
+                text.push(0);
+                start
+            };
+            at.push((place(name), place(port), place(driver)));
+        }
+        let head = strings.len() * size;
+        let total = (head + text.len() * 2).div_ceil(8);
+        let mut buffer = vec![0u64; total];
+        let base = buffer.as_mut_ptr().cast::<u8>();
+        for (index, (name, port, driver)) in at.into_iter().enumerate() {
+            let pointer = |start: usize| (base as usize + head + start * 2) as *mut u16;
+            // SAFETY: the buffer is 8-aligned and `head` bytes long for the structures; `index` is in range.
+            let info = unsafe { &mut *base.add(index * size).cast::<PRINTER_INFO_2W>() };
+            info.pPrinterName = pointer(name);
+            info.pPortName = pointer(port);
+            info.pDriverName = pointer(driver);
+            info.Attributes = attributes[index];
+        }
+        // SAFETY: the buffer is 8-aligned and has room for `text` after the structures.
+        unsafe {
+            ptr::copy_nonoverlapping(text.as_ptr().cast::<u8>(), base.add(head), text.len() * 2);
+        }
+        buffer
+    }
+
+    fn bytes_of(buffer: &[u64]) -> &[u8] {
+        // SAFETY: a view of the buffer's own bytes.
+        unsafe { slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer.len() * 8) }
+    }
+
+    /// The printers are read from the bytes `EnumPrintersW` fills, by the pointers in them, and nothing outside the
+    /// bytes is ever read: a pointer out of range, or a string with no end, is a fixed error, not a read.
+    #[test]
+    fn printers_are_read_from_the_filled_buffer_and_only_from_it() {
+        let buffer = printer_bytes(
+            &[
+                ("Office", "IP_10.0.0.8", "HP Universal"),
+                ("Fax \u{e9}", "SHRFAX:", ""),
+            ],
+            &[0, 0x4000],
+        );
+        let read = printers_in(bytes_of(&buffer), 2).unwrap();
+        assert_eq!(read[0].name, "Office");
+        assert_eq!(read[0].port, "IP_10.0.0.8");
+        assert_eq!(read[0].driver, "HP Universal");
+        assert_eq!(read[1].name, "Fax \u{e9}");
+        assert_eq!((read[1].driver.as_str(), read[1].attributes), ("", 0x4000));
+        assert!(printers_in(bytes_of(&buffer), 0).unwrap().is_empty());
+
+        // More structures than the bytes hold.
+        assert_eq!(
+            printers_in(bytes_of(&buffer), 1_000_000).err(),
+            Some(PRINTERS_UNREADABLE)
+        );
+        // A name pointer into the structures' own area is fine (inside), one far outside is refused.
+        let mut wild = printer_bytes(&[("Office", "P", "D")], &[0]);
+        let info = wild.as_mut_ptr().cast::<PRINTER_INFO_2W>();
+        // SAFETY: the buffer is 8-aligned and holds one structure.
+        unsafe { (*info).pPrinterName = 8 as *mut u16 };
+        assert_eq!(
+            printers_in(bytes_of(&wild), 1).err(),
+            Some(PRINTERS_UNREADABLE)
+        );
+        // A string whose terminator is missing before the bytes end.
+        let mut endless = printer_bytes(&[("Office", "P", "D")], &[0]);
+        let last = endless.len() - 1;
+        endless[last] = u64::MAX;
+        assert_eq!(
+            printers_in(bytes_of(&endless), 1).err(),
+            Some(PRINTERS_UNREADABLE)
+        );
+    }
+
+    /// Windows' real list, on this machine: it can be read, and the default Lockbox offers is always one of the
+    /// printers it offers. Needs the print spooler running, so it is run by hand: `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "needs the Windows print spooler"]
+    fn this_pcs_printers_can_be_listed() {
+        let installed = installed_printers().expect("Windows lists its printers");
+        let offered = installed.offered();
+        if let Some(default) = &offered.default {
+            assert!(offered.printers.contains(default));
+        }
+        assert!(offered.printers.len() <= installed.printers.len());
     }
 
     /// Fix round 1 follow-up: only name-surrogate reparse points lead elsewhere. The tags are Windows' own

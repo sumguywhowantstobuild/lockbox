@@ -41,10 +41,12 @@ windows-core = { version = "0.62", default-features = false }
 # "Open" (spec §7.2), the folder only the current user can reach: `Win32_Security` and `Win32_Security_Authorization`
 # (the token's user, the folder's permissions), `Win32_System_Threading` (`OpenProcessToken`). `AssocIsDangerous` is
 # under `Win32_UI_Shell`.
+# The printer list for Print (`os::win`): `Win32_Graphics_Printing` (`EnumPrintersW`, `GetDefaultPrinterW`).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_CloudFilters",

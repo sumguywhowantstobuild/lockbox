@@ -7,6 +7,7 @@ pub mod files;
 mod generator;
 pub mod items;
 mod list;
+pub mod readable;
 mod sessions;
 mod settings;
 pub mod vaults;
@@ -66,6 +67,10 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         files::open_file,
         files::retry_open_cleanup,
         files::reset_output_journal,
+        readable::save_recovery_pdf,
+        readable::save_readable_confirm,
+        readable::list_printers,
+        readable::print_recovery_key,
         backup::backup_vault,
         backup::test_backup,
         backup::open_backup_read_only,

@@ -14,9 +14,10 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::commands::readable::ReadableJob;
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
-use crate::session::Location;
+use crate::session::{Location, SessionId};
 
 /// How long a choice waits for its answer.
 const LIFETIME: Duration = Duration::from_secs(5 * 60);
@@ -89,6 +90,15 @@ pub enum PendingChoice {
     /// picked, and the credential typed, so the confirming command neither asks for files again nor lets another
     /// backup in. Boxed: the variant is much larger than the others.
     Restore(Box<crate::restore::RestoreChoice>),
+    /// `save_readable` to a cloud folder, waiting for the user's yes (`Confirm::CloudFolder`): the session and
+    /// generation that asked (the yes goes on only while that session is still unlocked in that generation, never for
+    /// another one), the job, and the destination (its folder canonical, as checked), so the dialog is not shown again.
+    Readable {
+        session: SessionId,
+        generation: u64,
+        job: ReadableJob,
+        dest: PathBuf,
+    },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
     Test(Option<Box<lockbox_core::Vault>>),

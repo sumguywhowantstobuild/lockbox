@@ -73,8 +73,9 @@ const DESTINATION_IN_VAULT: CoreError = CoreError::InvalidInput {
 /// `vault.json.bak`: that is a vault folder (a live vault, a pre-restore copy, a staging folder)
 /// or a folder inside one, where the decrypted copy could replace one of that vault's files.
 /// The folder is resolved first (links, junctions, `..`, short names), and each name is looked
-/// up with `symlink_metadata`, so a link named `vault.json` counts too.
-pub(super) fn refuse_vault_folder(dest: &Path) -> Result<()> {
+/// up with `symlink_metadata`, so a link named `vault.json` counts too. Public (as `fsio::refuse_vault_folder`), so
+/// the shell's readable files use this one check.
+pub fn refuse_vault_folder(dest: &Path) -> Result<()> {
     let folder = fs::canonicalize(parent_dir(dest))?;
     for dir in folder.ancestors() {
         for name in [HEADER_FILE, HEADER_BACKUP] {

@@ -2,9 +2,73 @@
    the page's own Ctrl+P (the browser's keys are off). Every rule sits inside `@media print`, so the screen is untouched.
 
    Hidden: every element in the body that is not the marked one, does not hold it and is not inside it. An element that
-   holds the marked one has none of its own text, so none shows beside it. */
+   holds the marked one has none of its own text, so none shows beside it. Inside the marked element, what is for the
+   screen only (the buttons and what they say) is marked `data-print-hide`. */
 @media print {
   body *:not([data-print-only]):not(:has([data-print-only])):not([data-print-only] *) {
-    display: none;
+    display: none !important;
+  }
+
+  [data-print-hide] {
+    display: none !important;
+  }
+
+  /* The marked element and everything that holds it (the frame's two sides, the window): out of the screen's layout and
+     into the page's flow, plain, so nothing is clipped, centred, or cut off at the window's height. */
+  html,
+  body,
+  :has([data-print-only]),
+  [data-print-only] {
+    display: block !important;
+    position: static !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    transform: none !important;
+    gap: 0 !important;
+  }
+
+  /* Black on white whatever the screen's colours are (a dark window would otherwise print white words on nothing). */
+  html,
+  body,
+  :has([data-print-only]),
+  [data-print-only],
+  [data-print-only] * {
+    background: #fff !important;
+    color: #000 !important;
+    text-shadow: none !important;
+  }
+
+  [data-print-only] > * {
+    margin: 0 0 6mm !important;
+  }
+
+  [data-print-only] .fu-kind {
+    font-size: 16pt !important;
+    line-height: 1.3 !important;
+  }
+
+  /* The words stay in two columns, 1 to 12 and 13 to 24, in a box that is never split across two pages. */
+  [data-print-only] .fu-key {
+    display: grid !important;
+    grid-template-columns: 1fr 1fr !important;
+    gap: 0 12mm !important;
+    padding: 6mm !important;
+    border: 1px solid #000 !important;
+    font-size: 14pt !important;
+    line-height: 1.7 !important;
+    break-inside: avoid !important;
+  }
+
+  [data-print-only] .fu-lose {
+    font-size: 12pt !important;
   }
 }

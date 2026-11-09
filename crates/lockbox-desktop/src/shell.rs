@@ -69,6 +69,10 @@ pub struct Shell {
     /// Tests only: how many times a creation or addition had to wait for another.
     #[cfg(test)]
     creating_waited: AtomicUsize,
+    /// Tests only: how long a PDF job waits for the printer's answer, in place of
+    /// [`PRINT_ANSWER_WAIT`](crate::commands::readable::PRINT_ANSWER_WAIT).
+    #[cfg(test)]
+    pub(crate) print_wait: Mutex<Option<std::time::Duration>>,
 }
 
 impl Shell {
@@ -122,6 +126,8 @@ impl Shell {
             shortcut_presses: AtomicU64::new(0),
             #[cfg(test)]
             creating_waited: AtomicUsize::new(0),
+            #[cfg(test)]
+            print_wait: Mutex::default(),
         })
     }
 

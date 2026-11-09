@@ -375,6 +375,97 @@ export async function confirmRecovery(session: number): Promise<void> {
   update(session, (current) => ({ ...current, recovery: null }));
 }
 
+/**
+ * What saving the key's PDF came to, for the screen: the folder picker was closed (`dismissed`), the folder is a cloud
+ * one and the person is asked first (`confirm` is the token to answer with), the file is written (`saved` is the folder
+ * that holds it), or the vault locked meanwhile (`stale`: nothing to say, nothing was written).
+ */
+export type KeyPdf = "dismissed" | "stale" | { confirm: string } | { saved: string };
+
+/**
+ * Runs a print command of the key screen. A vault that locked meanwhile (the bridge's `StaleAnswer`, or the shell's
+ * `locked` when the page missed the event, which also takes the vault's record away) comes back as `"stale"`; any other
+ * refusal is thrown for the screen to say. `meansLocked` names a refusal that also means the vault locked and the page
+ * missed it (a cloud question's token the shell has dropped).
+ */
+async function printCommand<T>(
+  session: number,
+  run: (vault: api.SessionRef) => Promise<T>,
+  meansLocked: (error: unknown) => boolean = () => false,
+): Promise<T | "stale"> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "stale";
+  const { generation } = entry;
+  try {
+    const answer = await run({ session, generation });
+    return stillOpen(session, generation) ? answer : "stale";
+  } catch (error) {
+    const missedLock = refusedAsLocked(error) || meansLocked(error);
+    if (missedLock) dropSession(session);
+    if (error instanceof api.StaleAnswer || missedLock || !stillOpen(session, generation)) return "stale";
+    throw error;
+  }
+}
+
+function keyPdfFrom(answer: api.Tagged<api.Outcome<api.SavedView>>): KeyPdf {
+  const outcome = answer.data;
+  if (outcome === "Dismissed") return "dismissed";
+  if ("Done" in outcome) return { saved: outcome.Done.folder };
+  if (typeof outcome.Confirm === "object" && "CloudFolder" in outcome.Confirm) {
+    return { confirm: outcome.Confirm.CloudFolder.token };
+  }
+  throw new Error("unexpected answer to save_recovery_pdf");
+}
+
+/** Saves the key on screen as a PDF: the shell asks where, prints the page as it shows, and writes the file. */
+export async function saveKeyPdf(session: number): Promise<KeyPdf> {
+  const answer = await printCommand(session, (vault) => api.saveRecoveryPdf(vault));
+  return answer === "stale" ? answer : keyPdfFrom(answer);
+}
+
+/**
+ * The person's yes to saving it in a cloud-synced folder: the shell goes on with the save it parked. The shell drops a
+ * session's parked questions when it locks, so `not_found` here means the vault locked and the page missed the event: the
+ * key and the question come off the screen, and nothing is said.
+ */
+export async function confirmKeyPdf(session: number, token: string): Promise<KeyPdf> {
+  const answer = await printCommand(
+    session,
+    () => api.saveReadableConfirm(token),
+    (error) => refusedWith(error, "not_found"),
+  );
+  return answer === "stale" ? answer : keyPdfFrom(answer);
+}
+
+/**
+ * The printers the key can be printed to, for the picker: `"stale"` when the vault locked while Windows was being asked
+ * (nothing to show). The list holds no vault data, so it is asked for without a session, but a lock still makes the
+ * answer stale. Any refusal is thrown for the screen to say.
+ */
+export async function loadPrinters(session: number): Promise<api.PrinterList | "stale"> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "stale";
+  const { generation } = entry;
+  try {
+    const list = await api.listPrinters();
+    return stillOpen(session, generation) ? list : "stale";
+  } catch (error) {
+    if (!stillOpen(session, generation)) return "stale";
+    throw error;
+  }
+}
+
+/** Whether the shell refused because the printer asked for is not listed any more (so the list is out of date). */
+export function refusedAsPrinterGone(error: unknown): boolean {
+  return refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "printer name";
+}
+
+/** Prints the key on screen to `printer` (a name from `loadPrinters`): the shell sends the job and answers once it has it. */
+export async function printKey(session: number, printer: string): Promise<"done" | "stale"> {
+  const answer = await printCommand(session, (vault) => api.printRecoveryKey(vault, printer));
+  return answer === "stale" ? answer : "done";
+}
+
 async function loadItems(record: SessionData): Promise<"opened" | "stale"> {
   const { session, generation } = record;
   try {

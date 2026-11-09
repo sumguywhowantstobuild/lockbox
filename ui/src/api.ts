@@ -150,6 +150,56 @@ export function recoveryConfirmed(vault: SessionRef): Promise<Tagged<null>> {
   return call<null>("recovery_confirmed", { session: vault.session, generation: vault.generation });
 }
 
+/**
+ * Where a readable file was saved, to show the person: the folder that holds it, as their own path. For showing only;
+ * no command takes it back.
+ */
+export interface SavedView {
+  folder: string;
+}
+
+/**
+ * Saves the recovery key on screen as a PDF (21c, 21f). Rust opens the save dialog, refuses a vault folder and Lockbox's
+ * own folder, and prints the page as it shows now: only the part marked `data-print-only` (see `print.css`), so the key
+ * reaches the PDF through the printed page and never through this call. Answers `"Dismissed"` when the dialog is
+ * closed, `{ Confirm: { CloudFolder: { token } } }` before anything is written to a cloud-synced folder (21e: go on with
+ * `saveReadableConfirm(token)`, or call this again to pick another folder), or `{ Done: SavedView }`. Refused with
+ * `busy` (`what: "printer"`) while a print of Lockbox's own runs, and `print_failed` (`what: "pdf"`) when no PDF came;
+ * nothing is left on disk either way. A lock while it runs makes the answer stale: no file appears and no error shows.
+ */
+export function saveRecoveryPdf(vault: SessionRef): Promise<Tagged<Outcome<SavedView>>> {
+  return call<Outcome<SavedView>>("save_recovery_pdf", { session: vault.session, generation: vault.generation });
+}
+
+/** The person's yes to saving a readable file in a cloud-synced folder (21e's Continue): the parked save goes on. */
+export function saveReadableConfirm(token: string): Promise<Tagged<Outcome<SavedView>>> {
+  return call<Outcome<SavedView>>("save_readable_confirm", { token });
+}
+
+/**
+ * The printers Lockbox can print to, by the names Windows shows, and the default one when it is among them. Printers
+ * that write a file through a save box of their own (Microsoft Print to PDF, XPS, OneNote, fax) are left out: that box
+ * would hold the key outside Lockbox after a lock, and Save as PDF is Lockbox's own way to make a file. No vault data.
+ */
+export interface PrinterList {
+  printers: string[];
+  default: string | null;
+}
+
+export function listPrinters(): Promise<PrinterList> {
+  return callPlain<PrinterList>("list_printers", {});
+}
+
+/**
+ * Prints the page as it shows now to `printer` (a name from `listPrinters`), with no Windows window: only the part
+ * marked `data-print-only`. Answers once the printer has the job. Refused with `busy` (`what: "printer"`) while a print
+ * of Lockbox's own runs, `invalid_input` (`what: "printer name"`) when that printer is not listed any more, and
+ * `print_failed` (`what: "print"`) when the job could not be sent. A lock while it runs makes the answer stale.
+ */
+export function printRecoveryKey(vault: SessionRef, printer: string): Promise<Tagged<null>> {
+  return call<null>("print_recovery_key", { session: vault.session, generation: vault.generation, printer });
+}
+
 export function listItems(vault: SessionRef): Promise<Tagged<ItemList>> {
   return call<ItemList>("list_items", { session: vault.session, generation: vault.generation });
 }

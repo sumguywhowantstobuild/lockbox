@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { messageFor, messageText } from "../../messages";
 import { makeNewKey, startPicking, type SessionData } from "../../store";
 import { Frame, SAY_KEY } from "./Frame";
+import { KeyActions, type PrintRun } from "./KeyActions";
 import { asksFor, wordsOf } from "./keyWords";
 
 /**
@@ -16,10 +18,14 @@ function focusWhenShown(heading: HTMLHeadingElement | null): void {
  * The recovery key step (21c for a new vault, 21f for one whose earlier step never finished): the key as 24 numbered
  * words in two columns, headed as what it is (a Lockbox key, not a crypto wallet phrase), shown for as long as the vault
  * stays unlocked, and what losing it means. It is the store's, so any lock takes it off the screen and the
- * next unlock makes a new one. Saving it as a PDF or printing it comes with a later task, so nothing here offers either.
+ * next unlock makes a new one. It can be printed or saved as a PDF (`KeyActions`); what goes on paper is the one element
+ * marked `data-print-only` (the heading, the words and the warning), and `print.css` hides the rest.
  * Also the screens before the key arrives (21f asks the shell for a new one) and after the shell would not make it.
  */
 export function RecoveryKey({ data }: { data: SessionData }) {
+  // The print that is running, if any. Continue waits for it: going on takes the key off the page, and the page is what
+  // the printer captures.
+  const [printing, setPrinting] = useState<PrintRun>(null);
   const step = data.recovery;
   if (step === null) return null;
 
@@ -89,12 +95,15 @@ export function RecoveryKey({ data }: { data: SessionData }) {
           That wasn&apos;t the right word, so here is your key again. Look it over, then go on to try three new words.
         </p>
       ) : null}
-      <h2 className="fu-kind">Lockbox recovery key, not a crypto wallet phrase</h2>
-      <div className="fu-key m">
-        {column(0, half)}
-        {column(half, words.length)}
+      <div className="fu-print" data-print-only>
+        <h2 className="fu-kind">Lockbox recovery key, not a crypto wallet phrase</h2>
+        <div className="fu-key m">
+          {column(0, half)}
+          {column(half, words.length)}
+        </div>
+        <KeyActions session={data.session} running={printing} setRunning={setPrinting} />
+        <p className="fu-lose">If you lose both your password and this key, nobody can get your data back.</p>
       </div>
-      <p className="fu-lose">If you lose both your password and this key, nobody can get your data back.</p>
       <p className="fu-hint">
         Don&apos;t keep the saved key on this PC. Writing it down by hand is fine. Screenshots won&apos;t work, because
         Lockbox stays out of screen capture.
@@ -103,7 +112,9 @@ export function RecoveryKey({ data }: { data: SessionData }) {
         <button
           type="button"
           className="prim"
+          aria-disabled={printing === null ? undefined : true}
           onClick={() => {
+            if (printing !== null) return;
             startPicking(data.session, asksFor(key));
           }}
         >

@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import type { ComponentPropsWithRef } from "react";
 
 /** How a button looks: the one main action of a screen, a quiet pill, the pill that is the main action of a panel. */
 export type ButtonLook = "main" | "pill" | "pill-main";
@@ -15,6 +15,6 @@ export function Button({
   type = "button",
   className,
   ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { look?: ButtonLook }) {
+}: ComponentPropsWithRef<"button"> & { look?: ButtonLook }) {
   return <button {...rest} type={type} className={[CLASS[look], className].filter(Boolean).join(" ")} />;
 }

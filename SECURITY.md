@@ -73,7 +73,7 @@ lock screen and the item list exist, and the rest follow task by task.
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. Recovery-key printing, an export and a saved `.env` come with the screens (Plan 4) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF is written like "Save a copy" (see "Printing the recovery key"); an export and a saved `.env` come with the screens (Plan 4) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) has begun with the first screens (Plan 4): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values and typed text at its lock event |
 | R7 Documented limits | This file |
@@ -191,8 +191,12 @@ in the code with a `shortcut:` comment.
   another program needs a file on disk; full-disk encryption covers the rest.
 - **What the launch sweep deletes.** Every temp plaintext file is recorded in `pending-outputs.json` (by its random temp
   path, never the original name) before it is created. At launch, an entry is deleted only if it has Lockbox's own temp
-  name (`.<16 hex>.lockbox-partial`, `.<16 hex>.lockbox-backup-partial`) or is a folder directly inside `open\`, and only
-  if no link is anywhere along its path. Anything else is dropped from the list and left on disk. An entry on a drive that
+  name (`.<16 hex>.lockbox-partial`, `.<16 hex>.lockbox-backup-partial`) or is a folder directly inside `open\`, or is the
+  hidden folder a recovery key PDF is printed in (`.<16 hex>.lockbox-partial-folder`, beside the place you saved to: the
+  PDF is a new file inside a new folder, since WebView2 refuses to write over an existing hidden file), and only
+  if no link is anywhere along its path. That PDF folder is never emptied by the sweep: it removes the journaled file
+  first, then the folder only if it is empty (never a recursive delete), so a folder that holds anything else is left on
+  disk and dropped from the list. Anything else is dropped from the list and left on disk. An entry on a drive that
   is not connected is kept for later. A damaged journal blocks new decrypted output until you let Lockbox set it aside;
   after that, any "Save a copy" temp files it listed are no longer swept and may need deleting by hand (they are hidden,
   named as above, and beside the place you saved to). The launch also lists `open\` itself, damaged journal or not, and removes folders named exactly 32 lowercase hex under the
@@ -219,8 +223,23 @@ in the code with a `shortcut:` comment.
 - **Browser shortcuts and menus are off, but only as far as WebView2 offers.** The window is built hidden, and shows only
   after WebView2 confirms its browser keys and default context menu are off; if it can't confirm, Lockbox stops. Tested on
   2026-11-06: Ctrl+P, F12, Ctrl+Shift+I, F5, Ctrl+R, Ctrl+U and right-click open nothing, while Ctrl+F, copy and paste still
-  reach the page. Lockbox prints only through its own code (the recovery key, once its screen exists), and anything printed
+  reach the page. Lockbox prints only through its own code (the recovery key's screen), and anything printed
   can pass through the print spooler (see above). *Accepted:* this is WebView2's documented switch; there is no stronger one.
+- **Printing the recovery key.** "Save as PDF" has WebView2 print the page as it shows into a file Lockbox then moves to
+  the place you picked, by "Save a copy"'s rules (a vault folder and Lockbox's own folder are refused, a cloud folder asks
+  first, an existing file is replaced only after Windows asked, and nothing is moved after a lock). "Print" shows a short
+  list of your printers inside Lockbox and sends the page straight to the one you pick, with no Windows print window,
+  and Lockbox writes no file there. Either way the page goes to Windows' print spooler (the queue of print jobs), which
+  may keep its own copy until the job is done, and Lockbox cannot clear that. Printers that make a file through a save box
+  of their own (Microsoft Print to PDF, the XPS writer, any printer on the file prompt's port, OneNote's printers and fax
+  printers) are not offered, and Lockbox refuses to print to them even by name: such a box would belong to another
+  program and would keep the page after a lock, which Lockbox cannot close. A third-party PDF printer on a port of its
+  own looks like a real printer to Windows and is offered; it is yours to avoid. A lock that comes before Lockbox hands
+  the page to WebView2 stops the print (checked right before the call, on the thread that makes it). WebView2 cannot
+  cancel a print, so after a lock Lockbox waits up to 30 seconds for the printer to answer; a print it already sent is the printer's, and a
+  PDF it made is deleted then (with no answer the file and its hidden folder stay in the output journal and the next
+  launch removes them). *Accepted:* the PDF is a copy you asked to have in plaintext, it is hidden until it is moved,
+  and the sweep removes any leftover; a print the printer has already taken cannot be recalled.
 - **Staying out of screen capture isn't a guarantee.** At every start Lockbox asks Windows to leave its window out of
   screenshots, recordings, screen sharing and Recall (`WDA_EXCLUDEFROMCAPTURE`), before the window shows. Tested on
   2026-11-06: screenshots and Snipping Tool leave Lockbox out, and Magnifier still shows it in Full screen,

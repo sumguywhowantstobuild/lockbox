@@ -11,6 +11,7 @@ import { LockboxParts } from "./LockboxParts";
 import { Menu } from "./Menu";
 import { Panel } from "./Panel";
 import { PasswordField } from "./PasswordField";
+import { Select } from "./Select";
 
 afterEach(cleanup);
 
@@ -167,6 +168,108 @@ test("a_combobox_narrows_as_you_type_and_picks_one", async () => {
   await expectNoAxe(screen.getByRole("listbox"));
   fireEvent.click(option);
   expect(screen.getByRole("status").textContent).toBe("Lineproof");
+});
+
+function Choose({ onPick }: { onPick?: (value: string) => void }) {
+  const [value, setValue] = useState("Hall Inkjet");
+  return (
+    <>
+      <Select
+        label="Printer"
+        items={["Office Laser", "Hall Inkjet", "Back Office"]}
+        value={value}
+        onValueChange={(next) => {
+          setValue(next);
+          onPick?.(next);
+        }}
+      />
+      <button type="button">After it</button>
+    </>
+  );
+}
+
+test("a_select_opens_by_keyboard_and_picks_with_arrows_and_enter", async () => {
+  const picked = vi.fn<(value: string) => void>();
+  const { container } = render(
+    <LockboxParts>
+      <Choose onPick={picked} />
+    </LockboxParts>,
+  );
+  // Named by its visible label, showing the chosen one, and nothing is open yet.
+  const trigger = screen.getByRole("combobox", { name: "Printer" });
+  expect(trigger.textContent).toBe("Hall Inkjet");
+  expect(trigger.getAttribute("aria-haspopup")).toBe("listbox");
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.queryByRole("listbox")).toBeNull();
+  await expectNoAxe(container);
+
+  // The arrow key opens it, with the list in the app's own menu look, one option per printer and the chosen one marked.
+  trigger.focus();
+  fireEvent.keyDown(trigger, { key: "ArrowDown" });
+  const list = await screen.findByRole("listbox");
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  expect(list.closest(".menu")).not.toBeNull();
+  const options = within(list).getAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual(["Office Laser", "Hall Inkjet", "Back Office"]);
+  expect(options.map((option) => option.getAttribute("aria-selected"))).toEqual(["false", "true", "false"]);
+  expect(options.every((option) => option.classList.contains("mi"))).toBe(true);
+  expect(document.querySelectorAll("style")).toHaveLength(0);
+  await expectNoAxe(list);
+
+  // Focus is in the list; ArrowDown moves to the next one, Enter picks it, and the list closes with focus back on the box.
+  await vi.waitFor(() => {
+    expect(list.contains(document.activeElement)).toBe(true);
+  });
+  const highlighted = () => options.find((option) => option.hasAttribute("data-highlighted"));
+  expect(highlighted()?.textContent).toBe("Hall Inkjet");
+  fireEvent.keyDown(document.activeElement as Element, { key: "ArrowDown" });
+  await vi.waitFor(() => {
+    expect(highlighted()?.textContent).toBe("Back Office");
+  });
+  fireEvent.keyDown(document.activeElement as Element, { key: "Enter" });
+  await vi.waitFor(() => {
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+  expect(picked).toHaveBeenCalledExactlyOnceWith("Back Office");
+  expect(trigger.textContent).toBe("Back Office");
+  await vi.waitFor(() => {
+    expect(document.activeElement).toBe(trigger);
+  });
+  expect(document.querySelectorAll("style")).toHaveLength(0);
+});
+
+test("a_select_picks_with_a_click_and_escape_changes_nothing", async () => {
+  const picked = vi.fn<(value: string) => void>();
+  render(
+    <LockboxParts>
+      <Choose onPick={picked} />
+    </LockboxParts>,
+  );
+  const trigger = screen.getByRole("combobox", { name: "Printer" });
+  trigger.focus();
+  fireEvent.keyDown(trigger, { key: "ArrowDown" });
+  const list = await screen.findByRole("listbox");
+  // Escape closes it, picks nothing, and focus is back on the box.
+  fireEvent.keyDown(list, { key: "Escape" });
+  await vi.waitFor(() => {
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+  expect(picked).not.toHaveBeenCalled();
+  expect(trigger.textContent).toBe("Hall Inkjet");
+  await vi.waitFor(() => {
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  // A click on an option picks it.
+  fireEvent.pointerDown(trigger, { button: 0 });
+  fireEvent.click(trigger);
+  const option = await screen.findByRole("option", { name: "Office Laser" });
+  fireEvent.pointerDown(option);
+  fireEvent.click(option);
+  await vi.waitFor(() => {
+    expect(trigger.textContent).toBe("Office Laser");
+  });
+  expect(picked).toHaveBeenCalledExactlyOnceWith("Office Laser");
 });
 
 test("a_panel_is_a_named_region_with_a_close_button", async () => {

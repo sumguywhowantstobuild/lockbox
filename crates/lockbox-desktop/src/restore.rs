@@ -111,7 +111,7 @@ impl fmt::Debug for JournalPaths {
 }
 
 /// A path as the user knows it: Lockbox spells a drive path `\\?\C:\..`, which Explorer does not.
-fn shown(path: &Path) -> String {
+pub(crate) fn shown(path: &Path) -> String {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
         Some(plain) if !plain.starts_with(r"UNC\") => plain.to_owned(),

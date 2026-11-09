@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use backup::BackupReport;
+pub use files::refuse_vault_folder;
 pub use journal::{JournalStep, JournalView, inspect_restore_journal};
 pub use naming::folder_name;
 pub use naming::is_reserved_device_name;

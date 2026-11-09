@@ -25,8 +25,15 @@
     color: inherit !important;
   }
 
-  .app .prim:disabled {
+  .app .prim:disabled,
+  .app .prim[aria-disabled="true"] {
     background: Canvas !important;
+    color: GrayText !important;
+    border-color: GrayText !important;
+  }
+
+  /* The quiet buttons of the key screen keep their own edge; one that waits for another print is greyed like a disabled one. */
+  .app .fu-sec[aria-disabled="true"] {
     color: GrayText !important;
     border-color: GrayText !important;
   }

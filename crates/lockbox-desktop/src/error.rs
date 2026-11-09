@@ -32,6 +32,12 @@ pub enum ShellError {
         what: &'static str,
     },
     Cancelled,
+    /// A print of the page did not happen: `"pdf"` when no PDF came (nothing is left on disk), `"print"` when the
+    /// job could not be sent to the printer that was picked. A print already running is `Busy { what: "printer" }`
+    /// instead.
+    PrintFailed {
+        what: &'static str,
+    },
     Core(CoreErrorView),
 }
 
@@ -69,6 +75,17 @@ pub type ShellResult<T> = Result<T, ShellError>;
 /// A create whose vault the vault list could not take, and that could not be removed again: the vault is on disk,
 /// in the folder the user chose, but not on the list and its recovery key never shown. The page tells the user to add
 /// it with "Add existing vault" and make a new recovery key. Fixed text, no path (R5).
+/// A print of Lockbox's own is still running (WebView2 takes one at a time): try again once it ends.
+pub const PRINTER_BUSY: ShellError = ShellError::Busy { what: "printer" };
+/// The recovery key PDF did not come: nothing was saved and nothing is left on disk.
+pub const PDF_NOT_MADE: ShellError = ShellError::PrintFailed { what: "pdf" };
+/// The print job could not be sent to the printer that was picked.
+pub const PRINT_NOT_SENT: ShellError = ShellError::PrintFailed { what: "print" };
+/// The printer that was picked is not among the ones Lockbox lists any more.
+pub const PRINTER_GONE: ShellError = ShellError::InvalidInput {
+    what: "printer name",
+};
+
 pub const VAULT_NOT_LISTED: ShellError = ShellError::InvalidInput {
     what: "vault not listed",
 };

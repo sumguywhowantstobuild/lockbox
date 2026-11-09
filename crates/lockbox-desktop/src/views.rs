@@ -124,6 +124,22 @@ pub struct SearchResults {
     pub busy: Vec<SessionId>,
 }
 
+/// Where a readable file was saved (`save_recovery_pdf`, `save_readable_confirm`): the folder that holds it, as the
+/// user's own path, for the page to show. No command takes it back (spec 4.1: the page never receives a path it can
+/// send back).
+#[derive(Serialize)]
+pub struct SavedView {
+    pub folder: String,
+}
+
+/// The printers Lockbox can print to (`list_printers`), by the names Windows shows, and the default one when it is
+/// among them. Printers that write a file through a save box of their own are left out. No vault data.
+#[derive(Serialize)]
+pub struct PrinterList {
+    pub printers: Vec<String>,
+    pub default: Option<String>,
+}
+
 /// A quarantined file no item references (spec §6.4), with its size in bytes.
 #[derive(Serialize)]
 pub struct OrphanView {

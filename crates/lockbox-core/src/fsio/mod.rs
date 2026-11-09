@@ -172,6 +172,41 @@ pub(crate) fn sync_after_replace(to: &Path) -> Result<()> {
     Ok(sys::sync_after_replace(to)?)
 }
 
+/// Publishes a readable file the shell has finished writing (a recovery key PDF): moves `temp` over `dest`, replacing
+/// what is there (the save dialog has already asked about that), and makes the move durable. Each attempt of the move
+/// runs through `gate` (the output journal's `publish`: it refuses once the session has locked), and the waits between
+/// attempts come outside it; a refusal or an error that is not a brief sharing violation stops the retries and is
+/// returned, with `dest` untouched and `temp` left for the caller to remove. An error after the move (durability not
+/// confirmed) means `dest` is already published and `temp` is gone.
+///
+/// Before anything is moved, the finished `temp` is flushed to disk (opened for writing, `sync_all`): whatever wrote it
+/// (WebView2's print-to-PDF gives no flush guarantee) may have left its data in the cache, and replacing an existing
+/// file with one that could be lost on a crash would lose both. A temp that cannot be opened or flushed stops
+/// publication the same way a refusal does: `dest` untouched, `temp` left for the caller, the gate never asked.
+///
+/// This is the one public way to publish a readable file, so the shell writes no weaker copy of the gated rename
+/// ([`rename_replace_gated`]) or of the durability step ([`sync_after_replace`]), which stay private.
+pub fn publish_readable(
+    temp: &Path,
+    dest: &Path,
+    gate: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()>,
+) -> Result<()> {
+    flush_file(temp)?;
+    rename_replace_gated(temp, dest, gate, || {})?;
+    sync_after_replace(dest)
+}
+
+/// Flushes the finished file at `path` to disk. It is opened for writing only to flush it, and nothing is written.
+fn flush_file(path: &Path) -> Result<()> {
+    #[cfg(any(test, feature = "test-internals"))]
+    failpoint::check("publish.before_flush")?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()?;
+    Ok(())
+}
+
 /// A destination that is already taken.
 pub(crate) const DESTINATION_EXISTS: CoreError = CoreError::InvalidInput {
     what: DESTINATION_EXISTS_WHAT,
@@ -672,6 +707,107 @@ mod tests {
             what: "destination inside vault"
         }));
         assert!(!is_destination_taken(&CoreError::NotFound));
+    }
+
+    /// `publish_readable` moves the finished temp over what is at the destination, through the gate, and makes the
+    /// move durable.
+    #[test]
+    fn publish_readable_replaces_what_is_there_through_the_gate() {
+        let dir = TempDir::new();
+        let (temp, dest) = (dir.path().join("temp"), dir.path().join("dest.pdf"));
+        std::fs::write(&temp, b"new").unwrap();
+        std::fs::write(&dest, b"old").unwrap();
+        let mut gate_calls = 0;
+        publish_readable(&temp, &dest, |attempt| {
+            gate_calls += 1;
+            attempt()
+        })
+        .unwrap();
+        assert_eq!(gate_calls, 1, "the one attempt went through the gate");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!temp.exists());
+
+        // A destination that is not there yet is made.
+        let (temp, fresh) = (dir.path().join("temp2"), dir.path().join("fresh.pdf"));
+        std::fs::write(&temp, b"other").unwrap();
+        publish_readable(&temp, &fresh, |attempt| attempt()).unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"other");
+    }
+
+    /// A gate that refuses (the session locked) stops the move: the destination is as it was and the temp stays for
+    /// the caller to remove. A refusal that is not a transient I/O error is not retried.
+    #[test]
+    fn publish_readable_stops_when_the_gate_refuses() {
+        let dir = TempDir::new();
+        let (temp, dest) = (dir.path().join("temp"), dir.path().join("dest.pdf"));
+        std::fs::write(&temp, b"new").unwrap();
+        std::fs::write(&dest, b"old").unwrap();
+        let mut gate_calls = 0;
+        let refused = publish_readable(&temp, &dest, |_attempt| {
+            gate_calls += 1;
+            Err(CoreError::Cancelled)
+        });
+        assert!(matches!(refused, Err(CoreError::Cancelled)));
+        assert_eq!(gate_calls, 1);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+        assert_eq!(std::fs::read(&temp).unwrap(), b"new");
+    }
+
+    /// The finished temp is flushed to disk before anything is moved: the flush comes before the gate's first attempt,
+    /// and a flush that fails (here by the failpoint, and for a temp that is not there) stops the publication with the
+    /// destination byte for byte as it was, the move never tried, and the temp left for the caller to remove.
+    #[test]
+    fn publish_readable_flushes_the_temp_before_the_move() {
+        let dir = TempDir::new();
+        let (temp, dest) = (dir.path().join("temp"), dir.path().join("dest.pdf"));
+        std::fs::write(&temp, b"new").unwrap();
+        std::fs::write(&dest, b"old").unwrap();
+
+        // The flush happens, and before the gate is asked.
+        let gate_calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = std::rc::Rc::clone(&gate_calls);
+        let flushes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let flushed = std::rc::Rc::clone(&flushes);
+        failpoint::observe(
+            "publish.before_flush",
+            Box::new(move || {
+                assert_eq!(seen.get(), 0, "the gate was asked before the flush");
+                flushed.set(flushed.get() + 1);
+            }),
+        );
+        let calls = std::rc::Rc::clone(&gate_calls);
+        publish_readable(&temp, &dest, |attempt| {
+            calls.set(calls.get() + 1);
+            attempt()
+        })
+        .unwrap();
+        failpoint::disarm_all();
+        assert_eq!((flushes.get(), gate_calls.get()), (1, 1));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+
+        // A flush that fails: nothing moved, the gate never asked.
+        std::fs::write(&temp, b"newer").unwrap();
+        failpoint::arm("publish.before_flush");
+        let mut asked = 0;
+        let failed = publish_readable(&temp, &dest, |attempt| {
+            asked += 1;
+            attempt()
+        });
+        failpoint::disarm_all();
+        assert!(matches!(failed, Err(CoreError::Io(_))), "{failed:?}");
+        assert_eq!(asked, 0, "the move was not tried");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert_eq!(std::fs::read(&temp).unwrap(), b"newer");
+
+        // A temp that cannot be opened to flush (it is not there): the same refusal.
+        let gone = dir.path().join("gone");
+        let failed = publish_readable(&gone, &dest, |attempt| {
+            asked += 1;
+            attempt()
+        });
+        assert!(matches!(failed, Err(CoreError::Io(_))), "{failed:?}");
+        assert_eq!(asked, 0);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
     }
 
     #[test]

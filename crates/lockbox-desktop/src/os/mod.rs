@@ -17,11 +17,13 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lockbox_core::blob::CancelToken;
 use lockbox_core::item::MAX_ITEM_JSON;
 use zeroize::Zeroizing;
 
 use crate::error::{CoreErrorView, ShellError, ShellResult};
 use crate::lock;
+use crate::views::PrinterList;
 
 /// The OS calls the shell makes, behind their traits.
 pub struct Os {
@@ -313,7 +315,84 @@ fn is_tag(held: &[u8], tag: &CopyTag) -> bool {
         .is_some_and(|(head, rest)| head == tag && rest.iter().all(|&byte| byte == 0))
 }
 
-/// A print job that did not leave a PDF. Fixed shapes and numbers only: never the path or what was on the page (R5).
+/// The printer attribute that marks a fax printer (`PRINTER_ATTRIBUTE_FAX`).
+pub const PRINTER_ATTRIBUTE_FAX: u32 = 0x4000;
+
+/// Windows could not list its printers. Fixed text only: never a printer's name or Windows' message.
+pub const PRINTERS_UNREADABLE: ShellError = ShellError::Core(CoreErrorView {
+    kind: "io",
+    what: Some("printer"),
+    needed: None,
+    available: None,
+    max_file: None,
+    min: None,
+    position: None,
+    found: None,
+});
+
+/// One printer as Windows lists it (`PRINTER_INFO_2`): its name, the port it prints to (a list, comma-separated, for a
+/// pool), its driver, and its attributes. Names are the person's own and are never put in an error or a log (R5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPrinter {
+    pub name: String,
+    pub port: String,
+    pub driver: String,
+    pub attributes: u32,
+}
+
+impl InstalledPrinter {
+    /// Whether this printer makes a file through a save box or a window of its own instead of sending a page to a device,
+    /// which Lockbox does not offer: that box (opened by WebView2's own process) would keep the job outside Lockbox
+    /// after a lock, and the recovery key's page with it. Save as PDF is Lockbox's own way to make a file.
+    ///
+    /// Chosen from what Windows says about the printer, by Microsoft's documentation, in this order of evidence:
+    /// - its port: `PORTPROMPT:` (the port of Microsoft Print to PDF and the Microsoft XPS Document Writer) and `FILE:`
+    ///   (the local port monitor's "ask for a file name") both open a save box. A pool is left out when any of its
+    ///   ports is one of these;
+    /// - its attributes: `PRINTER_ATTRIBUTE_FAX`, and a driver named for fax (Microsoft's Shared Fax Driver), since a
+    ///   fax printer opens the fax window;
+    /// - OneNote's printers ("Send to Microsoft OneNote ..." and "OneNote (Desktop)"), which open OneNote: by a driver
+    ///   or port that names OneNote.
+    ///
+    /// A third-party PDF printer on a port of its own cannot be told from a real printer here and stays listed.
+    pub fn writes_a_file_of_its_own(&self) -> bool {
+        let named = |text: &str, word: &str| text.to_ascii_lowercase().contains(word);
+        let own_box_port = self.port.split(',').any(|port| {
+            let port = port.trim();
+            port.eq_ignore_ascii_case("PORTPROMPT:") || port.eq_ignore_ascii_case("FILE:")
+        });
+        own_box_port
+            || self.attributes & PRINTER_ATTRIBUTE_FAX != 0
+            || named(&self.driver, "fax")
+            || named(&self.driver, "onenote")
+            || named(&self.port, "onenote")
+    }
+}
+
+/// The printers Windows has, and the one it uses by default (its name, whether or not it is among them).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstalledPrinters {
+    pub printers: Vec<InstalledPrinter>,
+    pub default: Option<String>,
+}
+
+impl InstalledPrinters {
+    /// What Lockbox offers: the printers that are not [`writes_a_file_of_its_own`](InstalledPrinter::writes_a_file_of_its_own),
+    /// in Windows' order, and the default only when it is among them (`None` when it was left out, or there is none).
+    pub fn offered(&self) -> PrinterList {
+        let printers: Vec<String> = self
+            .printers
+            .iter()
+            .filter(|printer| !printer.name.is_empty() && !printer.writes_a_file_of_its_own())
+            .map(|printer| printer.name.clone())
+            .collect();
+        let default = self.default.clone().filter(|name| printers.contains(name));
+        PrinterList { printers, default }
+    }
+}
+
+/// A print job that did not go through. Fixed shapes and numbers only: never the path, a printer's name or what was
+/// on the page (R5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrintFailed {
     /// A job of Lockbox's own is still running; WebView2 was not asked. (Microsoft's reference says a second job at
@@ -322,29 +401,75 @@ pub enum PrintFailed {
     /// WebView2 was not asked, or refused to start the job. `code` is the `HRESULT` it gave; 0 when there was no
     /// window to ask.
     NotStarted { code: i32 },
-    /// The job began and ended without a file. `code` is the `HRESULT` the completion gave; 0 when it gave none and
-    /// only said it had not succeeded, or when the answer never came.
+    /// The job began and ended without a file (a PDF) or without the printer taking it. `code` is the `HRESULT` the
+    /// completion gave; 0 when it gave none and only said it had not succeeded, or when the answer never came.
     NotWritten { code: i32 },
+    /// The session's token was cancelled (it locked) between the job being queued for the webview and WebView2 being
+    /// asked: WebView2 was never called, so nothing was printed and no file was made.
+    Revoked,
 }
 
 /// What a print job tells when it ends, called once. Dropped without being called when the webview goes first.
 pub type PrintDone = Box<dyn FnOnce(Result<(), PrintFailed>) + Send>;
 
-/// Printing the app's page to a PDF, so the shell can print without a window and tests can use a fake. One job at a
-/// time.
+/// Printing the app's page, so the shell can print without a window and tests can use a fake: to a PDF file
+/// ([`print_to_pdf`](Self::print_to_pdf)) or straight to a printer ([`print_to_printer`](Self::print_to_printer)), and
+/// the list of printers to pick from. One job at a time, the two kinds sharing the one rule.
 pub trait Printer: Send + Sync {
-    /// Prints the main window's page to the PDF file at `path`. WebView2 writes straight over the path it is given.
-    /// The one answer comes on the receiver; a receiver that finds its sender gone has had no answer (the webview
-    /// went first). While a job runs, another is refused at once with [`PrintFailed::Busy`].
-    fn print_to_pdf(&self, path: &Path) -> mpsc::Receiver<Result<(), PrintFailed>>;
+    /// Prints the main window's page to the PDF file at `path`. WebView2 writes straight over the path it is given,
+    /// and it refuses to write over an existing hidden file: the job then ends without an error and without a file
+    /// (`print_answer` reads that as [`PrintFailed::NotWritten`]), so `path` must be a new file, or a visible one. The
+    /// recovery key's PDF is a new file inside a new hidden folder. The one answer comes on the receiver; a receiver
+    /// that finds its sender gone has had no answer (the webview went first). While a job runs, another is refused at
+    /// once with [`PrintFailed::Busy`].
+    ///
+    /// `cancel` is the session's token. A job is queued for the webview's own thread and WebView2 is asked there, some
+    /// time later; `cancel` is checked on that thread right before WebView2's call, and a cancelled token ends the job
+    /// with [`PrintFailed::Revoked`] without WebView2 being called (a print cannot be recalled once it is submitted).
+    fn print_to_pdf(
+        &self,
+        path: &Path,
+        cancel: &CancelToken,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>>;
+
+    /// Prints the main window's page straight to the printer named `printer`, with no Windows window (WebView2's
+    /// `Print` with print settings that name it, backgrounds off). The one answer comes when WebView2 says the job
+    /// ended: `Ok` when the printer took it, otherwise why not (a printer that is not available among them). The job
+    /// counts as running until then, and refuses another with [`PrintFailed::Busy`] as
+    /// [`print_to_pdf`](Self::print_to_pdf) does, and `cancel` is checked right before WebView2's call as it is there.
+    /// The caller checks `printer` against [`installed_printers`](Self::installed_printers).
+    fn print_to_printer(
+        &self,
+        printer: &str,
+        cancel: &CancelToken,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>>;
+
+    /// The printers Windows has (the local ones and the ones this user is connected to) and its default one, read now.
+    /// Slow when a network printer's server does not answer, so it is called off the async runtime. Fixed errors only
+    /// ([`PRINTERS_UNREADABLE`]).
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters>;
 }
 
-/// The printing call itself, as Windows offers it. [`PrintSteps`] puts the one-at-a-time rule around it, so the rule is
-/// the same for the real printer and the tests' fake.
+/// The printing calls themselves, as Windows offers them. [`PrintSteps`] puts the one-at-a-time rule around them, so
+/// the rule is the same for the real printer and the tests' fake.
 pub trait PrintCalls: Send + Sync {
     /// Begins a job for `path` and returns. `done` is called once with how it ended, from any thread. On an `Err`
-    /// the job never began and `done` is not called.
-    fn start(&self, path: &Path, done: PrintDone) -> Result<(), PrintFailed>;
+    /// the job never began and `done` is not called. `cancel` is checked on the webview's thread right before
+    /// WebView2's call; cancelled, `done` gets [`PrintFailed::Revoked`] and WebView2 is not called.
+    fn start(&self, path: &Path, cancel: CancelToken, done: PrintDone) -> Result<(), PrintFailed>;
+
+    /// Begins a job for the printer named `printer` and returns. `done` is called once, from any thread, when WebView2's
+    /// completion handler has run. On an `Err` the job never began and `done` is not called. `cancel` is checked as for
+    /// [`start`](Self::start).
+    fn start_on_printer(
+        &self,
+        printer: &str,
+        cancel: CancelToken,
+        done: PrintDone,
+    ) -> Result<(), PrintFailed>;
+
+    /// The printers Windows has and its default one, read now.
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters>;
 }
 
 /// [`Printer`] from a [`PrintCalls`]: one job at a time.
@@ -372,8 +497,13 @@ impl<C: PrintCalls> PrintSteps<C> {
     }
 }
 
-impl<C: PrintCalls> Printer for PrintSteps<C> {
-    fn print_to_pdf(&self, path: &Path) -> mpsc::Receiver<Result<(), PrintFailed>> {
+impl<C: PrintCalls> PrintSteps<C> {
+    /// One job of either kind: refused at once while another runs, otherwise `begin` gets the `done` that gives the
+    /// printer back and answers.
+    fn one_job(
+        &self,
+        begin: impl FnOnce(PrintDone) -> Result<(), PrintFailed>,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>> {
         let (answer, answers) = mpsc::channel();
         // Taking the flag is the whole check: a second caller finds it taken.
         if self.running.swap(true, Ordering::SeqCst) {
@@ -389,10 +519,32 @@ impl<C: PrintCalls> Printer for PrintSteps<C> {
         });
         // On an `Err` the job never began and `done` was dropped (which gave the printer back): the refusal is the
         // answer. A `done` dropped later without being called leaves the receiver with no answer.
-        if let Err(failed) = self.calls.start(path, done) {
+        if let Err(failed) = begin(done) {
             let _ = answer.send(Err(failed));
         }
         answers
+    }
+}
+
+impl<C: PrintCalls> Printer for PrintSteps<C> {
+    fn print_to_pdf(
+        &self,
+        path: &Path,
+        cancel: &CancelToken,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>> {
+        self.one_job(|done| self.calls.start(path, cancel.clone(), done))
+    }
+
+    fn print_to_printer(
+        &self,
+        printer: &str,
+        cancel: &CancelToken,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>> {
+        self.one_job(|done| self.calls.start_on_printer(printer, cancel.clone(), done))
+    }
+
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters> {
+        self.calls.installed_printers()
     }
 }
 
@@ -673,6 +825,7 @@ pub enum HotkeyTaken {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::TryRecvError;
 
@@ -1222,11 +1375,11 @@ mod tests {
     #[test]
     fn print_to_pdf_refuses_a_second_job_while_one_runs() {
         let (fake, printer) = fake_printer();
-        let first = printer.print_to_pdf(Path::new("first.pdf"));
+        let first = printer.print_to_pdf(Path::new("first.pdf"), &CancelToken::new());
         assert_eq!(first.try_recv(), Err(TryRecvError::Empty), "answered early");
 
         for name in ["second.pdf", "third.pdf"] {
-            let refused = printer.print_to_pdf(Path::new(name));
+            let refused = printer.print_to_pdf(Path::new(name), &CancelToken::new());
             assert_eq!(refused.try_recv(), Ok(Err(PrintFailed::Busy)), "{name}");
         }
         assert_eq!(started_paths(&fake), [PathBuf::from("first.pdf")]);
@@ -1235,7 +1388,7 @@ mod tests {
         assert_eq!(first.try_recv(), Ok(Ok(())));
         assert!(!fake.finish(Ok(())), "a refused job was started");
 
-        let after = printer.print_to_pdf(Path::new("after.pdf"));
+        let after = printer.print_to_pdf(Path::new("after.pdf"), &CancelToken::new());
         assert_eq!(after.try_recv(), Err(TryRecvError::Empty));
         assert_eq!(
             started_paths(&fake),
@@ -1253,7 +1406,7 @@ mod tests {
         fake.refuse_next(PrintFailed::NotStarted {
             code: access_denied,
         });
-        let refused = printer.print_to_pdf(Path::new("a.pdf"));
+        let refused = printer.print_to_pdf(Path::new("a.pdf"), &CancelToken::new());
         assert_eq!(
             refused.try_recv(),
             Ok(Err(PrintFailed::NotStarted {
@@ -1261,22 +1414,212 @@ mod tests {
             }))
         );
 
-        let failed = printer.print_to_pdf(Path::new("b.pdf"));
+        let failed = printer.print_to_pdf(Path::new("b.pdf"), &CancelToken::new());
         assert_eq!(failed.try_recv(), Err(TryRecvError::Empty));
         let ended = PrintFailed::NotWritten { code: 7 };
         assert!(fake.finish(Err(ended)));
         assert_eq!(failed.try_recv(), Ok(Err(ended)));
 
-        let gone = printer.print_to_pdf(Path::new("c.pdf"));
+        let gone = printer.print_to_pdf(Path::new("c.pdf"), &CancelToken::new());
         fake.drop_running_jobs();
         assert_eq!(gone.try_recv(), Err(TryRecvError::Disconnected));
 
-        let free = printer.print_to_pdf(Path::new("d.pdf"));
+        let free = printer.print_to_pdf(Path::new("d.pdf"), &CancelToken::new());
         assert_eq!(free.try_recv(), Err(TryRecvError::Empty), "still busy");
         assert_eq!(
             started_paths(&fake),
             ["a.pdf", "b.pdf", "c.pdf", "d.pdf"].map(PathBuf::from)
         );
+    }
+
+    /// A job for a printer and a PDF job share the one job at a time: while either runs, the other is refused at once,
+    /// in both orders, without WebView2 being asked; the printer job ends when WebView2's completion says so.
+    #[test]
+    fn printer_job_and_pdf_share_one_job_at_a_time() {
+        let (fake, printer) = fake_printer();
+        let pdf = printer.print_to_pdf(Path::new("first.pdf"), &CancelToken::new());
+        assert_eq!(pdf.try_recv(), Err(TryRecvError::Empty));
+        let refused = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(refused.try_recv(), Ok(Err(PrintFailed::Busy)));
+        assert!(fake.printed_to().is_empty(), "WebView2 was not asked");
+
+        assert!(fake.finish(Ok(())));
+        assert_eq!(pdf.try_recv(), Ok(Ok(())));
+        let job = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(job.try_recv(), Err(TryRecvError::Empty));
+        let refused = printer.print_to_pdf(Path::new("second.pdf"), &CancelToken::new());
+        assert_eq!(refused.try_recv(), Ok(Err(PrintFailed::Busy)));
+        assert_eq!(started_paths(&fake), [PathBuf::from("first.pdf")]);
+
+        assert!(fake.finish(Ok(())));
+        assert_eq!(job.try_recv(), Ok(Ok(())));
+        assert_eq!(fake.printed_to(), ["Office"]);
+        let after = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(after.try_recv(), Err(TryRecvError::Empty), "free again");
+    }
+
+    /// A printer job that cannot start is reported with its `HRESULT` and gives the printer back.
+    #[test]
+    fn printer_job_failure_is_reported() {
+        let (fake, printer) = fake_printer();
+        let refusal = PrintFailed::NotStarted {
+            code: 0x8000_4005_u32 as i32,
+        };
+        fake.refuse_next(refusal);
+        assert_eq!(
+            printer
+                .print_to_printer("Office", &CancelToken::new())
+                .try_recv(),
+            Ok(Err(refusal))
+        );
+        let free = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(
+            free.try_recv(),
+            Err(TryRecvError::Empty),
+            "the refusal freed it"
+        );
+    }
+
+    /// A job is queued for the webview and WebView2 is asked later. A token cancelled in between ends the job with
+    /// `Revoked` and WebView2 is never asked (for a PDF and for a printer alike); the printer is free again; a token
+    /// still live at that point goes through.
+    #[test]
+    fn a_token_cancelled_before_submission_stops_the_job() {
+        let (fake, printer) = fake_printer();
+        fake.hold_submission();
+        let cancel = CancelToken::new();
+        let pdf = printer.print_to_pdf(Path::new("a.pdf"), &cancel);
+        assert_eq!(fake.queued(), 1);
+        cancel.cancel();
+        assert_eq!(fake.submit_queued(), 0, "nothing reached WebView2");
+        assert_eq!(pdf.try_recv(), Ok(Err(PrintFailed::Revoked)));
+
+        let job = printer.print_to_printer("Office", &cancel);
+        assert_eq!(job.try_recv(), Err(TryRecvError::Empty), "queued, not busy");
+        assert_eq!(fake.submit_queued(), 0);
+        assert_eq!(job.try_recv(), Ok(Err(PrintFailed::Revoked)));
+        assert!(fake.submitted().is_empty());
+
+        let live = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(fake.submit_queued(), 1);
+        assert_eq!(fake.submitted(), ["Office"]);
+        assert!(fake.finish(Ok(())));
+        assert_eq!(live.try_recv(), Ok(Ok(())));
+    }
+
+    fn installed(name: &str, port: &str, driver: &str, attributes: u32) -> InstalledPrinter {
+        InstalledPrinter {
+            name: name.to_owned(),
+            port: port.to_owned(),
+            driver: driver.to_owned(),
+            attributes,
+        }
+    }
+
+    /// The printers Lockbox offers are the ones that send a page to a device: not one on the file prompt's ports, not a
+    /// fax printer (by attribute, or by a driver named for fax), not a OneNote printer (by driver or port). A pool is
+    /// left out when any port in it is a file port. Case does not matter, and names that only look alike stay.
+    #[test]
+    fn printers_with_a_box_of_their_own_are_left_out() {
+        let kept = [
+            installed("Office", "IP_192.168.1.5", "HP Universal Printing PCL 6", 0),
+            installed("Pool", "LPT1:,USB001", "Generic / Text Only", 0),
+            installed("Portable", "PORTPROMPTER:", "Generic", 0),
+            installed("Notes", "USB002", "Notebook Printer", 0),
+        ];
+        let left_out = [
+            installed(
+                "Microsoft Print to PDF",
+                "PORTPROMPT:",
+                "Microsoft Print To PDF",
+                0,
+            ),
+            installed(
+                "Microsoft XPS Document Writer",
+                "portprompt:",
+                "Microsoft XPS Document Writer v4",
+                0,
+            ),
+            installed("File", "FILE:", "Generic / Text Only", 0),
+            installed("Pooled to a file", "LPT1:, PORTPROMPT:", "Generic", 0),
+            installed(
+                "Fax",
+                "SHRFAX:",
+                "Microsoft Shared Fax Driver",
+                PRINTER_ATTRIBUTE_FAX,
+            ),
+            installed("Office fax queue", "USB003", "Some Printer FAX", 0),
+            installed(
+                "By attribute",
+                "USB004",
+                "Generic",
+                PRINTER_ATTRIBUTE_FAX | 0x2,
+            ),
+            installed(
+                "Send to OneNote 16",
+                "nul:",
+                "Send to Microsoft OneNote 16 Driver",
+                0,
+            ),
+            installed(
+                "OneNote (Desktop)",
+                "Microsoft.Office.OneNote_16001_x64__8wekyb3d8bbwe_microsoft.onenoteim_S-1-5-21",
+                "Microsoft Software Printer Driver",
+                0,
+            ),
+        ];
+        for printer in &kept {
+            assert!(!printer.writes_a_file_of_its_own(), "{}", printer.name);
+        }
+        for printer in &left_out {
+            assert!(printer.writes_a_file_of_its_own(), "{}", printer.name);
+        }
+        let all = InstalledPrinters {
+            printers: left_out.iter().chain(&kept).cloned().collect(),
+            default: Some("Notes".to_owned()),
+        };
+        let offered = all.offered();
+        assert_eq!(offered.printers, ["Office", "Pool", "Portable", "Notes"]);
+        assert_eq!(offered.default.as_deref(), Some("Notes"));
+    }
+
+    /// WebView2 refuses to write over an existing hidden file (no error, no file), and the fake does the same, so a
+    /// test that hands it such a path fails as the real printer would. A new file, and an existing visible file (which
+    /// it writes over), work.
+    #[test]
+    fn fake_printer_refuses_an_existing_hidden_file() {
+        let (fake, printer) = fake_printer();
+        fake.write_on_success(b"pdf");
+        let dir = lockbox_core::internals::fsio::testutil::TempDir::new();
+
+        let hidden = dir.path().join("hidden.pdf");
+        fs::write(&hidden, b"mine").unwrap();
+        lockbox_core::internals::fsio::set_hidden(&hidden).unwrap();
+        let refused = printer.print_to_pdf(&hidden, &CancelToken::new());
+        assert!(fake.finish(Ok(())));
+        assert_eq!(
+            refused.try_recv(),
+            Ok(Err(PrintFailed::NotWritten { code: 0 })),
+            "ended unsuccessful"
+        );
+        assert_eq!(
+            fs::read(&hidden).unwrap(),
+            b"mine",
+            "no file written over it"
+        );
+
+        let visible = dir.path().join("visible.pdf");
+        fs::write(&visible, b"mine").unwrap();
+        let written = printer.print_to_pdf(&visible, &CancelToken::new());
+        assert!(fake.finish(Ok(())));
+        assert_eq!(written.try_recv(), Ok(Ok(())));
+        assert_eq!(fs::read(&visible).unwrap(), b"pdf");
+
+        let new = dir.path().join("new.pdf");
+        let made = printer.print_to_pdf(&new, &CancelToken::new());
+        assert!(fake.finish(Ok(())));
+        assert_eq!(made.try_recv(), Ok(Ok(())));
+        assert_eq!(fs::read(&new).unwrap(), b"pdf");
     }
 
     /// Fix round 3 (H3): what `same_path` treats as one folder, and what it keeps apart. The registry, `Location`

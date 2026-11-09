@@ -239,6 +239,37 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         check(`link-button words, ${state}`, c("--ink"), tint, 4.5);
       }
       check("link-button words, disabled", c("--ink2"), ground, 4.5);
+      // The key screen's Print and Save as PDF: card-coloured buttons with an edge on the plate. Words at rest, hovered and
+      // pressed (the tint laid over the card), greyed while another print runs, and the edge against the plate at rest.
+      for (const [state, fill] of [["rest", card], ["hover", over(c("--hov"), card)], ["pressed", over(c("--prs"), card)]] as const) {
+        check(`Print and Save as PDF words, ${state}`, c("--ink"), fill, 4.5);
+      }
+      check("Print and Save as PDF words, waiting", c("--ink2"), card, 4.5);
+      check("Print and Save as PDF edge on the plate", c("--edge"), ground, 3);
+      // The saved line's words on the plate, and the cloud question's quiet answer on the panel behind it.
+      check("saved line words on the plate", c("--ink"), ground, 4.5);
+      // The printer picker under them: its list (a field on the plate: words on the card, edge on the plate, and its label
+      // and sentence on the plate), its Print (the screen's main button: at rest, hovered, and greyed while a job runs, with
+      // its fill against the plate), and its Cancel (a quiet button, measured above).
+      check("printer list words on its field", c("--ink"), card, 4.5);
+      check("printer list edge on the plate", c("--edge"), ground, 3);
+      // The list opened from it (the menu's look): the arrows in the box, and each option's words at rest, highlighted and
+      // pressed (the tints laid over the card).
+      check("printer list arrows on its field", c("--ink2"), card, 3);
+      for (const [state, fill] of [["rest", card], ["highlighted", over(c("--hov"), card)], ["pressed", over(c("--prs"), card)]] as const) {
+        check(`printer list option words, ${state}`, c("--ink"), fill, 4.5);
+      }
+      check("printer label on the plate", c("--ink2"), ground, 4.5);
+      check("no-printer sentence on the plate", c("--ink"), ground, 4.5);
+      check("picker Print words, rest", ground, c("--ink"), 4.5);
+      check("picker Print words, hover", ground, c("--ink2"), 4.5);
+      check("picker Print words, waiting", c("--ink2"), over(c("--line"), ground), 4.5);
+      check("picker Print fill against the plate", c("--ink"), ground, 3);
+      check("cloud question words on the panel", c("--ink2"), card, 4.5);
+      // Its quiet pill (Continue) on the panel: the shade is translucent, so each state is laid over the card.
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`quiet pill words on the panel, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
+      }
       check("field in error, edge on the plate", c("--danger"), ground, 3);
       check("field in error, edge on the card", c("--danger"), card, 3);
       // The switch: its off track against the card, its knob against both tracks, and its on track against the card.

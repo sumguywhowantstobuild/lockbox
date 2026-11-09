@@ -43,6 +43,17 @@ export const WRONG_PASSWORD = { code: "core", kind: "wrong_password" };
 export const LOCKED = { code: "locked" };
 /** What the shell sends when it cannot write the mark first (`write_state(…, "vault state")`, `TooLarge`). */
 export const VAULT_STATE_REFUSED = { code: "too_large", what: "vault state" };
+/** What the shell sends while a print of its own runs, and when no PDF came (`error.rs`: `PRINTER_BUSY`, `PDF_NOT_MADE`). */
+export const PRINTER_BUSY = { code: "busy", what: "printer" };
+export const PDF_NOT_MADE = { code: "print_failed", what: "pdf" };
+/** What the shell sends when the printer asked for is not listed any more, and when the job could not be sent (`error.rs`: `PRINTER_GONE`, `PRINT_NOT_SENT`). */
+export const PRINTER_GONE = { code: "invalid_input", what: "printer name" };
+export const PRINT_NOT_SENT = { code: "print_failed", what: "print" };
+/** The printers the fake lists to begin with, and the one Windows has as the default (not the first, so a test can tell). */
+export const PRINTERS = ["Office Laser", "Hall Inkjet"];
+export const DEFAULT_PRINTER = "Hall Inkjet";
+/** The folder the fake saves a PDF in: a made-up path, shown to the person after a save. */
+export const SAVED_FOLDER = "C:\\Users\\Someone\\Documents";
 
 /**
  * Made-up stand-ins for the engine's word list: 64 lowercase words, none of them a word the screens use themselves
@@ -155,6 +166,24 @@ export interface FakeShell {
   dismissPickerNext(): void;
   /** The vault the next `add_existing_vault` finds in the folder the person picks. */
   offerExisting(vault: FakeVault): void;
+  /** The folders a recovery key PDF was saved in, in order (a PDF the shell never wrote is not here). */
+  pdfs: string[];
+  /** The next Save as PDF is closed without a choice. */
+  dismissPdfNext(): void;
+  /** The next Save as PDF finds a cloud-synced folder and asks first. Each call is one more question. */
+  cloudPdfNext(): void;
+  /** The next Save as PDF or Print is refused with this. */
+  refusePrintNext(error: object): void;
+  /** Holds every print command's answer until `release` is called (the PDF is still being made, the job is on its way). */
+  holdPrint(): () => void;
+  /** Drops every parked cloud question without a lock event, as the shell does when a session locks (a late yes is `not_found`). */
+  dropParkedChoices(): void;
+  /** The printers a print was sent to, in order, by the name the page sent. */
+  printed: string[];
+  /** The printers the shell lists from now on, and the default among them (`null` for none). */
+  setPrinters(printers: string[], defaultPrinter?: string | null): void;
+  /** Holds every `list_printers` answer until `release` is called (Windows is still being asked). */
+  holdPrinterList(): () => void;
 }
 
 let sessionRange = 0;
@@ -202,6 +231,17 @@ export function installFakeShell(
   let nextToken = 0;
   const pendingCreates = new Map<string, { name: string; password: string }>();
   const pendingAdds = new Set<string>();
+  const pdfs: string[] = [];
+  let dismissPdf = false;
+  let cloudPdf = 0;
+  let printRefusal: object | undefined;
+  let heldPrint: (() => void)[] | undefined;
+  let heldPrinterList: (() => void)[] | undefined;
+  let printers = [...PRINTERS];
+  let defaultPrinter: string | null = DEFAULT_PRINTER;
+  const printed: string[] = [];
+  // The save a cloud question parked: its session and generation, to go on with it (`save_readable_confirm`).
+  const pendingPdfs = new Map<string, { session: number; generation: number }>();
 
   listen.mockImplementation((event: string, handler: (event: { payload: unknown }) => void) => {
     calls.push({ cmd: `listen:${event}`, args: undefined });
@@ -389,6 +429,59 @@ export function installFakeShell(
         vault.unconfirmed = false;
         return tagged(session, generation, null);
       }
+      case "save_recovery_pdf": {
+        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if (printRefusal !== undefined) {
+          const error = printRefusal;
+          printRefusal = undefined;
+          return refuse(error);
+        }
+        if (dismissPdf) {
+          dismissPdf = false;
+          return tagged(session, generation, "Dismissed");
+        }
+        if (cloudPdf > 0) {
+          cloudPdf -= 1;
+          nextToken += 1;
+          const token = `pdf-token-${String(nextToken)}`;
+          pendingPdfs.set(token, { session, generation });
+          return tagged(session, generation, { Confirm: { CloudFolder: { token } } });
+        }
+        pdfs.push(SAVED_FOLDER);
+        return tagged(session, generation, { Done: { folder: SAVED_FOLDER } });
+      }
+      case "save_readable_confirm": {
+        const { token } = exactly(args, ["token"]) as { token: string };
+        const parked = pendingPdfs.get(token);
+        if (parked === undefined) return refuse({ code: "not_found" });
+        pendingPdfs.delete(token);
+        vaultFor(parked.session, parked.generation);
+        pdfs.push(SAVED_FOLDER);
+        return tagged(parked.session, parked.generation, { Done: { folder: SAVED_FOLDER } });
+      }
+      case "list_printers":
+        exactly(args ?? {}, []);
+        return { printers: [...printers], default: defaultPrinter !== null && printers.includes(defaultPrinter) ? defaultPrinter : null };
+      case "print_recovery_key": {
+        const { session, generation, printer } = exactly(args, ["session", "generation", "printer"]) as {
+          session: number;
+          generation: number;
+          printer: unknown;
+        };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if (printRefusal !== undefined) {
+          const error = printRefusal;
+          printRefusal = undefined;
+          return refuse(error);
+        }
+        // Only a printer the shell lists is printed to: a name that is gone, or never was, is refused.
+        if (typeof printer !== "string" || !printers.includes(printer)) return refuse(PRINTER_GONE);
+        printed.push(printer);
+        return tagged(session, generation, null);
+      }
       case "list_items": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
@@ -435,8 +528,31 @@ export function installFakeShell(
 
   invoke.mockImplementation((cmd: string, args?: unknown) => {
     calls.push({ cmd, args });
+    if (heldPrint !== undefined && (cmd === "save_recovery_pdf" || cmd === "print_recovery_key" || cmd === "save_readable_confirm")) {
+      // Decided when released, as the shell does: a lock in between leaves no file, and the answer is a refusal.
+      const waiting = heldPrint;
+      return new Promise((resolve, reject) => {
+        waiting.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          }
+        });
+      });
+    }
     try {
       const result = answer(cmd, args);
+      if (cmd === "list_printers" && heldPrinterList !== undefined) {
+        const waiting = heldPrinterList;
+        // Asked when released, so a list changed in between is the one that is read.
+        return new Promise((resolve) => {
+          waiting.push(() => {
+            resolve(answer(cmd, args));
+          });
+        });
+      }
       if (cmd === "list_items" && held !== undefined) {
         const release = held;
         return new Promise((resolve) => {
@@ -487,6 +603,40 @@ export function installFakeShell(
     },
     offerExisting: (vault) => {
       existing = vault;
+    },
+    pdfs,
+    dismissPdfNext: () => {
+      dismissPdf = true;
+    },
+    cloudPdfNext: () => {
+      cloudPdf += 1;
+    },
+    refusePrintNext: (error) => {
+      printRefusal = error;
+    },
+    holdPrint: () => {
+      const waiting: (() => void)[] = [];
+      heldPrint = waiting;
+      return () => {
+        heldPrint = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    dropParkedChoices: () => {
+      pendingPdfs.clear();
+    },
+    printed,
+    setPrinters: (names, preferred = null) => {
+      printers = [...names];
+      defaultPrinter = preferred;
+    },
+    holdPrinterList: () => {
+      const waiting: (() => void)[] = [];
+      heldPrinterList = waiting;
+      return () => {
+        heldPrinterList = undefined;
+        for (const release of waiting) release();
+      };
     },
   };
 }

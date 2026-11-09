@@ -38,6 +38,11 @@ const REFUSED: CoreError = CoreError::Cancelled;
 /// The engine's temp names: `.<16 lowercase hex>` and one of these.
 const TEMP_SUFFIXES: [&str; 2] = [".lockbox-partial", ".lockbox-backup-partial"];
 
+/// The name of the hidden folder a recovery key's PDF is printed in (WebView2 refuses an existing hidden file, so the file
+/// is a new one inside a new hidden folder): `.<16 lowercase hex>` and this. The launch sweep removes it only when it is
+/// empty, after the journaled file inside it.
+pub(crate) const FOLDER_SUFFIX: &str = ".lockbox-partial-folder";
+
 /// How many damaged journals [`Outputs::reset`] keeps beside the new one: `pending-outputs.json.damaged-1` to `-99`.
 const MAX_SET_ASIDE: u32 = 99;
 
@@ -123,6 +128,9 @@ enum Swept {
     Kept,
     /// Not Lockbox's, or already gone: dropped from the journal, nothing deleted.
     Dropped,
+    /// A temp folder that holds something: never emptied by the sweep (it deletes no tree). Dropped from the journal
+    /// unless a file of its own that stayed is still in it, which keeps it for the next launch.
+    NotEmpty,
 }
 
 impl Outputs {
@@ -282,10 +290,18 @@ impl Outputs {
     /// seconds), and forgets it unless it is kept (it could not be removed yet, or its drive is not there): whether it
     /// is done with. The journal's lock is not held meanwhile.
     pub(crate) fn remove_open(&self, folder: &Path, tries: u32) -> bool {
-        match self.sweep_one(folder, tries) {
+        self.remove_leftover(folder, tries)
+    }
+
+    /// Removes `entry` (an "Open" folder, an engine temp or the PDF's temp folder) by the sweep's rules in at most
+    /// `tries` attempts, and forgets it unless it is kept (it could not be removed yet, or its drive is not there):
+    /// whether it is done with. A temp folder that holds anything is left as it is and forgotten: it is not Lockbox's
+    /// to empty. The journal's lock is not held meanwhile.
+    pub(crate) fn remove_leftover(&self, entry: &Path, tries: u32) -> bool {
+        match self.sweep_one(entry, tries) {
             Swept::Kept => false,
-            Swept::Removed | Swept::Dropped => {
-                self.clear(folder);
+            Swept::Removed | Swept::Dropped | Swept::NotEmpty => {
+                self.clear(entry);
                 true
             }
         }
@@ -312,7 +328,10 @@ impl Outputs {
     ///   then plain names only: no `.`, `..` or empty part, refused as written, before anything normalises it;
     /// - it is an "Open" folder (its name 32 lowercase hex, directly inside `open\` as Lockbox spells it from the
     ///   known folder), or an engine temp (`.<16 lowercase hex>.lockbox-partial` or `.lockbox-backup-partial`) whose
-    ///   folder, resolved, is the folder written down;
+    ///   folder, resolved, is the folder written down, or the recovery key PDF's temp folder
+    ///   (`.<16 lowercase hex>.lockbox-partial-folder`, its own folder resolved the same way), which is removed only
+    ///   while it is empty, after the file journaled inside it, and is never emptied (a folder holding anything else is
+    ///   left, and forgotten);
     /// - no folder on its way, from the drive or share down (the state folder and the folders above it included), is
     ///   a link, a junction or a mount point (a cloud-file folder, whose reparse point keeps it in place, passes);
     /// - it is, by its own metadata, a plain folder or a plain file: no reparse point of any kind.
@@ -332,8 +351,17 @@ impl Outputs {
             return SweepReport::default();
         }
         let mut report = SweepReport::default();
-        let mut kept = Vec::new();
-        for entry in entries {
+        let mut kept: Vec<PathBuf> = Vec::new();
+        // The files first, then the PDF temp folders (whatever order the journal lists them in): a folder is looked at
+        // only once the file inside it has been dealt with.
+        let (folders, others): (Vec<PathBuf>, Vec<PathBuf>) =
+            entries.into_iter().partition(|entry| {
+                entry
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(is_temp_folder_name)
+            });
+        for entry in others.into_iter().chain(folders) {
             let tries = match entry.parent().is_some_and(|folder| self.is_open(folder)) {
                 true => LAUNCH_OPEN_TRIES,
                 false => DELETE_TRIES,
@@ -342,6 +370,17 @@ impl Outputs {
                 Swept::Removed => report.removed += 1,
                 Swept::Kept => kept.push(entry),
                 Swept::Dropped => {}
+                Swept::NotEmpty => {
+                    // Kept while a file of its own is, so the next launch finds both; otherwise it holds only what is
+                    // not Lockbox's: left alone, and forgotten.
+                    let holds_a_kept_file = kept.iter().any(|file| {
+                        file.parent()
+                            .is_some_and(|inside| same_path(inside, &entry))
+                    });
+                    if holds_a_kept_file {
+                        kept.push(entry);
+                    }
+                }
             }
         }
         report.kept = kept.len();
@@ -354,15 +393,26 @@ impl Outputs {
     /// a folder swapped for a link between two attempts stops the next one.
     fn sweep_one(&self, entry: &Path, tries: u32) -> Swept {
         let mut wait = FIRST_WAIT;
+        let temp_folder = entry
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(is_temp_folder_name);
         for attempt in 1..=tries {
             let folder = match self.check(entry) {
                 Checked::Delete { folder } => folder,
                 Checked::Keep => return Swept::Kept,
                 Checked::Drop => return Swept::Dropped,
             };
-            match delete_once(entry, folder) {
+            let shape = match (folder, temp_folder) {
+                (false, _) => Shape::File,
+                (true, false) => Shape::OpenFolder,
+                (true, true) => Shape::TempFolder,
+            };
+            match delete_once(entry, shape) {
                 Ok(()) => return Swept::Removed,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Swept::Dropped,
+                // Folder not empty: a temp folder is removed only while empty, and is not retried for.
+                Err(e) if temp_folder && e.raw_os_error() == Some(145) => return Swept::NotEmpty,
                 Err(e) if attempt < tries && is_transient(&e) => {
                     #[cfg(test)]
                     if let Some(hook) = lock(&self.hooks.on_retry).take() {
@@ -387,13 +437,11 @@ impl Outputs {
         else {
             return Checked::Drop;
         };
-        let is_folder = match (
-            is_open_name(name) && self.is_open(folder),
-            is_temp_name(name),
-        ) {
-            (true, _) => true,
-            (false, true) => false,
-            (false, false) => return Checked::Drop,
+        let open_folder = is_open_name(name) && self.is_open(folder);
+        let is_folder = match (open_folder, is_temp_name(name), is_temp_folder_name(name)) {
+            (true, _, _) | (false, false, true) => true,
+            (false, true, _) => false,
+            (false, false, false) => return Checked::Drop,
         };
         if !matches!(self.volumes.exists(&root), Ok(true)) {
             return Checked::Keep;
@@ -402,8 +450,9 @@ impl Outputs {
             Checked::Delete { .. } => {}
             not_safe => return not_safe,
         }
-        // A temp is written down with its folder resolved; one spelled any other way is not Lockbox's.
-        if !is_folder && !fs::canonicalize(folder).is_ok_and(|real| same_path(&real, folder)) {
+        // A temp (or a PDF's temp folder) is written down with its folder resolved; one spelled any other way is not
+        // Lockbox's.
+        if !open_folder && !fs::canonicalize(folder).is_ok_and(|real| same_path(&real, folder)) {
             return Checked::Drop;
         }
         match fs::symlink_metadata(entry) {
@@ -458,22 +507,39 @@ enum Checked {
     Drop,
 }
 
+/// What one delete attempt removes.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// An engine temp: a file.
+    File,
+    /// An "Open" folder, and everything in it.
+    OpenFolder,
+    /// The PDF's temp folder, and only while it is empty: never anything in it.
+    TempFolder,
+}
+
 /// One delete attempt, without retrying: an "Open" folder and everything in it (std's removal does not follow links
-/// inside it), or a temp, its read-only flag cleared first. A copy in the folder gets its flag back when the attempt
-/// fails: while a viewer holds it, it stays read-only.
-fn delete_once(entry: &Path, folder: bool) -> io::Result<()> {
-    if folder {
-        let cleared = clear_read_only_inside(entry);
-        let removed = fs::remove_dir_all(entry);
-        if removed.is_err() {
-            for file in cleared {
-                let _ = set_read_only(&file, true);
+/// inside it), a PDF's temp folder only while it is empty, or a temp, its read-only flag cleared first. A copy in an
+/// "Open" folder gets its flag back when the attempt fails: while a viewer holds it, it stays read-only.
+fn delete_once(entry: &Path, shape: Shape) -> io::Result<()> {
+    match shape {
+        Shape::OpenFolder => {
+            let cleared = clear_read_only_inside(entry);
+            let removed = fs::remove_dir_all(entry);
+            if removed.is_err() {
+                for file in cleared {
+                    let _ = set_read_only(&file, true);
+                }
             }
+            removed
         }
-        return removed;
+        // `remove_dir` refuses a folder that holds anything (Windows: directory not empty); it never recurses.
+        Shape::TempFolder => fs::remove_dir(entry),
+        Shape::File => {
+            set_read_only(entry, false)?;
+            fs::remove_file(entry)
+        }
     }
-    set_read_only(entry, false)?;
-    fs::remove_file(entry)
 }
 
 /// Clears the read-only flag of each plain file directly in `folder` (an opened copy): the files whose flag it cleared.
@@ -648,6 +714,13 @@ fn is_temp_name(name: &str) -> bool {
     })
 }
 
+/// The PDF's temp folder's name: `^\.[0-9a-f]{16}\.lockbox-partial-folder$`.
+fn is_temp_folder_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(FOLDER_SUFFIX))
+        .is_some_and(|hex| is_lower_hex(hex, 16))
+}
+
 /// Whether `meta` (from `symlink_metadata`) is a plain folder (`folder`) or a plain file: no reparse point of any
 /// kind.
 fn plain(meta: &Metadata, folder: bool) -> bool {
@@ -766,6 +839,8 @@ mod tests {
     const BACKUP_TEMP: &str = ".fedcba9876543210.lockbox-backup-partial";
     /// An "Open" folder's name.
     const OPEN: &str = "0123456789abcdef0123456789abcdef";
+    /// The hidden folder a recovery key PDF is printed in.
+    const PDF_FOLDER: &str = ".fedcba9876543210.lockbox-partial-folder";
 
     /// Always disarms, so a failing test cannot leak a failpoint into the next one on this thread.
     struct Cleanup;
@@ -1124,6 +1199,174 @@ mod tests {
 
         assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
         assert!(!open.exists());
+    }
+
+    /// A crash while the recovery key's PDF was printing: the journal lists the hidden folder (written first) and the
+    /// file inside it, both on disk. The launch sweep removes the file, then the folder (now empty), whatever order the
+    /// journal lists them in, and the file the user had saved there before is not touched. A crash before WebView2 made
+    /// its file leaves the folder alone: that is removed, and the entry for the file that never came is dropped.
+    #[test]
+    fn crash_leftover_swept_at_launch() {
+        let ts = TestShell::new();
+        let docs = ts.folder("Documents");
+        let saved = docs.join("Lockbox recovery key.pdf");
+        fs::write(&saved, b"the earlier pdf").unwrap();
+        let folder = docs.join(PDF_FOLDER);
+        fs::create_dir(&folder).unwrap();
+        set_hidden(&folder).unwrap();
+        let temp = folder.join(TEMP);
+        fs::write(&temp, b"half a pdf").unwrap();
+        write_journal(&ts, &[folder.clone(), temp.clone()]);
+
+        let report = ts.shell.sweep_outputs();
+        assert_eq!(
+            report,
+            SweepReport {
+                removed: 2,
+                kept: 0,
+                unreadable: false
+            }
+        );
+        assert!(!folder.exists(), "the folder is removed");
+        assert_eq!(fs::read(&saved).unwrap(), b"the earlier pdf");
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+
+        // The other order, and a file that never came.
+        fs::create_dir(&folder).unwrap();
+        write_journal(&ts, &[temp.clone(), folder.clone()]);
+        let report = ts.shell.sweep_outputs();
+        assert_eq!(
+            report,
+            SweepReport {
+                removed: 1,
+                kept: 0,
+                unreadable: false
+            }
+        );
+        assert!(!folder.exists());
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// The sweep never deletes recursively: a folder that holds anything besides the journaled file is left, with
+    /// everything else in it (a file, a subfolder with its file), and forgotten by the journal. A folder reached
+    /// through a link, or that is itself a link, is left whole too.
+    #[cfg(windows)]
+    #[test]
+    fn crash_leftover_folder_swept_at_launch() {
+        let ts = TestShell::new();
+        let docs = ts.folder("Documents");
+        let folder = docs.join(PDF_FOLDER);
+        fs::create_dir(&folder).unwrap();
+        let temp = folder.join(TEMP);
+        fs::write(&temp, b"half a pdf").unwrap();
+        fs::write(folder.join("notes.txt"), b"mine").unwrap();
+        fs::create_dir(folder.join("sub")).unwrap();
+        fs::write(folder.join("sub").join("deep.txt"), b"mine").unwrap();
+        write_journal(&ts, &[folder.clone(), temp.clone()]);
+
+        let report = ts.shell.sweep_outputs();
+        assert_eq!(
+            report,
+            SweepReport {
+                removed: 1,
+                kept: 0,
+                unreadable: false
+            },
+            "the journaled file only"
+        );
+        assert!(!temp.exists(), "the journaled file is removed");
+        assert_eq!(fs::read(folder.join("notes.txt")).unwrap(), b"mine");
+        assert_eq!(
+            fs::read(folder.join("sub").join("deep.txt")).unwrap(),
+            b"mine"
+        );
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new(), "forgotten, not kept");
+
+        // A junction named like the folder, and a folder reached through a junction in an ancestor.
+        let target = docs.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("kept.txt"), b"mine").unwrap();
+        let junction = docs.join(".0011223344556677.lockbox-partial-folder");
+        make_dir_link(&junction, &target);
+        let real = docs.join("real");
+        fs::create_dir_all(real.join(PDF_FOLDER)).unwrap();
+        let via = docs.join("via");
+        make_dir_link(&via, &real);
+        write_journal(&ts, &[junction.clone(), via.join(PDF_FOLDER)]);
+        assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());
+        assert!(
+            fs::symlink_metadata(&junction).is_ok(),
+            "the junction stays"
+        );
+        assert!(target.join("kept.txt").is_file());
+        assert!(real.join(PDF_FOLDER).is_dir(), "left, not removed");
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+    }
+
+    /// A journaled file another program holds for a moment is removed on a retry, and the folder, listed before it,
+    /// goes with it: files are swept before their folders, so the folder is looked at only once the file is gone.
+    #[test]
+    fn folder_follows_a_file_removed_on_a_retry() {
+        let ts = TestShell::new();
+        let docs = ts.folder("Documents");
+        let folder = docs.join(PDF_FOLDER);
+        fs::create_dir(&folder).unwrap();
+        let temp = folder.join(TEMP);
+        fs::write(&temp, b"half a pdf").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&temp)
+            .unwrap();
+        // Let go for good before the sweep's last try, so the file is removed there.
+        ts.shell.outputs.on_retry(Box::new(move || drop(held)));
+        write_journal(&ts, &[folder.clone(), temp.clone()]);
+        let report = ts.shell.sweep_outputs();
+        assert_eq!(
+            report,
+            SweepReport {
+                removed: 2,
+                kept: 0,
+                unreadable: false
+            }
+        );
+        assert!(!folder.exists());
+    }
+
+    /// A journaled file that stays (another program keeps it for the whole sweep) keeps its folder listed with it, for
+    /// the next launch: the folder holds nothing but that file. Both are removed once the file is let go.
+    #[test]
+    fn folder_stays_listed_while_its_file_stays() {
+        let ts = TestShell::new();
+        let docs = ts.folder("Documents");
+        let folder = docs.join(PDF_FOLDER);
+        fs::create_dir(&folder).unwrap();
+        let temp = folder.join(TEMP);
+        fs::write(&temp, b"half a pdf").unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&temp)
+            .unwrap();
+        write_journal(&ts, &[folder.clone(), temp.clone()]);
+        let kept = SweepReport {
+            removed: 0,
+            kept: 2,
+            unreadable: false,
+        };
+        assert_eq!(ts.shell.sweep_outputs(), kept);
+        assert!(temp.exists() && folder.is_dir());
+        assert_eq!(ts.journal().len(), 2, "both stay listed");
+
+        drop(held);
+        let removed = SweepReport {
+            removed: 2,
+            kept: 0,
+            unreadable: false,
+        };
+        assert_eq!(ts.shell.sweep_outputs(), removed);
+        assert!(!folder.exists());
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
     }
 
     /// Fix round 1: every delete attempt checks the entry again. The leftover is held open, so the first attempt

@@ -55,6 +55,19 @@ export const MESSAGES: Record<string, Words> = {
     title: "Lockbox couldn't save a note it needs before making the key, so it made none.",
     body: "Try again.",
   },
+  "code:invalid_input:state folder": {
+    title: "Lockbox won't save that in its own settings folder.",
+    body: "Choose another folder.",
+  },
+  // Printing: one print of Lockbox's own at a time, and a PDF that never came leaves nothing behind.
+  "code:busy:printer": { title: "Lockbox is still printing.", body: "Wait for it to finish, then try again." },
+  "code:print_failed": { title: "Lockbox couldn't print that.", body: "Try again." },
+  "code:print_failed:pdf": { title: "Lockbox couldn't make the PDF.", body: "Nothing was saved. Try again." },
+  "code:print_failed:print": {
+    title: "Lockbox couldn't send that to the printer.",
+    body: "Check that it's on and connected, then try again.",
+  },
+  "code:invalid_input:printer name": { title: "That printer isn't available any more.", body: "Pick another one." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   "code:core": GENERIC,
 
@@ -82,6 +95,10 @@ export const MESSAGES: Record<string, Words> = {
   },
   "core:too_large": { title: "That is too big for Lockbox to keep.", body: "" },
   "core:invalid_input": { title: "Lockbox can't use that.", body: "Check what you entered and try again." },
+  "core:invalid_input:destination in a vault folder": {
+    title: "Lockbox won't save that inside a vault's folder.",
+    body: "Choose another folder.",
+  },
   "core:vault_in_use": {
     title: "This vault is in use.",
     body: "Close whatever else has it open, then try again.",
@@ -172,6 +189,10 @@ export const KNOWN_WHATS: readonly string[] = [
   "output journal",
   "password",
   "password is empty",
+  "pdf",
+  "print",
+  "printer",
+  "printer name",
   "removable drive",
   "request",
   "restore",

@@ -102,6 +102,33 @@ fn import_export_round_trip_across_unlock() {
     assert_eq!(fs::read(&dest).unwrap(), data);
 }
 
+/// The shell writes readable files beside a destination the user picked, and refuses a vault folder with the engine's
+/// own check: public, so there is one copy of it. The vault's folder and a folder inside it are refused; an ordinary
+/// folder is not.
+#[test]
+fn refuse_vault_folder_is_public() {
+    let parent = tempfile::tempdir().unwrap();
+    let vault = new_vault(parent.path());
+    let inside = vault.dir().join("files");
+    for dest in [
+        vault.dir().join("copy.pdf"),
+        inside.join("copy.pdf"),
+        inside.join("..").join("copy.pdf"),
+    ] {
+        assert!(
+            matches!(
+                lockbox_core::fsio::refuse_vault_folder(&dest),
+                Err(CoreError::InvalidInput {
+                    what: "destination in a vault folder"
+                })
+            ),
+            "{dest:?}"
+        );
+    }
+    let elsewhere = tempfile::tempdir().unwrap();
+    lockbox_core::fsio::refuse_vault_folder(&elsewhere.path().join("copy.pdf")).unwrap();
+}
+
 #[test]
 fn attach_file_adds_to_an_existing_item() {
     let parent = tempfile::tempdir().unwrap();

@@ -91,6 +91,21 @@ pub fn check_location(
     })
 }
 
+/// The cloud provider syncing the folder `dir`, if any, by the same check a vault's folder gets ([`check_location`]'s
+/// `cloud`), without that check's other refusals: a file saved for the user may go to any drive. `InvalidInput
+/// { "folder" }` for a path that is not absolute or not a plain folder name Windows keeps as given.
+pub fn cloud_provider_of(
+    volumes: &dyn Volumes,
+    env: &dyn Env,
+    dir: &Path,
+) -> ShellResult<Option<CloudProvider>> {
+    let Some((existing, full)) = canonical_or_nearest(dir)? else {
+        return Err(ShellError::InvalidInput { what: "folder" });
+    };
+    let root = volumes.volume_root(&existing)?;
+    Ok(cloud_provider(volumes, env, &existing, &full, &root))
+}
+
 /// `dir` canonicalised: its nearest existing ancestor's canonical path (the part `fs::canonicalize` can resolve),
 /// and that path with the rest of `dir` added back. `None` when `dir` is relative; when an ancestor exists but cannot
 /// be resolved (a link that leads nowhere, a volume with no drive letter): climbing past it would check the wrong

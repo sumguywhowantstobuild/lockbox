@@ -170,7 +170,12 @@ each screen that links to them loses that link.
   policy allows fonts only from the app itself, and there's no network at run time.
 - **Recovery key PDF: WebView2's print-to-PDF** with a print style sheet that shows only the key's heading ("Lockbox recovery key, not a crypto wallet phrase", spec 5.2), its 24 numbered words and the words around them. The bindings
   are already in the shell, the page already draws the key, and a PDF library isn't needed (my call; Microsoft's reference
-  says a second print job at the same time fails at once, so the button waits for the first).
+  says a second print job at the same time fails at once, so the button waits for the first). **Print** shows Lockbox's own
+  printer list under the buttons and prints the same page straight to the one picked (WebView2's `Print` with that
+  printer's name), with no Windows window. Windows' own print window was tried first and dropped (Ariel, Task 7 hands-on,
+  2026-11-09): it keeps its copy of the page after Lockbox locks, still printed the key after an idle lock, and nothing
+  can close it. Printers that write a file through their own save box (Microsoft Print to PDF, XPS, OneNote, fax) aren't
+  listed, for the same reason; Save as PDF makes the file. The two share the one-job-at-a-time rule.
 - **Accessibility checks: `axe-core` called directly** (4.14, MPL-2.0, test only). `vitest-axe` hasn't been updated since
   January 2025, and calling it directly is only a few lines.
 - **No analytics, no telemetry, and no network calls from Lockbox itself.** Help opens the user's own browser.
@@ -360,6 +365,18 @@ for the vault's name. Moments with their own screen in a task (10d, 10e, 1c, 2c,
 | All old-copy names used | There are too many older copies of this vault. Delete some, then restore again. | Older copies, Cancel |
 | Nowhere to copy to | Unlock a vault first, so there's somewhere to copy this to. | OK |
 | Vault made but not listed | Your new vault is on disk but couldn't be added to the list. Use "I already have a vault" on the first screen to add it. (Its new recovery key is made at its first unlock, 21f.) | OK |
+| Password count while typing (21b) | At least 12 characters · 5 so far. At 12 or more, a check mark and "12 characters or more", said once to a screen reader. | none |
+| Recovery key saved as a PDF (21c, 21f) | Saved in C:\Users\you\Documents. | none |
+| Saving a readable file to a cloud folder (21e) | This folder is synced to the cloud. This file would be uploaded unprotected. | Continue, Pick another folder |
+| Saving a readable file inside a vault's folder | Lockbox won't save that inside a vault's folder. Choose another folder. | OK |
+| Saving a readable file in Lockbox's own folder | Lockbox won't save that in its own settings folder. Choose another folder. | OK |
+| Print still running | Lockbox is still printing. Wait for it to finish, then try again. | OK |
+| PDF not made | Lockbox couldn't make the PDF. Nothing was saved. Try again. | OK |
+| Print: choosing a printer (21c, 21f) | Printer: [the printers, the default first picked] | Print, Cancel |
+| Print: no printer set up | No printer is set up on this PC. Save as PDF instead, or add a printer in Windows' settings. | Cancel |
+| Print sent | Sent to [printer]. | none |
+| Print not sent | Lockbox couldn't send that to the printer. Check that it's on and connected, then try again. | OK |
+| Printer gone | That printer isn't available any more. Pick another one. | OK |
 
 **New behind these:** today's code has no "no" answer to Ask 3. Lock this vault uses the lock that already exists, and the
 question comes back at the next unlock. The vault-list reset for Ask 12 doesn't exist yet either. The shell has to say which

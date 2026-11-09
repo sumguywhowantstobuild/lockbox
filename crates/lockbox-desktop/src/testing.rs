@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 
+use lockbox_core::blob::CancelToken;
 use lockbox_core::internals::fsio::testutil::TempDir;
 use zeroize::Zeroizing;
 
@@ -17,8 +18,9 @@ use crate::error::ShellResult;
 use crate::lock;
 use crate::os::{
     CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS,
-    Env, IdleSource, Job, KnownFolder, Launcher, Os, Power, PrintCalls, PrintDone, PrintFailed,
-    PrintSteps, TAG_FORMAT, Timer, Volumes,
+    Env, IdleSource, InstalledPrinter, InstalledPrinters, Job, KnownFolder, Launcher, Os,
+    PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, TAG_FORMAT, Timer,
+    Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
@@ -751,9 +753,16 @@ pub struct FakeDialogs {
     starts: Mutex<Vec<Option<PathBuf>>>,
     /// The name each save dialog suggested, in order.
     suggested: Mutex<Vec<String>>,
+    /// The title each save dialog was given, in order.
+    titles: Mutex<Vec<String>>,
 }
 
 impl FakeDialogs {
+    /// The title each save dialog was opened with, in order.
+    pub fn titles(&self) -> Vec<String> {
+        lock(&self.titles).clone()
+    }
+
     /// The start folder each folder dialog was opened with (`None`: none given), in order.
     pub fn folder_starts(&self) -> Vec<Option<PathBuf>> {
         lock(&self.starts).clone()
@@ -798,10 +807,11 @@ impl Dialogs for FakeDialogs {
 
     fn save_file(
         &self,
-        _title: &str,
+        title: &str,
         suggested: &str,
         _filter: Option<(&str, &[&str])>,
     ) -> Option<PathBuf> {
+        lock(&self.titles).push(title.to_owned());
         lock(&self.suggested).push(suggested.to_owned());
         self.next()
     }
@@ -874,18 +884,42 @@ pub struct StartedPrint {
     pub folder_hidden: bool,
 }
 
-/// The printing call as the test sees it: records each job, holds its `done` until the test ends the job, and can
-/// refuse to begin one.
+/// Whether `path` is there and hidden (`FILE_ATTRIBUTE_HIDDEN`).
+fn is_hidden(path: Option<&Path>) -> bool {
+    path.and_then(|path| fs::symlink_metadata(path).ok())
+        .is_some_and(|meta| std::os::windows::fs::MetadataExt::file_attributes(&meta) & 0x2 != 0)
+}
+
+/// The printing calls as the test sees them: records each job, holds its `done` until the test ends the job, and can
+/// refuse to begin one. Like WebView2, a PDF job refuses to write over an existing hidden file: it ends unsuccessful,
+/// writing nothing.
 #[derive(Default)]
 pub struct FakePrintCalls {
     started: Mutex<Vec<StartedPrint>>,
-    /// Jobs begun and not ended, oldest first, each with its path.
+    /// Jobs begun and not ended, oldest first, each with its path (empty for a job for a printer).
     waiting: Mutex<VecDeque<(PathBuf, PrintDone)>>,
-    /// The next `start` refuses with this.
+    /// The next `start` or `start_on_printer` refuses with this.
     refuse_next: Mutex<Option<PrintFailed>>,
     /// What a job that ends well leaves in its file (it opens the file that is there and writes over it, as WebView2
     /// does); `None` writes nothing.
     pdf: Mutex<Option<Vec<u8>>>,
+    /// The printers the fake Windows has, and its default.
+    installed: Mutex<InstalledPrinters>,
+    /// Listing the printers fails (once) with this.
+    list_fails: Mutex<bool>,
+    /// Run once, inside the next listing, before it answers: a test locks the session there.
+    on_list: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The name each printer job was begun for, in order (and not refused as busy: the calls are what is counted).
+    printed_to: Mutex<Vec<String>>,
+    /// Run once, when the next PDF job begins, on the thread that begins it.
+    on_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Jobs queued for the webview's thread and not yet submitted to WebView2, oldest first.
+    queued: Mutex<VecDeque<QueuedPrint>>,
+    /// Jobs wait in `queued` until the test calls `submit_queued`.
+    held: AtomicBool,
+    /// The printers' names, and every job's path, of the jobs that reached WebView2.
+    submitted: Mutex<Vec<String>>,
+    submitted_jobs: Mutex<Vec<PathBuf>>,
 }
 
 impl FakePrintCalls {
@@ -898,11 +932,43 @@ impl FakePrintCalls {
         *lock(&self.refuse_next) = Some(failed);
     }
 
-    /// A job that ends well writes `bytes` over its file first. Used by the tests of the recovery key's PDF; only the
-    /// probe's tests used it before, and they are gone.
-    #[allow(dead_code)]
+    /// A job that ends well writes `bytes` over its file first (a new file, or a visible one that is there).
     pub fn write_on_success(&self, bytes: &[u8]) {
         *lock(&self.pdf) = Some(bytes.to_vec());
+    }
+
+    /// `hook` runs once, on the thread that begins the next job, when it is begun: a test arms a failpoint there that
+    /// the same thread reaches later (failpoints are per thread).
+    pub fn on_start(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_start) = Some(Box::new(hook));
+    }
+
+    /// How many jobs have begun and not ended.
+    pub fn running(&self) -> usize {
+        lock(&self.waiting).len()
+    }
+
+    /// The printers the fake Windows has, and the default one's name.
+    pub fn set_printers(&self, printers: Vec<InstalledPrinter>, default: Option<&str>) {
+        *lock(&self.installed) = InstalledPrinters {
+            printers,
+            default: default.map(str::to_owned),
+        };
+    }
+
+    /// The next listing of printers fails.
+    pub fn fail_listing(&self) {
+        *lock(&self.list_fails) = true;
+    }
+
+    /// `hook` runs inside the next listing of printers, before it answers.
+    pub fn on_listing(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_list) = Some(Box::new(hook));
+    }
+
+    /// The names the printer jobs were begun for, in order.
+    pub fn printed_to(&self) -> Vec<String> {
+        lock(&self.printed_to).clone()
     }
 
     /// Ends the oldest running job with `result`; false when none runs.
@@ -910,24 +976,29 @@ impl FakePrintCalls {
         let Some((path, done)) = lock(&self.waiting).pop_front() else {
             return false;
         };
-        if result.is_ok()
-            && let Some(pdf) = lock(&self.pdf).clone()
-        {
-            // Writes over the file that is there (truncating it), or makes the file when there is none.
-            let mut file = match fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&path)
-            {
-                Ok(file) => file,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => fs::OpenOptions::new()
+        let mut result = result;
+        // A PDF job (a job for a printer has no path). WebView2 ends one that meets an existing hidden file without an error
+        // and without a file.
+        if result.is_ok() && !path.as_os_str().is_empty() {
+            if is_hidden(Some(&path)) {
+                result = Err(PrintFailed::NotWritten { code: 0 });
+            } else if let Some(pdf) = lock(&self.pdf).clone() {
+                // Writes over the file that is there (truncating it), or makes the file when there is none.
+                let mut file = match fs::OpenOptions::new()
                     .write(true)
-                    .create_new(true)
+                    .truncate(true)
                     .open(&path)
-                    .unwrap(),
-                Err(error) => panic!("the fake print could not open its file: {error}"),
-            };
-            io::Write::write_all(&mut file, &pdf).unwrap();
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .unwrap(),
+                    Err(error) => panic!("the fake print could not open its file: {error}"),
+                };
+                io::Write::write_all(&mut file, &pdf).unwrap();
+            }
         }
         done(result);
         true
@@ -937,27 +1008,115 @@ impl FakePrintCalls {
     pub fn drop_running_jobs(&self) {
         lock(&self.waiting).clear();
     }
+
+    /// From now on a job waits in the queue, as it does for the webview's own thread, until [`submit_queued`](Self::submit_queued):
+    /// a test locks the session in between.
+    pub fn hold_submission(&self) {
+        self.held.store(true, Ordering::SeqCst);
+    }
+
+    /// How many jobs are queued and not yet submitted to WebView2.
+    pub fn queued(&self) -> usize {
+        lock(&self.queued).len()
+    }
+
+    /// The webview's thread gets to the queued jobs: each one whose token is cancelled ends with
+    /// [`PrintFailed::Revoked`] and WebView2 is not asked; each other is submitted (it runs until
+    /// [`finish`](Self::finish)). How many were submitted.
+    pub fn submit_queued(&self) -> usize {
+        let mut submitted = 0;
+        loop {
+            let Some(job) = lock(&self.queued).pop_front() else {
+                return submitted;
+            };
+            if job.cancel.is_cancelled() {
+                (job.done)(Err(PrintFailed::Revoked));
+                continue;
+            }
+            if !job.label.is_empty() {
+                lock(&self.submitted).push(job.label);
+            }
+            lock(&self.submitted_jobs).push(job.path.clone());
+            lock(&self.waiting).push_back((job.path, job.done));
+            submitted += 1;
+        }
+    }
+
+    /// The names of the printers whose jobs reached WebView2 (past the token's check), in order.
+    pub fn submitted(&self) -> Vec<String> {
+        lock(&self.submitted).clone()
+    }
+
+    /// The paths of the PDF jobs (and an empty path for each job for a printer) that reached WebView2, in order.
+    pub fn submitted_jobs(&self) -> Vec<PathBuf> {
+        lock(&self.submitted_jobs).clone()
+    }
+
+    /// Queues a job for the webview's thread and, unless held, runs that thread's step at once.
+    fn queue(&self, path: PathBuf, label: String, cancel: CancelToken, done: PrintDone) {
+        lock(&self.queued).push_back(QueuedPrint {
+            path,
+            label,
+            cancel,
+            done,
+        });
+        if !self.held.load(Ordering::SeqCst) {
+            self.submit_queued();
+        }
+    }
+}
+
+/// A job queued for the webview's thread, not yet submitted to WebView2.
+struct QueuedPrint {
+    path: PathBuf,
+    /// The printer's name for a job for a printer; empty for a PDF.
+    label: String,
+    cancel: CancelToken,
+    done: PrintDone,
 }
 
 impl PrintCalls for FakePrintCalls {
-    fn start(&self, path: &Path, done: PrintDone) -> Result<(), PrintFailed> {
-        let hidden = |path: Option<&Path>| {
-            path.and_then(|path| fs::symlink_metadata(path).ok())
-                .is_some_and(|meta| {
-                    std::os::windows::fs::MetadataExt::file_attributes(&meta) & 0x2 != 0
-                })
-        };
+    fn start(&self, path: &Path, cancel: CancelToken, done: PrintDone) -> Result<(), PrintFailed> {
+        let hook = lock(&self.on_start).take();
+        if let Some(hook) = hook {
+            hook();
+        }
         lock(&self.started).push(StartedPrint {
             path: path.to_path_buf(),
             existed: fs::symlink_metadata(path).is_ok(),
-            hidden: hidden(Some(path)),
-            folder_hidden: hidden(path.parent()),
+            hidden: is_hidden(Some(path)),
+            folder_hidden: is_hidden(path.parent()),
         });
         if let Some(failed) = lock(&self.refuse_next).take() {
             return Err(failed);
         }
-        lock(&self.waiting).push_back((path.to_path_buf(), done));
+        self.queue(path.to_path_buf(), String::new(), cancel, done);
         Ok(())
+    }
+
+    fn start_on_printer(
+        &self,
+        printer: &str,
+        cancel: CancelToken,
+        done: PrintDone,
+    ) -> Result<(), PrintFailed> {
+        lock(&self.printed_to).push(printer.to_owned());
+        if let Some(failed) = lock(&self.refuse_next).take() {
+            return Err(failed);
+        }
+        self.queue(PathBuf::new(), printer.to_owned(), cancel, done);
+        Ok(())
+    }
+
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters> {
+        let hook = lock(&self.on_list).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        if std::mem::take(&mut *lock(&self.list_fails)) {
+            return Err(PRINTERS_UNREADABLE);
+        }
+        Ok(lock(&self.installed).clone())
     }
 }
 

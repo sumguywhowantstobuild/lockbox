@@ -211,13 +211,16 @@
   transform: scale(0.97);
 }
 
-.prim[disabled] {
+/* `aria-disabled` is for a main button that must keep focus while it waits (the key screen's Continue during a print). */
+.prim[disabled],
+.prim[aria-disabled="true"] {
   background: var(--line);
   color: var(--ink2);
   cursor: not-allowed;
 }
 
-.prim[disabled]:active {
+.prim[disabled]:active,
+.prim[aria-disabled="true"]:active {
   transform: none;
 }
 
@@ -298,6 +301,92 @@
   flex-wrap: wrap;
   gap: 8px 16px;
   align-items: center;
+}
+
+/* What prints is one element (`data-print-only`: the key's heading, its words and its warning); on screen it lays out as
+   the steps do, one under another. */
+.fu-print {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* The key's second-level buttons (Print, Save as PDF) and what they say: the screen's own, never on paper. */
+.fu-actions {
+  min-width: 0;
+}
+
+.fu-actions .err {
+  margin-top: 10px;
+}
+
+/* A quiet button on the plate: an edge you can see, and the card's colour. While another print runs it is greyed but
+   stays where focus is (`aria-disabled`, not `disabled`, which would drop focus to the page). */
+.fu-sec {
+  height: 42px;
+  padding: 0 18px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s var(--ease);
+}
+
+.fu-sec:hover {
+  background: var(--hov);
+}
+
+.fu-sec:active {
+  background: var(--prs);
+}
+
+.fu-sec[aria-disabled="true"] {
+  color: var(--ink2);
+  cursor: not-allowed;
+}
+
+.fu-sec[aria-disabled="true"]:hover,
+.fu-sec[aria-disabled="true"]:active {
+  background: var(--card);
+}
+
+/* Where a PDF was saved. Empty until it is, so the screen reader has the line before it says anything. */
+.fu-status {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.fu-status:not(:empty) {
+  margin-top: 10px;
+}
+
+/* Lockbox's own printer picker, under the two buttons: the printers in a short list with the default picked, then Print
+   and Cancel; or one sentence and Cancel when there is no printer. Screen only, like the buttons above it. */
+.fu-picker {
+  margin-top: 14px;
+  max-width: 360px;
+}
+
+.fu-picker .flab {
+  margin-top: 0;
+}
+
+.fu-picker .fu-row {
+  margin-top: 12px;
+}
+
+.fu-none {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
 }
 
 /* What the key is: said above the words, so it is not mistaken for a crypto wallet's phrase. */
@@ -1621,6 +1710,35 @@
 
 .finp:hover {
   box-shadow: inset 0 0 0 1px var(--ink2);
+}
+
+/* The select part's box: a field that is a button, showing the chosen one with a small arrow pair; its list is the menu's
+   look, as wide as the box at least. */
+.sel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sel-i {
+  display: inline-flex;
+  color: var(--ink2);
+}
+
+.sel-pop {
+  min-width: var(--anchor-width);
+  max-height: min(var(--available-height), 280px);
+  overflow-y: auto;
+}
+
+.sel-on {
+  display: inline-flex;
+  margin-left: auto;
 }
 
 /* ---- The message at the foot ---- */

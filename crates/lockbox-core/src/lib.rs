@@ -55,9 +55,10 @@ pub mod blob {
 pub mod fsio {
     pub(crate) use crate::fsio_impl::*;
     pub use crate::fsio_impl::{
-        atomic_write, is_destination_taken, remove_dir_all_retry, remove_file_retry,
-        rename_file_no_replace,
+        atomic_write, hidden_temp_path, is_destination_taken, publish_readable,
+        remove_dir_all_retry, remove_file_retry, rename_file_no_replace,
     };
+    pub use crate::vault::refuse_vault_folder;
 }
 
 /// Saved entries. No serde: an item's JSON (password and file keys included) is only ever written
@@ -235,6 +236,19 @@ mod surface {
     /// fn g() { f::<lockbox_core::item::Item>() }
     /// ```
     pub fn item_is_not_deserialize() {}
+
+    /// The shell publishes a readable file through `publish_readable` only: the raw gated rename and the durability
+    /// step stay private, so no weaker copy of either can be written outside the engine.
+    ///
+    /// ```compile_fail
+    /// use lockbox_core::fsio::rename_replace_gated;
+    /// ```
+    pub fn raw_rename_is_private() {}
+
+    /// ```compile_fail
+    /// use lockbox_core::fsio::sync_after_replace;
+    /// ```
+    pub fn sync_after_replace_is_private() {}
 }
 
 #[cfg(test)]
