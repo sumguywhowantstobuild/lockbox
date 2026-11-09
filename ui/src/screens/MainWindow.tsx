@@ -11,6 +11,7 @@ import {
   useVaults,
   type SessionData,
 } from "../store";
+import { DetailsChangedAsk, LostOutputsAsk, VaultBanners } from "./Asks";
 import { ItemList } from "./ItemList";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
@@ -100,6 +101,11 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
           <div className="lscroll">
             <h1 className="big">{title}</h1>
             {locked === null ? null : <p className="lnote">{locked}</p>}
+            <div className="asks">
+              <LostOutputsAsk />
+              <VaultBanners data={data} />
+            </div>
+            <DetailsChangedAsk data={data} />
             {problem !== null ? (
               <p className="err" role="alert">
                 {problem.title} {problem.body}

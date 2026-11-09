@@ -1,10 +1,10 @@
 // The one place the screens reach the shell: a typed function for each command they use, over `bridge.ts`, which drops
 // an answer from a vault that has locked since. A screen imports this, never `@tauri-apps/api` or the bridge itself.
 // Every refusal comes out as the plain object the shell sent (see `messages.ts`); a stale answer as `StaleAnswer`.
-import { call, callPlain, open, type Opened, type Outcome, type SessionRef, type Tagged } from "./bridge";
+import { call, callPlain, open, type Opened, type Outcome, type PageNotice, type SessionRef, type Tagged } from "./bridge";
 
-export { onLocked, StaleAnswer } from "./bridge";
-export type { Confirm, Opened, Outcome, SessionRef, Tagged } from "./bridge";
+export { onLocked, onNotice, StaleAnswer } from "./bridge";
+export type { Confirm, Opened, Outcome, PageNotice, SessionRef, Tagged } from "./bridge";
 
 /** One vault on the list: no path, ever. `name` is null when its details cannot be read. */
 export interface VaultEntry {
@@ -21,12 +21,36 @@ export interface SessionInfo {
   state: "unlocked" | "locked" | "unavailable";
 }
 
-/** What an unlock found. The screens of the first task read only `info`; the warnings are shown by Task 8. */
+/** What the cleanup at unlock did (spec 6.4), as counts: the shell's `CleanupView`, field by field. */
+export interface CleanupView {
+  partials_removed: number;
+  temps_removed: number;
+  retired_deleted: number;
+  purges_finished: number;
+  /** Unreferenced files moved to `files/orphaned/` (Ask 5). */
+  orphans_quarantined: number;
+  orphans_restored: number;
+  /** Damaged items: when not zero, nothing was quarantined (Ask 4). */
+  skipped_damaged: number;
+  failed: number;
+}
+
+/** The cloud service syncing a vault's folder: a fixed name from the shell, never a path. */
+export type CloudProvider = "OneDrive" | "GoogleDrive" | "Dropbox" | "Other";
+
+/**
+ * What an unlock found, and so which of the app's questions to ask (Task 8): `header_mac_mismatch` is Ask 3 (answered with
+ * `acceptHeader` or `lockVault`), `used_backup_header` Ask 9, `cloud` Ask 10, `cleanup.skipped_damaged` Ask 4 and
+ * `cleanup.orphans_quarantined` Ask 5. An already-unlocked vault answers all of them as false, 0 and null.
+ */
 export interface UnlockView {
   info: SessionInfo;
   used_backup_header: boolean;
   header_mac_mismatch: boolean;
   header_repair_failed: boolean;
+  cleanup: CleanupView;
+  /** The cloud provider syncing the vault's folder, when this unlock's location check found one (Ask 10). */
+  cloud: CloudProvider | null;
   /**
    * The vault's recovery key was made but never typed back (a "not confirmed" mark is in the state folder). True only
    * for a writable, live vault with the mark, on every unlock answer, an already-unlocked one included; a read-only
@@ -148,6 +172,41 @@ export function regenerateRecovery(vault: SessionRef): Promise<Tagged<string>> {
  */
 export function recoveryConfirmed(vault: SessionRef): Promise<Tagged<null>> {
   return call<null>("recovery_confirmed", { session: vault.session, generation: vault.generation });
+}
+
+/**
+ * The person's yes to Ask 3: the vault's details, changed outside Lockbox, are signed again and saved (the shell writes).
+ * Until then the engine refuses every other header write, a new recovery key included, so this comes before one. Refused
+ * on a stale generation and on a read-only copy.
+ */
+export function acceptHeader(vault: SessionRef): Promise<Tagged<null>> {
+  return call<null>("accept_header", { session: vault.session, generation: vault.generation });
+}
+
+/**
+ * Locks one vault (Ask 3's "Lock this vault"): the same lock as Lock all, for this session alone. The shell sends the lock
+ * event before it answers; the vault asks its question again at the next unlock.
+ */
+export async function lockVault(session: number): Promise<void> {
+  await callPlain<null>("lock_vault", { session });
+}
+
+/**
+ * What launch found (the output sweep's counts and whether its record could not be read, opened copies another program
+ * still holds, a restore's outcome), asked once the page has loaded since launch work runs before it can listen. The shell
+ * keeps them rather than using them up, so the same notice may arrive again as a `lockbox://notice` event: the latest of
+ * each kind is the one that counts.
+ */
+export function launchNotices(): Promise<PageNotice[]> {
+  return callPlain<PageNotice[]>("launch_notices", {});
+}
+
+/**
+ * Sets a damaged record of opened files aside (Ask 11), so opening and saving decrypted copies work again. A record that
+ * reads fine is left as it is. Refused with `too_large` (`what: "damaged output journals"`) when 99 are already set aside.
+ */
+export async function resetOutputJournal(): Promise<void> {
+  await callPlain<null>("reset_output_journal", {});
 }
 
 /**

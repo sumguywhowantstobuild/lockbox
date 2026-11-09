@@ -1824,6 +1824,56 @@
   outline-offset: 1px;
 }
 
+/* ---- The app's questions: banners over the list and on the lock screen ---- */
+
+/* The banners of one screen, in a column; none, no space. */
+.asks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 62ch;
+  margin: 0 0 16px;
+}
+
+.asks:empty {
+  display: none;
+}
+
+/* A banner is words, with its buttons below: the card's colour and an edge, the text colour for the words. */
+.ask {
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+}
+
+.ask p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.ask .err {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.ask-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* A refusal of the question's answer, above the buttons and left-aligned like the words. */
+.dbtns .err {
+  flex: 1 1 100%;
+  order: -1;
+  margin: 0;
+  text-align: left;
+}
+
 @keyframes rise {
   from {
     opacity: 0;

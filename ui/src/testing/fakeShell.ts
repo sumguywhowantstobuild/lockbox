@@ -30,6 +30,21 @@ export interface FakeVault {
   items?: FakeItem[];
   /** The "recovery key not confirmed" mark the shell keeps for the vault's folder. */
   unconfirmed?: boolean;
+  /**
+   * The vault's details were changed outside Lockbox: every unlock reports `header_mac_mismatch` until `accept_header`,
+   * and the engine refuses a new recovery key meanwhile, as `HeaderGuard` does.
+   */
+  headerChanged?: boolean;
+  /** Every unlock reports `used_backup_header` (opened from the spare copy of the details). */
+  usedBackupHeader?: boolean;
+  /** Every unlock reports the vault's folder as synced by this provider. */
+  cloud?: "OneDrive" | "GoogleDrive" | "Dropbox" | "Other";
+  /** Items that can't be read: reported as `skipped_damaged` at unlock and as `damaged` in the item list. */
+  unreadable?: number;
+  /** Files no item uses, moved aside by the unlock's cleanup (`orphans_quarantined`). */
+  leftover?: number;
+  /** A newer Lockbox made this vault: unlock is refused as `unsupported_version`. */
+  newer?: boolean;
 }
 
 interface Live {
@@ -41,6 +56,12 @@ interface Live {
 export const MALFORMED = { code: "invalid_input", what: "request" };
 export const WRONG_PASSWORD = { code: "core", kind: "wrong_password" };
 export const LOCKED = { code: "locked" };
+/** What the shell sends when the vault list file can't be read (`registry.rs`: `Damaged { what: "vault list" }`). */
+export const VAULT_LIST_DAMAGED = { code: "core", kind: "damaged", what: "vault list" };
+/** What the engine sends when a newer Lockbox made the vault (`unsupported_version`). */
+export const NEWER_VAULT = { code: "core", kind: "unsupported_version" };
+/** What the engine refuses a new recovery key with while a changed header waits to be accepted (`HeaderGuard::check`). */
+const ACCEPT_FIRST = { code: "core", kind: "invalid_input", what: "accept the header change first" };
 /** What the shell sends when it cannot write the mark first (`write_state(…, "vault state")`, `TooLarge`). */
 export const VAULT_STATE_REFUSED = { code: "too_large", what: "vault state" };
 /** What the shell sends while a print of its own runs, and when no PDF came (`error.rs`: `PRINTER_BUSY`, `PDF_NOT_MADE`). */
@@ -184,6 +205,12 @@ export interface FakeShell {
   setPrinters(printers: string[], defaultPrinter?: string | null): void;
   /** Holds every `list_printers` answer until `release` is called (Windows is still being asked). */
   holdPrinterList(): () => void;
+  /** What launch found, as `launch_notices` answers it (kept, not used up). Set before the page starts. */
+  setLaunchNotices(notices: object[]): void;
+  /** A notice of a running app: sent as `lockbox://notice` to the page, and kept for `launch_notices` as `tell` does. */
+  tell(notice: object): void;
+  /** How many times `reset_output_journal` reached the shell. */
+  outputJournalResets(): number;
 }
 
 let sessionRange = 0;
@@ -211,7 +238,13 @@ export function installFakeShell(
   vaults: FakeVault[],
   settings = { idle_minutes: 5, clipboard_seconds: 30 },
 ): FakeShell {
-  const handlers: ((event: { payload: unknown }) => void)[] = [];
+  // The handlers each event has, as `listen` was given them.
+  const handlers = new Map<string, ((event: { payload: unknown }) => void)[]>();
+  const emit = (event: string, payload: unknown): void => {
+    for (const handler of handlers.get(event) ?? []) handler({ payload });
+  };
+  let launchNotices: object[] = [];
+  let outputResets = 0;
   const live = new Map<number, Live>();
   const sessionVault = new Map<number, FakeVault>();
   // A fresh range of session numbers for each fake, because the bridge remembers every session's generation for the
@@ -245,7 +278,7 @@ export function installFakeShell(
 
   listen.mockImplementation((event: string, handler: (event: { payload: unknown }) => void) => {
     calls.push({ cmd: `listen:${event}`, args: undefined });
-    handlers.push(handler);
+    handlers.set(event, [...(handlers.get(event) ?? []), handler]);
     return Promise.resolve(() => undefined);
   });
 
@@ -254,7 +287,7 @@ export function installFakeShell(
     if (entry?.unlocked !== true) return;
     entry.unlocked = false;
     entry.generation += 1;
-    for (const handler of handlers) handler({ payload: { session, generation: entry.generation, reason } });
+    emit("lockbox://locked", { session, generation: entry.generation, reason });
   };
 
   const vaultFor = (session: number, generation: number): FakeVault => {
@@ -341,23 +374,24 @@ export function installFakeShell(
         const vault = vaults.find((v) => v.id === id);
         if (vault === undefined) return refuse({ code: "not_found" });
         if (password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        if (vault.newer ?? false) return refuse(NEWER_VAULT);
         const [session, state] = openSession(vault);
         return tagged(session, state.generation, {
           info: infoOf(vault, session, state.generation),
-          used_backup_header: false,
-          header_mac_mismatch: false,
+          used_backup_header: vault.usedBackupHeader ?? false,
+          header_mac_mismatch: vault.headerChanged ?? false,
           header_repair_failed: false,
           cleanup: {
             partials_removed: 0,
             temps_removed: 0,
             retired_deleted: 0,
             purges_finished: 0,
-            orphans_quarantined: 0,
+            orphans_quarantined: vault.leftover ?? 0,
             orphans_restored: 0,
-            skipped_damaged: 0,
+            skipped_damaged: vault.unreadable ?? 0,
             failed: 0,
           },
-          cloud: null,
+          cloud: vault.cloud ?? null,
           // Worked out on every answer, as the shell does: a writable vault with the mark, never a read-only copy.
           recovery_unconfirmed: (vault.unconfirmed ?? false) && !(vault.readOnly ?? false),
         });
@@ -414,6 +448,8 @@ export function installFakeShell(
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The engine writes no header while a changed one waits for the person's yes.
+        if (vault.headerChanged ?? false) return refuse(ACCEPT_FIRST);
         // The mark goes first; when it can't be written no key is made.
         if (refuseMark) {
           refuseMark = false;
@@ -422,6 +458,20 @@ export function installFakeShell(
         vault.unconfirmed = true;
         return tagged(session, generation, makeKey(vault));
       }
+      case "accept_header": {
+        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        vault.headerChanged = false;
+        return tagged(session, generation, null);
+      }
+      case "launch_notices":
+        exactly(args ?? {}, []);
+        return [...launchNotices];
+      case "reset_output_journal":
+        exactly(args ?? {}, []);
+        outputResets += 1;
+        return null;
       case "recovery_confirmed": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
@@ -485,7 +535,8 @@ export function installFakeShell(
       case "list_items": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
-        return tagged(session, generation, { items: (vault.items ?? []).map(summary), damaged: [] });
+        const damaged = Array.from({ length: vault.unreadable ?? 0 }, (_, n) => itemId(0xd0 + n));
+        return tagged(session, generation, { items: (vault.items ?? []).map(summary), damaged });
       }
       case "get_item": {
         const { session, generation, id } = exactly(args, ["session", "generation", "id"]) as {
@@ -638,5 +689,13 @@ export function installFakeShell(
         for (const release of waiting) release();
       };
     },
+    setLaunchNotices: (notices) => {
+      launchNotices = [...notices];
+    },
+    tell: (notice) => {
+      launchNotices.push(notice);
+      emit("lockbox://notice", notice);
+    },
+    outputJournalResets: () => outputResets,
   };
 }

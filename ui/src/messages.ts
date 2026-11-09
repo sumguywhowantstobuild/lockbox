@@ -85,6 +85,8 @@ export const MESSAGES: Record<string, Words> = {
   "core:recovery_key_word": { title: "Word {position} isn't a recovery key word.", body: "Check it against the key you saved." },
   "core:recovery_key_count": { title: "That's {found} word{s}; a recovery key has 24.", body: "Check none are missing or doubled." },
   "core:damaged": DAMAGED,
+  // Ask 12: the list of vaults itself. The design's "Start a new list, then add each vault back" waits for the screen that does it (4C).
+  "core:damaged:vault list": { title: "Lockbox lost its list of vaults.", body: "Your vaults are still in their folders." },
   "core:password_too_short": { title: "That password is too short.", body: "" },
   "core:not_enough_space": { title: "There isn't enough room on that drive.", body: "" },
   "core:file_system_limit": { title: "That drive can't hold a file this big.", body: "" },

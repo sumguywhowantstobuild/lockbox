@@ -5,6 +5,7 @@ import { PasswordField } from "../parts/PasswordField";
 import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
 import { unlock, useStartError, useVaults } from "../store";
 import { useMode } from "../theme";
+import { LockScreenAsks } from "./Asks";
 
 /** A refusal as one line of text. */
 function said(message: Message): string {
@@ -81,6 +82,7 @@ export function LockScreen() {
       </div>
       <main className="plate">
         <h1>{heading}</h1>
+        <LockScreenAsks />
         {startError !== null ? (
           <p className="err" role="alert">
             {said(messageFor(startError))}

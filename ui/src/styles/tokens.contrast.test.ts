@@ -270,6 +270,13 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
         check(`quiet pill words on the panel, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
       }
+      // The app's questions: a banner's words and its refusal line on its card, and its edge against the screen it sits on
+      // (the plate, or the list's ground). Its Close and answer buttons are the quiet pill measured above, on the card, and
+      // Ask 3's two buttons are the dialog's own (the quiet pill, and the main button on the panel, both measured). The
+      // dialog is on the card too, so its refusal line is the same pair as the banner's.
+      check("banner words on its card", c("--ink"), card, 4.5);
+      check("banner refusal line on its card", c("--danger"), card, 4.5);
+      check("banner edge on the screen", c("--edge"), ground, 3);
       check("field in error, edge on the plate", c("--danger"), ground, 3);
       check("field in error, edge on the card", c("--danger"), card, 3);
       // The switch: its off track against the card, its knob against both tracks, and its on track against the card.

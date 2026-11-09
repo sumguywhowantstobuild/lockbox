@@ -1,6 +1,7 @@
 // What the page keeps of each unlocked vault: its item list, the item open in the panel, values the person asked to
 // see, text typed into a form, the message about the last copy, and a recovery key being shown or picked back (with the
-// questions asked of it). Nothing else. A lock wipes the lot at once: the
+// questions asked of it), and what its unlock found that is still to be answered (the app's questions, `SessionAsks`).
+// Beside the sessions, only what launch told and a refusal for the lock screen. Nothing else. A lock wipes the lot at once: the
 // store listens for `lockbox://locked` before any command is sent, and a lock event drops the vault's whole record
 // (`dropSession`). An answer that comes back for a vault that has locked since is dropped without a word (it is the
 // expected outcome of a lock, not an error): the bridge refuses it with `StaleAnswer`, and so does this file when the
@@ -36,6 +37,54 @@ export type RecoveryStep =
   /** The key hidden, and three words to pick, one question at a time: `at` (from 0) is the one now asked. */
   | { phase: "pick"; key: string; unfinished: boolean; asks: readonly Ask[]; at: number };
 
+/** The banners an unlock can raise, each closed with its own button (Asks 4, 5, 9 and 10). */
+export type Banner = "unreadable" | "leftover" | "spare" | "cloud";
+
+/**
+ * What an unlock found that the person has not answered yet. It lives in the session's record, so a lock drops it with
+ * the rest, and the next unlock is told again by the shell: the page keeps no memory that would hide a question.
+ */
+export interface SessionAsks {
+  /** Ask 3 waits: the vault's details were changed outside Lockbox. */
+  detailsChanged: boolean;
+  /** The vault's recovery key was never confirmed, and its new key (21f) follows Ask 3's yes, not before. */
+  keyWaits: boolean;
+  /** Ask 3's answer is on its way, so a second press does nothing. */
+  answering: boolean;
+  /** The shell's refusal of Ask 3's answer, to say in words; the question stays. */
+  detailsError: unknown;
+  /** How many items can't be read (Ask 4): the unlock's count, or the item list's if that is more. */
+  unreadable: number;
+  /** How many leftover files the cleanup moved aside (Ask 5). */
+  leftover: number;
+  /** Opened from the spare copy of the vault's details (Ask 9). */
+  spareDetails: boolean;
+  /** The cloud service syncing the vault's folder (Ask 10), or `null`. */
+  cloud: api.CloudProvider | null;
+  /** The banners the person has closed since this unlock. */
+  closed: Banner[];
+}
+
+const NO_ASKS: SessionAsks = {
+  detailsChanged: false,
+  keyWaits: false,
+  answering: false,
+  detailsError: null,
+  unreadable: 0,
+  leftover: 0,
+  spareDetails: false,
+  cloud: null,
+  closed: [],
+};
+
+/** What launch, or a running app, told that is still to be answered; not tied to a vault. */
+export interface Notices {
+  /** The record of opened files is damaged (Ask 11) until the person sets it aside. */
+  lostOutputs: boolean;
+  /** A restore was finished at launch (the words say to unlock with the password from when the backup was made). */
+  restoreFinished: boolean;
+}
+
 /** One unlocked vault. */
 export interface SessionData {
   session: number;
@@ -57,6 +106,8 @@ export interface SessionData {
   forms: Record<string, string>;
   /** The recovery key step this vault is in, or `null`. */
   recovery: RecoveryStep | null;
+  /** What the unlock found, still to be answered. */
+  asks: SessionAsks;
 }
 
 /** The message about the last copy (or the refusal of one), and the vault that made it. */
@@ -72,6 +123,9 @@ export interface StoreState {
   /** The unlocked vaults, in the order they were unlocked. */
   sessions: SessionData[];
   toast: Toast | null;
+  notices: Notices;
+  /** A refusal to say on the lock screen, since the vault it was about has locked (Ask 16); `null` for none. */
+  lockNote: unknown;
 }
 
 /** The page's own refusal for a lock listener that could not be set up; `messages.ts` has its words. */
@@ -86,7 +140,14 @@ function refusedAsLocked(error: unknown): boolean {
   return refusedWith(error, "locked");
 }
 
-const EMPTY: StoreState = { vaults: null, startError: null, sessions: [], toast: null };
+const EMPTY: StoreState = {
+  vaults: null,
+  startError: null,
+  sessions: [],
+  toast: null,
+  notices: { lostOutputs: false, restoreFinished: false },
+  lockNote: null,
+};
 
 let state: StoreState = EMPTY;
 const listeners = new Set<() => void>();
@@ -173,9 +234,25 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
   // The recovery key of this vault was made and never confirmed by picking: the page goes straight to a new one (21f), before it
   // shows anything of the vault. A read-only copy never does (the shell says false for it).
   const unfinished = answer.data.recovery_unconfirmed && !info.read_only;
-  const record = newRecord(answer, vaultId, info, unfinished ? { phase: "making" } : null);
-  set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
-  if (unfinished) void makeNewKey(record.session);
+  // But Ask 3 first: the engine refuses a new key while the changed details wait for a yes, so the key waits for it.
+  const details = answer.data.header_mac_mismatch;
+  const record = newRecord(answer, vaultId, info, unfinished && !details ? { phase: "making" } : null, {
+    ...NO_ASKS,
+    detailsChanged: details,
+    keyWaits: unfinished && details,
+    unreadable: answer.data.cleanup.skipped_damaged,
+    leftover: answer.data.cleanup.orphans_quarantined,
+    spareDetails: answer.data.used_backup_header,
+    cloud: answer.data.cloud,
+  });
+  // The vault is open: what the lock screen was still saying (a restore finished, a change saved before a lock) has been read.
+  set({
+    ...state,
+    sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record],
+    notices: { ...state.notices, restoreFinished: false },
+    lockNote: null,
+  });
+  if (unfinished && !details) void makeNewKey(record.session);
   return loadItems(record);
 }
 
@@ -184,6 +261,7 @@ function newRecord(
   vaultId: number,
   info: { name: string; read_only: boolean },
   recovery: RecoveryStep | null,
+  asks: SessionAsks = NO_ASKS,
 ): SessionData {
   return {
     session: answer.session,
@@ -198,6 +276,7 @@ function newRecord(
     reveals: {},
     forms: {},
     recovery,
+    asks,
   };
 }
 
@@ -471,7 +550,13 @@ async function loadItems(record: SessionData): Promise<"opened" | "stale"> {
   try {
     const list = await api.listItems(record);
     if (!stillOpen(session, generation)) return "stale";
-    update(session, (entry) => ({ ...entry, items: list.data.items, loadError: null }));
+    // Items that can't be read are told at unlock (Ask 4); the list's own count counts too, whichever is more.
+    update(session, (entry) => ({
+      ...entry,
+      items: list.data.items,
+      loadError: null,
+      asks: { ...entry.asks, unreadable: Math.max(entry.asks.unreadable, list.data.damaged.length) },
+    }));
     return "opened";
   } catch (error) {
     // A lock that overtook the question: the bridge says so, and so does the shell ("locked"). If the page never heard
@@ -495,6 +580,135 @@ export async function lockEverything(): Promise<void> {
   } catch (error) {
     set({ ...state, toast: { kind: "failed", session: null, error } });
   }
+}
+
+/** Changes what the unlock found for one session, when it is still there. */
+function updateAsks(session: number, change: (asks: SessionAsks) => SessionAsks): void {
+  update(session, (entry) => ({ ...entry, asks: change(entry.asks) }));
+}
+
+/**
+ * Ask 3's "Accept": the shell signs the vault's details again. Only then does the question close, and the new recovery
+ * key (21f) that waited behind it start. A refusal is kept for the question to say, and it stays. A vault that locked
+ * meanwhile (the bridge's `StaleAnswer`, or the shell's `locked` when the page missed the event) closes it with nothing
+ * said. A second press while the first has no answer does nothing.
+ */
+export async function acceptDetails(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || !entry.asks.detailsChanged || entry.asks.answering) return;
+  const { generation } = entry;
+  updateAsks(session, (asks) => ({ ...asks, answering: true, detailsError: null }));
+  try {
+    await api.acceptHeader({ session, generation });
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+    updateAsks(session, (asks) => ({ ...asks, answering: false, detailsError: error }));
+    return;
+  }
+  const now = sessionOf(session);
+  if (now?.generation !== generation) return;
+  const newKey = now.asks.keyWaits;
+  update(session, (current) => ({
+    ...current,
+    asks: { ...current.asks, detailsChanged: false, keyWaits: false, answering: false, detailsError: null },
+    recovery: newKey ? { phase: "making" } : current.recovery,
+  }));
+  if (newKey) void makeNewKey(session);
+}
+
+/**
+ * Ask 3's "Lock this vault": the lock that already exists, for this vault. Its event drops the record; if the event was
+ * lost on the way, the shell's answer that it has locked drops it. The question is asked again at the next unlock,
+ * because the shell reports the change again, and the page keeps nothing of this answer. A refusal is kept for the
+ * question to say. An answer that comes late, after the lock's event cleared this session and the vault was unlocked
+ * again, belongs to the old generation and touches nothing of the new session.
+ */
+export async function lockThisVault(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.asks.answering) return;
+  const { generation } = entry;
+  updateAsks(session, (asks) => ({ ...asks, answering: true, detailsError: null }));
+  try {
+    await api.lockVault(session);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+    if (refusedAsLocked(error)) {
+      dropSession(session);
+      return;
+    }
+    updateAsks(session, (asks) => ({ ...asks, answering: false, detailsError: error }));
+    return;
+  }
+  if (stillOpen(session, generation)) dropSession(session);
+}
+
+/** Closes one of an unlock's banners. It comes back at the next unlock if the shell still has it to report. */
+export function closeBanner(session: number, banner: Banner): void {
+  updateAsks(session, (asks) => (asks.closed.includes(banner) ? asks : { ...asks, closed: [...asks.closed, banner] }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Takes in what launch, or a running app, tells. Only the kinds that have a question in 4A change anything: the record of
+ * opened files that could not be read (Ask 11), and a restore finished at launch. The shell keeps its launch notices
+ * and may send one again as an event, so the latest of each kind replaces the one before.
+ */
+function takeNotice(notice: unknown): void {
+  if (!isRecord(notice)) return;
+  if (notice.kind === "output_sweep") {
+    set({ ...state, notices: { ...state.notices, lostOutputs: notice.unreadable === true } });
+  } else if (notice.kind === "restore") {
+    set({
+      ...state,
+      notices: { ...state.notices, restoreFinished: notice.state === "recovered" && notice.how === "finished" },
+    });
+  }
+}
+
+let noticesStarted: Promise<void> | undefined;
+
+/**
+ * Starts hearing notices, once the lock listener is up (call it after `startStore`): listens for `lockbox://notice`
+ * first, then asks for what launch kept, so none falls between. A notice that can't be heard or read tells nothing and
+ * stops nothing: the shell keeps launch notices for the next time the page asks.
+ */
+export function startNotices(): Promise<void> {
+  noticesStarted ??= (async () => {
+    if (refusedWith(state.startError, "page")) return;
+    try {
+      await api.onNotice(takeNotice);
+    } catch {
+      // Launch notices are still read below; only later ones are missed.
+    }
+    try {
+      for (const notice of await api.launchNotices()) takeNotice(notice);
+    } catch {
+      // Nothing to tell, as far as the page can know.
+    }
+  })();
+  return noticesStarted;
+}
+
+/**
+ * Ask 11's "Set it aside": the shell sets the damaged record of opened files aside, and the banner goes. A refusal is
+ * thrown for the banner to say, and the banner stays.
+ */
+export async function setOutputRecordAside(): Promise<void> {
+  await api.resetOutputJournal();
+  set({ ...state, notices: { ...state.notices, lostOutputs: false } });
+}
+
+/**
+ * Puts a refusal on the lock screen for the person to read, when the vault it was about is locked already (Ask 16: a new
+ * password was saved but the vault locked before the page could say so). It goes when a vault is unlocked. The change-
+ * password screen (4C) is what calls this; nothing in 4A does.
+ */
+export function sayOnLockScreen(refusal: unknown): void {
+  set({ ...state, lockNote: refusal });
 }
 
 /** Opens an item in the panel, or closes the panel (`null`). */
@@ -591,6 +805,14 @@ export function useToast(): Toast | null {
   return useSelect((current) => current.toast);
 }
 
+export function useNotices(): Notices {
+  return useSelect((current) => current.notices);
+}
+
+export function useLockNote(): unknown {
+  return useSelect((current) => current.lockNote);
+}
+
 /** The vault's item list, or `null` while it is on its way or when the vault is not unlocked. */
 export function useItems(session: number): ItemSummary[] | null {
   return useSelect((current) => current.sessions.find((entry) => entry.session === session)?.items ?? null);
@@ -613,6 +835,7 @@ export function debugState(): StoreState {
 /** For tests: back to a page that has just opened. */
 export function resetStoreForTests(): void {
   started = undefined;
+  noticesStarted = undefined;
   state = EMPTY;
   for (const notify of listeners) notify();
 }

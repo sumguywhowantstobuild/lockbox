@@ -155,3 +155,14 @@ test("late_lock_event_for_older_generation_is_ignored", async () => {
   handler({ payload: { session: 1, generation: 4, reason: "manual" } });
   expect(cleared).toHaveBeenCalledOnce();
 });
+
+// `lockbox://notice` carries no vault data, so it has no generation: each notice is handed over as it came.
+test("on_notice_hands_over_each_notice_as_it_came", async () => {
+  const seen = vi.fn();
+  await bridge.onNotice(seen);
+  const [event, handler] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
+  expect(event).toBe("lockbox://notice");
+  const sweep = { kind: "output_sweep", removed: 0, kept: 0, unreadable: true };
+  handler({ payload: sweep });
+  expect(seen).toHaveBeenCalledExactlyOnceWith(sweep);
+});

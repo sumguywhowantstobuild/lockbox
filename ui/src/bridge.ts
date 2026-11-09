@@ -30,6 +30,15 @@ export type RestoreNotice =
   | { state: "pending"; paths: JournalPaths }
   | { state: "unclear"; journal: string; paths: JournalPaths | null };
 
+/**
+ * What launch, or a running app, has to tell (`launch_notices`, and `lockbox://notice`): flat objects tagged `kind`, with
+ * counts and flags only. The output sweep's `unreadable` is true when the record of opened files could not be read.
+ */
+export type PageNotice =
+  | { kind: "output_sweep"; removed: number; kept: number; unreadable: boolean }
+  | { kind: "open_cleanup"; removed: number; still_open: number }
+  | ({ kind: "restore" } & RestoreNotice);
+
 /** What dismissing a restore journal leaves behind, for the user to act on. */
 export interface Leaves {
   staging: string | null;
@@ -152,6 +161,13 @@ export async function open<T>(cmd: string, args?: InvokeArgs): Promise<Opened<T>
   const tagged = "Done" in answer ? answer.Done : answer;
   if (!advance(tagged.session, tagged.generation)) throw new StaleAnswer();
   return tagged;
+}
+
+/** Listens for `lockbox://notice`: each notice is handed over as it came (it holds no vault data, so it has no generation). */
+export function onNotice(handler: (notice: PageNotice) => void): Promise<UnlistenFn> {
+  return listen<PageNotice>("lockbox://notice", ({ payload }) => {
+    handler(payload);
+  });
 }
 
 /**
