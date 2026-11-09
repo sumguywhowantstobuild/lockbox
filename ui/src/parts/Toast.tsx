@@ -3,6 +3,9 @@ import { messageFor } from "../messages";
 import { clearToast, useToast } from "../store";
 import { CloseIcon } from "./Icon";
 
+/** How long "Saved" stays. */
+const SAVED_SECONDS = 4;
+
 /** Whole seconds until `endsAt`, counting down while the page is open; 0 once it has passed or when there is none. */
 function useSecondsLeft(endsAt: number | null): number {
   const subscribe = useCallback(
@@ -28,12 +31,22 @@ function useSecondsLeft(endsAt: number | null): number {
 export function ToastStack() {
   const toast = useToast();
   const copied = toast?.kind === "copied" ? toast : null;
+  const saved = toast?.kind === "saved" ? toast : null;
   const left = useSecondsLeft(copied?.endsAt ?? null);
 
   // When the time is up the message goes. The shell clears the clipboard at the same moment.
   useEffect(() => {
     if (copied !== null && left === 0) clearToast();
   }, [copied, left]);
+
+  // "Saved" says it once and goes after a few seconds, or when a copy's message takes its place.
+  useEffect(() => {
+    if (saved === null) return;
+    const timer = setTimeout(clearToast, SAVED_SECONDS * 1000);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [saved]);
 
   const failure = toast?.kind === "failed" ? messageFor(toast.error) : null;
   return (
@@ -46,6 +59,11 @@ export function ToastStack() {
               clears in <span className="tn">{left}</span> s
             </span>
             <span className="sr">It clears from the clipboard in {copied.seconds} seconds.</span>
+          </div>
+        ) : null}
+        {saved !== null ? (
+          <div className="toast">
+            <span>Saved</span>
           </div>
         ) : null}
       </div>

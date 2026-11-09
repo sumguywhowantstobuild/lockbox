@@ -752,10 +752,13 @@ test("ready_screen_says_what_to_do_first", async () => {
   const main = screen.getByRole("main");
   expect(within(main).getByText("Your vault is empty")).toBeTruthy();
   expect(within(main).getByText("What to do first: add a login, or a key, a note or a file.")).toBeTruthy();
-  // The key is gone from the page for good, and nothing from a later task is offered yet.
+  // The key is gone from the page for good. Add is in the toolbar (Task 11), and nothing else from a later task is offered.
   expect(keyWordsOnPage(key)).toEqual([]);
-  expect(screen.queryByRole("button", { name: /^(Add|Login|Key|Note|File|Help|Paste)/ })).toBeNull();
-  expect(within(main).queryByRole("button")).toBeNull();
+  expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^(Login|Key|Note|File|Help|Paste)/ })).toBeNull();
+  const list = main.querySelector<HTMLElement>(".lscroll");
+  expect(list).not.toBeNull();
+  expect(within(list as HTMLElement).queryByRole("button")).toBeNull();
   await expectNoAxe(container);
 });
 

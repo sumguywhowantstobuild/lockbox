@@ -18,6 +18,28 @@ export interface OpenItem {
   detail: ItemDetail | null;
   /** The shell's refusal, when it would not give the item. */
   error: unknown;
+  /** It was just saved from the new-login form: the panel takes focus when it opens, as the form's next step. */
+  saved: boolean;
+}
+
+/**
+ * A form or tool open in the side panel instead of an item's details. What is typed into it is that form's own state, not
+ * kept here: a lock takes the session's record, this with it, and the form goes with nothing saved and nothing said.
+ */
+export type Tool =
+  /** The new-login form (6b), its title started with `title` (the search text it was opened from, or empty). */
+  | { kind: "new_login"; title: string }
+  /** The Generator page (16a). */
+  | { kind: "generator" };
+
+/** What the new-login form sends: the person's own text, as typed. The shell completes the website and checks the limits. */
+export interface LoginDraft {
+  title: string;
+  username: string;
+  website: string;
+  password: string;
+  /** The folder's id, or `null` for none. */
+  folder: string | null;
 }
 
 /**
@@ -104,6 +126,8 @@ export interface SessionData {
   /** The shell's refusal, when it would not give the list. */
   loadError: unknown;
   openItem: OpenItem | null;
+  /** The form or tool open in the panel (it and an open item are never both), or `null`. */
+  tool: Tool | null;
   /** The folder shown, or `null` for All items. */
   folder: string | null;
   /** Values the person asked to see (a password on Reveal), by item. */
@@ -116,9 +140,10 @@ export interface SessionData {
   asks: SessionAsks;
 }
 
-/** The message about the last copy (or the refusal of one), and the vault that made it. */
+/** The message about the last copy (or the refusal of one) or save, and the vault that made it. */
 export type Toast =
   | { kind: "copied"; session: number; text: string; seconds: number; endsAt: number }
+  | { kind: "saved"; session: number }
   | { kind: "failed"; session: number | null; error: unknown };
 
 /** What one vault answered to the search: its items, tagged with the generation they were read in. */
@@ -319,6 +344,7 @@ function newRecord(
     items: null,
     loadError: null,
     openItem: null,
+    tool: null,
     folder: null,
     reveals: {},
     forms: {},
@@ -805,8 +831,11 @@ export function sayOnLockScreen(refusal: unknown): void {
   set({ ...state, lockNote: refusal });
 }
 
-/** Opens an item in the panel, or closes the panel (`null`). */
-export async function selectItem(session: number, id: string | null): Promise<void> {
+/**
+ * Opens an item in the panel, or closes the panel (`null`). An item takes the panel from a form or tool open in it:
+ * what was typed there goes with it. `saved` is for an item just saved from the new-login form.
+ */
+export async function selectItem(session: number, id: string | null, saved = false): Promise<void> {
   const entry = sessionOf(session);
   if (entry === undefined) return;
   if (id === null) {
@@ -814,15 +843,68 @@ export async function selectItem(session: number, id: string | null): Promise<vo
     return;
   }
   const { generation } = entry;
-  update(session, (current) => ({ ...current, openItem: { id, detail: null, error: null } }));
+  update(session, (current) => ({ ...current, tool: null, openItem: { id, detail: null, error: null, saved } }));
   const shows = () => sessionOf(session)?.openItem?.id === id && stillOpen(session, generation);
   try {
     const answer = await api.getItem({ session, generation }, id);
-    if (shows()) update(session, (current) => ({ ...current, openItem: { id, detail: answer.data, error: null } }));
+    if (shows()) update(session, (current) => ({ ...current, openItem: { id, detail: answer.data, error: null, saved } }));
   } catch (error) {
     if (refusedAsLocked(error)) dropSession(session);
     if (error instanceof api.StaleAnswer || !shows()) return;
-    update(session, (current) => ({ ...current, openItem: { id, detail: null, error } }));
+    update(session, (current) => ({ ...current, openItem: { id, detail: null, error, saved } }));
+  }
+}
+
+/** Opens the new-login form in the vault's panel, its title started with `title`. Nothing in a vault that is read-only. */
+export function openNewLogin(session: number, title = ""): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  update(session, (current) => ({ ...current, openItem: null, tool: { kind: "new_login", title } }));
+}
+
+/** Opens the Generator page in the vault's panel. */
+export function openGenerator(session: number): void {
+  update(session, (current) => ({ ...current, openItem: null, tool: { kind: "generator" } }));
+}
+
+/** Closes the form or tool in the panel; what was typed in it is gone. */
+export function closeTool(session: number): void {
+  update(session, (current) => ({ ...current, tool: null }));
+}
+
+/** How a save came out: made (the form is gone and the login is open), the vault locked meanwhile, or the shell's refusal. */
+export type SaveResult = "saved" | "stale" | { failed: unknown };
+
+/**
+ * Saves the new-login form's text as a login, whole, in one write by the shell. On success the form goes, the list is read
+ * again, the new login opens in the panel and "Saved" is said. A vault that locked meanwhile (the bridge's `StaleAnswer`,
+ * or the shell's `locked` when the page missed the event) gets nothing said: the form is already gone with the vault's
+ * record, and what was written stays written. A refusal comes back for the form to say, and the form stays as it was.
+ */
+export async function saveNewLogin(session: number, draft: LoginDraft): Promise<SaveResult> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "stale";
+  const { generation } = entry;
+  try {
+    const website = draft.website.trim();
+    const made = await api.newLogin({ session, generation }, draft.title.trim(), draft.folder, {
+      username: draft.username,
+      password: draft.password,
+      urls: website === "" ? [] : [website],
+    });
+    if (!stillOpen(session, generation)) return "stale";
+    // The login exists now. Whatever the list says next, the form's job is done.
+    const record = sessionOf(session);
+    if (record === undefined) return "stale";
+    const read = await loadItems(record);
+    if (read === "stale" || !stillOpen(session, generation)) return "stale";
+    set({ ...state, toast: { kind: "saved", session } });
+    void selectItem(session, made.data, true);
+    return "saved";
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    return { failed: error };
   }
 }
 
@@ -839,19 +921,32 @@ type Done = "done" | "stale" | { failed: unknown };
  * person when it will be cleared. The shell's refusal comes back for the caller to say where it fits.
  */
 async function copyAndTell(session: number, id: string, field: CopyableField): Promise<Done> {
+  return copyThenTell(
+    session,
+    field === "password" ? "Password copied" : "Username copied",
+    (vault) => api.copyField(vault, id, field),
+  );
+}
+
+/** Runs a copy the shell makes, and once it has, says `text` and when the clipboard clears. */
+async function copyThenTell(
+  session: number,
+  text: string,
+  copy: (vault: api.SessionRef) => Promise<unknown>,
+): Promise<Done> {
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
   const { generation } = entry;
   try {
     const { clipboard_seconds } = await api.getSettings();
-    await api.copyField({ session, generation }, id, field);
+    await copy({ session, generation });
     if (!stillOpen(session, generation)) return "stale";
     set({
       ...state,
       toast: {
         kind: "copied",
         session,
-        text: field === "password" ? "Password copied" : "Username copied",
+        text,
         seconds: clipboard_seconds,
         endsAt: Date.now() + clipboard_seconds * 1000,
       },
@@ -862,6 +957,16 @@ async function copyAndTell(session: number, id: string, field: CopyableField): P
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     return { failed: error };
   }
+}
+
+/**
+ * Copies the password the Generator page shows: the value goes back to the shell, which puts it on the clipboard with the
+ * marks and timer of any copy, owned by this vault. The page never uses its own clipboard, which skips those marks. The
+ * message says when it clears; a refusal is said as a message. A vault that locked meanwhile gets nothing.
+ */
+export async function copyGenerated(session: number, value: string): Promise<void> {
+  const done = await copyThenTell(session, "Password copied", (vault) => api.copyGenerated(vault, value));
+  if (typeof done === "object") set({ ...state, toast: { kind: "failed", session, error: done.failed } });
 }
 
 /**

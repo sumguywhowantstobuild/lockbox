@@ -220,9 +220,24 @@ impl Vault {
         title: &str,
         collection: Option<ItemId>,
     ) -> Result<ItemId> {
+        self.new_item_with_notes(kind, title, collection, Zeroizing::new(String::new()))
+    }
+
+    /// Like [`new_item`](Self::new_item), for an item that starts with its `notes`: the item (its `kind` already
+    /// holding a login's fields) is sealed and written once, whole, so a lock or a crash between two calls can never
+    /// leave an empty item behind.
+    pub fn new_item_with_notes(
+        &mut self,
+        kind: ItemKind,
+        title: &str,
+        collection: Option<ItemId>,
+        notes: Zeroizing<String>,
+    ) -> Result<ItemId> {
         let id = self.fresh_item_id()?;
         self.check_collection(&id, &kind, collection, None)?;
-        self.commit_item(blank_item(id, kind, title, collection))?;
+        let mut item = blank_item(id, kind, title, collection);
+        item.notes = notes;
+        self.commit_item(item)?;
         Ok(id)
     }
 
@@ -407,6 +422,48 @@ mod tests {
             other => panic!("wrong kind {other:?}"),
         }
         assert_eq!(vault.items().count(), 1);
+    }
+
+    /// A new item can start with its notes and a login's fields, and is written once: no empty item exists between two
+    /// writes, and a refused collection writes nothing.
+    #[test]
+    fn a_new_item_carries_its_notes_in_one_write() {
+        let (_parent, mut vault) = new_vault();
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = std::rc::Rc::clone(&writes);
+        failpoint::observe(
+            "items.after_write",
+            Box::new(move || seen.set(seen.get() + 1)),
+        );
+        let notes = Zeroizing::new("backup code in the safe".to_string());
+        let id = vault
+            .new_item_with_notes(login("hunter2"), "Mail", None, notes)
+            .unwrap();
+        failpoint::disarm_all();
+        assert_eq!(writes.get(), 1, "more than one write");
+
+        let vault = reopen(vault);
+        let item = vault.get_item(&id).unwrap();
+        assert_eq!((item.title.as_str(), item.revision), ("Mail", 0));
+        assert_eq!(&**item.notes, "backup code in the safe");
+        match &item.kind {
+            ItemKind::Login { password, .. } => assert_eq!(&***password, "hunter2"),
+            other => panic!("wrong kind {other:?}"),
+        }
+
+        // The same collection rules as `new_item`, and nothing written when they refuse.
+        let mut vault = vault;
+        let count = vault.items().count();
+        invalid(
+            vault.new_item_with_notes(
+                ItemKind::Note,
+                "x",
+                Some(ItemId::random()),
+                Zeroizing::new("n".to_string()),
+            ),
+            "collection",
+        );
+        assert_eq!(vault.items().count(), count);
     }
 
     #[test]

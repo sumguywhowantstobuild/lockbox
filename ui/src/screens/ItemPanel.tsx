@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ItemDetail, ItemKind, ItemSummary } from "../api";
 import { changedText, formatBytes } from "../format";
 import { messageFor } from "../messages";
@@ -200,6 +200,14 @@ export function ItemPanel({
   const [openedAt] = useState(() => new Date());
   const open = data.openItem;
   const summary = open === null ? undefined : data.items?.find((item) => item.id === open.id);
+  // A login just saved from the new-login form takes focus on its heading: the form it came from is gone, and the next
+  // thing is its Copy buttons, a Tab away.
+  const title = useRef<HTMLHeadingElement>(null);
+  const justSaved = open?.saved === true;
+  const shown = summary !== undefined;
+  useEffect(() => {
+    if (justSaved && shown) title.current?.focus();
+  }, [justSaved, shown]);
   if (open === null || summary === undefined) return null;
 
   const folder = summary.collection === null ? undefined : folderNames.get(summary.collection);
@@ -210,6 +218,7 @@ export function ItemPanel({
   return (
     <Panel
       title={summary.title}
+      titleRef={justSaved ? title : undefined}
       subtitle={subtitle}
       icon={<KindIcon kind={summary.kind} />}
       onClose={onClose}

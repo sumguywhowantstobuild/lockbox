@@ -329,6 +329,37 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       // What it says when nothing is found, which vaults were busy, and a refusal, all on the card (the pairs above).
       check("search sentences on the card", c("--ink2"), card, 4.5);
       check("search refusal on the card", c("--danger"), card, 4.5);
+
+      // Add, the new-login form and the generator. Add is the main button on the toolbar's ground (its words in each state
+      // and its fill against the ground are the main button's pairs above). In the form: its fields are the panel's card
+      // (words, edge and error edge measured above), and its hint and the folder list's words are the ordinary text.
+      check("form hint on the panel", c("--ink2"), paper, 4.5);
+      check("form error line on the panel", c("--danger"), paper, 4.5);
+      check("form field in error, edge on the panel", c("--danger"), paper, 3);
+      // The generator's block is a faint tint on the panel; its value sits on a card inside it.
+      const genBlock = over([...rgbOf("--sh"), 0.05] as Rgba, paper);
+      check("generator labels on their block", c("--ink"), genBlock, 4.5);
+      check("generator value on its card", c("--ink"), card, 4.5);
+      check("generator refusal line on its block", c("--danger"), genBlock, 4.5);
+      check("generator value's focus ring on its card", c("--v"), card, 3);
+      // The slider and the two checkboxes are drawn in the vault's colour on that block.
+      check("generator slider and checkboxes on their block", c("--v"), genBlock, 3);
+      // Characters or Passphrase: the track is a tint on the block; the chosen one is a card with the vault's colour round
+      // it, so the choice does not rest on a tint, and both kinds' words are the ordinary text colour on what they sit on.
+      const segTrack = over([...rgbOf("--sh"), 0.08] as Rgba, genBlock);
+      const segTrackOnPanel = over([...rgbOf("--sh"), 0.08] as Rgba, paper);
+      check("kind button words, not chosen, on the track in the form", c("--ink"), segTrack, 4.5);
+      check("kind button words, not chosen, on the track on the page", c("--ink"), segTrackOnPanel, 4.5);
+      check("kind button words, chosen, on its card", c("--ink"), card, 4.5);
+      check("chosen kind's outline against the track in the form", c("--v"), segTrack, 3);
+      check("chosen kind's outline against the track on the page", c("--v"), segTrackOnPanel, 3);
+      check("chosen kind's outline against its card", c("--v"), card, 3);
+      // The form's quiet pills (Generate, Try another, Cancel) are the pill measured above, here on the panel and on the block.
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`quiet pill words on the generator block, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, genBlock), 4.5);
+        check(`quiet pill words on the panel, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, paper), 4.5);
+      }
+      // "Saved" is the message bar's words, measured above.
     }
   }
 

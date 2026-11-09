@@ -88,6 +88,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         backup::open_pre_restore_read_only,
         generator::generate_password,
         generator::generate_passphrase,
+        generator::copy_generated,
         settings::get_settings,
         settings::set_settings
     ]

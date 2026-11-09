@@ -133,6 +133,93 @@ pub enum NewKind {
     Collection,
 }
 
+/// The fields a new item starts with, saved with it in one write (`new_item`). No `Debug`: it holds item content and
+/// maybe a password. Any field may be left out. Only a login takes them: any sent for another kind are refused.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ItemFields {
+    pub username: String,
+    pub password: Zeroizing<String>,
+    pub urls: Vec<String>,
+    pub notes: Zeroizing<String>,
+}
+
+impl ItemFields {
+    /// The page's limits, checked before anything is written (and before a website is looked at).
+    fn check(&self) -> ShellResult<()> {
+        at_most(&self.username, MAX_USERNAME, "username")?;
+        at_most(&self.password, MAX_PASSWORD, "password")?;
+        at_most(&self.notes, MAX_NOTES, "notes")?;
+        if self.urls.len() > MAX_URLS {
+            return Err(ShellError::TooLarge { what: "urls" });
+        }
+        for url in &self.urls {
+            at_most(url, MAX_URL, "url")?;
+        }
+        Ok(())
+    }
+}
+
+/// A website the page sent that is not an `http` or `https` address.
+const NOT_A_WEBSITE: ShellError = ShellError::InvalidInput { what: "website" };
+
+/// Whether `text` begins with a scheme of its own (`http:`, `mailto:`, `C:`), as opposed to a host and port
+/// (`localhost:3000`, `example.com:8080/a`), which have none. A scheme is a letter then letters, digits, `+`, `-` or
+/// `.`, then a colon; what follows the colon is a port only when it is digits and then the end or `/`, `?` or `#`.
+fn has_scheme(text: &str) -> bool {
+    let Some((head, rest)) = text.split_once(':') else {
+        return false;
+    };
+    let mut letters = head.chars();
+    let shaped = letters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && letters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !shaped {
+        return false;
+    }
+    // The two schemes a website may have are never a host name, so `https:80` is not host `https` and port 80.
+    if head.eq_ignore_ascii_case("http") || head.eq_ignore_ascii_case("https") {
+        return true;
+    }
+    // Digits are ASCII, so the count is a character boundary.
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let after = &rest[digits..];
+    let is_port = digits > 0 && (after.is_empty() || after.starts_with(['/', '?', '#']));
+    !is_port
+}
+
+/// A website as it is saved: trimmed, with `https://` in front when it has no scheme of its own, and only an `http` or
+/// `https` address at all (`InvalidInput { what: "website" }` otherwise). One rule with [`web_url`], the one that decides
+/// whether the shell opens it: whatever this answers, `web_url` parses. It allows only that shape: an empty address,
+/// a control character anywhere (a parser would drop it silently), an address that starts with a slash (a network
+/// path), and every other scheme are refused. The address is kept as typed, not rewritten.
+pub fn normalise_url(text: &str) -> ShellResult<String> {
+    let typed = text.trim();
+    if typed.is_empty() || typed.chars().any(char::is_control) {
+        return Err(NOT_A_WEBSITE);
+    }
+    let saved = match has_scheme(typed) {
+        true => typed.to_owned(),
+        false if typed.starts_with(['/', '\\']) => return Err(NOT_A_WEBSITE),
+        false => format!("https://{typed}"),
+    };
+    // The address grew by `https://`: the page's limit counts what is saved.
+    at_most(&saved, MAX_URL, "url")?;
+    // The two shapes that pass: `http://…` or `https://…`, as written. A parser forgives more (`https:example.com`,
+    // `http:/a`), but what is kept is what the person can read as an address.
+    let starts = |scheme: &str| {
+        saved
+            .get(..scheme.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+    };
+    if !(starts("http://") || starts("https://")) {
+        return Err(NOT_A_WEBSITE);
+    }
+    web_url(&saved).ok_or(NOT_A_WEBSITE)?;
+    Ok(saved)
+}
+
 /// The field `copy_field` copies: `"password"`, `"username"`, `"notes"`, or `{ "url": <index> }`, the index into the
 /// login's links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -316,7 +403,7 @@ impl Shell {
         })
     }
 
-    /// A new, empty item: its ID. Revision 0 until its first edit.
+    /// A new item: its ID. Revision 0 until its first edit. With `fields` it starts whole and is written once.
     pub fn new_item(
         &self,
         session: SessionId,
@@ -324,20 +411,40 @@ impl Shell {
         kind: NewKind,
         title: String,
         collection: Option<String>,
+        fields: Option<ItemFields>,
     ) -> ShellResult<Tagged<String>> {
+        // Every limit first, then the websites, then the session: nothing is written unless all of it holds.
         at_most(&title, MAX_TITLE, "title")?;
+        if let Some(fields) = &fields {
+            fields.check()?;
+        }
         let collection = collection_id(collection.as_deref())?;
-        let kind = match kind {
-            NewKind::Login => ItemKind::Login {
-                username: String::new(),
-                password: Zeroizing::default(),
-                urls: Vec::new(),
-            },
-            NewKind::Note => ItemKind::Note,
-            NewKind::Collection => ItemKind::Collection,
+        let (kind, notes) = match (kind, fields) {
+            (NewKind::Login, fields) => {
+                let ItemFields {
+                    username,
+                    password,
+                    urls,
+                    notes,
+                } = fields.unwrap_or_default();
+                let urls = urls.iter().map(|url| normalise_url(url));
+                let urls = urls.collect::<ShellResult<Vec<String>>>()?;
+                let login = ItemKind::Login {
+                    username,
+                    password,
+                    urls,
+                };
+                (login, notes)
+            }
+            // Only a login starts with fields (a note's come with its own task): any sent for another kind are refused.
+            (NewKind::Note, None) => (ItemKind::Note, Zeroizing::default()),
+            (NewKind::Collection, None) => (ItemKind::Collection, Zeroizing::default()),
+            (NewKind::Note | NewKind::Collection, Some(_)) => return Err(NOT_A_LOGIN),
         };
         self.sessions.write(session, generation, |vault, _| {
-            Ok(vault.new_item(kind, &title, collection)?.to_hex())
+            Ok(vault
+                .new_item_with_notes(kind, &title, collection, notes)?
+                .to_hex())
         })
     }
 
@@ -423,7 +530,7 @@ impl Shell {
     }
 
     /// Each unlocked session with its current generation, read in one step.
-    fn unlocked(&self) -> Vec<(SessionId, u64)> {
+    pub(super) fn unlocked(&self) -> Vec<(SessionId, u64)> {
         let sessions = self.sessions.list().into_iter();
         sessions
             .filter(|info| info.state == SessionState::Unlocked)
@@ -550,6 +657,7 @@ struct NewItemArgs {
     kind: NewKind,
     title: String,
     collection: Option<String>,
+    fields: Option<ItemFields>,
 }
 
 #[derive(Deserialize)]
@@ -650,9 +758,10 @@ pub(super) async fn new_item(
         kind,
         title,
         collection,
+        fields,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.new_item(session, generation, kind, title, collection)).await
+    blocking(move || shell.new_item(session, generation, kind, title, collection, fields)).await
 }
 
 #[tauri::command]
@@ -863,7 +972,14 @@ mod tests {
     fn login(ts: &TestShell, session: SessionId, generation: u64, title: &str) -> String {
         let id = ts
             .shell
-            .new_item(session, generation, NewKind::Login, title.to_owned(), None)
+            .new_item(
+                session,
+                generation,
+                NewKind::Login,
+                title.to_owned(),
+                None,
+                None,
+            )
             .unwrap()
             .data;
         ts.shell
@@ -1094,7 +1210,7 @@ mod tests {
         // A note has no password to reveal.
         let note = ts
             .shell
-            .new_item(s, g, NewKind::Note, "Diary".into(), None)
+            .new_item(s, g, NewKind::Note, "Diary".into(), None, None)
             .unwrap()
             .data;
         assert_eq!(
@@ -1277,7 +1393,7 @@ mod tests {
             // A new item's title, a collection's name among them.
             for kind in [NewKind::Note, NewKind::Collection] {
                 assert_eq!(
-                    ts.shell.new_item(s, g, kind, long(1025), None).err(),
+                    ts.shell.new_item(s, g, kind, long(1025), None, None).err(),
                     too_large("title"),
                     "{kind:?} in {unit}"
                 );
@@ -1320,7 +1436,7 @@ mod tests {
             assert!(detail.summary.title.starts_with(unit));
             let collection = ts
                 .shell
-                .new_item(s, g, NewKind::Collection, long(1024), None)
+                .new_item(s, g, NewKind::Collection, long(1024), None, None)
                 .unwrap();
             assert_eq!(collection.session, s);
         }
@@ -1450,7 +1566,7 @@ mod tests {
         login(&ts, family, gf, "Bank");
         let work_bank = login(&ts, work, gw, "Bank");
         ts.shell
-            .new_item(work, gw, NewKind::Note, "Mail".into(), None)
+            .new_item(work, gw, NewKind::Note, "Mail".into(), None, None)
             .unwrap();
 
         let found = ts.shell.search_all("bank").unwrap();
@@ -1553,7 +1669,9 @@ mod tests {
         let read_only = Some(ShellError::ReadOnly);
         let shell = &ts.shell;
         assert_eq!(
-            shell.new_item(r, gr, NewKind::Note, "x".into(), None).err(),
+            shell
+                .new_item(r, gr, NewKind::Note, "x".into(), None, None)
+                .err(),
             read_only
         );
         assert_eq!(
@@ -1582,12 +1700,19 @@ mod tests {
         let (s, g) = open_vault(&ts, "Family");
         let collection = ts
             .shell
-            .new_item(s, g, NewKind::Collection, "Banking".into(), None)
+            .new_item(s, g, NewKind::Collection, "Banking".into(), None, None)
             .unwrap()
             .data;
         let member = ts
             .shell
-            .new_item(s, g, NewKind::Note, "PIN".into(), Some(collection.clone()))
+            .new_item(
+                s,
+                g,
+                NewKind::Note,
+                "PIN".into(),
+                Some(collection.clone()),
+                None,
+            )
             .unwrap()
             .data;
         assert_eq!(
@@ -1639,12 +1764,12 @@ mod tests {
         let (s, g) = open_vault(&ts, "Family");
         let old = ts
             .shell
-            .new_item(s, g, NewKind::Note, "Old".into(), None)
+            .new_item(s, g, NewKind::Note, "Old".into(), None, None)
             .unwrap()
             .data;
         let fresh = ts
             .shell
-            .new_item(s, g, NewKind::Note, "Fresh".into(), None)
+            .new_item(s, g, NewKind::Note, "Fresh".into(), None, None)
             .unwrap()
             .data;
         ts.shell.trash_item(s, g, &old).unwrap();
@@ -1750,7 +1875,7 @@ mod tests {
         let opens = ts.clipboard.opens();
         let note = ts
             .shell
-            .new_item(s, g, NewKind::Note, "Plans".into(), None)
+            .new_item(s, g, NewKind::Note, "Plans".into(), None, None)
             .unwrap()
             .data;
         let foreign = ItemId::random().to_hex();
@@ -1847,6 +1972,492 @@ mod tests {
         let extra =
             json!({ "session": 1, "generation": 1, "id": id, "field": "password", "text": "x" });
         assert_eq!(parse::<CopyFieldArgs>(&body(extra)).err(), Some(MALFORMED));
+    }
+
+    /// The fields a new login starts with: a website with no scheme, which the shell completes.
+    fn login_fields() -> ItemFields {
+        ItemFields {
+            username: "ada@example.com".to_owned(),
+            password: secret(LOGIN_PW),
+            urls: vec!["support.example.com".to_owned()],
+            notes: secret("a note"),
+        }
+    }
+
+    /// Item files written while `work` runs, counted at the engine's own step after each write.
+    fn item_writes<T>(work: impl FnOnce() -> T) -> (T, usize) {
+        let writes = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&writes);
+        failpoint::observe(
+            "items.after_write",
+            Box::new(move || seen.set(seen.get() + 1)),
+        );
+        let result = work();
+        failpoint::disarm_all();
+        (result, writes.get())
+    }
+
+    /// How many item files the `n`th vault holds on disk.
+    fn item_files(ts: &TestShell, n: usize) -> usize {
+        match fs::read_dir(vault_dir(ts, n).join("items")) {
+            Ok(entries) => entries.count(),
+            Err(_) => 0,
+        }
+    }
+
+    /// A new login starts whole and is written once, so a lock between two calls can never leave an empty item.
+    #[test]
+    fn new_item_with_fields_is_one_write() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let folder = ts
+            .shell
+            .new_item(s, g, NewKind::Collection, "Banking".into(), None, None)
+            .unwrap()
+            .data;
+        let (made, writes) = item_writes(|| {
+            ts.shell.new_item(
+                s,
+                g,
+                NewKind::Login,
+                "Bank".into(),
+                Some(folder.clone()),
+                Some(login_fields()),
+            )
+        });
+        let id = made.unwrap().data;
+        assert_eq!(writes, 1, "more than one item write");
+        assert_eq!(item_files(&ts, 0), 2, "the folder and the login");
+
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(detail.revision, 0, "never edited");
+        assert_eq!(detail.summary.username.as_deref(), Some("ada@example.com"));
+        assert_eq!(detail.summary.collection.as_deref(), Some(folder.as_str()));
+        assert_eq!(detail.summary.site.as_deref(), Some("support.example.com"));
+        assert_eq!(detail.urls, ["https://support.example.com"]);
+        assert_eq!(detail.notes.as_str(), "a note");
+        assert!(detail.has_password);
+        assert_eq!(
+            ts.shell.reveal_password(s, g, &id).unwrap().data.as_str(),
+            LOGIN_PW
+        );
+
+        // The write is the item's only: a write that fails before it lands leaves nothing, not an empty login.
+        failpoint::arm("atomic_write.before_replace");
+        let failed = ts.shell.new_item(
+            s,
+            g,
+            NewKind::Login,
+            "Mail".into(),
+            None,
+            Some(login_fields()),
+        );
+        failpoint::disarm_all();
+        assert!(failed.is_err());
+        let titles: Vec<String> = ts
+            .shell
+            .list_items(s, g)
+            .unwrap()
+            .data
+            .items
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        assert!(!titles.contains(&"Mail".to_owned()), "{titles:?}");
+        assert_eq!(item_files(&ts, 0), 2);
+
+        // Only a login starts with fields. A note or a folder made as before (no fields) is still made, and any fields
+        // sent for either, a login's own or notes alone, are refused with nothing written.
+        let notes_only = || ItemFields {
+            notes: secret("steps"),
+            ..ItemFields::default()
+        };
+        let plain = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Steps".into(), None, None)
+            .unwrap()
+            .data;
+        assert_eq!(
+            ts.shell.get_item(s, g, &plain).unwrap().data.notes.as_str(),
+            ""
+        );
+        let (refused, writes) = item_writes(|| {
+            let try_kind = |kind, fields| {
+                ts.shell
+                    .new_item(s, g, kind, "x".into(), None, Some(fields))
+                    .err()
+            };
+            [
+                try_kind(NewKind::Note, login_fields()),
+                try_kind(NewKind::Note, notes_only()),
+                try_kind(NewKind::Note, ItemFields::default()),
+                try_kind(NewKind::Collection, ItemFields::default()),
+                try_kind(NewKind::Collection, notes_only()),
+            ]
+        });
+        assert_eq!(refused, [Some(NOT_A_LOGIN); 5]);
+        assert_eq!(writes, 0);
+    }
+
+    /// A new item with fields is refused as every item command is: a stale generation (`Locked`), a folder of another
+    /// vault, and a read-only session, and none of them writes.
+    #[test]
+    fn new_item_with_fields_is_refused_stale_foreign_and_read_only() {
+        let ts = TestShell::new();
+        let (a, ga) = open_vault(&ts, "Family");
+        let (b, gb) = open_vault(&ts, "Work");
+        let foreign = ts
+            .shell
+            .new_item(b, gb, NewKind::Collection, "Theirs".into(), None, None)
+            .unwrap()
+            .data;
+        let (refused, writes) = item_writes(|| {
+            (
+                ts.shell.new_item(
+                    a,
+                    ga,
+                    NewKind::Login,
+                    "Bank".into(),
+                    Some(foreign),
+                    Some(login_fields()),
+                ),
+                ts.shell.new_item(
+                    a,
+                    ga + 1,
+                    NewKind::Login,
+                    "Bank".into(),
+                    None,
+                    Some(login_fields()),
+                ),
+            )
+        });
+        assert_eq!(
+            refused.0.err(),
+            Some(CoreError::InvalidInput { what: "collection" }.into())
+        );
+        assert_eq!(refused.1.err(), Some(ShellError::Locked));
+        assert_eq!(writes, 0);
+        assert_eq!(item_files(&ts, 0), 0);
+
+        // A session that locked: its old generation is refused.
+        let (_, dir) = ts.shell.registry.entries()[0].clone();
+        ts.shell.sessions.lock(a, LockReason::Manual);
+        assert_eq!(
+            ts.shell
+                .new_item(
+                    a,
+                    ga,
+                    NewKind::Login,
+                    "Bank".into(),
+                    None,
+                    Some(login_fields())
+                )
+                .err(),
+            Some(ShellError::Locked)
+        );
+
+        // Read-only: refused where it writes.
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let vault = heavy(|| {
+            ReadOnlyVault::open_folder(&dir, Credential::Password(PW), &CancelToken::new())
+        })
+        .unwrap();
+        let location = Location::folder(&dir).unwrap();
+        let opened = ts.shell.sessions.open(Some(location.clone()), None, |_| {
+            Ok(OpenStep::Session(location, Opened::ReadOnly(vault), ()))
+        });
+        let Ok(Outcome::Done(tagged)) = opened else {
+            panic!("the read-only session did not open");
+        };
+        let (made, writes) = item_writes(|| {
+            ts.shell.new_item(
+                tagged.session,
+                tagged.generation,
+                NewKind::Login,
+                "Bank".into(),
+                None,
+                Some(login_fields()),
+            )
+        });
+        assert_eq!(made.err(), Some(ShellError::ReadOnly));
+        assert_eq!(writes, 0);
+        assert_eq!(item_files(&ts, 0), 0);
+    }
+
+    /// Every field's limit is checked before anything is written, and before a website is looked at: an over-long
+    /// field is `TooLarge` even when another field is a bad website.
+    #[test]
+    fn new_item_limits_checked_first() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let too_large = |what| Some(ShellError::TooLarge { what });
+        for unit in ["a", "é"] {
+            let long = |n: usize| bytes_of(unit, n);
+            let with = |change: &dyn Fn(&mut ItemFields)| {
+                let mut fields = ItemFields {
+                    urls: vec!["javascript:x".to_owned()],
+                    ..login_fields()
+                };
+                change(&mut fields);
+                fields
+            };
+            let over: Vec<(String, ItemFields, &str)> = vec![
+                (long(1025), with(&|_| {}), "title"),
+                (
+                    "Bank".to_owned(),
+                    with(&|f| f.username = long(1025)),
+                    "username",
+                ),
+                (
+                    "Bank".to_owned(),
+                    with(&|f| f.password = secret(&long(4097))),
+                    "password",
+                ),
+                (
+                    "Bank".to_owned(),
+                    with(&|f| f.notes = secret(&long(524_289))),
+                    "notes",
+                ),
+                (
+                    "Bank".to_owned(),
+                    with(&|f| f.urls = vec![long(2049)]),
+                    "url",
+                ),
+                (
+                    "Bank".to_owned(),
+                    with(&|f| f.urls = vec!["https://a.example".to_owned(); 33]),
+                    "urls",
+                ),
+            ];
+            for (title, fields, what) in over {
+                let (made, writes) = item_writes(|| {
+                    ts.shell
+                        .new_item(s, g, NewKind::Login, title, None, Some(fields))
+                });
+                assert_eq!(made.err(), too_large(what), "{what} in {unit}");
+                assert_eq!(writes, 0, "{what} in {unit}");
+            }
+        }
+        assert_eq!(item_files(&ts, 0), 0, "something was written");
+        assert!(ts.shell.list_items(s, g).unwrap().data.items.is_empty());
+
+        // Every field at its limit is saved whole, in one write.
+        let full = ItemFields {
+            username: bytes_of("é", 1024),
+            password: secret(&bytes_of("é", 4096)),
+            urls: vec![format!("https://{}", bytes_of("a", 2040)); 32],
+            notes: secret(&bytes_of("é", 524_288)),
+        };
+        let (made, writes) = item_writes(|| {
+            ts.shell
+                .new_item(s, g, NewKind::Login, bytes_of("é", 1024), None, Some(full))
+        });
+        let id = made.unwrap().data;
+        assert_eq!(writes, 1);
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!((detail.urls.len(), detail.notes.len()), (32, 524_288));
+
+        // A website that grows past its limit once `https://` is in front is refused too, with nothing written.
+        let (made, writes) = item_writes(|| {
+            ts.shell.new_item(
+                s,
+                g,
+                NewKind::Login,
+                "Edge".into(),
+                None,
+                Some(ItemFields {
+                    urls: vec![bytes_of("a", 2048)],
+                    ..ItemFields::default()
+                }),
+            )
+        });
+        assert_eq!(made.err(), too_large("url"));
+        assert_eq!(writes, 0);
+    }
+
+    /// A website with no scheme gets `https://`; one that has `http` or `https` is kept as typed, trimmed. Whatever
+    /// comes out is what `web_url`, the shell's one rule for opening a link, accepts.
+    #[test]
+    fn https_added_when_missing() {
+        for (typed, saved) in [
+            ("support.example.com", "https://support.example.com"),
+            ("  support.example.com \t", "https://support.example.com"),
+            ("localhost:3000", "https://localhost:3000"),
+            ("192.168.0.1/login", "https://192.168.0.1/login"),
+            (
+                "example.com:8080/a?b=c#d",
+                "https://example.com:8080/a?b=c#d",
+            ),
+            ("www.example.com/a b", "https://www.example.com/a b"),
+            ("http://plain.example", "http://plain.example"),
+            ("https://secure.example/x", "https://secure.example/x"),
+            ("HTTPS://Example.com/Path", "HTTPS://Example.com/Path"),
+            ("https://ada:pw@host.example", "https://ada:pw@host.example"),
+        ] {
+            let said = normalise_url(typed).unwrap();
+            assert_eq!(said, saved, "{typed}");
+            assert!(web_url(&said).is_some(), "{said} would not open");
+        }
+
+        // `new_item` saves the completed address, and the shell can open it.
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let fields = ItemFields {
+            urls: vec!["support.example.com".to_owned(), "http://b.example".into()],
+            ..ItemFields::default()
+        };
+        let id = ts
+            .shell
+            .new_item(s, g, NewKind::Login, "Site".into(), None, Some(fields))
+            .unwrap()
+            .data;
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(
+            detail.urls,
+            ["https://support.example.com", "http://b.example"]
+        );
+        ts.shell.open_url(s, g, &id, 0).unwrap();
+        assert_eq!(ts.launcher.opened(), ["https://support.example.com/"]);
+    }
+
+    /// Only `http` and `https` are websites. Every other scheme, a path, an empty or half address, and anything with a
+    /// control character is refused as `InvalidInput { what: "website" }`, by `normalise_url` and by `new_item`, which
+    /// then writes nothing.
+    #[test]
+    fn other_schemes_refused() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let refusal = Some(ShellError::InvalidInput { what: "website" });
+        for typed in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "file:///C:/x",
+            "ftp://files.example.com",
+            "mailto:ada@example.com",
+            "ms-settings:",
+            "ms-settings:network",
+            "tel:+15551234",
+            "data:text/html,<b>x</b>",
+            "vbscript:x",
+            "view-source:https://a.example",
+            r"\\server\share",
+            r"C:\x.exe",
+            // A parser forgives these; what is kept has to read as an address.
+            "https:example.com",
+            "http:/a.example",
+            "https:80",
+            "",
+            "   ",
+            "http://",
+            "https://",
+            "http://exa mple.com",
+            "https://exa\nmple.com",
+            "https://exa\tmple.com",
+            "exa\u{0}mple.com",
+            "https://a.example/\u{7f}",
+        ] {
+            assert_eq!(normalise_url(typed).err(), refusal, "{typed:?}");
+            let fields = ItemFields {
+                urls: vec!["https://fine.example".to_owned(), typed.to_owned()],
+                ..login_fields()
+            };
+            let (made, writes) = item_writes(|| {
+                ts.shell
+                    .new_item(s, g, NewKind::Login, "Bank".into(), None, Some(fields))
+            });
+            assert_eq!(made.err(), refusal, "{typed:?}");
+            assert_eq!(writes, 0, "{typed:?}");
+        }
+        assert_eq!(item_files(&ts, 0), 0, "something was written");
+        // The refusal says nothing of the address.
+        let said = format!("{:?}", normalise_url("javascript:secret-token").err());
+        assert!(!said.contains("secret-token"), "{said}");
+    }
+
+    /// The check keeps everything but a web address out, whatever it is given: a generated mass of odd text (schemes,
+    /// ports, slashes, `@`, brackets, percent signs, control characters, non-ASCII) never gives an answer that is not
+    /// an `http` or `https` address `web_url` opens, a trimmed address that already is one comes back unchanged, and
+    /// the slowest input is measured (no pattern engine to hang, but the bound is pinned).
+    #[test]
+    fn normalise_url_only_ever_answers_web_addresses() {
+        use std::time::{Duration, Instant};
+
+        #[rustfmt::skip]
+        const PIECES: &[&str] = &[
+            "http", "https", "HTTP", "ftp", "file", "javascript", "mailto", "localhost", "example", "com", "a", "1",
+            "80", "65535", "://", ":", "/", "//", "///", "\\", "@", ".", "..", "-", "_", "%", "%20", "%zz", "?", "#",
+            "[", "]", "::1", "é", "日本", " ", "\t", "\n", "\r", "\u{0}", "\u{7f}", "\u{200b}", "xn--",
+        ];
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let (mut accepted, mut slowest) = (0, Duration::ZERO);
+        for _ in 0..30_000 {
+            let pieces = 1 + (next() % 12) as usize;
+            let typed: String = (0..pieces)
+                .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+                .collect();
+            let started = Instant::now();
+            let answer = normalise_url(&typed);
+            slowest = slowest.max(started.elapsed());
+            if let Ok(saved) = answer {
+                accepted += 1;
+                let lower = saved.to_ascii_lowercase();
+                assert!(
+                    lower.starts_with("http://") || lower.starts_with("https://"),
+                    "{typed:?} gave {saved:?}"
+                );
+                assert!(web_url(&saved).is_some(), "{typed:?} gave {saved:?}");
+                assert!(!saved.chars().any(char::is_control), "{typed:?}");
+                assert_eq!(saved.trim(), saved, "{typed:?}");
+            }
+            // Already a web address once trimmed, written out as one: kept as it is.
+            let trimmed = typed.trim();
+            let written = trimmed.to_ascii_lowercase();
+            let written_out = written.starts_with("http://") || written.starts_with("https://");
+            if written_out && !trimmed.chars().any(char::is_control) && web_url(trimmed).is_some() {
+                assert_eq!(normalise_url(&typed).as_deref(), Ok(trimmed), "{typed:?}");
+            }
+        }
+        assert!(
+            accepted > 100,
+            "only {accepted} were accepted: the mass is not varied enough"
+        );
+        assert!(
+            slowest < Duration::from_millis(100),
+            "the slowest input took {slowest:?}"
+        );
+    }
+
+    #[test]
+    fn new_item_request_is_strict() {
+        let body = |value: Value| InvokeBody::Json(value);
+        let base = json!({ "session": 1, "generation": 1, "kind": "login", "title": "t", "collection": null });
+        // Today's callers send no `fields`.
+        assert!(parse::<NewItemArgs>(&body(base.clone())).is_ok());
+        let mut with = base.clone();
+        with["fields"] = json!({
+            "username": "ada", "password": "pw", "urls": ["a.example"], "notes": "n",
+        });
+        assert!(parse::<NewItemArgs>(&body(with.clone())).is_ok());
+        with["fields"] = json!({ "notes": "n" });
+        assert!(parse::<NewItemArgs>(&body(with)).is_ok());
+        for bad in [
+            json!({ "username": "ada", "kind": "key" }),
+            json!({ "urls": "a.example" }),
+            json!({ "password": 5 }),
+        ] {
+            let mut request = base.clone();
+            request["fields"] = bad;
+            assert_eq!(parse::<NewItemArgs>(&body(request)).err(), Some(MALFORMED));
+        }
+        let mut extra = base;
+        extra["extra"] = json!(1);
+        assert_eq!(parse::<NewItemArgs>(&body(extra)).err(), Some(MALFORMED));
     }
 
     #[test]

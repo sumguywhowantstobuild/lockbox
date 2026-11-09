@@ -62,6 +62,7 @@ pub const COMMANDS: &[&str] = &[
     "open_pre_restore_read_only",
     "generate_password",
     "generate_passphrase",
+    "copy_generated",
     "get_settings",
     "set_settings",
 ];

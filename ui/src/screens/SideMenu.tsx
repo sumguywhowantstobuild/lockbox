@@ -1,11 +1,12 @@
 import { useState } from "react";
 import type { ItemSummary } from "../api";
-import { ListIcon, LockIcon, SearchIcon, SideMenuIcon } from "../parts/Icon";
+import { GeneratorIcon, ListIcon, LockIcon, SearchIcon, SideMenuIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
 import { VaultMark, type VaultLook } from "../parts/Pattern";
 import {
   lockEverything,
   lockOneVault,
+  openGenerator,
   openSearch,
   selectFolder,
   useSessions,
@@ -25,8 +26,9 @@ const TILES = ["t0", "t1", "t2", "t3", "t4"];
 
 /**
  * The side menu: which vault is open (its name opens the vault menu: each vault and whether it is open, and Lock for this
- * one), Search, All items, the folders (to read, not to change), and Lock all. It closes to a strip of icons; then each icon
- * carries its name for a screen reader, and for a hint when the pointer rests on it.
+ * one), Search, All items, the folders (to read, not to change), the Generator, and Lock all. It closes to a strip of
+ * icons; then each icon carries its name for a screen reader, and for a hint when the pointer rests on it. The menu is only
+ * there while a vault is unlocked, so the Generator never shows on the lock screen.
  */
 export function SideMenu({
   data,
@@ -135,6 +137,17 @@ export function SideMenu({
         ))}
       </div>
       <div className="rfoot">
+        <button
+          type="button"
+          className="nav util navgen"
+          {...named("Generator")}
+          onClick={() => {
+            openGenerator(data.session);
+          }}
+        >
+          <GeneratorIcon />
+          <span className="nt">Generator</span>
+        </button>
         <div className="rbtns">
           <button
             type="button"

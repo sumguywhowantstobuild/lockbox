@@ -68,6 +68,11 @@ export const MESSAGES: Record<string, Words> = {
     body: "Check that it's on and connected, then try again.",
   },
   "code:invalid_input:printer name": { title: "That printer isn't available any more.", body: "Pick another one." },
+  // A new login's website: Rust adds https:// where there is none and keeps only http and https addresses.
+  "code:invalid_input:website": {
+    title: "That isn't a web address Lockbox can open.",
+    body: "Use one that starts with http:// or https://.",
+  },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   "code:core": GENERIC,
 
@@ -225,6 +230,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "vault not listed",
   "vault state",
   "vault still finishing an operation",
+  "website",
 ];
 
 /** A message as one line of text, for a screen that shows it in one place. */

@@ -228,7 +228,8 @@ test("results_cover_every_unlocked_vault", async () => {
   expect(within(note).getAllByRole("button")).toHaveLength(1);
   expect(within(dialog).queryByText(/^Client contract/)).toBeNull();
   expect(within(dialog).queryByRole("button", { name: /Copy key/ })).toBeNull();
-  expect(within(dialog).queryByRole("button", { name: /New item/ })).toBeNull();
+  // New item is at the foot whatever was found (Task 11), and it is a button, not a result.
+  expect(within(dialog).getByRole("button", { name: "New item" })).toBeTruthy();
   await expectNoAxe(container);
 
   // Picking a result of the vault that is not on screen puts that vault on screen, with the item open.
@@ -294,10 +295,10 @@ test("nothing_found_says_so", async () => {
   const { container } = await unlocked();
   const { dialog } = await searchFor("zzzz");
   expect(await within(dialog).findByText('Nothing for "zzzz"')).toBeTruthy();
-  expect(within(dialog).getByText("Try another word.")).toBeTruthy();
+  // 2d's words, with the clause that offers a new login (Task 11), and the button that makes one.
+  expect(within(dialog).getByText("Try another word, or add a new login.")).toBeTruthy();
   expect(within(dialog).queryByRole("list")).toBeNull();
-  // Nothing here leads to a screen a later task builds.
-  expect(dialog.textContent).not.toMatch(/new login|New item/);
+  expect(within(dialog).getByRole("button", { name: "New item" })).toBeTruthy();
   expect(within(dialog).queryByText(/is locked|are locked|is busy|are busy/)).toBeNull();
   await expectNoAxe(container);
 });
@@ -307,8 +308,7 @@ test("says_when_vaults_are_locked", async () => {
   let { dialog } = await searchFor("acme");
   // One locked vault is named.
   expect(await within(dialog).findByText('Nothing for "acme"')).toBeTruthy();
-  expect(within(dialog).getByText("Home is locked, so it isn't searched. Try another word.")).toBeTruthy();
-  expect(dialog.textContent).not.toContain("add a new login");
+  expect(within(dialog).getByText("Home is locked, so it isn't searched. Try another word, or add a new login.")).toBeTruthy();
   expect(searchCalls().at(-1)).toEqual({ query: "acme" });
   fireEvent.keyDown(dialog, { key: "Escape" });
   await waitFor(() => {
@@ -327,7 +327,9 @@ test("says_when_vaults_are_locked", async () => {
     { id: 10, name: "Old copy", items: [] },
   ]);
   ({ dialog } = await searchFor("acme"));
-  expect(await within(dialog).findByText("Home, Work and Old copy are locked, so they aren't searched. Try another word.")).toBeTruthy();
+  expect(
+    await within(dialog).findByText("Home, Work and Old copy are locked, so they aren't searched. Try another word, or add a new login."),
+  ).toBeTruthy();
   // A result is shown with the other vaults' names, with no sentence about the locked ones when something was found.
   fireEvent.change(within(dialog).getByRole("textbox", { name: SEARCH }), { target: { value: "console" } });
   await result(dialog, /admin@example\.com/);
@@ -528,13 +530,14 @@ test("lock_all_at_the_foot", async () => {
   await twoOpen();
   const { dialog } = await searchFor("console");
   await result(dialog, /me@example\.com · Home/);
-  // At the foot, Lock all, and at its other end Close. New item is a later task's.
+  // At the foot, New item (Task 11), then Lock all, and at the other end Close.
+  const added = within(dialog).getByRole("button", { name: "New item" });
   const lock = within(dialog).getByRole("button", { name: "Lock all" });
   const close = within(dialog).getByRole("button", { name: "Close" });
+  expect(added.compareDocumentPosition(lock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(lock.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   const lastResult = rowsOf(dialog).at(-1) as HTMLElement;
-  expect(lastResult.compareDocumentPosition(lock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  expect(within(dialog).queryByRole("button", { name: /new item/i })).toBeNull();
+  expect(lastResult.compareDocumentPosition(added) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
   fireEvent.click(lock);
   expect(await screen.findByLabelText(/^Password for /)).toBeTruthy();

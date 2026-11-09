@@ -351,8 +351,9 @@ mod tests {
         let api = FakeClose::default();
         close_requested(app.handle(), &api);
         assert!(api.prevented(), "the window was left to close");
+        // The lock event is sent just after the session's state changes, from the close's own thread: wait for both.
         wait_until("the close never locked", || {
-            state_of(&ts, family) == SessionState::Locked
+            state_of(&ts, family) == SessionState::Locked && !ts.events.locked().is_empty()
         });
         assert_eq!(
             ts.events.locked().iter().map(|l| l.2).collect::<Vec<_>>(),

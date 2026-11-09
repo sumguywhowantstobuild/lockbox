@@ -258,6 +258,48 @@ export interface FakeShell {
   holdSearch(): () => void;
   /** Makes a vault busy (or not) from now on, as a long change on it does: its search answer is `busy`. */
   setBusy(vaultId: number, busy: boolean): void;
+  /** Every `new_item` that reached the shell and was made, as it was sent. */
+  made: { session: number; generation: number; kind: string; title: string; collection: string | null; fields: Record<string, unknown> | null }[];
+  /** Every `copy_generated` that reached the shell, as it was sent (the values are made up). */
+  generated: { session: number; generation: number; value: string }[];
+  /**
+   * Holds every `new_item` answer until `release` is called: the item is made when the command arrives, as the shell
+   * writes it, and the answer is read later, so a lock in between leaves an answer tagged with the generation from before.
+   */
+  holdNewItem(): () => void;
+}
+
+/** What the shell sends for a website that is not an `http` or `https` address (`NOT_A_WEBSITE`). */
+export const NOT_A_WEBSITE = { code: "invalid_input", what: "website" };
+
+/**
+ * `normalise_url` as the shell has it, in short: trimmed, `https://` added when there is no scheme of its own (a host and
+ * port such as `localhost:3000` has none), and every other scheme, an empty address and a control character refused.
+ */
+function normaliseUrl(text: string): string {
+  const typed = text.trim();
+  // eslint-disable-next-line no-control-regex -- the shell refuses control characters
+  if (typed === "" || /[\u0000-\u001f\u007f-\u009f]/.test(typed)) return refuse(NOT_A_WEBSITE);
+  const scheme = /^([a-z][a-z0-9+.-]*):(\d+(?:[/?#]|$))?/i.exec(typed);
+  const hasScheme = scheme !== null && (scheme[2] === undefined || /^https?$/i.test(scheme[1] ?? ""));
+  if (!hasScheme && /^[/\\]/.test(typed)) return refuse(NOT_A_WEBSITE);
+  const saved = hasScheme ? typed : `https://${typed}`;
+  if (!/^https?:\/\//i.test(saved)) return refuse(NOT_A_WEBSITE);
+  return saved;
+}
+
+/** The generator's own limit on what `copy_generated` takes (`MAX_GENERATED` in `commands/generator.rs`). */
+const MAX_GENERATED = 192;
+
+/** A small repeatable random source, so a test's "different value" is not left to chance. */
+function randomSource(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 let sessionRange = 0;
@@ -308,6 +350,11 @@ export function installFakeShell(
   const copied: FakeShell["copied"] = [];
   const opened: FakeShell["opened"] = [];
   let heldSearch: (() => void)[] | undefined;
+  let heldNewItem: (() => void)[] | undefined;
+  const made: FakeShell["made"] = [];
+  const generated: FakeShell["generated"] = [];
+  const random = randomSource(7);
+  let nextItem = 0x1000;
   const keys = new Map<FakeVault, string>();
   let keysMade = 0;
   let chosenKey: string | undefined;
@@ -674,6 +721,104 @@ export function installFakeShell(
         opened.push(sent);
         return tagged(sent.session, sent.generation, null);
       }
+      case "new_item": {
+        const sent = exactly(args, ["session", "generation", "kind", "title", "collection", "fields"]) as {
+          session: number;
+          generation: number;
+          kind: string;
+          title: string;
+          collection: string | null;
+          fields: Record<string, unknown> | null;
+        };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (sent.kind !== "login") return refuse(MALFORMED);
+        if (sent.fields !== null) {
+          const known = ["username", "password", "urls", "notes"];
+          if (Object.keys(sent.fields).some((name) => !known.includes(name))) return refuse(MALFORMED);
+        }
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const fields = sent.fields ?? {};
+        const urls = ((fields.urls as string[] | undefined) ?? []).map(normaliseUrl);
+        const folder = sent.collection;
+        if (folder !== null && vault.items?.find((item) => item.id === folder && item.kind === "collection") === undefined) {
+          return refuse({ code: "core", kind: "invalid_input", what: "collection" });
+        }
+        nextItem += 1;
+        const id = itemId(nextItem);
+        const password = (fields.password as string | undefined) ?? "";
+        vault.items = [
+          ...(vault.items ?? []),
+          {
+            id,
+            kind: "login",
+            title: sent.title,
+            username: (fields.username as string | undefined) ?? "",
+            collection: folder,
+            urls,
+            notes: (fields.notes as string | undefined) ?? "",
+            has_password: password !== "",
+            modified_at: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+          },
+        ];
+        made.push(sent);
+        return tagged(sent.session, sent.generation, id);
+      }
+      case "generate_password": {
+        const { options } = exactly(args, ["options"]) as { options: unknown };
+        const given = exactly(options, ["length", "lowercase", "uppercase", "digits", "symbols", "avoid_ambiguous"]) as {
+          length: number;
+          lowercase: boolean;
+          uppercase: boolean;
+          digits: boolean;
+          symbols: boolean;
+        };
+        if (!Number.isInteger(given.length) || given.length < 8 || given.length > 128) {
+          return refuse({ code: "core", kind: "invalid_input", what: "password length" });
+        }
+        const classes = [
+          given.lowercase ? "abcdefghijkmnpqrstuvwxyz" : "",
+          given.uppercase ? "ABCDEFGHJKLMNPQRSTUVWXYZ" : "",
+          given.digits ? "23456789" : "",
+          given.symbols ? "!@#$%^&*-_=+" : "",
+        ].filter((set) => set !== "");
+        if (classes.length === 0) return refuse({ code: "core", kind: "invalid_input", what: "no character class selected" });
+        const pick = (set: string) => set.charAt(Math.floor(random() * set.length));
+        const chars = classes.map(pick);
+        while (chars.length < given.length) chars.push(pick(classes.join("")));
+        return chars.join("");
+      }
+      case "generate_passphrase": {
+        const { options } = exactly(args, ["options"]) as { options: unknown };
+        const given = exactly(options, ["words", "separator", "capitalize", "include_number"]) as {
+          words: number;
+          separator: string;
+          capitalize: boolean;
+          include_number: boolean;
+        };
+        if (!Number.isInteger(given.words) || given.words < 3 || given.words > 12) {
+          return refuse({ code: "core", kind: "invalid_input", what: "word count" });
+        }
+        const numbered = given.include_number ? Math.floor(random() * given.words) : -1;
+        const words = Array.from({ length: given.words }, (_, at) => {
+          const word = FAKE_WORDS[Math.floor(random() * FAKE_WORDS.length)] ?? "";
+          const shown = given.capitalize ? word.charAt(0).toUpperCase() + word.slice(1) : word;
+          return at === numbered ? `${shown}${String(Math.floor(random() * 10))}` : shown;
+        });
+        return words.join(given.separator);
+      }
+      case "copy_generated": {
+        const sent = exactly(args, ["session", "generation", "value"]) as {
+          session: number;
+          generation: number;
+          value: unknown;
+        };
+        // A read-only vault may copy: nothing is written to it.
+        vaultFor(sent.session, sent.generation);
+        if (typeof sent.value !== "string") return refuse(MALFORMED);
+        if (new TextEncoder().encode(sent.value).length > MAX_GENERATED) return refuse({ code: "too_large", what: "password" });
+        generated.push({ session: sent.session, generation: sent.generation, value: sent.value });
+        return tagged(sent.session, sent.generation, null);
+      }
       case "close_explained_ok":
         exactly(args ?? {}, []);
         closeExplainedCalls += 1;
@@ -730,6 +875,14 @@ export function installFakeShell(
       }
       if (cmd === "search_all" && heldSearch !== undefined) {
         const release = heldSearch;
+        return new Promise((resolve) => {
+          release.push(() => {
+            resolve(result);
+          });
+        });
+      }
+      if (cmd === "new_item" && heldNewItem !== undefined) {
+        const release = heldNewItem;
         return new Promise((resolve) => {
           release.push(() => {
             resolve(result);
@@ -853,6 +1006,16 @@ export function installFakeShell(
     setBusy: (vaultId, busy) => {
       const vault = vaults.find((v) => v.id === vaultId);
       if (vault !== undefined) vault.busy = busy;
+    },
+    made,
+    generated,
+    holdNewItem: () => {
+      const waiting: (() => void)[] = [];
+      heldNewItem = waiting;
+      return () => {
+        heldNewItem = undefined;
+        for (const release of waiting) release();
+      };
     },
   };
 }

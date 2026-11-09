@@ -69,6 +69,15 @@ export function SearchIcon() {
   );
 }
 
+export function PlusIcon() {
+  return <Drawing d="M12 5v14M5 12h14" />;
+}
+
+/** Eight short rays round a point: the Generator. */
+export function GeneratorIcon() {
+  return <Drawing d="M12 4v3M12 17v3M4 12h3M17 12h3M6.5 6.5l2 2M15.5 15.5l2 2M17.5 6.5l-2 2M8.5 15.5l-2 2" />;
+}
+
 export function LockIcon() {
   return (
     <svg className="i" viewBox="0 0 24 24" aria-hidden="true">

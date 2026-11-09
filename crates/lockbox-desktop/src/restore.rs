@@ -2350,6 +2350,7 @@ mod tests {
                 crate::commands::items::NewKind::Note,
                 "Later".into(),
                 None,
+                None,
             )
             .unwrap();
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
@@ -2817,6 +2818,7 @@ mod tests {
                 g,
                 crate::commands::items::NewKind::Note,
                 "Newer".into(),
+                None,
                 None,
             )
             .unwrap();

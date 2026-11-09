@@ -11,7 +11,10 @@ import {
   useVaults,
   type SessionData,
 } from "../store";
+import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, VaultBanners } from "./Asks";
+import { LoginForm } from "./forms/LoginForm";
+import { GeneratorPage } from "./GeneratorPanel";
 import { ItemList } from "./ItemList";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
@@ -64,7 +67,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   return (
     <div className="win">
       <SideMenu data={data} look={look} folders={folders} total={items.length} />
-      <div className={data.openItem === null ? "stage" : "stage open"}>
+      <div className={data.openItem === null && data.tool === null ? "stage" : "stage open"}>
         <main className="mainpane">
           <div className="tb">
             <span className="tb-t" aria-hidden="true">
@@ -98,6 +101,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 </button>
               )}
             </div>
+            {data.readOnly ? null : <AddMenu session={data.session} />}
           </div>
           <div className="lscroll">
             <h1 className="big">{title}</h1>
@@ -157,6 +161,10 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             }}
           />
         )}
+        {data.tool?.kind === "new_login" ? (
+          <LoginForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} title={data.tool.title} />
+        ) : null}
+        {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         <ToastStack />
       </div>
       <SearchPanel />

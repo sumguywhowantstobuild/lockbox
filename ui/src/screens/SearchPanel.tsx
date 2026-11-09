@@ -10,6 +10,7 @@ import {
   copyFromSearch,
   lockEverything,
   openFromSearch,
+  openNewLogin,
   openSearch,
   setSearchQuery,
   showResult,
@@ -55,7 +56,8 @@ function detailOf(session: SessionData, item: ItemSummary): string {
  * vaults were too busy to answer, and puts the actions of a sign-in on each result: copy the username, copy the password,
  * open the site (the shell opens it, from the login's own saved address). Copying steps the search aside and opens the
  * login, so the message about the copy and its clear time is on screen. A lock takes its vault's results away with no
- * message; the last lock closes the search. Files, a new item and keys come with later tasks.
+ * message; the last lock closes the search. New item (and the clause that offers a new login when nothing is found) opens
+ * the new-login form in the vault on screen, its title started with what was typed. Files and keys come with later tasks.
  */
 export function SearchPanel() {
   const search = useSearch();
@@ -96,6 +98,9 @@ export function SearchPanel() {
     }
   }
 
+  // New item adds to the vault on screen (the one opened last), unless that one is a backup opened to read.
+  const active = sessions.at(-1);
+  const canAdd = active !== undefined && !active.readOnly;
   const nameOf = (session: number) => sessions.find((entry) => entry.session === session)?.name ?? "";
   const busy = (search?.busy ?? []).map(nameOf).filter((name) => name !== "");
   const openVaults = new Set(sessions.map((entry) => entry.vaultId));
@@ -230,10 +235,21 @@ export function SearchPanel() {
           ) : (
             <div className="hempty">
               <b>{`Nothing for "${search.answered.trim()}"`}</b>
-              <span>{`${lockedWords}Try another word.`}</span>
+              <span>{`${lockedWords}Try another word${canAdd ? ", or add a new login" : ""}.`}</span>
             </div>
           )}
           <div className="sfoot">
+            {active === undefined || !canAdd ? null : (
+              <Button
+                onClick={() => {
+                  // What was typed starts the title: it is the name the person was looking for.
+                  openNewLogin(active.session, search.query.trim());
+                  closeSearch();
+                }}
+              >
+                New item
+              </Button>
+            )}
             <Button
               onClick={() => {
                 void lockEverything();

@@ -66,6 +66,7 @@
     "allow-open-pre-restore-read-only",
     "allow-generate-password",
     "allow-generate-passphrase",
+    "allow-copy-generated",
     "allow-get-settings",
     "allow-set-settings"
   ]

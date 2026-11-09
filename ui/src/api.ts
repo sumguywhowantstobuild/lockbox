@@ -299,6 +299,75 @@ export function copyField(vault: SessionRef, id: string, field: CopyableField): 
 }
 
 /**
+ * What a new login starts with, saved with it in one write. Each may be left out. The websites are sent as typed: the
+ * shell adds `https://` where it is missing and refuses anything but `http` and `https` (`invalid_input`, `what:
+ * "website"`). The password goes to Rust here, like a typed password, and never comes back but on Reveal.
+ */
+export interface ItemFields {
+  username?: string;
+  password?: string;
+  urls?: string[];
+  notes?: string;
+}
+
+/**
+ * Makes a new login in the vault, whole and in one write, and answers its id. `collection` is a folder's id, or `null` for
+ * none. Refused with `too_large` past the shell's limits, `invalid_input` (`what: "website"`) for a website that is not an
+ * `http` or `https` address, and `read_only` in a vault opened from a backup; nothing is written then.
+ */
+export function newLogin(
+  vault: SessionRef,
+  title: string,
+  collection: string | null,
+  fields: ItemFields,
+): Promise<Tagged<string>> {
+  return call<string>("new_item", {
+    session: vault.session,
+    generation: vault.generation,
+    kind: "login",
+    title,
+    collection,
+    fields,
+  });
+}
+
+/** The generator's options for a password, as the engine takes them (`length` is 8 to 128). */
+export interface PasswordOptions {
+  length: number;
+  lowercase: boolean;
+  uppercase: boolean;
+  digits: boolean;
+  symbols: boolean;
+  avoid_ambiguous: boolean;
+}
+
+/** The generator's options for a passphrase (`words` is 3 to 12; `separator` is not a letter or digit). */
+export interface PassphraseOptions {
+  words: number;
+  separator: string;
+  capitalize: boolean;
+  include_number: boolean;
+}
+
+/** A new random password, for display. It crosses Rust to the page as it always has; no vault is involved. */
+export function generatePassword(options: PasswordOptions): Promise<string> {
+  return callPlain<string>("generate_password", { options });
+}
+
+export function generatePassphrase(options: PassphraseOptions): Promise<string> {
+  return callPlain<string>("generate_passphrase", { options });
+}
+
+/**
+ * Puts a generated value the page holds on the clipboard, in Rust, with the marks and timer of any copy, owned by the
+ * vault on screen: cleared after the settings' delay, or when that vault locks. Refused with `too_large` for a value
+ * longer than the generator makes. A read-only vault may copy.
+ */
+export function copyGenerated(vault: SessionRef, value: string): Promise<Tagged<null>> {
+  return call<null>("copy_generated", { session: vault.session, generation: vault.generation, value });
+}
+
+/**
  * Searches every unlocked vault for `query` (title, username, website, folder name): one answer per vault searched, each
  * tagged with the generation it was read in, and the sessions that were busy with a long change (their results are
  * missing). A vault that locked meanwhile is in neither, and an answer from before a lock is dropped here. The query

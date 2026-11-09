@@ -68,8 +68,8 @@ test("items_list_after_unlock", async () => {
   // A login's row shows its username, a file's its name and size, and which folder each is in.
   expect(within(list).getByText("admin@example.com")).toBeTruthy();
   expect(within(list).getByText("contract-demo.pdf · 96 KB")).toBeTruthy();
-  // Nothing from a later task: no Add, no kind or sort lists.
-  expect(screen.queryByRole("button", { name: /^Add/ })).toBeNull();
+  // Add is in the toolbar (Task 11); nothing else from a later task: no kind or sort lists.
+  expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
   expect(screen.queryByLabelText("Sort")).toBeNull();
   // The side menu: the vault, All items (counted), the folders, Lock all.
   const side = screen.getByRole("navigation", { name: "Vault and folders" });
@@ -353,7 +353,10 @@ test("an_empty_vault_says_so", async () => {
   // 21g: what it is, and what to do first. Nothing here leads to a screen a later task builds.
   expect(screen.getByText("Your vault is empty")).toBeTruthy();
   expect(screen.getByText("What to do first: add a login, or a key, a note or a file.")).toBeTruthy();
-  expect(within(screen.getByRole("main")).queryByRole("button")).toBeNull();
+  // The list area offers no button of its own: Add is in the toolbar above it (Task 11).
+  const list = screen.getByRole("main").querySelector<HTMLElement>(".lscroll");
+  expect(list).not.toBeNull();
+  expect(within(list as HTMLElement).queryByRole("button")).toBeNull();
   await expectNoAxe(container);
 });
 
