@@ -13,7 +13,10 @@ import {
 } from "../store";
 import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, VaultBanners } from "./Asks";
+import { EmptyAdd } from "./EmptyAdd";
+import { KeyForm } from "./forms/KeyForm";
 import { LoginForm } from "./forms/LoginForm";
+import { NoteForm } from "./forms/NoteForm";
 import { GeneratorPage } from "./GeneratorPanel";
 import { ItemList } from "./ItemList";
 import { Ready } from "./setup/Ready";
@@ -120,12 +123,18 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 Opening…
               </p>
             ) : everything.length === 0 && data.folder === null && needle === "" ? (
-              <Ready />
+              <Ready>{data.readOnly ? null : <EmptyAdd session={data.session} />}</Ready>
             ) : inView.length === 0 ? (
               <div className="grp lempty">
                 <p className="le-t">
                   {folderName === undefined ? "Nothing in this vault yet." : `Nothing in ${folderName} yet.`}
                 </p>
+                {data.readOnly ? null : (
+                  <>
+                    <p className="le-b">Add a login, a key or a note.</p>
+                    <EmptyAdd session={data.session} />
+                  </>
+                )}
               </div>
             ) : shown.length === 0 ? (
               <div className="grp lempty">
@@ -143,8 +152,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                   onOpen={(id) => {
                     void selectItem(data.session, id);
                   }}
-                  onCopyPassword={(id) => {
-                    void copyField(data.session, id, "password");
+                  onCopy={(id, field) => {
+                    void copyField(data.session, id, field);
                   }}
                 />
               </>
@@ -163,6 +172,12 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         )}
         {data.tool?.kind === "new_login" ? (
           <LoginForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} title={data.tool.title} />
+        ) : null}
+        {data.tool?.kind === "new_key" ? (
+          <KeyForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
+        ) : null}
+        {data.tool?.kind === "new_note" ? (
+          <NoteForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
         ) : null}
         {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         <ToastStack />

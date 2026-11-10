@@ -1,5 +1,5 @@
 //! Items, search and links (spec §4.1): what crosses to the page, and when. Every answer is built from the views in
-//! [`crate::views`]: a password crosses only through `reveal_password`, never a file key or a nonce.
+//! [`crate::views`]: a password or a key's value crosses only through `reveal_password`, never a file key or a nonce.
 //!
 //! Each command is a thin wrapper that parses its request and runs a [`Shell`] method below on the blocking pool. The
 //! page's limits are checked before the session is touched, so a refused edit writes nothing. Permanent deletes
@@ -29,6 +29,8 @@ const MAX_URL: usize = 2048;
 const MAX_URLS: usize = 32;
 const MAX_NOTES: usize = 524_288;
 const MAX_PASSWORD: usize = 4096;
+/// A key's value: room for a certificate or a private key as well as a token.
+const MAX_KEY_VALUE: usize = 16_384;
 /// The search query's limit, in characters.
 const MAX_QUERY_CHARS: usize = 256;
 /// The most results one vault gives a search.
@@ -38,6 +40,9 @@ const SEARCH_LIMIT: usize = 100;
 const NOT_A_LOGIN: ShellError = ShellError::InvalidInput {
     what: "not a login",
 };
+
+/// A key's value asked of an item that is not a key, or given for a kind that has none.
+const NOT_A_KEY: ShellError = ShellError::InvalidInput { what: "not a key" };
 
 /// A link number past the login's links (`copy_field`).
 const NO_SUCH_LINK: ShellError = ShellError::InvalidInput { what: "link" };
@@ -129,12 +134,15 @@ fn writable<'a>(vault: &'a VaultRef<'_>) -> ShellResult<&'a Vault> {
 #[serde(rename_all = "lowercase")]
 pub enum NewKind {
     Login,
+    Key,
     Note,
     Collection,
 }
 
 /// The fields a new item starts with, saved with it in one write (`new_item`). No `Debug`: it holds item content and
-/// maybe a password. Any field may be left out. Only a login takes them: any sent for another kind are refused.
+/// maybe a password or a key's value. Any field may be left out. Each belongs to a kind: `username`, `password` and
+/// `urls` to a login, `value` to a key, `notes` to a login, a key or a note (a folder takes none); one sent for a kind
+/// that has no use for it is refused.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ItemFields {
@@ -142,6 +150,7 @@ pub struct ItemFields {
     pub password: Zeroizing<String>,
     pub urls: Vec<String>,
     pub notes: Zeroizing<String>,
+    pub value: Zeroizing<String>,
 }
 
 impl ItemFields {
@@ -149,6 +158,7 @@ impl ItemFields {
     fn check(&self) -> ShellResult<()> {
         at_most(&self.username, MAX_USERNAME, "username")?;
         at_most(&self.password, MAX_PASSWORD, "password")?;
+        at_most(&self.value, MAX_KEY_VALUE, "value")?;
         at_most(&self.notes, MAX_NOTES, "notes")?;
         if self.urls.len() > MAX_URLS {
             return Err(ShellError::TooLarge { what: "urls" });
@@ -220,8 +230,8 @@ pub fn normalise_url(text: &str) -> ShellResult<String> {
     Ok(saved)
 }
 
-/// The field `copy_field` copies: `"password"`, `"username"`, `"notes"`, or `{ "url": <index> }`, the index into the
-/// login's links.
+/// The field `copy_field` copies: `"password"`, `"username"`, `"notes"`, `"key_value"` (a key's value), or
+/// `{ "url": <index> }`, the index into the login's links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CopyField {
@@ -229,6 +239,16 @@ pub enum CopyField {
     Username,
     Url(u8),
     Notes,
+    KeyValue,
+}
+
+/// What `reveal_password` sends to the page: a login's `"password"` or a key's `"key_value"`. Asked of the other kind
+/// it is refused, so no field gives a value its kind does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevealField {
+    Password,
+    KeyValue,
 }
 
 /// An item's user-editable fields, as the page sends them back. No `Debug`: it holds item content and maybe a
@@ -345,21 +365,25 @@ impl Shell {
         })
     }
 
-    /// A login's password, on the user's "Reveal" (spec §4.1): the one command that sends it to the page.
+    /// A login's password or a key's value, on the user's "Reveal" (spec §4.1): the one command that sends either to the
+    /// page. The field must be the item's own: `password` of a login, `key_value` of a key.
     pub fn reveal_password(
         &self,
         session: SessionId,
         generation: u64,
         id: &str,
+        field: RevealField,
     ) -> ShellResult<Tagged<Zeroizing<String>>> {
         let id = item_id(id)?;
         self.sessions.read(session, generation, |vault, _| {
-            let password = match &items(&vault).item(&id)?.kind {
-                ItemKind::Login { password, .. } => password.clone(),
-                _ => return Err(NOT_A_LOGIN),
+            let value = match (field, &items(&vault).item(&id)?.kind) {
+                (RevealField::Password, ItemKind::Login { password, .. }) => password.clone(),
+                (RevealField::KeyValue, ItemKind::Key { value }) => value.clone(),
+                (RevealField::Password, _) => return Err(NOT_A_LOGIN),
+                (RevealField::KeyValue, _) => return Err(NOT_A_KEY),
             };
             read_done()?;
-            Ok(password)
+            Ok(value)
         })
     }
 
@@ -378,6 +402,8 @@ impl Shell {
             let value = match (field, &item.kind) {
                 (CopyField::Notes, _) => item.notes.clone(),
                 (CopyField::Password, ItemKind::Login { password, .. }) => password.clone(),
+                (CopyField::KeyValue, ItemKind::Key { value }) => value.clone(),
+                (CopyField::KeyValue, _) => return Err(NOT_A_KEY),
                 (CopyField::Username, ItemKind::Login { username, .. }) => {
                     Zeroizing::new(username.clone())
                 }
@@ -419,6 +445,8 @@ impl Shell {
             fields.check()?;
         }
         let collection = collection_id(collection.as_deref())?;
+        // Each field belongs to a kind (see `ItemFields`): one sent for a kind with no use for it is refused, before
+        // anything is written.
         let (kind, notes) = match (kind, fields) {
             (NewKind::Login, fields) => {
                 let ItemFields {
@@ -426,7 +454,11 @@ impl Shell {
                     password,
                     urls,
                     notes,
+                    value,
                 } = fields.unwrap_or_default();
+                if !value.is_empty() {
+                    return Err(NOT_A_KEY);
+                }
                 let urls = urls.iter().map(|url| normalise_url(url));
                 let urls = urls.collect::<ShellResult<Vec<String>>>()?;
                 let login = ItemKind::Login {
@@ -436,10 +468,38 @@ impl Shell {
                 };
                 (login, notes)
             }
-            // Only a login starts with fields (a note's come with its own task): any sent for another kind are refused.
-            (NewKind::Note, None) => (ItemKind::Note, Zeroizing::default()),
+            (NewKind::Key, fields) => {
+                let ItemFields {
+                    username,
+                    password,
+                    urls,
+                    notes,
+                    value,
+                } = fields.unwrap_or_default();
+                if !username.is_empty() || !password.is_empty() || !urls.is_empty() {
+                    return Err(NOT_A_LOGIN);
+                }
+                (ItemKind::Key { value }, notes)
+            }
+            (NewKind::Note, fields) => {
+                let ItemFields {
+                    username,
+                    password,
+                    urls,
+                    notes,
+                    value,
+                } = fields.unwrap_or_default();
+                if !username.is_empty() || !password.is_empty() || !urls.is_empty() {
+                    return Err(NOT_A_LOGIN);
+                }
+                if !value.is_empty() {
+                    return Err(NOT_A_KEY);
+                }
+                (ItemKind::Note, notes)
+            }
+            // A folder has a name and nothing else: any fields sent for one are refused.
             (NewKind::Collection, None) => (ItemKind::Collection, Zeroizing::default()),
-            (NewKind::Note | NewKind::Collection, Some(_)) => return Err(NOT_A_LOGIN),
+            (NewKind::Collection, Some(_)) => return Err(NOT_A_LOGIN),
         };
         self.sessions.write(session, generation, |vault, _| {
             Ok(vault
@@ -642,6 +702,15 @@ struct ItemArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RevealArgs {
+    session: SessionId,
+    generation: u64,
+    id: String,
+    field: RevealField,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CopyFieldArgs {
     session: SessionId,
     generation: u64,
@@ -723,13 +792,14 @@ pub(super) async fn reveal_password(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Tagged<Zeroizing<String>>> {
-    let ItemArgs {
+    let RevealArgs {
         session,
         generation,
         id,
+        field,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.reveal_password(session, generation, &id)).await
+    blocking(move || shell.reveal_password(session, generation, &id, field)).await
 }
 
 #[tauri::command]
@@ -926,6 +996,7 @@ mod tests {
     use super::super::{MALFORMED, parse};
     use super::*;
     use crate::error::{Outcome, ShellError};
+    use crate::os::{Clock, EXCLUSION_FORMATS};
     use crate::session::{Location, LockReason, OpenStep, Opened, SessionId};
     use crate::testing::{TestShell, heavy};
     use crate::views::{ItemDetail, ItemList, ItemSummary, SearchResults};
@@ -1073,7 +1144,7 @@ mod tests {
             detail,
             tagged(json!({
                 "summary": summary, "revision": 2, "notes": "a note", "urls": ["https://bank.example"],
-                "has_password": true,
+                "has_password": true, "has_value": false,
             }))
         );
         assert_eq!(
@@ -1134,7 +1205,7 @@ mod tests {
             detail,
             json!({
                 "summary": expected, "revision": 1, "notes": "a note", "urls": ["https://bank.example"],
-                "has_password": true,
+                "has_password": true, "has_value": false,
             })
         );
         assert_eq!(
@@ -1200,7 +1271,10 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = open_vault(&ts, "Family");
         let id = login(&ts, s, g, "Bank");
-        let revealed = ts.shell.reveal_password(s, g, &id).unwrap();
+        let revealed = ts
+            .shell
+            .reveal_password(s, g, &id, RevealField::Password)
+            .unwrap();
         assert_eq!((revealed.session, revealed.generation), (s, g));
         assert_eq!(revealed.data.as_str(), LOGIN_PW);
         assert_eq!(
@@ -1214,7 +1288,9 @@ mod tests {
             .unwrap()
             .data;
         assert_eq!(
-            ts.shell.reveal_password(s, g, &note).err(),
+            ts.shell
+                .reveal_password(s, g, &note, RevealField::Password)
+                .err(),
             Some(NOT_A_LOGIN)
         );
     }
@@ -1229,7 +1305,12 @@ mod tests {
         let not_found = Some(ShellError::from(CoreError::NotFound));
         let shell = &ts.shell;
         assert_eq!(shell.get_item(a, ga, &foreign).err(), not_found);
-        assert_eq!(shell.reveal_password(a, ga, &foreign).err(), not_found);
+        for field in [RevealField::Password, RevealField::KeyValue] {
+            assert_eq!(
+                shell.reveal_password(a, ga, &foreign, field).err(),
+                not_found
+            );
+        }
         assert_eq!(
             shell
                 .update_item(a, ga, edit(&foreign, 1, "Mine now", None))
@@ -1259,10 +1340,7 @@ mod tests {
         ts.shell
             .update_item(s, g, edit(&id, 1, "Bank (old)", None))
             .unwrap();
-        assert_eq!(
-            ts.shell.reveal_password(s, g, &id).unwrap().data.as_str(),
-            LOGIN_PW
-        );
+        assert_eq!(revealed(&ts, s, g, &id).as_str(), LOGIN_PW);
         let detail = ts.shell.get_item(s, g, &id).unwrap().data;
         assert_eq!(detail.summary.title, "Bank (old)");
         assert_eq!(detail.revision, 2);
@@ -1271,10 +1349,7 @@ mod tests {
         ts.shell
             .update_item(s, g, edit(&id, 2, "Bank", Some("another one")))
             .unwrap();
-        assert_eq!(
-            ts.shell.reveal_password(s, g, &id).unwrap().data.as_str(),
-            "another one"
-        );
+        assert_eq!(revealed(&ts, s, g, &id).as_str(), "another one");
     }
 
     #[test]
@@ -1464,7 +1539,9 @@ mod tests {
             READ_DONE,
             Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
         );
-        let revealed = ts.shell.reveal_password(family, gf, &id);
+        let revealed = ts
+            .shell
+            .reveal_password(family, gf, &id, RevealField::Password);
         failpoint::disarm_all();
         assert_eq!(revealed.err(), Some(ShellError::Locked));
 
@@ -1688,7 +1765,11 @@ mod tests {
         assert_eq!(list.items.len(), 1);
         assert!(list.items[0].trashed);
         assert_eq!(
-            shell.reveal_password(r, gr, &id).unwrap().data.as_str(),
+            shell
+                .reveal_password(r, gr, &id, RevealField::Password)
+                .unwrap()
+                .data
+                .as_str(),
             LOGIN_PW
         );
     }
@@ -1981,6 +2062,7 @@ mod tests {
             password: secret(LOGIN_PW),
             urls: vec!["support.example.com".to_owned()],
             notes: secret("a note"),
+            ..ItemFields::default()
         }
     }
 
@@ -2037,10 +2119,7 @@ mod tests {
         assert_eq!(detail.urls, ["https://support.example.com"]);
         assert_eq!(detail.notes.as_str(), "a note");
         assert!(detail.has_password);
-        assert_eq!(
-            ts.shell.reveal_password(s, g, &id).unwrap().data.as_str(),
-            LOGIN_PW
-        );
+        assert_eq!(revealed(&ts, s, g, &id).as_str(), LOGIN_PW);
 
         // The write is the item's only: a write that fails before it lands leaves nothing, not an empty login.
         failpoint::arm("atomic_write.before_replace");
@@ -2066,8 +2145,8 @@ mod tests {
         assert!(!titles.contains(&"Mail".to_owned()), "{titles:?}");
         assert_eq!(item_files(&ts, 0), 2);
 
-        // Only a login starts with fields. A note or a folder made as before (no fields) is still made, and any fields
-        // sent for either, a login's own or notes alone, are refused with nothing written.
+        // A login's own fields are for a login alone. A note or a folder made as before (no fields) is still made; a note
+        // may start with its text (`a_new_note_carries_its_text_in_one_write`), and a folder takes no fields at all.
         let notes_only = || ItemFields {
             notes: secret("steps"),
             ..ItemFields::default()
@@ -2089,13 +2168,12 @@ mod tests {
             };
             [
                 try_kind(NewKind::Note, login_fields()),
-                try_kind(NewKind::Note, notes_only()),
-                try_kind(NewKind::Note, ItemFields::default()),
+                try_kind(NewKind::Collection, login_fields()),
                 try_kind(NewKind::Collection, ItemFields::default()),
                 try_kind(NewKind::Collection, notes_only()),
             ]
         });
-        assert_eq!(refused, [Some(NOT_A_LOGIN); 5]);
+        assert_eq!(refused, [Some(NOT_A_LOGIN); 4]);
         assert_eq!(writes, 0);
     }
 
@@ -2247,6 +2325,7 @@ mod tests {
             password: secret(&bytes_of("é", 4096)),
             urls: vec![format!("https://{}", bytes_of("a", 2040)); 32],
             notes: secret(&bytes_of("é", 524_288)),
+            ..ItemFields::default()
         };
         let (made, writes) = item_writes(|| {
             ts.shell
@@ -2475,5 +2554,877 @@ mod tests {
         // A file item is made by attaching a file, never by `new_item`.
         let file = json!({ "session": 1, "generation": 1, "kind": "file", "title": "t" });
         assert_eq!(parse::<NewItemArgs>(&body(file)).err(), Some(MALFORMED));
+    }
+
+    /// A key's value, made up for these tests (never a real key).
+    const KEY_VALUE: &str = "demo-zzz-qqq-one";
+
+    /// What a field over its limit is refused with.
+    fn too_large_in(field: &'static str) -> Option<ShellError> {
+        Some(ShellError::TooLarge { what: field })
+    }
+
+    /// A key's fields: the value alone.
+    fn key_fields() -> ItemFields {
+        ItemFields {
+            value: secret(KEY_VALUE),
+            ..ItemFields::default()
+        }
+    }
+
+    /// A key named `name` holding [`KEY_VALUE`]: its ID.
+    fn key(ts: &TestShell, session: SessionId, generation: u64, name: &str) -> String {
+        ts.shell
+            .new_item(
+                session,
+                generation,
+                NewKind::Key,
+                name.to_owned(),
+                None,
+                Some(key_fields()),
+            )
+            .unwrap()
+            .data
+    }
+
+    /// A login's password, as `reveal_password` gives it.
+    fn revealed(
+        ts: &TestShell,
+        session: SessionId,
+        generation: u64,
+        id: &str,
+    ) -> Zeroizing<String> {
+        ts.shell
+            .reveal_password(session, generation, id, RevealField::Password)
+            .unwrap()
+            .data
+    }
+
+    /// The first vault, opened again as a read-only copy (as a backup is): its session and generation.
+    fn read_only_session(ts: &TestShell) -> (SessionId, u64) {
+        let dir = vault_dir(ts, 0);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let vault = heavy(|| {
+            ReadOnlyVault::open_folder(&dir, Credential::Password(PW), &CancelToken::new())
+        })
+        .unwrap();
+        let location = Location::folder(&dir).unwrap();
+        let opened = ts.shell.sessions.open(Some(location.clone()), None, |_| {
+            Ok(OpenStep::Session(location, Opened::ReadOnly(vault), ()))
+        });
+        let Ok(Outcome::Done(tagged)) = opened else {
+            panic!("the read-only session did not open");
+        };
+        (tagged.session, tagged.generation)
+    }
+
+    /// A key is made whole in one write with its name as its title and its value inside, and Reveal is the one way the
+    /// value reaches the page: tagged like a password's, refused for a stale generation and a foreign item, and
+    /// dropped when a lock lands between the read and the answer.
+    #[test]
+    fn reveal_key_value() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let folder = ts
+            .shell
+            .new_item(s, g, NewKind::Collection, "Agency".into(), None, None)
+            .unwrap()
+            .data;
+        let (made, writes) = item_writes(|| {
+            ts.shell.new_item(
+                s,
+                g,
+                NewKind::Key,
+                "OPENAI_API_KEY".into(),
+                Some(folder.clone()),
+                Some(key_fields()),
+            )
+        });
+        let id = made.unwrap().data;
+        assert_eq!(writes, 1, "more than one item write");
+        assert_eq!(item_files(&ts, 0), 2, "the folder and the key");
+
+        let shown = ts
+            .shell
+            .reveal_password(s, g, &id, RevealField::KeyValue)
+            .unwrap();
+        assert_eq!((shown.session, shown.generation), (s, g));
+        assert_eq!(shown.data.as_str(), KEY_VALUE);
+        assert_eq!(
+            serde_json::to_value(&shown).unwrap(),
+            json!({ "session": s.0, "generation": g, "data": KEY_VALUE })
+        );
+
+        // Opened, the key says it has a value and gives none; its name is its title.
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(detail.summary.title, "OPENAI_API_KEY");
+        assert_eq!(detail.summary.collection.as_deref(), Some(folder.as_str()));
+        assert_eq!(detail.revision, 0, "never edited");
+        assert!(detail.has_value && !detail.has_password);
+        assert_eq!((detail.notes.as_str(), detail.urls.len()), ("", 0));
+        assert_eq!(
+            serde_json::to_value(&detail.summary).unwrap()["kind"],
+            "key"
+        );
+
+        // A key made with no fields has no value, and Reveal gives the empty text.
+        let bare = ts
+            .shell
+            .new_item(s, g, NewKind::Key, "EMPTY_ONE".into(), None, None)
+            .unwrap()
+            .data;
+        assert!(!ts.shell.get_item(s, g, &bare).unwrap().data.has_value);
+        assert_eq!(
+            ts.shell
+                .reveal_password(s, g, &bare, RevealField::KeyValue)
+                .unwrap()
+                .data
+                .as_str(),
+            ""
+        );
+
+        // The key asked for is the one named, never the newest: a newer key, made after this one, gives its own value
+        // under its own ID, and the first still gives its own, to Reveal and to Copy alike.
+        let newer = ts
+            .shell
+            .new_item(
+                s,
+                g,
+                NewKind::Key,
+                "NEWER_KEY".into(),
+                None,
+                Some(ItemFields {
+                    value: secret("newer-value-0042"),
+                    ..ItemFields::default()
+                }),
+            )
+            .unwrap()
+            .data;
+        let value_of = |item: &str| {
+            ts.shell
+                .reveal_password(s, g, item, RevealField::KeyValue)
+                .unwrap()
+                .data
+        };
+        assert_eq!(value_of(&id).as_str(), KEY_VALUE);
+        assert_eq!(value_of(&newer).as_str(), "newer-value-0042");
+        ts.shell.copy_field(s, g, &id, CopyField::KeyValue).unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some(KEY_VALUE));
+
+        // §9: a lock between the read and the answer returns nothing.
+        let shell = Arc::clone(&ts.shell);
+        failpoint::observe(
+            READ_DONE,
+            Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
+        );
+        let during = ts.shell.reveal_password(s, g, &id, RevealField::KeyValue);
+        failpoint::disarm_all();
+        assert_eq!(during.err(), Some(ShellError::Locked));
+        // The old generation stays refused after the lock, whatever field is asked.
+        for field in [RevealField::KeyValue, RevealField::Password] {
+            assert_eq!(
+                ts.shell.reveal_password(s, g, &id, field).err(),
+                Some(ShellError::Locked)
+            );
+        }
+    }
+
+    /// A key's value is copied in Rust like a password: the same marks, the same timer (the settings' own, read at each
+    /// copy), cleared with its vault's lock, and the answer carries no value.
+    #[test]
+    fn copy_key_value_stays_in_rust() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = key(&ts, s, g, "OPENAI_API_KEY");
+        let start = ts.clock.now();
+        let answer = ts.shell.copy_field(s, g, &id, CopyField::KeyValue).unwrap();
+        assert_eq!((answer.session, answer.generation), (s, g));
+        let json = serde_json::to_value(&answer).unwrap();
+        assert_eq!(
+            json,
+            json!({ "session": s.0, "generation": g, "data": null })
+        );
+        assert!(!json.to_string().contains("demo-zzz"));
+        assert_eq!(ts.clipboard.text().as_deref(), Some(KEY_VALUE));
+        assert_eq!(ts.clipboard.formats(), EXCLUSION_FORMATS, "the marks");
+        assert_eq!(ts.shell.clipboard.owner(), Some(s));
+        let at = |secs: u64| {
+            let when = start + Duration::from_secs(secs);
+            ts.clock.set(when);
+            ts.timer.run_due(when);
+        };
+        at(29);
+        assert_eq!(
+            ts.clipboard.text().as_deref(),
+            Some(KEY_VALUE),
+            "cleared early"
+        );
+        at(30);
+        assert_eq!(ts.clipboard.text(), None, "not cleared at 30 s");
+        assert_eq!(ts.shell.clipboard.owner(), None);
+
+        // Something the person copied since is left alone, as for any copy.
+        let start = ts.clock.now();
+        ts.shell.copy_field(s, g, &id, CopyField::KeyValue).unwrap();
+        assert!(ts.clipboard.user_copy("mine"));
+        let when = start + Duration::from_secs(30);
+        ts.clock.set(when);
+        ts.timer.run_due(when);
+        assert_eq!(ts.clipboard.text().as_deref(), Some("mine"));
+
+        // The vault's lock clears it.
+        ts.shell.copy_field(s, g, &id, CopyField::KeyValue).unwrap();
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(ts.clipboard.text(), None, "the lock left it");
+        assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// A key's own fields go with a key, a login's with a login: each asked of the other is refused with a fixed
+    /// error and nothing is read, copied or opened on the clipboard.
+    #[test]
+    fn reveal_field_refused_on_wrong_kind() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let login_id = login(&ts, s, g, "Bank");
+        let key_id = key(&ts, s, g, "OPENAI_API_KEY");
+        let note = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Plans".into(), None, None)
+            .unwrap()
+            .data;
+        let folder = ts
+            .shell
+            .new_item(s, g, NewKind::Collection, "Agency".into(), None, None)
+            .unwrap()
+            .data;
+        let revealing = [
+            (login_id.as_str(), RevealField::KeyValue, NOT_A_KEY),
+            (note.as_str(), RevealField::KeyValue, NOT_A_KEY),
+            (folder.as_str(), RevealField::KeyValue, NOT_A_KEY),
+            (key_id.as_str(), RevealField::Password, NOT_A_LOGIN),
+            (note.as_str(), RevealField::Password, NOT_A_LOGIN),
+        ];
+        for (id, field, refusal) in revealing {
+            assert_eq!(
+                ts.shell.reveal_password(s, g, id, field).err(),
+                Some(refusal),
+                "{field:?}"
+            );
+        }
+        assert!(ts.clipboard.user_copy("theirs"));
+        let opens = ts.clipboard.opens();
+        let copying = [
+            (login_id.as_str(), CopyField::KeyValue, NOT_A_KEY),
+            (note.as_str(), CopyField::KeyValue, NOT_A_KEY),
+            (key_id.as_str(), CopyField::Password, NOT_A_LOGIN),
+            (key_id.as_str(), CopyField::Username, NOT_A_LOGIN),
+            (key_id.as_str(), CopyField::Url(0), NOT_A_LOGIN),
+        ];
+        for (id, field, refusal) in copying {
+            assert_eq!(
+                ts.shell.copy_field(s, g, id, field).err(),
+                Some(refusal),
+                "{field:?}"
+            );
+        }
+        assert_eq!(ts.clipboard.text().as_deref(), Some("theirs"));
+        assert_eq!(
+            ts.clipboard.opens(),
+            opens,
+            "a refusal opened the clipboard"
+        );
+
+        // A foreign item of another vault, and an item that is not there, are `NotFound` for both commands.
+        let (b, gb) = open_vault(&ts, "Work");
+        let foreign = key(&ts, b, gb, "THEIR_KEY");
+        let not_found = Some(ShellError::from(CoreError::NotFound));
+        for id in [foreign.clone(), ItemId::random().to_hex()] {
+            assert_eq!(
+                ts.shell
+                    .reveal_password(s, g, &id, RevealField::KeyValue)
+                    .err(),
+                not_found
+            );
+            assert_eq!(
+                ts.shell.copy_field(s, g, &id, CopyField::KeyValue).err(),
+                not_found
+            );
+        }
+        // A stale generation is `Locked` for both, and nothing reaches the clipboard.
+        assert_eq!(
+            ts.shell
+                .reveal_password(s, g + 1, &key_id, RevealField::KeyValue)
+                .err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(
+            ts.shell
+                .copy_field(s, g + 1, &key_id, CopyField::KeyValue)
+                .err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(ts.clipboard.text().as_deref(), Some("theirs"));
+        // The item itself is untouched in its own vault.
+        assert_eq!(
+            ts.shell
+                .reveal_password(b, gb, &foreign, RevealField::KeyValue)
+                .unwrap()
+                .data
+                .as_str(),
+            KEY_VALUE
+        );
+    }
+
+    /// A key's value is read, not written, so a read-only copy (a backup opened to look) reveals and copies it; every
+    /// write on it is refused.
+    #[test]
+    fn a_key_in_a_read_only_copy_can_be_read_but_not_made() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = key(&ts, s, g, "OPENAI_API_KEY");
+        let (r, gr) = read_only_session(&ts);
+
+        let shown = ts
+            .shell
+            .reveal_password(r, gr, &id, RevealField::KeyValue)
+            .unwrap();
+        assert_eq!(shown.data.as_str(), KEY_VALUE);
+        ts.shell
+            .copy_field(r, gr, &id, CopyField::KeyValue)
+            .unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some(KEY_VALUE));
+        let detail = ts.shell.get_item(r, gr, &id).unwrap().data;
+        assert!(detail.has_value);
+
+        let (refused, writes) = item_writes(|| {
+            [
+                ts.shell
+                    .new_item(
+                        r,
+                        gr,
+                        NewKind::Key,
+                        "NEW_KEY".into(),
+                        None,
+                        Some(key_fields()),
+                    )
+                    .err(),
+                ts.shell
+                    .new_item(
+                        r,
+                        gr,
+                        NewKind::Note,
+                        "Plans".into(),
+                        None,
+                        Some(ItemFields {
+                            notes: secret("text"),
+                            ..ItemFields::default()
+                        }),
+                    )
+                    .err(),
+                ts.shell
+                    .update_item(r, gr, edit(&id, 0, "RENAMED", None))
+                    .err(),
+            ]
+        });
+        assert_eq!(refused, [Some(ShellError::ReadOnly); 3]);
+        assert_eq!(writes, 0);
+    }
+
+    /// A bad name is refused by the engine whichever way a key's title is set (created through the shell, or
+    /// renamed), with the one fixed refusal the page puts in words, and nothing is written or changed. A note keeps
+    /// any title.
+    #[test]
+    fn bad_key_name_refused() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let bad_name = Some(ShellError::from(CoreError::InvalidInput {
+            what: "key name",
+        }));
+        for bad in [
+            "",
+            " ",
+            "1KEY",
+            "OPENAI-API-KEY",
+            "OPENAI API KEY",
+            "A.B",
+            "A=B",
+            "é",
+            "KEY\n",
+            "日本",
+            " KEY",
+        ] {
+            let (made, writes) = item_writes(|| {
+                ts.shell
+                    .new_item(s, g, NewKind::Key, bad.to_owned(), None, Some(key_fields()))
+            });
+            assert_eq!(made.err(), bad_name, "{bad:?}");
+            assert_eq!(writes, 0, "{bad:?}");
+            // Without fields too.
+            assert_eq!(
+                ts.shell
+                    .new_item(s, g, NewKind::Key, bad.to_owned(), None, None)
+                    .err(),
+                bad_name,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(item_files(&ts, 0), 0, "something was written");
+        assert!(ts.shell.list_items(s, g).unwrap().data.items.is_empty());
+        // What the page gets: fixed words only, never the name.
+        let refusal = serde_json::to_value(bad_name).unwrap();
+        assert_eq!(
+            refusal,
+            json!({ "code": "core", "kind": "invalid_input", "what": "key name" })
+        );
+
+        // The title's own limit holds first: one over it is `TooLarge`, one at it is a good name.
+        let too_large = too_large_in("title");
+        assert_eq!(
+            ts.shell
+                .new_item(
+                    s,
+                    g,
+                    NewKind::Key,
+                    "A".repeat(1025),
+                    None,
+                    Some(key_fields())
+                )
+                .err(),
+            too_large
+        );
+        let long = ts
+            .shell
+            .new_item(
+                s,
+                g,
+                NewKind::Key,
+                "A".repeat(1024),
+                None,
+                Some(key_fields()),
+            )
+            .unwrap()
+            .data;
+
+        // A rename goes through the engine's rule too, and a refusal leaves the key as it was.
+        let id = key(&ts, s, g, "GOOD_NAME");
+        let before = fs::read(item_file(&ts, 0, &id)).unwrap();
+        for bad in ["", "9NAME", "BAD NAME"] {
+            let change = ItemEdit {
+                notes: secret(""),
+                username: None,
+                urls: None,
+                ..edit(&id, 0, bad, None)
+            };
+            assert_eq!(
+                ts.shell.update_item(s, g, change).err(),
+                bad_name,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(fs::read(item_file(&ts, 0, &id)).unwrap(), before);
+        let rename = ItemEdit {
+            notes: secret(""),
+            username: None,
+            urls: None,
+            ..edit(&id, 0, "BETTER_NAME", None)
+        };
+        ts.shell.update_item(s, g, rename).unwrap();
+        assert_eq!(
+            ts.shell.get_item(s, g, &id).unwrap().data.summary.title,
+            "BETTER_NAME"
+        );
+        // The value did not move with the name.
+        assert_eq!(
+            ts.shell
+                .reveal_password(s, g, &id, RevealField::KeyValue)
+                .unwrap()
+                .data
+                .as_str(),
+            KEY_VALUE
+        );
+        // A login's fields sent to a key in an edit are refused, as for a note.
+        let login_edit = edit(&id, 1, "BETTER_NAME", Some("x"));
+        assert_eq!(
+            ts.shell.update_item(s, g, login_edit).err(),
+            Some(NOT_A_LOGIN)
+        );
+        assert!(ts.shell.get_item(s, g, &long).is_ok());
+
+        // Any other kind keeps any title.
+        for title in ["My note, with spaces!", "1 note", "é"] {
+            ts.shell
+                .new_item(s, g, NewKind::Note, title.into(), None, None)
+                .unwrap();
+        }
+    }
+
+    /// A key starts with its value alone (and notes, which any item may have): a login's fields are refused for it
+    /// and its value for every other kind, each before anything is written; the value has a limit of its own, checked
+    /// before the name.
+    #[test]
+    fn a_new_keys_fields_are_for_a_key_alone() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let (refused, writes) = item_writes(|| {
+            let try_new = |kind, title: &str, fields| {
+                ts.shell
+                    .new_item(s, g, kind, title.into(), None, Some(fields))
+                    .err()
+            };
+            let value_only = key_fields;
+            [
+                try_new(NewKind::Key, "A_KEY", login_fields()),
+                try_new(
+                    NewKind::Key,
+                    "A_KEY",
+                    ItemFields {
+                        username: "ada".into(),
+                        ..value_only()
+                    },
+                ),
+                try_new(
+                    NewKind::Key,
+                    "A_KEY",
+                    ItemFields {
+                        urls: vec!["https://a.example".into()],
+                        ..value_only()
+                    },
+                ),
+                try_new(
+                    NewKind::Key,
+                    "A_KEY",
+                    ItemFields {
+                        password: secret("pw"),
+                        ..value_only()
+                    },
+                ),
+                try_new(NewKind::Login, "Bank", value_only()),
+                try_new(NewKind::Note, "Plans", value_only()),
+                try_new(NewKind::Collection, "Folder", value_only()),
+            ]
+        });
+        assert_eq!(
+            refused,
+            [
+                Some(NOT_A_LOGIN),
+                Some(NOT_A_LOGIN),
+                Some(NOT_A_LOGIN),
+                Some(NOT_A_LOGIN),
+                Some(NOT_A_KEY),
+                Some(NOT_A_KEY),
+                // A folder takes no fields at all, so it is refused whatever they are.
+                Some(NOT_A_LOGIN),
+            ]
+        );
+        assert_eq!(writes, 0);
+        assert_eq!(item_files(&ts, 0), 0);
+
+        // The value's limit: one byte over, in ASCII and in "é", is `TooLarge`, even with a bad name; one at it is saved.
+        for unit in ["a", "é"] {
+            let big = ItemFields {
+                value: secret(&bytes_of(unit, MAX_KEY_VALUE + 1)),
+                ..ItemFields::default()
+            };
+            let (made, writes) = item_writes(|| {
+                ts.shell
+                    .new_item(s, g, NewKind::Key, "not a name".into(), None, Some(big))
+            });
+            assert_eq!(made.err(), too_large_in("value"), "{unit}");
+            assert_eq!(writes, 0);
+        }
+        let full = ItemFields {
+            value: secret(&bytes_of("é", MAX_KEY_VALUE)),
+            ..ItemFields::default()
+        };
+        let id = ts
+            .shell
+            .new_item(s, g, NewKind::Key, "BIG_ONE".into(), None, Some(full))
+            .unwrap()
+            .data;
+        assert_eq!(
+            ts.shell
+                .reveal_password(s, g, &id, RevealField::KeyValue)
+                .unwrap()
+                .data
+                .len(),
+            MAX_KEY_VALUE
+        );
+        assert_eq!(item_files(&ts, 0), 1);
+
+        // A key may carry notes like any item, and says them when opened.
+        let with_notes = ItemFields {
+            notes: secret("rotate monthly"),
+            ..key_fields()
+        };
+        let noted = ts
+            .shell
+            .new_item(s, g, NewKind::Key, "NOTED".into(), None, Some(with_notes))
+            .unwrap()
+            .data;
+        assert_eq!(
+            ts.shell.get_item(s, g, &noted).unwrap().data.notes.as_str(),
+            "rotate monthly"
+        );
+    }
+
+    /// A new key is refused as every item command is: a stale generation (`Locked`) and a folder of another vault,
+    /// neither of them writing (a read-only copy is in `a_key_in_a_read_only_copy_can_be_read_but_not_made`).
+    #[test]
+    fn new_key_is_refused_stale_and_foreign() {
+        let ts = TestShell::new();
+        let (a, ga) = open_vault(&ts, "Family");
+        let (b, gb) = open_vault(&ts, "Work");
+        let foreign = ts
+            .shell
+            .new_item(b, gb, NewKind::Collection, "Theirs".into(), None, None)
+            .unwrap()
+            .data;
+        let (refused, writes) = item_writes(|| {
+            (
+                ts.shell.new_item(
+                    a,
+                    ga,
+                    NewKind::Key,
+                    "A_KEY".into(),
+                    Some(foreign),
+                    Some(key_fields()),
+                ),
+                ts.shell.new_item(
+                    a,
+                    ga + 1,
+                    NewKind::Key,
+                    "A_KEY".into(),
+                    None,
+                    Some(key_fields()),
+                ),
+            )
+        });
+        assert_eq!(
+            refused.0.err(),
+            Some(CoreError::InvalidInput { what: "collection" }.into())
+        );
+        assert_eq!(refused.1.err(), Some(ShellError::Locked));
+        assert_eq!(writes, 0);
+        assert_eq!(item_files(&ts, 0), 0);
+    }
+
+    /// A note starts with its text in the one write, as a login starts with its fields: nothing is left empty between
+    /// two calls, the text is kept exactly (lines, quotes, other scripts), its limit is checked before anything is
+    /// written, and a login's own fields are still refused for it.
+    #[test]
+    fn a_new_note_carries_its_text_in_one_write() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let text = "Rotate the token.\n\"Then\" tell the team — 鍵\n";
+        let fields = || ItemFields {
+            notes: secret(text),
+            ..ItemFields::default()
+        };
+        let (made, writes) = item_writes(|| {
+            ts.shell.new_item(
+                s,
+                g,
+                NewKind::Note,
+                "Rotation steps".into(),
+                None,
+                Some(fields()),
+            )
+        });
+        let id = made.unwrap().data;
+        assert_eq!(writes, 1, "more than one item write");
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(
+            (detail.summary.title.as_str(), detail.revision),
+            ("Rotation steps", 0)
+        );
+        assert_eq!(detail.notes.as_str(), text);
+        assert!(!detail.has_password && !detail.has_value);
+        assert_eq!(
+            serde_json::to_value(&detail.summary).unwrap()["kind"],
+            "note"
+        );
+        // The text copies in Rust like any field.
+        ts.shell.copy_field(s, g, &id, CopyField::Notes).unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some(text));
+
+        // No text at all is an empty note, with fields given or not.
+        let empty = ts
+            .shell
+            .new_item(
+                s,
+                g,
+                NewKind::Note,
+                "Empty".into(),
+                None,
+                Some(ItemFields::default()),
+            )
+            .unwrap()
+            .data;
+        assert_eq!(
+            ts.shell.get_item(s, g, &empty).unwrap().data.notes.as_str(),
+            ""
+        );
+
+        // The text's limit, in ASCII and in "é": over it is `TooLarge` with nothing written; at it is saved.
+        for unit in ["a", "é"] {
+            let big = ItemFields {
+                notes: secret(&bytes_of(unit, 524_289)),
+                ..ItemFields::default()
+            };
+            let (made, writes) = item_writes(|| {
+                ts.shell
+                    .new_item(s, g, NewKind::Note, "Big".into(), None, Some(big))
+            });
+            assert_eq!(made.err(), too_large_in("notes"), "{unit}");
+            assert_eq!(writes, 0);
+        }
+        let full = ItemFields {
+            notes: secret(&bytes_of("é", 524_288)),
+            ..ItemFields::default()
+        };
+        let big = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Big".into(), None, Some(full))
+            .unwrap()
+            .data;
+        assert_eq!(
+            ts.shell.get_item(s, g, &big).unwrap().data.notes.len(),
+            524_288
+        );
+
+        // A write that fails before it lands leaves no empty note; a folder of another vault, a stale generation and a
+        // read-only copy are refused as for every item.
+        let files = item_files(&ts, 0);
+        failpoint::arm("atomic_write.before_replace");
+        let failed = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Lost".into(), None, Some(fields()));
+        failpoint::disarm_all();
+        assert!(failed.is_err());
+        assert_eq!(item_files(&ts, 0), files);
+        let (b, gb) = open_vault(&ts, "Work");
+        let foreign = ts
+            .shell
+            .new_item(b, gb, NewKind::Collection, "Theirs".into(), None, None)
+            .unwrap()
+            .data;
+        let (refused, writes) = item_writes(|| {
+            (
+                ts.shell
+                    .new_item(
+                        s,
+                        g,
+                        NewKind::Note,
+                        "x".into(),
+                        Some(foreign),
+                        Some(fields()),
+                    )
+                    .err(),
+                ts.shell
+                    .new_item(s, g + 1, NewKind::Note, "x".into(), None, Some(fields()))
+                    .err(),
+            )
+        });
+        assert_eq!(
+            refused,
+            (
+                Some(CoreError::InvalidInput { what: "collection" }.into()),
+                Some(ShellError::Locked)
+            )
+        );
+        assert_eq!(writes, 0);
+        let (r, gr) = read_only_session(&ts);
+        let (made, writes) = item_writes(|| {
+            ts.shell
+                .new_item(r, gr, NewKind::Note, "x".into(), None, Some(fields()))
+        });
+        assert_eq!(made.err(), Some(ShellError::ReadOnly));
+        assert_eq!(writes, 0);
+    }
+
+    /// A key never reaches the page but through Reveal: the list, an opened key and a search say there is one, and
+    /// the search finds the key by its name, never by its value.
+    #[test]
+    fn summary_never_holds_a_value() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = key(&ts, s, g, "OPENAI_API_KEY");
+        let list = serde_json::to_value(ts.shell.list_items(s, g).unwrap()).unwrap();
+        let detail = serde_json::to_value(ts.shell.get_item(s, g, &id).unwrap()).unwrap();
+        let by_name = ts.shell.search_all("openai").unwrap();
+        let by_value = ts.shell.search_all("demo-zzz").unwrap();
+        assert_eq!(by_name.hits[0].data.len(), 1);
+        assert!(
+            by_value.hits[0].data.is_empty(),
+            "a key was found by its value"
+        );
+        let found = serde_json::to_value(&by_name).unwrap();
+        for view in [&list, &detail, &found] {
+            let text = view.to_string();
+            for leaked in [KEY_VALUE, "demo-zzz", "qqq-one"] {
+                assert!(!text.contains(leaked), "a view holds {leaked}");
+            }
+            assert!(!text.contains("\"value\""), "a view has a value field");
+        }
+        assert_eq!(list["data"]["items"][0]["kind"], "key");
+        assert_eq!(found["hits"][0]["data"][0]["kind"], "key");
+        assert_eq!(detail["data"]["has_value"], true);
+        assert_eq!(detail["data"]["has_password"], false);
+        assert_eq!(list["data"]["items"][0]["username"], Value::Null);
+        assert_eq!(list["data"]["items"][0]["site"], Value::Null);
+    }
+
+    #[test]
+    fn reveal_and_key_requests_are_strict() {
+        let body = |value: Value| InvokeBody::Json(value);
+        let id = "0".repeat(32);
+        for field in [json!("password"), json!("key_value")] {
+            let request = json!({ "session": 1, "generation": 1, "id": id, "field": field });
+            assert!(parse::<RevealArgs>(&body(request)).is_ok(), "{field}");
+        }
+        for field in [
+            json!("value"),
+            json!("Password"),
+            json!("previous"),
+            json!({ "previous": 0 }),
+            json!(null),
+        ] {
+            let request = json!({ "session": 1, "generation": 1, "id": id, "field": field });
+            assert_eq!(
+                parse::<RevealArgs>(&body(request)).err(),
+                Some(MALFORMED),
+                "{field}"
+            );
+        }
+        // The field is needed, and nothing else is allowed.
+        let missing = json!({ "session": 1, "generation": 1, "id": id });
+        assert_eq!(parse::<RevealArgs>(&body(missing)).err(), Some(MALFORMED));
+        let extra =
+            json!({ "session": 1, "generation": 1, "id": id, "field": "key_value", "text": "x" });
+        assert_eq!(parse::<RevealArgs>(&body(extra)).err(), Some(MALFORMED));
+
+        // Copying a key's value is a field of `copy_field` too.
+        let copy = json!({ "session": 1, "generation": 1, "id": id, "field": "key_value" });
+        assert!(parse::<CopyFieldArgs>(&body(copy)).is_ok());
+        let wrong = json!({ "session": 1, "generation": 1, "id": id, "field": "keyvalue" });
+        assert_eq!(parse::<CopyFieldArgs>(&body(wrong)).err(), Some(MALFORMED));
+
+        // A new key, with its value, and a new note with its text.
+        let key = json!({
+            "session": 1, "generation": 1, "kind": "key", "title": "A_KEY", "collection": null,
+            "fields": { "value": "v" },
+        });
+        assert!(parse::<NewItemArgs>(&body(key.clone())).is_ok());
+        let mut note = key;
+        note["kind"] = json!("note");
+        note["fields"] = json!({ "notes": "text" });
+        assert!(parse::<NewItemArgs>(&body(note.clone())).is_ok());
+        note["fields"] = json!({ "value": 5 });
+        assert_eq!(
+            parse::<NewItemArgs>(&body(note.clone())).err(),
+            Some(MALFORMED)
+        );
+        note["fields"] = json!({ "secret": "x" });
+        assert_eq!(parse::<NewItemArgs>(&body(note)).err(), Some(MALFORMED));
     }
 }

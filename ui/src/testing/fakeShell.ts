@@ -9,7 +9,7 @@ export const PASSWORD = "correct horse battery";
 
 export interface FakeItem {
   id: string;
-  kind: "login" | "note" | "file" | "collection";
+  kind: "login" | "key" | "note" | "file" | "collection";
   title: string;
   username?: string | null;
   collection?: string | null;
@@ -18,6 +18,10 @@ export interface FakeItem {
   notes?: string;
   urls?: string[];
   has_password?: boolean;
+  /** A key's value: it reaches the page only through `reveal_password`, as in the shell. */
+  value?: string;
+  /** A login's password: it reaches the page only through `reveal_password`, as in the shell. */
+  password?: string;
   attachments?: { file_id: string; name: string; length: number; media_type: string }[];
 }
 
@@ -262,6 +266,15 @@ export interface FakeShell {
   made: { session: number; generation: number; kind: string; title: string; collection: string | null; fields: Record<string, unknown> | null }[];
   /** Every `copy_generated` that reached the shell, as it was sent (the values are made up). */
   generated: { session: number; generation: number; value: string }[];
+  /** Every `reveal_password` the shell answered, as it was sent (a refused one is not here). */
+  revealed: { session: number; generation: number; id: string; field: string }[];
+  /**
+   * Holds every `reveal_password` answer until `release` is called: the value is read when the command arrives, as the
+   * shell reads it, and the answer comes later, so the person can open another item or lock in between.
+   */
+  holdReveal(): () => void;
+  /** While `holdReveal` holds, lets the oldest waiting answer through and keeps holding the rest, to answer out of step. */
+  releaseOneReveal(): void;
   /**
    * Holds every `new_item` answer until `release` is called: the item is made when the command arrives, as the shell
    * writes it, and the answer is read later, so a lock in between leaves an answer tagged with the generation from before.
@@ -271,6 +284,13 @@ export interface FakeShell {
 
 /** What the shell sends for a website that is not an `http` or `https` address (`NOT_A_WEBSITE`). */
 export const NOT_A_WEBSITE = { code: "invalid_input", what: "website" };
+/** What the engine sends for a key's name that is not a variable name (`check_key_name`). */
+export const BAD_KEY_NAME = { code: "core", kind: "invalid_input", what: "key name" };
+/** What the shell sends for a login's field asked of a key or a note, and a key's value asked of anything else. */
+const NOT_A_LOGIN = { code: "invalid_input", what: "not a login" };
+const NOT_A_KEY = { code: "invalid_input", what: "not a key" };
+/** The shell's limit on a key's value (`MAX_KEY_VALUE`). */
+const MAX_KEY_VALUE = 16_384;
 
 /**
  * `normalise_url` as the shell has it, in short: trimmed, `https://` added when there is no scheme of its own (a host and
@@ -351,8 +371,10 @@ export function installFakeShell(
   const opened: FakeShell["opened"] = [];
   let heldSearch: (() => void)[] | undefined;
   let heldNewItem: (() => void)[] | undefined;
+  let heldReveal: (() => void)[] | undefined;
   const made: FakeShell["made"] = [];
   const generated: FakeShell["generated"] = [];
+  const revealed: FakeShell["revealed"] = [];
   const random = randomSource(7);
   let nextItem = 0x1000;
   const keys = new Map<FakeVault, string>();
@@ -661,14 +683,36 @@ export function installFakeShell(
           notes: item.notes ?? "",
           urls: item.urls ?? [],
           has_password: item.has_password ?? false,
+          has_value: item.kind === "key" && (item.value ?? "") !== "",
         });
+      }
+      case "reveal_password": {
+        const sent = exactly(args, ["session", "generation", "id", "field"]) as {
+          session: number;
+          generation: number;
+          id: string;
+          field: unknown;
+        };
+        const item = vaultFor(sent.session, sent.generation).items?.find((i) => i.id === sent.id);
+        if (item === undefined) return refuse({ code: "core", kind: "not_found" });
+        if (sent.field !== "password" && sent.field !== "key_value") return refuse(MALFORMED);
+        // A login's password and a key's value, each only of its own kind.
+        if (sent.field === "password" && item.kind !== "login") return refuse(NOT_A_LOGIN);
+        if (sent.field === "key_value" && item.kind !== "key") return refuse(NOT_A_KEY);
+        revealed.push({ session: sent.session, generation: sent.generation, id: sent.id, field: sent.field });
+        return tagged(sent.session, sent.generation, sent.field === "key_value" ? (item.value ?? "") : (item.password ?? "Pw-from-the-fake-shell"));
       }
       case "copy_field": {
         const sent = exactly(args, ["session", "generation", "id", "field"]) as {
           session: number;
           generation: number;
+          id: string;
+          field: unknown;
         };
-        vaultFor(sent.session, sent.generation);
+        const item = vaultFor(sent.session, sent.generation).items?.find((i) => i.id === sent.id);
+        // A key's value is a key's alone, and a login's fields are a login's.
+        if (item !== undefined && sent.field === "key_value" && item.kind !== "key") return refuse(NOT_A_KEY);
+        if (item?.kind === "key" && (sent.field === "password" || sent.field === "username")) return refuse(NOT_A_LOGIN);
         copied.push(sent);
         return tagged(sent.session, sent.generation, null);
       }
@@ -731,32 +775,45 @@ export function installFakeShell(
           fields: Record<string, unknown> | null;
         };
         const vault = vaultFor(sent.session, sent.generation);
-        if (sent.kind !== "login") return refuse(MALFORMED);
+        if (sent.kind !== "login" && sent.kind !== "key" && sent.kind !== "note") return refuse(MALFORMED);
+        const kind = sent.kind;
         if (sent.fields !== null) {
-          const known = ["username", "password", "urls", "notes"];
+          const known = ["username", "password", "urls", "notes", "value"];
           if (Object.keys(sent.fields).some((name) => !known.includes(name))) return refuse(MALFORMED);
         }
-        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         const fields = sent.fields ?? {};
-        const urls = ((fields.urls as string[] | undefined) ?? []).map(normaliseUrl);
+        // The shell's limits come first, then which fields belong to which kind, then the session's own refusals.
+        if (typeof fields.value === "string" && new TextEncoder().encode(fields.value).length > MAX_KEY_VALUE) {
+          return refuse({ code: "too_large", what: "value" });
+        }
+        const text = (name: string): string => {
+          const found = fields[name];
+          return typeof found === "string" ? found : "";
+        };
+        const loginOnly = text("username") !== "" || text("password") !== "" || ((fields.urls as string[] | undefined) ?? []).length > 0;
+        if (kind !== "login" && loginOnly) return refuse(NOT_A_LOGIN);
+        if (kind !== "key" && text("value") !== "") return refuse(NOT_A_KEY);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const urls = kind === "login" ? ((fields.urls as string[] | undefined) ?? []).map(normaliseUrl) : [];
         const folder = sent.collection;
         if (folder !== null && vault.items?.find((item) => item.id === folder && item.kind === "collection") === undefined) {
           return refuse({ code: "core", kind: "invalid_input", what: "collection" });
         }
+        // The engine's rule for a key's title: a variable name.
+        if (kind === "key" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(sent.title)) return refuse(BAD_KEY_NAME);
         nextItem += 1;
         const id = itemId(nextItem);
-        const password = (fields.password as string | undefined) ?? "";
+        const password = text("password");
         vault.items = [
           ...(vault.items ?? []),
           {
             id,
-            kind: "login",
+            kind,
             title: sent.title,
-            username: (fields.username as string | undefined) ?? "",
+            ...(kind === "login" ? { username: text("username"), urls, has_password: password !== "" } : {}),
+            ...(kind === "key" ? { value: text("value") } : {}),
             collection: folder,
-            urls,
-            notes: (fields.notes as string | undefined) ?? "",
-            has_password: password !== "",
+            notes: text("notes"),
             modified_at: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
           },
         ];
@@ -889,6 +946,14 @@ export function installFakeShell(
           });
         });
       }
+      if (cmd === "reveal_password" && heldReveal !== undefined) {
+        const release = heldReveal;
+        return new Promise((resolve) => {
+          release.push(() => {
+            resolve(result);
+          });
+        });
+      }
       return Promise.resolve(result);
     } catch (error) {
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
@@ -1009,6 +1074,18 @@ export function installFakeShell(
     },
     made,
     generated,
+    revealed,
+    holdReveal: () => {
+      const waiting: (() => void)[] = [];
+      heldReveal = waiting;
+      return () => {
+        heldReveal = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    releaseOneReveal: () => {
+      heldReveal?.shift()?.();
+    },
     holdNewItem: () => {
       const waiting: (() => void)[] = [];
       heldNewItem = waiting;

@@ -1,17 +1,24 @@
-import type { ItemKind, ItemSummary } from "../api";
+import type { CopyableField, ItemKind, ItemSummary } from "../api";
 import { formatBytes } from "../format";
 import { Clip } from "../parts/Clip";
 import { CopyIcon, KindIcon, PaperclipIcon } from "../parts/Icon";
 
-/** The groups of the list, in the order they show, and the words for each. */
+/** The groups of the list, in the order they show (keys first, as drawn), and the words for each. */
 const GROUPS: { kind: ItemKind; heading: string; word: string }[] = [
+  { kind: "key", heading: "Keys", word: "Key" },
   { kind: "login", heading: "Logins", word: "Login" },
   { kind: "note", heading: "Notes", word: "Note" },
   { kind: "file", heading: "Files", word: "File" },
 ];
 
 // A picture colour for each kind of item, as the approved screens had them.
-const TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", collection: "t4" };
+const TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", key: "t3", collection: "t4" };
+
+/** What a row's copy button copies, and how it is named for a screen reader; a note and a file have none. */
+const COPY: Partial<Record<ItemKind, { field: CopyableField; word: string }>> = {
+  login: { field: "password", word: "password" },
+  key: { field: "key_value", word: "key" },
+};
 
 function detailOf(item: ItemSummary): string {
   if (item.kind === "login") return item.username ?? "";
@@ -26,22 +33,22 @@ function byTitle(a: ItemSummary, b: ItemSummary): number {
 
 /**
  * The items of a list, in a group for each kind. A row opens the item; a login's row has a button that copies its
- * password. `folderNames` names the folder of each item when the list spans folders (All items), so a row says where it
- * lives.
+ * password, and a key's one that copies its value (both in Rust: the page never holds either). `folderNames` names the
+ * folder of each item when the list spans folders (All items), so a row says where it lives.
  */
 export function ItemList({
   items,
   openId,
   folderNames,
   onOpen,
-  onCopyPassword,
+  onCopy,
 }: {
   items: readonly ItemSummary[];
   openId: string | null;
   /** Folder names by folder ID, or `null` to show none. */
   folderNames: ReadonlyMap<string, string> | null;
   onOpen: (id: string) => void;
-  onCopyPassword: (id: string) => void;
+  onCopy: (id: string, field: CopyableField) => void;
 }) {
   return (
     <div className="lgroups">
@@ -57,6 +64,7 @@ export function ItemList({
             <ul className="grp lgrp">
               {group.map((item) => {
                 const folder = item.collection === null ? undefined : folderNames?.get(item.collection);
+                const copy = COPY[item.kind];
                 return (
                   <li key={item.id} className={item.id === openId ? "lrow on" : "lrow"}>
                     <button
@@ -80,13 +88,13 @@ export function ItemList({
                       {folder === undefined ? null : <span className="rfold">{folder}</span>}
                     </button>
                     <div className="cslot">
-                      {item.kind === "login" ? (
+                      {copy !== undefined ? (
                         <button
                           type="button"
                           className="cpy"
-                          aria-label={`Copy password for ${item.title}`}
+                          aria-label={`Copy ${copy.word} for ${item.title}`}
                           onClick={() => {
-                            onCopyPassword(item.id);
+                            onCopy(item.id, copy.field);
                           }}
                         >
                           <CopyIcon />

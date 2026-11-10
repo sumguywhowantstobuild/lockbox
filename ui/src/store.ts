@@ -29,6 +29,10 @@ export interface OpenItem {
 export type Tool =
   /** The new-login form (6b), its title started with `title` (the search text it was opened from, or empty). */
   | { kind: "new_login"; title: string }
+  /** The new-key form (7a). */
+  | { kind: "new_key" }
+  /** The new-note form (7b). */
+  | { kind: "new_note" }
   /** The Generator page (16a). */
   | { kind: "generator" };
 
@@ -38,6 +42,22 @@ export interface LoginDraft {
   username: string;
   website: string;
   password: string;
+  /** The folder's id, or `null` for none. */
+  folder: string | null;
+}
+
+/** What the new-key form sends: the name, and the value exactly as typed or pasted. The shell checks the name and the limits. */
+export interface KeyDraft {
+  name: string;
+  value: string;
+  /** The folder's id, or `null` for none. */
+  folder: string | null;
+}
+
+/** What the new-note form sends: the title and the text as typed. */
+export interface NoteDraft {
+  title: string;
+  text: string;
   /** The folder's id, or `null` for none. */
   folder: string | null;
 }
@@ -130,8 +150,17 @@ export interface SessionData {
   tool: Tool | null;
   /** The folder shown, or `null` for All items. */
   folder: string | null;
-  /** Values the person asked to see (a password on Reveal), by item. */
+  /**
+   * Values the person asked to see (a key's value or a login's password on Reveal), by item. Only the item open in the panel
+   * can have one: Hide, opening an item (the same one again too), a form or another folder, or closing the panel, takes it
+   * away, and a lock takes the whole record.
+   */
   reveals: Record<string, string>;
+  /**
+   * The reveal token: a Reveal request keeps the number it was asked under, and every one of those events moves it on
+   * (`endReveals`), so an answer that comes after is known to be late and is dropped.
+   */
+  revealEpoch: number;
   /** Text typed and not saved, by name. */
   forms: Record<string, string>;
   /** The recovery key step this vault is in, or `null`. */
@@ -212,6 +241,11 @@ const listeners = new Set<() => void>();
 let started: Promise<void> | undefined;
 /** Which search is the latest asked (and 0 more each time the search closes): an older answer is dropped. */
 let searchRun = 0;
+
+/** A session's record with every revealed value gone and the reveal token moved on, so no request still out can show one. */
+function endReveals(entry: SessionData): SessionData {
+  return { ...entry, reveals: {}, revealEpoch: entry.revealEpoch + 1 };
+}
 
 function set(next: StoreState): void {
   state = next;
@@ -347,6 +381,7 @@ function newRecord(
     tool: null,
     folder: null,
     reveals: {},
+    revealEpoch: 0,
     forms: {},
     recovery,
     asks,
@@ -839,11 +874,16 @@ export async function selectItem(session: number, id: string | null, saved = fal
   const entry = sessionOf(session);
   if (entry === undefined) return;
   if (id === null) {
-    update(session, (current) => ({ ...current, openItem: null }));
+    update(session, (current) => ({ ...endReveals(current), openItem: null }));
     return;
   }
   const { generation } = entry;
-  update(session, (current) => ({ ...current, tool: null, openItem: { id, detail: null, error: null, saved } }));
+  // A value revealed for the item that was open does not stay for the next, or for the same one opened again.
+  update(session, (current) => ({
+    ...endReveals(current),
+    tool: null,
+    openItem: { id, detail: null, error: null, saved },
+  }));
   const shows = () => sessionOf(session)?.openItem?.id === id && stillOpen(session, generation);
   try {
     const answer = await api.getItem({ session, generation }, id);
@@ -857,14 +897,29 @@ export async function selectItem(session: number, id: string | null, saved = fal
 
 /** Opens the new-login form in the vault's panel, its title started with `title`. Nothing in a vault that is read-only. */
 export function openNewLogin(session: number, title = ""): void {
+  openTool(session, { kind: "new_login", title });
+}
+
+/** Opens the new-key form in the vault's panel. Nothing in a vault that is read-only. */
+export function openNewKey(session: number): void {
+  openTool(session, { kind: "new_key" });
+}
+
+/** Opens the new-note form in the vault's panel. Nothing in a vault that is read-only. */
+export function openNewNote(session: number): void {
+  openTool(session, { kind: "new_note" });
+}
+
+/** Puts a form in the vault's panel in place of the item open there (and of the value revealed for it). */
+function openTool(session: number, tool: Tool): void {
   const entry = sessionOf(session);
   if (entry === undefined || entry.readOnly) return;
-  update(session, (current) => ({ ...current, openItem: null, tool: { kind: "new_login", title } }));
+  update(session, (current) => ({ ...endReveals(current), openItem: null, tool }));
 }
 
 /** Opens the Generator page in the vault's panel. */
 export function openGenerator(session: number): void {
-  update(session, (current) => ({ ...current, openItem: null, tool: { kind: "generator" } }));
+  update(session, (current) => ({ ...endReveals(current), openItem: null, tool: { kind: "generator" } }));
 }
 
 /** Closes the form or tool in the panel; what was typed in it is gone. */
@@ -881,17 +936,37 @@ export type SaveResult = "saved" | "stale" | { failed: unknown };
  * or the shell's `locked` when the page missed the event) gets nothing said: the form is already gone with the vault's
  * record, and what was written stays written. A refusal comes back for the form to say, and the form stays as it was.
  */
-export async function saveNewLogin(session: number, draft: LoginDraft): Promise<SaveResult> {
+export function saveNewLogin(session: number, draft: LoginDraft): Promise<SaveResult> {
+  const website = draft.website.trim();
+  return saveNew(session, (vault) =>
+    api.newLogin(vault, draft.title.trim(), draft.folder, {
+      username: draft.username,
+      password: draft.password,
+      urls: website === "" ? [] : [website],
+    }),
+  );
+}
+
+/**
+ * Saves the new-key form as a key, whole, in one write: the name (trimmed) is its title, the value goes to Rust exactly as
+ * typed and is never kept here. Everything else is as `saveNewLogin`: the key opens hidden with "Saved", a vault that locked
+ * meanwhile gets nothing said, and a refusal (a name that is not a variable name) comes back for the form to say.
+ */
+export function saveNewKey(session: number, draft: KeyDraft): Promise<SaveResult> {
+  return saveNew(session, (vault) => api.newKey(vault, draft.name.trim(), draft.folder, draft.value));
+}
+
+/** Saves the new-note form as a note, whole, in one write, and opens it with its text showing. As `saveNewLogin`. */
+export function saveNewNote(session: number, draft: NoteDraft): Promise<SaveResult> {
+  return saveNew(session, (vault) => api.newNote(vault, draft.title.trim(), draft.folder, draft.text));
+}
+
+async function saveNew(session: number, make: (vault: api.SessionRef) => Promise<api.Tagged<string>>): Promise<SaveResult> {
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
   const { generation } = entry;
   try {
-    const website = draft.website.trim();
-    const made = await api.newLogin({ session, generation }, draft.title.trim(), draft.folder, {
-      username: draft.username,
-      password: draft.password,
-      urls: website === "" ? [] : [website],
-    });
+    const made = await make({ session, generation });
     if (!stillOpen(session, generation)) return "stale";
     // The login exists now. Whatever the list says next, the form's job is done.
     const record = sessionOf(session);
@@ -910,7 +985,7 @@ export async function saveNewLogin(session: number, draft: LoginDraft): Promise<
 
 /** Shows a folder's items (`null`: all items), and closes the panel. */
 export function selectFolder(session: number, folder: string | null): void {
-  update(session, (entry) => ({ ...entry, folder, openItem: null }));
+  update(session, (entry) => ({ ...endReveals(entry), folder, openItem: null }));
 }
 
 /** How a copy or an open ended: it worked, the vault locked meanwhile (nothing to say), or the shell's refusal. */
@@ -921,12 +996,16 @@ type Done = "done" | "stale" | { failed: unknown };
  * person when it will be cleared. The shell's refusal comes back for the caller to say where it fits.
  */
 async function copyAndTell(session: number, id: string, field: CopyableField): Promise<Done> {
-  return copyThenTell(
-    session,
-    field === "password" ? "Password copied" : "Username copied",
-    (vault) => api.copyField(vault, id, field),
-  );
+  return copyThenTell(session, COPIED[field], (vault) => api.copyField(vault, id, field));
 }
+
+/** What the message says after each copy. */
+const COPIED: Record<CopyableField, string> = {
+  password: "Password copied",
+  username: "Username copied",
+  key_value: "Key copied",
+  notes: "Text copied",
+};
 
 /** Runs a copy the shell makes, and once it has, says `text` and when the clipboard clears. */
 async function copyThenTell(
@@ -976,6 +1055,35 @@ export async function copyGenerated(session: number, value: string): Promise<voi
 export async function copyField(session: number, id: string, field: CopyableField): Promise<void> {
   const done = await copyAndTell(session, id, field);
   if (typeof done === "object") set({ ...state, toast: { kind: "failed", session, error: done.failed } });
+}
+
+/**
+ * Reveal on an item's details: asks the shell for a login's password or a key's value (`field`) and keeps it in the session's
+ * record while the item stays open. Each request carries the session's reveal token as it was when asked; Hide, another item,
+ * a form or tool, another folder, the panel closing and the same item opening again all change it (`endReveals`), and an
+ * answer whose token is no longer the current one is dropped, so a late answer, or a second one from a second press, never
+ * puts a hidden value back. An answer from a vault that locked is dropped too. Neither says anything; a refusal that is still
+ * current is said as a message.
+ */
+export async function revealValue(session: number, id: string, field: api.RevealableField): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return;
+  const { generation, revealEpoch: token } = entry;
+  const current = () => stillOpen(session, generation) && sessionOf(session)?.revealEpoch === token;
+  try {
+    const answer = await api.revealValue({ session, generation }, id, field);
+    if (!current() || sessionOf(session)?.openItem?.id !== id) return;
+    update(session, (record) => ({ ...record, reveals: { ...record.reveals, [id]: answer.data } }));
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !current()) return;
+    set({ ...state, toast: { kind: "failed", session, error } });
+  }
+}
+
+/** Hide on a revealed value: it goes off the page and out of the store, and any answer still on its way is no longer wanted. */
+export function hideReveal(session: number): void {
+  update(session, endReveals);
 }
 
 /** Opens the login's website number `index` through the shell, which opens only an `http` or `https` one. */

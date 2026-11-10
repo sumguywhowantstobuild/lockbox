@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { ItemDetail, ItemKind, ItemSummary } from "../api";
+import type { CopyableField, ItemDetail, ItemKind, ItemSummary, RevealableField } from "../api";
 import { changedText, formatBytes } from "../format";
 import { messageFor } from "../messages";
+import { Button } from "../parts/Button";
 import { CopyIcon, KindIcon } from "../parts/Icon";
 import { Panel } from "../parts/Panel";
-import { copyField, openSite, type SessionData } from "../store";
+import { copyField, hideReveal, openSite, revealValue, type SessionData } from "../store";
+import { useValueGuard } from "../useValueGuard";
 
-const KIND_WORD: Record<ItemKind, string> = { login: "Login", note: "Note", file: "File", collection: "Folder" };
-const KIND_TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", collection: "t4" };
+const KIND_WORD: Record<ItemKind, string> = { login: "Login", key: "Key", note: "Note", file: "File", collection: "Folder" };
+const KIND_TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", key: "t3", collection: "t4" };
 
 /**
  * A stored website as an address the shell would open: it parses, and it is `http` or `https` (the shell's own rule, which
@@ -37,11 +39,11 @@ function shown(stored: string): string {
     .replace(/\/$/, "");
 }
 
-function Field({ label, children, action }: { label: string; children: ReactNode; action?: ReactNode }) {
+function Field({ label, children, action }: { label?: string; children: ReactNode; action?: ReactNode }) {
   return (
     <div className="fld">
       <div className="fv">
-        <span className="fl">{label}</span>
+        {label === undefined ? null : <span className="fl">{label}</span>}
         {children}
       </div>
       {action}
@@ -75,32 +77,16 @@ function LoginFields({ data, summary, detail }: { data: SessionData; summary: It
             </Field>
           )}
           {detail === null ? null : (
-            <div className="fld col">
-              <span className="fl">Password</span>
-              {detail.has_password ? (
-                <>
-                  {/* Dots that stand for a password, never one: the password is not on this page. */}
-                  <span className="sec hid" aria-hidden="true">
-                    ••••••••••••••
-                  </span>
-                  <span className="sr">Hidden</span>
-                  <div className="fact">
-                    <button
-                      type="button"
-                      className="pill t cp"
-                      onClick={() => {
-                        void copyField(data.session, summary.id, "password");
-                      }}
-                    >
-                      <CopyIcon />
-                      Copy password
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <span className="fval">No password saved</span>
-              )}
-            </div>
+            <SecretValue
+              data={data}
+              summary={summary}
+              field="password"
+              label="Password"
+              boxName="Password"
+              copyWords="Copy password"
+              has={detail.has_password}
+              noneWords="No password saved"
+            />
           )}
         </div>
       </section>
@@ -147,16 +133,149 @@ function LoginFields({ data, summary, detail }: { data: SessionData; summary: It
   );
 }
 
-function NoteFields({ detail }: { detail: ItemDetail | null }) {
+/**
+ * A key's value, once revealed: in Geist Mono where a screen reader can reach it, and not selectable, so a copy aimed at it
+ * is stopped and Ctrl+C does what Copy key does, through the shell (`useValueGuard`). It is on the page only while it is
+ * shown.
+ */
+function RevealedValue({ value, name, onCopy }: { value: string; name: string; onCopy: () => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  useValueGuard(box, onCopy);
+  return (
+    <div ref={box} className="sec kval" role="textbox" aria-readonly="true" aria-label={name} tabIndex={0}>
+      {value}
+    </div>
+  );
+}
+
+/**
+ * A value the person can reveal, for a login's password and a key's value alike (one path, with the field that differs): its
+ * label, the value hidden as dots, Copy (in Rust) and Reveal. Reveal asks the shell for the value and shows it in the guarded
+ * box with Hide in Reveal's place; Hide, opening another item (or this one again), a form, another folder, closing the panel
+ * or a lock takes it away, and an answer that comes late never brings it back (`revealValue` in the store). With nothing
+ * saved, it says so and offers neither.
+ */
+function SecretValue({
+  data,
+  summary,
+  field,
+  label,
+  boxName,
+  copyWords,
+  has,
+  noneWords,
+}: {
+  data: SessionData;
+  summary: ItemSummary;
+  field: RevealableField & CopyableField;
+  label: string;
+  /** What a screen reader calls the box that holds the revealed value. */
+  boxName: string;
+  copyWords: string;
+  has: boolean;
+  noneWords: string;
+}) {
+  const value = data.reveals[summary.id];
+  const copyIt = () => {
+    void copyField(data.session, summary.id, field);
+  };
+  return (
+    <div className="fld col">
+      <span className="fl">{label}</span>
+      {has ? (
+        <>
+          {value === undefined ? (
+            <>
+              {/* Dots that stand for a value, never one: the value is not on this page until Reveal. */}
+              <span className="sec hid" aria-hidden="true">
+                ••••••••••••••
+              </span>
+              <span className="sr">Hidden</span>
+            </>
+          ) : (
+            <RevealedValue value={value} name={boxName} onCopy={copyIt} />
+          )}
+          <div className="fact">
+            <Button look="pill-main" onClick={copyIt}>
+              <CopyIcon />
+              {copyWords}
+            </Button>
+            <Button
+              onClick={() => {
+                if (value === undefined) void revealValue(data.session, summary.id, field);
+                else hideReveal(data.session);
+              }}
+            >
+              {value === undefined ? "Reveal" : "Hide"}
+            </Button>
+          </div>
+        </>
+      ) : (
+        <span className="fval">{noneWords}</span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A key's details (3c, 3d): its value, hidden until Reveal (`SecretValue`), and its notes when it has some.
+ */
+function KeyFields({ data, summary, detail }: { data: SessionData; summary: ItemSummary; detail: ItemDetail | null }) {
+  if (detail === null) return null;
+  return (
+    <>
+      <section className="gp">
+        <div className="grp">
+          <SecretValue
+            data={data}
+            summary={summary}
+            field="key_value"
+            label="Value"
+            boxName="Key value"
+            copyWords="Copy key"
+            has={detail.has_value}
+            noneWords="No value saved"
+          />
+        </div>
+      </section>
+      {detail.notes !== "" ? (
+        <section className="gp">
+          <div className="grp">
+            <Field label="Notes">
+              <span className="fnote">{detail.notes}</span>
+            </Field>
+          </div>
+        </section>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * A note's text (3g), shown as soon as the note opens (decision A: a note is not hidden like a password or a key's value),
+ * with Copy, which copies it in Rust like any copy.
+ */
+function NoteFields({ data, summary, detail }: { data: SessionData; summary: ItemSummary; detail: ItemDetail | null }) {
   if (detail === null || detail.notes === "") return null;
   return (
     <section className="gp">
       <div className="grp">
-        <div className="fld">
-          <div className="fv">
-            <span className="fnote">{detail.notes}</span>
-          </div>
-        </div>
+        <Field
+          action={
+            <button
+              type="button"
+              className="pill"
+              aria-label="Copy text"
+              onClick={() => {
+                void copyField(data.session, summary.id, "notes");
+              }}
+            >
+              Copy
+            </button>
+          }
+        >
+          <span className="fnote">{detail.notes}</span>
+        </Field>
       </div>
     </section>
   );
@@ -229,7 +348,8 @@ export function ItemPanel({
         </p>
       ) : null}
       {summary.kind === "login" ? <LoginFields data={data} summary={summary} detail={open.detail} /> : null}
-      {summary.kind === "note" ? <NoteFields detail={open.detail} /> : null}
+      {summary.kind === "key" ? <KeyFields data={data} summary={summary} detail={open.detail} /> : null}
+      {summary.kind === "note" ? <NoteFields data={data} summary={summary} detail={open.detail} /> : null}
       {summary.kind === "file" ? <FileFields summary={summary} /> : null}
     </Panel>
   );

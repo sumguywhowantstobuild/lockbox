@@ -6,6 +6,7 @@ import { Button } from "../parts/Button";
 import { CopyIcon } from "../parts/Icon";
 import { Panel } from "../parts/Panel";
 import { closeTool, copyGenerated, type SessionData } from "../store";
+import { useValueGuard } from "../useValueGuard";
 
 type Kind = "characters" | "passphrase";
 
@@ -133,31 +134,9 @@ function GeneratorBlock({
   const id = useId();
   const valueBox = useRef<HTMLDivElement>(null);
 
-  // A native copy or cut would put the password on the clipboard without the marks that keep it out of Windows' clipboard
-  // history, its timer and its clearing at a lock. So while the generator is on screen, a copy or cut aimed at the value
-  // is stopped: a selection that touches it, or focus on the value's box with nothing else selected. On the page, Ctrl+C
-  // then does what the Copy button does (through the shell); in the form nothing is copied, and Use this is the way out.
-  // Anything else is left alone, ordinary text selected beside a focused control included: the password never stands in
-  // for text the person meant to copy.
-  useEffect(() => {
-    const guard = (event: Event) => {
-      const value = valueBox.current;
-      if (value === null) return;
-      const selection = document.getSelection();
-      const ranges = selection === null ? [] : Array.from({ length: selection.rangeCount }, (_, at) => selection.getRangeAt(at));
-      const touches = ranges.some((range) => range.intersectsNode(value));
-      const onTheValue = document.activeElement === value && ranges.every((range) => range.collapsed);
-      if (!touches && !onTheValue) return;
-      event.preventDefault();
-      if (event.type === "copy") onCopyKey?.();
-    };
-    document.addEventListener("copy", guard);
-    document.addEventListener("cut", guard);
-    return () => {
-      document.removeEventListener("copy", guard);
-      document.removeEventListener("cut", guard);
-    };
-  }, [onCopyKey]);
+  // While the generator is on screen a native copy or cut aimed at the value is stopped (see `useValueGuard`). On the page,
+  // Ctrl+C then does what the Copy button does (through the shell); in the form nothing is copied, and Use this is the way out.
+  useValueGuard(valueBox, onCopyKey);
 
   const { choices } = generator;
   const passphrase = choices.kind === "passphrase";

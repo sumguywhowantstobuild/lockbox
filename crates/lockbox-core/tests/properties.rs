@@ -58,6 +58,9 @@ fn kind() -> impl Strategy<Value = ItemKind> {
                 urls,
             }
         }),
+        text(200).prop_map(|value| ItemKind::Key {
+            value: Zeroizing::new(value),
+        }),
         Just(ItemKind::Note),
         Just(ItemKind::File),
         Just(ItemKind::Collection),

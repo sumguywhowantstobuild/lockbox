@@ -2,7 +2,7 @@
 //! IDs of the matching items.
 //!
 //! Indexed: every live item's title; a login's username and URLs; and the title of the item's
-//! collection. Never indexed: passwords, notes, attached file names. Trashed and purging items
+//! collection (a key's name is its title). Never indexed: passwords, a key's value, notes, attached file names. Trashed and purging items
 //! are left out. The index holds plain strings, like the items themselves (the vault is
 //! unlocked while it exists). The vault rebuilds it whole after every change to its items.
 
@@ -203,6 +203,71 @@ mod tests {
         assert!(find(&items, "secretnote").is_empty());
         assert!(find(&items, "passport").is_empty());
         assert_eq!(find(&items, "site"), [id(1)]);
+    }
+
+    fn key(n: u8, name: &str, value: &str) -> Item {
+        let kind = ItemKind::Key {
+            value: Zeroizing::new(value.to_owned()),
+        };
+        item(n, kind, name)
+    }
+
+    /// A key's value is never in the index, in whole or in part, however it is found; the name is, like any title.
+    #[test]
+    fn key_value_never_indexed() {
+        let mut one = key(1, "OPENAI_API_KEY", "demo-zzz-qqq-one");
+        one.notes = Zeroizing::new("rotate monthly".to_owned());
+        let items = [one];
+        for query in [
+            "demo-zzz",
+            "qqq-one",
+            "demo-",
+            "zzz-qqq",
+            "q-on",
+            "DEMO-ZZZ-QQQ-ONE",
+        ] {
+            assert!(
+                find(&items, query).is_empty(),
+                "{query} found a key by its value"
+            );
+        }
+        // Nor does the engine's own search, through a vault that is saved and unlocked again.
+        let (_parent, mut vault) = new_vault();
+        let kind = ItemKind::Key {
+            value: Zeroizing::new("demo-zzz-qqq-one".to_owned()),
+        };
+        let made = vault.new_item(kind, "OPENAI_API_KEY", None).unwrap();
+        assert!(vault.search("demo-zzz", 10).is_empty());
+        assert_eq!(vault.search("openai", 10), [made]);
+        let dir = vault.dir().to_path_buf();
+        drop(vault);
+        let (vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(vault.search("qqq-one", 10).is_empty());
+        assert_eq!(vault.search("openai", 10), [made]);
+    }
+
+    #[test]
+    fn key_name_is_indexed() {
+        let mut in_folder = key(3, "STRIPE_SECRET_KEY", "v3");
+        in_folder.collection = Some(id(9));
+        let items = [
+            item(9, ItemKind::Collection, "Lineproof"),
+            key(1, "OPENAI_API_KEY", "v1"),
+            key(2, "TELEGRAM_BOT_TOKEN", "v2"),
+            in_folder,
+        ];
+        // The whole name, a part of it, in any case, and what follows an underscore.
+        assert_eq!(find(&items, "OPENAI_API_KEY"), [id(1)]);
+        assert_eq!(find(&items, "openai"), [id(1)]);
+        assert_eq!(find(&items, "bot_tok"), [id(2)]);
+        assert_eq!(find(&items, "api_key"), [id(1)]);
+        // A key in a folder is found by the folder's name, like any item, and still not by its value.
+        assert_eq!(find(&items, "lineproof"), [id(9), id(3)]);
+        assert!(find(&items, "v1").is_empty());
+        // A trashed key is not found.
+        let mut gone = key(4, "OLD_KEY", "v4");
+        gone.trashed_at = Some("2026-01-01T00:00:00Z".to_owned());
+        assert!(find(&[gone], "old_key").is_empty());
     }
 
     #[test]

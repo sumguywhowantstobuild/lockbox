@@ -1355,6 +1355,14 @@
   color: var(--ink2);
 }
 
+/* Add, right there in an empty vault or folder: a button for each kind that can be made. */
+.le-a {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
 /* ---- The panel from the right ---- */
 
 .panel {
@@ -1502,6 +1510,17 @@
 
 .sec.hid {
   letter-spacing: 0.09em;
+}
+
+/* A key's value, once revealed: in Geist Mono, and not selectable, since a native copy would skip the marks that keep it out
+   of Windows' clipboard history (Ctrl+C on it is Copy key, through the shell). */
+.kval {
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 14px;
+  /* What was saved is what shows: runs of spaces, tabs and line breaks stay, and a long line wraps at the edge. */
+  white-space: pre-wrap;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .fact {
@@ -2274,6 +2293,16 @@
 
 .finp.m {
   font-family: "Geist Mono Variable", ui-monospace, monospace;
+}
+
+/* A note's text: a taller box that grows downward only, its lines kept as typed. */
+.farea {
+  height: auto;
+  min-height: 132px;
+  padding: 10px 12px;
+  line-height: 1.5;
+  font-family: inherit;
+  resize: vertical;
 }
 
 .finp[aria-invalid="true"] {

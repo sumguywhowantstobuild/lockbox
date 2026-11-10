@@ -133,6 +133,19 @@ test("a_vault_made_but_not_listed_points_at_the_first_screens_words", () => {
   expect(words.body).not.toMatch(/recovery key/i);
 });
 
+test("a_bad_key_name_has_words_of_its_own", () => {
+  // The engine refuses a key's name that is not a variable name; the shell sends it as the engine's refusal.
+  const words = messageFor({ code: "core", kind: "invalid_input", what: "key name" });
+  expect(words).toEqual({
+    title: "That isn't a name Lockbox can use for a key.",
+    body: "Use letters, digits and _ only, and don't start with a digit.",
+  });
+  expect(KNOWN_WHATS).toContain("key name");
+  // A key's value asked of another kind, or a login's field of a key, is a page mistake: the plain words, nothing of the kind.
+  expect(KNOWN_WHATS).toContain("not a key");
+  expect(messageFor({ code: "invalid_input", what: "not a key" }).title).toBe("Lockbox can't use that.");
+});
+
 test("no_message_contains_raw_error_text", () => {
   const SENTINEL = "SENTINEL-7f3a C:\\Users\\secret";
   const errors: unknown[] = [

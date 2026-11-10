@@ -10,7 +10,7 @@ use super::Vault;
 use super::naming::{created_at_now, now_secs, rfc3339_utc};
 use crate::fsio::{atomic_write, read_retry};
 use crate::ids::{ItemId, VaultId};
-use crate::item::{Item, ItemKind, MAX_ITEM_FILE, open_item, seal_item};
+use crate::item::{Item, ItemKind, MAX_ITEM_FILE, check_key_name, open_item, seal_item};
 use crate::secret::Key32;
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
@@ -113,6 +113,15 @@ pub(super) fn blank_item(
         trashed_at: None,
         purging: false,
         retired_blobs: Vec::new(),
+    }
+}
+
+/// The rule for a title that depends on the kind: a key's title is its name, so it is a variable name. Every other kind
+/// keeps any title. Called wherever a title is set (`new_item_with_notes`, `update_item`), before anything is written.
+fn check_title(kind: &ItemKind, title: &str) -> Result<()> {
+    match kind {
+        ItemKind::Key { .. } => check_key_name(title),
+        _ => Ok(()),
     }
 }
 
@@ -233,6 +242,7 @@ impl Vault {
         collection: Option<ItemId>,
         notes: Zeroizing<String>,
     ) -> Result<ItemId> {
+        check_title(&kind, title)?;
         let id = self.fresh_item_id()?;
         self.check_collection(&id, &kind, collection, None)?;
         let mut item = blank_item(id, kind, title, collection);
@@ -255,6 +265,7 @@ impl Vault {
             });
         }
         self.check_collection(&item.id, &item.kind, item.collection, stored.collection)?;
+        check_title(&item.kind, &item.title)?;
         let was_collection = matches!(stored.kind, ItemKind::Collection);
         let has_members = || self.items.values().any(|m| m.collection == Some(item.id));
         if was_collection && !matches!(item.kind, ItemKind::Collection) && has_members() {
@@ -464,6 +475,121 @@ mod tests {
             "collection",
         );
         assert_eq!(vault.items().count(), count);
+    }
+
+    fn key(value: &str) -> ItemKind {
+        ItemKind::Key {
+            value: Zeroizing::new(value.into()),
+        }
+    }
+
+    /// How many item files the vault holds on disk.
+    fn files_on_disk(vault: &Vault) -> usize {
+        match fs::read_dir(vault.dir().join("items")) {
+            Ok(entries) => entries.count(),
+            Err(_) => 0,
+        }
+    }
+
+    /// A key is saved whole, in one write, with its name as its title, and is there after an unlock; it takes the
+    /// folder rules of any item.
+    #[test]
+    fn a_key_survives_an_unlock() {
+        let (_parent, mut vault) = new_vault();
+        let folder = vault
+            .new_item(ItemKind::Collection, "Agency", None)
+            .unwrap();
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = std::rc::Rc::clone(&writes);
+        failpoint::observe(
+            "items.after_write",
+            Box::new(move || seen.set(seen.get() + 1)),
+        );
+        let id = vault
+            .new_item_with_notes(
+                key("demo-zzz-qqq-one"),
+                "OPENAI_API_KEY",
+                Some(folder),
+                Zeroizing::new(String::new()),
+            )
+            .unwrap();
+        failpoint::disarm_all();
+        assert_eq!(writes.get(), 1, "more than one write");
+
+        let vault = reopen(vault);
+        assert!(vault.damaged_items().is_empty());
+        let item = vault.get_item(&id).unwrap();
+        assert_eq!((item.title.as_str(), item.revision), ("OPENAI_API_KEY", 0));
+        assert_eq!(item.collection, Some(folder));
+        match &item.kind {
+            ItemKind::Key { value } => assert_eq!(&***value, "demo-zzz-qqq-one"),
+            other => panic!("wrong kind {other:?}"),
+        }
+        // On disk the value is not in the clear.
+        let bytes = fs::read(item_path(&vault, &id)).unwrap();
+        assert!(!bytes.windows(8).any(|window| window == b"demo-zzz"));
+    }
+
+    /// The engine enforces a key's name wherever a key's title is set: creating one, renaming one, and turning another
+    /// kind into a key. A refusal writes nothing and changes nothing; the other kinds keep any title.
+    #[test]
+    fn key_name_is_enforced_on_create_and_update() {
+        let (_parent, mut vault) = new_vault();
+        let note = vault
+            .new_item(ItemKind::Note, "A note, with any title!", None)
+            .unwrap();
+        let before = files_on_disk(&vault);
+        let key_name = "key name";
+        for bad in ["", "1KEY", "A-B", "A B", "é", "A\n", " A"] {
+            invalid(vault.new_item(key("v"), bad, None), key_name);
+            invalid(
+                vault.new_item_with_notes(key("v"), bad, None, Zeroizing::new("n".into())),
+                key_name,
+            );
+        }
+        assert_eq!(vault.items().count(), 1);
+        assert_eq!(files_on_disk(&vault), before, "a refusal wrote a file");
+
+        let id = vault.new_item(key("v"), "GOOD_NAME", None).unwrap();
+        let stored = fs::read(item_path(&vault, &id)).unwrap();
+        // A rename to a bad name is refused whole: the key, its revision and its file stay as they were.
+        for bad in ["", "9NAME", "BAD NAME", "BAD-NAME"] {
+            let mut edit = vault.get_item(&id).unwrap().clone();
+            edit.title = bad.into();
+            invalid(vault.update_item(edit), key_name);
+        }
+        let item = vault.get_item(&id).unwrap();
+        assert_eq!((item.title.as_str(), item.revision), ("GOOD_NAME", 0));
+        assert_eq!(fs::read(item_path(&vault, &id)).unwrap(), stored);
+        let mut edit = vault.get_item(&id).unwrap().clone();
+        edit.title = "BETTER_NAME".into();
+        vault.update_item(edit).unwrap();
+        assert_eq!(vault.get_item(&id).unwrap().title, "BETTER_NAME");
+
+        // A note can become a key only under a good name, and a key can become a note under any title.
+        let mut edit = vault.get_item(&note).unwrap().clone();
+        edit.kind = key("v");
+        invalid(vault.update_item(edit), key_name);
+        assert!(matches!(
+            vault.get_item(&note).unwrap().kind,
+            ItemKind::Note
+        ));
+        let mut edit = vault.get_item(&note).unwrap().clone();
+        edit.kind = key("v");
+        edit.title = "FROM_A_NOTE".into();
+        vault.update_item(edit).unwrap();
+        let mut edit = vault.get_item(&note).unwrap().clone();
+        edit.kind = ItemKind::Note;
+        edit.title = "Back, with spaces".into();
+        vault.update_item(edit).unwrap();
+
+        // Nothing else that changes an item looks at the name: trash and restore keep a key as it is.
+        vault.trash_item(&id).unwrap();
+        vault.restore_item(&id).unwrap();
+        assert_eq!(vault.get_item(&id).unwrap().title, "BETTER_NAME");
+        // The refusal says nothing of the name.
+        let said = format!("{:?}", vault.new_item(key("v"), "secret name", None));
+        assert!(!said.contains("secret"), "{said}");
     }
 
     #[test]

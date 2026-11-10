@@ -102,6 +102,11 @@ export const MESSAGES: Record<string, Words> = {
   },
   "core:too_large": { title: "That is too big for Lockbox to keep.", body: "" },
   "core:invalid_input": { title: "Lockbox can't use that.", body: "Check what you entered and try again." },
+  // A key's name is a variable name, since a `.env` file is where keys go out: the engine refuses any other.
+  "core:invalid_input:key name": {
+    title: "That isn't a name Lockbox can use for a key.",
+    body: "Use letters, digits and _ only, and don't start with a digit.",
+  },
   "core:invalid_input:destination in a vault folder": {
     title: "Lockbox won't save that inside a vault's folder.",
     body: "Choose another folder.",
@@ -178,6 +183,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "key derivation input",
   "key derivation memory",
   "key length",
+  "key name",
   "key slot",
   "key slots",
   "link",
@@ -185,6 +191,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "no character class selected",
   "not a collection",
   "not a file",
+  "not a key",
   "not a login",
   "not a plain folder",
   "not a pre-restore copy",

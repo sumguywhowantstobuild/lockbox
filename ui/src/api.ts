@@ -77,7 +77,7 @@ export interface CreatedView {
   recovery_key: string;
 }
 
-export type ItemKind = "login" | "note" | "file" | "collection";
+export type ItemKind = "login" | "key" | "note" | "file" | "collection";
 
 export interface FileView {
   file_id: string;
@@ -109,13 +109,15 @@ export interface ItemList {
   damaged: string[];
 }
 
-/** One item opened. A login's password is not here: it crosses only on Reveal. */
+/** One item opened. A login's password and a key's value are not here: each crosses only on Reveal. */
 export interface ItemDetail {
   summary: ItemSummary;
   revision: number;
   notes: string;
   urls: string[];
   has_password: boolean;
+  /** A key has a value to reveal or copy. Only whether: the value is not here. */
+  has_value: boolean;
 }
 
 export interface Settings {
@@ -123,8 +125,11 @@ export interface Settings {
   clipboard_seconds: number;
 }
 
-/** The fields a copy button can ask the shell to put on the clipboard. The value never comes to the page. */
-export type CopyableField = "password" | "username";
+/**
+ * The fields a copy button can ask the shell to put on the clipboard: a login's `password` and `username`, a key's
+ * `key_value` and a note's text, `notes`. The value never comes to the page.
+ */
+export type CopyableField = "password" | "username" | "key_value" | "notes";
 
 export function listVaults(): Promise<VaultEntry[]> {
   return callPlain<VaultEntry[]>("list_vaults", {});
@@ -299,15 +304,31 @@ export function copyField(vault: SessionRef, id: string, field: CopyableField): 
 }
 
 /**
- * What a new login starts with, saved with it in one write. Each may be left out. The websites are sent as typed: the
- * shell adds `https://` where it is missing and refuses anything but `http` and `https` (`invalid_input`, `what:
- * "website"`). The password goes to Rust here, like a typed password, and never comes back but on Reveal.
+ * What a new item starts with, saved with it in one write. Each may be left out, and each belongs to a kind: `username`,
+ * `password` and `urls` to a login, `value` to a key, `notes` (the text) to a login, a key or a note; the shell refuses one
+ * sent for a kind that has no use for it. The websites are sent as typed: the shell adds `https://` where it is missing and
+ * refuses anything but `http` and `https` (`invalid_input`, `what: "website"`). The password and a key's value go to Rust
+ * here, like a typed password, and never come back but on Reveal.
  */
 export interface ItemFields {
   username?: string;
   password?: string;
   urls?: string[];
   notes?: string;
+  value?: string;
+}
+
+/** What `new_item` makes here; a folder is the side menu's task, a stored file is made by attaching one. */
+type NewKind = "login" | "key" | "note";
+
+function newItem(
+  vault: SessionRef,
+  kind: NewKind,
+  title: string,
+  collection: string | null,
+  fields: ItemFields,
+): Promise<Tagged<string>> {
+  return call<string>("new_item", { session: vault.session, generation: vault.generation, kind, title, collection, fields });
 }
 
 /**
@@ -321,14 +342,33 @@ export function newLogin(
   collection: string | null,
   fields: ItemFields,
 ): Promise<Tagged<string>> {
-  return call<string>("new_item", {
-    session: vault.session,
-    generation: vault.generation,
-    kind: "login",
-    title,
-    collection,
-    fields,
-  });
+  return newItem(vault, "login", title, collection, fields);
+}
+
+/**
+ * Makes a new key, named `name` (its title) and holding `value`, whole and in one write; answers its id. Refused as
+ * `newLogin` is, and with `core` `invalid_input` (`what: "key name"`) when the name is not made of letters, digits and `_`
+ * or starts with a digit.
+ */
+export function newKey(vault: SessionRef, name: string, collection: string | null, value: string): Promise<Tagged<string>> {
+  return newItem(vault, "key", name, collection, { value });
+}
+
+/** Makes a new note, titled `title` and holding `text`, whole and in one write; answers its id. Refused as `newLogin` is. */
+export function newNote(vault: SessionRef, title: string, collection: string | null, text: string): Promise<Tagged<string>> {
+  return newItem(vault, "note", title, collection, { notes: text });
+}
+
+/** What Reveal can ask for: a login's `password` or a key's `key_value`. */
+export type RevealableField = "password" | "key_value";
+
+/**
+ * Reveal: a login's password or a key's value, asked for by the person, from Rust: the one way either reaches the page.
+ * Refused with `invalid_input` (`what: "not a login"` or `"not a key"`) when the field is not the item's own. It is kept only
+ * while the item is open, and a lock takes it away.
+ */
+export function revealValue(vault: SessionRef, id: string, field: RevealableField): Promise<Tagged<string>> {
+  return call<string>("reveal_password", { session: vault.session, generation: vault.generation, id, field });
 }
 
 /** The generator's options for a password, as the engine takes them (`length` is 8 to 128). */

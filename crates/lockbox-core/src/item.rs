@@ -42,6 +42,11 @@ pub enum ItemKind {
         password: Zeroizing<String>,
         urls: Vec<String>,
     },
+    /// A named secret value (an API key, a token): the item's title is its name, a variable name (see
+    /// [`check_key_name`]). The value is never indexed for search.
+    Key {
+        value: Zeroizing<String>,
+    },
     Note,
     File,
     Collection,
@@ -51,6 +56,7 @@ impl ItemKind {
     fn name(&self) -> &'static str {
         match self {
             Self::Login { .. } => "login",
+            Self::Key { .. } => "key",
             Self::Note => "note",
             Self::File => "file",
             Self::Collection => "collection",
@@ -62,6 +68,21 @@ impl ItemKind {
 impl fmt::Debug for ItemKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
+    }
+}
+
+/// Whether `name` can be a key's name: a variable name, since a `.env` file is where keys go out. Only the ASCII letters,
+/// digits and `_`, not starting with a digit, and not empty; anything else is `InvalidInput { "key name" }`, which says
+/// nothing of the name itself. The page's own limit on a title's length applies as it does to every title.
+pub fn check_key_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let starts = chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
+    if starts && chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Ok(())
+    } else {
+        Err(CoreError::InvalidInput { what: "key name" })
     }
 }
 
@@ -200,10 +221,10 @@ struct ItemWire {
     retired_blobs: Vec<FileId>,
 }
 
-/// An `ItemKind`'s JSON. Externally tagged, so a login reads straight into its wiped fields:
-/// `"note"` / `"file"` / `"collection"`, or `{"login": {"username": .., "password": .., "urls": [..]}}`.
-/// (An internally tagged enum would buffer every field, password included, in serde's
-/// unwiped private `Content` type first.)
+/// An `ItemKind`'s JSON. Externally tagged, so a login or a key reads straight into its wiped fields:
+/// `"note"` / `"file"` / `"collection"`, `{"login": {"username": .., "password": .., "urls": [..]}}` or
+/// `{"key": {"value": ..}}`. (An internally tagged enum would buffer every field, password included, in serde's
+/// unwiped private `Content` type first.) A kind added here changes no byte of what the others write.
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "ItemKind", rename_all = "lowercase", deny_unknown_fields)]
 enum KindWire {
@@ -211,6 +232,9 @@ enum KindWire {
         username: String,
         password: Zeroizing<String>,
         urls: Vec<String>,
+    },
+    Key {
+        value: Zeroizing<String>,
     },
     Note,
     File,
@@ -910,6 +934,321 @@ mod tests {
         expected.resize(512, 0);
         let plain = padded_plaintext(&login()).unwrap();
         assert_eq!(plain.as_slice(), expected.as_slice());
+    }
+
+    /// A key's value, made up for these tests.
+    const KEY_VALUE: &str = "demo-zzz-qqq-one";
+
+    fn key() -> Item {
+        let mut item = base(ItemKind::Key {
+            value: Zeroizing::new(KEY_VALUE.into()),
+        });
+        item.title = "OPENAI_API_KEY".into();
+        item
+    }
+
+    /// A key reads back as it was written, through the file as well as through JSON, and its JSON is
+    /// `{"key":{"value":..}}`: an externally tagged kind like a login, so the value reads straight into its wiped field.
+    #[test]
+    fn key_round_trips() {
+        let (v, k) = vault();
+        let item = key();
+        assert_eq!(
+            json(&item)["kind"],
+            serde_json::json!({ "key": { "value": KEY_VALUE } })
+        );
+        let sealed = seal_item(&item, &v, &k).unwrap();
+        let back = open_item(&sealed, &item.id, &v, &k).unwrap();
+        assert_eq!(json(&back), json(&item));
+        match &back.kind {
+            ItemKind::Key { value } => assert_eq!(value.as_str(), KEY_VALUE),
+            other => panic!("kind changed to {other:?}"),
+        }
+        assert_eq!(back.title, "OPENAI_API_KEY");
+        // A different value is a different item.
+        let mut other = key();
+        other.kind = ItemKind::Key {
+            value: Zeroizing::new("demo-zzz-qqq-two".into()),
+        };
+        assert!(same_item(&item, &item.clone()) && !same_item(&item, &other));
+        // A value with quotes, backslashes, newlines and non-English text is kept exactly.
+        let mut odd = key();
+        let text = "line one\n\"two\" \\ ключ 鍵\t";
+        odd.kind = ItemKind::Key {
+            value: Zeroizing::new(text.into()),
+        };
+        let back = open_item(&seal_item(&odd, &v, &k).unwrap(), &odd.id, &v, &k).unwrap();
+        assert!(matches!(&back.kind, ItemKind::Key { value } if value.as_str() == text));
+        // The strict shapes: no other field, none missing, and not the old internally tagged shape.
+        for kind in [
+            r#"{"key":{"value":"x","extra":1}}"#,
+            r#"{"key":{}}"#,
+            r#""key""#,
+            r#"{"key":"x"}"#,
+            r#"{"Key":{"value":"x"}}"#,
+        ] {
+            assert!(kind_from(kind).is_err(), "{kind}");
+        }
+        assert!(kind_from(r#"{"key":{"value":""}}"#).is_ok());
+    }
+
+    #[test]
+    fn key_debug_shows_no_value() {
+        let item = key();
+        for out in [
+            format!("{item:?}"),
+            format!("{item:#?}"),
+            format!("{:?}", item.kind),
+            format!("{:#?}", item.kind),
+        ] {
+            assert!(!out.contains(KEY_VALUE), "the value leaked in {out}");
+            assert!(
+                !out.contains("demo-zzz"),
+                "part of the value leaked in {out}"
+            );
+            assert!(!out.contains("OPENAI_API_KEY"), "the name leaked in {out}");
+            assert!(out.contains("key"), "{out}");
+        }
+        assert_eq!(format!("{:?}", item.kind), "key");
+    }
+
+    /// A key joins the others in the bytes it writes (pinned here from the first version of it), and the bytes the
+    /// other kinds write are the ones `plaintext_golden_bytes` and `plaintext_golden_bytes_of_the_other_kinds` pin.
+    #[test]
+    fn key_golden_bytes() {
+        let expected_json = format!(
+            concat!(
+                r#"{{"id":"{}","kind":{{"key":{{"value":"demo-zzz-qqq-one"}}}},"#,
+                r#""title":"OPENAI_API_KEY","notes":"n","collection":null,"attachments":[],"revision":3,"#,
+                r#""created_at":"2026-10-09T00:00:00Z","modified_at":"2026-10-09T00:00:01Z","#,
+                r#""trashed_at":null,"purging":false,"retired_blobs":[]}}"#
+            ),
+            "aa".repeat(16)
+        );
+        let mut expected = expected_json.into_bytes();
+        expected.push(0x80);
+        expected.resize(512, 0);
+        assert_eq!(
+            padded_plaintext(&key()).unwrap().as_slice(),
+            expected.as_slice()
+        );
+    }
+
+    /// The item files of the four old kinds (`fixtures/old-items.txt`), sealed by the code before keys existed with the
+    /// test vault's key, a fixed nonce and the ID `aa..aa`: they open as they did, and write back the same bytes once
+    /// the JSON is the same (the format of the old kinds did not move).
+    fn old_file(name: &str) -> Vec<u8> {
+        let text = include_str!("fixtures/old-items.txt");
+        let mut hex = String::new();
+        let mut inside = false;
+        for line in text.lines() {
+            if line.chars().all(|c| c.is_ascii_uppercase()) {
+                inside = line == name;
+            } else if inside {
+                hex.push_str(line);
+            }
+        }
+        assert!(!hex.is_empty(), "no fixture named {name}");
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn old_format_items_still_open() {
+        let (v, k) = vault();
+        let id = ItemId([0xAA; 16]);
+
+        let login = open_item(&old_file("LOGIN"), &id, &v, &k).unwrap();
+        match &login.kind {
+            ItemKind::Login {
+                username,
+                password,
+                urls,
+            } => {
+                assert_eq!(username, "ariel");
+                assert_eq!(password.as_str(), "hunter2");
+                assert_eq!(urls, &["https://example.com"]);
+            }
+            other => panic!("kind changed to {other:?}"),
+        }
+        assert_eq!(login.collection, Some(ItemId([0xBB; 16])));
+        assert_eq!(login.attachments.len(), 1);
+        assert_eq!(login.attachments[0].name, "tax.pdf");
+        assert_eq!(login.attachments[0].file_key.as_bytes(), &[0x42; 32]);
+        assert_eq!((login.title.as_str(), login.revision), ("Example", 3));
+
+        for (name, check) in [
+            (
+                "NOTE",
+                (|k: &ItemKind| matches!(k, ItemKind::Note)) as fn(&ItemKind) -> bool,
+            ),
+            ("FILE", |k| matches!(k, ItemKind::File)),
+            ("COLLECTION", |k| matches!(k, ItemKind::Collection)),
+        ] {
+            let item = open_item(&old_file(name), &id, &v, &k).unwrap();
+            assert!(check(&item.kind), "{name}: {:?}", item.kind);
+            assert_eq!((item.title.as_str(), item.notes.as_str()), ("Example", "n"));
+            assert!(item.attachments.is_empty() && item.collection.is_none());
+        }
+
+        // The same item written again today has the bytes the old code wrote in its plaintext.
+        let again = open_item(&old_file("NOTE"), &id, &v, &k).unwrap();
+        let old_plain = {
+            let mut plain = serde_json::to_vec(&ItemOut(&base(ItemKind::Note))).unwrap();
+            plain.push(0x80);
+            plain.resize(512, 0);
+            plain
+        };
+        assert_eq!(padded_plaintext(&again).unwrap().as_slice(), old_plain);
+    }
+
+    /// The name of a key is a variable name, since `.env` out is the point: ASCII letters, digits and `_`, not starting
+    /// with a digit, not empty. Everything else is refused with the one fixed `what`, and nothing is said of the name.
+    #[test]
+    fn key_name_rules() {
+        let long = "A".repeat(1024);
+        for good in [
+            "A",
+            "a",
+            "_",
+            "__",
+            "OPENAI_API_KEY",
+            "openai_api_key",
+            "key1",
+            "_1",
+            "A_b_2",
+            "TELEGRAM_BOT_TOKEN",
+            long.as_str(),
+        ] {
+            assert!(check_key_name(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            " ",
+            "1",
+            "1KEY",
+            "9_",
+            "A-B",
+            "A B",
+            "A.B",
+            "A=B",
+            "A$",
+            "$A",
+            " A",
+            "A ",
+            "A\n",
+            "A\r\n",
+            "A\t",
+            "A\0",
+            "\u{7f}",
+            "é",
+            "Clé",
+            "日本",
+            "ＡＢＣ",      // full-width letters
+            "A\u{200b}",   // a zero-width space
+            "A\u{0301}",   // a combining accent
+            "٣",           // an Arabic-Indic digit
+            "KEY\u{ff3f}", // a full-width underscore
+            "A/B",
+            "A\\B",
+            "A:B",
+            "A,B",
+            "\"A\"",
+        ] {
+            assert!(
+                matches!(
+                    check_key_name(bad),
+                    Err(CoreError::InvalidInput { what: "key name" })
+                ),
+                "{bad:?}"
+            );
+        }
+        // Every ASCII character one by one: only letters, digits and `_` pass, and a digit only after the first place.
+        for byte in 0u8..=127 {
+            let c = char::from(byte);
+            let alone = check_key_name(&c.to_string()).is_ok();
+            assert_eq!(alone, c.is_ascii_alphabetic() || c == '_', "{c:?} alone");
+            let after = check_key_name(&format!("A{c}")).is_ok();
+            assert_eq!(
+                after,
+                c.is_ascii_alphanumeric() || c == '_',
+                "{c:?} after a letter"
+            );
+        }
+        // The refusal says nothing of the name.
+        let said = format!("{:?}", check_key_name("secret value 1").unwrap_err());
+        assert!(!said.contains("secret"), "{said}");
+    }
+
+    /// The check keeps everything but a name out, whatever it is given: many odd texts never pass unless they are made
+    /// of the allowed characters alone, and the slowest one is measured (no pattern engine to hang).
+    #[test]
+    fn key_name_check_only_ever_passes_names() {
+        use std::time::{Duration, Instant};
+
+        const PIECES: &[&str] = &[
+            "A", "z", "_", "0", "9", "-", ".", " ", "\n", "\0", "=", "é", "日", "\u{200b}",
+            "\u{0301}", "$", "/", "\\", "AB_", "KEY", "1", "٣",
+        ];
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let (mut accepted, mut slowest) = (0, Duration::ZERO);
+        for _ in 0..30_000 {
+            let pieces = 1 + (next() % 12) as usize;
+            let name: String = (0..pieces)
+                .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+                .collect();
+            let started = Instant::now();
+            let passed = check_key_name(&name).is_ok();
+            slowest = slowest.max(started.elapsed());
+            let only_allowed = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit());
+            assert_eq!(passed, only_allowed, "{name:?}");
+            accepted += usize::from(passed);
+        }
+        assert!(
+            accepted > 500,
+            "only {accepted} passed: the mass is not varied enough"
+        );
+        assert!(
+            slowest < Duration::from_millis(100),
+            "the slowest took {slowest:?}"
+        );
+    }
+
+    /// The bytes a note, a file and a folder write are pinned too, taken from the code before keys existed: adding a kind
+    /// must not change what the others write.
+    #[test]
+    fn plaintext_golden_bytes_of_the_other_kinds() {
+        for (kind, expected_kind) in [
+            (ItemKind::Note, r#""note""#),
+            (ItemKind::File, r#""file""#),
+            (ItemKind::Collection, r#""collection""#),
+        ] {
+            let expected_json = format!(
+                concat!(
+                    r#"{{"id":"{}","kind":{},"#,
+                    r#""title":"Example","notes":"n","collection":null,"attachments":[],"revision":3,"#,
+                    r#""created_at":"2026-10-09T00:00:00Z","modified_at":"2026-10-09T00:00:01Z","#,
+                    r#""trashed_at":null,"purging":false,"retired_blobs":[]}}"#
+                ),
+                "aa".repeat(16),
+                expected_kind
+            );
+            let mut expected = expected_json.into_bytes();
+            expected.push(0x80);
+            expected.resize(512, 0);
+            let plain = padded_plaintext(&base(kind)).unwrap();
+            assert_eq!(plain.as_slice(), expected.as_slice(), "{expected_kind}");
+        }
     }
 
     #[test]

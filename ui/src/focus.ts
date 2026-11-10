@@ -4,8 +4,22 @@
 // focus back to its own button has finished.
 const OPENERS = { add: ".addb", generator: ".navgen" } as const;
 
-export function focusBack(opener: keyof typeof OPENERS): void {
+/** The button on the page that opened the form now open, when it stays there (an empty list's own Add buttons), or `null`. */
+let opener: HTMLElement | null = null;
+
+/**
+ * Says which button opened the next form, so closing it gives focus back to that button: the empty list's Login, Key and
+ * Note, which stay on the page. A form opened from a menu or the search says `null`, and focus goes to the toolbar's Add.
+ */
+export function rememberOpener(button: HTMLElement | null): void {
+  opener = button;
+}
+
+export function focusBack(fallback: keyof typeof OPENERS): void {
+  const button = opener;
+  opener = null;
   window.setTimeout(() => {
-    document.querySelector<HTMLElement>(OPENERS[opener])?.focus();
+    if (button?.isConnected === true) button.focus();
+    else document.querySelector<HTMLElement>(OPENERS[fallback])?.focus();
   }, 0);
 }

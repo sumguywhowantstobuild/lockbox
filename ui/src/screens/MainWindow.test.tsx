@@ -90,10 +90,10 @@ test("selecting_shows_details_with_password_hidden", async () => {
   expect(within(panel).getByText("Login · Agency support agent · changed 2 days ago")).toBeTruthy();
   expect(await within(panel).findByText("admin@example.com")).toBeTruthy();
   expect(within(panel).getByText("support.example.com")).toBeTruthy();
-  // The password is hidden, and nothing on the page can show it: no Reveal here, and the shell was never asked.
+  // The password is hidden until Reveal (Task 12), and the shell was never asked for it before.
   const password = within(panel).getByText("Password").closest("div");
   expect(password?.textContent).toContain("••••");
-  expect(within(panel).queryByRole("button", { name: /reveal/i })).toBeNull();
+  expect(within(panel).getByRole("button", { name: "Reveal" })).toBeTruthy();
   expect(invoke.mock.calls.some(([cmd]) => cmd === "reveal_password")).toBe(false);
   // Only what the shell sends for the item, with exactly these arguments.
   const live = shell.sessionOf(7);
@@ -353,10 +353,10 @@ test("an_empty_vault_says_so", async () => {
   // 21g: what it is, and what to do first. Nothing here leads to a screen a later task builds.
   expect(screen.getByText("Your vault is empty")).toBeTruthy();
   expect(screen.getByText("What to do first: add a login, or a key, a note or a file.")).toBeTruthy();
-  // The list area offers no button of its own: Add is in the toolbar above it (Task 11).
+  // Add is right there too (Task 12): the three kinds that can be made, and nothing from a later task.
   const list = screen.getByRole("main").querySelector<HTMLElement>(".lscroll");
   expect(list).not.toBeNull();
-  expect(within(list as HTMLElement).queryByRole("button")).toBeNull();
+  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note"]);
   await expectNoAxe(container);
 });
 

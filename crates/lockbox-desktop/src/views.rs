@@ -1,6 +1,6 @@
 //! What the page sees of items (spec §4.1). The engine's `Item` has no serde of its own; each view here is built
-//! field by field from it and never holds a password (only whether there is one), a file key or a nonce. A password
-//! crosses only through `reveal_password`. IDs are 32 lowercase hex characters. No `Debug`: titles, usernames, names
+//! field by field from it and never holds a password or a key's value (only whether there is one), a file key or a
+//! nonce. A password or a key's value crosses only through `reveal_password`. IDs are 32 lowercase hex characters. No `Debug`: titles, usernames, names
 //! and notes are item content (R5).
 
 use lockbox_core::ids::{FileId, ItemId};
@@ -35,7 +35,7 @@ impl FileView {
 #[derive(Serialize)]
 pub struct ItemSummary {
     pub id: String,
-    /// `"login"`, `"note"`, `"file"` or `"collection"`.
+    /// `"login"`, `"key"`, `"note"`, `"file"` or `"collection"`.
     pub kind: &'static str,
     pub title: String,
     /// A login's username; `None` for every other kind.
@@ -71,6 +71,8 @@ impl ItemSummary {
                     .and_then(|url| url.host_str().map(str::to_owned));
                 ("login", Some(username.clone()), site)
             }
+            // A key's name is its title; its value is not here, in this view or any other but Reveal's.
+            ItemKind::Key { .. } => ("key", None, None),
             ItemKind::Note => ("note", None, None),
             ItemKind::File => ("file", None, None),
             ItemKind::Collection => ("collection", None, None),
@@ -90,7 +92,7 @@ impl ItemSummary {
     }
 }
 
-/// One item opened: its summary, notes and links, and whether it has a password to reveal.
+/// One item opened: its summary, notes and links, and whether it has a password or a key's value to reveal.
 #[derive(Serialize)]
 pub struct ItemDetail {
     pub summary: ItemSummary,
@@ -99,13 +101,16 @@ pub struct ItemDetail {
     pub notes: Zeroizing<String>,
     pub urls: Vec<String>,
     pub has_password: bool,
+    /// A key has a value to reveal. Only whether: the value crosses through `reveal_password` alone.
+    pub has_value: bool,
 }
 
 impl ItemDetail {
     pub fn of(item: &Item) -> ItemDetail {
-        let (urls, has_password) = match &item.kind {
-            ItemKind::Login { urls, password, .. } => (urls.clone(), !password.is_empty()),
-            _ => (Vec::new(), false),
+        let (urls, has_password, has_value) = match &item.kind {
+            ItemKind::Login { urls, password, .. } => (urls.clone(), !password.is_empty(), false),
+            ItemKind::Key { value } => (Vec::new(), false, !value.is_empty()),
+            _ => (Vec::new(), false, false),
         };
         ItemDetail {
             summary: ItemSummary::of(item),
@@ -113,6 +118,7 @@ impl ItemDetail {
             notes: item.notes.clone(),
             urls,
             has_password,
+            has_value,
         }
     }
 }
@@ -254,6 +260,65 @@ mod tests {
         for leaked in ["hunter2", "token", "8443", "/a/b", "part", "https://"] {
             assert!(!summary.contains(leaked), "the summary holds {leaked}");
         }
+    }
+
+    /// A key's value, made up for these tests.
+    const KEY_VALUE: &str = "demo-zzz-qqq-one";
+
+    fn key() -> Item {
+        let mut item = item(ItemKind::Key {
+            value: secret(KEY_VALUE),
+        });
+        item.title = "OPENAI_API_KEY".into();
+        item.notes = secret("rotate monthly");
+        item
+    }
+
+    /// No view of a key carries its value, whole or in part, in any field or under any name: a summary, a detail
+    /// and a list say there is one (`has_value`) and nothing else. The shapes are pinned field by field.
+    #[test]
+    fn summary_never_holds_a_value() {
+        let key = key();
+        let summary = serde_json::to_value(ItemSummary::of(&key)).unwrap();
+        let detail = serde_json::to_value(ItemDetail::of(&key)).unwrap();
+        let list = serde_json::to_value(ItemList::of([&key].into_iter(), &[])).unwrap();
+        for view in [&summary, &detail, &list] {
+            let text = view.to_string();
+            for leaked in [KEY_VALUE, "demo-zzz", "qqq-one", "\"value\"", "\"key\":{"] {
+                assert!(!text.contains(leaked), "a view holds {leaked}: {text}");
+            }
+        }
+        let expected = json!({
+            "id": "07".repeat(16), "kind": "key", "title": "OPENAI_API_KEY", "username": null,
+            "collection": null, "trashed": false, "site": null,
+            "created_at": "2026-10-29T00:00:00Z", "modified_at": "2026-10-29T00:00:00Z",
+            "attachments": [],
+        });
+        assert_eq!(summary, expected);
+        assert_eq!(
+            detail,
+            json!({
+                "summary": expected, "revision": 1, "notes": "rotate monthly", "urls": [],
+                "has_password": false, "has_value": true,
+            })
+        );
+        assert_eq!(list, json!({ "items": [expected], "damaged": [] }));
+
+        // An empty value is no value; every other kind has none.
+        let empty = item(ItemKind::Key { value: secret("") });
+        assert_eq!(
+            serde_json::to_value(ItemDetail::of(&empty)).unwrap()["has_value"],
+            false
+        );
+        for kind in [ItemKind::Note, ItemKind::File, ItemKind::Collection] {
+            let detail = serde_json::to_value(ItemDetail::of(&item(kind))).unwrap();
+            assert_eq!(detail["has_value"], false);
+        }
+        let login = serde_json::to_value(ItemDetail::of(&login(&[]))).unwrap();
+        assert_eq!(
+            (&login["has_value"], &login["has_password"]),
+            (&json!(false), &json!(true))
+        );
     }
 
     #[test]

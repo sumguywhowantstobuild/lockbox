@@ -1,27 +1,13 @@
-import { useEffect, useId, useRef, useState, type SyntheticEvent } from "react";
+import { useId, useRef, useState, type SyntheticEvent } from "react";
 import { focusBack } from "../../focus";
 import { messageFor } from "../../messages";
 import { Button } from "../../parts/Button";
 import { Panel } from "../../parts/Panel";
-import { Select, type SelectChoice } from "../../parts/Select";
+import { Select } from "../../parts/Select";
 import { closeTool, saveNewLogin, type SessionData } from "../../store";
 import { GeneratorInForm } from "../GeneratorPanel";
 import type { FolderEntry } from "../SideMenu";
-
-/** The Folder list's value for "No folder": never an item's id, which is 32 hex characters. */
-const NO_FOLDER = "none";
-
-/**
- * The folders to pick from: the one on screen first, then the rest by name, and "No folder" last, or first when All items is
- * on screen (nothing is the one on screen then).
- */
-function folderChoices(folders: readonly FolderEntry[], onScreen: string | null): SelectChoice[] {
-  const named = folders.map((folder) => ({ value: folder.id, label: folder.name }));
-  const none = { value: NO_FOLDER, label: "No folder" };
-  if (onScreen === null) return [none, ...named];
-  const first = named.filter((choice) => choice.value === onScreen);
-  return [...first, ...named.filter((choice) => choice.value !== onScreen), none];
-}
+import { folderChoices, NO_FOLDER, useFocusOnOpen, whereWords } from "./shared";
 
 /**
  * The new-login form (6b, with the generator of 6c): Title, Username, Website, Password with Generate, Folder, and Cancel
@@ -54,22 +40,9 @@ export function LoginForm({
   const titleBox = useRef<HTMLInputElement>(null);
   const passwordBox = useRef<HTMLInputElement>(null);
 
-  // Focus goes to the title when the form opens. A menu or the search that opened it gives focus back to its own button as
-  // it closes, which can come after this, so it is taken once more a moment later if it has gone elsewhere.
-  useEffect(() => {
-    titleBox.current?.focus();
-    const again = window.setTimeout(() => {
-      if (document.activeElement === document.body || document.activeElement?.closest(".addb") != null) {
-        titleBox.current?.focus();
-      }
-    }, 0);
-    return () => {
-      window.clearTimeout(again);
-    };
-  }, []);
+  useFocusOnOpen(titleBox);
 
-  const folderName = folders.find((entry) => entry.id === folder)?.name;
-  const subtitle = folderName === undefined ? `In ${data.name}.` : `In ${folderName}, ${data.name}.`;
+  const subtitle = whereWords(folders, folder, data.name);
 
   const cancel = () => {
     closeTool(data.session);

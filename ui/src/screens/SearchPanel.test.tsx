@@ -473,7 +473,7 @@ test("copy_buttons_on_the_login_details", async () => {
   await within(panel).findByText("admin@example.com");
   const live = shell.sessionOf(7);
 
-  // Copy for the username, Copy password, and an Open for each website; Reveal is a later task's.
+  // Copy for the username, Copy password, and an Open for each website; Reveal is on the details only, never on a search result.
   fireEvent.click(within(panel).getByRole("button", { name: "Copy username" }));
   await waitFor(() => {
     expect(shell.copied.at(-1)).toEqual({ session: live?.session, generation: live?.generation, id: itemId(1), field: "username" });
@@ -482,7 +482,8 @@ test("copy_buttons_on_the_login_details", async () => {
   await waitFor(() => {
     expect(shell.copied.at(-1)).toMatchObject({ id: itemId(1), field: "password" });
   });
-  expect(within(panel).queryByRole("button", { name: /reveal/i })).toBeNull();
+  expect(within(panel).getByRole("button", { name: "Reveal" })).toBeTruthy();
+  expect(invoke.mock.calls.some(([cmd]) => cmd === "reveal_password")).toBe(false);
 
   const opens = within(panel).getAllByRole("button", { name: /^Open / });
   expect(opens.map((button) => button.getAttribute("aria-label"))).toEqual(["Open support.example.com", "Open status.example.com"]);

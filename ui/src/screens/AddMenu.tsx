@@ -1,11 +1,12 @@
+import { rememberOpener } from "../focus";
 import { PlusIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
-import { openNewLogin } from "../store";
+import { openNewKey, openNewLogin, openNewNote } from "../store";
 
 /**
- * Add (6a), at the right end of the toolbar: a menu of what can be added. A login is the only kind in this version; a key
- * and a note come with their forms, and a file and a pasted .env with theirs, and none of them is listed before it works.
- * Not shown in a vault opened from a backup, where nothing can be added.
+ * Add (6a), at the right end of the toolbar: a menu of what can be added. A login, a key and a note are equal in it, as
+ * drawn; a file and a pasted .env come with their forms, and neither is listed before it works. Not shown in a vault opened
+ * from a backup, where nothing can be added.
  */
 export function AddMenu({ session }: { session: number }) {
   return (
@@ -23,7 +24,22 @@ export function AddMenu({ session }: { session: number }) {
           {
             label: "Login",
             onSelect: () => {
+              rememberOpener(null);
               openNewLogin(session);
+            },
+          },
+          {
+            label: "Key",
+            onSelect: () => {
+              rememberOpener(null);
+              openNewKey(session);
+            },
+          },
+          {
+            label: "Note",
+            onSelect: () => {
+              rememberOpener(null);
+              openNewNote(session);
             },
           },
         ]}
