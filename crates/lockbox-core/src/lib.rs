@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 // Public as a whole: every item is part of the surface.
+pub mod env_file;
 pub mod generator;
 pub mod ids;
 
