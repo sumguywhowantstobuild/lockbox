@@ -326,7 +326,7 @@ fn a_key_with_a_word_from_a_fixed_sentence_is_not_a_leak() {
         &RECOVERY_REFUSALS
     ));
     // An answer that is not one of the fixed sentences is refused, whatever the input.
-    let other = CoreError::Damaged { what: "header" };
+    let other = CoreError::WrongPassword;
     assert!(assert_recovery_refusal_is_fixed(&other, b"athlete quick rose").is_err());
 }
 
