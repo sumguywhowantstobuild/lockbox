@@ -6,7 +6,7 @@
 
 @media (forced-colors: active) {
   /* What had only a background or a shadow gets a real edge. */
-  .app :is(.pill, .prim, .addb, .seg, .rbtn, .tb2, .ib, .fin, .inp, .finp, .vbtn, .srch, .nav.on, .lrow.on) {
+  .app :is(.pill, .prim, .addb, .seg, .rbtn, .tb2, .ib, .fin, .ssort, .inp, .finp, .vbtn, .srch, .nav.on, .lrow.on) {
     border: 1px solid CanvasText !important;
   }
 

@@ -387,6 +387,34 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("new folder box words on its card", c("--ink"), card, 4.5);
       check("new folder box error edge on the side menu", c("--danger"), rail, 3);
       check("new folder box focus ring on the side menu", c("--v"), rail, 3);
+
+      // Show one kind, and sort (Task 15). The two lists in the toolbar are on the list's ground: their words and their
+      // arrow pair at rest, hovered or open, and pressed (the tints laid over the ground), and their focus ring.
+      for (const [state, fill] of [["rest", ground], ["hover or open", over(c("--hov"), ground)], ["pressed", over(c("--prs"), ground)]] as const) {
+        check(`kind and sort list words, ${state}`, c("--ink"), fill, 4.5);
+        check(`kind and sort list arrows, ${state}`, c("--ink2"), fill, 3);
+      }
+      check("kind and sort list focus ring on the ground", c("--v"), ground, 3);
+      // The list each opens (the menu's look): an option's words and the chosen one's check mark, at rest, highlighted and
+      // pressed.
+      for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`kind and sort option words, ${state}`, c("--ink"), fill, 4.5);
+        check(`kind and sort option check mark, ${state}`, c("--ink"), fill, 3);
+      }
+      // The line that says the list is narrowed, on the ground, and "Show all" in it at rest, hovered and pressed.
+      check("narrowed-list line on the ground", c("--ink2"), ground, 4.5);
+      for (const [state, fill] of [["rest", ground], ["hover", over(c("--hov"), ground)], ["pressed", over(c("--prs"), ground)]] as const) {
+        check(`Show all words, ${state}`, c("--ink"), fill, 4.5);
+      }
+      // Nothing matching (17c), on a card: its words (the text pairs above), Clear filter and Show all as the main pill
+      // (its words on its fill in each state, and its fill against the card), and Search all vaults as the quiet pill.
+      for (const [state, fill] of [["rest", "--add"], ["hover", "--addh"], ["pressed", "--addp"]] as const) {
+        check(`Clear filter words, ${state}`, c("--addi"), c(fill), 4.5);
+        check(`Clear filter button against its card, ${state}`, c(fill), card, 3);
+      }
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`Search all vaults words, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
+      }
     }
   }
 

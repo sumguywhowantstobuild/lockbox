@@ -1372,7 +1372,8 @@ test("every_new_part_passes_the_accessibility_check", async () => {
 
 test("no_style_element_or_inline_style_is_made_by_the_new_parts", async () => {
   const { container } = await unlocked();
-  expect(container.querySelectorAll("[style]")).toHaveLength(0);
+  // The list's toolbar has the kind and sort lists (Task 15), each with the library's own hidden input inside it, set by script.
+  expect([...container.querySelectorAll("[style]")].filter((element) => element.closest(".tb .sortw") === null)).toEqual([]);
   await openTrash();
   await openTrashed("Folder", "Slotted");
   // The page itself, with the Trash view and its panel, writes none (what a part sets by script while a dialog is open is its own).

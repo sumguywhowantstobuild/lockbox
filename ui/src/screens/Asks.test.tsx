@@ -533,9 +533,11 @@ test("each_ask_passes_axe", async () => {
     listen.mockReset();
     await run();
     const container = drawn;
-    // The dialog part sets style properties from script (allowed by the policy); the markup of the screens writes none.
+    // The dialog part sets style properties from script (allowed by the policy), and so does the library's own hidden input
+    // inside the toolbar's kind and sort lists; the markup of the screens writes none.
     if (screen.queryByRole("dialog") === null) {
-      expect(container.querySelectorAll("style, [style]"), `${name}: no style element or attribute`).toHaveLength(0);
+      const styled = [...container.querySelectorAll("style, [style]")].filter((element) => element.closest(".tb .sortw") === null);
+      expect(styled, `${name}: no style element or attribute`).toEqual([]);
     }
     await expectNoAxe(container);
     cleanup();

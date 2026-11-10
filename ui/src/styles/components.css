@@ -1046,6 +1046,44 @@
   height: 12px;
 }
 
+/* The kind and sort lists beside the filter (17a, 17b): small boxes in the filter box's look, each showing its choice with
+   the arrow pair. The kind list is a little wider, for "All kinds". Their list is the select part's. */
+.sortw {
+  position: relative;
+  flex: 0 0 90px;
+}
+
+.sortw.k {
+  flex-basis: 104px;
+}
+
+.ssort {
+  width: 100%;
+  height: 30px;
+  padding: 0 5px 0 10px;
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color 0.2s var(--ease);
+}
+
+.ssort:hover,
+.ssort[data-popup-open] {
+  background: var(--hov);
+}
+
+.ssort:active {
+  background: var(--prs);
+}
+
+.win .ssort:focus-visible {
+  outline-offset: 0;
+}
+
 .ib {
   flex: none;
   display: inline-flex;
@@ -1109,6 +1147,15 @@
   margin: -10px 0 16px;
   font-size: 13.5px;
   color: var(--ink2);
+}
+
+/* "Show all" at the end of that line: a link in the sentence, so it keeps the line's height and size. */
+.lnote .lnk {
+  height: auto;
+  margin: -2px -4px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-size: inherit;
 }
 
 .sech {

@@ -47,8 +47,12 @@ export function dayWords(when: string, now: Date): string {
   return then.getFullYear() === now.getFullYear() ? date : `${date} ${String(then.getFullYear())}`;
 }
 
-/** How long ago `when` was, in the words both "changed ..." and "deleted ..." follow; empty when the date cannot be read. */
-function agoWords(when: string, now: Date): string {
+/**
+ * How long ago `when` was, in the words "changed ..." and "deleted ..." follow and a list sorted by date shows on each row:
+ * "today", "yesterday", "2 days ago" for the first week, then "this month", "last month", "in September", "in December
+ * 2025". Empty when the date cannot be read.
+ */
+export function agoWords(when: string, now: Date): string {
   const then = new Date(when);
   if (when === "" || Number.isNaN(then.getTime())) return "";
   const days = Math.max(0, dayNumber(now) - dayNumber(then));

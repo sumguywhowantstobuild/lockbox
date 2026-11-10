@@ -15,7 +15,8 @@ export interface SelectChoice {
  * without picking, and focus goes back to the box. Always has one chosen (`value` is one of `items`); for many items
  * to narrow by typing, use `Combobox`. `label` is the visible label, which also names the box for a screen reader.
  * `triggerRef` reaches the box, for a screen that puts focus on it. An item is a plain string (shown and returned as it
- * is), or a `SelectChoice` when what is shown is not what identifies it.
+ * is), or a `SelectChoice` when what is shown is not what identifies it. `compact` is the toolbar's form: a small box with
+ * no label in view (the label still names it for a screen reader).
  */
 export function Select({
   label,
@@ -23,12 +24,14 @@ export function Select({
   value,
   onValueChange,
   triggerRef,
+  compact = false,
 }: {
   label: string;
   items: readonly (string | SelectChoice)[];
   value: string;
   onValueChange: (value: string) => void;
   triggerRef?: Ref<HTMLButtonElement>;
+  compact?: boolean;
 }) {
   const container = usePortalContainer();
   const choices = items.map((item) => (typeof item === "string" ? { value: item, label: item } : item));
@@ -40,8 +43,8 @@ export function Select({
         if (next !== null) onValueChange(next);
       }}
     >
-      <BaseSelect.Label className="flab">{label}</BaseSelect.Label>
-      <BaseSelect.Trigger ref={triggerRef} className="finp sel">
+      <BaseSelect.Label className={compact ? "sr" : "flab"}>{label}</BaseSelect.Label>
+      <BaseSelect.Trigger ref={triggerRef} className={compact ? "ssort sel" : "finp sel"}>
         <BaseSelect.Value />
         <BaseSelect.Icon className="sel-i">
           <ChevronsIcon />

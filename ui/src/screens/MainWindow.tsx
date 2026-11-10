@@ -1,14 +1,17 @@
 import { useState } from "react";
 import { messageFor } from "../messages";
+import { Button } from "../parts/Button";
 import { CloseIcon, FilterIcon, MoreIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
 import type { VaultLook } from "../parts/Pattern";
 import { ToastStack } from "../parts/Toast";
 import {
   copyField,
+  openSearch,
   pickTrashed,
   selectItem,
   setForm,
+  setSearchQuery,
   useForm,
   useSessions,
   useVaults,
@@ -24,13 +27,12 @@ import { LoginForm } from "./forms/LoginForm";
 import { NoteForm } from "./forms/NoteForm";
 import { GeneratorPage } from "./GeneratorPanel";
 import { ItemList } from "./ItemList";
+import { FILTER, itemCount, kindCount, kindPlural, ListTools, showAll, useKind, useSort } from "./ListTools";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
 import { SearchPanel } from "./SearchPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
 import { TrashPanel, TrashView } from "./TrashView";
-
-const FILTER = "filter";
 
 /** The words for the vaults that are not open, so the list does not look as if their items were missing. */
 function lockedLine(names: readonly string[]): string | null {
@@ -41,14 +43,18 @@ function lockedLine(names: readonly string[]): string | null {
 }
 
 /**
- * The main window of an unlocked vault: the side menu, the toolbar with its filter, the list of items (all of them, or
- * one folder's) and, when one is picked, its details in the panel; and the search, which Ctrl+F and Ctrl+K open over it.
- * A failed or stale answer never reaches this far as an error: a vault that locked is simply no longer here.
+ * The main window of an unlocked vault: the side menu, the toolbar with its filter and its kind and sort lists, the list of
+ * items (all of them, or one folder's, narrowed and ordered as chosen) and, when one is picked, its details in the panel;
+ * and the search, which Ctrl+F and Ctrl+K open over it. A narrowed list always says so, with a way back, so it never looks
+ * like missing items. A failed or stale answer never reaches this far as an error: a vault that locked is simply no longer
+ * here.
  */
 export function MainWindow({ data, look }: { data: SessionData; look: VaultLook }) {
   const vaults = useVaults();
   const sessions = useSessions();
   const filter = useForm(data.session, FILTER);
+  const kind = useKind(data.session);
+  const sort = useSort(data.session);
   // The folder's own question, while one is open: which, for which folder (kept as it was when asked).
   const [asking, setAsking] = useState<{ kind: "rename" | "delete"; folder: { id: string; name: string }; count: number } | null>(null);
   const everything = data.items ?? [];
@@ -74,13 +80,23 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   const inView = data.folder === null ? items : items.filter((item) => item.collection === data.folder);
   const needle = filter.trim().toLowerCase();
   const matches = (text: string | null | undefined) => (text ?? "").toLowerCase().includes(needle);
+  const ofKind = kind === "all" ? inView : inView.filter((item) => item.kind === kind);
   const shown =
     needle === ""
-      ? inView
-      : inView.filter(
+      ? ofKind
+      : ofKind.filter(
           (item) =>
             matches(item.title) || matches(item.username) || item.attachments.some((file) => matches(file.name)),
         );
+  // What is narrowed away, said in words: the kind, the typed word, or both.
+  const word = filter.trim();
+  const showing =
+    kind === "all"
+      ? `Showing ${String(shown.length)} of ${String(inView.length)}, filtered by “${word}”.`
+      : `Showing ${kindCount(kind, shown.length)} of ${itemCount(inView.length)}${needle === "" ? "" : `, filtered by “${word}”`}.`;
+  // The place that holds the items, by name: the folder, or the vault for All items.
+  const holder = folderName ?? data.name;
+  const rest = inView.length === 1 ? "it" : "them";
   const title = data.trash ? "Trash" : (folderName ?? "All items");
   const openVaults = new Set(sessions.map((session) => session.vaultId));
   const locked = lockedLine(
@@ -129,6 +145,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 )}
               </div>
             )}
+            {data.trash ? null : <ListTools session={data.session} />}
             {folderMenu === null ? null : (
               // The folder's own menu (14b): Rename and Delete, and nothing a later plan builds. Not on All items, not in the Trash.
               <Menu
@@ -194,17 +211,70 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                   </>
                 )}
               </div>
-            ) : shown.length === 0 ? (
+            ) : shown.length === 0 && needle !== "" ? (
+              // Nothing matches the typed word (17c): what was typed, how many items there really are, and two ways on.
               <div className="grp lempty">
-                <p className="le-t">Nothing matches “{filter.trim()}”.</p>
+                <p className="le-t">Nothing here matches “{word}”</p>
+                <p className="le-b">{`${holder} has ${itemCount(inView.length)}. Clear the filter to see ${rest}.`}</p>
+                <div className="le-a">
+                  <Button
+                    look="pill-main"
+                    onClick={() => {
+                      showAll(data.session);
+                    }}
+                  >
+                    Clear filter
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      openSearch();
+                      void setSearchQuery(word);
+                    }}
+                  >
+                    Search all vaults
+                  </Button>
+                </div>
+              </div>
+            ) : shown.length === 0 && kind !== "all" ? (
+              // Nothing of the chosen kind here: the same card, in the kind's own word.
+              <div className="grp lempty">
+                <p className="le-t">{`No ${kindPlural(kind)} here`}</p>
+                <p className="le-b">{`${holder} has ${itemCount(inView.length)}. Show all kinds to see ${rest}.`}</p>
+                <div className="le-a">
+                  <Button
+                    look="pill-main"
+                    onClick={() => {
+                      showAll(data.session);
+                    }}
+                  >
+                    Show all
+                  </Button>
+                </div>
               </div>
             ) : (
               <>
-                {needle === "" ? null : (
-                  <p className="lnote">{`Showing ${String(shown.length)} of ${String(inView.length)}, filtered by “${filter.trim()}”.`}</p>
+                {needle === "" && kind === "all" ? null : (
+                  <p className="lnote">
+                    {showing}
+                    {kind === "all" ? null : (
+                      <>
+                        {" "}
+                        <button
+                          type="button"
+                          className="lnk"
+                          onClick={() => {
+                            showAll(data.session);
+                          }}
+                        >
+                          Show all
+                        </button>
+                      </>
+                    )}
+                  </p>
                 )}
                 <ItemList
                   items={shown}
+                  sort={sort}
                   openId={data.openItem?.id ?? null}
                   folderNames={data.folder === null ? folderNames : null}
                   onOpen={(id) => {

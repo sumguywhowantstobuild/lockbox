@@ -1,5 +1,16 @@
 import { expect, test } from "vitest";
-import { changedText, dayWords, deletedText, formatBytes } from "./format";
+import { agoWords, changedText, dayWords, deletedText, formatBytes } from "./format";
+
+test("a_row_sorted_by_date_says_when_in_the_words_of_a_change", () => {
+  const now = new Date("2026-11-10T12:00:00Z");
+  // The words alone, as a row of a list sorted by date shows them (17b): what "changed ..." says, without the verb.
+  for (const when of ["2026-11-10T09:00:00Z", "2026-11-09T12:00:00Z", "2026-11-04T12:00:00Z", "2026-10-01T09:00:00Z", "2025-12-20T09:00:00Z"]) {
+    expect(`changed ${agoWords(when, now)}`).toBe(changedText(when, now));
+  }
+  expect(agoWords("2026-11-08T09:00:00Z", now)).toBe("2 days ago");
+  expect(agoWords("", now)).toBe("");
+  expect(agoWords("not a date", now)).toBe("");
+});
 
 test("sizes_are_written_in_the_unit_people_read", () => {
   expect(formatBytes(0)).toBe("0 B");

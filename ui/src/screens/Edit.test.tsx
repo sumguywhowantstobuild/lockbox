@@ -361,10 +361,11 @@ test("password_shows_while_editing", async () => {
   // As drawn (11a), the password is readable in its box: plain text, with no Show or Hide to press.
   expect(inputOf(form, "Password").type).toBe("text");
   expect(within(form).queryByRole("button", { name: /^(Show|Hide)$/ })).toBeNull();
-  // It is in the box and nowhere else: not in the text of the page, a label or a title; no inline style anywhere.
+  // It is in the box and nowhere else: not in the text of the page, a label or a title; no inline style anywhere (but the
+  // library's own hidden input inside the toolbar's kind and sort lists, which it sets by script).
   expect(document.body.textContent).not.toContain(NOW_PW);
   expect(labelsAndTitles()).not.toContain(NOW_PW);
-  expect(container.querySelector("[style]")).toBeNull();
+  expect([...container.querySelectorAll("[style]")].filter((element) => element.closest(".tb .sortw") === null)).toEqual([]);
   expect(container.querySelector("style")).toBeNull();
   // The form has no Folder (moving is another task's), and the details were not asked for again.
   expect(within(form).queryByText("Folder")).toBeNull();

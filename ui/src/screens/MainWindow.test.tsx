@@ -68,9 +68,10 @@ test("items_list_after_unlock", async () => {
   // A login's row shows its username, a file's its name and size, and which folder each is in.
   expect(within(list).getByText("admin@example.com")).toBeTruthy();
   expect(within(list).getByText("contract-demo.pdf · 96 KB")).toBeTruthy();
-  // Add is in the toolbar (Task 11); nothing else from a later task: no kind or sort lists.
+  // Add is in the toolbar (Task 11), with the kind and sort lists beside the filter (Task 15).
   expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
-  expect(screen.queryByLabelText("Sort")).toBeNull();
+  expect(screen.getByRole("combobox", { name: "Show only one kind" }).textContent).toBe("All kinds");
+  expect(screen.getByRole("combobox", { name: "Sort" }).textContent).toBe("Kind");
   // The side menu: the vault, All items (counted), the folders, Lock all.
   const side = screen.getByRole("navigation", { name: "Vault and folders" });
   expect(within(side).getByText("My vault")).toBeTruthy();
@@ -78,7 +79,8 @@ test("items_list_after_unlock", async () => {
   expect(within(side).getByRole("button", { name: /^Agency support agent/ })).toBeTruthy();
   expect(within(side).getByRole("button", { name: /^Lineproof/ })).toBeTruthy();
   expect(within(side).getByRole("button", { name: "Lock all" })).toBeTruthy();
-  expect(container.querySelectorAll("[style]")).toHaveLength(0);
+  // No style in what the page draws but the library's own hidden input inside the kind and sort lists, which it sets by script.
+  expect([...container.querySelectorAll("[style]")].filter((element) => element.closest(".tb .sortw") === null)).toEqual([]);
   expect(container.querySelectorAll("style")).toHaveLength(0);
   await expectNoAxe(container);
 });
@@ -337,9 +339,9 @@ test("filter_narrows_the_list_with_a_way_to_clear_it", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
   expect(within(screen.getByRole("main")).getByText("Error tracker")).toBeTruthy();
   expect(screen.getByRole<HTMLInputElement>("searchbox", { name: "Filter this list" }).value).toBe("");
-  // Nothing matching says so.
+  // Nothing matching says so (the drawn words, 17c; `ListTools.test.tsx` has the rest).
   fireEvent.change(screen.getByRole("searchbox", { name: "Filter this list" }), { target: { value: "zzzz" } });
-  expect(within(screen.getByRole("main")).getByText("Nothing matches “zzzz”.")).toBeTruthy();
+  expect(within(screen.getByRole("main")).getByText("Nothing here matches “zzzz”")).toBeTruthy();
 });
 
 test("a_locked_vault_is_named_in_a_line", async () => {
