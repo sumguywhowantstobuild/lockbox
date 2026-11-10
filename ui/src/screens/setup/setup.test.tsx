@@ -1800,6 +1800,54 @@ test("an_expired_cloud_question_says_so_and_keeps_the_session_on_the_page_and_in
   expect(shell.pdfs).toEqual([]);
 });
 
+test("a_missed_lock_on_the_cloud_question_takes_the_key_and_the_session_off_and_says_nothing", async () => {
+  start([]);
+  await toTheKey();
+  const key = shell.keyOf(1) ?? "";
+  shell.cloudPdfNext();
+  await pressSavePdf();
+  const dialog = await screen.findByRole("dialog", { name: CLOUD_TITLE });
+  // The vault locks and the shell lets go of the question it had parked, but the page never hears the lock event.
+  shell.lockWithoutEvent(shell.sessionOf(1)?.session ?? 0);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
+  expect(commandsSent()).toContain("save_readable_confirm");
+  // No words, no question, no key and no session on the page, and nothing written.
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.body.textContent).not.toContain("took too long");
+  expect(keyWordsOnPage(key)).toEqual([]);
+  expect(debugState().sessions).toEqual([]);
+  expect(shell.pdfs).toEqual([]);
+});
+
+test("a_stale_answer_to_the_lookup_takes_the_key_and_the_session_off_and_says_nothing", async () => {
+  start([]);
+  await toTheKey();
+  const key = shell.keyOf(1) ?? "";
+  shell.cloudPdfNext();
+  await pressSavePdf();
+  const dialog = await screen.findByRole("dialog", { name: CLOUD_TITLE });
+  shell.dropParkedChoices();
+  // The lookup is answered tagged with another generation than the bridge knows: stale, with no lock event heard.
+  const real = invoke.getMockImplementation();
+  if (real === undefined) throw new Error("no fake shell");
+  invoke.mockImplementation((cmd: string, args?: unknown) =>
+    cmd === "list_items"
+      ? (real(cmd, args) as Promise<{ generation: number }>).then((answer) => ({ ...answer, generation: answer.generation + 1 }))
+      : (real(cmd, args) as Promise<unknown>),
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
+  expect(commandsSent()).toContain("list_items");
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.body.textContent).not.toContain("took too long");
+  expect(keyWordsOnPage(key)).toEqual([]);
+  expect(debugState().sessions).toEqual([]);
+  expect(shell.pdfs).toEqual([]);
+});
+
 test("a_cloud_question_that_fails_for_another_reason_keeps_the_key_and_says_why", async () => {
   // The control for the test above: a gone question is no lock either; any other refusal is said and the key stays.
   start([]);

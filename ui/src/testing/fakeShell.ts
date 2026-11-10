@@ -213,6 +213,12 @@ export interface FakeShell {
   copied: Record<string, unknown>[];
   /** Sends `lockbox://locked` for the session and moves its generation on, as a lock does. */
   lock(session: number, reason?: string): void;
+  /**
+   * Locks the session in the shell without telling the page: the generation moves on and everything the session had parked (a cloud
+   * question, a pasted `.env`) is let go, as a lock does, but no `lockbox://locked` is sent. The page learns of it only from the next
+   * refusal (`locked`) or stale answer, as when a lock event is missed.
+   */
+  lockWithoutEvent(session: number): void;
   /** The session the vault is open in, if it is. */
   sessionOf(vaultId: number): Live | undefined;
   /** Holds every `list_items` answer until `release` is called, to lock while one is in flight. */
@@ -1484,6 +1490,14 @@ export function installFakeShell(
     calls,
     copied,
     lock,
+    lockWithoutEvent: (session) => {
+      const entry = live.get(session);
+      if (entry?.unlocked !== true) return;
+      entry.unlocked = false;
+      entry.generation += 1;
+      for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
+      for (const [token, parked] of pendingPdfs) if (parked.session === session) pendingPdfs.delete(token);
+    },
     sessionOf: (vaultId) => {
       const vault = vaults.find((v) => v.id === vaultId);
       return [...live.values()].find((entry) => sessionVault.get(entry.session) === vault);

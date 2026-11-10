@@ -4,7 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
-import { debugState, openPasteEnv, resetStoreForTests } from "../store";
+import { debugState, openPasteEnv, resetStoreForTests, unlock } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import {
   ENV_KEYS_TOO_MANY,
@@ -499,6 +499,101 @@ test("changing_the_folder_moves_already_here_with_no_call_sent", async () => {
   // None of it asked Rust anything: the one read is the only call.
   expect(sent("env_read")).toHaveLength(1);
   expect(sent("env_save")).toEqual([]);
+});
+
+test("picking_the_folder_already_chosen_keeps_the_picks", async () => {
+  await unlocked();
+  await openFolder("Agency support agent");
+  const panel = await openPanel();
+  await pasteRows(panel, ["OPENAI_API_KEY=1", "FRESH_KEY=2"].join("\n"));
+  const clash = rowOf(panel, "OPENAI_API_KEY");
+  fireEvent.click(within(clash).getByRole("button", { name: "Keep both" }));
+  expect(within(clash).getByText("Saves as OPENAI_API_KEY_2")).toBeTruthy();
+  // Opening the Folder list and choosing the folder that is already chosen is no change: Keep both stays.
+  await pickFolder(panel, "Agency support agent");
+  expect(within(rowOf(panel, "OPENAI_API_KEY")).getByRole("button", { name: "Keep both" }).getAttribute("aria-pressed")).toBe("true");
+  expect(within(rowOf(panel, "OPENAI_API_KEY")).getByText("Saves as OPENAI_API_KEY_2")).toBeTruthy();
+  // So the save sends Keep both, and the key that is there is not overwritten.
+  fireEvent.click(saveButton(panel));
+  await waitFor(() => {
+    expect(sent("env_save")).toHaveLength(1);
+  });
+  expect(sent("env_save")[0]?.choices).toEqual([
+    { index: 0, action: "keep_both" },
+    { index: 1, action: "save" },
+  ]);
+  await waitFor(() => {
+    expect(stored().some((item) => item.title === "OPENAI_API_KEY_2")).toBe(true);
+  });
+  expect(stored().find((item) => item.id === OPENAI)?.value).toBe("old-openai");
+});
+
+test("a_save_gives_focus_back_to_add_where_the_panel_was_opened_from_it", async () => {
+  await unlocked();
+  const panel = await openPanel();
+  await pasteRows(panel, `ADD_OPENED=${valueOf("ADD_OPENED")}`);
+  fireEvent.click(saveButton(panel));
+  await waitFor(() => {
+    expect(toastText()).toContain("Saved 1 key to No folder");
+  });
+  expect(screen.queryByRole("complementary", { name: "Paste a .env" })).toBeNull();
+  await waitFor(() => {
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add" }));
+  });
+});
+
+test("a_save_gives_focus_back_to_the_folders_menu_where_the_panel_was_opened_from_it", async () => {
+  await unlocked();
+  await openFolder("Lineproof");
+  const menu = await openMenu(screen.getByRole("button", { name: "More for this folder" }));
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Paste a .env" }));
+  const panel = await screen.findByRole("complementary", { name: "Paste a .env" });
+  await pasteRows(panel, `MENU_OPENED=${valueOf("MENU_OPENED")}`);
+  fireEvent.click(saveButton(panel));
+  await waitFor(() => {
+    expect(toastText()).toContain("Saved 1 key to Lineproof");
+  });
+  expect(screen.queryByRole("complementary", { name: "Paste a .env" })).toBeNull();
+  await waitFor(() => {
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "More for this folder" }));
+  });
+});
+
+test("a_save_that_ends_after_the_person_went_to_another_vault_does_not_take_focus", async () => {
+  vault = { id: 7, name: "My vault", items: withKeys() };
+  shell = installFakeShell(invoke, listen, [vault, { id: 8, name: "Home", items: sampleItems() }]);
+  render(<App />);
+  const field = await screen.findByLabelText(/^Password for /);
+  fireEvent.change(field, { target: { value: PASSWORD } });
+  fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+  await screen.findByRole("heading", { level: 1, name: "All items" });
+  const panel = await openPanel();
+  await pasteRows(panel, `SLOW_SAVE=${valueOf("SLOW_SAVE")}`);
+  const release = shell.holdEnvSave();
+  fireEvent.click(saveButton(panel));
+  await waitFor(() => {
+    expect(sent("env_save")).toHaveLength(1);
+  });
+  // While the shell still has the save, the person unlocks another vault, which is the one on screen now; the first vault's panel
+  // is gone from the screen, though its record keeps the tool.
+  await act(async () => {
+    expect(await unlock(8, PASSWORD)).toBe("opened");
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Paste a .env" })).toBeNull();
+  });
+  const filter = screen.getByLabelText<HTMLInputElement>("Filter this list");
+  filter.focus();
+  release();
+  await waitFor(() => {
+    expect(debugState().sessions.find((entry) => entry.vaultId === 7)?.tool).toBeNull();
+  });
+  // Let any move of focus that was asked for happen.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(document.activeElement).toBe(filter);
+  expect(stored().some((item) => item.title === "SLOW_SAVE")).toBe(true);
 });
 
 test("save_sends_one_choice_per_row_with_the_right_actions_and_the_folder", async () => {

@@ -611,7 +611,9 @@ async function printCommand<T>(session: number, run: (vault: api.SessionRef) => 
     const answer = await run({ session, generation });
     return stillOpen(session, generation) ? answer : "stale";
   } catch (error) {
-    const missedLock = refusedAsLocked(error);
+    // A stale answer says the bridge has seen a later generation than this call began in, as a `locked` refusal does: a session the
+    // page still holds at the generation the call started with is dropped; one that was opened again since is left alone.
+    const missedLock = refusedAsLocked(error) || (error instanceof api.StaleAnswer && stillOpen(session, generation));
     if (missedLock) dropSession(session);
     if (error instanceof api.StaleAnswer || missedLock || !stillOpen(session, generation)) return "stale";
     throw error;
@@ -625,6 +627,19 @@ async function printCommand<T>(session: number, run: (vault: api.SessionRef) => 
  */
 function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired"): Error {
   return Object.assign(new Error(kind), { code: "page", kind });
+}
+
+/**
+ * What a cloud question's `not_found` means, found out by asking the shell about the session itself: a lock also lets go of a parked
+ * save, and the page may have missed its event. The item list is asked for (`list_items`: the one command of a session that takes
+ * nothing, changes nothing and sends nothing secret), through `printCommand`, so a `locked` refusal or a stale answer takes the session
+ * off the page and comes back as `"stale"`: nothing is said. A session that is still live had only an old question: the page's refusal
+ * (`expiredQuestion`) is thrown to say so. If the lookup itself fails another way, that failure is thrown to be said, and the session stays.
+ */
+async function whyNotFound(session: number, kind: "key_pdf_expired" | "env_file_expired"): Promise<"stale"> {
+  const seen = await printCommand(session, (vault) => api.listItems(vault));
+  if (seen === "stale") return "stale";
+  throw expiredQuestion(kind);
 }
 
 function keyPdfFrom(answer: api.Tagged<api.Outcome<api.SavedView>>): KeyPdf {
@@ -649,15 +664,17 @@ export async function saveKeyPdf(session: number): Promise<KeyPdf> {
 
 /**
  * The person's yes to saving it in a cloud-synced folder: the shell goes on with the save it parked. The shell lets go of a
- * parked save at a lock and also after five minutes, so `not_found` is not news of a lock: it is thrown as the page's own refusal
- * ("that took too long, press Save as PDF again") for the screen to say, the question closes, and the session stays.
+ * parked save at a lock and also after five minutes, so `not_found` is not news of a lock by itself: the shell is asked about the
+ * session (`whyNotFound`). Locked: the session leaves the page and nothing is said (`"stale"`). Still live: the page's own refusal
+ * ("that took too long, press Save as PDF again") is thrown for the screen to say, the question closes, and the session stays.
  */
 export async function confirmKeyPdf(session: number, token: string): Promise<KeyPdf> {
   let answer;
   try {
     answer = await printCommand(session, () => api.saveReadableConfirm(token));
   } catch (error) {
-    throw refusedWith(error, "not_found") ? expiredQuestion("key_pdf_expired") : error;
+    if (refusedWith(error, "not_found")) return whyNotFound(session, "key_pdf_expired");
+    throw error;
   }
   return answer === "stale" ? answer : keyPdfFrom(answer);
 }
@@ -1602,7 +1619,7 @@ export function refusedAsEnvGone(error: unknown): boolean {
 }
 
 /** How a pasted `.env`'s save came out: how many keys were written (the panel is gone), a lock meanwhile (nothing to say), or the refusal. */
-export type EnvSaved = { saved: number } | "stale" | { failed: unknown };
+export type EnvSaved = { saved: number; closed: boolean } | "stale" | { failed: unknown };
 
 /** "3 keys", "1 key". */
 function keysWords(count: number): string {
@@ -1613,7 +1630,9 @@ function keysWords(count: number): string {
  * Saves the pasted keys with one choice for every row, into `collection` (a folder's id, or `null`), by the token Rust holds them
  * under. The list is read again whatever the answer (a save cut short can have written some). Written: the panel closes (when it is
  * still the one that saved) and "Saved 3 keys to <where>" is said, `where` being the folder's name or "No folder", as a move says it.
- * A refusal comes back for the panel to say. A vault that locked meanwhile gets nothing said.
+ * A refusal comes back for the panel to say. A vault that locked meanwhile gets nothing said. `onScreen` says whether the panel that
+ * asked is still the one on screen; it is asked at the moment the panel is closed, and `closed` is true only then, so a panel that
+ * left the screen meanwhile (the person went to another vault) is closed in its record without asking for focus.
  */
 export async function saveEnv(
   session: number,
@@ -1621,6 +1640,7 @@ export async function saveEnv(
   choices: api.EnvChoice[],
   collection: string | null,
   where: string,
+  onScreen: () => boolean,
 ): Promise<EnvSaved> {
   const starter = sessionOf(session)?.tool;
   const done = await change(session, (vault) => api.envSave(vault, token, choices, collection));
@@ -1628,8 +1648,10 @@ export async function saveEnv(
   if ("failed" in done) return { failed: done.failed };
   const count = done.done.data;
   say(session, `Saved ${keysWords(count)} to ${where}`);
-  if (starter !== undefined && starter !== null && sessionOf(session)?.tool === starter) closeTool(session);
-  return { saved: count };
+  const closes = starter !== undefined && starter !== null && sessionOf(session)?.tool === starter;
+  const shown = closes && onScreen();
+  if (closes) closeTool(session);
+  return { saved: count, closed: shown };
 }
 
 /** Says something the person has to read and act on, until it is dismissed. */
@@ -1708,15 +1730,24 @@ export async function saveEnvFile(session: number, collection: string): Promise<
 
 /**
  * The person's yes to saving the `.env` file in a cloud-synced folder: the shell goes on with the save it parked. As the recovery key's
- * PDF: `not_found` is a question left open past five minutes, not news of a lock, so it is said in words as something to do again,
- * the question closes, and the session stays.
+ * PDF: `not_found` alone is not news of a lock, so the shell is asked about the session (`whyNotFound`). Locked: the session leaves the
+ * page and nothing is said. Still live: it is said in words as something to do again, the question closes, and the session stays.
+ * A lookup that fails another way is said as that failure.
  */
 export async function confirmEnvFile(session: number, token: string): Promise<EnvFile> {
   let answer;
   try {
     answer = await printCommand(session, () => api.saveReadableConfirm(token));
   } catch (error) {
-    sayFailure(session, refusedWith(error, "not_found") ? expiredQuestion("env_file_expired") : error);
+    let failure = error;
+    if (refusedWith(error, "not_found")) {
+      try {
+        return await whyNotFound(session, "env_file_expired");
+      } catch (lookup) {
+        failure = lookup;
+      }
+    }
+    sayFailure(session, failure);
     return "done";
   }
   return answer === "stale" ? "stale" : sayEnvFile(session, answer.data);

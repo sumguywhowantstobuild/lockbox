@@ -362,6 +362,71 @@ test("an_expired_cloud_question_says_so_and_keeps_the_session_on_the_page_and_in
   expect(shell.envFiles).toEqual([FOLDER]);
 });
 
+test("a_missed_lock_on_the_cloud_question_takes_the_session_off_and_says_nothing", async () => {
+  await unlocked();
+  await openFolder("Agency support agent");
+  await choose("Save as .env file");
+  shell.cloudPdfNext();
+  fireEvent.click(within(await screen.findByRole("dialog", { name: "Save as .env file" })).getByRole("button", { name: "Save" }));
+  const dialog = await screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+  // The vault locks (its parked question goes with it) and the page never hears the lock event.
+  shell.lockWithoutEvent(shell.sessionOf(7)?.session ?? 0);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
+  // The shell is asked about the session, says it is locked, and the session leaves the page: nothing is said, nothing is written.
+  await screen.findByLabelText(/^Password for /);
+  expect(sent("save_readable_confirm")).toHaveLength(1);
+  expect(debugState().sessions).toEqual([]);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.body.textContent).not.toContain("took too long");
+  expect(shell.envFiles).toEqual([]);
+});
+
+test("a_stale_answer_to_the_lookup_takes_the_session_off_and_says_nothing", async () => {
+  await unlocked();
+  await openFolder("Agency support agent");
+  await choose("Save as .env file");
+  shell.cloudPdfNext();
+  fireEvent.click(within(await screen.findByRole("dialog", { name: "Save as .env file" })).getByRole("button", { name: "Save" }));
+  const dialog = await screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+  shell.dropParkedChoices();
+  // The shell answers the lookup tagged with another generation than the bridge knows (the vault locked and the page missed the event):
+  // the bridge calls the answer stale, which is the same news as a `locked` refusal.
+  const real = invoke.getMockImplementation();
+  if (real === undefined) throw new Error("no fake shell");
+  invoke.mockImplementation((cmd: string, args?: unknown) =>
+    cmd === "list_items"
+      ? (real(cmd, args) as Promise<{ generation: number }>).then((answer) => ({ ...answer, generation: answer.generation + 1 }))
+      : (real(cmd, args) as Promise<unknown>),
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
+  await screen.findByLabelText(/^Password for /);
+  expect(sent("list_items").length).toBeGreaterThan(1);
+  expect(debugState().sessions).toEqual([]);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.body.textContent).not.toContain("took too long");
+  expect(shell.envFiles).toEqual([]);
+});
+
+test("a_lookup_that_fails_another_way_says_why_and_keeps_the_session", async () => {
+  await unlocked();
+  await openFolder("Agency support agent");
+  await choose("Save as .env file");
+  shell.cloudPdfNext();
+  fireEvent.click(within(await screen.findByRole("dialog", { name: "Save as .env file" })).getByRole("button", { name: "Save" }));
+  const dialog = await screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+  shell.dropParkedChoices();
+  // The question is gone, and the shell's answer to the lookup that follows is a busy vault: that is what is said.
+  shell.refuseNext("list_items", { code: "busy" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("That vault is busy.");
+  expect(alert.textContent).not.toContain("took too long");
+  expect(debugState().sessions).toHaveLength(1);
+  expect(shell.sessionOf(7)?.unlocked).toBe(true);
+});
+
 test("cancel_does_nothing_while_the_save_runs_and_the_warning_stays", async () => {
   await unlocked();
   await openFolder("Agency support agent");

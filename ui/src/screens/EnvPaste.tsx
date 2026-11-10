@@ -169,8 +169,15 @@ export function EnvPaste({ data, folders }: { data: SessionData; folders: readon
     setSaving(true);
     setProblem(null);
     const where = folders.find((entry) => entry.id === place)?.name ?? "No folder";
-    const done = await saveEnv(session, waiting.token, choices, place, where);
-    if (done === "stale" || !mounted.current) return;
+    const done = await saveEnv(session, waiting.token, choices, place, where, () => mounted.current);
+    if (done === "stale") return;
+    if ("saved" in done) {
+      // The store closed this panel as the save ended, and it was still the one on screen: focus goes back to where it was opened
+      // from, as Cancel does it. A panel the person closed or left meanwhile is not asked for focus.
+      if (done.closed) focusBack("add");
+      return;
+    }
+    if (!mounted.current) return;
     if ("failed" in done) {
       // Forget the rows and the token, and go back to the empty box: the person pastes again.
       setProblem(refusedAsEnvGone(done.failed) ? LET_GO : messageText(messageFor(done.failed)));
@@ -179,9 +186,7 @@ export function EnvPaste({ data, folders }: { data: SessionData; folders: readon
       setPicks({});
       setSaving(false);
       setBoxBack(boxBack + 1);
-      return;
     }
-    focusBack("add");
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -316,7 +321,9 @@ export function EnvPaste({ data, folders }: { data: SessionData; folders: readon
               items={folderChoices(folders, data.folder)}
               value={folder}
               onValueChange={(next) => {
-                // The marks are worked out afresh for the new folder, from what Rust already sent: no call, and every clash starts on Replace.
+                // The marks are worked out afresh for a new folder, from what Rust already sent: no call, and every clash starts on
+                // Replace. The folder already chosen, chosen again, is no change, and the picks stay as they were.
+                if (next === folder) return;
                 setFolder(next);
                 setPicks({});
               }}
