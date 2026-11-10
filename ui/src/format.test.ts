@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { changedText, dayWords, formatBytes } from "./format";
+import { changedText, dayWords, deletedText, formatBytes } from "./format";
 
 test("sizes_are_written_in_the_unit_people_read", () => {
   expect(formatBytes(0)).toBe("0 B");
@@ -45,4 +45,22 @@ test("an_until_line_says_today_or_the_date", () => {
 
 test("this_month_is_named_when_it_is_older_than_a_week", () => {
   expect(changedText("2026-11-01T12:00:00Z", new Date("2026-11-20T12:00:00Z"))).toBe("changed this month");
+});
+
+test("a_delete_is_told_in_the_same_day_words_as_a_change", () => {
+  const now = new Date("2026-11-10T12:00:00Z");
+  const said = (when: string) => deletedText(when, now);
+  expect(said("2026-11-10T09:00:00Z")).toBe("deleted today");
+  expect(said("2026-11-09T12:00:00Z")).toBe("deleted yesterday");
+  expect(said("2026-11-08T09:00:00Z")).toBe("deleted 2 days ago");
+  expect(said("2026-11-01T09:00:00Z")).toBe("deleted this month");
+  expect(said("2026-10-01T09:00:00Z")).toBe("deleted last month");
+  expect(said("2026-09-20T09:00:00Z")).toBe("deleted in September");
+  expect(said("2025-12-20T09:00:00Z")).toBe("deleted in December 2025");
+  // The same words as a change, apart from the verb.
+  for (const when of ["2026-11-10T09:00:00Z", "2026-11-04T12:00:00Z", "2026-09-20T09:00:00Z"]) {
+    expect(said(when).replace(/^deleted/, "changed")).toBe(changedText(when, now));
+  }
+  expect(said("")).toBe("");
+  expect(said("not a date")).toBe("");
 });

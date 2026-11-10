@@ -79,6 +79,26 @@ export function GeneratorIcon() {
   return <Drawing d="M12 4v3M12 17v3M4 12h3M17 12h3M6.5 6.5l2 2M15.5 15.5l2 2M17.5 6.5l-2 2M8.5 15.5l-2 2" />;
 }
 
+/** A bin: the Trash. */
+export function TrashIcon() {
+  return (
+    <svg className="i" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 7h14M10 7V5.5A1.5 1.5 0 0 1 11.5 4h1A1.5 1.5 0 0 1 14 5.5V7M7 7l.8 11.2A1.5 1.5 0 0 0 9.3 19.5h5.4a1.5 1.5 0 0 0 1.5-1.3L17 7" />
+    </svg>
+  );
+}
+
+/** Three dots: more for this (the folder's menu). */
+export function MoreIcon() {
+  return (
+    <svg className="i" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="6" cy="12" r="1.2" />
+      <circle cx="12" cy="12" r="1.2" />
+      <circle cx="18" cy="12" r="1.2" />
+    </svg>
+  );
+}
+
 export function LockIcon() {
   return (
     <svg className="i" viewBox="0 0 24 24" aria-hidden="true">

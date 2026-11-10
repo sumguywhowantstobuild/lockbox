@@ -15,6 +15,27 @@ export function rememberOpener(button: HTMLElement | null): void {
   opener = button;
 }
 
+/**
+ * Focus goes to the list (the first row of the list or of the Trash view, or the heading when there is none) after something
+ * that took its own place off the page: a panel closed by Move to trash, Restore or a delete, or a folder that went. The move
+ * waits one turn so a menu or a dialog that is still giving focus back has finished.
+ */
+export function focusList(): void {
+  window.setTimeout(() => {
+    const target = document.querySelector<HTMLElement>(".lgroups .rgo") ?? document.querySelector<HTMLElement>("h1.big");
+    target?.focus();
+  }, 0);
+}
+
+/** Focus goes to the control `selector` finds (one turn later, as above), or `fallback` runs when it is not there any more. */
+export function focusButton(selector: string, fallback?: () => void): void {
+  window.setTimeout(() => {
+    const target = document.querySelector<HTMLElement>(selector);
+    if (target !== null) target.focus();
+    else fallback?.();
+  }, 0);
+}
+
 export function focusBack(fallback: keyof typeof OPENERS): void {
   const button = opener;
   opener = null;

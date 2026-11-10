@@ -94,6 +94,12 @@ export interface ItemSummary {
   username: string | null;
   collection: string | null;
   trashed: boolean;
+  /** When it went to the trash (RFC 3339, UTC, whole seconds); `null` when it is not in the trash. */
+  trashed_at: string | null;
+  /** The folder whose delete sent it to the trash, when that is why it is there; `null` for one trashed on its own. */
+  trashed_with: string | null;
+  /** Its delete for good has begun and not finished: it is frozen, and a folder's restore does not bring it back. */
+  purging: boolean;
   /**
    * The host of a login's first website (`support.example.com`), and nothing else of the address; `null` when there is
    * none, or the shell would not open it (only `http` and `https` open). Whether to offer "Open site" is this being set.
@@ -335,17 +341,26 @@ export interface ItemFields {
   value?: string;
 }
 
-/** What `new_item` makes here; a folder is the side menu's task, a stored file is made by attaching one. */
-type NewKind = "login" | "key" | "note";
+/** What `new_item` makes here; a stored file is made by attaching one. (A folder is the shell's kind `collection`.) */
+type NewKind = "login" | "key" | "note" | "collection";
 
 function newItem(
   vault: SessionRef,
   kind: NewKind,
   title: string,
   collection: string | null,
-  fields: ItemFields,
+  fields: ItemFields | null,
 ): Promise<Tagged<string>> {
   return call<string>("new_item", { session: vault.session, generation: vault.generation, kind, title, collection, fields });
+}
+
+/**
+ * Makes a new folder named `name` (trimmed by the shell), in no other folder, and answers its id. A folder takes no fields, so
+ * none are sent. Refused with `too_large` past the title limit, `invalid_input` (`what: "folder name"`) for a name with nothing
+ * in it, and `read_only` in a vault opened from a backup. The same name as another folder is allowed.
+ */
+export function newFolder(vault: SessionRef, name: string): Promise<Tagged<string>> {
+  return newItem(vault, "collection", name, null, null);
 }
 
 /**
@@ -422,6 +437,35 @@ export function updateItem(vault: SessionRef, edit: ItemEdit): Promise<Tagged<nu
   // A field that was not changed is not sent at all, not sent as `undefined`.
   const sent = Object.fromEntries(Object.entries(edit).filter(([, value]) => value !== undefined));
   return call<null>("update_item", { session: vault.session, generation: vault.generation, edit: sent });
+}
+
+/**
+ * Moves an item (not a folder) to the trash. Refused with `core` `invalid_input` (`what: "use delete_collection"`) for a folder,
+ * `not_found` for an id that is not in the vault, and `read_only` in a vault opened from a backup.
+ */
+export function trashItem(vault: SessionRef, id: string): Promise<Tagged<null>> {
+  return call<null>("trash_item", { session: vault.session, generation: vault.generation, id });
+}
+
+/**
+ * Takes an item out of the trash, and its folder too if that is in the trash. For a folder: the items that went with it come
+ * back, and the folder. Refused with `core` `invalid_input` (`what: "being deleted"`) for one whose delete for good has begun.
+ */
+export function restoreItem(vault: SessionRef, id: string): Promise<Tagged<null>> {
+  return call<null>("restore_item", { session: vault.session, generation: vault.generation, id });
+}
+
+/** Moves a folder and its items to the trash; answers how many items went with it. */
+export function deleteFolder(vault: SessionRef, id: string): Promise<Tagged<number>> {
+  return call<number>("delete_collection", { session: vault.session, generation: vault.generation, id });
+}
+
+/**
+ * Deletes an item in the trash for good, with its attached files, once the person has said yes. A folder goes alone: its items
+ * stay in the trash. Refused with `core` `invalid_input` (`what: "not in trash"`) for an item that is not there.
+ */
+export function purgeItem(vault: SessionRef, id: string): Promise<Tagged<null>> {
+  return call<null>("purge_item", { session: vault.session, generation: vault.generation, id });
 }
 
 /** The generator's options for a password, as the engine takes them (`length` is 8 to 128). */

@@ -100,6 +100,10 @@ export function ValueField({
         onCut={(event) => {
           if (shown) event.preventDefault();
         }}
+        // Nor can it be dragged out as text while it is shown.
+        onDragStart={(event) => {
+          if (shown) event.preventDefault();
+        }}
       />
       {children}
     </div>

@@ -121,6 +121,7 @@ fn item() -> impl Strategy<Value = Item> {
         ),
         (
             option::of(text(40)),
+            option::of(any::<[u8; 16]>()),
             any::<bool>(),
             vec(any::<[u8; 16]>(), 0..4),
         ),
@@ -128,7 +129,7 @@ fn item() -> impl Strategy<Value = Item> {
         .prop_map(|(head, middle, tail)| {
             let (id, kind, title, notes) = head;
             let (collection, attachments, revision, created_at, modified_at) = middle;
-            let (trashed_at, purging, retired) = tail;
+            let (trashed_at, trashed_with, purging, retired) = tail;
             Item {
                 id: ItemId(id),
                 kind,
@@ -140,6 +141,7 @@ fn item() -> impl Strategy<Value = Item> {
                 created_at,
                 modified_at,
                 trashed_at,
+                trashed_with: trashed_with.map(ItemId),
                 purging,
                 retired_blobs: retired.into_iter().map(FileId).collect(),
             }
@@ -228,6 +230,7 @@ static VALID_ITEM: LazyLock<Vec<u8>> = LazyLock::new(|| {
         created_at: "2026-10-13T00:00:00Z".into(),
         modified_at: "2026-10-13T00:00:00Z".into(),
         trashed_at: None,
+        trashed_with: None,
         purging: false,
         retired_blobs: vec![],
     };

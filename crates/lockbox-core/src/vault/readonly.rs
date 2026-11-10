@@ -262,6 +262,7 @@ impl Vault {
         item.created_at = now.clone();
         item.modified_at = now;
         item.trashed_at = None;
+        item.trashed_with = None;
         item.purging = false;
         item.retired_blobs = Vec::new();
         Ok(item)
@@ -1161,6 +1162,17 @@ mod tests {
         let copy = f.vault.get_item(&new).unwrap();
         assert_eq!(copy.collection, None);
         assert!(copy.trashed_at.is_none());
+
+        // A backup made after the folder was deleted holds the note trashed with it; the copy is not trashed, and goes
+        // with nothing.
+        let later = f.backup("b.lockbox-backup");
+        let ro = open_backup(&later).unwrap();
+        let from = ro.get_item(&note).unwrap();
+        assert!(from.trashed_at.is_some() && from.trashed_with == Some(c));
+        let (_parent, mut other) = live_vault();
+        let new = other.copy_item_from(&ro, &note, false, &cancel).unwrap().id;
+        let copy = other.get_item(&new).unwrap();
+        assert!(copy.trashed_at.is_none() && copy.trashed_with.is_none());
     }
 
     #[test]

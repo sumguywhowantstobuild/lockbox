@@ -114,6 +114,7 @@ pub(super) fn blank_item(
         created_at: now.clone(),
         modified_at: now,
         trashed_at: None,
+        trashed_with: None,
         purging: false,
         retired_blobs: Vec::new(),
     }
@@ -221,14 +222,16 @@ impl Vault {
         Ok(())
     }
 
-    /// Puts an item in or out of the trash. A real change counts as an edit (revision and
-    /// `modified_at`); an item already in that state is left alone and nothing is written.
-    fn set_trashed(&mut self, id: &ItemId, at: Option<String>) -> Result<()> {
+    /// Puts an item in or out of the trash, in one write. A real change counts as an edit (revision and `modified_at`); an
+    /// item already in that state is left alone and nothing is written. Going in, `with` is the folder whose delete sends
+    /// it (`trashed_with`), written in the same step as `trashed_at`; coming out always clears it.
+    fn set_trashed(&mut self, id: &ItemId, at: Option<String>, with: Option<ItemId>) -> Result<()> {
         let stored = self.get_item(id)?;
         if stored.trashed_at.is_some() == at.is_some() {
             return Ok(());
         }
         let mut next = edited(stored)?;
+        next.trashed_with = if at.is_some() { with } else { None };
         next.trashed_at = at;
         self.commit_item(next)
     }
@@ -353,12 +356,27 @@ impl Vault {
                 what: "use delete_collection",
             });
         }
-        self.set_trashed(id, Some(created_at_now()))
+        self.set_trashed(id, Some(created_at_now()), None)
     }
 
-    /// Takes an item out of the trash, and its collection too if that is in the trash
-    /// (collection first, so a crash in between leaves a valid state). The link to the
-    /// collection is kept even if that collection is missing or damaged; the UI treats it as "no collection".
+    /// Whether `member` is in the trash because of the delete of `folder`, and so comes back with it: trashed with that
+    /// folder, still filed in it, and not being deleted for good. The page counts the same way (what the folder's
+    /// restore will bring back).
+    fn went_with(member: &Item, folder: &ItemId) -> bool {
+        member.trashed_at.is_some()
+            && !member.purging
+            && member.trashed_with == Some(*folder)
+            && member.collection == Some(*folder)
+    }
+
+    /// Takes an item out of the trash. A collection brings back the items that went to the trash with it, each in one
+    /// write, **items first and the collection last**, so a crash leaves the collection in the trash and restoring it
+    /// again finishes the job; items trashed on their own, or with another collection, stay where they are, and so does
+    /// one being deleted for good (its purge is its own job: the rest still come back). A collection being deleted for
+    /// good is refused whole, and nothing changes. Any other item comes back alone, with its collection too if that is in
+    /// the trash (collection first, so a crash in between leaves a valid state), and not that collection's other items.
+    /// Every restore clears the restored item's own `trashed_with`. The link to the collection is kept even if that
+    /// collection is missing or damaged; the UI treats it as "no collection".
     pub fn restore_item(&mut self, id: &ItemId) -> Result<()> {
         let item = self.get_item(id)?;
         if item.purging {
@@ -366,6 +384,18 @@ impl Vault {
         }
         if item.trashed_at.is_none() {
             return Ok(());
+        }
+        if matches!(item.kind, ItemKind::Collection) {
+            let members: Vec<ItemId> = self
+                .items
+                .values()
+                .filter(|member| Self::went_with(member, id))
+                .map(|member| member.id)
+                .collect();
+            for member in &members {
+                self.set_trashed(member, None, None)?;
+            }
+            return self.set_trashed(id, None, None);
         }
         // A collection that is gone altogether is not this call's problem.
         let collection = item.collection.filter(|c| self.items.contains_key(c));
@@ -375,13 +405,15 @@ impl Vault {
             return Err(BEING_DELETED);
         }
         if let Some(collection) = collection {
-            self.set_trashed(&collection, None)?;
+            self.set_trashed(&collection, None, None)?;
         }
-        self.set_trashed(id, None)
+        self.set_trashed(id, None, None)
     }
 
-    /// Trashes a collection and its items; returns how many items were newly trashed.
-    /// Items go first and the collection last, so a crash leaves a state that a retry finishes.
+    /// Trashes a collection and its items; returns how many items were newly trashed. Each of those records the
+    /// collection in `trashed_with`, in the same write that trashes it; an item already in the trash is left exactly as it
+    /// is. Items go first and the collection last, so a crash leaves a state that a retry finishes, writing the same value
+    /// on the items still to go.
     pub fn delete_collection(&mut self, id: &ItemId) -> Result<usize> {
         if !matches!(self.get_item(id)?.kind, ItemKind::Collection) {
             return Err(CoreError::InvalidInput {
@@ -396,9 +428,9 @@ impl Vault {
             .map(|m| m.id)
             .collect();
         for member in &members {
-            self.set_trashed(member, Some(now.clone()))?;
+            self.set_trashed(member, Some(now.clone()), Some(*id))?;
         }
-        self.set_trashed(id, Some(now))?;
+        self.set_trashed(id, Some(now), None)?;
         Ok(members.len())
     }
 
@@ -673,6 +705,7 @@ mod tests {
 
         let mut forged = stored.clone();
         forged.trashed_at = None;
+        forged.trashed_with = Some(ItemId([9; 16]));
         forged.created_at = "1999-01-01T00:00:00Z".into();
         forged.purging = true;
         forged.retired_blobs = vec![crate::ids::FileId([9; 16])];
@@ -683,6 +716,10 @@ mod tests {
         let now = vault.get_item(&id).unwrap();
         assert_eq!(now.title, "Renamed");
         assert_eq!(now.trashed_at, stored.trashed_at);
+        assert_eq!(
+            now.trashed_with, stored.trashed_with,
+            "the page cannot set it"
+        );
         assert_eq!(now.created_at, stored.created_at);
         assert!(!now.purging && now.retired_blobs.is_empty());
         assert_ne!(now.modified_at, "1999-01-01T00:00:00Z");
@@ -796,18 +833,17 @@ mod tests {
     }
 
     #[test]
-    fn restoring_a_member_restores_its_collection_but_not_the_reverse() {
+    fn restoring_a_member_restores_its_collection_alone() {
         let (_parent, mut vault) = new_vault();
         let (work, a, b, _) = with_collection(&mut vault);
         vault.delete_collection(&work).unwrap();
 
+        // A folder brings back what went with it (Task 14).
         vault.restore_item(&work).unwrap();
         assert!(!is_trashed(&vault, &work));
-        assert!(
-            is_trashed(&vault, &a) && is_trashed(&vault, &b),
-            "only itself"
-        );
+        assert!(!is_trashed(&vault, &a) && !is_trashed(&vault, &b));
 
+        // A member brings back its folder alone, not the other members.
         vault.delete_collection(&work).unwrap();
         vault.restore_item(&a).unwrap();
         assert!(!is_trashed(&vault, &a) && !is_trashed(&vault, &work));
@@ -1028,6 +1064,372 @@ mod tests {
         vault.restore_item(&a).unwrap(); // collection already active: only a changes
         let revision = |id| vault.get_item(&id).unwrap().revision;
         assert_eq!((revision(a), revision(work)), (2, 2));
+    }
+
+    // Folders and the trash (Task 14): an item trashed with its folder records the folder in `trashed_with`, and restoring
+    // the folder brings back the items that name it and no others.
+
+    fn went_with(vault: &Vault, id: &ItemId) -> Option<ItemId> {
+        vault.get_item(id).unwrap().trashed_with
+    }
+
+    /// Counts the item files written from now on, until `failpoint::disarm_all`.
+    fn count_writes() -> std::rc::Rc<std::cell::Cell<usize>> {
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = std::rc::Rc::clone(&writes);
+        failpoint::observe(
+            "items.after_write",
+            Box::new(move || seen.set(seen.get() + 1)),
+        );
+        writes
+    }
+
+    /// Makes item write number `n` from now on (counting from 0), and every one after it, fail before it lands, as a
+    /// crash does: what was written before stays, nothing after it is. Until `failpoint::disarm_all`.
+    fn crash_at_write(n: usize) {
+        let seen = std::cell::Cell::new(0);
+        failpoint::observe(
+            "atomic_write.before_replace",
+            Box::new(move || {
+                if seen.get() == n {
+                    failpoint::arm("atomic_write.before_replace");
+                }
+                seen.set(seen.get() + 1);
+            }),
+        );
+    }
+
+    /// A folder with `n` notes in it.
+    fn folder_with(vault: &mut Vault, n: usize) -> (ItemId, Vec<ItemId>) {
+        let folder = vault.new_item(ItemKind::Collection, "Work", None).unwrap();
+        let notes = (0..n)
+            .map(|i| {
+                vault
+                    .new_item(ItemKind::Note, &format!("Note {i}"), Some(folder))
+                    .unwrap()
+            })
+            .collect();
+        (folder, notes)
+    }
+
+    #[test]
+    fn folder_restore_brings_back_what_went_with_it() {
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 3);
+        let loose = vault.new_item(ItemKind::Note, "Loose", None).unwrap();
+        assert_eq!(vault.delete_collection(&work).unwrap(), 3);
+        for note in &notes {
+            assert_eq!(
+                went_with(&vault, note),
+                Some(work),
+                "recorded in the delete"
+            );
+        }
+        assert_eq!(went_with(&vault, &work), None, "a folder goes with nothing");
+        assert_eq!(went_with(&vault, &loose), None);
+
+        let before: Vec<u64> = notes
+            .iter()
+            .map(|n| vault.get_item(n).unwrap().revision)
+            .collect();
+        let writes = count_writes();
+        vault.restore_item(&work).unwrap();
+        failpoint::disarm_all();
+        assert_eq!(
+            writes.get(),
+            4,
+            "one write for each item and one for the folder"
+        );
+        for (note, was) in notes.iter().zip(before) {
+            let item = vault.get_item(note).unwrap();
+            assert!(item.trashed_at.is_none() && item.trashed_with.is_none());
+            assert_eq!(item.revision, was + 1, "a real change, once");
+            assert_eq!(item.collection, Some(work));
+        }
+        let folder = vault.get_item(&work).unwrap();
+        assert!(folder.trashed_at.is_none() && folder.trashed_with.is_none());
+
+        // It is on disk, too.
+        let vault = reopen(vault);
+        for id in notes.iter().chain([&work, &loose]) {
+            assert!(!is_trashed(&vault, id));
+            assert_eq!(went_with(&vault, id), None);
+        }
+    }
+
+    #[test]
+    fn folder_restore_leaves_items_trashed_earlier() {
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 3);
+        let other = vault.new_item(ItemKind::Collection, "Home", None).unwrap();
+        let elsewhere = vault.new_item(ItemKind::Note, "Else", Some(other)).unwrap();
+        // One item trashed on its own before the delete, and one that went with another folder.
+        vault.trash_item(&notes[0]).unwrap();
+        vault.delete_collection(&other).unwrap();
+        let earlier = vault.get_item(&notes[0]).unwrap().clone();
+        assert_eq!(went_with(&vault, &notes[0]), None);
+
+        assert_eq!(vault.delete_collection(&work).unwrap(), 2);
+        assert_eq!(went_with(&vault, &notes[0]), None, "left exactly as it was");
+        assert_eq!(
+            vault.get_item(&notes[0]).unwrap().revision,
+            earlier.revision
+        );
+        vault.restore_item(&work).unwrap();
+
+        assert!(!is_trashed(&vault, &work));
+        assert!(!is_trashed(&vault, &notes[1]) && !is_trashed(&vault, &notes[2]));
+        let stayed = vault.get_item(&notes[0]).unwrap();
+        assert!(stayed.trashed_at.is_some(), "trashed earlier: stays");
+        assert_eq!(stayed.trashed_at, earlier.trashed_at);
+        assert_eq!(stayed.revision, earlier.revision, "not written");
+        assert!(is_trashed(&vault, &elsewhere) && is_trashed(&vault, &other));
+        assert_eq!(went_with(&vault, &elsewhere), Some(other));
+
+        let vault = reopen(vault);
+        assert!(is_trashed(&vault, &notes[0]) && is_trashed(&vault, &elsewhere));
+        assert!(!is_trashed(&vault, &work));
+    }
+
+    #[test]
+    fn crash_midway_restores_the_right_items() {
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 3);
+        vault.trash_item(&notes[0]).unwrap(); // earlier, on its own
+
+        // A crash after the first member of the delete was written: that one carries the folder, the rest are as they were.
+        crash_at_write(1);
+        assert!(matches!(
+            vault.delete_collection(&work),
+            Err(CoreError::Io(_))
+        ));
+        failpoint::disarm_all();
+        let mut vault = reopen(vault);
+        // (The members are written in the order of their IDs, so which one went first is not fixed.)
+        let gone: Vec<&ItemId> = notes[1..]
+            .iter()
+            .filter(|n| is_trashed(&vault, n))
+            .collect();
+        assert_eq!(gone.len(), 1);
+        assert_eq!(went_with(&vault, gone[0]), Some(work));
+        assert!(!is_trashed(&vault, &work));
+        assert_eq!(went_with(&vault, &notes[0]), None);
+
+        // The delete is tried again and finishes; the restore then brings back exactly what went with the folder.
+        assert_eq!(vault.delete_collection(&work).unwrap(), 1);
+        for note in &notes[1..] {
+            assert_eq!(went_with(&vault, note), Some(work));
+        }
+        vault.restore_item(&work).unwrap();
+        assert!(!is_trashed(&vault, &work));
+        assert!(!is_trashed(&vault, &notes[1]) && !is_trashed(&vault, &notes[2]));
+        assert!(
+            is_trashed(&vault, &notes[0]),
+            "trashed earlier: still there"
+        );
+        let vault = reopen(vault);
+        assert!(is_trashed(&vault, &notes[0]) && !is_trashed(&vault, &notes[1]));
+    }
+
+    #[test]
+    fn retry_writes_the_same_value() {
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 3);
+        crash_at_write(2);
+        assert!(vault.delete_collection(&work).is_err());
+        failpoint::disarm_all();
+        let mut vault = reopen(vault);
+        let done: Vec<ItemId> = notes
+            .iter()
+            .copied()
+            .filter(|n| is_trashed(&vault, n))
+            .collect();
+        assert_eq!(done.len(), 2, "two were written before the crash");
+        let first = vault.get_item(&done[0]).unwrap().clone();
+        assert_eq!(first.trashed_with, Some(work));
+        let (revision, at) = (first.revision, first.trashed_at.clone());
+
+        assert_eq!(
+            vault.delete_collection(&work).unwrap(),
+            1,
+            "only the last one"
+        );
+        for note in &notes {
+            assert_eq!(went_with(&vault, note), Some(work));
+        }
+        let kept = vault.get_item(&done[0]).unwrap();
+        assert_eq!((kept.revision, &kept.trashed_at), (revision, &at));
+        assert!(is_trashed(&vault, &work));
+        // Once more changes nothing and writes nothing.
+        let writes = count_writes();
+        assert_eq!(vault.delete_collection(&work).unwrap(), 0);
+        failpoint::disarm_all();
+        assert_eq!(writes.get(), 0);
+    }
+
+    #[test]
+    fn restore_retry_after_a_crash_finishes() {
+        // A crash at each write of a restore in turn (three items, then the folder): restoring again always finishes.
+        for crash in 0..4 {
+            let (_parent, mut vault) = new_vault();
+            let (work, notes) = folder_with(&mut vault, 3);
+            let kept = vault.new_item(ItemKind::Note, "Kept", Some(work)).unwrap();
+            vault.trash_item(&kept).unwrap();
+            vault.delete_collection(&work).unwrap();
+            crash_at_write(crash);
+            assert!(
+                matches!(vault.restore_item(&work), Err(CoreError::Io(_))),
+                "{crash}"
+            );
+            failpoint::disarm_all();
+            let mut vault = reopen(vault);
+            let back = notes.iter().filter(|n| !is_trashed(&vault, n)).count();
+            assert_eq!(back, crash.min(3), "items come first ({crash})");
+            assert!(is_trashed(&vault, &work), "the folder goes last ({crash})");
+
+            vault.restore_item(&work).unwrap();
+            assert!(!is_trashed(&vault, &work), "{crash}");
+            for note in &notes {
+                assert!(!is_trashed(&vault, note) && went_with(&vault, note).is_none());
+            }
+            assert!(is_trashed(&vault, &kept), "trashed earlier ({crash})");
+            let vault = reopen(vault);
+            assert!(!is_trashed(&vault, &work) && is_trashed(&vault, &kept));
+        }
+    }
+
+    #[test]
+    fn restoring_an_item_clears_its_field() {
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 2);
+        vault.delete_collection(&work).unwrap();
+        assert_eq!(went_with(&vault, &notes[0]), Some(work));
+
+        let writes = count_writes();
+        vault.restore_item(&notes[0]).unwrap();
+        failpoint::disarm_all();
+        assert_eq!(writes.get(), 2, "its folder, then itself: nothing else");
+        let item = vault.get_item(&notes[0]).unwrap();
+        assert!(item.trashed_at.is_none() && item.trashed_with.is_none());
+        // The other one still goes with the folder, trashed.
+        assert!(is_trashed(&vault, &notes[1]));
+        assert_eq!(went_with(&vault, &notes[1]), Some(work));
+        let vault = reopen(vault);
+        assert_eq!(went_with(&vault, &notes[0]), None);
+        assert_eq!(went_with(&vault, &notes[1]), Some(work));
+
+        // A single item trashed on its own has none, and a restore of it writes once.
+        let mut vault = vault;
+        let loose = vault.new_item(ItemKind::Note, "Loose", None).unwrap();
+        vault.trash_item(&loose).unwrap();
+        assert_eq!(went_with(&vault, &loose), None);
+        let writes = count_writes();
+        vault.restore_item(&loose).unwrap();
+        failpoint::disarm_all();
+        assert_eq!(writes.get(), 1);
+        assert_eq!(went_with(&vault, &loose), None);
+    }
+
+    #[test]
+    fn restoring_an_item_brings_back_its_folder() {
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 3);
+        vault.delete_collection(&work).unwrap();
+
+        // The folder is written first: a crash on the second write leaves the folder back and the item in the trash.
+        crash_at_write(1);
+        assert!(vault.restore_item(&notes[1]).is_err());
+        failpoint::disarm_all();
+        let mut vault = reopen(vault);
+        assert!(!is_trashed(&vault, &work), "folder first");
+        assert!(is_trashed(&vault, &notes[1]));
+        assert_eq!(went_with(&vault, &notes[1]), Some(work));
+
+        vault.restore_item(&notes[1]).unwrap();
+        assert!(!is_trashed(&vault, &notes[1]) && went_with(&vault, &notes[1]).is_none());
+        // Only the folder and that one item: the others stay in the trash, still naming the folder.
+        for note in [&notes[0], &notes[2]] {
+            assert!(is_trashed(&vault, note));
+            assert_eq!(went_with(&vault, note), Some(work));
+        }
+    }
+
+    /// The accepted edge (design, known limits): delete a folder, restore one item (the folder returns), delete the
+    /// folder again, then restore it: the items still in the trash from the first delete come back too.
+    #[test]
+    fn a_second_delete_lets_a_folder_restore_the_first_ones_too() {
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 3);
+        vault.delete_collection(&work).unwrap();
+        vault.restore_item(&notes[0]).unwrap();
+        assert_eq!(vault.delete_collection(&work).unwrap(), 1);
+        vault.restore_item(&work).unwrap();
+        for id in notes.iter().chain([&work]) {
+            assert!(!is_trashed(&vault, id));
+        }
+    }
+
+    /// A member being deleted for good is left alone by a folder's restore: the folder and the other members come back,
+    /// that one stays in the trash, frozen, for its purge to finish. A folder being deleted for good is not restored,
+    /// and nothing of it or its members changes.
+    #[test]
+    fn a_restore_never_brings_back_what_is_being_deleted() {
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 3);
+        vault.delete_collection(&work).unwrap();
+        failpoint::arm("purge.after_mark");
+        assert!(vault.purge_item(&notes[1]).is_err());
+        failpoint::disarm_all();
+        let frozen = vault.get_item(&notes[1]).unwrap().clone();
+        assert!(frozen.purging);
+
+        vault.restore_item(&work).unwrap();
+        assert!(!is_trashed(&vault, &work));
+        assert!(!is_trashed(&vault, &notes[0]) && !is_trashed(&vault, &notes[2]));
+        let after = vault.get_item(&notes[1]).unwrap();
+        assert!(
+            after.trashed_at.is_some() && after.purging,
+            "stays in the trash"
+        );
+        assert_eq!(after.trashed_with, Some(work));
+        assert_eq!(after.revision, frozen.revision, "not written");
+        // Its purge still finishes.
+        vault.purge_item(&notes[1]).unwrap();
+        assert!(matches!(
+            vault.get_item(&notes[1]),
+            Err(CoreError::NotFound)
+        ));
+
+        // A folder being purged is refused whole, and its members stay where they are.
+        let home = vault.new_item(ItemKind::Collection, "Home", None).unwrap();
+        let homes = vault.new_item(ItemKind::Note, "H", Some(home)).unwrap();
+        vault.delete_collection(&home).unwrap();
+        failpoint::arm("purge.after_mark");
+        assert!(vault.purge_item(&home).is_err());
+        failpoint::disarm_all();
+        let writes = count_writes();
+        invalid(vault.restore_item(&home), "being deleted");
+        failpoint::disarm_all();
+        assert_eq!(writes.get(), 0, "nothing half-done");
+        assert!(is_trashed(&vault, &home) && is_trashed(&vault, &homes));
+        assert_eq!(went_with(&vault, &homes), Some(home));
+    }
+
+    #[test]
+    fn a_folder_restore_ignores_members_it_does_not_hold() {
+        // A trashed item that names the folder but was filed elsewhere since is not this folder's to bring back; and an
+        // item that merely sits in the folder (never trashed with it) is not either.
+        let (_parent, mut vault) = new_vault();
+        let (work, notes) = folder_with(&mut vault, 2);
+        let other = vault.new_item(ItemKind::Collection, "Home", None).unwrap();
+        vault.delete_collection(&work).unwrap();
+        let mut edit = vault.get_item(&notes[0]).unwrap().clone();
+        edit.collection = Some(other);
+        vault.update_item(edit).unwrap();
+        assert_eq!(went_with(&vault, &notes[0]), Some(work), "an edit keeps it");
+        vault.restore_item(&work).unwrap();
+        assert!(is_trashed(&vault, &notes[0]));
+        assert!(!is_trashed(&vault, &notes[1]));
     }
 
     #[test]

@@ -73,6 +73,8 @@ export const MESSAGES: Record<string, Words> = {
     title: "That isn't a web address Lockbox can open.",
     body: "Use one that starts with http:// or https://.",
   },
+  // A folder named with nothing, new or renamed: the page asks first, and the shell refuses it all the same.
+  "code:invalid_input:folder name": { title: "A folder needs a name.", body: "Type a name first." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   "code:core": GENERIC,
 

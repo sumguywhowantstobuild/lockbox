@@ -9,6 +9,7 @@
 // session it was for is gone.
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
+import { focusList } from "./focus";
 import type { CopyableField, CopyTarget, ItemDetail, ItemSummary, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
 
@@ -157,6 +158,8 @@ export interface SessionData {
   tool: Tool | null;
   /** The folder shown, or `null` for All items. */
   folder: string | null;
+  /** The Trash view is on screen instead of the list (then `folder` is `null`, and a picked row's panel is the Trash panel). */
+  trash: boolean;
   /**
    * Values the person asked to see (a key's value or a login's password on Reveal), by item. Only the item open in the panel
    * can have one: Hide, opening an item (the same one again too), a form or another folder, or closing the panel, takes it
@@ -176,10 +179,17 @@ export interface SessionData {
   asks: SessionAsks;
 }
 
-/** The message about the last copy (or the refusal of one) or save, and the vault that made it. */
+/** The message about the last copy (or the refusal of one), save, move or restore, and the vault that made it. */
 export type Toast =
   | { kind: "copied"; session: number; text: string; seconds: number; endsAt: number }
   | { kind: "saved"; session: number }
+  /** A short message of its own words ("Moved to Lineproof", "Restored"): it says it once and goes after a few seconds. */
+  | { kind: "said"; session: number; text: string }
+  /**
+   * "Moved to Trash" with Undo: `id` is the item or folder that went (held here, never found again from a title), for Undo to
+   * bring back. It stays about ten seconds, and waits while the pointer or focus is on it.
+   */
+  | { kind: "trashed"; session: number; id: string }
   | { kind: "failed"; session: number | null; error: unknown };
 
 /** What one vault answered to the search: its items, tagged with the generation they were read in. */
@@ -387,6 +397,7 @@ function newRecord(
     openItem: null,
     tool: null,
     folder: null,
+    trash: false,
     reveals: {},
     revealEpoch: 0,
     forms: {},
@@ -660,24 +671,50 @@ export async function printKey(session: number, printer: string): Promise<"done"
   return answer === "stale" ? answer : "done";
 }
 
-async function loadItems(record: SessionData): Promise<"opened" | "stale"> {
+/**
+ * The number of the latest list asked of each session. Every list load goes through `loadItems`, which takes the next number as
+ * it asks and keeps an answer only while its number is still the latest: an older answer that comes after a newer one (a delayed
+ * list from a move that arrives after the list from a delete) is dropped, so it can never put back what the newer one took away.
+ * A lock or a new generation still wins over all of it (`stillOpen`).
+ */
+const listRuns = new Map<number, number>();
+
+/**
+ * Reads the vault's list again and puts it on the page, along with what depends on it: an open panel that no longer belongs (its
+ * item has gone to the Trash, or is gone, outside the Trash view; or has left the Trash, in it) closes, and a value revealed in it
+ * goes with it. `quiet` says a refusal of the read changes nothing on the page (a read on top of a refusal that is already being
+ * said). `"stale"` when the vault locked meanwhile; an answer overtaken by a newer ask is `"opened"` and installs nothing.
+ */
+async function loadItems(record: SessionData, options: { quiet?: boolean } = {}): Promise<"opened" | "stale"> {
   const { session, generation } = record;
+  const run = (listRuns.get(session) ?? 0) + 1;
+  listRuns.set(session, run);
+  const latest = () => listRuns.get(session) === run;
   try {
     const list = await api.listItems(record);
     if (!stillOpen(session, generation)) return "stale";
+    if (!latest()) return "opened";
     // Items that can't be read are told at unlock (Ask 4); the list's own count counts too, whichever is more.
-    update(session, (entry) => ({
-      ...entry,
-      items: list.data.items,
-      loadError: null,
-      asks: { ...entry.asks, unreadable: Math.max(entry.asks.unreadable, list.data.damaged.length) },
-    }));
+    update(session, (entry) => {
+      const items = list.data.items;
+      const open = entry.openItem;
+      const row = open === null ? undefined : items.find((item) => item.id === open.id);
+      const orphaned = open !== null && (row === undefined || row.trashed !== entry.trash);
+      const next = {
+        ...entry,
+        items,
+        loadError: null,
+        asks: { ...entry.asks, unreadable: Math.max(entry.asks.unreadable, list.data.damaged.length) },
+      };
+      return orphaned ? { ...endReveals(next), openItem: null } : next;
+    });
     return "opened";
   } catch (error) {
     // A lock that overtook the question: the bridge says so, and so does the shell ("locked"). If the page never heard
     // the lock, the refusal is the news of it: the vault goes.
     if (refusedAsLocked(error)) dropSession(session);
     if (error instanceof api.StaleAnswer || refusedAsLocked(error) || !stillOpen(session, generation)) return "stale";
+    if (!latest() || options.quiet === true) return "opened";
     update(session, (entry) => ({ ...entry, loadError: error }));
     return "opened";
   }
@@ -901,6 +938,8 @@ export async function selectItem(session: number, id: string | null, opened: Ope
   update(session, (current) => ({
     ...endReveals(current),
     tool: null,
+    // An item of the list is never opened in the Trash view: a result of the search takes the person out of it.
+    trash: false,
     openItem: { id, detail: opened.detail ?? null, error: null, saved, focusEdit },
   }));
   const shows = () => sessionOf(session)?.openItem?.id === id && stillOpen(session, generation);
@@ -993,7 +1032,7 @@ export function openNewNote(session: number): void {
 function openTool(session: number, tool: Tool): void {
   const entry = sessionOf(session);
   if (entry === undefined || entry.readOnly) return;
-  update(session, (current) => ({ ...endReveals(current), openItem: null, tool }));
+  update(session, (current) => ({ ...endReveals(current), openItem: null, tool, trash: false }));
 }
 
 /** Opens the Generator page in the vault's panel. */
@@ -1094,7 +1133,23 @@ async function saveThen(
 
 /** Shows a folder's items (`null`: all items), and closes the panel. */
 export function selectFolder(session: number, folder: string | null): void {
-  update(session, (entry) => ({ ...endReveals(entry), folder, openItem: null }));
+  update(session, (entry) => ({ ...endReveals(entry), folder, trash: false, openItem: null }));
+}
+
+/** Shows the Trash view in place of the list, and closes the panel and any form (the Trash has nothing to add). */
+export function openTrash(session: number): void {
+  update(session, (entry) => ({ ...endReveals(entry), folder: null, trash: true, openItem: null, tool: null }));
+}
+
+/**
+ * Picks a row of the Trash view (`null` closes the panel). Nothing of the item is asked of the shell for it: the Trash panel
+ * shows what the list already says (its title, kind, folder and when), and no password, key or note.
+ */
+export function pickTrashed(session: number, id: string | null): void {
+  update(session, (entry) => ({
+    ...endReveals(entry),
+    openItem: id === null ? null : { id, detail: null, error: null, saved: false, focusEdit: false },
+  }));
 }
 
 /** How a copy or an open ended: it worked, the vault locked meanwhile (nothing to say), or the shell's refusal. */
@@ -1228,6 +1283,248 @@ async function openAndTell(session: number, id: string, index: number): Promise<
 export async function openSite(session: number, id: string, index: number): Promise<void> {
   const done = await openAndTell(session, id, index);
   if (typeof done === "object") set({ ...state, toast: { kind: "failed", session, error: done.failed } });
+}
+
+/** What a change the shell writes came to: done, the vault locked meanwhile (nothing to say), or the shell's refusal. */
+type Changed<T> = { done: T } | "stale" | { failed: unknown };
+
+/**
+ * Runs a change the shell writes (a move, a trash, a restore, a folder made or renamed) and, once it is written, reads the
+ * list again. A vault that locked meanwhile (the bridge's `StaleAnswer`, or the shell's `locked` when the page missed the event,
+ * which also takes the vault's record away) comes back as `"stale"`: nothing to say. The caller decides what the answer does to
+ * the screen, and checks that the view it started from is still the one on screen first (a late answer never acts on a view that
+ * is gone or newer); the list is read whatever the view, since the change is written.
+ */
+async function change<T>(session: number, run: (vault: api.SessionRef) => Promise<T>): Promise<Changed<T>> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "stale";
+  const { generation } = entry;
+  try {
+    const done = await run({ session, generation });
+    if (!stillOpen(session, generation)) return "stale";
+    const record = sessionOf(session);
+    if (record === undefined) return "stale";
+    const read = await loadItems(record);
+    if (read === "stale" || !stillOpen(session, generation)) return "stale";
+    return { done };
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    // A refusal can come after some of the change was written (a folder's items go one at a time), or after the write landed.
+    // The list is read again so the page agrees with the vault, a panel that no longer belongs closes with its revealed value,
+    // and the refusal is still what is said: a refused read on top of it says nothing and throws nothing.
+    const record = sessionOf(session);
+    if (record !== undefined) {
+      const read = await loadItems(record, { quiet: true });
+      if (read === "stale" || !stillOpen(session, generation)) return "stale";
+    }
+    return { failed: error };
+  }
+}
+
+function say(session: number, text: string): void {
+  set({ ...state, toast: { kind: "said", session, text } });
+}
+
+function sayFailure(session: number, error: unknown): void {
+  set({ ...state, toast: { kind: "failed", session, error } });
+}
+
+/**
+ * Whether the panel is still the one a change began from: it is on `id` (`openAtStart` says it was when the change began), or the
+ * list read that followed the change closed it because its item had gone. A panel the person has since moved to another item is
+ * not, and is left as it is.
+ */
+function panelWasOurs(session: number, id: string, openAtStart: boolean): boolean {
+  const now = sessionOf(session)?.openItem ?? null;
+  return now === null ? openAtStart : now.id === id;
+}
+
+/** Reads the open item's details again after a change to it, in place: what the panel shows stays, and Reveal's value too. */
+async function reloadOpen(session: number, id: string): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return;
+  const { generation } = entry;
+  try {
+    const answer = await api.getItem({ session, generation }, id);
+    if (!stillOpen(session, generation) || sessionOf(session)?.openItem?.id !== id) return;
+    update(session, (current) =>
+      current.openItem?.id === id ? { ...current, openItem: { ...current.openItem, detail: answer.data, error: null } } : current,
+    );
+  } catch (error) {
+    // What the panel shows stays; only a lock is news.
+    if (refusedAsLocked(error)) dropSession(session);
+  }
+}
+
+/**
+ * Move on the open item: it goes to `folder` (a folder's id, or `null` for none) at once, as an edit that sends the revision the
+ * panel read, so a change made meanwhile makes it stale and nothing moves (the shell's refusal is said as a message). Says
+ * "Moved to <name>" (`name` is the folder's, `null` for none). The panel reads the item again, and only when it is still the
+ * one open. Picking the folder it is in does nothing. Nothing in a vault that is read-only.
+ */
+export async function moveOpenItem(session: number, folder: string | null, name: string | null): Promise<void> {
+  const entry = sessionOf(session);
+  const open = entry?.openItem;
+  if (entry === undefined || entry.readOnly || open === null || open === undefined || open.detail === null) return;
+  const { id, detail } = open;
+  if (detail.summary.collection === folder) return;
+  const edit: api.ItemEdit = {
+    id,
+    revision: detail.revision,
+    title: detail.summary.title,
+    notes: detail.notes,
+    collection: folder,
+  };
+  const done = await change(session, (vault) => api.updateItem(vault, edit));
+  if (done === "stale") return;
+  if ("failed" in done) {
+    sayFailure(session, done.failed);
+    return;
+  }
+  say(session, `Moved to ${name ?? "No folder"}`);
+  void reloadOpen(session, id);
+}
+
+/**
+ * Move to trash on the open item: it goes at once, with no question. The panel closes (when it is still that item's), the list
+ * is read again, and "Moved to Trash" shows with Undo, which holds the item's id. Focus goes to the list. A refusal is said as a
+ * message and the panel stays. A vault that locked meanwhile gets nothing.
+ */
+export async function trashOpenItem(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  const open = entry?.openItem;
+  if (entry === undefined || entry.readOnly || open === null || open === undefined) return;
+  const { id } = open;
+  const done = await change(session, (vault) => api.trashItem(vault, id));
+  if (done === "stale") return;
+  if ("failed" in done) {
+    sayFailure(session, done.failed);
+    return;
+  }
+  const stillThere = panelWasOurs(session, id, true);
+  if (stillThere) update(session, (current) => ({ ...endReveals(current), openItem: null }));
+  set({ ...state, toast: { kind: "trashed", session, id } });
+  if (stillThere) focusList();
+}
+
+/**
+ * Delete on the folder on screen, once the person said yes: it and its items go to the trash, the view goes to All items
+ * (when it is still that folder's), and "Moved to Trash" shows with Undo, which holds the folder's id and brings the folder back
+ * with what went with it. A refusal is said as a message.
+ */
+export async function deleteFolderOnScreen(session: number, id: string): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const done = await change(session, (vault) => api.deleteFolder(vault, id));
+  if (done === "stale") return;
+  if ("failed" in done) {
+    sayFailure(session, done.failed);
+    return;
+  }
+  const leaving = sessionOf(session)?.folder === id;
+  if (leaving) selectFolder(session, null);
+  set({ ...state, toast: { kind: "trashed", session, id } });
+  if (leaving) focusList();
+}
+
+/** Undo on "Moved to Trash": brings back what went (the item, or the folder with its items) and says "Restored". */
+export async function undoTrash(session: number, id: string): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const done = await change(session, (vault) => api.restoreItem(vault, id));
+  if (done === "stale") return;
+  // Whatever comes next replaces the message, and with it the Undo button. If that button has focus now, focus goes to the
+  // list (or the heading, when there is none) rather than to the top of the page; if focus is elsewhere, it stays there.
+  const hadFocus = document.activeElement?.closest(".tstack") != null;
+  if ("failed" in done) sayFailure(session, done.failed);
+  else say(session, "Restored");
+  if (hadFocus) focusList();
+}
+
+/**
+ * Restore on a Trash row's panel: the item comes back (its folder with it when that is in the trash too; a folder brings back
+ * the items that went with it). The panel closes when it is still that row's, and "Restored" is said. A refusal is said as a message.
+ */
+export async function restoreTrashed(session: number, id: string): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const openAtStart = entry.openItem?.id === id;
+  const done = await change(session, (vault) => api.restoreItem(vault, id));
+  if (done === "stale") return;
+  if ("failed" in done) {
+    sayFailure(session, done.failed);
+    return;
+  }
+  const stillThere = panelWasOurs(session, id, openAtStart);
+  if (stillThere) update(session, (current) => ({ ...endReveals(current), openItem: null }));
+  say(session, "Restored");
+  if (stillThere) focusList();
+}
+
+/**
+ * Delete for good on a Trash row, once the person said yes in the question: the item (a folder alone) goes for good. The panel
+ * closes when it is still that row's. A refusal is said as a message and the row stays.
+ */
+export async function purgeTrashed(session: number, id: string): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const openAtStart = entry.openItem?.id === id;
+  const done = await change(session, (vault) => api.purgeItem(vault, id));
+  if (done === "stale") return;
+  if ("failed" in done) {
+    sayFailure(session, done.failed);
+    return;
+  }
+  const stillThere = panelWasOurs(session, id, openAtStart);
+  if (stillThere) update(session, (current) => ({ ...endReveals(current), openItem: null }));
+  say(session, "Deleted for good");
+  if (stillThere) focusList();
+}
+
+/** What making a folder came to: its id, a lock meanwhile (nothing to say), or the shell's refusal to say under the box. */
+export type FolderMade = { made: string } | "stale" | { failed: unknown };
+
+/**
+ * Makes a folder named `name` (the shell trims it, and refuses one with nothing in it). The list is read again; the new folder is
+ * not opened here: the name box that asked opens it when it is still there (the late answer of a box that is gone opens nothing).
+ */
+export async function addFolder(session: number, name: string): Promise<FolderMade> {
+  const done = await change(session, (vault) => api.newFolder(vault, name));
+  if (done === "stale") return "stale";
+  if ("failed" in done) return { failed: done.failed };
+  return { made: done.done.data };
+}
+
+/** What the page read of a folder to rename it: its revision and notes, as `get_item` says them. */
+export type FolderRead = { revision: number; notes: string } | "stale" | { failed: unknown };
+
+/** Reads a folder's revision (for a rename to send back) and notes (which a rename keeps). */
+export async function readFolder(session: number, id: string): Promise<FolderRead> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "stale";
+  const { generation } = entry;
+  try {
+    const answer = await api.getItem({ session, generation }, id);
+    return stillOpen(session, generation) ? { revision: answer.data.revision, notes: answer.data.notes } : "stale";
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    return { failed: error };
+  }
+}
+
+/**
+ * Renames a folder, as an edit that sends the folder's revision (from `readFolder`): a change made meanwhile makes it stale and
+ * nothing changes (the shell's refusal comes back for the dialog to say). The list is read again, so the folder's name changes
+ * wherever it is shown. A vault that locked meanwhile gets nothing said.
+ */
+export async function renameFolder(session: number, id: string, read: { revision: number; notes: string }, name: string): Promise<SaveResult> {
+  const edit: api.ItemEdit = { id, revision: read.revision, title: name, notes: read.notes, collection: null };
+  const done = await change(session, (vault) => api.updateItem(vault, edit));
+  if (done === "stale") return "stale";
+  if ("failed" in done) return { failed: done.failed };
+  return "saved";
 }
 
 /** Opens the search (Ctrl+F, Ctrl+K): the one search, empty. It does nothing when there is no vault open, or one is open already. */
@@ -1376,6 +1673,7 @@ export function resetStoreForTests(): void {
   noticesStarted = undefined;
   confirmingClose = false;
   searchRun = 0;
+  listRuns.clear();
   state = EMPTY;
   for (const notify of listeners) notify();
 }

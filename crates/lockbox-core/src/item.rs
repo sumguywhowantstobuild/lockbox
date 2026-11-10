@@ -203,6 +203,10 @@ pub struct Item {
     pub created_at: String,
     pub modified_at: String,
     pub trashed_at: Option<String>,
+    /// The folder this item was trashed together with, when it went to the trash because that folder was deleted. An ID,
+    /// not a secret, and never indexed. Set only by `delete_collection` and cleared by any restore, so restoring the
+    /// folder brings back the items that name it and no others.
+    pub trashed_with: Option<ItemId>,
     pub purging: bool,
     pub retired_blobs: Vec<FileId>,
 }
@@ -239,6 +243,8 @@ struct ItemWire {
     created_at: String,
     modified_at: String,
     trashed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trashed_with: Option<ItemId>,
     purging: bool,
     retired_blobs: Vec<FileId>,
 }
@@ -554,6 +560,7 @@ mod tests {
             created_at: "2026-10-09T00:00:00Z".into(),
             modified_at: "2026-10-09T00:00:01Z".into(),
             trashed_at: None,
+            trashed_with: None,
             purging: false,
             retired_blobs: vec![],
         }
@@ -594,13 +601,14 @@ mod tests {
         assert!(same_item(&full, &full.clone()));
 
         type Edit = fn(&mut Item);
-        let edits: [(&str, Edit); 9] = [
+        let edits: [(&str, Edit); 10] = [
             ("title", |i| i.title.push('x')),
             ("notes", |i| i.notes.push('x')),
             ("collection", |i| i.collection = Some(ItemId([1; 16]))),
             ("revision", |i| i.revision += 1),
             ("modified_at", |i| i.modified_at.push('x')),
             ("trashed_at", |i| i.trashed_at = Some("t".into())),
+            ("trashed_with", |i| i.trashed_with = Some(ItemId([2; 16]))),
             ("purging", |i| i.purging = true),
             ("retired", |i| i.retired_blobs.push(FileId([9; 16]))),
             ("file key", |i| {
@@ -675,6 +683,7 @@ mod tests {
         with_extras.collection = Some(ItemId([0xBB; 16]));
         with_extras.attachments = vec![file_ref(), file_ref()];
         with_extras.trashed_at = Some("2026-10-10T00:00:00Z".into());
+        with_extras.trashed_with = Some(ItemId([0xBB; 16]));
         with_extras.purging = true;
         with_extras.retired_blobs = vec![FileId([0x44; 16])];
         for item in [
@@ -1060,6 +1069,77 @@ mod tests {
             previous_passwords.pop();
         }
         assert!(!same_item(&item, &fewer));
+
+        // An item trashed with its folder: `trashed_with` comes right after `trashed_at`, as the folder's ID in hex. Pinned
+        // from the first version of the field; with none it is left out, which the blocks above prove.
+        let mut with_folder = login();
+        with_folder.collection = Some(ItemId([0xBB; 16]));
+        with_folder.trashed_at = Some("2026-10-10T00:00:00Z".into());
+        with_folder.trashed_with = Some(ItemId([0xBB; 16]));
+        let expected_json = format!(
+            concat!(
+                r#"{{"id":"{}","kind":{{"login":{{"username":"ariel","password":"hunter2","urls":["https://example.com"]}}}},"#,
+                r#""title":"Example","notes":"n","collection":"{}","attachments":[],"revision":3,"#,
+                r#""created_at":"2026-10-09T00:00:00Z","modified_at":"2026-10-09T00:00:01Z","#,
+                r#""trashed_at":"2026-10-10T00:00:00Z","trashed_with":"{}","purging":false,"retired_blobs":[]}}"#
+            ),
+            "aa".repeat(16),
+            "bb".repeat(16),
+            "bb".repeat(16)
+        );
+        let mut expected = expected_json.into_bytes();
+        expected.push(0x80);
+        expected.resize(512, 0);
+        let plain = padded_plaintext(&with_folder).unwrap();
+        assert_eq!(plain.as_slice(), expected.as_slice());
+        let back = open_item(
+            &seal_item(&with_folder, &v, &k).unwrap(),
+            &with_folder.id,
+            &v,
+            &k,
+        )
+        .unwrap();
+        assert_eq!(back.trashed_with, Some(ItemId([0xBB; 16])));
+        assert!(same_item(&with_folder, &back));
+        // And the same item without the field is a different item, and has no such word in its bytes.
+        let mut without = with_folder.clone();
+        without.trashed_with = None;
+        assert!(!same_item(&with_folder, &without));
+        let bytes = padded_plaintext(&without).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("trashed_with"));
+    }
+
+    /// `trashed_with` is a folder's ID and nothing else: any other shape is a damaged item, and `null` is the same as
+    /// no field.
+    #[test]
+    fn trashed_with_must_be_an_id() {
+        let (v, k) = vault();
+        let id = ItemId([0xAA; 16]);
+        let mut item = base(ItemKind::Note);
+        item.trashed_at = Some("2026-10-10T00:00:00Z".into());
+        item.trashed_with = Some(ItemId([0xBB; 16]));
+        let good = serde_json::to_string(&ItemOut(&item)).unwrap();
+        let field = format!(r#""trashed_with":"{}""#, "bb".repeat(16));
+        assert!(good.contains(&field), "{good}");
+        for (replacement, opens) in [
+            (r#""trashed_with":null"#.to_owned(), true),
+            (field.clone(), true),
+            (r#""trashed_with":"zz""#.to_owned(), false),
+            (r#""trashed_with":7"#.to_owned(), false),
+            (r#""trashed_with":["bb"]"#.to_owned(), false),
+            (r#""trashed_with":"""#.to_owned(), false),
+        ] {
+            let json = good.replace(&field, &replacement);
+            let mut plain = json.into_bytes();
+            plain.push(0x80);
+            plain.resize(plain.len().div_ceil(512) * 512, 0);
+            let sealed = seal_raw(&plain, &id, &v, &k);
+            assert_eq!(
+                open_item(&sealed, &id, &v, &k).is_ok(),
+                opens,
+                "{replacement}"
+            );
+        }
     }
 
     /// An earlier password, made up for these tests.
@@ -1314,6 +1394,28 @@ mod tests {
             plain
         };
         assert_eq!(padded_plaintext(&again).unwrap().as_slice(), old_plain);
+    }
+
+    /// Every item file written before `trashed_with` existed (`fixtures/old-items.txt`) opens with none, and written again
+    /// is the very bytes the old code sealed: nothing about the field shows when it is none.
+    #[test]
+    fn old_items_with_no_field_still_open() {
+        let (v, k) = vault();
+        let id = ItemId([0xAA; 16]);
+        for name in ["LOGIN", "NOTE", "FILE", "COLLECTION"] {
+            let bytes = old_file(name);
+            let item = open_item(&bytes, &id, &v, &k).unwrap();
+            assert!(item.trashed_with.is_none(), "{name}");
+            let nonce: [u8; 24] = bytes[6..HEADER_LEN].try_into().unwrap();
+            let mut old_plain = Vec::from(&bytes[HEADER_LEN..]);
+            aead::decrypt_in_place(&k, &nonce, &item_ad(&v, &id), &mut old_plain).unwrap();
+            assert_eq!(
+                padded_plaintext(&item).unwrap().as_slice(),
+                old_plain.as_slice(),
+                "{name}"
+            );
+            assert!(!String::from_utf8_lossy(&old_plain).contains("trashed_with"));
+        }
     }
 
     /// The name of a key is a variable name, since `.env` out is the point: ASCII letters, digits and `_`, not starting

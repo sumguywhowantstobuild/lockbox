@@ -1168,3 +1168,38 @@ test("the_latest_reveal_press_wins_whatever_order_the_answers_arrive_in", async 
   expect(within(panel).queryByRole("textbox", { name: "Earlier password, until 12 March" })).toBeNull();
   nowhereOnThePage(OLD_TWO);
 });
+
+// Task 13's re-check left one thing for Task 14: text could be dragged out of a readable box, which a person can do on purpose
+// and which skips the clipboard's marks, timer and clearing. A drag out of the readable Password box, or out of the key's Value
+// box while its value is shown, is stopped, as a native copy and cut already are.
+
+test("a_drag_out_of_the_readable_password_box_is_stopped", async () => {
+  await unlocked();
+  const form = await openEdit("Bot admin console", "Edit login");
+  const box = inputOf(form, "Password");
+  await waitFor(() => {
+    expect(box.value).toBe(NOW_PW);
+  });
+  expect(box.type).toBe("text");
+  // `fireEvent` answers false when the page called `preventDefault`.
+  expect(fireEvent.dragStart(box)).toBe(false);
+  // Other boxes (the title, the username) are ordinary text and are left alone.
+  expect(fireEvent.dragStart(inputOf(form, "Title"))).toBe(true);
+});
+
+test("a_drag_out_of_a_shown_key_value_box_is_stopped_and_a_hidden_one_has_nothing_to_drag", async () => {
+  await unlocked();
+  const form = await openEdit("TELEGRAM_BOT_TOKEN", "Edit key");
+  const value = inputOf(form, "Value");
+  await waitFor(() => {
+    expect(value.value).toBe(BOT_TOKEN);
+  });
+  // Hidden, it is dots and nothing readable leaves it, so there is nothing to stop.
+  expect(value.type).toBe("password");
+  expect(fireEvent.dragStart(value)).toBe(true);
+  fireEvent.click(within(form).getByRole("button", { name: "Show" }));
+  expect(value.type).toBe("text");
+  expect(fireEvent.dragStart(value)).toBe(false);
+  fireEvent.click(within(form).getByRole("button", { name: "Hide" }));
+  expect(fireEvent.dragStart(value)).toBe(true);
+});

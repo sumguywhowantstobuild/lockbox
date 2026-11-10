@@ -4,9 +4,21 @@ import { changedText, dayWords, formatBytes } from "../format";
 import { messageFor } from "../messages";
 import { Button } from "../parts/Button";
 import { CopyIcon, KindIcon } from "../parts/Icon";
+import { Menu, type MenuItem } from "../parts/Menu";
 import { Panel } from "../parts/Panel";
-import { copyField, hideReveal, openEdit, openSite, revealKey, revealValue, type SessionData } from "../store";
+import {
+  copyField,
+  hideReveal,
+  moveOpenItem,
+  openEdit,
+  openSite,
+  revealKey,
+  revealValue,
+  trashOpenItem,
+  type SessionData,
+} from "../store";
 import { useValueGuard } from "../useValueGuard";
+import type { FolderEntry } from "./SideMenu";
 
 const KIND_WORD: Record<ItemKind, string> = { login: "Login", key: "Key", note: "Note", file: "File", collection: "Folder" };
 const KIND_TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", key: "t3", collection: "t4" };
@@ -405,10 +417,13 @@ function FileFields({ summary, detail }: { summary: ItemSummary; detail: ItemDet
  */
 export function ItemPanel({
   data,
+  folders,
   folderNames,
   onClose,
 }: {
   data: SessionData;
+  /** The folders to move the item to, by name (the live ones). */
+  folders: readonly FolderEntry[];
   folderNames: ReadonlyMap<string, string>;
   onClose: () => void;
 }) {
@@ -440,6 +455,27 @@ export function ItemPanel({
     .filter((part) => part !== undefined && part !== "")
     .join(" · ");
   const problem = open.error === null ? null : messageFor(open.error);
+  // Move to folder (12a): "No folder", then each folder by name, the one the item is in marked. An item whose folder is gone from
+  // the list (in the trash, or missing) counts as in no folder, as the rest of the page does.
+  const inFolder = summary.collection !== null && folders.some((entry) => entry.id === summary.collection);
+  const moveChoices: MenuItem[] = [
+    {
+      id: "none",
+      label: "No folder",
+      checked: !inFolder,
+      onSelect: () => {
+        void moveOpenItem(data.session, null, null);
+      },
+    },
+    ...folders.map((entry) => ({
+      id: entry.id,
+      label: entry.name,
+      checked: summary.collection === entry.id,
+      onSelect: () => {
+        void moveOpenItem(data.session, entry.id, entry.name);
+      },
+    })),
+  ];
   return (
     <Panel
       title={summary.title}
@@ -449,17 +485,20 @@ export function ItemPanel({
       onClose={onClose}
       tools={
         data.readOnly ? (
-          // A vault opened from a backup: said as drawn, and no Edit (the shell refuses the edit there as well).
+          // A vault opened from a backup: said as drawn, and no Move or Edit (the shell refuses both there as well).
           <span className="chip">Read-only</span>
         ) : open.detail === null ? undefined : (
-          <Button
-            ref={editButton}
-            onClick={() => {
-              openEdit(data.session);
-            }}
-          >
-            Edit
-          </Button>
+          <>
+            <Menu label="Move" popupLabel="Move to folder" items={moveChoices} />
+            <Button
+              ref={editButton}
+              onClick={() => {
+                openEdit(data.session);
+              }}
+            >
+              Edit
+            </Button>
+          </>
         )
       }
     >
@@ -472,6 +511,20 @@ export function ItemPanel({
       {summary.kind === "key" ? <KeyFields data={data} summary={summary} detail={open.detail} /> : null}
       {summary.kind === "note" ? <NoteFields data={data} summary={summary} detail={open.detail} /> : null}
       {summary.kind === "file" ? <FileFields summary={summary} detail={open.detail} /> : null}
+      {data.readOnly ? null : (
+        // At the foot of the details, as drawn (13a): it goes at once, with no question, and says where to find it.
+        <div className="ptrash">
+          <Button
+            className="dngb"
+            onClick={() => {
+              void trashOpenItem(data.session);
+            }}
+          >
+            Move to trash
+          </Button>
+          <p className="tnote">You can restore it from Trash.</p>
+        </div>
+      )}
     </Panel>
   );
 }

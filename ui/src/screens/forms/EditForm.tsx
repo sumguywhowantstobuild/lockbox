@@ -258,6 +258,10 @@ export function EditForm({
                 onCut={(event) => {
                   event.preventDefault();
                 }}
+                // The readable text cannot be dragged out either, which would skip the clipboard's marks, timer and clearing.
+                onDragStart={(event) => {
+                  event.preventDefault();
+                }}
               />
               {multiLine ? (
                 <p className="fhint" id={secretHint}>

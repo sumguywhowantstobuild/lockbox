@@ -44,6 +44,21 @@ const NOT_A_LOGIN: ShellError = ShellError::InvalidInput {
 /// A key's value asked of an item that is not a key, or given for a kind that has none.
 const NOT_A_KEY: ShellError = ShellError::InvalidInput { what: "not a key" };
 
+/// A folder named with nothing but spaces, or with nothing.
+const NO_FOLDER_NAME: ShellError = ShellError::InvalidInput {
+    what: "folder name",
+};
+
+/// A folder's name as it is kept: trimmed, and refused when nothing is left. The same name as another folder is fine,
+/// as it is for any item; the length limit is the title's, checked before this.
+fn folder_name(title: &str) -> ShellResult<String> {
+    let name = title.trim();
+    match name.is_empty() {
+        true => Err(NO_FOLDER_NAME),
+        false => Ok(name.to_owned()),
+    }
+}
+
 /// A link number past the login's links (`copy_field`).
 const NO_SUCH_LINK: ShellError = ShellError::InvalidInput { what: "link" };
 
@@ -551,6 +566,10 @@ impl Shell {
             (NewKind::Collection, None) => (ItemKind::Collection, Zeroizing::default()),
             (NewKind::Collection, Some(_)) => return Err(NOT_A_LOGIN),
         };
+        let title = match kind {
+            ItemKind::Collection => folder_name(&title)?,
+            _ => title,
+        };
         self.sessions.write(session, generation, |vault, _| {
             Ok(vault
                 .new_item_with_notes(kind, &title, collection, notes)?
@@ -574,7 +593,12 @@ impl Shell {
         let id = item_id(&edit.id)?;
         let collection = collection_id(edit.collection.as_deref())?;
         self.sessions.write(session, generation, |vault, _| {
-            let next = edit.applied_to(vault.get_item(&id)?.clone(), collection)?;
+            let stored = vault.get_item(&id)?.clone();
+            // A folder's new name is trimmed and never empty, as a new folder's.
+            if matches!(stored.kind, ItemKind::Collection) {
+                edit.title = folder_name(&edit.title)?;
+            }
+            let next = edit.applied_to(stored, collection)?;
             Ok(vault.update_item(next)?)
         })
     }
@@ -1188,7 +1212,7 @@ mod tests {
         let item_dates = &list["data"]["items"][0];
         let summary = json!({
             "id": id, "kind": "login", "title": "Bank", "username": "ada@example.com", "collection": null,
-            "trashed": false, "site": "bank.example",
+            "trashed": false, "trashed_at": null, "trashed_with": null, "purging": false, "site": "bank.example",
             "created_at": item_dates["created_at"], "modified_at": item_dates["modified_at"],
             "attachments": [{
                 "file_id": file_id.to_hex(), "name": "statement.pdf", "length": 9,
@@ -1240,6 +1264,7 @@ mod tests {
             created_at: "2026-10-29T00:00:00Z".into(),
             modified_at: "2026-10-29T00:00:00Z".into(),
             trashed_at: None,
+            trashed_with: None,
             purging: false,
             retired_blobs: Vec::new(),
         };
@@ -1251,7 +1276,7 @@ mod tests {
         }
         let expected = json!({
             "id": "07".repeat(16), "kind": "login", "title": "Bank", "username": "ada", "collection": null,
-            "trashed": false, "site": "bank.example",
+            "trashed": false, "trashed_at": null, "trashed_with": null, "purging": false, "site": "bank.example",
             "created_at": "2026-10-29T00:00:00Z", "modified_at": "2026-10-29T00:00:00Z",
             "attachments": [{
                 "file_id": "09".repeat(16), "name": "statement.pdf", "length": 9,
@@ -1316,6 +1341,7 @@ mod tests {
             created_at: "2026-01-02T03:04:05Z".into(),
             modified_at: "2026-02-03T04:05:06Z".into(),
             trashed_at: None,
+            trashed_with: None,
             purging: false,
             retired_blobs: Vec::new(),
         };
@@ -4156,6 +4182,11 @@ mod tests {
             json!({ "previous_passwords": [] }),
             json!({ "previous_passwords": [{ "password": "x", "replaced_at": "t" }] }),
             json!({ "previous": [] }),
+            // Where an item sits in the trash is the engine's to write: a move, a rename or an edit cannot set it.
+            json!({ "trashed_with": "00".repeat(16) }),
+            json!({ "trashed_at": "2026-11-10T00:00:00Z" }),
+            json!({ "trashed": true }),
+            json!({ "purging": false }),
             json!({ "key_value": 5 }),
             json!({ "value": "v" }),
         ] {
@@ -4196,5 +4227,539 @@ mod tests {
                 "copy {field}"
             );
         }
+    }
+
+    // Move, trash and folders (Task 14). A move is `update_item` with a new folder, a rename is `update_item` on the
+    // folder with a new title, a new folder is `new_item` of kind collection, and the Trash view reads what the list
+    // holds: no command of its own.
+
+    /// A folder named `name`: its ID.
+    fn folder(ts: &TestShell, session: SessionId, generation: u64, name: &str) -> String {
+        ts.shell
+            .new_item(
+                session,
+                generation,
+                NewKind::Collection,
+                name.to_owned(),
+                None,
+                None,
+            )
+            .unwrap()
+            .data
+    }
+
+    /// A note titled `title`, in `folder` when given: its ID.
+    fn note_in(
+        ts: &TestShell,
+        session: SessionId,
+        generation: u64,
+        title: &str,
+        folder: Option<&String>,
+    ) -> String {
+        ts.shell
+            .new_item(
+                session,
+                generation,
+                NewKind::Note,
+                title.to_owned(),
+                folder.cloned(),
+                None,
+            )
+            .unwrap()
+            .data
+    }
+
+    /// An edit of a note or a folder: its title, and the folder it is to be in.
+    fn plain_edit(id: &str, revision: u64, title: &str, folder: Option<&String>) -> ItemEdit {
+        ItemEdit {
+            id: id.to_owned(),
+            revision,
+            title: title.to_owned(),
+            notes: secret(""),
+            collection: folder.cloned(),
+            username: None,
+            password: None,
+            urls: None,
+            key_value: None,
+        }
+    }
+
+    /// The list as the page reads it, as JSON, and one item of it by ID.
+    fn listed(ts: &TestShell, session: SessionId, generation: u64) -> Value {
+        serde_json::to_value(ts.shell.list_items(session, generation).unwrap().data).unwrap()["items"].clone()
+    }
+
+    fn row<'a>(list: &'a Value, id: &str) -> &'a Value {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == json!(id))
+            .unwrap()
+    }
+
+    /// The number the page says a folder's restore brings back, worked out from the list the page holds as the page does
+    /// (`TrashView`): the items in the trash that went with that folder, are still filed in it and are not being deleted for
+    /// good.
+    fn page_count(list: &Value, folder: &str) -> usize {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                item["trashed"] == json!(true)
+                    && item["purging"] == json!(false)
+                    && item["trashed_with"] == json!(folder)
+                    && item["collection"] == json!(folder)
+            })
+            .count()
+    }
+
+    /// The Trash view needs when an item went there and with which folder, and gets exactly that: an item deleted with
+    /// its folder names it, one trashed on its own and the folder itself name none.
+    #[test]
+    fn trash_view_reads_when_and_with_which_folder() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let work = folder(&ts, s, g, "Work");
+        let inside = note_in(&ts, s, g, "Inside", Some(&work));
+        let alone = note_in(&ts, s, g, "Alone", None);
+        let live = note_in(&ts, s, g, "Live", None);
+        ts.shell.trash_item(s, g, &alone).unwrap();
+        assert_eq!(ts.shell.delete_collection(s, g, &work).unwrap().data, 1);
+
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &inside)["trashed_with"], json!(work));
+        for id in [&alone, &work] {
+            assert_eq!(row(&list, id)["trashed_with"], Value::Null, "{id}");
+        }
+        for id in [&inside, &alone, &work] {
+            let when = row(&list, id)["trashed_at"].as_str().unwrap();
+            assert!(when.ends_with('Z') && when.len() == 20, "{when}");
+            assert_eq!(row(&list, id)["trashed"], json!(true));
+            assert_eq!(row(&list, id)["purging"], json!(false));
+        }
+        assert_eq!(row(&list, &live)["trashed_at"], Value::Null);
+        assert_eq!(row(&list, &live)["trashed_with"], Value::Null);
+
+        // After a restore the field is gone from the list too.
+        ts.shell.restore_item(s, g, &inside).unwrap();
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &inside)["trashed_with"], Value::Null);
+        assert_eq!(row(&list, &inside)["trashed_at"], Value::Null);
+    }
+
+    /// The number the page shows for a folder in the Trash ("the 3 items that went with it") is what Restore brings back:
+    /// the case is built through the shell, with an item trashed before the delete and one being deleted for good, and the
+    /// page's own count is compared with what `restore_item` restores.
+    #[test]
+    fn the_page_count_is_what_a_folder_restore_brings_back() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let work = folder(&ts, s, g, "Work");
+        let members: Vec<String> = (0..4)
+            .map(|n| note_in(&ts, s, g, &format!("Note {n}"), Some(&work)))
+            .collect();
+        let earlier = note_in(&ts, s, g, "Earlier", Some(&work));
+        ts.shell.trash_item(s, g, &earlier).unwrap();
+        assert_eq!(ts.shell.delete_collection(s, g, &work).unwrap().data, 4);
+        // One of the four is now being deleted for good: it stays in the trash whatever a restore does.
+        failpoint::arm("purge.after_mark");
+        assert!(ts.shell.purge_item(s, g, &members[1]).is_err());
+        failpoint::disarm_all();
+
+        let before = listed(&ts, s, g);
+        assert_eq!(row(&before, &members[1])["purging"], json!(true));
+        let shown = page_count(&before, &work);
+        assert_eq!(shown, 3, "four went with it, one is being deleted");
+
+        ts.shell.restore_item(s, g, &work).unwrap();
+        let after = listed(&ts, s, g);
+        let back = before
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["id"] != json!(work))
+            .filter(|item| {
+                item["trashed"] == json!(true)
+                    && row(&after, item["id"].as_str().unwrap())["trashed"] == json!(false)
+            })
+            .count();
+        assert_eq!(
+            back, shown,
+            "the page said {shown}, restore brought back {back}"
+        );
+        assert_eq!(row(&after, &work)["trashed"], json!(false));
+        assert_eq!(row(&after, &earlier)["trashed"], json!(true));
+        assert_eq!(row(&after, &members[1])["trashed"], json!(true));
+        assert_eq!(page_count(&after, &work), 0);
+    }
+
+    /// Each command that changes the trash or the folders is refused with a stale generation (`Locked`), writes nothing,
+    /// and changes nothing, before and after a real lock.
+    #[test]
+    fn trash_and_folder_commands_refuse_a_stale_generation() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let work = folder(&ts, s, g, "Work");
+        let inside = note_in(&ts, s, g, "Inside", Some(&work));
+        let gone = note_in(&ts, s, g, "Gone", None);
+        ts.shell.trash_item(s, g, &gone).unwrap();
+        let locked = Some(ShellError::Locked);
+        let attempts = |generation: u64| {
+            let shell = &ts.shell;
+            [
+                shell.trash_item(s, generation, &inside).err(),
+                shell.restore_item(s, generation, &gone).err(),
+                shell.restore_item(s, generation, &work).err(),
+                shell.purge_item(s, generation, &gone).err(),
+                shell.delete_collection(s, generation, &work).err(),
+                shell
+                    .update_item(s, generation, plain_edit(&inside, 0, "Inside", None))
+                    .err(),
+                shell
+                    .update_item(s, generation, plain_edit(&work, 0, "Renamed", None))
+                    .err(),
+                shell
+                    .new_item(s, generation, NewKind::Collection, "New".into(), None, None)
+                    .err(),
+            ]
+        };
+        let (refused, writes) = item_writes(|| attempts(g + 1));
+        assert_eq!(refused, [locked; 8]);
+        assert_eq!(writes, 0);
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &inside)["trashed"], json!(false));
+        assert_eq!(row(&list, &work)["title"], json!("Work"));
+        assert_eq!(row(&list, &gone)["trashed"], json!(true));
+
+        // And the old generation after a lock.
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        let (refused, writes) = item_writes(|| attempts(g));
+        assert_eq!(refused, [locked; 8]);
+        assert_eq!(writes, 0);
+    }
+
+    /// Every command of the trash and the folders is refused for an item of another vault (`NotFound`) and in a read-only
+    /// copy, where nothing is written.
+    #[test]
+    fn trash_and_folder_commands_refuse_a_foreign_id_and_a_read_only_copy() {
+        let ts = TestShell::new();
+        let (a, ga) = open_vault(&ts, "Family");
+        let (b, gb) = open_vault(&ts, "Work");
+        let theirs = folder(&ts, b, gb, "Theirs");
+        let their_note = note_in(&ts, b, gb, "Their note", Some(&theirs));
+        let mine = note_in(&ts, a, ga, "Mine", None);
+        let not_found = Some(ShellError::from(CoreError::NotFound));
+        let (refused, writes) = item_writes(|| {
+            let shell = &ts.shell;
+            [
+                shell.trash_item(a, ga, &their_note).err(),
+                shell.restore_item(a, ga, &their_note).err(),
+                shell.purge_item(a, ga, &their_note).err(),
+                shell.delete_collection(a, ga, &theirs).err(),
+                shell
+                    .update_item(a, ga, plain_edit(&their_note, 0, "x", None))
+                    .err(),
+                shell
+                    .update_item(a, ga, plain_edit(&theirs, 0, "x", None))
+                    .err(),
+            ]
+        });
+        assert_eq!(refused, [not_found; 6]);
+        assert_eq!(writes, 0);
+        // Moving my item into their folder is refused as a folder that is not here.
+        let (moved, writes) = item_writes(|| {
+            ts.shell
+                .update_item(a, ga, plain_edit(&mine, 0, "Mine", Some(&theirs)))
+                .err()
+        });
+        assert_eq!(
+            moved,
+            Some(CoreError::InvalidInput { what: "collection" }.into())
+        );
+        assert_eq!(writes, 0);
+
+        // A read-only copy of the first vault: no write of any of these goes through.
+        let folder_a = folder(&ts, a, ga, "Mine too");
+        ts.shell.trash_item(a, ga, &mine).unwrap();
+        let (r, gr) = read_only_session(&ts);
+        let read_only = Some(ShellError::ReadOnly);
+        let (refused, writes) = item_writes(|| {
+            let shell = &ts.shell;
+            [
+                shell
+                    .new_item(r, gr, NewKind::Collection, "New".into(), None, None)
+                    .err(),
+                shell
+                    .update_item(r, gr, plain_edit(&folder_a, 0, "Renamed", None))
+                    .err(),
+                shell
+                    .update_item(r, gr, plain_edit(&mine, 1, "Mine", Some(&folder_a)))
+                    .err(),
+                shell.delete_collection(r, gr, &folder_a).err(),
+                shell.trash_item(r, gr, &folder_a).err(),
+                shell.restore_item(r, gr, &mine).err(),
+                shell.purge_item(r, gr, &mine).err(),
+            ]
+        });
+        assert_eq!(refused, [read_only; 7]);
+        assert_eq!(writes, 0);
+        let list = serde_json::to_value(ts.shell.list_items(r, gr).unwrap().data).unwrap()["items"]
+            .clone();
+        assert_eq!(
+            row(&list, &mine)["trashed"],
+            json!(true),
+            "the list still reads"
+        );
+    }
+
+    /// A move is an edit with a new folder, from the revision the page read: it works into a folder and out of it, and is
+    /// refused (nothing moves) into a folder that is in the trash or is not there, from a stale revision, and for a
+    /// folder, which never sits in another.
+    #[test]
+    fn a_move_goes_into_a_live_folder_and_out_again() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let work = folder(&ts, s, g, "Work");
+        let home = folder(&ts, s, g, "Home");
+        let note = note_in(&ts, s, g, "Plans", Some(&work));
+        let invalid = |what: &'static str| Some(ShellError::from(CoreError::InvalidInput { what }));
+
+        // Into another folder, and out of any.
+        let revision = revision_of(&ts, s, g, &note);
+        ts.shell
+            .update_item(s, g, plain_edit(&note, revision, "Plans", Some(&home)))
+            .unwrap();
+        assert_eq!(row(&listed(&ts, s, g), &note)["collection"], json!(home));
+        let revision = revision_of(&ts, s, g, &note);
+        assert_eq!(revision, 1, "a move counts as an edit");
+        ts.shell
+            .update_item(s, g, plain_edit(&note, revision, "Plans", None))
+            .unwrap();
+        assert_eq!(row(&listed(&ts, s, g), &note)["collection"], Value::Null);
+
+        // A stale revision moves nothing.
+        let (stale, writes) = item_writes(|| {
+            ts.shell
+                .update_item(s, g, plain_edit(&note, 0, "Plans", Some(&work)))
+                .err()
+        });
+        assert_eq!(stale, invalid("stale revision"));
+        assert_eq!(writes, 0);
+        assert_eq!(row(&listed(&ts, s, g), &note)["collection"], Value::Null);
+
+        // A folder in the trash, a folder that is not there, and a note that is not a folder are not places to move to.
+        let revision = revision_of(&ts, s, g, &note);
+        let other = note_in(&ts, s, g, "Other", None);
+        let missing = "ab".repeat(16);
+        ts.shell.delete_collection(s, g, &home).unwrap();
+        let (refused, writes) = item_writes(|| {
+            [
+                ts.shell
+                    .update_item(s, g, plain_edit(&note, revision, "Plans", Some(&home)))
+                    .err(),
+                ts.shell
+                    .update_item(s, g, plain_edit(&note, revision, "Plans", Some(&missing)))
+                    .err(),
+                ts.shell
+                    .update_item(s, g, plain_edit(&note, revision, "Plans", Some(&other)))
+                    .err(),
+            ]
+        });
+        assert_eq!(refused, [invalid("collection"); 3]);
+        assert_eq!(writes, 0);
+        assert_eq!(row(&listed(&ts, s, g), &note)["collection"], Value::Null);
+
+        // A folder never sits in a folder.
+        let revision = revision_of(&ts, s, g, &work);
+        assert_eq!(
+            ts.shell
+                .update_item(s, g, plain_edit(&work, revision, "Work", Some(&work)))
+                .err(),
+            invalid("collection")
+        );
+        let inner = folder(&ts, s, g, "Inner");
+        let revision = revision_of(&ts, s, g, &inner);
+        assert_eq!(
+            ts.shell
+                .update_item(s, g, plain_edit(&inner, revision, "Inner", Some(&work)))
+                .err(),
+            invalid("collection inside a collection")
+        );
+        assert_eq!(
+            ts.shell
+                .new_item(
+                    s,
+                    g,
+                    NewKind::Collection,
+                    "Deep".into(),
+                    Some(work.clone()),
+                    None
+                )
+                .err(),
+            invalid("collection inside a collection")
+        );
+    }
+
+    /// A folder's name follows the title limit and may not be empty once trimmed; the same name as another folder is
+    /// allowed, as it is for items; a rename sends the folder's revision, and a stale one changes nothing.
+    #[test]
+    fn folder_names_new_and_renamed() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let empty = Some(ShellError::InvalidInput {
+            what: "folder name",
+        });
+        let new = |title: &str| {
+            ts.shell
+                .new_item(s, g, NewKind::Collection, title.to_owned(), None, None)
+        };
+
+        // Empty after trimming: refused, and nothing is written.
+        let (refused, writes) =
+            item_writes(|| ["", " ", "   ", "\t\n"].map(|title| new(title).err()));
+        assert_eq!(refused, [empty; 4]);
+        assert_eq!(writes, 0);
+        assert_eq!(item_files(&ts, 0), 0);
+
+        // The title limit, in bytes, as for every title; and exactly at it works.
+        assert!(matches!(
+            new(&"a".repeat(MAX_TITLE + 1)).err(),
+            Some(ShellError::TooLarge { .. })
+        ));
+        assert_eq!(item_files(&ts, 0), 0);
+        let long = new(&"a".repeat(MAX_TITLE)).unwrap().data;
+
+        // Kept trimmed, and the same name twice makes two folders.
+        let one = new("  Work  ").unwrap().data;
+        let two = new("Work").unwrap().data;
+        assert_ne!(one, two);
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &one)["title"], json!("Work"));
+        assert_eq!(row(&list, &two)["title"], json!("Work"));
+        assert_eq!(row(&list, &long)["kind"], json!("collection"));
+
+        // A rename: from the revision read, trimmed, never empty, and the same name as another folder is fine.
+        let revision = revision_of(&ts, s, g, &one);
+        let (refused, writes) = item_writes(|| {
+            ["", "  ", "\t"].map(|title| {
+                ts.shell
+                    .update_item(s, g, plain_edit(&one, revision, title, None))
+                    .err()
+            })
+        });
+        assert_eq!(refused, [empty; 3]);
+        assert_eq!(writes, 0);
+        assert!(matches!(
+            ts.shell
+                .update_item(
+                    s,
+                    g,
+                    plain_edit(&one, revision, &"a".repeat(MAX_TITLE + 1), None)
+                )
+                .err(),
+            Some(ShellError::TooLarge { .. })
+        ));
+        ts.shell
+            .update_item(s, g, plain_edit(&one, revision, " Client work ", None))
+            .unwrap();
+        assert_eq!(row(&listed(&ts, s, g), &one)["title"], json!("Client work"));
+        ts.shell
+            .update_item(
+                s,
+                g,
+                plain_edit(&two, revision_of(&ts, s, g, &two), "Client work", None),
+            )
+            .unwrap();
+
+        // A stale revision changes nothing and says so.
+        let (stale, writes) = item_writes(|| {
+            ts.shell
+                .update_item(s, g, plain_edit(&one, revision, "Late", None))
+                .err()
+        });
+        assert_eq!(
+            stale,
+            Some(
+                CoreError::InvalidInput {
+                    what: "stale revision"
+                }
+                .into()
+            )
+        );
+        assert_eq!(writes, 0);
+        assert_eq!(row(&listed(&ts, s, g), &one)["title"], json!("Client work"));
+
+        // A rename keeps what is in the folder.
+        let held = note_in(&ts, s, g, "Held", Some(&one));
+        let revision = revision_of(&ts, s, g, &one);
+        ts.shell
+            .update_item(s, g, plain_edit(&one, revision, "Renamed", None))
+            .unwrap();
+        assert_eq!(row(&listed(&ts, s, g), &held)["collection"], json!(one));
+        // A folder takes no login fields.
+        let mut login_edit = plain_edit(&one, revision + 1, "Renamed", None);
+        login_edit.password = Some(secret("demo-zzz-qqq-one"));
+        assert_eq!(
+            ts.shell.update_item(s, g, login_edit).err(),
+            Some(NOT_A_LOGIN)
+        );
+    }
+
+    /// Restoring a folder through the shell brings back what went with it, once, and says how many went (`delete_collection`
+    /// answers the number); a folder is not trashed on its own (`trash_item` says to delete it).
+    #[test]
+    fn delete_and_restore_a_folder_through_the_shell() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let work = folder(&ts, s, g, "Work");
+        let members: Vec<String> = (0..3)
+            .map(|n| note_in(&ts, s, g, &format!("Note {n}"), Some(&work)))
+            .collect();
+        assert_eq!(
+            ts.shell.trash_item(s, g, &work).err(),
+            Some(
+                CoreError::InvalidInput {
+                    what: "use delete_collection"
+                }
+                .into()
+            )
+        );
+        assert_eq!(ts.shell.delete_collection(s, g, &work).unwrap().data, 3);
+        let list = listed(&ts, s, g);
+        assert_eq!(page_count(&list, &work), 3);
+        let (_, writes) = item_writes(|| ts.shell.restore_item(s, g, &work).unwrap());
+        assert_eq!(writes, 4);
+        let list = listed(&ts, s, g);
+        for id in members.iter().chain([&work]) {
+            assert_eq!(row(&list, id)["trashed"], json!(false), "{id}");
+            assert_eq!(row(&list, id)["trashed_with"], Value::Null);
+        }
+        // Once more: nothing to do.
+        let (_, writes) = item_writes(|| ts.shell.restore_item(s, g, &work).unwrap());
+        assert_eq!(writes, 0);
+    }
+
+    /// A trashed item is not moved into a folder by a page that sends the edit all the same: it goes with the folder it
+    /// was in only while it names it, and a move of a trashed item leaves it in the trash.
+    #[test]
+    fn moving_a_trashed_item_leaves_it_in_the_trash_and_out_of_the_old_folders_restore() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let work = folder(&ts, s, g, "Work");
+        let home = folder(&ts, s, g, "Home");
+        let a = note_in(&ts, s, g, "A", Some(&work));
+        let b = note_in(&ts, s, g, "B", Some(&work));
+        ts.shell.delete_collection(s, g, &work).unwrap();
+        let revision = revision_of(&ts, s, g, &a);
+        ts.shell
+            .update_item(s, g, plain_edit(&a, revision, "A", Some(&home)))
+            .unwrap();
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &a)["trashed"], json!(true));
+        assert_eq!(page_count(&list, &work), 1, "only B still counts");
+        ts.shell.restore_item(s, g, &work).unwrap();
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &b)["trashed"], json!(false));
+        assert_eq!(row(&list, &a)["trashed"], json!(true), "A went elsewhere");
     }
 }

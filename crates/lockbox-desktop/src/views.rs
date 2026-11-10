@@ -43,6 +43,15 @@ pub struct ItemSummary {
     /// The ID of the collection the item is in.
     pub collection: Option<String>,
     pub trashed: bool,
+    /// When the item went to the trash (RFC 3339, UTC, whole seconds, as the engine keeps it), for the Trash view's
+    /// "deleted <when>"; `None` for an item that is not in the trash.
+    pub trashed_at: Option<String>,
+    /// The folder the item went to the trash with, when it went because that folder was deleted: the same kind of ID as
+    /// `collection`. `None` for an item trashed on its own and for one that is not in the trash. Not a secret.
+    pub trashed_with: Option<String>,
+    /// The item is being deleted for good (its delete started and has not finished): the page leaves it out of the number
+    /// a folder's restore brings back, since the restore does not bring it back.
+    pub purging: bool,
     /// The host of a login's first website, for a search result to say where the login is for: nothing else of the
     /// address (no scheme, port, login, path or query). `None` when there is no website, it does not parse, or it is
     /// not an `http` or `https` one, which is exactly when `open_url` would not open link 0.
@@ -84,6 +93,9 @@ impl ItemSummary {
             username,
             collection: item.collection.as_ref().map(ItemId::to_hex),
             trashed: item.trashed_at.is_some(),
+            trashed_at: item.trashed_at.clone(),
+            trashed_with: item.trashed_with.as_ref().map(ItemId::to_hex),
+            purging: item.purging,
             site,
             created_at: item.created_at.clone(),
             modified_at: item.modified_at.clone(),
@@ -233,6 +245,7 @@ mod tests {
             created_at: "2026-10-29T00:00:00Z".into(),
             modified_at: "2026-10-29T00:00:00Z".into(),
             trashed_at: None,
+            trashed_with: None,
             purging: false,
             retired_blobs: Vec::new(),
         }
@@ -322,7 +335,8 @@ mod tests {
         }
         let expected = json!({
             "id": "07".repeat(16), "kind": "key", "title": "OPENAI_API_KEY", "username": null,
-            "collection": null, "trashed": false, "site": null,
+            "collection": null, "trashed": false, "trashed_at": null, "trashed_with": null, "purging": false,
+            "site": null,
             "created_at": "2026-10-29T00:00:00Z", "modified_at": "2026-10-29T00:00:00Z",
             "attachments": [],
         });
@@ -399,6 +413,36 @@ mod tests {
             let detail = serde_json::to_value(ItemDetail::of(&item)).unwrap();
             assert_eq!(detail["previous"], json!([]));
         }
+    }
+
+    /// What the Trash view reads of a trashed item: when it went there (the engine's own RFC 3339 text), the folder it
+    /// went with (an ID, like `collection`), and whether it is being deleted for good (so the page leaves it out of the
+    /// number a folder's restore brings back). A live item has the first two as null, present and not missing. Nothing
+    /// else of the item crosses for it.
+    #[test]
+    fn trash_fields_cross_as_a_date_and_an_id() {
+        let mut gone = item(ItemKind::Note);
+        gone.notes = secret("demo-note-text");
+        gone.collection = Some(ItemId([9; 16]));
+        gone.trashed_at = Some("2026-11-08T10:00:00Z".into());
+        gone.trashed_with = Some(ItemId([9; 16]));
+        let summary = serde_json::to_value(ItemSummary::of(&gone)).unwrap();
+        assert_eq!(summary["trashed"], json!(true));
+        assert_eq!(summary["trashed_at"], json!("2026-11-08T10:00:00Z"));
+        assert_eq!(summary["trashed_with"], json!("09".repeat(16)));
+        assert_eq!(summary["purging"], json!(false));
+        assert!(!summary.to_string().contains("demo-note"));
+
+        gone.purging = true;
+        let summary = serde_json::to_value(ItemSummary::of(&gone)).unwrap();
+        assert_eq!(summary["purging"], json!(true));
+
+        let live = serde_json::to_value(ItemSummary::of(&item(ItemKind::Note))).unwrap();
+        let fields = live.as_object().unwrap();
+        for name in ["trashed_at", "trashed_with"] {
+            assert_eq!(fields.get(name), Some(&Value::Null), "{name}");
+        }
+        assert_eq!(fields["trashed"], json!(false));
     }
 
     #[test]

@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { messageFor } from "../messages";
-import { CloseIcon, FilterIcon } from "../parts/Icon";
+import { CloseIcon, FilterIcon, MoreIcon } from "../parts/Icon";
+import { Menu } from "../parts/Menu";
 import type { VaultLook } from "../parts/Pattern";
 import { ToastStack } from "../parts/Toast";
 import {
   copyField,
+  pickTrashed,
   selectItem,
   setForm,
   useForm,
@@ -15,6 +18,7 @@ import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, VaultBanners } from "./Asks";
 import { EmptyAdd } from "./EmptyAdd";
 import { EditForm } from "./forms/EditForm";
+import { DeleteFolderDialog, RenameFolderDialog } from "./forms/FolderForm";
 import { KeyForm } from "./forms/KeyForm";
 import { LoginForm } from "./forms/LoginForm";
 import { NoteForm } from "./forms/NoteForm";
@@ -24,6 +28,7 @@ import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
 import { SearchPanel } from "./SearchPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
+import { TrashPanel, TrashView } from "./TrashView";
 
 const FILTER = "filter";
 
@@ -44,11 +49,28 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   const vaults = useVaults();
   const sessions = useSessions();
   const filter = useForm(data.session, FILTER);
+  // The folder's own question, while one is open: which, for which folder (kept as it was when asked).
+  const [asking, setAsking] = useState<{ kind: "rename" | "delete"; folder: { id: string; name: string }; count: number } | null>(null);
   const everything = data.items ?? [];
   const items = everything.filter((item) => item.kind !== "collection" && !item.trashed);
+  const inTrash = everything.filter((item) => item.trashed);
   const folders = foldersOf(everything);
   const folderNames = new Map(folders.map((folder) => [folder.id, folder.name]));
   const folderName = data.folder === null ? undefined : folderNames.get(data.folder);
+  // The panel: the item's details outside the Trash view (never for one that has gone to the Trash since), or a Trash row's panel in it.
+  const picked = data.openItem === null ? undefined : everything.find((item) => item.id === data.openItem?.id);
+  const panel = data.trash
+    ? picked?.trashed === true
+      ? "trash"
+      : null
+    : data.openItem !== null && picked?.trashed !== true
+      ? "item"
+      : null;
+  const folderId = data.folder;
+  const folderMenu =
+    data.trash || data.readOnly || folderId === null || folderName === undefined
+      ? null
+      : { id: folderId, name: folderName, count: folders.find((folder) => folder.id === folderId)?.count ?? 0 };
   const inView = data.folder === null ? items : items.filter((item) => item.collection === data.folder);
   const needle = filter.trim().toLowerCase();
   const matches = (text: string | null | undefined) => (text ?? "").toLowerCase().includes(needle);
@@ -59,7 +81,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
           (item) =>
             matches(item.title) || matches(item.username) || item.attachments.some((file) => matches(file.name)),
         );
-  const title = folderName ?? "All items";
+  const title = data.trash ? "Trash" : (folderName ?? "All items");
   const openVaults = new Set(sessions.map((session) => session.vaultId));
   const locked = lockedLine(
     (vaults ?? [])
@@ -70,45 +92,72 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
 
   return (
     <div className="win">
-      <SideMenu data={data} look={look} folders={folders} total={items.length} />
-      <div className={data.openItem === null && data.tool === null ? "stage" : "stage open"}>
+      <SideMenu data={data} look={look} folders={folders} total={items.length} trashed={inTrash.length} />
+      <div className={panel === null && data.tool === null ? "stage" : "stage open"}>
         <main className="mainpane">
           <div className="tb">
             <span className="tb-t" aria-hidden="true">
               {title}
             </span>
             <span className="sp" />
-            <div className="fil">
-              <FilterIcon />
-              <input
-                className="fin"
-                type="search"
-                aria-label="Filter this list"
-                placeholder="Filter"
-                autoComplete="off"
-                spellCheck={false}
-                value={filter}
-                onChange={(event) => {
-                  setForm(data.session, FILTER, event.currentTarget.value);
-                }}
-              />
-              {filter === "" ? null : (
-                <button
-                  type="button"
-                  className="fx"
-                  aria-label="Clear filter"
-                  onClick={() => {
-                    setForm(data.session, FILTER, "");
+            {data.trash ? null : (
+              <div className="fil">
+                <FilterIcon />
+                <input
+                  className="fin"
+                  type="search"
+                  aria-label="Filter this list"
+                  placeholder="Filter"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={filter}
+                  onChange={(event) => {
+                    setForm(data.session, FILTER, event.currentTarget.value);
                   }}
-                >
-                  <CloseIcon />
-                </button>
-              )}
-            </div>
-            {data.readOnly ? null : <AddMenu session={data.session} />}
+                />
+                {filter === "" ? null : (
+                  <button
+                    type="button"
+                    className="fx"
+                    aria-label="Clear filter"
+                    onClick={() => {
+                      setForm(data.session, FILTER, "");
+                    }}
+                  >
+                    <CloseIcon />
+                  </button>
+                )}
+              </div>
+            )}
+            {folderMenu === null ? null : (
+              // The folder's own menu (14b): Rename and Delete, and nothing a later plan builds. Not on All items, not in the Trash.
+              <Menu
+                label="More for this folder"
+                icon={<MoreIcon />}
+                triggerClassName="ib"
+                items={[
+                  {
+                    label: "Rename folder",
+                    onSelect: () => {
+                      setAsking({ kind: "rename", folder: folderMenu, count: folderMenu.count });
+                    },
+                  },
+                  {
+                    label: "Delete folder",
+                    danger: true,
+                    onSelect: () => {
+                      setAsking({ kind: "delete", folder: folderMenu, count: folderMenu.count });
+                    },
+                  },
+                ]}
+              />
+            )}
+            {data.readOnly || data.trash ? null : <AddMenu session={data.session} />}
           </div>
           <div className="lscroll">
-            <h1 className="big">{title}</h1>
+            <h1 className="big" tabIndex={-1}>
+              {title}
+            </h1>
             {locked === null ? null : <p className="lnote">{locked}</p>}
             <div className="asks">
               <LostOutputsAsk />
@@ -123,6 +172,14 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               <p className="note" aria-busy="true">
                 Opening…
               </p>
+            ) : data.trash ? (
+              <TrashView
+                items={inTrash}
+                openId={data.openItem?.id ?? null}
+                onOpen={(id) => {
+                  pickTrashed(data.session, id);
+                }}
+              />
             ) : everything.length === 0 && data.folder === null && needle === "" ? (
               <Ready>{data.readOnly ? null : <EmptyAdd session={data.session} />}</Ready>
             ) : inView.length === 0 ? (
@@ -161,16 +218,18 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             )}
           </div>
         </main>
-        {data.openItem === null ? null : (
+        {panel === "item" && data.openItem !== null ? (
           <ItemPanel
             key={data.openItem.id}
             data={data}
+            folders={folders}
             folderNames={folderNames}
             onClose={() => {
               void selectItem(data.session, null);
             }}
           />
-        )}
+        ) : null}
+        {panel === "trash" && picked !== undefined ? <TrashPanel key={picked.id} data={data} summary={picked} items={everything} /> : null}
         {data.tool?.kind === "new_login" ? (
           <LoginForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} title={data.tool.title} />
         ) : null}
@@ -193,6 +252,25 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         <ToastStack />
       </div>
       <SearchPanel />
+      {asking?.kind === "rename" ? (
+        <RenameFolderDialog
+          session={data.session}
+          folder={asking.folder}
+          onClose={() => {
+            setAsking(null);
+          }}
+        />
+      ) : null}
+      {asking?.kind === "delete" ? (
+        <DeleteFolderDialog
+          session={data.session}
+          folder={asking.folder}
+          count={asking.count}
+          onClose={() => {
+            setAsking(null);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

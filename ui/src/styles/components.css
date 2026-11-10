@@ -2322,6 +2322,46 @@
   margin-top: 8px;
 }
 
+/* ---- The Trash and the folders (Task 14) ---- */
+
+/* The words that delete are the error colour on the quiet pill: Delete, Delete for good, Move to trash. */
+.pill.dngb {
+  color: var(--danger);
+}
+
+/* A short line of words in a panel, under what it explains. */
+.tnote {
+  margin: 8px 0 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink2);
+}
+
+/* Move to trash at the foot of an item's details, with its sentence under it. */
+.ptrash {
+  margin-top: 26px;
+  padding-top: 4px;
+}
+
+/* "New folder" in the side menu becomes a name box: its edge in the quiet text colour (the ordinary edge is a hair under 3 to 1
+   on the side menu's tint), and in the error colour once the name was refused. */
+.nfold {
+  padding: 4px 0 2px;
+}
+
+.nfin {
+  height: 34px;
+  box-shadow: inset 0 0 0 1px var(--ink2);
+}
+
+.nfin[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.nfold .err {
+  margin: 6px 4px 0;
+}
+
 /* The generator: the value, what changes it, and its two buttons. Inside the form it sits under the password; on its own
    page it is the page. */
 .gen {

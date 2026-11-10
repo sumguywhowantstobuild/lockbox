@@ -139,6 +139,13 @@ must give an error with fixed wording, never a panic.
   and the quarantine (never one another item still attaches; refused while `files/` or `files/orphaned/` is a link),
   then delete the item file. A crash in between is finished at the next unlock. Refused while `items/` is a link,
   checked before the mark and again before the item file is deleted.
+- **Trash and folders** (`trash_item`, `restore_item`, `delete_collection`): each trash or restore of an item is one
+  item write. `delete_collection` writes the items first and the folder last, and each item it newly trashes records the
+  folder in `trashed_with` in that same write; an item already in the trash is left as it is, and a retry after a crash
+  writes the same value on the items still to go. `restore_item` on a folder brings back the items in the trash that
+  name it (still filed in it, and not being purged), items first and the folder last, so a crash leaves the folder in the
+  trash and restoring it again finishes the job; a folder being purged is refused whole. Restoring any other item clears
+  its own `trashed_with` and brings back its folder alone, folder first.
 
 ### Restore a backup (`PreparedRestore::prepare`, `commit`; spec 6.8)
 1. `prepare` refuses while anything is at the journal path, then opens the archive with its own parser, unlocks it

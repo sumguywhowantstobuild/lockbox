@@ -146,6 +146,20 @@ test("a_bad_key_name_has_words_of_its_own", () => {
   expect(messageFor({ code: "invalid_input", what: "not a key" }).title).toBe("Lockbox can't use that.");
 });
 
+test("a_folder_without_a_name_has_words_and_the_trash_refusals_stay_plain", () => {
+  // The shell refuses a folder named with nothing (new, or renamed); the page asks first, so this is the shell's own say.
+  expect(messageFor({ code: "invalid_input", what: "folder name" })).toEqual({
+    title: "A folder needs a name.",
+    body: "Type a name first.",
+  });
+  // The engine's refusals of the trash and the folders say no more than the plain words, and none says a title.
+  for (const what of ["being deleted", "not in trash", "not a collection", "use delete_collection", "collection", "collection inside a collection"]) {
+    expect(KNOWN_WHATS, what).toContain(what);
+    const message = messageFor({ code: "core", kind: "invalid_input", what });
+    expect(message.title, what).toBe("Lockbox can't use that.");
+  }
+});
+
 test("no_message_contains_raw_error_text", () => {
   const SENTINEL = "SENTINEL-7f3a C:\\Users\\secret";
   const errors: unknown[] = [

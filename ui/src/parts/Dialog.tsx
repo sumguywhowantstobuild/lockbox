@@ -13,6 +13,7 @@ export function Dialog({
   onOpenChange,
   title,
   description,
+  body,
   initialFocus,
   children,
 }: {
@@ -21,6 +22,8 @@ export function Dialog({
   title: string;
   /** One sentence or paragraph, or a list of paragraphs: a screen reader reads them all as the dialog's description. */
   description?: string | readonly string[];
+  /** What sits between the words and the buttons: a dialog that asks for a line of text (a folder's name) puts its box here. */
+  body?: ReactNode;
   initialFocus?: RefObject<HTMLElement | null>;
   children?: ReactNode;
 }) {
@@ -41,6 +44,7 @@ export function Dialog({
               ))}
             </BaseDialog.Description>
           )}
+          {body}
           <div className="dbtns">{children}</div>
         </BaseDialog.Popup>
       </BaseDialog.Portal>

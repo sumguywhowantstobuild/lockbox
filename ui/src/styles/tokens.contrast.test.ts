@@ -360,6 +360,33 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         check(`quiet pill words on the panel, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, paper), 4.5);
       }
       // "Saved" is the message bar's words, measured above.
+
+      // Move, trash and folders (Task 14). The Delete buttons (Delete, Delete for good, Move to trash) are the quiet pill with
+      // the error colour for their words, on a dialog's card and on the panel, laid over as the translucent shade looks then.
+      for (const [name, surface] of [["card", card], ["panel", paper]] as const) {
+        for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+          check(`Delete button words, ${state}, on the ${name}`, c("--danger"), over([...rgbOf("--sh"), alpha] as Rgba, surface), 4.5);
+        }
+      }
+      // Undo on the message bar: white words on the white tint over the bar, at rest and hovered.
+      for (const [state, alpha] of [["rest", 0.14], ["hover", 0.24]] as const) {
+        check(`Undo words, ${state}`, c("--toast-ink"), over([255, 255, 255, alpha], c("--toast")), 4.5);
+      }
+      // The Trash entry once picked is a picked side-menu item: its words and count on the tint, and its marker.
+      check("Trash entry words, picked", c("--ink"), selectedNav, 4.5);
+      check("Trash entry count, picked", c("--ink2"), selectedNav, 4.5);
+      check("Trash entry marker, picked", c("--add"), selectedNav, 3);
+      // The folder marked in the Move menu: its check mark and its words on the menu's card, at rest, highlighted and pressed.
+      for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`Move menu check mark, ${state}`, c("--ink"), fill, 3);
+        check(`Move menu folder words, ${state}`, c("--ink"), fill, 4.5);
+      }
+      // The new folder's name box in the side menu: its edge (the quiet text colour, since the ordinary field edge is a hair
+      // under 3 to 1 against the side menu's tint) against the side menu, its words on its own card, its error edge.
+      check("new folder box edge on the side menu", c("--ink2"), rail, 3);
+      check("new folder box words on its card", c("--ink"), card, 4.5);
+      check("new folder box error edge on the side menu", c("--danger"), rail, 3);
+      check("new folder box focus ring on the side menu", c("--v"), rail, 3);
     }
   }
 

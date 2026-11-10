@@ -125,6 +125,7 @@ mod tests {
             created_at: String::new(),
             modified_at: String::new(),
             trashed_at: None,
+            trashed_with: None,
             purging: false,
             retired_blobs: Vec::new(),
         }
@@ -287,6 +288,18 @@ mod tests {
         assert!(find(&items, "gone").is_empty());
         assert!(find(&items, "folder").is_empty());
         assert_eq!(find(&items, "member"), [id(4)]);
+    }
+
+    /// `trashed_with` is a folder's ID and is never indexed: not the ID in hex, nor a part of it, even on an item that is
+    /// live with the field set (which the engine never writes).
+    #[test]
+    fn trashed_with_is_never_indexed() {
+        let mut member = item(4, ItemKind::Note, "member");
+        member.trashed_with = Some(id(0xAB));
+        let items = [member];
+        assert_eq!(find(&items, "member"), [id(4)]);
+        assert!(find(&items, &"ab".repeat(16)).is_empty());
+        assert!(find(&items, "abab").is_empty());
     }
 
     #[test]

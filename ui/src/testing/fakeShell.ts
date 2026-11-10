@@ -14,6 +14,12 @@ export interface FakeItem {
   username?: string | null;
   collection?: string | null;
   trashed?: boolean;
+  /** When it went to the trash (RFC 3339); a trashed item with none went on 1 November. */
+  trashedAt?: string;
+  /** The folder whose delete sent it to the trash (`trashed_with`), as the engine records it. */
+  trashedWith?: string;
+  /** Its delete for good started and has not finished (`purging`): frozen, and left out of a folder's restore. */
+  purging?: boolean;
   modified_at?: string;
   notes?: string;
   urls?: string[];
@@ -190,6 +196,9 @@ function summary(item: FakeItem) {
     username: item.kind === "login" ? (item.username ?? "") : null,
     collection: item.collection ?? null,
     trashed: item.trashed ?? false,
+    trashed_at: item.trashed === true ? (item.trashedAt ?? "2026-11-01T09:00:00Z") : null,
+    trashed_with: item.trashed === true ? (item.trashedWith ?? null) : null,
+    purging: item.purging ?? false,
     site: siteOf(item),
     created_at: "2026-08-01T09:00:00Z",
     modified_at: item.modified_at ?? "2026-08-01T09:00:00Z",
@@ -207,7 +216,12 @@ export interface FakeShell {
   /** The session the vault is open in, if it is. */
   sessionOf(vaultId: number): Live | undefined;
   /** Holds every `list_items` answer until `release` is called, to lock while one is in flight. */
-  holdListItems(): () => void;
+  holdListItems(newestFirst?: boolean): () => void;
+  /**
+   * The next `delete_collection` or `restore_item` of a folder (`cmd`) makes `writes` of its changes and then refuses with
+   * `error`, as the engine can when a write fails partway: what was written stays written, and the answer is a refusal.
+   */
+  failPartwayNext(cmd: "delete_collection" | "restore_item", writes: number, error: object): void;
   /** The recovery key last made for the vault (by creating it or by `regenerate_recovery`), as the shell showed it. */
   keyOf(vaultId: number): string | undefined;
   /** Whether the vault carries the "not confirmed" mark. */
@@ -298,6 +312,12 @@ export interface FakeShell {
    * writes it, and the answer is read later, so a lock in between leaves an answer tagged with the generation from before.
    */
   holdNewItem(): () => void;
+  /**
+   * Holds every answer of `trash_item`, `restore_item`, `delete_collection` and `purge_item` until `release` is called: the
+   * change is made when the command arrives, as the shell writes it, and the answer is read later, so a lock or another click in
+   * between leaves an answer tagged with the generation from before.
+   */
+  holdTrash(): () => void;
 }
 
 /** What the shell sends for a website that is not an `http` or `https` address (`NOT_A_WEBSITE`). */
@@ -309,6 +329,48 @@ const NOT_A_LOGIN = { code: "invalid_input", what: "not a login" };
 const NOT_A_KEY = { code: "invalid_input", what: "not a key" };
 /** What the shell sends for an earlier password's number past the login's list. */
 const NO_SUCH_EARLIER = { code: "invalid_input", what: "earlier password" };
+/** An item counted as one more edit: next revision, modified now. */
+function bump(item: FakeItem): void {
+  item.revision = (item.revision ?? 2) + 1;
+  item.modified_at = nowText();
+}
+
+/** Puts an item in the trash, with the folder whose delete sends it (`with`), as the engine writes it; one already there is left alone. */
+function intoTrash(item: FakeItem, folder: string | undefined): void {
+  if (item.trashed ?? false) return;
+  item.trashed = true;
+  item.trashedAt = nowText();
+  item.trashedWith = folder;
+  bump(item);
+}
+
+/** Takes an item out of the trash and clears the folder it went with; one that is not there is left alone. */
+function outOfTrash(item: FakeItem): void {
+  if (!(item.trashed ?? false)) return;
+  item.trashed = false;
+  item.trashedAt = undefined;
+  item.trashedWith = undefined;
+  bump(item);
+}
+
+/** What the shell sends for a folder named with nothing (`NO_FOLDER_NAME`). */
+export const FOLDER_NAME_EMPTY = { code: "invalid_input", what: "folder name" };
+/** What the engine sends for an item whose delete for good has started (`BEING_DELETED`). */
+const BEING_DELETED = { code: "core", kind: "invalid_input", what: "being deleted" };
+/** The shell's limit on a title, in bytes (`MAX_TITLE`). */
+const MAX_TITLE = 1024;
+
+/** The time as the engine writes it: RFC 3339, UTC, whole seconds. */
+function nowText(): string {
+  return new Date().toISOString().replace(/\.\d+Z$/, "Z");
+}
+
+/** What the engine sends for a folder asked to go to the trash on its own (`trash_item`). */
+const USE_DELETE_COLLECTION = { code: "core", kind: "invalid_input", what: "use delete_collection" };
+/** What the engine sends for a delete of something that is not a folder (`delete_collection`). */
+const NOT_A_COLLECTION = { code: "core", kind: "invalid_input", what: "not a collection" };
+/** What the engine sends for a delete for good of an item that is not in the trash (`purge_item`). */
+const NOT_IN_TRASH = { code: "core", kind: "invalid_input", what: "not in trash" };
 /** What the engine sends when an edit's revision is not the stored one. */
 export const STALE_REVISION = { code: "core", kind: "invalid_input", what: "stale revision" };
 /** How many earlier passwords a login keeps (`MAX_PREVIOUS_PASSWORDS`). */
@@ -399,6 +461,7 @@ export function installFakeShell(
   sessionRange += 100;
   let nextSession = sessionRange;
   let held: (() => void)[] | undefined;
+  let partway: { cmd: string; writes: number; error: object } | undefined;
   const calls: FakeShell["calls"] = [];
   const copied: FakeShell["copied"] = [];
   const opened: FakeShell["opened"] = [];
@@ -406,6 +469,7 @@ export function installFakeShell(
   let heldNewItem: (() => void)[] | undefined;
   let heldReveal: (() => void)[] | undefined;
   let heldUpdate: (() => void)[] | undefined;
+  let heldTrash: (() => void)[] | undefined;
   const refusals = new Map<string, object>();
   const edited: FakeShell["edited"] = [];
   const made: FakeShell["made"] = [];
@@ -465,6 +529,21 @@ export function installFakeShell(
   };
 
   const tagged = (session: number, generation: number, data: unknown) => ({ session, generation, data });
+
+  /**
+   * One write of a command that makes several: runs it, unless `failPartwayNext` armed this command and its writes are used up,
+   * when it refuses instead (what was written before stays written).
+   */
+  const partwayWrites = (cmd: string): ((apply: () => void) => void) => {
+    const armed = partway?.cmd === cmd ? partway : undefined;
+    if (armed !== undefined) partway = undefined;
+    let left = armed?.writes ?? Number.POSITIVE_INFINITY;
+    return (apply) => {
+      if (armed !== undefined && left <= 0) refuse(armed.error);
+      left -= 1;
+      apply();
+    };
+  };
 
   /** Opens (or opens again) the vault's session and moves its generation on, as an unlock does. */
   const openSession = (vault: FakeVault): [number, Live] => {
@@ -827,13 +906,35 @@ export function installFakeShell(
           fields: Record<string, unknown> | null;
         };
         const vault = vaultFor(sent.session, sent.generation);
-        if (sent.kind !== "login" && sent.kind !== "key" && sent.kind !== "note") return refuse(MALFORMED);
+        if (sent.kind !== "login" && sent.kind !== "key" && sent.kind !== "note" && sent.kind !== "collection") return refuse(MALFORMED);
         const kind = sent.kind;
         if (sent.fields !== null) {
           const known = ["username", "password", "urls", "notes", "value"];
           if (Object.keys(sent.fields).some((name) => !known.includes(name))) return refuse(MALFORMED);
         }
         const fields = sent.fields ?? {};
+        // A folder has a name and nothing else: fields sent for one are refused, and the name is trimmed and never empty.
+        if (kind === "collection") {
+          if (sent.fields !== null) return refuse(NOT_A_LOGIN);
+          if (new TextEncoder().encode(sent.title).length > MAX_TITLE) return refuse({ code: "too_large", what: "title" });
+          if (sent.title.trim() === "") return refuse(FOLDER_NAME_EMPTY);
+          if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+          nextItem += 1;
+          const folderId = itemId(nextItem);
+          if (sent.collection !== null) {
+            const parent = sent.collection;
+            if (vault.items?.find((item) => item.id === parent && item.kind === "collection" && !(item.trashed ?? false)) === undefined) {
+              return refuse({ code: "core", kind: "invalid_input", what: "collection" });
+            }
+            return refuse({ code: "core", kind: "invalid_input", what: "collection inside a collection" });
+          }
+          vault.items = [
+            ...(vault.items ?? []),
+            { id: folderId, kind: "collection", title: sent.title.trim(), collection: null, modified_at: nowText() },
+          ];
+          made.push(sent);
+          return tagged(sent.session, sent.generation, folderId);
+        }
         // The shell's limits come first, then which fields belong to which kind, then the session's own refusals.
         if (typeof fields.value === "string" && new TextEncoder().encode(fields.value).length > MAX_KEY_VALUE) {
           return refuse({ code: "too_large", what: "value" });
@@ -897,13 +998,27 @@ export function installFakeShell(
         const id = edit.id;
         const item = vault.items?.find((i) => i.id === id);
         if (item === undefined) return refuse({ code: "core", kind: "not_found" });
+        // A folder's new name is trimmed and never empty (`folder_name`).
+        if (item.kind === "collection" && (text("title") ?? "").trim() === "") return refuse(FOLDER_NAME_EMPTY);
         const loginFields = edit.username !== undefined || edit.password !== undefined || edit.urls !== undefined;
         if (item.kind === "login" && edit.key_value !== undefined) return refuse(NOT_A_KEY);
         if (item.kind === "key" && loginFields) return refuse(NOT_A_LOGIN);
         if (item.kind !== "login" && item.kind !== "key" && loginFields) return refuse(NOT_A_LOGIN);
         if (item.kind !== "login" && item.kind !== "key" && edit.key_value !== undefined) return refuse(NOT_A_KEY);
+        if (item.purging ?? false) return refuse(BEING_DELETED);
         if ((item.revision ?? 2) !== edit.revision) return refuse(STALE_REVISION);
-        const title = text("title") ?? "";
+        // The engine's folder rules (`check_collection`): a folder newly named must be a folder that is not in the trash, and
+        // nothing sits in itself or, if it is a folder, in another.
+        const target = typeof edit.collection === "string" ? edit.collection : null;
+        if (target !== null) {
+          if (target === item.id) return refuse({ code: "core", kind: "invalid_input", what: "collection" });
+          if (item.kind === "collection") return refuse({ code: "core", kind: "invalid_input", what: "collection inside a collection" });
+          const usable = vault.items?.find((other) => other.id === target && other.kind === "collection" && !(other.trashed ?? false));
+          if (target !== (item.collection ?? null) && usable === undefined) {
+            return refuse({ code: "core", kind: "invalid_input", what: "collection" });
+          }
+        }
+        const title = item.kind === "collection" ? (text("title") ?? "").trim() : (text("title") ?? "");
         if (item.kind === "key" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(title)) return refuse(BAD_KEY_NAME);
         // The engine moves the old password aside on a real change, and the page never sends the list.
         const before = item.password ?? (item.has_password ?? false ? "Pw-from-the-fake-shell" : "");
@@ -932,6 +1047,59 @@ export function installFakeShell(
         item.modified_at = new Date().toISOString().replace(/\.\d+Z$/, "Z");
         edited.push(sent);
         return tagged(sent.session, sent.generation, null);
+      }
+      case "trash_item":
+      case "restore_item":
+      case "delete_collection":
+      case "purge_item": {
+        const { session, generation, id } = exactly(args, ["session", "generation", "id"]) as {
+          session: number;
+          generation: number;
+          id: string;
+        };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const all = vault.items ?? [];
+        const item = all.find((i) => i.id === id);
+        if (item === undefined) return refuse({ code: "core", kind: "not_found" });
+        if (cmd === "trash_item") {
+          if (item.purging ?? false) return refuse(BEING_DELETED);
+          if (item.kind === "collection") return refuse(USE_DELETE_COLLECTION);
+          intoTrash(item, undefined);
+          return tagged(session, generation, null);
+        }
+        if (cmd === "delete_collection") {
+          if (item.kind !== "collection") return refuse(NOT_A_COLLECTION);
+          // The items first, each with the folder it went with; the folder last. One already in the trash is left as it is.
+          const members = all.filter((m) => m.collection === id && !(m.trashed ?? false));
+          const write = partwayWrites(cmd);
+          for (const member of members) write(() => { intoTrash(member, id); });
+          write(() => { intoTrash(item, undefined); });
+          return tagged(session, generation, members.length);
+        }
+        if (cmd === "purge_item") {
+          if (!(item.trashed ?? false)) return refuse(NOT_IN_TRASH);
+          vault.items = all.filter((i) => i.id !== id);
+          return tagged(session, generation, null);
+        }
+        // restore_item
+        if (item.purging ?? false) return refuse(BEING_DELETED);
+        if (!(item.trashed ?? false)) return tagged(session, generation, null);
+        if (item.kind === "collection") {
+          // What went with it and is still filed in it, items first and the folder last; not what is being deleted for good.
+          const members = all.filter(
+            (m) => (m.trashed ?? false) && !(m.purging ?? false) && m.trashedWith === id && (m.collection ?? null) === id,
+          );
+          const write = partwayWrites(cmd);
+          for (const member of members) write(() => { outOfTrash(member); });
+          write(() => { outOfTrash(item); });
+          return tagged(session, generation, null);
+        }
+        const folder = all.find((f) => f.id === item.collection);
+        if (folder !== undefined && (folder.purging ?? false)) return refuse(BEING_DELETED);
+        if (folder !== undefined) outOfTrash(folder);
+        outOfTrash(item);
+        return tagged(session, generation, null);
       }
       case "generate_password": {
         const { options } = exactly(args, ["options"]) as { options: unknown };
@@ -1073,6 +1241,17 @@ export function installFakeShell(
           });
         });
       }
+      if (
+        (cmd === "trash_item" || cmd === "restore_item" || cmd === "delete_collection" || cmd === "purge_item") &&
+        heldTrash !== undefined
+      ) {
+        const release = heldTrash;
+        return new Promise((resolve) => {
+          release.push(() => {
+            resolve(result);
+          });
+        });
+      }
       if (cmd === "reveal_password" && heldReveal !== undefined) {
         const release = heldReveal;
         return new Promise((resolve) => {
@@ -1096,13 +1275,17 @@ export function installFakeShell(
       const vault = vaults.find((v) => v.id === vaultId);
       return [...live.values()].find((entry) => sessionVault.get(entry.session) === vault);
     },
-    holdListItems: () => {
+    holdListItems: (newestFirst = false) => {
       const waiting: (() => void)[] = [];
       held = waiting;
       return () => {
         held = undefined;
-        for (const release of waiting) release();
+        // Oldest first, as the shell answers; or the newest first, so an older answer comes late.
+        for (const release of newestFirst ? [...waiting].reverse() : waiting) release();
       };
+    },
+    failPartwayNext: (cmd, writes, error) => {
+      partway = { cmd, writes, error };
     },
     keyOf: (vaultId) => {
       const vault = vaults.find((v) => v.id === vaultId);
@@ -1230,6 +1413,14 @@ export function installFakeShell(
       heldUpdate = waiting;
       return () => {
         heldUpdate = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdTrash: () => {
+      const waiting: (() => void)[] = [];
+      heldTrash = waiting;
+      return () => {
+        heldTrash = undefined;
         for (const release of waiting) release();
       };
     },
