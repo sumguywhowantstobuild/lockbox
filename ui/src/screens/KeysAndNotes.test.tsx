@@ -672,6 +672,39 @@ test("the_words_for_a_refused_paste_do_not_hide_the_saves_own", async () => {
   expect(shell.made.at(-1)?.fields).toEqual({ value: TYPED_KEY });
 });
 
+test("a_changed_value_does_not_clear_the_words_save_put_in_place_of_a_refused_pastes", async () => {
+  await unlocked();
+  const form = await openForm("Key");
+  const refusedName =
+    "That isn't a name Lockbox can use for a key. Use letters, digits and _ only, and don't start with a digit.";
+  // A refused paste, then Save with no name: Save's words take the line over from the paste's.
+  expect(pasteInto(inputOf(form, "Value"), "a\nb")).toBe(false);
+  expect((await within(form).findByRole("alert")).textContent).toBe(ONE_LINE_ONLY);
+  fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+  await waitFor(() => {
+    expect(within(form).getByRole("alert").textContent).toBe("Type a name first.");
+  });
+  expect(inputOf(form, "Name").getAttribute("aria-invalid")).toBe("true");
+  // A change to the value is not the paste's words going away: Save's words stay, and so does the mark on the Name box.
+  typeInto(form, "Value", TYPED_KEY);
+  expect(within(form).getByRole("alert").textContent).toBe("Type a name first.");
+  expect(inputOf(form, "Name").getAttribute("aria-invalid")).toBe("true");
+
+  // The same when the shell refuses the name: a refused paste, Save, then a change to the value.
+  typeInto(form, "Name", "bad name");
+  expect(pasteInto(inputOf(form, "Value"), "a\nb")).toBe(false);
+  expect(within(form).getByRole("alert").textContent).toBe(ONE_LINE_ONLY);
+  fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+  await waitFor(() => {
+    expect(within(form).getByRole("alert").textContent).toBe(refusedName);
+  });
+  expect(inputOf(form, "Name").getAttribute("aria-invalid")).toBe("true");
+  typeInto(form, "Value", `${TYPED_KEY}x`);
+  expect(within(form).getByRole("alert").textContent).toBe(refusedName);
+  expect(inputOf(form, "Name").getAttribute("aria-invalid")).toBe("true");
+  expect(shell.made).toEqual([]);
+});
+
 test("a_name_is_needed_before_saving_a_key", async () => {
   await unlocked();
   const form = await openForm("Key");

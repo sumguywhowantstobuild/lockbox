@@ -672,6 +672,7 @@ mod tests {
                     username: None,
                     password: None,
                     urls: None,
+                    key_value: None,
                 };
                 let edited = shell.update_item(s, g, edit).err();
                 dialogs.answer(Some(source.clone()));

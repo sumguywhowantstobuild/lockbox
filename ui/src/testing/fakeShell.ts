@@ -22,6 +22,13 @@ export interface FakeItem {
   value?: string;
   /** A login's password: it reaches the page only through `reveal_password`, as in the shell. */
   password?: string;
+  /**
+   * A login's earlier passwords, newest first, each with the time it was replaced. Only their numbers and times reach the
+   * page (in `get_item`); a password crosses through `reveal_password` and `copy_field` as `{ previous: <number> }`.
+   */
+  previous?: { password: string; replaced_at: string }[];
+  /** What `get_item` says the revision is (2 unless set); an accepted `update_item` adds one, as the engine does. */
+  revision?: number;
   attachments?: { file_id: string; name: string; length: number; media_type: string }[];
 }
 
@@ -267,7 +274,16 @@ export interface FakeShell {
   /** Every `copy_generated` that reached the shell, as it was sent (the values are made up). */
   generated: { session: number; generation: number; value: string }[];
   /** Every `reveal_password` the shell answered, as it was sent (a refused one is not here). */
-  revealed: { session: number; generation: number; id: string; field: string }[];
+  revealed: { session: number; generation: number; id: string; field: string | { previous: number } }[];
+  /** Every `update_item` the shell accepted, as it was sent (a refused one is not here). */
+  edited: { session: number; generation: number; edit: Record<string, unknown> }[];
+  /**
+   * Holds every `update_item` answer until `release` is called: the item is changed when the command arrives, as the shell
+   * writes it, and the answer is read later, so a lock in between leaves an answer tagged with the generation from before.
+   */
+  holdUpdate(): () => void;
+  /** The next `cmd` sent is refused with `error` (once), before anything else is done for it. */
+  refuseNext(cmd: string, error: object): void;
   /**
    * Holds every `reveal_password` answer until `release` is called: the value is read when the command arrives, as the
    * shell reads it, and the answer comes later, so the person can open another item or lock in between.
@@ -275,6 +291,8 @@ export interface FakeShell {
   holdReveal(): () => void;
   /** While `holdReveal` holds, lets the oldest waiting answer through and keeps holding the rest, to answer out of step. */
   releaseOneReveal(): void;
+  /** While `holdReveal` holds, lets the newest waiting answer through first, so an earlier press is answered last. */
+  releaseNewestReveal(): void;
   /**
    * Holds every `new_item` answer until `release` is called: the item is made when the command arrives, as the shell
    * writes it, and the answer is read later, so a lock in between leaves an answer tagged with the generation from before.
@@ -289,6 +307,21 @@ export const BAD_KEY_NAME = { code: "core", kind: "invalid_input", what: "key na
 /** What the shell sends for a login's field asked of a key or a note, and a key's value asked of anything else. */
 const NOT_A_LOGIN = { code: "invalid_input", what: "not a login" };
 const NOT_A_KEY = { code: "invalid_input", what: "not a key" };
+/** What the shell sends for an earlier password's number past the login's list. */
+const NO_SUCH_EARLIER = { code: "invalid_input", what: "earlier password" };
+/** What the engine sends when an edit's revision is not the stored one. */
+export const STALE_REVISION = { code: "core", kind: "invalid_input", what: "stale revision" };
+/** How many earlier passwords a login keeps (`MAX_PREVIOUS_PASSWORDS`). */
+const MAX_PREVIOUS = 5;
+
+/** The number in `{ previous: <number> }` as the shell reads it (0 to 255, nothing else in the object), or null. */
+function previousIndex(field: unknown): number | null {
+  if (typeof field !== "object" || field === null || Array.isArray(field)) return null;
+  const keys = Object.keys(field);
+  const index = (field as { previous?: unknown }).previous;
+  if (keys.length !== 1 || keys[0] !== "previous") return null;
+  return typeof index === "number" && Number.isInteger(index) && index >= 0 && index <= 255 ? index : null;
+}
 /** The shell's limit on a key's value (`MAX_KEY_VALUE`). */
 const MAX_KEY_VALUE = 16_384;
 
@@ -372,6 +405,9 @@ export function installFakeShell(
   let heldSearch: (() => void)[] | undefined;
   let heldNewItem: (() => void)[] | undefined;
   let heldReveal: (() => void)[] | undefined;
+  let heldUpdate: (() => void)[] | undefined;
+  const refusals = new Map<string, object>();
+  const edited: FakeShell["edited"] = [];
   const made: FakeShell["made"] = [];
   const generated: FakeShell["generated"] = [];
   const revealed: FakeShell["revealed"] = [];
@@ -679,11 +715,13 @@ export function installFakeShell(
         if (item === undefined) return refuse({ code: "core", kind: "not_found" });
         return tagged(session, generation, {
           summary: summary(item),
-          revision: 2,
+          revision: item.revision ?? 2,
           notes: item.notes ?? "",
           urls: item.urls ?? [],
           has_password: item.has_password ?? false,
           has_value: item.kind === "key" && (item.value ?? "") !== "",
+          // Numbers and times only: a password crosses through `reveal_password` and `copy_field`.
+          previous: (item.previous ?? []).map((old, index) => ({ index, replaced_at: old.replaced_at })),
         });
       }
       case "reveal_password": {
@@ -695,6 +733,15 @@ export function installFakeShell(
         };
         const item = vaultFor(sent.session, sent.generation).items?.find((i) => i.id === sent.id);
         if (item === undefined) return refuse({ code: "core", kind: "not_found" });
+        const earlier = previousIndex(sent.field);
+        if (earlier !== null) {
+          // An earlier password: a login's, by its number.
+          if (item.kind !== "login") return refuse(NOT_A_LOGIN);
+          const old = item.previous?.[earlier];
+          if (old === undefined) return refuse(NO_SUCH_EARLIER);
+          revealed.push({ session: sent.session, generation: sent.generation, id: sent.id, field: { previous: earlier } });
+          return tagged(sent.session, sent.generation, old.password);
+        }
         if (sent.field !== "password" && sent.field !== "key_value") return refuse(MALFORMED);
         // A login's password and a key's value, each only of its own kind.
         if (sent.field === "password" && item.kind !== "login") return refuse(NOT_A_LOGIN);
@@ -710,6 +757,11 @@ export function installFakeShell(
           field: unknown;
         };
         const item = vaultFor(sent.session, sent.generation).items?.find((i) => i.id === sent.id);
+        const earlier = previousIndex(sent.field);
+        if (earlier !== null && item !== undefined) {
+          if (item.kind !== "login") return refuse(NOT_A_LOGIN);
+          if (item.previous?.[earlier] === undefined) return refuse(NO_SUCH_EARLIER);
+        }
         // A key's value is a key's alone, and a login's fields are a login's.
         if (item !== undefined && sent.field === "key_value" && item.kind !== "key") return refuse(NOT_A_KEY);
         if (item?.kind === "key" && (sent.field === "password" || sent.field === "username")) return refuse(NOT_A_LOGIN);
@@ -820,6 +872,67 @@ export function installFakeShell(
         made.push(sent);
         return tagged(sent.session, sent.generation, id);
       }
+      case "update_item": {
+        const sent = exactly(args, ["session", "generation", "edit"]) as {
+          session: number;
+          generation: number;
+          edit: Record<string, unknown>;
+        };
+        // The edit says its own fields and no others (`ItemEdit`): the optional ones may be left out, and nothing says an
+        // earlier password, which only the engine writes.
+        const required = ["id", "revision", "title", "notes", "collection"];
+        const optional = ["username", "password", "urls", "key_value"];
+        const given = Object.keys(sent.edit);
+        if (given.some((name) => !required.includes(name) && !optional.includes(name))) return refuse(MALFORMED);
+        if (required.some((name) => !given.includes(name))) return refuse(MALFORMED);
+        const edit = sent.edit;
+        const text = (name: string): string | undefined => (typeof edit[name] === "string" ? edit[name] : undefined);
+        if (typeof edit.id !== "string" || typeof edit.revision !== "number" || text("title") === undefined) return refuse(MALFORMED);
+        if (typeof edit.key_value === "string" && new TextEncoder().encode(edit.key_value).length > MAX_KEY_VALUE) {
+          return refuse({ code: "too_large", what: "value" });
+        }
+        const urls = edit.urls === undefined ? undefined : (edit.urls as string[]).map(normaliseUrl);
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const id = edit.id;
+        const item = vault.items?.find((i) => i.id === id);
+        if (item === undefined) return refuse({ code: "core", kind: "not_found" });
+        const loginFields = edit.username !== undefined || edit.password !== undefined || edit.urls !== undefined;
+        if (item.kind === "login" && edit.key_value !== undefined) return refuse(NOT_A_KEY);
+        if (item.kind === "key" && loginFields) return refuse(NOT_A_LOGIN);
+        if (item.kind !== "login" && item.kind !== "key" && loginFields) return refuse(NOT_A_LOGIN);
+        if (item.kind !== "login" && item.kind !== "key" && edit.key_value !== undefined) return refuse(NOT_A_KEY);
+        if ((item.revision ?? 2) !== edit.revision) return refuse(STALE_REVISION);
+        const title = text("title") ?? "";
+        if (item.kind === "key" && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(title)) return refuse(BAD_KEY_NAME);
+        // The engine moves the old password aside on a real change, and the page never sends the list.
+        const before = item.password ?? (item.has_password ?? false ? "Pw-from-the-fake-shell" : "");
+        const password = text("password");
+        if (item.kind === "login" && password !== undefined) {
+          if (password !== before && before !== "") {
+            item.previous = [{ password: before, replaced_at: new Date().toISOString().replace(/\.\d+Z$/, "Z") }, ...(item.previous ?? [])].slice(
+              0,
+              MAX_PREVIOUS,
+            );
+          }
+          item.password = password;
+          item.has_password = password !== "";
+        }
+        if (item.kind === "login") {
+          const username = text("username");
+          if (username !== undefined) item.username = username;
+          if (urls !== undefined) item.urls = urls;
+        }
+        const value = text("key_value");
+        if (item.kind === "key" && value !== undefined) item.value = value;
+        item.title = title;
+        item.notes = text("notes") ?? "";
+        item.collection = typeof edit.collection === "string" ? edit.collection : null;
+        item.revision = (item.revision ?? 2) + 1;
+        item.modified_at = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+        edited.push(sent);
+        return tagged(sent.session, sent.generation, null);
+      }
       case "generate_password": {
         const { options } = exactly(args, ["options"]) as { options: unknown };
         const given = exactly(options, ["length", "lowercase", "uppercase", "digits", "symbols", "avoid_ambiguous"]) as {
@@ -897,6 +1010,12 @@ export function installFakeShell(
 
   invoke.mockImplementation((cmd: string, args?: unknown) => {
     calls.push({ cmd, args });
+    const refusal = refusals.get(cmd);
+    if (refusal !== undefined) {
+      refusals.delete(cmd);
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+      return Promise.reject(refusal);
+    }
     if (heldPrint !== undefined && (cmd === "save_recovery_pdf" || cmd === "print_recovery_key" || cmd === "save_readable_confirm")) {
       // Decided when released, as the shell does: a lock in between leaves no file, and the answer is a refusal.
       const waiting = heldPrint;
@@ -940,6 +1059,14 @@ export function installFakeShell(
       }
       if (cmd === "new_item" && heldNewItem !== undefined) {
         const release = heldNewItem;
+        return new Promise((resolve) => {
+          release.push(() => {
+            resolve(result);
+          });
+        });
+      }
+      if (cmd === "update_item" && heldUpdate !== undefined) {
+        const release = heldUpdate;
         return new Promise((resolve) => {
           release.push(() => {
             resolve(result);
@@ -1086,6 +1213,9 @@ export function installFakeShell(
     releaseOneReveal: () => {
       heldReveal?.shift()?.();
     },
+    releaseNewestReveal: () => {
+      heldReveal?.pop()?.();
+    },
     holdNewItem: () => {
       const waiting: (() => void)[] = [];
       heldNewItem = waiting;
@@ -1093,6 +1223,18 @@ export function installFakeShell(
         heldNewItem = undefined;
         for (const release of waiting) release();
       };
+    },
+    edited,
+    holdUpdate: () => {
+      const waiting: (() => void)[] = [];
+      heldUpdate = waiting;
+      return () => {
+        heldUpdate = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    refuseNext: (cmd, error) => {
+      refusals.set(cmd, error);
     },
   };
 }

@@ -10,7 +10,10 @@ use super::Vault;
 use super::naming::{created_at_now, now_secs, rfc3339_utc};
 use crate::fsio::{atomic_write, read_retry};
 use crate::ids::{ItemId, VaultId};
-use crate::item::{Item, ItemKind, MAX_ITEM_FILE, check_key_name, open_item, seal_item};
+use crate::item::{
+    Item, ItemKind, MAX_ITEM_FILE, MAX_PREVIOUS_PASSWORDS, PreviousPassword, check_key_name,
+    open_item, seal_item,
+};
 use crate::secret::Key32;
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
@@ -122,6 +125,41 @@ fn check_title(kind: &ItemKind, title: &str) -> Result<()> {
     match kind {
         ItemKind::Key { .. } => check_key_name(title),
         _ => Ok(()),
+    }
+}
+
+/// The earlier passwords of a login about to be saved (`new`, as the caller sent it) over `stored`: always the stored
+/// list, never the caller's, and with the stored password put at its front, stamped `at`, when the new one really
+/// differs and the stored one is not empty. At most [`MAX_PREVIOUS_PASSWORDS`] stay; the oldest goes. A new kind that is
+/// not a login, or a stored one that is not, leaves nothing to carry.
+fn keep_earlier_passwords(stored: &ItemKind, new: &mut ItemKind, at: &str) {
+    let ItemKind::Login {
+        password,
+        previous_passwords,
+        ..
+    } = new
+    else {
+        return;
+    };
+    *previous_passwords = Vec::new();
+    let ItemKind::Login {
+        password: was,
+        previous_passwords: earlier,
+        ..
+    } = stored
+    else {
+        return;
+    };
+    previous_passwords.extend(earlier.iter().cloned());
+    if **password != **was && !was.is_empty() {
+        previous_passwords.insert(
+            0,
+            PreviousPassword {
+                password: was.clone(),
+                replaced_at: at.to_owned(),
+            },
+        );
+        previous_passwords.truncate(MAX_PREVIOUS_PASSWORDS);
     }
 }
 
@@ -245,6 +283,14 @@ impl Vault {
         check_title(&kind, title)?;
         let id = self.fresh_item_id()?;
         self.check_collection(&id, &kind, collection, None)?;
+        // A new login has no earlier passwords, whatever list it came with: only `update_item` writes one.
+        let mut kind = kind;
+        if let ItemKind::Login {
+            previous_passwords, ..
+        } = &mut kind
+        {
+            previous_passwords.clear();
+        }
         let mut item = blank_item(id, kind, title, collection);
         item.notes = notes;
         self.commit_item(item)?;
@@ -274,7 +320,9 @@ impl Vault {
             });
         }
         let mut next = edited(stored)?;
-        next.kind = item.kind;
+        let mut kind = item.kind;
+        keep_earlier_passwords(&stored.kind, &mut kind, &next.modified_at);
+        next.kind = kind;
         next.title = item.title;
         next.notes = item.notes;
         next.collection = item.collection;
@@ -397,6 +445,7 @@ mod tests {
             username: "ariel".into(),
             password: Zeroizing::new(password.into()),
             urls: vec!["https://example.com".into()],
+            previous_passwords: Vec::new(),
         }
     }
 
@@ -1088,5 +1137,266 @@ mod tests {
         let vault = reopen(vault);
         let item = vault.get_item(&id).unwrap();
         assert_eq!((item.title.as_str(), item.revision), ("Changed again", 2));
+    }
+
+    // Earlier passwords (Task 13): the engine moves the old password aside on a real change, and nothing else writes the
+    // list.
+
+    /// A login with `password` as its password and no earlier ones, as a page edit would send it.
+    fn login_with(password: &str) -> ItemKind {
+        ItemKind::Login {
+            username: "ariel".into(),
+            password: Zeroizing::new(password.into()),
+            urls: vec!["https://example.com".into()],
+            previous_passwords: Vec::new(),
+        }
+    }
+
+    /// Sets the login `id`'s password to `password` through `update_item`, as the shell's edit does.
+    fn set_password(vault: &mut Vault, id: &ItemId, password: &str) {
+        let mut edit = vault.get_item(id).unwrap().clone();
+        edit.kind = login_with(password);
+        vault.update_item(edit).unwrap();
+    }
+
+    /// The login's password and its earlier ones, newest first, with the time each was replaced.
+    fn passwords_of(vault: &Vault, id: &ItemId) -> (String, Vec<(String, String)>) {
+        match &vault.get_item(id).unwrap().kind {
+            ItemKind::Login {
+                password,
+                previous_passwords,
+                ..
+            } => (
+                password.to_string(),
+                previous_passwords
+                    .iter()
+                    .map(|old| (old.password.to_string(), old.replaced_at.clone()))
+                    .collect(),
+            ),
+            other => panic!("not a login: {other:?}"),
+        }
+    }
+
+    fn forged(password: &str) -> PreviousPassword {
+        PreviousPassword {
+            password: Zeroizing::new(password.into()),
+            replaced_at: "1999-01-01T00:00:00Z".into(),
+        }
+    }
+
+    /// A real change of password puts the old one at the front of the login's earlier passwords with the time it was
+    /// replaced (the edit's own time), in the same write, and an unlock reads it back. A change of anything else moves
+    /// nothing.
+    #[test]
+    fn real_change_moves_the_old_password() {
+        let (_parent, mut vault) = new_vault();
+        let id = vault
+            .new_item(login_with("demo-pass-one"), "Mail", None)
+            .unwrap();
+        assert!(passwords_of(&vault, &id).1.is_empty());
+
+        let writes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = std::rc::Rc::clone(&writes);
+        failpoint::observe(
+            "items.after_write",
+            Box::new(move || seen.set(seen.get() + 1)),
+        );
+        set_password(&mut vault, &id, "demo-pass-two");
+        failpoint::disarm_all();
+        assert_eq!(writes.get(), 1, "more than one write");
+        let modified = vault.get_item(&id).unwrap().modified_at.clone();
+        let (now, earlier) = passwords_of(&vault, &id);
+        assert_eq!(now, "demo-pass-two");
+        assert_eq!(earlier, [("demo-pass-one".to_owned(), modified.clone())]);
+
+        set_password(&mut vault, &id, "demo-pass-three");
+        let (now, earlier) = passwords_of(&vault, &id);
+        assert_eq!(now, "demo-pass-three");
+        let names: Vec<&str> = earlier.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(names, ["demo-pass-two", "demo-pass-one"], "newest first");
+        assert_eq!(earlier[1].1, modified, "the first one's time did not move");
+
+        // Another field changing, the password staying: nothing moves.
+        let mut edit = vault.get_item(&id).unwrap().clone();
+        edit.title = "Mail (work)".into();
+        vault.update_item(edit).unwrap();
+        assert_eq!(passwords_of(&vault, &id).1.len(), 2);
+
+        let vault = reopen(vault);
+        assert!(vault.damaged_items().is_empty());
+        let (now, earlier) = passwords_of(&vault, &id);
+        assert_eq!(now, "demo-pass-three");
+        assert_eq!(earlier.len(), 2);
+        assert_eq!(earlier[0].0, "demo-pass-two");
+        // On disk, none of it is in the clear.
+        let bytes = fs::read(item_path(&vault, &id)).unwrap();
+        assert!(!bytes.windows(9).any(|window| window == b"demo-pass"));
+    }
+
+    /// Saving the same password again, over and over, moves nothing and keeps the list as it is.
+    #[test]
+    fn same_password_moves_nothing() {
+        let (_parent, mut vault) = new_vault();
+        let id = vault
+            .new_item(login_with("demo-pass-one"), "Mail", None)
+            .unwrap();
+        set_password(&mut vault, &id, "demo-pass-one");
+        set_password(&mut vault, &id, "demo-pass-one");
+        assert!(passwords_of(&vault, &id).1.is_empty());
+        set_password(&mut vault, &id, "demo-pass-two");
+        assert_eq!(passwords_of(&vault, &id).1.len(), 1);
+        set_password(&mut vault, &id, "demo-pass-two");
+        assert_eq!(passwords_of(&vault, &id).1.len(), 1);
+        // A change back to an older one is a real change: the one now in use goes to the front, and the older one stays
+        // listed too (each row is a password that was replaced, whatever it was).
+        set_password(&mut vault, &id, "demo-pass-one");
+        let (now, earlier) = passwords_of(&vault, &id);
+        assert_eq!(now, "demo-pass-one");
+        let names: Vec<&str> = earlier.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(names, ["demo-pass-two", "demo-pass-one"]);
+    }
+
+    /// At most five are kept: the sixth change drops the oldest, whatever the number of changes after.
+    #[test]
+    fn at_most_five_oldest_dropped() {
+        let (_parent, mut vault) = new_vault();
+        let id = vault
+            .new_item(login_with("demo-pw-0"), "Mail", None)
+            .unwrap();
+        for n in 1..=7 {
+            set_password(&mut vault, &id, &format!("demo-pw-{n}"));
+            let kept = passwords_of(&vault, &id).1.len();
+            assert_eq!(kept, n.min(5), "after change {n}");
+        }
+        let (now, earlier) = passwords_of(&vault, &id);
+        assert_eq!(now, "demo-pw-7");
+        let names: Vec<&str> = earlier.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "demo-pw-6",
+                "demo-pw-5",
+                "demo-pw-4",
+                "demo-pw-3",
+                "demo-pw-2"
+            ],
+            "the two oldest are gone"
+        );
+        let vault = reopen(vault);
+        assert_eq!(passwords_of(&vault, &id).1.len(), 5);
+    }
+
+    /// A password that was empty is not worth keeping: setting the first one moves nothing. Clearing one moves it.
+    #[test]
+    fn empty_old_password_moves_nothing() {
+        let (_parent, mut vault) = new_vault();
+        let id = vault.new_item(login_with(""), "Mail", None).unwrap();
+        set_password(&mut vault, &id, "demo-pass-one");
+        assert!(passwords_of(&vault, &id).1.is_empty());
+        set_password(&mut vault, &id, "");
+        let (now, earlier) = passwords_of(&vault, &id);
+        assert_eq!(now, "");
+        assert_eq!(earlier.len(), 1);
+        assert_eq!(earlier[0].0, "demo-pass-one");
+        // And the empty one now in use is not kept when the next one comes.
+        set_password(&mut vault, &id, "demo-pass-two");
+        assert_eq!(passwords_of(&vault, &id).1.len(), 1);
+    }
+
+    /// Nothing outside the engine writes the list: an item handed to `update_item` or `new_item` with a list of its own
+    /// (a forged one, a copy of another) gets the stored list, or none on a new item, and never the caller's.
+    #[test]
+    fn page_cannot_write_previous_passwords() {
+        let (_parent, mut vault) = new_vault();
+        let forged_kind = |password: &str| ItemKind::Login {
+            username: "ariel".into(),
+            password: Zeroizing::new(password.into()),
+            urls: Vec::new(),
+            previous_passwords: vec![forged("demo-forged-one"), forged("demo-forged-two")],
+        };
+
+        // A new item starts with no earlier passwords, whatever it came with.
+        let id = vault
+            .new_item(forged_kind("demo-pass-one"), "Mail", None)
+            .unwrap();
+        assert!(passwords_of(&vault, &id).1.is_empty());
+        let other = vault
+            .new_item_with_notes(
+                forged_kind("demo-pass-one"),
+                "Other",
+                None,
+                Zeroizing::new(String::new()),
+            )
+            .unwrap();
+        assert!(passwords_of(&vault, &other).1.is_empty());
+
+        // The same password with a forged list: the stored list stays as it was (none).
+        let mut edit = vault.get_item(&id).unwrap().clone();
+        edit.kind = forged_kind("demo-pass-one");
+        vault.update_item(edit).unwrap();
+        assert!(passwords_of(&vault, &id).1.is_empty());
+
+        // A real change with a forged list: the one the engine moved, and none of the forged.
+        let mut edit = vault.get_item(&id).unwrap().clone();
+        edit.kind = forged_kind("demo-pass-two");
+        vault.update_item(edit).unwrap();
+        let (now, earlier) = passwords_of(&vault, &id);
+        assert_eq!(now, "demo-pass-two");
+        assert_eq!(earlier.len(), 1);
+        assert_eq!(earlier[0].0, "demo-pass-one");
+        assert_ne!(earlier[0].1, "1999-01-01T00:00:00Z");
+
+        // A forged empty list cannot erase the stored one either.
+        let mut edit = vault.get_item(&id).unwrap().clone();
+        edit.kind = login_with("demo-pass-two");
+        vault.update_item(edit).unwrap();
+        assert_eq!(passwords_of(&vault, &id).1.len(), 1);
+
+        // A note turned into a login has none, whatever list it came with.
+        let note = vault.new_item(ItemKind::Note, "Plans", None).unwrap();
+        let mut edit = vault.get_item(&note).unwrap().clone();
+        edit.kind = forged_kind("demo-pass-one");
+        vault.update_item(edit).unwrap();
+        assert!(passwords_of(&vault, &note).1.is_empty());
+    }
+
+    /// Earlier passwords are never in a search index (not by their text, whatever the query) and never in `Debug`, and
+    /// they are wiped like the password in use (`Zeroizing`).
+    #[test]
+    fn previous_passwords_are_wiped_and_never_indexed() {
+        let (_parent, mut vault) = new_vault();
+        let id = vault
+            .new_item(login_with("demo-oldest-secret"), "Mail", None)
+            .unwrap();
+        set_password(&mut vault, &id, "demo-newer-secret");
+        set_password(&mut vault, &id, "demo-newest-secret");
+        for query in ["demo-oldest", "oldest", "demo-newer", "secret"] {
+            assert!(vault.search(query, 10).is_empty(), "{query}");
+        }
+        assert_eq!(vault.search("mail", 10), [id], "the title is still found");
+
+        let item = vault.get_item(&id).unwrap();
+        for out in [
+            format!("{item:?}"),
+            format!("{item:#?}"),
+            format!("{:?}", item.kind),
+            format!("{:#?}", item.kind),
+        ] {
+            assert!(!out.contains("demo-"), "a password leaked in {out}");
+        }
+        match &item.kind {
+            ItemKind::Login {
+                previous_passwords, ..
+            } => {
+                // The type is the wiped one: this does not compile for a plain `String`.
+                fn wiped(_: &Zeroizing<String>) {}
+                for old in previous_passwords {
+                    wiped(&old.password);
+                    let said = format!("{old:?}");
+                    assert!(!said.contains("demo-"), "{said}");
+                }
+            }
+            other => panic!("not a login: {other:?}"),
+        }
     }
 }

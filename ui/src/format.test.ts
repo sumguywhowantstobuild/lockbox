@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { changedText, formatBytes } from "./format";
+import { changedText, dayWords, formatBytes } from "./format";
 
 test("sizes_are_written_in_the_unit_people_read", () => {
   expect(formatBytes(0)).toBe("0 B");
@@ -27,6 +27,18 @@ test("a_change_is_told_by_how_long_ago_then_by_month", () => {
   // Later than now (the clock moved): not a time to the future.
   expect(said("2026-11-09T12:00:00Z")).toBe("changed today");
   // A date that cannot be read says nothing rather than something wrong.
+  expect(said("")).toBe("");
+  expect(said("not a date")).toBe("");
+});
+
+test("an_until_line_says_today_or_the_date", () => {
+  const now = new Date("2026-11-06T12:00:00Z");
+  const said = (when: string) => dayWords(when, now);
+  expect(said("2026-11-06T09:00:00Z")).toBe("today");
+  expect(said("2026-03-12T08:00:00Z")).toBe("12 March");
+  // Yesterday is a date, not a word of its own: the line is "Until 5 November".
+  expect(said("2026-11-05T09:00:00Z")).toBe("5 November");
+  expect(said("2025-11-09T08:00:00Z")).toBe("9 November 2025");
   expect(said("")).toBe("");
   expect(said("not a date")).toBe("");
 });

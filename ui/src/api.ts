@@ -109,6 +109,15 @@ export interface ItemList {
   damaged: string[];
 }
 
+/**
+ * One of a login's earlier passwords: its number (what Reveal and Copy send back) and when it was replaced (RFC 3339, UTC).
+ * Never the password: that crosses only on Reveal, or while editing.
+ */
+export interface PreviousView {
+  index: number;
+  replaced_at: string;
+}
+
 /** One item opened. A login's password and a key's value are not here: each crosses only on Reveal. */
 export interface ItemDetail {
   summary: ItemSummary;
@@ -118,6 +127,8 @@ export interface ItemDetail {
   has_password: boolean;
   /** A key has a value to reveal or copy. Only whether: the value is not here. */
   has_value: boolean;
+  /** A login's earlier passwords, newest first (at most five); empty for every other kind. */
+  previous: PreviousView[];
 }
 
 export interface Settings {
@@ -130,6 +141,9 @@ export interface Settings {
  * `key_value` and a note's text, `notes`. The value never comes to the page.
  */
 export type CopyableField = "password" | "username" | "key_value" | "notes";
+
+/** What `copyField` can copy: a field above, or one of a login's earlier passwords by its number (`PreviousView.index`). */
+export type CopyTarget = CopyableField | { previous: number };
 
 export function listVaults(): Promise<VaultEntry[]> {
   return callPlain<VaultEntry[]>("list_vaults", {});
@@ -298,8 +312,11 @@ export function getItem(vault: SessionRef, id: string): Promise<Tagged<ItemDetai
   return call<ItemDetail>("get_item", { session: vault.session, generation: vault.generation, id });
 }
 
-/** Puts a field of the item on the clipboard, in Rust, and clears it after the settings' delay. */
-export function copyField(vault: SessionRef, id: string, field: CopyableField): Promise<Tagged<null>> {
+/**
+ * Puts a field of the item on the clipboard, in Rust, and clears it after the settings' delay. An earlier password is asked
+ * for by its number; a number past the login's list is refused (`invalid_input`, `what: "earlier password"`).
+ */
+export function copyField(vault: SessionRef, id: string, field: CopyTarget): Promise<Tagged<null>> {
   return call<null>("copy_field", { session: vault.session, generation: vault.generation, id, field });
 }
 
@@ -359,16 +376,52 @@ export function newNote(vault: SessionRef, title: string, collection: string | n
   return newItem(vault, "note", title, collection, { notes: text });
 }
 
-/** What Reveal can ask for: a login's `password` or a key's `key_value`. */
-export type RevealableField = "password" | "key_value";
+/**
+ * What Reveal can ask for: a login's `password`, a key's `key_value`, or one of a login's earlier passwords by its number
+ * (`{ previous: 0 }` is the newest).
+ */
+export type RevealableField = "password" | "key_value" | { previous: number };
 
 /**
- * Reveal: a login's password or a key's value, asked for by the person, from Rust: the one way either reaches the page.
- * Refused with `invalid_input` (`what: "not a login"` or `"not a key"`) when the field is not the item's own. It is kept only
- * while the item is open, and a lock takes it away.
+ * Reveal: a login's password, a key's value or an earlier password, asked for by the person (or by an edit form, which
+ * needs the stored value to show), from Rust: the one way any of them reaches the page. Refused with `invalid_input`
+ * (`what: "not a login"` or `"not a key"`) when the field is not the item's own, and (`what: "earlier password"`) for a
+ * number past the list. It is kept only while the item is open (or the form is), and a lock takes it away.
  */
 export function revealValue(vault: SessionRef, id: string, field: RevealableField): Promise<Tagged<string>> {
   return call<string>("reveal_password", { session: vault.session, generation: vault.generation, id, field });
+}
+
+/**
+ * What an edit sends: the item's title and notes and folder, always (the shell wants them, and a folder left out would take
+ * the item out of its folder), and a field of its kind only when the person changed it. A field left out is kept as stored,
+ * byte for byte. There is no field for a login's earlier passwords: only the engine writes that list.
+ */
+export interface ItemEdit {
+  id: string;
+  /** The revision the page read: a change made meanwhile makes the edit stale (`core` `invalid_input`, `what: "stale revision"`). */
+  revision: number;
+  title: string;
+  notes: string;
+  /** The folder's id, or `null` for none. */
+  collection: string | null;
+  username?: string;
+  password?: string;
+  /** All the login's websites, as typed: the shell adds `https://` where it is missing and refuses all but `http` and `https`. */
+  urls?: string[];
+  /** A key's value. */
+  key_value?: string;
+}
+
+/**
+ * Saves an edit of an item, in one write. A real change of a login's password moves the old one into its earlier passwords
+ * (the engine does that). Refused with `read_only` in a vault opened from a backup, `invalid_input` (`what: "not a key"`,
+ * `"not a login"`, `"website"`), `too_large`, and `core` `invalid_input` (`what: "key name"`, `"stale revision"`).
+ */
+export function updateItem(vault: SessionRef, edit: ItemEdit): Promise<Tagged<null>> {
+  // A field that was not changed is not sent at all, not sent as `undefined`.
+  const sent = Object.fromEntries(Object.entries(edit).filter(([, value]) => value !== undefined));
+  return call<null>("update_item", { session: vault.session, generation: vault.generation, edit: sent });
 }
 
 /** The generator's options for a password, as the engine takes them (`length` is 8 to 128). */

@@ -1442,6 +1442,15 @@
   margin-top: 18px;
 }
 
+/* A heading over a group of fields in the panel ("Earlier passwords"): the colour of a field's label. */
+.gh {
+  margin: 0 0 6px 14px;
+  font-size: 12.5px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--ink2);
+}
+
 .fld {
   position: relative;
   display: flex;

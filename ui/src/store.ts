@@ -9,7 +9,7 @@
 // session it was for is gone.
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
-import type { CopyableField, ItemDetail, ItemSummary, VaultEntry } from "./api";
+import type { CopyableField, CopyTarget, ItemDetail, ItemSummary, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
 
 /** The item open in the panel: its summary row's id, and what the shell said of it once it has. */
@@ -20,6 +20,8 @@ export interface OpenItem {
   error: unknown;
   /** It was just saved from the new-login form: the panel takes focus when it opens, as the form's next step. */
   saved: boolean;
+  /** It comes back from its Edit form (saved or cancelled): focus goes to Edit, the button that opened the form. */
+  focusEdit: boolean;
 }
 
 /**
@@ -33,6 +35,11 @@ export type Tool =
   | { kind: "new_key" }
   /** The new-note form (7b). */
   | { kind: "new_note" }
+  /**
+   * The Edit form of an item (11a, and 7a, 7b and 10f for the other kinds), from the summary and the details the panel had
+   * when Edit was pressed. What the form asks of Rust (the password, a key's value) and what is typed live in the form.
+   */
+  | { kind: "edit"; summary: ItemSummary; detail: ItemDetail }
   /** The Generator page (16a). */
   | { kind: "generator" };
 
@@ -866,11 +873,21 @@ export function sayOnLockScreen(refusal: unknown): void {
   set({ ...state, lockNote: refusal });
 }
 
+/** How an item comes to the panel, beyond which one: from where it was opened. */
+export interface OpenedHow {
+  /** Just saved from a new-item form: the panel takes focus on its heading. */
+  saved?: boolean;
+  /** Back from its Edit form: focus goes to Edit. */
+  focusEdit?: boolean;
+  /** What the panel had a moment ago (Cancel on a form): shown at once, and read again from the shell meanwhile. */
+  detail?: ItemDetail;
+}
+
 /**
  * Opens an item in the panel, or closes the panel (`null`). An item takes the panel from a form or tool open in it:
- * what was typed there goes with it. `saved` is for an item just saved from the new-login form.
+ * what was typed there goes with it.
  */
-export async function selectItem(session: number, id: string | null, saved = false): Promise<void> {
+export async function selectItem(session: number, id: string | null, opened: OpenedHow = {}): Promise<void> {
   const entry = sessionOf(session);
   if (entry === undefined) return;
   if (id === null) {
@@ -878,20 +895,82 @@ export async function selectItem(session: number, id: string | null, saved = fal
     return;
   }
   const { generation } = entry;
+  const saved = opened.saved ?? false;
+  const focusEdit = opened.focusEdit ?? false;
   // A value revealed for the item that was open does not stay for the next, or for the same one opened again.
   update(session, (current) => ({
     ...endReveals(current),
     tool: null,
-    openItem: { id, detail: null, error: null, saved },
+    openItem: { id, detail: opened.detail ?? null, error: null, saved, focusEdit },
   }));
   const shows = () => sessionOf(session)?.openItem?.id === id && stillOpen(session, generation);
   try {
     const answer = await api.getItem({ session, generation }, id);
-    if (shows()) update(session, (current) => ({ ...current, openItem: { id, detail: answer.data, error: null, saved } }));
+    if (shows()) {
+      update(session, (current) => ({ ...current, openItem: { id, detail: answer.data, error: null, saved, focusEdit } }));
+    }
   } catch (error) {
     if (refusedAsLocked(error)) dropSession(session);
     if (error instanceof api.StaleAnswer || !shows()) return;
-    update(session, (current) => ({ ...current, openItem: { id, detail: null, error, saved } }));
+    // What was shown stays when only the second read failed.
+    update(session, (current) => ({
+      ...current,
+      openItem: { id, detail: opened.detail ?? null, error, saved, focusEdit },
+    }));
+  }
+}
+
+/**
+ * Edit on an open item's details: the item's form takes the panel, from the summary and the details the panel has. Nothing in a
+ * vault that is read-only, and nothing until the details have come. The form asks for what it needs itself
+ * (`revealForEdit`), so no value is kept here.
+ */
+export function openEdit(session: number): void {
+  const entry = sessionOf(session);
+  const open = entry?.openItem;
+  if (entry === undefined || entry.readOnly || open === null || open === undefined || open.detail === null) return;
+  const detail = open.detail;
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    tool: { kind: "edit", summary: detail.summary, detail },
+  }));
+}
+
+/**
+ * Cancel on an Edit form: nothing was saved. The item's details come back at once, from what the panel had, and are read
+ * again from the shell (the item may have changed since), with focus on Edit.
+ */
+export function closeEdit(session: number): void {
+  const tool = sessionOf(session)?.tool;
+  if (tool?.kind !== "edit") return;
+  void selectItem(session, tool.summary.id, { focusEdit: true, detail: tool.detail });
+}
+
+/** What `revealForEdit` came to: the stored value, a refusal to say, or nothing to say (a lock, or the form is gone). */
+export type StoredValue = { value: string } | { failed: unknown } | "gone";
+
+/**
+ * The stored password or key's value an Edit form shows, asked of Rust as the form opens, through the same reveal command
+ * as Reveal. The request carries the reveal token as it was when asked: Cancel, another item, another form and a lock move
+ * it on (or drop the session), so an answer that is late, or for a form that is no longer there, comes back as `"gone"`
+ * and fills nothing. The value goes to the form's state alone, never into the store.
+ */
+export async function revealForEdit(session: number, id: string, field: "password" | "key_value"): Promise<StoredValue> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "gone";
+  const { generation, revealEpoch: token } = entry;
+  const current = () => {
+    const now = sessionOf(session);
+    return stillOpen(session, generation) && now?.revealEpoch === token && now.tool?.kind === "edit" && now.tool.summary.id === id;
+  };
+  try {
+    const answer = await api.revealValue({ session, generation }, id, field);
+    return current() ? { value: answer.data } : "gone";
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !current()) return "gone";
+    return { failed: error };
   }
 }
 
@@ -961,20 +1040,50 @@ export function saveNewNote(session: number, draft: NoteDraft): Promise<SaveResu
   return saveNew(session, (vault) => api.newNote(vault, draft.title.trim(), draft.folder, draft.text));
 }
 
-async function saveNew(session: number, make: (vault: api.SessionRef) => Promise<api.Tagged<string>>): Promise<SaveResult> {
+/**
+ * Saves the Edit form: the one write the shell makes of the changes, whole. On success the form goes, the list is read again,
+ * the item's details open with "Saved" and focus on Edit. A refusal comes back for the form to say (a stale revision among
+ * them: the item changed while it was open), and the form stays as it was. A vault that locked meanwhile gets nothing said,
+ * as `saveNewLogin`.
+ */
+export function saveEdit(session: number, edit: api.ItemEdit): Promise<SaveResult> {
+  return saveThen(session, async (vault) => {
+    await api.updateItem(vault, edit);
+    return edit.id;
+  }, { focusEdit: true });
+}
+
+function saveNew(session: number, make: (vault: api.SessionRef) => Promise<api.Tagged<string>>): Promise<SaveResult> {
+  return saveThen(session, async (vault) => (await make(vault)).data, { saved: true });
+}
+
+/**
+ * Runs a save that the shell writes in one step (`write` answers the id of the item to show), then reads the list again and
+ * opens the item. The item exists once the write is done: whatever the list refresh says (it may be refused), the item's
+ * details still open, from their own read.
+ */
+async function saveThen(
+  session: number,
+  write: (vault: api.SessionRef) => Promise<string>,
+  opened: OpenedHow,
+): Promise<SaveResult> {
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
   const { generation } = entry;
+  // The form that started this save, by its own object (a second form of the same kind for another item is another one).
+  const starter = entry.tool;
   try {
-    const made = await make({ session, generation });
+    const id = await write({ session, generation });
     if (!stillOpen(session, generation)) return "stale";
-    // The login exists now. Whatever the list says next, the form's job is done.
+    // It is written now. Whatever the list says next, the form's job is done.
     const record = sessionOf(session);
     if (record === undefined) return "stale";
     const read = await loadItems(record);
     if (read === "stale" || !stillOpen(session, generation)) return "stale";
     set({ ...state, toast: { kind: "saved", session } });
-    void selectItem(session, made.data, true);
+    // The saved item opens only if the form that saved it is still what the panel shows. If the person has cancelled and
+    // gone on to something else (another item, a newer form with text in it), the panel stays as they have it.
+    if (sessionOf(session)?.tool === starter) void selectItem(session, id, opened);
     return "saved";
   } catch (error) {
     if (refusedAsLocked(error)) dropSession(session);
@@ -995,8 +1104,9 @@ type Done = "done" | "stale" | { failed: unknown };
  * Asks the shell to put a field of the item on the clipboard (it never reaches the page) and, once it has, tells the
  * person when it will be cleared. The shell's refusal comes back for the caller to say where it fits.
  */
-async function copyAndTell(session: number, id: string, field: CopyableField): Promise<Done> {
-  return copyThenTell(session, COPIED[field], (vault) => api.copyField(vault, id, field));
+async function copyAndTell(session: number, id: string, field: CopyTarget): Promise<Done> {
+  const words = typeof field === "string" ? COPIED[field] : "Password copied";
+  return copyThenTell(session, words, (vault) => api.copyField(vault, id, field));
 }
 
 /** What the message says after each copy. */
@@ -1052,14 +1162,22 @@ export async function copyGenerated(session: number, value: string): Promise<voi
  * Asks the shell to put a field of the item on the clipboard (it never reaches the page) and tells the person when it
  * will be cleared. A vault that locked meanwhile gets no message.
  */
-export async function copyField(session: number, id: string, field: CopyableField): Promise<void> {
+export async function copyField(session: number, id: string, field: CopyTarget): Promise<void> {
   const done = await copyAndTell(session, id, field);
   if (typeof done === "object") set({ ...state, toast: { kind: "failed", session, error: done.failed } });
 }
 
 /**
- * Reveal on an item's details: asks the shell for a login's password or a key's value (`field`) and keeps it in the session's
- * record while the item stays open. Each request carries the session's reveal token as it was when asked; Hide, another item,
+ * Where `SessionData.reveals` keeps a revealed value: under the item's id for its password or key's value, and under the id and
+ * the number for one of a login's earlier passwords.
+ */
+export function revealKey(id: string, field: api.RevealableField): string {
+  return typeof field === "string" ? id : `${id}:previous:${String(field.previous)}`;
+}
+
+/**
+ * Reveal on an item's details: asks the shell for a login's password, a key's value or an earlier password (`field`) and keeps
+ * it in the session's record while the item stays open. Each request carries the session's reveal token as it was when asked; Hide, another item,
  * a form or tool, another folder, the panel closing and the same item opening again all change it (`endReveals`), and an
  * answer whose token is no longer the current one is dropped, so a late answer, or a second one from a second press, never
  * puts a hidden value back. An answer from a vault that locked is dropped too. Neither says anything; a refusal that is still
@@ -1068,12 +1186,17 @@ export async function copyField(session: number, id: string, field: CopyableFiel
 export async function revealValue(session: number, id: string, field: api.RevealableField): Promise<void> {
   const entry = sessionOf(session);
   if (entry === undefined) return;
-  const { generation, revealEpoch: token } = entry;
+  const { generation } = entry;
+  // Each request moves the token on as it starts and accepts only its own answer, so the latest press wins whatever order the
+  // answers come in. What is shown stays until the answer replaces it.
+  const token = entry.revealEpoch + 1;
+  update(session, (record) => ({ ...record, revealEpoch: token }));
   const current = () => stillOpen(session, generation) && sessionOf(session)?.revealEpoch === token;
   try {
     const answer = await api.revealValue({ session, generation }, id, field);
     if (!current() || sessionOf(session)?.openItem?.id !== id) return;
-    update(session, (record) => ({ ...record, reveals: { ...record.reveals, [id]: answer.data } }));
+    // One value on screen at a time: this one takes the place of any other the item's details were showing.
+    update(session, (record) => ({ ...record, reveals: { [revealKey(id, field)]: answer.data } }));
   } catch (error) {
     if (refusedAsLocked(error)) dropSession(session);
     if (error instanceof api.StaleAnswer || !current()) return;

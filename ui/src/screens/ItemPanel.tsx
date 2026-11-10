@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { CopyableField, ItemDetail, ItemKind, ItemSummary, RevealableField } from "../api";
-import { changedText, formatBytes } from "../format";
+import type { ItemDetail, ItemKind, ItemSummary } from "../api";
+import { changedText, dayWords, formatBytes } from "../format";
 import { messageFor } from "../messages";
 import { Button } from "../parts/Button";
 import { CopyIcon, KindIcon } from "../parts/Icon";
 import { Panel } from "../parts/Panel";
-import { copyField, hideReveal, openSite, revealValue, type SessionData } from "../store";
+import { copyField, hideReveal, openEdit, openSite, revealKey, revealValue, type SessionData } from "../store";
 import { useValueGuard } from "../useValueGuard";
 
 const KIND_WORD: Record<ItemKind, string> = { login: "Login", key: "Key", note: "Note", file: "File", collection: "Folder" };
@@ -51,7 +51,18 @@ function Field({ label, children, action }: { label?: string; children: ReactNod
   );
 }
 
-function LoginFields({ data, summary, detail }: { data: SessionData; summary: ItemSummary; detail: ItemDetail | null }) {
+function LoginFields({
+  data,
+  summary,
+  detail,
+  now,
+}: {
+  data: SessionData;
+  summary: ItemSummary;
+  detail: ItemDetail | null;
+  /** When the panel opened, for the days its earlier passwords say. */
+  now: Date;
+}) {
   const username = summary.username ?? "";
   return (
     <>
@@ -129,7 +140,78 @@ function LoginFields({ data, summary, detail }: { data: SessionData; summary: It
           </div>
         </section>
       ) : null}
+      {detail !== null && detail.previous.length > 0 ? (
+        <section className="gp">
+          <h3 className="gh">Earlier passwords</h3>
+          <div className="grp">
+            {detail.previous.map((old) => (
+              <EarlierPassword key={old.index} data={data} summary={summary} index={old.index} replacedAt={old.replaced_at} now={now} />
+            ))}
+          </div>
+        </section>
+      ) : null}
     </>
+  );
+}
+
+/**
+ * One of a login's earlier passwords (11b): "Until <day>" (the day it was replaced), the password hidden as dots, Copy (in
+ * Rust, like any copy) and Reveal, which shows it in the guarded box through the same reveal token as the password in use.
+ * One value is on screen at a time: Reveal here takes another off, and Hide, another item, a form or a lock takes this one. Its
+ * buttons are named by the day, never by what is in it.
+ */
+function EarlierPassword({
+  data,
+  summary,
+  index,
+  replacedAt,
+  now,
+}: {
+  data: SessionData;
+  summary: ItemSummary;
+  index: number;
+  replacedAt: string;
+  now: Date;
+}) {
+  const field = { previous: index };
+  const value = data.reveals[revealKey(summary.id, field)];
+  const day = dayWords(replacedAt, now);
+  // Numbered when the date could not be read, so the rows still tell apart.
+  const which = day === "" ? `earlier password ${String(index + 1)}` : `earlier password, until ${day}`;
+  const copyIt = () => {
+    void copyField(data.session, summary.id, field);
+  };
+  return (
+    <div className="fld">
+      <div className="fv">
+        <span className="fl">{day === "" ? `Earlier ${String(index + 1)}` : `Until ${day}`}</span>
+        {value === undefined ? (
+          <>
+            {/* Dots that stand for a value, never one. */}
+            <span className="sec hid" aria-hidden="true">
+              ••••••••••••
+            </span>
+            <span className="sr">Hidden</span>
+          </>
+        ) : (
+          <RevealedValue value={value} name={which.charAt(0).toUpperCase() + which.slice(1)} onCopy={copyIt} />
+        )}
+      </div>
+      <button type="button" className="pill" aria-label={`Copy ${which}`} onClick={copyIt}>
+        Copy
+      </button>
+      <button
+        type="button"
+        className="pill"
+        aria-label={`${value === undefined ? "Reveal" : "Hide"} ${which}`}
+        onClick={() => {
+          if (value === undefined) void revealValue(data.session, summary.id, field);
+          else hideReveal(data.session);
+        }}
+      >
+        {value === undefined ? "Reveal" : "Hide"}
+      </button>
+    </div>
   );
 }
 
@@ -167,7 +249,7 @@ function SecretValue({
 }: {
   data: SessionData;
   summary: ItemSummary;
-  field: RevealableField & CopyableField;
+  field: "password" | "key_value";
   label: string;
   /** What a screen reader calls the box that holds the revealed value. */
   boxName: string;
@@ -281,24 +363,39 @@ function NoteFields({ data, summary, detail }: { data: SessionData; summary: Ite
   );
 }
 
-function FileFields({ summary }: { summary: ItemSummary }) {
-  if (summary.attachments.length === 0) return null;
+/** A file's details: what is stored, and its note when it has one (Notes, as a key's details show theirs). */
+function FileFields({ summary, detail }: { summary: ItemSummary; detail: ItemDetail | null }) {
+  const note = detail !== null && detail.notes !== "";
+  if (summary.attachments.length === 0 && !note) return null;
   return (
-    <section className="gp">
-      <div className="grp">
-        {summary.attachments.map((file) => (
-          <div className="frow" key={file.file_id}>
-            <span className={`ftile ${KIND_TILE.file}`} aria-hidden="true">
-              <KindIcon kind="file" />
-            </span>
-            <span className="fmeta">
-              <b>{file.name}</b>
-              <small>{formatBytes(file.length)}</small>
-            </span>
+    <>
+      {summary.attachments.length === 0 ? null : (
+        <section className="gp">
+          <div className="grp">
+            {summary.attachments.map((file) => (
+              <div className="frow" key={file.file_id}>
+                <span className={`ftile ${KIND_TILE.file}`} aria-hidden="true">
+                  <KindIcon kind="file" />
+                </span>
+                <span className="fmeta">
+                  <b>{file.name}</b>
+                  <small>{formatBytes(file.length)}</small>
+                </span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-    </section>
+        </section>
+      )}
+      {note ? (
+        <section className="gp">
+          <div className="grp">
+            <Field label="Notes">
+              <span className="fnote">{detail.notes}</span>
+            </Field>
+          </div>
+        </section>
+      ) : null}
+    </>
   );
 }
 
@@ -318,7 +415,9 @@ export function ItemPanel({
   // When the panel opened: "changed 2 days ago" is said from this, and does not move while it is open.
   const [openedAt] = useState(() => new Date());
   const open = data.openItem;
-  const summary = open === null ? undefined : data.items?.find((item) => item.id === open.id);
+  // The details' own summary is the freshest there is (read after a save), and is there even when the list could not be
+  // read again right after it; the list's is what shows until the details have come.
+  const summary = open === null ? undefined : (open.detail?.summary ?? data.items?.find((item) => item.id === open.id));
   // A login just saved from the new-login form takes focus on its heading: the form it came from is gone, and the next
   // thing is its Copy buttons, a Tab away.
   const title = useRef<HTMLHeadingElement>(null);
@@ -327,6 +426,13 @@ export function ItemPanel({
   useEffect(() => {
     if (justSaved && shown) title.current?.focus();
   }, [justSaved, shown]);
+  // Back from its Edit form (saved or cancelled), focus goes to Edit, the button that opened the form, once it is there.
+  const editButton = useRef<HTMLButtonElement>(null);
+  const backFromEdit = open?.focusEdit === true;
+  const hasDetail = open?.detail != null;
+  useEffect(() => {
+    if (backFromEdit && hasDetail) editButton.current?.focus();
+  }, [backFromEdit, hasDetail]);
   if (open === null || summary === undefined) return null;
 
   const folder = summary.collection === null ? undefined : folderNames.get(summary.collection);
@@ -341,16 +447,31 @@ export function ItemPanel({
       subtitle={subtitle}
       icon={<KindIcon kind={summary.kind} />}
       onClose={onClose}
+      tools={
+        data.readOnly ? (
+          // A vault opened from a backup: said as drawn, and no Edit (the shell refuses the edit there as well).
+          <span className="chip">Read-only</span>
+        ) : open.detail === null ? undefined : (
+          <Button
+            ref={editButton}
+            onClick={() => {
+              openEdit(data.session);
+            }}
+          >
+            Edit
+          </Button>
+        )
+      }
     >
       {problem !== null ? (
         <p className="err" role="alert">
           {problem.title} {problem.body}
         </p>
       ) : null}
-      {summary.kind === "login" ? <LoginFields data={data} summary={summary} detail={open.detail} /> : null}
+      {summary.kind === "login" ? <LoginFields data={data} summary={summary} detail={open.detail} now={openedAt} /> : null}
       {summary.kind === "key" ? <KeyFields data={data} summary={summary} detail={open.detail} /> : null}
       {summary.kind === "note" ? <NoteFields data={data} summary={summary} detail={open.detail} /> : null}
-      {summary.kind === "file" ? <FileFields summary={summary} /> : null}
+      {summary.kind === "file" ? <FileFields summary={summary} detail={open.detail} /> : null}
     </Panel>
   );
 }

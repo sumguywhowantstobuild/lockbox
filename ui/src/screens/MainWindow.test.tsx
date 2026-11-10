@@ -102,8 +102,10 @@ test("selecting_shows_details_with_password_hidden", async () => {
     generation: live?.generation,
     id: itemId(1),
   });
-  // Nothing from a later task: no Move, Edit, trash, attach. The one Open is the website's (Task 10), through `open_url`.
-  for (const words of [/^Move/, /^Edit/, /trash/i, /attach/i]) {
+  // Edit is here (Task 13), and nothing from a later task: no Move, trash, attach. The one Open is the website's (Task 10),
+  // through `open_url`.
+  expect(within(panel).getByRole("button", { name: "Edit" })).toBeTruthy();
+  for (const words of [/^Move/, /trash/i, /attach/i]) {
     expect(within(panel).queryByRole("button", { name: words })).toBeNull();
   }
   expect(within(panel).getAllByRole("button", { name: /^Open/ }).map((button) => button.getAttribute("aria-label"))).toEqual([

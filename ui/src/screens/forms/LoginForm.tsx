@@ -7,7 +7,7 @@ import { Select } from "../../parts/Select";
 import { closeTool, saveNewLogin, type SessionData } from "../../store";
 import { GeneratorInForm } from "../GeneratorPanel";
 import type { FolderEntry } from "../SideMenu";
-import { folderChoices, NO_FOLDER, useFocusOnOpen, whereWords } from "./shared";
+import { folderChoices, hasInnerLineBreak, NO_FOLDER, PASSWORD_MANY_LINES, useFocusOnOpen, whereWords } from "./shared";
 
 /**
  * The new-login form (6b, with the generator of 6c): Title, Username, Website, Password with Generate, Folder, and Cancel
@@ -37,12 +37,32 @@ export function LoginForm({
   const [problem, setProblem] = useState<string | null>(null);
   /** The title is empty and Save was pressed: the field is marked, and the words say why. */
   const [titleMissing, setTitleMissing] = useState(false);
+  /** The words now under the fields are a refused paste's (they clear on the next change or a clean paste). */
+  const [pasteRefused, setPasteRefused] = useState(false);
   const titleBox = useRef<HTMLInputElement>(null);
   const passwordBox = useRef<HTMLInputElement>(null);
 
   useFocusOnOpen(titleBox);
 
   const subtitle = whereWords(folders, folder, data.name);
+
+  /** Something other than a refused paste has the line now: a change to the password must not clear it. */
+  const sayInstead = (words: string | null) => {
+    setProblem(words);
+    setPasteRefused(false);
+  };
+
+  /** Reads what is being pasted or dropped before the box does; stops it, and says why, if it would be changed silently. */
+  const checkText = (text: string, event: { preventDefault: () => void }) => {
+    if (hasInnerLineBreak(text)) {
+      event.preventDefault();
+      setProblem(PASSWORD_MANY_LINES);
+      setPasteRefused(true);
+      setTitleMissing(false);
+    } else if (pasteRefused) {
+      sayInstead(null);
+    }
+  };
 
   const cancel = () => {
     closeTool(data.session);
@@ -53,13 +73,13 @@ export function LoginForm({
     event.preventDefault();
     if (saving) return;
     if (title.trim() === "") {
-      setProblem("Type a title first.");
+      sayInstead("Type a title first.");
       setTitleMissing(true);
       titleBox.current?.focus();
       return;
     }
     setSaving(true);
-    setProblem(null);
+    sayInstead(null);
     setTitleMissing(false);
     const done = await saveNewLogin(data.session, {
       title,
@@ -71,7 +91,7 @@ export function LoginForm({
     // Saved or locked: the form is already gone, and there is nothing to say.
     if (typeof done !== "object") return;
     const words = messageFor(done.failed);
-    setProblem(words.body === "" ? words.title : `${words.title} ${words.body}`);
+    sayInstead(words.body === "" ? words.title : `${words.title} ${words.body}`);
     setSaving(false);
   };
 
@@ -169,6 +189,13 @@ export function LoginForm({
             value={password}
             onChange={(event) => {
               setPassword(event.currentTarget.value);
+              if (pasteRefused) sayInstead(null);
+            }}
+            onPaste={(event) => {
+              checkText(event.clipboardData.getData("text"), event);
+            }}
+            onDrop={(event) => {
+              checkText(event.dataTransfer.getData("text"), event);
             }}
           />
         </div>

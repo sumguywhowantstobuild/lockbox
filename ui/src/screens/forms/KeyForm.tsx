@@ -7,24 +7,13 @@ import { Select } from "../../parts/Select";
 import { closeTool, saveNewKey, type SessionData } from "../../store";
 import type { FolderEntry } from "../SideMenu";
 import { folderChoices, NO_FOLDER, useFocusOnOpen, whereWords } from "./shared";
+import { MANY_LINES, ValueField } from "./ValueField";
 
 /** What a key's name may be, said once under its box and again when the shell refuses a name. */
-const NAME_RULE = "Letters, digits and _ only. It can't start with a digit.";
-
-/** What the form says when a paste or a drop holds a line break inside the value: nothing was changed. */
-const MANY_LINES = "That value has more than one line, so it wasn't pasted. A key's value is one line here.";
-
-/**
- * Whether `text` has a line break anywhere but its very start or end. The box is one line: it drops a break at either end
- * (a pasted key that ends with one is still the key), but would join the lines of anything longer without a word, and a
- * credential must never change silently.
- */
-function hasInnerLineBreak(text: string): boolean {
-  return /[\r\n]/.test(text.replace(/^[\r\n]+|[\r\n]+$/g, ""));
-}
+export const NAME_RULE = "Letters, digits and _ only. It can't start with a digit.";
 
 /** Whether the shell refused the name itself (the engine's `key name`), so the Name box is the one to mark. */
-function refusedTheName(error: unknown): boolean {
+export function refusedTheName(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { what?: unknown }).what === "key name";
 }
 
@@ -33,14 +22,12 @@ function refusedTheName(error: unknown): boolean {
  * write, then opens it hidden with "Saved". What is typed lives in this form's own state, the value included: Cancel, a lock
  * and picking another item all take it, and a lock says nothing. The name must be a variable name (letters, digits and `_`,
  * not starting with a digit), since a key's name is what `.env` out uses: the shell refuses any other, in words under the
- * fields, and the form stays as it was. While the value is shown, a copy or cut aimed at its box is stopped, so it cannot
- * leave around the clipboard's marks, timer and clearing.
+ * fields, and the form stays as it was. The Value box is the one the edit-key form uses (`ValueField`).
  */
 export function KeyForm({ data, folders }: { data: SessionData; folders: readonly FolderEntry[] }) {
   const formId = useId();
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
-  const [shown, setShown] = useState(false);
   const [folder, setFolder] = useState(data.folder ?? NO_FOLDER);
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -52,17 +39,10 @@ export function KeyForm({ data, folders }: { data: SessionData; folders: readonl
 
   useFocusOnOpen(nameBox);
 
-  /** Reads what is being pasted or dropped before the box does; stops it, and says why, if it would be changed silently. */
-  const checkText = (text: string, event: { preventDefault: () => void }) => {
-    if (hasInnerLineBreak(text)) {
-      event.preventDefault();
-      setProblem(MANY_LINES);
-      setPasteRefused(true);
-      setNameMarked(false);
-    } else if (pasteRefused) {
-      setProblem(null);
-      setPasteRefused(false);
-    }
+  /** Something other than a refused paste has the line now: a change to the value must not clear it. */
+  const saySomethingElse = (words: string | null) => {
+    setProblem(words);
+    setPasteRefused(false);
   };
 
   const cancel = () => {
@@ -74,19 +54,19 @@ export function KeyForm({ data, folders }: { data: SessionData; folders: readonl
     event.preventDefault();
     if (saving) return;
     if (name.trim() === "") {
-      setProblem("Type a name first.");
+      saySomethingElse("Type a name first.");
       setNameMarked(true);
       nameBox.current?.focus();
       return;
     }
     setSaving(true);
-    setProblem(null);
+    saySomethingElse(null);
     setNameMarked(false);
     const done = await saveNewKey(data.session, { name, value, folder: folder === NO_FOLDER ? null : folder });
     // Saved or locked: the form is already gone, and there is nothing to say.
     if (typeof done !== "object") return;
     const words = messageFor(done.failed);
-    setProblem(words.body === "" ? words.title : `${words.title} ${words.body}`);
+    saySomethingElse(words.body === "" ? words.title : `${words.title} ${words.body}`);
     setNameMarked(refusedTheName(done.failed));
     setSaving(false);
   };
@@ -128,50 +108,22 @@ export function KeyForm({ data, folders }: { data: SessionData; folders: readonl
             {NAME_RULE}
           </p>
         </div>
-        <div className="fbox">
-          <div className="flrow">
-            <label className="flab" htmlFor={`${formId}-value`}>
-              Value
-            </label>
-            <Button
-              aria-controls={`${formId}-value`}
-              onClick={() => {
-                setShown(!shown);
-              }}
-            >
-              {shown ? "Hide" : "Show"}
-            </Button>
-          </div>
-          <input
-            id={`${formId}-value`}
-            className="finp m"
-            type={shown ? "text" : "password"}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="Paste the key"
-            value={value}
-            onChange={(event) => {
-              setValue(event.currentTarget.value);
-              if (pasteRefused) {
-                setProblem(null);
-                setPasteRefused(false);
-              }
-            }}
-            onPaste={(event) => {
-              checkText(event.clipboardData.getData("text"), event);
-            }}
-            onDrop={(event) => {
-              checkText(event.dataTransfer.getData("text"), event);
-            }}
-            // Shown, the value can be selected, so a native copy or cut would skip the clipboard's marks, timer and clearing.
-            onCopy={(event) => {
-              if (shown) event.preventDefault();
-            }}
-            onCut={(event) => {
-              if (shown) event.preventDefault();
-            }}
-          />
-        </div>
+        <ValueField
+          id={`${formId}-value`}
+          value={value}
+          onChange={setValue}
+          onRefused={() => {
+            setProblem(MANY_LINES);
+            setPasteRefused(true);
+            setNameMarked(false);
+          }}
+          onAccepted={() => {
+            if (pasteRefused) {
+              setProblem(null);
+              setPasteRefused(false);
+            }
+          }}
+        />
         <div className="fbox">
           <Select
             label="Folder"

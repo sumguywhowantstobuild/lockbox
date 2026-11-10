@@ -107,6 +107,12 @@ export const MESSAGES: Record<string, Words> = {
     title: "That isn't a name Lockbox can use for a key.",
     body: "Use letters, digits and _ only, and don't start with a digit.",
   },
+  // An edit made from a read of the item that is no longer the stored one: the design has no words for it, so these are
+  // the session's own. The engine refuses the whole edit, so nothing was saved.
+  "core:invalid_input:stale revision": {
+    title: "This item changed while you were editing it.",
+    body: "Nothing was saved. Cancel, then open it again to see the change.",
+  },
   "core:invalid_input:destination in a vault folder": {
     title: "Lockbox won't save that inside a vault's folder.",
     body: "Choose another folder.",
@@ -165,6 +171,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "destination inside vault",
   "destination is the backup",
   "destination not writable",
+  "earlier password",
   "file",
   "file missing",
   "file name",

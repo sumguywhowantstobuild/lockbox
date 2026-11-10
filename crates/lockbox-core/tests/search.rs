@@ -32,6 +32,7 @@ fn five_thousand_items_fast() {
             username: format!("user{n}@example.com"),
             password: Zeroizing::new(format!("pw-{n}")),
             urls: vec![format!("https://site{n}.example.org/login")],
+            previous_passwords: Vec::new(),
         };
         let folder = (n % 3 == 0).then(|| folders[n % folders.len()]);
         let id = vault

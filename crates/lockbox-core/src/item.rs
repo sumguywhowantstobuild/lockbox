@@ -34,6 +34,25 @@ const TAG_LEN: usize = 16;
 const BUCKET: usize = 512;
 const DAMAGED: CoreError = CoreError::Damaged { what: "item" };
 
+/// The most earlier passwords a login keeps: the sixth change drops the oldest.
+pub const MAX_PREVIOUS_PASSWORDS: usize = 5;
+
+/// A password a login had before it was changed, and when it was replaced (RFC 3339, UTC, as every date here). Only the
+/// engine writes these: `update_item` moves the old password here on a real change. Wiped like the password in use, never
+/// indexed for search, and never in `Debug`. Its JSON is `PreviousWire`'s.
+#[derive(Clone)]
+pub struct PreviousPassword {
+    pub password: Zeroizing<String>,
+    pub replaced_at: String,
+}
+
+// Nothing of it: not the password, and the date says when a password changed, which is enough to leave out of a log.
+impl fmt::Debug for PreviousPassword {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreviousPassword").finish_non_exhaustive()
+    }
+}
+
 /// What an item is. Its JSON is `KindWire`'s.
 #[derive(Clone)]
 pub enum ItemKind {
@@ -41,6 +60,9 @@ pub enum ItemKind {
         username: String,
         password: Zeroizing<String>,
         urls: Vec<String>,
+        /// Newest first, at most [`MAX_PREVIOUS_PASSWORDS`]. Left out of the JSON when empty, so a login without any
+        /// writes the bytes it always did, and an older file without the field opens with none.
+        previous_passwords: Vec<PreviousPassword>,
     },
     /// A named secret value (an API key, a token): the item's title is its name, a variable name (see
     /// [`check_key_name`]). The value is never indexed for search.
@@ -222,8 +244,8 @@ struct ItemWire {
 }
 
 /// An `ItemKind`'s JSON. Externally tagged, so a login or a key reads straight into its wiped fields:
-/// `"note"` / `"file"` / `"collection"`, `{"login": {"username": .., "password": .., "urls": [..]}}` or
-/// `{"key": {"value": ..}}`. (An internally tagged enum would buffer every field, password included, in serde's
+/// `"note"` / `"file"` / `"collection"`, `{"login": {"username": .., "password": .., "urls": [..]}}` (with a
+/// `"previous_passwords"` list after `urls` only when it has some) or `{"key": {"value": ..}}`. (An internally tagged enum would buffer every field, password included, in serde's
 /// unwiped private `Content` type first.) A kind added here changes no byte of what the others write.
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "ItemKind", rename_all = "lowercase", deny_unknown_fields)]
@@ -232,6 +254,8 @@ enum KindWire {
         username: String,
         password: Zeroizing<String>,
         urls: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty", with = "previous_list")]
+        previous_passwords: Vec<PreviousPassword>,
     },
     Key {
         value: Zeroizing<String>,
@@ -256,6 +280,70 @@ struct FileRefWire {
     chunk_count: u64,
     name: String,
     media_type: String,
+}
+
+/// A `PreviousPassword`'s JSON.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "PreviousPassword", deny_unknown_fields)]
+struct PreviousWire {
+    password: Zeroizing<String>,
+    replaced_at: String,
+}
+
+/// Serialises a `PreviousPassword` through [`PreviousWire`].
+struct PreviousOut<'a>(&'a PreviousPassword);
+
+impl Serialize for PreviousOut<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        PreviousWire::serialize(self.0, s)
+    }
+}
+
+/// Reads a `PreviousPassword` through [`PreviousWire`], straight into its wiped field.
+struct PreviousIn(PreviousPassword);
+
+impl<'de> Deserialize<'de> for PreviousIn {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        PreviousWire::deserialize(d).map(PreviousIn)
+    }
+}
+
+/// `previous_passwords` as a JSON array of [`PreviousWire`], built element by element like serde's own `Vec` (no second
+/// vector, so no extra copy of a password).
+mod previous_list {
+    use super::{PreviousIn, PreviousOut, PreviousPassword};
+    use serde::de::{SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S: Serializer>(list: &[PreviousPassword], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(list.iter().map(PreviousOut))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<PreviousPassword>, D::Error> {
+        struct List;
+
+        impl<'de> Visitor<'de> for List {
+            type Value = Vec<PreviousPassword>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a sequence")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Vec<PreviousPassword>, A::Error> {
+                let mut list = Vec::new();
+                while let Some(PreviousIn(old)) = seq.next_element()? {
+                    list.push(old);
+                }
+                Ok(list)
+            }
+        }
+
+        d.deserialize_seq(List)
+    }
 }
 
 /// Serialises an `Item` through [`ItemWire`].
@@ -476,6 +564,7 @@ mod tests {
             username: "ariel".into(),
             password: Zeroizing::new("hunter2".into()),
             urls: vec!["https://example.com".into()],
+            previous_passwords: vec![],
         })
     }
 
@@ -934,6 +1023,127 @@ mod tests {
         expected.resize(512, 0);
         let plain = padded_plaintext(&login()).unwrap();
         assert_eq!(plain.as_slice(), expected.as_slice());
+
+        // A login with earlier passwords: the same bytes up to `urls`, then the list, newest first. Pinned here from the
+        // first version of the field, as the key's bytes are.
+        let expected_json = format!(
+            concat!(
+                r#"{{"id":"{}","kind":{{"login":{{"username":"ariel","password":"hunter2","urls":["https://example.com"],"#,
+                r#""previous_passwords":[{{"password":"demo-old-one","replaced_at":"2026-10-09T00:00:02Z"}},"#,
+                r#"{{"password":"demo-old-two","replaced_at":"2026-10-09T00:00:03Z"}}]}}}},"#,
+                r#""title":"Example","notes":"n","collection":null,"attachments":[],"revision":3,"#,
+                r#""created_at":"2026-10-09T00:00:00Z","modified_at":"2026-10-09T00:00:01Z","#,
+                r#""trashed_at":null,"purging":false,"retired_blobs":[]}}"#
+            ),
+            "aa".repeat(16)
+        );
+        let mut expected = expected_json.into_bytes();
+        expected.push(0x80);
+        expected.resize(512, 0);
+        let plain = padded_plaintext(&login_with_earlier()).unwrap();
+        assert_eq!(plain.as_slice(), expected.as_slice());
+        // It reads back as written, through the file too.
+        let (v, k) = vault();
+        let item = login_with_earlier();
+        let back = open_item(&seal_item(&item, &v, &k).unwrap(), &item.id, &v, &k).unwrap();
+        assert_eq!(
+            padded_plaintext(&back).unwrap().as_slice(),
+            expected.as_slice()
+        );
+        assert!(same_item(&item, &back));
+        // The list is part of the item: another list is another item.
+        let mut fewer = login_with_earlier();
+        if let ItemKind::Login {
+            previous_passwords, ..
+        } = &mut fewer.kind
+        {
+            previous_passwords.pop();
+        }
+        assert!(!same_item(&item, &fewer));
+    }
+
+    /// An earlier password, made up for these tests.
+    fn earlier(password: &str, replaced_at: &str) -> PreviousPassword {
+        PreviousPassword {
+            password: Zeroizing::new(password.into()),
+            replaced_at: replaced_at.into(),
+        }
+    }
+
+    fn login_with_earlier() -> Item {
+        base(ItemKind::Login {
+            username: "ariel".into(),
+            password: Zeroizing::new("hunter2".into()),
+            urls: vec!["https://example.com".into()],
+            previous_passwords: vec![
+                earlier("demo-old-one", "2026-10-09T00:00:02Z"),
+                earlier("demo-old-two", "2026-10-09T00:00:03Z"),
+            ],
+        })
+    }
+
+    /// An item file written before earlier passwords existed (`fixtures/old-items.txt`) opens with none, and written
+    /// again it is the very bytes it was: the field is left out of the JSON when the list is empty. The field's own
+    /// shape is strict.
+    #[test]
+    fn old_item_with_no_field_opens() {
+        let (v, k) = vault();
+        let id = ItemId([0xAA; 16]);
+        let bytes = old_file("LOGIN");
+        let login = open_item(&bytes, &id, &v, &k).unwrap();
+        match &login.kind {
+            ItemKind::Login {
+                previous_passwords, ..
+            } => assert!(previous_passwords.is_empty()),
+            other => panic!("kind changed to {other:?}"),
+        }
+        // The plaintext the old code sealed, opened by hand, is what is written today.
+        let nonce: [u8; 24] = bytes[6..HEADER_LEN].try_into().unwrap();
+        let mut old_plain = Vec::from(&bytes[HEADER_LEN..]);
+        aead::decrypt_in_place(&k, &nonce, &item_ad(&v, &id), &mut old_plain).unwrap();
+        assert_eq!(
+            padded_plaintext(&login).unwrap().as_slice(),
+            old_plain.as_slice()
+        );
+        assert!(!String::from_utf8_lossy(&old_plain).contains("previous_passwords"));
+
+        // With or without the field, an old shape and an empty list are the same login.
+        for kind in [
+            r#"{"login":{"username":"","password":"","urls":[]}}"#,
+            r#"{"login":{"username":"","password":"","urls":[],"previous_passwords":[]}}"#,
+            r#"{"login":{"username":"","password":"","urls":[],"previous_passwords":[{"password":"x","replaced_at":"t"}]}}"#,
+        ] {
+            assert!(kind_from(kind).is_ok(), "{kind}");
+        }
+        for kind in [
+            // An entry has its two fields and no other.
+            r#"{"login":{"username":"","password":"","urls":[],"previous_passwords":[{"password":"x"}]}}"#,
+            r#"{"login":{"username":"","password":"","urls":[],"previous_passwords":[{"replaced_at":"t"}]}}"#,
+            r#"{"login":{"username":"","password":"","urls":[],"previous_passwords":[{"password":"x","replaced_at":"t","extra":1}]}}"#,
+            r#"{"login":{"username":"","password":"","urls":[],"previous_passwords":["x"]}}"#,
+            r#"{"login":{"username":"","password":"","urls":[],"previous_passwords":null}}"#,
+            // And only a login has the list.
+            r#"{"key":{"value":"x","previous_passwords":[]}}"#,
+        ] {
+            assert!(kind_from(kind).is_err(), "{kind}");
+        }
+    }
+
+    /// `Debug` shows nothing of an earlier password, alone or inside an item.
+    #[test]
+    fn previous_passwords_debug_shows_nothing() {
+        let item = login_with_earlier();
+        let alone = format!("{:?}", earlier("demo-old-one", "2026-10-09T00:00:02Z"));
+        for out in [
+            alone,
+            format!("{item:?}"),
+            format!("{item:#?}"),
+            format!("{:?}", item.kind),
+            format!("{:#?}", item.kind),
+        ] {
+            assert!(!out.contains("demo-old"), "a password leaked in {out}");
+            assert!(!out.contains("hunter2"), "a password leaked in {out}");
+        }
     }
 
     /// A key's value, made up for these tests.
@@ -1066,7 +1276,9 @@ mod tests {
                 username,
                 password,
                 urls,
+                previous_passwords,
             } => {
+                assert!(previous_passwords.is_empty());
                 assert_eq!(username, "ariel");
                 assert_eq!(password.as_str(), "hunter2");
                 assert_eq!(urls, &["https://example.com"]);

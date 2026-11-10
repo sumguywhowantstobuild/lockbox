@@ -2,6 +2,18 @@ import { useEffect, type RefObject } from "react";
 import type { SelectChoice } from "../../parts/Select";
 import type { FolderEntry } from "../SideMenu";
 
+/**
+ * Whether `text` has a line break anywhere but its very start or end. A one-line box drops a break at either end (a pasted key
+ * or password that ends with one is still that), but would join the lines of anything longer without a word, and a credential
+ * must never change silently. The one check for every one-line box that takes a credential (a key's Value, a login's Password).
+ */
+export function hasInnerLineBreak(text: string): boolean {
+  return /[\r\n]/.test(text.replace(/^[\r\n]+|[\r\n]+$/g, ""));
+}
+
+/** What a login form says when a paste or a drop into the Password box holds a line break inside it: nothing was changed. */
+export const PASSWORD_MANY_LINES = "That password has more than one line, so it wasn't pasted. A password is one line here.";
+
 /** The Folder list's value for "No folder": never an item's id, which is 32 hex characters. */
 export const NO_FOLDER = "none";
 

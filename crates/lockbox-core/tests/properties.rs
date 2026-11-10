@@ -13,7 +13,7 @@ use lockbox_core::internals::header::{HEADER_FILE, parse_header};
 use lockbox_core::internals::item::{FileRefParts, open_item, same_item, seal_item};
 use lockbox_core::internals::recovery;
 use lockbox_core::internals::secret::{Key32, random_bytes};
-use lockbox_core::item::{FileRef, Item, ItemKind};
+use lockbox_core::item::{FileRef, Item, ItemKind, PreviousPassword};
 use lockbox_core::recovery::RecoverySecret;
 use lockbox_core::{CoreError, Vault};
 use proptest::collection::vec;
@@ -51,13 +51,24 @@ fn random_bytes_of(len: impl Strategy<Value = usize>) -> impl Strategy<Value = V
 
 fn kind() -> impl Strategy<Value = ItemKind> {
     prop_oneof![
-        (text(200), text(200), vec(text(200), 0..4)).prop_map(|(username, password, urls)| {
-            ItemKind::Login {
+        (
+            text(200),
+            text(200),
+            vec(text(200), 0..4),
+            vec((text(100), text(30)), 0..4),
+        )
+            .prop_map(|(username, password, urls, earlier)| ItemKind::Login {
                 username,
                 password: Zeroizing::new(password),
                 urls,
-            }
-        }),
+                previous_passwords: earlier
+                    .into_iter()
+                    .map(|(password, replaced_at)| PreviousPassword {
+                        password: Zeroizing::new(password),
+                        replaced_at,
+                    })
+                    .collect(),
+            }),
         text(200).prop_map(|value| ItemKind::Key {
             value: Zeroizing::new(value),
         }),
@@ -207,6 +218,7 @@ static VALID_ITEM: LazyLock<Vec<u8>> = LazyLock::new(|| {
             username: "ariel".into(),
             password: Zeroizing::new("hunter2".into()),
             urls: vec!["https://example.com".into()],
+            previous_passwords: vec![],
         },
         title: "Example".into(),
         notes: Zeroizing::new("a note".into()),

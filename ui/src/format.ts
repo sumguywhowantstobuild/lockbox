@@ -36,6 +36,18 @@ function dayNumber(date: Date): number {
 }
 
 /**
+ * A day in the words of an "Until" line (11b): "today", or the date as "12 March" (with the year, "9 November 2025", when it is
+ * not this year's). A date that cannot be read gives an empty string, so the screen says nothing instead of something wrong.
+ */
+export function dayWords(when: string, now: Date): string {
+  const then = new Date(when);
+  if (when === "" || Number.isNaN(then.getTime())) return "";
+  if (dayNumber(now) === dayNumber(then)) return "today";
+  const date = `${String(then.getDate())} ${MONTHS[then.getMonth()] ?? ""}`;
+  return then.getFullYear() === now.getFullYear() ? date : `${date} ${String(then.getFullYear())}`;
+}
+
+/**
  * When an item last changed, in the words of the details panel: "changed today", "changed 2 days ago" for the first
  * week, then "changed this month", "changed last month", "changed in September", "changed in December 2025". A date
  * that cannot be read gives an empty string, so the screen says nothing instead of something wrong.

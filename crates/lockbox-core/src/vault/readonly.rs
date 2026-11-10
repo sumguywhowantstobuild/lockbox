@@ -461,6 +461,7 @@ mod tests {
             username: "ariel".to_owned(),
             password: Zeroizing::new("hunter22".to_owned()),
             urls: vec!["https://bank.example".to_owned()],
+            previous_passwords: Vec::new(),
         };
         f.vault.new_item(login, "Bank", None).unwrap();
         let (item, file) = f.file_item(b"hello world");
@@ -1006,6 +1007,7 @@ mod tests {
             username: "ariel".to_owned(),
             password: Zeroizing::new("hunter22".to_owned()),
             urls: vec!["https://bank.example".to_owned()],
+            previous_passwords: Vec::new(),
         };
         let item = f.vault.new_item(kind, "Bank", None).unwrap();
         let small = f.attach(&item, SMALL);
@@ -1059,6 +1061,7 @@ mod tests {
                 username,
                 password,
                 urls,
+                ..
             } => (username.clone(), (**password).clone(), urls.clone()),
             other => panic!("not a login: {other:?}"),
         }
@@ -1539,6 +1542,7 @@ mod tests {
             username: "ariel".to_owned(),
             password: Zeroizing::new("hunter22".to_owned()),
             urls: Vec::new(),
+            previous_passwords: Vec::new(),
         };
         let item = f.vault.new_item(kind, "Three files", None).unwrap();
         let big = big_bytes();
@@ -1703,6 +1707,7 @@ mod tests {
             username: "ariel".to_owned(),
             password: Zeroizing::new("hunter22".to_owned()),
             urls: Vec::new(),
+            previous_passwords: Vec::new(),
         };
         let item = f.vault.new_item(kind, "Four files", None).unwrap();
         // IDs that fall as the attachments go on: ff.., ee.., dd.., cc..

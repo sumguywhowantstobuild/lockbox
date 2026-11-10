@@ -135,6 +135,7 @@ mod tests {
             username: username.to_owned(),
             password: Zeroizing::new("hunter2zz".to_owned()),
             urls: urls.iter().map(|u| (*u).to_owned()).collect(),
+            previous_passwords: Vec::new(),
         };
         item(n, kind, title)
     }
@@ -350,6 +351,7 @@ mod tests {
             username: "carol".to_owned(),
             password: Zeroizing::new("pw".to_owned()),
             urls: vec![],
+            previous_passwords: Vec::new(),
         };
         let one = vault.new_item(kind, "Alpha", None).unwrap();
         assert_eq!(vault.search("alpha", 10), [one]);

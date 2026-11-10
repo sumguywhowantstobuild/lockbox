@@ -14,6 +14,7 @@ import {
 import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, VaultBanners } from "./Asks";
 import { EmptyAdd } from "./EmptyAdd";
+import { EditForm } from "./forms/EditForm";
 import { KeyForm } from "./forms/KeyForm";
 import { LoginForm } from "./forms/LoginForm";
 import { NoteForm } from "./forms/NoteForm";
@@ -178,6 +179,15 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         ) : null}
         {data.tool?.kind === "new_note" ? (
           <NoteForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
+        ) : null}
+        {data.tool?.kind === "edit" ? (
+          <EditForm
+            key={`${String(data.session)}:${String(data.generation)}:${data.tool.summary.id}`}
+            data={data}
+            folders={folders}
+            summary={data.tool.summary}
+            detail={data.tool.detail}
+          />
         ) : null}
         {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         <ToastStack />

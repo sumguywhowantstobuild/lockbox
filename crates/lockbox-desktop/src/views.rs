@@ -103,14 +103,44 @@ pub struct ItemDetail {
     pub has_password: bool,
     /// A key has a value to reveal. Only whether: the value crosses through `reveal_password` alone.
     pub has_value: bool,
+    /// A login's earlier passwords, newest first: each one's number and when it was replaced, never the password.
+    pub previous: Vec<PreviousView>,
+}
+
+/// One of a login's earlier passwords, as the page sees it. `index` is what Reveal and Copy send back
+/// (`RevealField::Previous`, `CopyField::Previous`); the password itself crosses only through those.
+#[derive(Serialize)]
+pub struct PreviousView {
+    pub index: u8,
+    /// RFC 3339, UTC, whole seconds.
+    pub replaced_at: String,
 }
 
 impl ItemDetail {
     pub fn of(item: &Item) -> ItemDetail {
-        let (urls, has_password, has_value) = match &item.kind {
-            ItemKind::Login { urls, password, .. } => (urls.clone(), !password.is_empty(), false),
-            ItemKind::Key { value } => (Vec::new(), false, !value.is_empty()),
-            _ => (Vec::new(), false, false),
+        let (urls, has_password, has_value, previous) = match &item.kind {
+            ItemKind::Login {
+                urls,
+                password,
+                previous_passwords,
+                ..
+            } => {
+                let previous = previous_passwords.iter().enumerate();
+                let previous = previous.filter_map(|(at, old)| {
+                    Some(PreviousView {
+                        index: u8::try_from(at).ok()?,
+                        replaced_at: old.replaced_at.clone(),
+                    })
+                });
+                (
+                    urls.clone(),
+                    !password.is_empty(),
+                    false,
+                    previous.collect(),
+                )
+            }
+            ItemKind::Key { value } => (Vec::new(), false, !value.is_empty(), Vec::new()),
+            _ => (Vec::new(), false, false, Vec::new()),
         };
         ItemDetail {
             summary: ItemSummary::of(item),
@@ -119,6 +149,7 @@ impl ItemDetail {
             urls,
             has_password,
             has_value,
+            previous,
         }
     }
 }
@@ -212,6 +243,7 @@ mod tests {
             username: "ada".into(),
             password: secret("Pw-0123456789-xyz"),
             urls: urls.iter().map(|url| (*url).to_owned()).collect(),
+            previous_passwords: Vec::new(),
         })
     }
 
@@ -299,7 +331,7 @@ mod tests {
             detail,
             json!({
                 "summary": expected, "revision": 1, "notes": "rotate monthly", "urls": [],
-                "has_password": false, "has_value": true,
+                "has_password": false, "has_value": true, "previous": [],
             })
         );
         assert_eq!(list, json!({ "items": [expected], "damaged": [] }));
@@ -319,6 +351,54 @@ mod tests {
             (&login["has_value"], &login["has_password"]),
             (&json!(false), &json!(true))
         );
+    }
+
+    /// A login's earlier passwords reach the page as a number and a date each, newest first, and as nothing else: not in
+    /// the details, the summary or a list, whole or in part. A key, a note and the rest have none.
+    #[test]
+    fn earlier_passwords_cross_as_numbers_and_dates_only() {
+        use lockbox_core::item::PreviousPassword;
+        let old = |password: &str, at: &str| PreviousPassword {
+            password: secret(password),
+            replaced_at: at.into(),
+        };
+        let mut with_earlier = login(&["https://bank.example"]);
+        if let ItemKind::Login {
+            previous_passwords, ..
+        } = &mut with_earlier.kind
+        {
+            *previous_passwords = vec![
+                old("demo-old-one", "2026-11-09T10:00:00Z"),
+                old("demo-old-two", "2026-03-12T08:00:00Z"),
+            ];
+        }
+        let detail = serde_json::to_value(ItemDetail::of(&with_earlier)).unwrap();
+        assert_eq!(
+            detail["previous"],
+            json!([
+                { "index": 0, "replaced_at": "2026-11-09T10:00:00Z" },
+                { "index": 1, "replaced_at": "2026-03-12T08:00:00Z" },
+            ])
+        );
+        let summary = serde_json::to_value(ItemSummary::of(&with_earlier)).unwrap();
+        let list = serde_json::to_value(ItemList::of([&with_earlier].into_iter(), &[])).unwrap();
+        for view in [&detail, &summary, &list] {
+            let text = view.to_string();
+            for leaked in ["demo-old", "old-one", "old-two", "Pw-0123456789-xyz"] {
+                assert!(!text.contains(leaked), "a view holds {leaked}: {text}");
+            }
+        }
+        assert!(summary.get("previous").is_none() && list.to_string().find("previous").is_none());
+        // One without any, and the other kinds, say so with an empty list.
+        for item in [
+            login(&[]),
+            key(),
+            item(ItemKind::Note),
+            item(ItemKind::File),
+        ] {
+            let detail = serde_json::to_value(ItemDetail::of(&item)).unwrap();
+            assert_eq!(detail["previous"], json!([]));
+        }
     }
 
     #[test]

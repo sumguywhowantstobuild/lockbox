@@ -5,7 +5,8 @@ import { CloseIcon } from "./Icon";
  * The panel that slides in from the right: details of an item, and its forms. It is a named region, so a screen reader
  * can find it; its title is the heading of what is in it. The close button is always there. A form puts its buttons in
  * `footer`, a bar that stays in view while the fields scroll. `titleRef` reaches the heading, which can take focus when
- * the panel opens as the next step of what the person just did.
+ * the panel opens as the next step of what the person just did. `tools` are the pills (or a label) at the top, before Close: an
+ * item's Edit, or "Read-only".
  */
 export function Panel({
   title,
@@ -14,6 +15,7 @@ export function Panel({
   titleClassName,
   titleRef,
   onClose,
+  tools,
   footer,
   children,
 }: {
@@ -24,6 +26,7 @@ export function Panel({
   titleClassName?: string;
   titleRef?: Ref<HTMLHeadingElement>;
   onClose: () => void;
+  tools?: ReactNode;
   footer?: ReactNode;
   children?: ReactNode;
 }) {
@@ -32,6 +35,7 @@ export function Panel({
       <div className="ptop">
         {icon === undefined ? null : <span className="pico">{icon}</span>}
         <span className="sp" />
+        {tools}
         <button type="button" className="ib" aria-label="Close panel" onClick={onClose}>
           <CloseIcon />
         </button>

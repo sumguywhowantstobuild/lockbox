@@ -47,6 +47,11 @@ const NOT_A_KEY: ShellError = ShellError::InvalidInput { what: "not a key" };
 /// A link number past the login's links (`copy_field`).
 const NO_SUCH_LINK: ShellError = ShellError::InvalidInput { what: "link" };
 
+/// An earlier password's number past the login's list (`reveal_password`, `copy_field`).
+const NO_SUCH_EARLIER: ShellError = ShellError::InvalidInput {
+    what: "earlier password",
+};
+
 /// Tests only: the last step of a read that returns item data, after the vault work and before the answer.
 #[cfg(test)]
 const READ_DONE: &str = "shell.items.read_done";
@@ -230,8 +235,8 @@ pub fn normalise_url(text: &str) -> ShellResult<String> {
     Ok(saved)
 }
 
-/// The field `copy_field` copies: `"password"`, `"username"`, `"notes"`, `"key_value"` (a key's value), or
-/// `{ "url": <index> }`, the index into the login's links.
+/// The field `copy_field` copies: `"password"`, `"username"`, `"notes"`, `"key_value"` (a key's value), `{ "url": <index> }`,
+/// the index into the login's links, or `{ "previous": <index> }`, one of the login's earlier passwords, newest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CopyField {
@@ -240,15 +245,18 @@ pub enum CopyField {
     Url(u8),
     Notes,
     KeyValue,
+    Previous(u8),
 }
 
-/// What `reveal_password` sends to the page: a login's `"password"` or a key's `"key_value"`. Asked of the other kind
-/// it is refused, so no field gives a value its kind does not have.
+/// What `reveal_password` sends to the page: a login's `"password"`, a key's `"key_value"`, or `{ "previous": <index> }`,
+/// one of a login's earlier passwords, newest first. Asked of the other kind it is refused, so no field gives a value its
+/// kind does not have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RevealField {
     Password,
     KeyValue,
+    Previous(u8),
 }
 
 /// An item's user-editable fields, as the page sends them back. No `Debug`: it holds item content and maybe a
@@ -267,6 +275,9 @@ pub struct ItemEdit {
     pub username: Option<String>,
     pub password: Option<Zeroizing<String>>,
     pub urls: Option<Vec<String>>,
+    /// A key's value; `None` keeps the stored one, byte for byte. Refused on any other kind. There is no field for a
+    /// login's earlier passwords: only the engine writes that list, when a password really changes.
+    pub key_value: Option<Zeroizing<String>>,
 }
 
 impl ItemEdit {
@@ -279,6 +290,9 @@ impl ItemEdit {
         }
         if let Some(password) = &self.password {
             at_most(password, MAX_PASSWORD, "password")?;
+        }
+        if let Some(value) = &self.key_value {
+            at_most(value, MAX_KEY_VALUE, "value")?;
         }
         if let Some(urls) = &self.urls {
             if urls.len() > MAX_URLS {
@@ -303,13 +317,21 @@ impl ItemEdit {
             username,
             password,
             urls,
+            key_value,
         } = self;
+        let login_fields = username.is_some() || password.is_some() || urls.is_some();
         match &mut stored.kind {
+            // The stored earlier passwords are left as they are: the engine moves the old password there when the new
+            // one differs, and takes the list from its own copy whatever this item holds.
             ItemKind::Login {
                 username: stored_username,
                 password: stored_password,
                 urls: stored_urls,
+                ..
             } => {
+                if key_value.is_some() {
+                    return Err(NOT_A_KEY);
+                }
                 if let Some(username) = username {
                     *stored_username = username;
                 }
@@ -320,9 +342,16 @@ impl ItemEdit {
                     *stored_urls = urls;
                 }
             }
-            _ if username.is_some() || password.is_some() || urls.is_some() => {
-                return Err(NOT_A_LOGIN);
+            ItemKind::Key { value } => {
+                if login_fields {
+                    return Err(NOT_A_LOGIN);
+                }
+                if let Some(new) = key_value {
+                    *value = new;
+                }
             }
+            _ if login_fields => return Err(NOT_A_LOGIN),
+            _ if key_value.is_some() => return Err(NOT_A_KEY),
             _ => {}
         }
         stored.revision = revision;
@@ -379,7 +408,17 @@ impl Shell {
             let value = match (field, &items(&vault).item(&id)?.kind) {
                 (RevealField::Password, ItemKind::Login { password, .. }) => password.clone(),
                 (RevealField::KeyValue, ItemKind::Key { value }) => value.clone(),
-                (RevealField::Password, _) => return Err(NOT_A_LOGIN),
+                (
+                    RevealField::Previous(index),
+                    ItemKind::Login {
+                        previous_passwords, ..
+                    },
+                ) => previous_passwords
+                    .get(usize::from(index))
+                    .ok_or(NO_SUCH_EARLIER)?
+                    .password
+                    .clone(),
+                (RevealField::Password | RevealField::Previous(_), _) => return Err(NOT_A_LOGIN),
                 (RevealField::KeyValue, _) => return Err(NOT_A_KEY),
             };
             read_done()?;
@@ -404,6 +443,16 @@ impl Shell {
                 (CopyField::Password, ItemKind::Login { password, .. }) => password.clone(),
                 (CopyField::KeyValue, ItemKind::Key { value }) => value.clone(),
                 (CopyField::KeyValue, _) => return Err(NOT_A_KEY),
+                (
+                    CopyField::Previous(index),
+                    ItemKind::Login {
+                        previous_passwords, ..
+                    },
+                ) => previous_passwords
+                    .get(usize::from(index))
+                    .ok_or(NO_SUCH_EARLIER)?
+                    .password
+                    .clone(),
                 (CopyField::Username, ItemKind::Login { username, .. }) => {
                     Zeroizing::new(username.clone())
                 }
@@ -465,6 +514,7 @@ impl Shell {
                     username,
                     password,
                     urls,
+                    previous_passwords: Vec::new(),
                 };
                 (login, notes)
             }
@@ -512,9 +562,15 @@ impl Shell {
         &self,
         session: SessionId,
         generation: u64,
-        edit: ItemEdit,
+        mut edit: ItemEdit,
     ) -> ShellResult<Tagged<()>> {
         edit.check()?;
+        // Websites are completed and checked as a new login's are, before anything is written.
+        edit.urls = edit
+            .urls
+            .take()
+            .map(|urls| urls.iter().map(|url| normalise_url(url)).collect())
+            .transpose()?;
         let id = item_id(&edit.id)?;
         let collection = collection_id(edit.collection.as_deref())?;
         self.sessions.write(session, generation, |vault, _| {
@@ -1036,6 +1092,7 @@ mod tests {
             username: Some("ada@example.com".to_owned()),
             password: password.map(secret),
             urls: Some(vec!["https://bank.example".to_owned()]),
+            key_value: None,
         }
     }
 
@@ -1144,7 +1201,7 @@ mod tests {
             detail,
             tagged(json!({
                 "summary": summary, "revision": 2, "notes": "a note", "urls": ["https://bank.example"],
-                "has_password": true, "has_value": false,
+                "has_password": true, "has_value": false, "previous": [],
             }))
         );
         assert_eq!(
@@ -1160,6 +1217,7 @@ mod tests {
                 username: "ada".into(),
                 password: secret(LOGIN_PW),
                 urls: vec!["https://bank.example".into()],
+                previous_passwords: Vec::new(),
             },
             title: "Bank".into(),
             notes: secret("a note"),
@@ -1205,7 +1263,7 @@ mod tests {
             detail,
             json!({
                 "summary": expected, "revision": 1, "notes": "a note", "urls": ["https://bank.example"],
-                "has_password": true, "has_value": false,
+                "has_password": true, "has_value": false, "previous": [],
             })
         );
         assert_eq!(
@@ -1502,7 +1560,9 @@ mod tests {
                 collection: None,
                 username: Some(long(1024)),
                 password: Some(secret(&long(4096))),
-                urls: Some(vec![long(2048); 32]),
+                // A web address at the limit: the shell completes and checks a website, so it has to be one.
+                urls: Some(vec![format!("https://a.example/{}", long(2048 - 18)); 32]),
+                key_value: None,
             };
             ts.shell.update_item(s, g, full).unwrap();
             let detail = ts.shell.get_item(s, g, &id).unwrap().data;
@@ -1673,16 +1733,19 @@ mod tests {
             r"C:\x.exe",
             "mailto:a@b",
         ];
-        let urls = Some(links.iter().map(|link| link.to_string()).collect());
+        // An edit only saves web addresses now, so the others are put in the way an older Lockbox or another program could
+        // have left them: straight through the engine. `open_url` must refuse them whatever wrote them.
+        let urls: Vec<String> = links.iter().map(|link| link.to_string()).collect();
         ts.shell
-            .update_item(
-                s,
-                g,
-                ItemEdit {
-                    urls,
-                    ..edit(&id, 1, "Links", None)
-                },
-            )
+            .sessions
+            .write(s, g, |vault, _| {
+                let id = ItemId::from_hex(&id).unwrap();
+                let mut item = vault.get_item(&id)?.clone();
+                if let ItemKind::Login { urls: stored, .. } = &mut item.kind {
+                    *stored = urls;
+                }
+                Ok(vault.update_item(item)?)
+            })
             .unwrap();
 
         let opened = ts.shell.open_url(s, g, &id, 0).unwrap();
@@ -3385,8 +3448,8 @@ mod tests {
         for field in [
             json!("value"),
             json!("Password"),
+            // An earlier password is asked for by its number (`edit_and_previous_requests_are_strict`), never by the word.
             json!("previous"),
-            json!({ "previous": 0 }),
             json!(null),
         ] {
             let request = json!({ "session": 1, "generation": 1, "id": id, "field": field });
@@ -3426,5 +3489,712 @@ mod tests {
         );
         note["fields"] = json!({ "secret": "x" });
         assert_eq!(parse::<NewItemArgs>(&body(note)).err(), Some(MALFORMED));
+    }
+
+    // Task 13: edit, and earlier passwords.
+
+    /// An item's revision now, for an edit that is not stale.
+    fn revision_of(ts: &TestShell, session: SessionId, generation: u64, id: &str) -> u64 {
+        ts.shell
+            .get_item(session, generation, id)
+            .unwrap()
+            .data
+            .revision
+    }
+
+    /// Changes the login's password through the shell's edit, as the page's Save does (the other fields as they are).
+    fn change_password(ts: &TestShell, session: SessionId, generation: u64, id: &str, to: &str) {
+        let revision = revision_of(ts, session, generation, id);
+        ts.shell
+            .update_item(session, generation, edit(id, revision, "Bank", Some(to)))
+            .unwrap();
+    }
+
+    /// A key edit: the name, no notes, and `value` when it is to change.
+    fn key_edit(id: &str, revision: u64, name: &str, value: Option<&str>) -> ItemEdit {
+        ItemEdit {
+            notes: secret(""),
+            username: None,
+            urls: None,
+            key_value: value.map(secret),
+            ..edit(id, revision, name, None)
+        }
+    }
+
+    /// What `reveal_password` gives for a login's password.
+    fn password_of(ts: &TestShell, s: SessionId, g: u64, id: &str) -> Zeroizing<String> {
+        revealed(ts, s, g, id)
+    }
+
+    /// An earlier password is shown by its number and the day it was replaced, never by its text; Reveal gives it and
+    /// Copy puts it on the clipboard in Rust with the marks and the timer of any copy; each is refused stale, for a
+    /// foreign item and for a kind that has none; the one asked for is the one named, never the newest; a read-only copy
+    /// reveals and copies them too.
+    #[test]
+    fn reveal_and_copy_previous() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        change_password(&ts, s, g, &id, "demo-pass-two");
+        change_password(&ts, s, g, &id, "demo-pass-three");
+
+        // The details say how many there are and when each was replaced, and nothing of what they were.
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(detail.previous.len(), 2);
+        let view = serde_json::to_value(&detail).unwrap();
+        for (at, index) in [(0, 0), (1, 1)] {
+            let row = view["previous"][at].as_object().unwrap();
+            let mut keys: Vec<&str> = row.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["index", "replaced_at"]);
+            assert_eq!(row["index"], index);
+            let when = row["replaced_at"].as_str().unwrap();
+            assert!(when.len() == 20 && when.ends_with('Z'), "{when}");
+        }
+        for leaked in [LOGIN_PW, "demo-pass-two", "demo-pass-three"] {
+            assert!(
+                !view.to_string().contains(leaked),
+                "the details hold {leaked}"
+            );
+        }
+
+        // Reveal: newest first, each tagged like a password's.
+        let reveal = |field| ts.shell.reveal_password(s, g, &id, field).unwrap();
+        let shown = reveal(RevealField::Previous(0));
+        assert_eq!((shown.session, shown.generation), (s, g));
+        assert_eq!(shown.data.as_str(), "demo-pass-two");
+        assert_eq!(
+            serde_json::to_value(&shown).unwrap(),
+            json!({ "session": s.0, "generation": g, "data": "demo-pass-two" })
+        );
+        assert_eq!(reveal(RevealField::Previous(1)).data.as_str(), LOGIN_PW);
+        assert_eq!(
+            reveal(RevealField::Password).data.as_str(),
+            "demo-pass-three"
+        );
+
+        // The one named, never the newest: a second login made after this one, with an earlier password of its own.
+        let second = ts
+            .shell
+            .new_item(
+                s,
+                g,
+                NewKind::Login,
+                "Other".into(),
+                None,
+                Some(ItemFields {
+                    password: secret("demo-second-one"),
+                    ..ItemFields::default()
+                }),
+            )
+            .unwrap()
+            .data;
+        ts.shell
+            .update_item(s, g, edit(&second, 0, "Other", Some("demo-second-two")))
+            .unwrap();
+        let earliest = |item: &str| {
+            ts.shell
+                .reveal_password(s, g, item, RevealField::Previous(0))
+                .unwrap()
+                .data
+        };
+        assert_eq!(earliest(&second).as_str(), "demo-second-one");
+        assert_eq!(earliest(&id).as_str(), "demo-pass-two");
+
+        // Copy: in Rust, with the marks and the timer, and the answer carries no value.
+        let start = ts.clock.now();
+        let answer = ts
+            .shell
+            .copy_field(s, g, &id, CopyField::Previous(1))
+            .unwrap();
+        assert_eq!((answer.session, answer.generation), (s, g));
+        let json = serde_json::to_value(&answer).unwrap();
+        assert_eq!(
+            json,
+            json!({ "session": s.0, "generation": g, "data": null })
+        );
+        assert_eq!(ts.clipboard.text().as_deref(), Some(LOGIN_PW));
+        assert_eq!(ts.clipboard.formats(), EXCLUSION_FORMATS, "the marks");
+        assert_eq!(ts.shell.clipboard.owner(), Some(s));
+        let at = |secs: u64| {
+            let when = start + Duration::from_secs(secs);
+            ts.clock.set(when);
+            ts.timer.run_due(when);
+        };
+        at(29);
+        assert_eq!(ts.clipboard.text().as_deref(), Some(LOGIN_PW));
+        at(30);
+        assert_eq!(ts.clipboard.text(), None, "not cleared at 30 s");
+        ts.shell
+            .copy_field(s, g, &second, CopyField::Previous(0))
+            .unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some("demo-second-one"));
+
+        // A kind with none, and an item of another vault, are refused with fixed errors and nothing is copied.
+        let key_id = key(&ts, s, g, "OPENAI_API_KEY");
+        let note = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Plans".into(), None, None)
+            .unwrap()
+            .data;
+        let (b, gb) = open_vault(&ts, "Work");
+        let theirs = login(&ts, b, gb, "Theirs");
+        change_password(&ts, b, gb, &theirs, "demo-theirs-two");
+        assert!(ts.clipboard.user_copy("mine"));
+        let opens = ts.clipboard.opens();
+        let not_found = Some(ShellError::from(CoreError::NotFound));
+        for (item, refusal) in [
+            (key_id.as_str(), Some(NOT_A_LOGIN)),
+            (note.as_str(), Some(NOT_A_LOGIN)),
+            (theirs.as_str(), not_found),
+            (ItemId::random().to_hex().as_str(), not_found),
+        ] {
+            assert_eq!(
+                ts.shell
+                    .reveal_password(s, g, item, RevealField::Previous(0))
+                    .err(),
+                refusal
+            );
+            assert_eq!(
+                ts.shell
+                    .copy_field(s, g, item, CopyField::Previous(0))
+                    .err(),
+                refusal
+            );
+        }
+        assert_eq!(ts.clipboard.text().as_deref(), Some("mine"));
+        assert_eq!(
+            ts.clipboard.opens(),
+            opens,
+            "a refusal opened the clipboard"
+        );
+        // Left alone in its own vault.
+        assert_eq!(
+            ts.shell
+                .reveal_password(b, gb, &theirs, RevealField::Previous(0))
+                .unwrap()
+                .data
+                .as_str(),
+            LOGIN_PW
+        );
+
+        // A lock clears a copy, and the old generation is refused afterwards, whatever is asked.
+        ts.shell
+            .copy_field(s, g, &id, CopyField::Previous(0))
+            .unwrap();
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(ts.clipboard.text(), None, "the lock left it");
+        assert_eq!(
+            ts.shell
+                .reveal_password(s, g, &id, RevealField::Previous(0))
+                .err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(
+            ts.shell.copy_field(s, g, &id, CopyField::Previous(0)).err(),
+            Some(ShellError::Locked)
+        );
+
+        // A read-only copy reads them too: reading is not writing.
+        let (r, gr) = read_only_session(&ts);
+        assert_eq!(
+            ts.shell
+                .reveal_password(r, gr, &id, RevealField::Previous(1))
+                .unwrap()
+                .data
+                .as_str(),
+            LOGIN_PW
+        );
+        ts.shell
+            .copy_field(r, gr, &id, CopyField::Previous(0))
+            .unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some("demo-pass-two"));
+    }
+
+    /// A number past the end of the list is refused with a fixed error, for Reveal and Copy alike, and nothing reaches
+    /// the clipboard: none when there are none, and past the fifth, which is as many as are kept.
+    #[test]
+    fn previous_index_past_the_end_refused() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        assert!(ts.clipboard.user_copy("mine"));
+        let opens = ts.clipboard.opens();
+        let refused = Some(NO_SUCH_EARLIER);
+        let past = |from: u8| {
+            for index in [from, from + 1, u8::MAX] {
+                assert_eq!(
+                    ts.shell
+                        .reveal_password(s, g, &id, RevealField::Previous(index))
+                        .err(),
+                    refused,
+                    "reveal {index}"
+                );
+                assert_eq!(
+                    ts.shell
+                        .copy_field(s, g, &id, CopyField::Previous(index))
+                        .err(),
+                    refused,
+                    "copy {index}"
+                );
+            }
+        };
+        past(0);
+        change_password(&ts, s, g, &id, "demo-pass-two");
+        assert!(
+            ts.shell
+                .reveal_password(s, g, &id, RevealField::Previous(0))
+                .is_ok()
+        );
+        past(1);
+        for n in 3..=9 {
+            change_password(&ts, s, g, &id, &format!("demo-pass-{n}"));
+        }
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(detail.previous.len(), 5, "as many as are kept");
+        assert!(
+            ts.shell
+                .reveal_password(s, g, &id, RevealField::Previous(4))
+                .is_ok()
+        );
+        past(5);
+        assert_eq!(ts.clipboard.text().as_deref(), Some("mine"));
+        assert_eq!(
+            ts.clipboard.opens(),
+            opens,
+            "a refusal opened the clipboard"
+        );
+    }
+
+    /// An edit's websites are completed and checked as a new login's are: `https://` where there is no scheme, and only
+    /// `http` and `https` addresses; a refusal writes nothing, whichever of several it is.
+    #[test]
+    fn edit_normalises_the_website() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        let with_urls = |ts: &TestShell, urls: &[&str]| {
+            let revision = revision_of(ts, s, g, &id);
+            let change = ItemEdit {
+                urls: Some(urls.iter().map(|url| (*url).to_owned()).collect()),
+                ..edit(&id, revision, "Bank", None)
+            };
+            ts.shell.update_item(s, g, change)
+        };
+        for (typed, saved) in [
+            ("example.com", "https://example.com"),
+            (" bank.example/a ", "https://bank.example/a"),
+            ("HTTP://Example.com", "HTTP://Example.com"),
+            ("localhost:3000", "https://localhost:3000"),
+            ("https://kept.example", "https://kept.example"),
+        ] {
+            with_urls(&ts, &[typed]).unwrap();
+            let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+            assert_eq!(detail.urls, [saved], "{typed}");
+        }
+        with_urls(&ts, &["one.example", "https://two.example"]).unwrap();
+        assert_eq!(
+            ts.shell.get_item(s, g, &id).unwrap().data.urls,
+            ["https://one.example", "https://two.example"]
+        );
+
+        let file = item_file(&ts, 0, &id);
+        let before = fs::read(&file).unwrap();
+        for bad in [
+            "ftp://files.example",
+            "javascript:alert(1)",
+            "",
+            "   ",
+            "//host/x",
+            r"C:\x.exe",
+            "https://a.exa\nmple",
+        ] {
+            assert_eq!(
+                with_urls(&ts, &["fine.example", bad]).err(),
+                Some(NOT_A_WEBSITE),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(fs::read(&file).unwrap(), before, "a refusal wrote");
+        // Left out, the websites stay as they were.
+        let revision = revision_of(&ts, s, g, &id);
+        ts.shell
+            .update_item(s, g, edit(&id, revision, "Bank", None))
+            .unwrap();
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(detail.urls.len(), 1, "the edit helper sets one website");
+        // And a refused website changes nothing else either: the password and the earlier ones stay.
+        let change = ItemEdit {
+            urls: Some(vec!["ftp://x".to_owned()]),
+            ..edit(&id, revision + 1, "Renamed", Some("demo-never-saved"))
+        };
+        assert_eq!(
+            ts.shell.update_item(s, g, change).err(),
+            Some(NOT_A_WEBSITE)
+        );
+        assert_eq!(password_of(&ts, s, g, &id).as_str(), LOGIN_PW);
+        assert!(
+            ts.shell
+                .get_item(s, g, &id)
+                .unwrap()
+                .data
+                .previous
+                .is_empty()
+        );
+    }
+
+    /// An edit made from an old read of the item (the revision the page had) is refused whole, as the engine's
+    /// `stale revision`, which the page puts in words ("changed meanwhile"): the item, its password and its earlier
+    /// passwords stay as they were, a key's value too.
+    #[test]
+    fn edit_stale_revision_says_changed_meanwhile() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        ts.shell
+            .update_item(s, g, edit(&id, 1, "Bank (new title)", None))
+            .unwrap();
+        let file = item_file(&ts, 0, &id);
+        let before = fs::read(&file).unwrap();
+        let stale = Some(ShellError::from(CoreError::InvalidInput {
+            what: "stale revision",
+        }));
+        for revision in [1, 3, 99] {
+            let late = edit(&id, revision, "Bank (late)", Some("demo-late-password"));
+            let refused = ts.shell.update_item(s, g, late).err();
+            assert_eq!(refused, stale, "revision {revision}");
+        }
+        assert_eq!(
+            serde_json::to_value(stale).unwrap(),
+            json!({ "code": "core", "kind": "invalid_input", "what": "stale revision" })
+        );
+        assert_eq!(fs::read(&file).unwrap(), before);
+        assert_eq!(password_of(&ts, s, g, &id).as_str(), LOGIN_PW);
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(
+            (
+                detail.summary.title.as_str(),
+                detail.revision,
+                detail.previous.len()
+            ),
+            ("Bank (new title)", 2, 0)
+        );
+
+        let key_id = key(&ts, s, g, "OPENAI_API_KEY");
+        ts.shell
+            .update_item(s, g, key_edit(&key_id, 0, "OPENAI_API_KEY", None))
+            .unwrap();
+        let before = fs::read(item_file(&ts, 0, &key_id)).unwrap();
+        let late = key_edit(&key_id, 0, "RENAMED_KEY", Some("demo-late-value"));
+        assert_eq!(ts.shell.update_item(s, g, late).err(), stale);
+        assert_eq!(fs::read(item_file(&ts, 0, &key_id)).unwrap(), before);
+        assert_eq!(
+            ts.shell
+                .reveal_password(s, g, &key_id, RevealField::KeyValue)
+                .unwrap()
+                .data
+                .as_str(),
+            KEY_VALUE
+        );
+    }
+
+    /// A key's value changes in an edit, and is kept, byte for byte, when the edit does not send one: a value the page
+    /// could not show in one line is not lost by saving a new name. Sent for a login or a note it is refused (`not a
+    /// key`), a login's fields sent for a key are refused (`not a login`), the name rule and the value's limit hold, and
+    /// a refusal changes nothing.
+    #[test]
+    fn key_edit_changes_value() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = key(&ts, s, g, "OPENAI_API_KEY");
+        let value_of = || {
+            ts.shell
+                .reveal_password(s, g, &id, RevealField::KeyValue)
+                .unwrap()
+                .data
+        };
+        assert_eq!(value_of().as_str(), KEY_VALUE);
+
+        // A value with line breaks and spaces round-trips exactly, and a rename that sends no value keeps it.
+        let odd = "line one\nline two\r\n  tab\there  ";
+        ts.shell
+            .update_item(s, g, key_edit(&id, 0, "OPENAI_API_KEY", Some(odd)))
+            .unwrap();
+        assert_eq!(value_of().as_str(), odd);
+        ts.shell
+            .update_item(s, g, key_edit(&id, 1, "RENAMED_KEY", None))
+            .unwrap();
+        assert_eq!(value_of().as_str(), odd, "kept byte for byte");
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert_eq!(
+            (detail.summary.title.as_str(), detail.revision),
+            ("RENAMED_KEY", 2)
+        );
+        assert!(detail.has_value && !detail.has_password);
+
+        // A new value, with a new name in the same edit; the copy is the new one.
+        ts.shell
+            .update_item(s, g, key_edit(&id, 2, "THIRD_NAME", Some("demo-new-value")))
+            .unwrap();
+        assert_eq!(value_of().as_str(), "demo-new-value");
+        ts.shell.copy_field(s, g, &id, CopyField::KeyValue).unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some("demo-new-value"));
+        // An empty value is a value too: it says "No value saved".
+        ts.shell
+            .update_item(s, g, key_edit(&id, 3, "THIRD_NAME", Some("")))
+            .unwrap();
+        assert!(!ts.shell.get_item(s, g, &id).unwrap().data.has_value);
+        ts.shell
+            .update_item(s, g, key_edit(&id, 4, "THIRD_NAME", Some(KEY_VALUE)))
+            .unwrap();
+
+        // The limit holds at its edge, and a refusal changes nothing; the name rule holds with a value.
+        let file = item_file(&ts, 0, &id);
+        let before = fs::read(&file).unwrap();
+        let big = "k".repeat(16_385);
+        assert_eq!(
+            ts.shell
+                .update_item(s, g, key_edit(&id, 5, "THIRD_NAME", Some(&big)))
+                .err(),
+            too_large_in("value")
+        );
+        let bad_name = Some(ShellError::from(CoreError::InvalidInput {
+            what: "key name",
+        }));
+        for name in ["", "9NAME", "BAD NAME"] {
+            let change = key_edit(&id, 5, name, Some("demo-never-saved"));
+            assert_eq!(
+                ts.shell.update_item(s, g, change).err(),
+                bad_name,
+                "{name:?}"
+            );
+        }
+        assert_eq!(fs::read(&file).unwrap(), before);
+        ts.shell
+            .update_item(s, g, key_edit(&id, 5, "THIRD_NAME", Some(&big[1..])))
+            .unwrap();
+        assert_eq!(value_of().len(), 16_384);
+
+        // A value sent for a login or a note, a login's fields sent for a key: refused, nothing written.
+        let login_id = login(&ts, s, g, "Bank");
+        let note = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Plans".into(), None, None)
+            .unwrap()
+            .data;
+        for (item, revision) in [(&login_id, 1), (&note, 0)] {
+            let before = fs::read(item_file(&ts, 0, item)).unwrap();
+            let change = ItemEdit {
+                username: None,
+                urls: None,
+                password: None,
+                ..key_edit(item, revision, "Anything", Some("demo-value"))
+            };
+            assert_eq!(
+                ts.shell.update_item(s, g, change).err(),
+                Some(NOT_A_KEY),
+                "{item}"
+            );
+            assert_eq!(fs::read(item_file(&ts, 0, item)).unwrap(), before);
+        }
+        let before = fs::read(&file).unwrap();
+        let change = edit(&id, 6, "THIRD_NAME", Some("demo-pw"));
+        assert_eq!(ts.shell.update_item(s, g, change).err(), Some(NOT_A_LOGIN));
+        assert_eq!(fs::read(&file).unwrap(), before);
+    }
+
+    /// An edit never changes what it does not send: a login saved with a password that has a line break inside (a
+    /// page's one-line box cannot hold it) keeps it byte for byte when the edit leaves the password out, moves nothing
+    /// when the same one is sent, and moves it, as it was, into the earlier passwords when a new one is.
+    #[test]
+    fn edit_leaves_what_was_not_sent_as_it_was() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let odd = "demo line one\nline two\r\n end ";
+        let id = ts
+            .shell
+            .new_item(
+                s,
+                g,
+                NewKind::Login,
+                "Bank".into(),
+                None,
+                Some(ItemFields {
+                    username: "ada@example.com".into(),
+                    password: secret(odd),
+                    urls: vec!["https://bank.example".into()],
+                    notes: secret("a\r\nb"),
+                    ..ItemFields::default()
+                }),
+            )
+            .unwrap()
+            .data;
+        let only_title = |revision: u64, password: Option<&str>| ItemEdit {
+            id: id.clone(),
+            revision,
+            title: "Bank, renamed".into(),
+            notes: secret("a\r\nb"),
+            collection: None,
+            username: None,
+            password: password.map(secret),
+            urls: None,
+            key_value: None,
+        };
+        ts.shell.update_item(s, g, only_title(0, None)).unwrap();
+        assert_eq!(
+            password_of(&ts, s, g, &id).as_str(),
+            odd,
+            "kept byte for byte"
+        );
+        ts.shell
+            .update_item(s, g, only_title(1, Some(odd)))
+            .unwrap();
+        assert_eq!(password_of(&ts, s, g, &id).as_str(), odd);
+        let detail = ts.shell.get_item(s, g, &id).unwrap().data;
+        assert!(detail.previous.is_empty(), "the same password moved");
+        assert_eq!(detail.urls, ["https://bank.example"]);
+        assert_eq!(detail.notes.as_str(), "a\r\nb");
+        assert_eq!(detail.summary.username.as_deref(), Some("ada@example.com"));
+
+        ts.shell
+            .update_item(s, g, only_title(2, Some("demo-changed")))
+            .unwrap();
+        assert_eq!(password_of(&ts, s, g, &id).as_str(), "demo-changed");
+        let moved = ts
+            .shell
+            .reveal_password(s, g, &id, RevealField::Previous(0))
+            .unwrap();
+        assert_eq!(moved.data.as_str(), odd, "moved as it was");
+    }
+
+    /// The one write that can carry a key's value or a login's password is the edit, and it is refused where the
+    /// vault cannot be written, for a stale generation and for an item of another vault, with nothing written.
+    #[test]
+    fn edit_with_a_value_is_refused_stale_foreign_and_read_only() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = key(&ts, s, g, "OPENAI_API_KEY");
+        let login_id = login(&ts, s, g, "Bank");
+        let (b, gb) = open_vault(&ts, "Work");
+        let theirs = key(&ts, b, gb, "THEIR_KEY");
+        let before = fs::read(item_file(&ts, 0, &id)).unwrap();
+
+        let ((stale, foreign, foreign_login), writes) = item_writes(|| {
+            (
+                ts.shell
+                    .update_item(s, g + 1, key_edit(&id, 0, "OPENAI_API_KEY", Some("demo-x")))
+                    .err(),
+                ts.shell
+                    .update_item(s, g, key_edit(&theirs, 0, "THEIR_KEY", Some("demo-x")))
+                    .err(),
+                ts.shell
+                    .update_item(s, g, edit(&theirs, 0, "Bank", Some("demo-x")))
+                    .err(),
+            )
+        });
+        assert_eq!(stale, Some(ShellError::Locked));
+        let not_found = Some(ShellError::from(CoreError::NotFound));
+        assert_eq!((foreign, foreign_login), (not_found, not_found));
+        assert_eq!(writes, 0);
+        assert_eq!(fs::read(item_file(&ts, 0, &id)).unwrap(), before);
+        assert_eq!(
+            ts.shell
+                .reveal_password(b, gb, &theirs, RevealField::KeyValue)
+                .unwrap()
+                .data
+                .as_str(),
+            KEY_VALUE
+        );
+
+        let (r, gr) = read_only_session(&ts);
+        let (refused, writes) = item_writes(|| {
+            [
+                ts.shell
+                    .update_item(r, gr, key_edit(&id, 0, "OPENAI_API_KEY", Some("demo-x")))
+                    .err(),
+                ts.shell
+                    .update_item(r, gr, edit(&login_id, 1, "Bank", Some("demo-x")))
+                    .err(),
+            ]
+        });
+        assert_eq!(
+            refused,
+            [Some(ShellError::ReadOnly), Some(ShellError::ReadOnly)]
+        );
+        assert_eq!(writes, 0);
+        assert_eq!(fs::read(item_file(&ts, 0, &id)).unwrap(), before);
+    }
+
+    /// The edit request says its fields and no others: a key's value is one, an earlier password never is (nothing but
+    /// the engine writes the list), and `previous` is a number in a reveal or a copy, never a bare word or a number past
+    /// what fits.
+    #[test]
+    fn edit_and_previous_requests_are_strict() {
+        let body = |value: Value| InvokeBody::Json(value);
+        let id = "0".repeat(32);
+        let edit = |extra: Value| {
+            let mut edit = json!({
+                "id": id, "revision": 1, "title": "t", "notes": "n", "collection": null,
+            });
+            for (name, value) in extra.as_object().unwrap() {
+                edit[name] = value.clone();
+            }
+            json!({ "session": 1, "generation": 1, "edit": edit })
+        };
+        for good in [
+            json!({}),
+            json!({ "key_value": "v" }),
+            json!({ "key_value": null }),
+            json!({ "username": "u", "password": "p", "urls": ["https://a.example"] }),
+        ] {
+            assert!(
+                parse::<UpdateItem>(&body(edit(good.clone()))).is_ok(),
+                "{good}"
+            );
+        }
+        for bad in [
+            json!({ "previous_passwords": [] }),
+            json!({ "previous_passwords": [{ "password": "x", "replaced_at": "t" }] }),
+            json!({ "previous": [] }),
+            json!({ "key_value": 5 }),
+            json!({ "value": "v" }),
+        ] {
+            assert_eq!(
+                parse::<UpdateItem>(&body(edit(bad.clone()))).err(),
+                Some(MALFORMED),
+                "{bad}"
+            );
+        }
+
+        for field in [json!({ "previous": 0 }), json!({ "previous": 255 })] {
+            let request = json!({ "session": 1, "generation": 1, "id": id, "field": field });
+            assert!(
+                parse::<RevealArgs>(&body(request.clone())).is_ok(),
+                "{field}"
+            );
+            assert!(parse::<CopyFieldArgs>(&body(request)).is_ok(), "{field}");
+        }
+        for field in [
+            json!("previous"),
+            json!({ "previous": 256 }),
+            json!({ "previous": -1 }),
+            json!({ "previous": "0" }),
+            json!({ "previous": 1.5 }),
+            json!({ "previous": null }),
+            json!({ "previous": 0, "other": 1 }),
+            json!({ "Previous": 0 }),
+        ] {
+            let request = json!({ "session": 1, "generation": 1, "id": id, "field": field });
+            assert_eq!(
+                parse::<RevealArgs>(&body(request.clone())).err(),
+                Some(MALFORMED),
+                "reveal {field}"
+            );
+            assert_eq!(
+                parse::<CopyFieldArgs>(&body(request)).err(),
+                Some(MALFORMED),
+                "copy {field}"
+            );
+        }
     }
 }

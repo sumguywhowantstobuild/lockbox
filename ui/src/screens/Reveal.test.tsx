@@ -156,8 +156,9 @@ for (const kind of KINDS) {
     nowhereOnThePage(kind.value);
   });
 
-  // Finding 1, first sequence: Reveal pressed twice while the answer is delayed. The first answer shows the value, Hide takes
-  // it away, and the second answer, which comes after, must not put it back.
+  // Finding 1, first sequence: Reveal pressed twice while the answer is delayed. Each press accepts only its own answer (the
+  // latest press wins), so the first answer is dropped and the second shows the value; Hide takes it away, and an answer that
+  // comes after must not put it back.
   test(`${kind.what}_a_second_reveal_answer_after_hide_does_not_show_the_value`, async () => {
     await unlocked();
     const panel = await select(kind.title);
@@ -168,6 +169,13 @@ for (const kind of KINDS) {
     await waitFor(() => {
       expect(shell.revealed).toHaveLength(2);
     });
+    // The earlier press's answer comes first and is not the latest press's: nothing shows.
+    await act(async () => {
+      shell.releaseOneReveal();
+      await Promise.resolve();
+    });
+    expect(within(panel).queryByRole("textbox", { name: kind.box })).toBeNull();
+    // The latest press's answer comes: it shows. Hide takes it away.
     await act(async () => {
       shell.releaseOneReveal();
       await Promise.resolve();
@@ -182,6 +190,33 @@ for (const kind of KINDS) {
     });
     expect(within(panel).queryByRole("textbox", { name: kind.box })).toBeNull();
     expect(within(panel).getByRole("button", { name: "Reveal" })).toBeTruthy();
+    nowhereOnThePage(kind.value);
+  });
+
+  // The latest press is answered first, Hide takes the value away, and the earlier press's answer, which comes late, does not
+  // put it back.
+  test(`${kind.what}_an_earlier_press_answered_late_after_hide_does_not_show_the_value`, async () => {
+    await unlocked();
+    const panel = await select(kind.title);
+    const release = shell.holdReveal();
+    const reveal = within(panel).getByRole("button", { name: "Reveal" });
+    fireEvent.click(reveal);
+    fireEvent.click(reveal);
+    await waitFor(() => {
+      expect(shell.revealed).toHaveLength(2);
+    });
+    await act(async () => {
+      shell.releaseNewestReveal();
+      await Promise.resolve();
+    });
+    expect((await within(panel).findByRole("textbox", { name: kind.box })).textContent).toBe(kind.value);
+    fireEvent.click(within(panel).getByRole("button", { name: "Hide" }));
+    await act(async () => {
+      release();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(within(panel).queryByRole("textbox", { name: kind.box })).toBeNull();
     nowhereOnThePage(kind.value);
   });
 
