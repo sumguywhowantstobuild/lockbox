@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
 use crate::autolock::AutoLock;
 use crate::clipboard::Clipboard;
+use crate::commands::env;
 use crate::error::{ShellError, ShellResult};
 use crate::locations::{LocationCheck, check_location, is_within};
 use crate::lock;
@@ -111,6 +112,9 @@ impl Shell {
         // Then the restore's: a restore that is not swapping ends with a lock (it drops its staged restore on a worker).
         let restore = Arc::new(Restores::new());
         sessions.on_lock(restore.lock_hook(Arc::downgrade(&sessions)));
+        // Then the pasted `.env` values' (a lock of one vault drains nothing of `Pending` by itself, and a paste parked
+        // while a lock was under way is dropped here).
+        sessions.on_lock(env::lock_hook(Arc::downgrade(&sessions)));
         Ok(Shell {
             sessions,
             settings,

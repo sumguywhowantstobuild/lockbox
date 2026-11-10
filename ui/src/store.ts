@@ -37,6 +37,12 @@ export type Tool =
   /** The new-note form (7b). */
   | { kind: "new_note" }
   /**
+   * Paste a .env (15a to 15c). What is pasted never comes here: the panel sends it to Rust at once, and keeps only the rows' names
+   * and the token the values wait under, in its own state. `opening` numbers each time it is opened, so opening it again (from another
+   * folder's menu, say) is a new panel with nothing of the old one's rows or folder in it.
+   */
+  | { kind: "paste_env"; opening: number }
+  /**
    * The Edit form of an item (11a, and 7a, 7b and 10f for the other kinds), from the summary and the details the panel had
    * when Edit was pressed. What the form asks of Rust (the password, a key's value) and what is typed live in the form.
    */
@@ -190,6 +196,11 @@ export type Toast =
    * bring back. It stays about ten seconds, and waits while the pointer or focus is on it.
    */
   | { kind: "trashed"; session: number; id: string }
+  /**
+   * A sentence of the page's own that the person has to read and act on (a name found twice, a file saved without encryption): it
+   * stays until it is dismissed or another message takes its place, since four seconds is too short to read it.
+   */
+  | { kind: "told"; session: number; text: string }
   | { kind: "failed"; session: number | null; error: unknown };
 
 /** What one vault answered to the search: its items, tagged with the generation they were read in. */
@@ -590,14 +601,9 @@ export type KeyPdf = "dismissed" | "stale" | { confirm: string } | { saved: stri
 /**
  * Runs a print command of the key screen. A vault that locked meanwhile (the bridge's `StaleAnswer`, or the shell's
  * `locked` when the page missed the event, which also takes the vault's record away) comes back as `"stale"`; any other
- * refusal is thrown for the screen to say. `meansLocked` names a refusal that also means the vault locked and the page
- * missed it (a cloud question's token the shell has dropped).
+ * refusal is thrown for the screen to say.
  */
-async function printCommand<T>(
-  session: number,
-  run: (vault: api.SessionRef) => Promise<T>,
-  meansLocked: (error: unknown) => boolean = () => false,
-): Promise<T | "stale"> {
+async function printCommand<T>(session: number, run: (vault: api.SessionRef) => Promise<T>): Promise<T | "stale"> {
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
   const { generation } = entry;
@@ -605,15 +611,28 @@ async function printCommand<T>(
     const answer = await run({ session, generation });
     return stillOpen(session, generation) ? answer : "stale";
   } catch (error) {
-    const missedLock = refusedAsLocked(error) || meansLocked(error);
+    const missedLock = refusedAsLocked(error);
     if (missedLock) dropSession(session);
     if (error instanceof api.StaleAnswer || missedLock || !stillOpen(session, generation)) return "stale";
     throw error;
   }
 }
 
+/**
+ * The page's own refusal for a cloud question whose yes found nothing parked (`not_found`): the shell lets go of a parked save after
+ * five minutes as well as at a lock, so it says nothing of a lock. A real lock is heard as the lock event, or as the `locked` refusal of
+ * the next command, and takes the session then. Carries only the words' key, never anything the shell sent.
+ */
+function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired"): Error {
+  return Object.assign(new Error(kind), { code: "page", kind });
+}
+
 function keyPdfFrom(answer: api.Tagged<api.Outcome<api.SavedView>>): KeyPdf {
-  const outcome = answer.data;
+  return keyPdfOf(answer.data);
+}
+
+/** What a save dialog's outcome means for the screen (the recovery key's PDF and a saved `.env` file are answered alike). */
+function keyPdfOf(outcome: api.Outcome<api.SavedView>): KeyPdf {
   if (outcome === "Dismissed") return "dismissed";
   if ("Done" in outcome) return { saved: outcome.Done.folder };
   if (typeof outcome.Confirm === "object" && "CloudFolder" in outcome.Confirm) {
@@ -629,16 +648,17 @@ export async function saveKeyPdf(session: number): Promise<KeyPdf> {
 }
 
 /**
- * The person's yes to saving it in a cloud-synced folder: the shell goes on with the save it parked. The shell drops a
- * session's parked questions when it locks, so `not_found` here means the vault locked and the page missed the event: the
- * key and the question come off the screen, and nothing is said.
+ * The person's yes to saving it in a cloud-synced folder: the shell goes on with the save it parked. The shell lets go of a
+ * parked save at a lock and also after five minutes, so `not_found` is not news of a lock: it is thrown as the page's own refusal
+ * ("that took too long, press Save as PDF again") for the screen to say, the question closes, and the session stays.
  */
 export async function confirmKeyPdf(session: number, token: string): Promise<KeyPdf> {
-  const answer = await printCommand(
-    session,
-    () => api.saveReadableConfirm(token),
-    (error) => refusedWith(error, "not_found"),
-  );
+  let answer;
+  try {
+    answer = await printCommand(session, () => api.saveReadableConfirm(token));
+  } catch (error) {
+    throw refusedWith(error, "not_found") ? expiredQuestion("key_pdf_expired") : error;
+  }
   return answer === "stale" ? answer : keyPdfFrom(answer);
 }
 
@@ -1028,6 +1048,15 @@ export function openNewNote(session: number): void {
   openTool(session, { kind: "new_note" });
 }
 
+/** The number of the last time Paste a .env was opened. */
+let pasteOpenings = 0;
+
+/** Opens Paste a .env in the vault's panel, as a new panel each time. Nothing in a vault that is read-only. */
+export function openPasteEnv(session: number): void {
+  pasteOpenings += 1;
+  openTool(session, { kind: "paste_env", opening: pasteOpenings });
+}
+
 /** Puts a form in the vault's panel in place of the item open there (and of the value revealed for it). */
 function openTool(session: number, tool: Tool): void {
   const entry = sessionOf(session);
@@ -1172,19 +1201,24 @@ const COPIED: Record<CopyableField, string> = {
   notes: "Text copied",
 };
 
-/** Runs a copy the shell makes, and once it has, says `text` and when the clipboard clears. */
+/**
+ * Runs a copy the shell makes, and once it has, says `text` and when the clipboard clears. `copied` looks at the shell's answer and
+ * says whether anything was put on the clipboard: when it says no (nothing was copied), nothing is said here and the caller does.
+ */
 async function copyThenTell(
   session: number,
   text: string,
   copy: (vault: api.SessionRef) => Promise<unknown>,
+  copied: (answer: unknown) => boolean = () => true,
 ): Promise<Done> {
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
   const { generation } = entry;
   try {
     const { clipboard_seconds } = await api.getSettings();
-    await copy({ session, generation });
+    const answer = await copy({ session, generation });
     if (!stillOpen(session, generation)) return "stale";
+    if (!copied(answer)) return "done";
     set({
       ...state,
       toast: {
@@ -1525,6 +1559,167 @@ export async function renameFolder(session: number, id: string, read: { revision
   if (done === "stale") return "stale";
   if ("failed" in done) return { failed: done.failed };
   return "saved";
+}
+
+/** What reading a pasted `.env` came to: its rows (names only), a vault that locked meanwhile (nothing to say), or the shell's refusal. */
+export type EnvRead = { rows: api.EnvRows } | "stale" | { failed: unknown };
+
+/**
+ * Sends a pasted `.env`'s text to Rust, once, and answers what it came to: names, the numbers of lines that could not be read, and
+ * which names clash in which folder, never a value. The text is only an argument of this one call: nothing here keeps it, logs it
+ * or puts it in the session's record, and a refusal comes back as the shell's own object, which holds none of it.
+ */
+export async function readEnv(session: number, text: string): Promise<EnvRead> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "stale";
+  const { generation } = entry;
+  try {
+    const answer = await api.envRead({ session, generation }, text);
+    return stillOpen(session, generation) ? { rows: answer.data } : "stale";
+  } catch (error) {
+    if (refusedAsLocked(error)) dropSession(session);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    return { failed: error };
+  }
+}
+
+/**
+ * Lets Rust forget the values of a pasted `.env` at once: a save in which every row is left out writes nothing, and uses the token
+ * up. It is sent without waiting and its outcome is not shown (a token already gone is the same as one let go). A vault that has
+ * locked since sends nothing: the lock already let the values go, and a stale call would only be refused.
+ */
+export function releaseEnv(session: number, generation: number, token: string, indexes: readonly number[]): void {
+  if (!stillOpen(session, generation)) return;
+  const choices = indexes.map((index): api.EnvChoice => ({ index, action: "leave_out" }));
+  void api.envSave({ session, generation }, token, choices, null).then(undefined, (error: unknown) => {
+    if (refusedAsLocked(error)) dropSession(session);
+  });
+}
+
+/** Whether the shell refused a save because it no longer holds the pasted values (used, five minutes old, or let go by a lock). */
+export function refusedAsEnvGone(error: unknown): boolean {
+  return refusedWith(error, "not_found");
+}
+
+/** How a pasted `.env`'s save came out: how many keys were written (the panel is gone), a lock meanwhile (nothing to say), or the refusal. */
+export type EnvSaved = { saved: number } | "stale" | { failed: unknown };
+
+/** "3 keys", "1 key". */
+function keysWords(count: number): string {
+  return `${String(count)} ${count === 1 ? "key" : "keys"}`;
+}
+
+/**
+ * Saves the pasted keys with one choice for every row, into `collection` (a folder's id, or `null`), by the token Rust holds them
+ * under. The list is read again whatever the answer (a save cut short can have written some). Written: the panel closes (when it is
+ * still the one that saved) and "Saved 3 keys to <where>" is said, `where` being the folder's name or "No folder", as a move says it.
+ * A refusal comes back for the panel to say. A vault that locked meanwhile gets nothing said.
+ */
+export async function saveEnv(
+  session: number,
+  token: string,
+  choices: api.EnvChoice[],
+  collection: string | null,
+  where: string,
+): Promise<EnvSaved> {
+  const starter = sessionOf(session)?.tool;
+  const done = await change(session, (vault) => api.envSave(vault, token, choices, collection));
+  if (done === "stale") return "stale";
+  if ("failed" in done) return { failed: done.failed };
+  const count = done.done.data;
+  say(session, `Saved ${keysWords(count)} to ${where}`);
+  if (starter !== undefined && starter !== null && sessionOf(session)?.tool === starter) closeTool(session);
+  return { saved: count };
+}
+
+/** Says something the person has to read and act on, until it is dismissed. */
+function told(session: number, text: string): void {
+  set({ ...state, toast: { kind: "told", session, text } });
+}
+
+/** What a folder's keys taken out says when two of them share a name: nothing was copied or written. */
+function twiceWords(name: string): string {
+  return `${name} appears twice in this folder. Rename or move one, then try again.`;
+}
+
+/** What is said after a `.env` file is written: where it went, and that it is not encrypted. */
+const UNENCRYPTED_COPY = "This copy isn't encrypted. Delete it when you're finished.";
+
+/**
+ * Copy all as .env: Rust makes the text and puts it on the clipboard with the marks and timer of any copy; the page hears only
+ * whether it worked. Worked: "Keys copied" and when the clipboard clears. Two keys with one name: nothing is copied, and the
+ * sentence says which. A refusal is said as a message; a vault that locked meanwhile gets nothing.
+ */
+export async function copyEnv(session: number, collection: string): Promise<void> {
+  // What the shell answered besides `Done`, for after the copy is over (an object, so what is read is the answer and not a guess).
+  const found: { twice: string | null } = { twice: null };
+  const done = await copyThenTell(
+    session,
+    "Keys copied",
+    async (vault) => {
+      const answer = await api.envCopy(vault, collection);
+      if (typeof answer.data === "object" && "Duplicate" in answer.data) found.twice = answer.data.Duplicate.name;
+      return answer;
+    },
+    () => found.twice === null,
+  );
+  if (typeof done === "object") sayFailure(session, done.failed);
+  else if (done === "done" && found.twice !== null) told(session, twiceWords(found.twice));
+}
+
+/**
+ * What Save as .env file left for the dialog: nothing more (`done`: it was written, dismissed, said in words or refused), a vault
+ * that locked meanwhile (`stale`: nothing to say, nothing was written), or a cloud-synced folder, with the token to answer with.
+ */
+export type EnvFile = "done" | "stale" | { confirm: string };
+
+/** Says what a save dialog's outcome came to for a `.env` file, and what is left for the dialog. */
+function sayEnvFile(session: number, outcome: api.Outcome<api.SavedView>): EnvFile {
+  const result = keyPdfOf(outcome);
+  if (typeof result === "object" && "confirm" in result) return result;
+  if (typeof result === "object" && "saved" in result) told(session, `Saved in ${result.saved}. ${UNENCRYPTED_COPY}`);
+  return "done";
+}
+
+/**
+ * Saves the folder's keys as a readable `.env` file: Rust opens the save dialog and writes the file. Written: where it went, and that
+ * the copy is not encrypted. A closed dialog does nothing. Two keys with one name: the same sentence as Copy all, and no file. A
+ * refusal is said as a message. A lock while it runs makes the answer stale: no file, and nothing said.
+ */
+export async function saveEnvFile(session: number, collection: string): Promise<EnvFile> {
+  let answer;
+  try {
+    answer = await printCommand(session, (vault) => api.envSaveFile(vault, collection));
+  } catch (error) {
+    sayFailure(session, error);
+    return "done";
+  }
+  if (answer === "stale") return "stale";
+  const out = answer.data;
+  if (typeof out === "object" && "Duplicate" in out) {
+    told(session, twiceWords(out.Duplicate.name));
+    return "done";
+  }
+  if (typeof out === "object" && "Saved" in out) return sayEnvFile(session, out.Saved);
+  // `"Done"` is the answer of a copy: not one a save can give, so it is said in the plain words rather than as a success.
+  sayFailure(session, new Error("unexpected answer to env_save_file"));
+  return "done";
+}
+
+/**
+ * The person's yes to saving the `.env` file in a cloud-synced folder: the shell goes on with the save it parked. As the recovery key's
+ * PDF: `not_found` is a question left open past five minutes, not news of a lock, so it is said in words as something to do again,
+ * the question closes, and the session stays.
+ */
+export async function confirmEnvFile(session: number, token: string): Promise<EnvFile> {
+  let answer;
+  try {
+    answer = await printCommand(session, () => api.saveReadableConfirm(token));
+  } catch (error) {
+    sayFailure(session, refusedWith(error, "not_found") ? expiredQuestion("env_file_expired") : error);
+    return "done";
+  }
+  return answer === "stale" ? "stale" : sayEnvFile(session, answer.data);
 }
 
 /** Opens the search (Ctrl+F, Ctrl+K): the one search, empty. It does nothing when there is no vault open, or one is open already. */

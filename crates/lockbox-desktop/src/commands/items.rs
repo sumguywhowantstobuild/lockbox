@@ -23,14 +23,14 @@ use crate::shell::Shell;
 use crate::views::{ItemDetail, ItemList, ItemSummary, OrphanView, SearchResults, web_url};
 
 /// The page's limits (`TooLarge`), in bytes; the engine's own 1 MiB item cap stays behind them.
-const MAX_TITLE: usize = 1024;
+pub(super) const MAX_TITLE: usize = 1024;
 const MAX_USERNAME: usize = 1024;
 const MAX_URL: usize = 2048;
 const MAX_URLS: usize = 32;
 const MAX_NOTES: usize = 524_288;
 const MAX_PASSWORD: usize = 4096;
 /// A key's value: room for a certificate or a private key as well as a token.
-const MAX_KEY_VALUE: usize = 16_384;
+pub(super) const MAX_KEY_VALUE: usize = 16_384;
 /// The search query's limit, in characters.
 const MAX_QUERY_CHARS: usize = 256;
 /// The most results one vault gives a search.
@@ -80,7 +80,7 @@ fn read_done() -> ShellResult<()> {
 }
 
 /// Refuses `text` longer than `max` bytes (`TooLarge { what }`).
-fn at_most(text: &str, max: usize, what: &'static str) -> ShellResult<()> {
+pub(super) fn at_most(text: &str, max: usize, what: &'static str) -> ShellResult<()> {
     match text.len() > max {
         true => Err(ShellError::TooLarge { what }),
         false => Ok(()),
@@ -88,11 +88,11 @@ fn at_most(text: &str, max: usize, what: &'static str) -> ShellResult<()> {
 }
 
 /// An item ID the page sent: 32 lowercase hex characters.
-fn item_id(text: &str) -> ShellResult<ItemId> {
+pub(super) fn item_id(text: &str) -> ShellResult<ItemId> {
     Ok(ItemId::from_hex(text)?)
 }
 
-fn collection_id(text: Option<&str>) -> ShellResult<Option<ItemId>> {
+pub(super) fn collection_id(text: Option<&str>) -> ShellResult<Option<ItemId>> {
     text.map(item_id).transpose()
 }
 

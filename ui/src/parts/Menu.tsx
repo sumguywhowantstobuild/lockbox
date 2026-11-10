@@ -1,5 +1,5 @@
 import { Menu as BaseMenu } from "@base-ui/react/menu";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { CheckIcon } from "./Icon";
 import { usePortalContainer } from "./Portal";
 
@@ -18,6 +18,8 @@ export interface MenuItem {
    * mark and said as "checked" to a screen reader (a choice of a group, not a plain action), and never by colour alone.
    */
   checked?: boolean;
+  /** Set apart from the items before it by a divider line (a plain menu, not one of choices). */
+  apart?: boolean;
 }
 
 /** A line that tells how something stands, in words (a vault and `Unlocked`). It is read, not chosen. */
@@ -72,9 +74,12 @@ export function Menu({
     </BaseMenu.RadioGroup>
   ) : (
     items.map((item) => (
-      <BaseMenu.Item key={item.label} className={item.danger === true ? "mi dng" : "mi"} onClick={item.onSelect}>
-        {item.label}
-      </BaseMenu.Item>
+      <Fragment key={item.label}>
+        {item.apart === true ? <BaseMenu.Separator className="mline" /> : null}
+        <BaseMenu.Item className={item.danger === true ? "mi dng" : "mi"} onClick={item.onSelect}>
+          {item.label}
+        </BaseMenu.Item>
+      </Fragment>
     ))
   );
   return (

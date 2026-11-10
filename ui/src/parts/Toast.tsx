@@ -94,7 +94,9 @@ export function ToastStack() {
     };
   }, [trashed, holding]);
 
+  // A failure, or a sentence the person has to act on (`told`): both are alerts, and both stay until dismissed or replaced.
   const failure = toast?.kind === "failed" ? messageFor(toast.error) : null;
+  const told = toast?.kind === "told" ? toast.text : null;
   return (
     <div className="tstack">
       <div role="status" className="live">
@@ -132,11 +134,9 @@ export function ToastStack() {
           </div>
         ) : null}
       </div>
-      {failure !== null ? (
+      {failure !== null || told !== null ? (
         <div role="alert" className="toast">
-          <span>
-            {failure.title} {failure.body}
-          </span>
+          <span>{failure === null ? told : `${failure.title} ${failure.body}`}</span>
           <button type="button" className="tb2" aria-label="Dismiss message" onClick={clearToast}>
             <CloseIcon />
           </button>

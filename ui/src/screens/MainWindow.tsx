@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { rememberOpener } from "../focus";
 import { messageFor } from "../messages";
 import { Button } from "../parts/Button";
 import { CloseIcon, FilterIcon, MoreIcon } from "../parts/Icon";
@@ -6,7 +7,9 @@ import { Menu } from "../parts/Menu";
 import type { VaultLook } from "../parts/Pattern";
 import { ToastStack } from "../parts/Toast";
 import {
+  copyEnv,
   copyField,
+  openPasteEnv,
   openSearch,
   pickTrashed,
   selectItem,
@@ -20,6 +23,8 @@ import {
 import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, VaultBanners } from "./Asks";
 import { EmptyAdd } from "./EmptyAdd";
+import { EnvFileDialog } from "./EnvOut";
+import { EnvPaste } from "./EnvPaste";
 import { EditForm } from "./forms/EditForm";
 import { DeleteFolderDialog, RenameFolderDialog } from "./forms/FolderForm";
 import { KeyForm } from "./forms/KeyForm";
@@ -56,7 +61,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   const kind = useKind(data.session);
   const sort = useSort(data.session);
   // The folder's own question, while one is open: which, for which folder (kept as it was when asked).
-  const [asking, setAsking] = useState<{ kind: "rename" | "delete"; folder: { id: string; name: string }; count: number } | null>(null);
+  const [asking, setAsking] = useState<{ kind: "rename" | "delete" | "env_file"; folder: { id: string; name: string }; count: number } | null>(null);
   const everything = data.items ?? [];
   const items = everything.filter((item) => item.kind !== "collection" && !item.trashed);
   const inTrash = everything.filter((item) => item.trashed);
@@ -77,6 +82,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
     data.trash || data.readOnly || folderId === null || folderName === undefined
       ? null
       : { id: folderId, name: folderName, count: folders.find((folder) => folder.id === folderId)?.count ?? 0 };
+  // Taking keys out is offered only where there is a key to take: one in this folder that is not in the Trash (`items` has none of those).
+  const folderHasKeys = folderId !== null && items.some((item) => item.kind === "key" && item.collection === folderId);
   const inView = data.folder === null ? items : items.filter((item) => item.collection === data.folder);
   const needle = filter.trim().toLowerCase();
   const matches = (text: string | null | undefined) => (text ?? "").toLowerCase().includes(needle);
@@ -147,14 +154,40 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             )}
             {data.trash ? null : <ListTools session={data.session} />}
             {folderMenu === null ? null : (
-              // The folder's own menu (14b): Rename and Delete, and nothing a later plan builds. Not on All items, not in the Trash.
+              // The folder's own menu (14b, 15d): Paste a .env, the two ways to take the keys out (only when the folder holds a key), then
+              // Rename and Delete set apart, and nothing a later plan builds. Not on All items, not in the Trash, not in a read-only vault.
               <Menu
                 label="More for this folder"
                 icon={<MoreIcon />}
                 triggerClassName="ib"
                 items={[
                   {
+                    label: "Paste a .env",
+                    onSelect: () => {
+                      // Closing the panel gives focus back to the folder's menu button, the way the dialogs below do.
+                      rememberOpener(document.querySelector<HTMLElement>('[aria-label="More for this folder"]'));
+                      openPasteEnv(data.session);
+                    },
+                  },
+                  ...(folderHasKeys
+                    ? [
+                        {
+                          label: "Copy all as .env",
+                          onSelect: () => {
+                            void copyEnv(data.session, folderMenu.id);
+                          },
+                        },
+                        {
+                          label: "Save as .env file",
+                          onSelect: () => {
+                            setAsking({ kind: "env_file", folder: folderMenu, count: folderMenu.count });
+                          },
+                        },
+                      ]
+                    : []),
+                  {
                     label: "Rename folder",
+                    apart: true,
                     onSelect: () => {
                       setAsking({ kind: "rename", folder: folderMenu, count: folderMenu.count });
                     },
@@ -309,6 +342,9 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         {data.tool?.kind === "new_note" ? (
           <NoteForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
         ) : null}
+        {data.tool?.kind === "paste_env" ? (
+          <EnvPaste key={`${String(data.session)}:${String(data.generation)}:${String(data.tool.opening)}`} data={data} folders={folders} />
+        ) : null}
         {data.tool?.kind === "edit" ? (
           <EditForm
             key={`${String(data.session)}:${String(data.generation)}:${data.tool.summary.id}`}
@@ -324,6 +360,15 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
       <SearchPanel />
       {asking?.kind === "rename" ? (
         <RenameFolderDialog
+          session={data.session}
+          folder={asking.folder}
+          onClose={() => {
+            setAsking(null);
+          }}
+        />
+      ) : null}
+      {asking?.kind === "env_file" ? (
+        <EnvFileDialog
           session={data.session}
           folder={asking.folder}
           onClose={() => {

@@ -75,6 +75,12 @@ export const MESSAGES: Record<string, Words> = {
   },
   // A folder named with nothing, new or renamed: the page asks first, and the shell refuses it all the same.
   "code:invalid_input:folder name": { title: "A folder needs a name.", body: "Type a name first." },
+  // A pasted .env (Task 17): too much text, too many keys, choices that no longer fit the folder, a name found twice, and a folder with nothing to take out.
+  "code:too_large:env text": { title: "That's too much to paste at once.", body: "A pasted .env can be up to 1 MB." },
+  "code:too_large:env keys": { title: "That's too many keys to paste at once.", body: "A pasted .env can hold up to 500 keys." },
+  "code:invalid_input:env rows": { title: "This folder changed while you were choosing.", body: "Paste the .env again." },
+  "code:invalid_input:env twice": { title: "A key name is in this folder twice.", body: "Rename or move one, then try again." },
+  "code:invalid_input:no keys": { title: "This folder has no keys.", body: "Add a key first." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   "code:core": GENERIC,
 
@@ -83,6 +89,9 @@ export const MESSAGES: Record<string, Words> = {
     title: "Lockbox can't listen for locks, so it won't open a vault.",
     body: "Close Lockbox and open it again.",
   },
+  // A cloud question left open past the shell's five minutes: the shell let go of the save it had parked, so the yes finds nothing.
+  "page:key_pdf_expired": { title: "That took too long, so nothing was saved. Press Save as PDF again.", body: "" },
+  "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
 
   "core:wrong_password": { title: "Wrong password.", body: "" },
   "core:recovery_key_typo": { title: "That recovery key has a typing mistake.", body: "Check it against the one you saved." },
@@ -174,6 +183,10 @@ export const KNOWN_WHATS: readonly string[] = [
   "destination is the backup",
   "destination not writable",
   "earlier password",
+  "env keys",
+  "env rows",
+  "env text",
+  "env twice",
   "file",
   "file missing",
   "file name",
@@ -198,6 +211,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "link",
   "link type",
   "no character class selected",
+  "no keys",
   "not a collection",
   "not a file",
   "not a key",

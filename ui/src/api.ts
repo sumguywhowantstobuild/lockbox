@@ -526,3 +526,91 @@ export function openUrl(vault: SessionRef, id: string, index: number): Promise<T
 export async function lockAll(): Promise<void> {
   await callPlain<null>("lock_all", {});
 }
+
+/** One key read from a pasted `.env`: its place among the keys read (from 0; what a choice sends back) and its name. Never its value. */
+export interface EnvRow {
+  index: number;
+  name: string;
+}
+
+/**
+ * A row whose name is already taken in one place: by a key that is there, or by an earlier row of the same paste.
+ * `saved_as` is the name Keep both saves it under there (`NAME_2`, or the next free number).
+ */
+export interface EnvClash {
+  index: number;
+  saved_as: string;
+}
+
+/**
+ * What a pasted `.env` came to. The values wait in Rust under `token` (five minutes, or until the vault locks) and never
+ * come back. `bad_lines` are the numbers of the lines that could not be read, counted from 1. `clashes` has one entry for
+ * every folder of the vault (by id) and one for no folder (`null`): the rows that clash there. A folder that is not
+ * listed has no clashes.
+ */
+export interface EnvRows {
+  /** `null` when no key was read: nothing waits in Rust. */
+  token: string | null;
+  rows: EnvRow[];
+  bad_lines: number[];
+  clashes: { collection: string | null; rows: EnvClash[] }[];
+}
+
+/** What to do with one row. `save` is for a row with no clash; `keep_both` only for one that clashes. */
+export type EnvAction = "save" | "replace" | "keep_both" | "leave_out";
+
+export interface EnvChoice {
+  index: number;
+  action: EnvAction;
+}
+
+/**
+ * What taking a folder's keys out came to: `"Done"` (copied), `{ Saved }` (the save dialog's outcome, as
+ * `saveRecoveryPdf` answers it; a cloud folder's yes goes through `saveReadableConfirm`), or `{ Duplicate }` when two
+ * keys in the folder share a name: nothing was copied or written then.
+ */
+export type EnvOut = "Done" | { Saved: Outcome<SavedView> } | { Duplicate: { name: string } };
+
+/**
+ * Reads a pasted `.env` in Rust, like a typed password: the text goes once and the answer has names only. Refused with
+ * `too_large` (`what: "env text"` over 1,048,576 bytes, `"env keys"` over 500 keys, `"value"` for a value over a key's
+ * limit, `"title"` for a name over a title's) and `read_only`.
+ */
+export function envRead(vault: SessionRef, text: string): Promise<Tagged<EnvRows>> {
+  return call<EnvRows>("env_read", { session: vault.session, generation: vault.generation, text });
+}
+
+/**
+ * Saves the rows as key items in `collection` (a folder's id, or `null` for none) and answers how many keys were written.
+ * `choices` names every row once. The token is used up whatever the answer. Refused, with nothing written, with
+ * `not_found` when the token is gone (used, older than five minutes, or dropped by a lock), `invalid_input`
+ * (`what: "env rows"`) when the choices do not fit the folder as it is now, and (`what: "env twice"`) when Replace finds
+ * the name twice in the folder. Every row `leave_out` writes nothing and answers 0: that is how Cancel lets go of the
+ * values at once.
+ */
+export function envSave(
+  vault: SessionRef,
+  token: string,
+  choices: EnvChoice[],
+  collection: string | null,
+): Promise<Tagged<number>> {
+  return call<number>("env_save", { session: vault.session, generation: vault.generation, token, choices, collection });
+}
+
+/**
+ * Copies the folder's keys in `.env` form, in Rust, with the marks and timer of any copy. Refused with `not_found` for a
+ * folder that is not there and `invalid_input` (`what: "no keys"`) for one with no key in it. A read-only vault may copy.
+ */
+export function envCopy(vault: SessionRef, collection: string): Promise<Tagged<EnvOut>> {
+  return call<EnvOut>("env_copy", { session: vault.session, generation: vault.generation, collection });
+}
+
+/**
+ * Saves the folder's keys as a readable `.env` file: Rust opens the save dialog and writes as `saveRecoveryPdf` does
+ * (`"Dismissed"`, a `CloudFolder` question answered with `saveReadableConfirm`, or `Done` with where it went). Refused as
+ * `envCopy` is, with `read_only`, and with `invalid_input` (`what: "env twice"`) when the folder gained a second key of
+ * one name while the dialog was open. A lock while it runs makes the answer stale: no file appears and no error shows.
+ */
+export function envSaveFile(vault: SessionRef, collection: string): Promise<Tagged<EnvOut>> {
+  return call<EnvOut>("env_save_file", { session: vault.session, generation: vault.generation, collection });
+}

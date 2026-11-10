@@ -160,6 +160,25 @@ test("a_folder_without_a_name_has_words_and_the_trash_refusals_stay_plain", () =
   }
 });
 
+test("the_env_refusals_have_words_of_their_own", () => {
+  // Task 17's five labels, exactly as the shell sends them (the connection's table), each with its own title and body.
+  const words: [object, string, string][] = [
+    [{ code: "too_large", what: "env text" }, "That's too much to paste at once.", "A pasted .env can be up to 1 MB."],
+    [{ code: "too_large", what: "env keys" }, "That's too many keys to paste at once.", "A pasted .env can hold up to 500 keys."],
+    [{ code: "invalid_input", what: "env rows" }, "This folder changed while you were choosing.", "Paste the .env again."],
+    [{ code: "invalid_input", what: "env twice" }, "A key name is in this folder twice.", "Rename or move one, then try again."],
+    [{ code: "invalid_input", what: "no keys" }, "This folder has no keys.", "Add a key first."],
+  ];
+  for (const [error, title, body] of words) {
+    expect(messageFor(error), JSON.stringify(error)).toEqual({ title, body });
+    expect(KNOWN_WHATS).toContain((error as { what: string }).what);
+  }
+  // The label lists stay sorted, so the next one goes where a reader looks for it.
+  expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
+  // A value or a name over its limit has its own label already, and the same plain words as any too-large refusal.
+  expect(messageFor({ code: "too_large", what: "value" }).title).toBe("That is too big for Lockbox to keep.");
+});
+
 test("no_message_contains_raw_error_text", () => {
   const SENTINEL = "SENTINEL-7f3a C:\\Users\\secret";
   const errors: unknown[] = [

@@ -1780,29 +1780,28 @@ test("a_locked_refusal_without_the_lock_event_shows_nothing_and_takes_the_key_of
   expect(debugState().sessions).toEqual([]);
 });
 
-test("a_gone_cloud_question_without_the_lock_event_shows_nothing_and_takes_the_key_off", async () => {
+test("an_expired_cloud_question_says_so_and_keeps_the_session_on_the_page_and_in_the_engine", async () => {
   start([]);
   await toTheKey();
   const key = shell.keyOf(1) ?? "";
   shell.cloudPdfNext();
   await pressSavePdf();
   const dialog = await screen.findByRole("dialog", { name: CLOUD_TITLE });
-  // The vault locked and the shell dropped the question it had parked, but the page never heard the lock event.
+  // The shell dropped the question it had parked (five minutes passed, and nothing locked the vault): the yes is `not_found`.
   shell.dropParkedChoices();
   fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
-  await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
+  expect((await screen.findByRole("alert")).textContent).toBe("That took too long, so nothing was saved. Press Save as PDF again.");
   expect(commandsSent()).toContain("save_readable_confirm");
-  // No words, no question left on the page, no key, no session, and nothing written.
-  expect(screen.queryByRole("alert")).toBeNull();
+  // The question is closed, but the vault was not locked: the page and the engine both still have the session, and the key is still shown.
   expect(screen.queryByRole("dialog")).toBeNull();
-  expect(statusText()).toBe("");
-  expect(keyWordsOnPage(key)).toEqual([]);
-  expect(debugState().sessions).toEqual([]);
+  expect(debugState().sessions).toHaveLength(1);
+  expect(shell.sessionOf(1)?.unlocked).toBe(true);
+  expect(keyWordsOnPage(key).length).toBeGreaterThan(0);
   expect(shell.pdfs).toEqual([]);
 });
 
 test("a_cloud_question_that_fails_for_another_reason_keeps_the_key_and_says_why", async () => {
-  // The control for the test above: only a gone question is taken for a lock; any other refusal is said and the key stays.
+  // The control for the test above: a gone question is no lock either; any other refusal is said and the key stays.
   start([]);
   await toTheKey();
   const key = shell.keyOf(1) ?? "";

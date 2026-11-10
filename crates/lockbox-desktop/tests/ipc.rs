@@ -240,6 +240,42 @@ fn readable_file_commands_are_granted_to_the_main_window_only() {
     }
 }
 
+/// The `.env` commands (Task 17) are listed, granted to the main window and reach their handler from it; another window
+/// and a remote origin are refused by the ACL, before the handler. The page sends the pasted text to `env_read` once and
+/// no path to any of them (their bodies are checked in `commands::env`'s own tests).
+#[test]
+fn env_commands_are_granted_to_the_main_window_only() {
+    let commands = ["env_read", "env_save", "env_copy", "env_save_file"];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for cmd in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(json!({}));
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
 #[test]
 fn remote_origin_is_refused() {
     let app = app();

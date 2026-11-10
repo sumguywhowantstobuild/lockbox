@@ -37,13 +37,13 @@ export function whereWords(folders: readonly FolderEntry[], folder: string, vaul
 
 /**
  * Focus goes to the first field when a form opens. A menu or the search that opened it gives focus back to its own button as
- * it closes, which can come after this, so it is taken once more a moment later if it has gone elsewhere.
+ * it closes (Add, or the folder's menu), which can come after this, so it is taken once more a moment later if it has gone elsewhere.
  */
 export function useFocusOnOpen(field: RefObject<HTMLElement | null>): void {
   useEffect(() => {
     field.current?.focus();
     const again = window.setTimeout(() => {
-      if (document.activeElement === document.body || document.activeElement?.closest(".addb") != null) {
+      if (document.activeElement === document.body || document.activeElement?.closest('.addb, [aria-label="More for this folder"]') != null) {
         field.current?.focus();
       }
     }, 0);

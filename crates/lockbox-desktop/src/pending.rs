@@ -1,12 +1,14 @@
 //! Choices waiting for the user's yes ([`Pending`]), each behind a one-time [`Token`] the confirming command sends
 //! back. What waits can be a typed password or an unlocked vault, so a lock of all vaults drops everything here
-//! (`Sessions::lock_all`).
+//! (`Sessions::lock_all`). A pasted `.env`'s values wait here too, tied to their vault, so a lock of that one vault
+//! drops them as well (`Pending::drop_env_pastes`, from a lock hook).
 
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use lockbox_core::env_file::EnvEntry;
 use lockbox_core::ids::VaultId;
 use lockbox_core::{UnlockReport, Vault};
 use serde::de::{self, Deserializer};
@@ -99,6 +101,14 @@ pub enum PendingChoice {
         job: ReadableJob,
         dest: PathBuf,
     },
+    /// `env_read`'s keys, waiting for `env_save`: the session and generation that read the paste (a save from any other
+    /// is refused), and each key read, in the paste's order, its value wiped when dropped. Dropped by the lock of that
+    /// one vault too ([`Pending::drop_env_pastes`]), not only by Lock all.
+    EnvPaste {
+        session: SessionId,
+        generation: u64,
+        entries: Vec<EnvEntry>,
+    },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
     Test(Option<Box<lockbox_core::Vault>>),
@@ -164,6 +174,27 @@ impl Pending {
             .drain(..)
             .map(|parked| parked.choice)
             .collect()
+    }
+
+    /// Drops the pasted keys waiting for `only` (those of every session when `None`), and nothing else here: the lock
+    /// hook's work, since a lock of one vault drains nothing of its own. The values are wiped as they drop, after the
+    /// mutex is released.
+    pub(crate) fn drop_env_pastes(&self, only: Option<SessionId>) {
+        let dropped = {
+            let mut parked = lock(&self.parked);
+            let ours = |p: &Parked| match &p.choice {
+                PendingChoice::EnvPaste { session, .. } => {
+                    only.is_none_or(|locked| locked == *session)
+                }
+                _ => false,
+            };
+            let (gone, kept): (Vec<Parked>, Vec<Parked>) =
+                std::mem::take(&mut *parked).into_iter().partition(ours);
+            *parked = kept;
+            gone
+        };
+        // Dropped here, with the mutex released: each value is wiped as it goes.
+        drop(dropped);
     }
 
     fn park_at(&self, choice: PendingChoice, now: Instant) -> (Token, Vec<PendingChoice>) {
@@ -287,6 +318,54 @@ mod tests {
         pending.sweep_at(now + LIFETIME);
         assert!(dropped.load(Ordering::SeqCst), "the sweep dropped it");
         assert_eq!(pending.len(), 0);
+    }
+
+    fn paste_of(session: u64) -> PendingChoice {
+        PendingChoice::EnvPaste {
+            session: SessionId(session),
+            generation: 1,
+            entries: vec![EnvEntry {
+                name: "API_KEY".to_owned(),
+                value: Zeroizing::new("made-up-value".to_owned()),
+            }],
+        }
+    }
+
+    /// A lock of one vault drops the pasted keys of that vault and nothing else: another vault's paste and every other
+    /// kind of waiting choice stay; a lock of all drops every paste (the choices of other kinds are Lock all's own).
+    #[test]
+    fn drop_env_pastes_takes_one_sessions_and_only_pastes() {
+        let pending = Pending::default();
+        let first = pending.put(paste_of(1));
+        let second = pending.put(paste_of(2));
+        let (dropped, marker) = marker();
+        pending.put(marker);
+
+        pending.drop_env_pastes(Some(SessionId(1)));
+        assert_eq!(pending.len(), 2);
+        assert!(!dropped.load(Ordering::SeqCst), "another kind stays");
+        assert!(matches!(pending.take(&first), Err(ShellError::NotFound)));
+        assert!(pending.take(&second).is_ok(), "the other session's stays");
+
+        let third = pending.put(paste_of(3));
+        pending.drop_env_pastes(None);
+        assert_eq!(pending.len(), 1);
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert!(matches!(pending.take(&third), Err(ShellError::NotFound)));
+    }
+
+    /// A paste waits five minutes like every other choice.
+    #[test]
+    fn env_paste_expires_with_the_rest() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(paste_of(1), now);
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending.take_at(&token, now + LIFETIME),
+            Err(ShellError::NotFound)
+        ));
+        assert_eq!(pending.len(), 0, "an expired paste is dropped");
     }
 
     #[test]

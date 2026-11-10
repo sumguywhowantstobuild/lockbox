@@ -943,7 +943,7 @@ test("the_same_name_as_another_folder_is_allowed", async () => {
   });
 });
 
-test("the_folders_menu_has_rename_and_delete_and_nothing_a_later_plan_builds", async () => {
+test("the_folders_menu_has_the_env_entries_rename_and_delete_and_nothing_a_later_plan_builds", async () => {
   await unlocked();
   // Not on All items, and not on Trash.
   expect(screen.queryByRole("button", { name: "More for this folder" })).toBeNull();
@@ -953,20 +953,21 @@ test("the_folders_menu_has_rename_and_delete_and_nothing_a_later_plan_builds", a
   const more = screen.getByRole("button", { name: "More for this folder" });
   expect(more.getAttribute("aria-haspopup")).toBe("menu");
   const menu = await openMenu(more);
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Rename folder", "Delete folder"]);
-  expect(within(menu).queryByText(/\.env/)).toBeNull();
+  // Lineproof holds no key, so only what leads somewhere: Paste a .env first, then the folder's own two.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Paste a .env", "Rename folder", "Delete folder"]);
   expect(within(menu).queryByText(/Save all/i)).toBeNull();
   await expectNoAxe(menu);
 });
 
 test("save_all_not_in_folder_menu_until_4b", async () => {
-  await unlocked();
+  await unlocked({ extra: [{ id: itemId(60), kind: "key", title: "A_KEY", collection: FOLDER, value: "demo-4b" }] });
   await openFolder("Agency support agent");
   const menu = await openMenu(screen.getByRole("button", { name: "More for this folder" }));
   const names = within(menu).getAllByRole("menuitem").map((item) => item.textContent);
-  expect(names).toEqual(["Rename folder", "Delete folder"]);
-  expect(thePage()).not.toMatch(/Save all files|Save all|\.env/);
-  expect(screen.queryByRole("button", { name: /Paste a \.env|Copy all as \.env|Save as \.env file/ })).toBeNull();
+  // With a key in the folder the two taking-out entries show; the files' own "Save all files" is 4B's.
+  expect(names).toEqual(["Paste a .env", "Copy all as .env", "Save as .env file", "Rename folder", "Delete folder"]);
+  expect(thePage()).not.toMatch(/Save all files|Save all/);
+  expect(screen.queryByRole("button", { name: /Save all/ })).toBeNull();
 });
 
 test("rename_folder_from_its_menu", async () => {

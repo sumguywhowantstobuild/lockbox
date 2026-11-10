@@ -3,6 +3,7 @@
 
 mod args;
 pub mod backup;
+pub mod env;
 pub mod files;
 mod generator;
 pub mod items;
@@ -72,6 +73,10 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         readable::save_readable_confirm,
         readable::list_printers,
         readable::print_recovery_key,
+        env::env_read,
+        env::env_save,
+        env::env_copy,
+        env::env_save_file,
         backup::backup_vault,
         backup::test_backup,
         backup::open_backup_read_only,

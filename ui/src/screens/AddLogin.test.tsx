@@ -94,14 +94,14 @@ function sent(cmd: string): unknown[] {
 
 test("add_then_login_opens_the_form", async () => {
   const { container } = await unlocked();
-  // Add sits in the toolbar, at its right end, and opens a menu: a login, a key and a note, equal (Task 12).
+  // Add sits in the toolbar, at its right end, and opens a menu: a login, a key and a note, equal (Task 12), and a pasted .env set apart (Task 17).
   const add = addButton();
   expect(add.closest(".tb")).not.toBeNull();
   expect(add.getAttribute("aria-haspopup")).toBe("menu");
   fireEvent.pointerDown(add, { button: 0 });
   fireEvent.click(add);
   const menu = await screen.findByRole("menu");
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note"]);
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note", "Paste a .env"]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "Login" }));
 
   const form = await screen.findByRole("complementary", { name: "New login" });

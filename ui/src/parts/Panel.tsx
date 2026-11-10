@@ -1,4 +1,4 @@
-import type { ReactNode, Ref } from "react";
+import type { KeyboardEventHandler, ReactNode, Ref } from "react";
 import { CloseIcon } from "./Icon";
 
 /**
@@ -17,6 +17,7 @@ export function Panel({
   onClose,
   tools,
   footer,
+  onKeyDown,
   children,
 }: {
   title: string;
@@ -28,10 +29,12 @@ export function Panel({
   onClose: () => void;
   tools?: ReactNode;
   footer?: ReactNode;
+  /** Keys pressed inside the panel (and in a list or menu it opened): a panel that closes on Escape listens here. */
+  onKeyDown?: KeyboardEventHandler<HTMLElement>;
   children?: ReactNode;
 }) {
   return (
-    <aside className="panel on" aria-label={title}>
+    <aside className="panel on" aria-label={title} onKeyDown={onKeyDown}>
       <div className="ptop">
         {icon === undefined ? null : <span className="pico">{icon}</span>}
         <span className="sp" />

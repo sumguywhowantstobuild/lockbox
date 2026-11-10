@@ -415,6 +415,28 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
         check(`Search all vaults words, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
       }
+
+      // Paste a .env (Task 17, 15a to 15c). The box is a field on the panel (its words, edge and hint are measured above). The
+      // rows sit on a card: a key's name, the dots for its hidden value and "Already here" in their own words, and the button
+      // that leaves a row out, an icon alone, at rest and hovered (the tint laid over the card).
+      check("pasted key name on its card", c("--ink"), card, 4.5);
+      check("hidden value and Already here words on the card", c("--ink2"), card, 4.5);
+      for (const [state, fill] of [["rest", card], ["hover", over(c("--hov"), card)], ["pressed", over(c("--prs"), card)]] as const) {
+        check(`leave out button icon, ${state}`, c("--ink2"), fill, 3);
+      }
+      // Replace, Keep both, Cancel: the track is a tint on the card, the chosen one is a card with the vault's colour round it,
+      // so the choice rests on an outline and on "pressed" said to a screen reader, never on a tint alone.
+      const envTrack = over([...rgbOf("--sh"), 0.08] as Rgba, card);
+      check("clash choice words, not chosen, on the track", c("--ink"), envTrack, 4.5);
+      check("clash choice words, chosen, on its card", c("--ink"), card, 4.5);
+      check("chosen clash choice's outline against the track", c("--v"), envTrack, 3);
+      check("chosen clash choice's outline against its card", c("--v"), card, 3);
+      check("Saves as words on the card", c("--ink2"), card, 4.5);
+      // Save while there is nothing to save: the panel's main pill, greyed (the shade of a disabled button), on the panel.
+      check("panel Save words, off", c("--ink2"), over(c("--line"), paper), 4.5);
+      check("panel Save words, off, on a dialog's card", c("--ink2"), over(c("--line"), card), 4.5);
+      // Cancel (the quiet pill) while a save runs, on a dialog's card: the quiet words over the pill's shade.
+      check("quiet pill words, off, on a dialog's card", c("--ink2"), over([...rgbOf("--sh"), 0.07] as Rgba, card), 4.5);
     }
   }
 

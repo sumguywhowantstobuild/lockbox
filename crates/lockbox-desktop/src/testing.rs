@@ -784,9 +784,19 @@ pub struct FakeDialogs {
     suggested: Mutex<Vec<String>>,
     /// The title each save dialog was given, in order.
     titles: Mutex<Vec<String>>,
+    /// The filter each save dialog was given, in order: its name and extensions, or `None` for no filter.
+    filters: Mutex<Vec<Filter>>,
 }
 
+/// A dialog's filter as the fake records it: a name and the extensions it shows, or none.
+pub type Filter = Option<(String, Vec<String>)>;
+
 impl FakeDialogs {
+    /// The filter each save dialog was opened with, in order (`None`: no filter, so a real dialog adds no extension).
+    pub fn filters(&self) -> Vec<Filter> {
+        lock(&self.filters).clone()
+    }
+
     /// The title each save dialog was opened with, in order.
     pub fn titles(&self) -> Vec<String> {
         lock(&self.titles).clone()
@@ -838,8 +848,14 @@ impl Dialogs for FakeDialogs {
         &self,
         title: &str,
         suggested: &str,
-        _filter: Option<(&str, &[&str])>,
+        filter: Option<(&str, &[&str])>,
     ) -> Option<PathBuf> {
+        lock(&self.filters).push(filter.map(|(name, extensions)| {
+            (
+                name.to_owned(),
+                extensions.iter().map(|e| (*e).to_owned()).collect(),
+            )
+        }));
         lock(&self.titles).push(title.to_owned());
         lock(&self.suggested).push(suggested.to_owned());
         self.next()

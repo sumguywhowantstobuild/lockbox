@@ -1,5 +1,5 @@
-//! One way to write a readable file (spec §7.2, §7.4): a file that holds a secret in plain form (for now the recovery
-//! key's PDF) goes where the user picks, by Save a copy's rules. Rust opens the dialog, so no path crosses the page;
+//! One way to write a readable file (spec §7.2, §7.4): a file that holds a secret in plain form (the recovery key's
+//! PDF, a folder's keys as a `.env`) goes where the user picks, by Save a copy's rules. Rust opens the dialog, so no path crosses the page;
 //! the output journal's checks run first (a damaged journal refuses), then the vault-folder and state-folder refusals,
 //! then the cloud question; the file is made in a journaled temp beside the destination, and renamed into place only
 //! while the session is still unlocked in the generation that asked. An existing file is untouched until then.
@@ -7,7 +7,8 @@
 //! The PDF is WebView2's print-to-PDF of the page as it shows, so the key reaches it only through the printed page, and
 //! no command carries it. WebView2 refuses an existing hidden file and writes straight over the path it is given, so
 //! the printer gets a new file inside a new hidden folder beside the destination, both with Lockbox's own temp names and
-//! both written in the journal before they exist.
+//! both written in the journal before they exist. The `.env` file's bytes are made in Rust (`commands::env`), written to
+//! one journaled temp beside the destination and published the same way.
 
 use std::fs;
 use std::path::Path;
@@ -16,6 +17,7 @@ use std::time::Duration;
 
 use lockbox_core::blob::{CancelToken, OutputJournal};
 use lockbox_core::fsio::{hidden_temp_path, publish_readable, refuse_vault_folder};
+use lockbox_core::ids::ItemId;
 use serde::Deserialize;
 use tauri::State;
 use tauri::ipc::Request;
@@ -53,11 +55,14 @@ pub struct ReadableJob {
     pub kind: ReadableKind,
 }
 
-/// What a [`ReadableJob`] writes. Task 17 adds the `.env` file.
+/// What a [`ReadableJob`] writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadableKind {
     /// The recovery key's PDF: WebView2's print-to-PDF of the page as it shows.
     RecoveryPdf,
+    /// A folder's keys as a `.env` file. It holds the folder's id and never any text: the keys are read again when the
+    /// file is written, after the dialog and after a cloud folder's yes, so the file is what the folder holds then.
+    EnvFile { collection: ItemId },
 }
 
 impl ReadableJob {
@@ -70,9 +75,21 @@ impl ReadableJob {
         }
     }
 
-    fn filter(&self) -> (&'static str, &'static [&'static str]) {
+    /// The keys of the folder `collection` as a `.env` file.
+    pub fn env_file(collection: ItemId) -> ReadableJob {
+        ReadableJob {
+            title: "Save the keys as a .env file",
+            file_name: ".env".to_owned(),
+            kind: ReadableKind::EnvFile { collection },
+        }
+    }
+
+    /// The dialog's filter. A `.env` file has none: a filter makes Windows add its extension to a name typed without
+    /// one, so the name the person keeps would not be the name written. With no filter the dialog adds nothing.
+    fn filter(&self) -> Option<(&'static str, &'static [&'static str])> {
         match self.kind {
-            ReadableKind::RecoveryPdf => PDF_FILTER,
+            ReadableKind::RecoveryPdf => Some(PDF_FILTER),
+            ReadableKind::EnvFile { .. } => None,
         }
     }
 }
@@ -95,7 +112,7 @@ impl Shell {
         let Some(dest) = self
             .os
             .dialogs
-            .save_file(job.title, &job.file_name, Some(job.filter()))
+            .save_file(job.title, &job.file_name, job.filter())
         else {
             return self.still_current(session, generation, Outcome::Dismissed);
         };
@@ -169,7 +186,11 @@ impl Shell {
 
     /// The session's cancel token (cancelled by its lock), once it is checked to be unlocked in `generation` and
     /// writable. The vault is let go at once: a print can take seconds, and a lock must not be held up by it.
-    fn live_writable(&self, session: SessionId, generation: u64) -> ShellResult<CancelToken> {
+    pub(super) fn live_writable(
+        &self,
+        session: SessionId,
+        generation: u64,
+    ) -> ShellResult<CancelToken> {
         let held = self
             .sessions
             .read(session, generation, |vault, cancel| match vault {
@@ -215,6 +236,9 @@ impl Shell {
         match job.kind {
             ReadableKind::RecoveryPdf => {
                 self.write_recovery_pdf(session, generation, &cancel, &dest)
+            }
+            ReadableKind::EnvFile { collection } => {
+                self.write_env_file(session, generation, &cancel, &dest, collection)
             }
         }
     }

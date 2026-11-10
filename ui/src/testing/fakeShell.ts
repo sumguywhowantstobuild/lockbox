@@ -238,13 +238,13 @@ export interface FakeShell {
   offerExisting(vault: FakeVault): void;
   /** The folders a recovery key PDF was saved in, in order (a PDF the shell never wrote is not here). */
   pdfs: string[];
-  /** The next Save as PDF is closed without a choice. */
+  /** The next Save as PDF, or Save as .env file, is closed without a choice. */
   dismissPdfNext(): void;
-  /** The next Save as PDF finds a cloud-synced folder and asks first. Each call is one more question. */
+  /** The next Save as PDF, or Save as .env file, finds a cloud-synced folder and asks first. Each call is one more question. */
   cloudPdfNext(): void;
   /** The next Save as PDF or Print is refused with this. */
   refusePrintNext(error: object): void;
-  /** Holds every print command's answer until `release` is called (the PDF is still being made, the job is on its way). */
+  /** Holds every print command's answer, and a `.env` file's, until `release` is called (the PDF is still being made, the job is on its way). */
   holdPrint(): () => void;
   /** Drops every parked cloud question without a lock event, as the shell does when a session locks (a late yes is `not_found`). */
   dropParkedChoices(): void;
@@ -318,6 +318,21 @@ export interface FakeShell {
    * between leaves an answer tagged with the generation from before.
    */
   holdTrash(): () => void;
+  /**
+   * Holds every `env_read` answer until `release` is called: the paste is read, and its token made, when the command arrives, as
+   * the shell does, and the answer comes later, so the panel can close or a newer paste can be sent in between.
+   */
+  holdEnvRead(): () => void;
+  /** Holds every `env_save` answer until `release` is called: the keys are written when the command arrives, the answer comes later. */
+  holdEnvSave(): () => void;
+  /** How many pasted `.env`s the shell still holds the values of (a token that is not used up, dropped by a lock or older than five minutes). */
+  envHeld(): number;
+  /** Lets the shell forget every held paste at once, as five minutes do: a late `env_save` is then `not_found`. */
+  expireEnvTokens(): void;
+  /** The folders (by id) whose keys `env_copy` put on the clipboard, in order. */
+  envCopied: string[];
+  /** The folders (by id) whose keys `env_save_file` wrote as a file, in order (a Dismissed or refused save is not here). */
+  envFiles: string[];
 }
 
 /** What the shell sends for a website that is not an `http` or `https` address (`NOT_A_WEBSITE`). */
@@ -425,6 +440,67 @@ function refuse(error: object): never {
   throw error;
 }
 
+/** What the shell sends for a pasted `.env` over 1 MB, over 500 keys, and for choices that no longer fit the folder, a name found twice, and a folder with no key. */
+export const ENV_TEXT_TOO_LARGE = { code: "too_large", what: "env text" };
+export const ENV_KEYS_TOO_MANY = { code: "too_large", what: "env keys" };
+export const ENV_ROWS_CHANGED = { code: "invalid_input", what: "env rows" };
+export const ENV_TWICE = { code: "invalid_input", what: "env twice" };
+export const NO_KEYS = { code: "invalid_input", what: "no keys" };
+/** The most a pasted `.env` can be, in bytes, and the most keys it can hold. */
+const MAX_ENV_TEXT = 1_048_576;
+const MAX_ENV_KEYS = 500;
+
+/** One key read from a pasted `.env`, with its value, which waits in the fake as in the shell and never comes back. */
+interface EnvPasted {
+  index: number;
+  name: string;
+  value: string;
+}
+
+/**
+ * A small stand-in for the engine's `.env` reader: `NAME=value` per line, an optional `export `, blank lines and `#` comments
+ * skipped, one pair of quotes taken off a value; a line it can't read is its number (from 1), never its text.
+ */
+function readEnvText(text: string): { rows: EnvPasted[]; bad: number[] } {
+  const rows: EnvPasted[] = [];
+  const bad: number[] = [];
+  text.split(/\r?\n/).forEach((raw, at) => {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) return;
+    const found = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
+    if (found === null) {
+      bad.push(at + 1);
+      return;
+    }
+    rows.push({ index: rows.length, name: found[1] ?? "", value: (found[2] ?? "").replace(/^(['"])(.*)\1$/, "$2") });
+  });
+  return { rows, bad };
+}
+
+/** The live key items filed in `place` (a folder's id, or null for none), as the engine counts them. */
+function liveKeys(items: readonly FakeItem[], place: string | null): FakeItem[] {
+  return items.filter((item) => item.kind === "key" && !(item.trashed ?? false) && (item.collection ?? null) === place);
+}
+
+/** The rows that clash in `place`, with the name Keep both would use, by the rules the shell works them out by. */
+function envClashes(items: readonly FakeItem[], rows: readonly EnvPasted[], place: string | null): { index: number; saved_as: string }[] {
+  const there = liveKeys(items, place).map((item) => item.title);
+  const pasted = new Set(rows.map((row) => row.name));
+  const given = new Set<string>();
+  const found: { index: number; saved_as: string }[] = [];
+  rows.forEach((row, at) => {
+    if (!there.includes(row.name) && !rows.slice(0, at).some((earlier) => earlier.name === row.name)) return;
+    let number = 2;
+    while (there.includes(`${row.name}_${String(number)}`) || pasted.has(`${row.name}_${String(number)}`) || given.has(`${row.name}_${String(number)}`)) {
+      number += 1;
+    }
+    const savedAs = `${row.name}_${String(number)}`;
+    given.add(savedAs);
+    found.push({ index: row.index, saved_as: savedAs });
+  });
+  return found;
+}
+
 function exactly(args: unknown, keys: string[]): Record<string, unknown> {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return refuse(MALFORMED);
   const found = Object.keys(args).sort();
@@ -496,8 +572,15 @@ export function installFakeShell(
   let printers = [...PRINTERS];
   let defaultPrinter: string | null = DEFAULT_PRINTER;
   const printed: string[] = [];
-  // The save a cloud question parked: its session and generation, to go on with it (`save_readable_confirm`).
-  const pendingPdfs = new Map<string, { session: number; generation: number }>();
+  // The save a cloud question parked: its session and generation, to go on with it (`save_readable_confirm`), and the folder
+  // of a `.env` file (null for the recovery key's PDF).
+  const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null }>();
+  // The pasted `.env`s the shell holds, by token: their rows, values included, which never leave the fake.
+  const envPastes = new Map<string, { session: number; generation: number; rows: EnvPasted[] }>();
+  let heldEnvRead: (() => void)[] | undefined;
+  let heldEnvSave: (() => void)[] | undefined;
+  const envCopied: string[] = [];
+  const envFiles: string[] = [];
 
   listen.mockImplementation((event: string, handler: (event: { payload: unknown }) => void) => {
     calls.push({ cmd: `listen:${event}`, args: undefined });
@@ -510,6 +593,8 @@ export function installFakeShell(
     if (entry?.unlocked !== true) return;
     entry.unlocked = false;
     entry.generation += 1;
+    // A lock lets go of the values of every paste its vault held.
+    for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
     emit("lockbox://locked", { session, generation: entry.generation, reason });
   };
 
@@ -742,7 +827,7 @@ export function installFakeShell(
           cloudPdf -= 1;
           nextToken += 1;
           const token = `pdf-token-${String(nextToken)}`;
-          pendingPdfs.set(token, { session, generation });
+          pendingPdfs.set(token, { session, generation, envFolder: null });
           return tagged(session, generation, { Confirm: { CloudFolder: { token } } });
         }
         pdfs.push(SAVED_FOLDER);
@@ -754,8 +839,124 @@ export function installFakeShell(
         if (parked === undefined) return refuse({ code: "not_found" });
         pendingPdfs.delete(token);
         vaultFor(parked.session, parked.generation);
-        pdfs.push(SAVED_FOLDER);
+        if (parked.envFolder === null) pdfs.push(SAVED_FOLDER);
+        else envFiles.push(parked.envFolder);
         return tagged(parked.session, parked.generation, { Done: { folder: SAVED_FOLDER } });
+      }
+      case "env_read": {
+        const sent = exactly(args, ["session", "generation", "text"]) as { session: number; generation: number; text: unknown };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (typeof sent.text !== "string") return refuse(MALFORMED);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if (new TextEncoder().encode(sent.text).length > MAX_ENV_TEXT) return refuse(ENV_TEXT_TOO_LARGE);
+        const { rows, bad } = readEnvText(sent.text);
+        if (rows.length > MAX_ENV_KEYS) return refuse(ENV_KEYS_TOO_MANY);
+        let token: string | null = null;
+        if (rows.length > 0) {
+          nextToken += 1;
+          token = `env-token-${String(nextToken)}`;
+          envPastes.set(token, { session: sent.session, generation: sent.generation, rows });
+        }
+        const all = vault.items ?? [];
+        const places = [...all.filter((item) => item.kind === "collection" && !(item.trashed ?? false)).map((folder) => folder.id), null];
+        // Names only: a value never comes back.
+        return tagged(sent.session, sent.generation, {
+          token,
+          rows: rows.map(({ index, name }) => ({ index, name })),
+          bad_lines: bad,
+          clashes: places.map((place) => ({ collection: place, rows: envClashes(all, rows, place) })),
+        });
+      }
+      case "env_save": {
+        const sent = exactly(args, ["session", "generation", "token", "choices", "collection"]) as {
+          session: number;
+          generation: number;
+          token: unknown;
+          choices: unknown;
+          collection: unknown;
+        };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if (typeof sent.token !== "string" || !Array.isArray(sent.choices) || (sent.collection !== null && typeof sent.collection !== "string")) {
+          return refuse(MALFORMED);
+        }
+        const held = envPastes.get(sent.token);
+        // Used up whatever the answer is.
+        envPastes.delete(sent.token);
+        if (held?.session !== sent.session || held.generation !== sent.generation) return refuse({ code: "not_found" });
+        const choices = (sent.choices as { index?: unknown; action?: unknown }[]).map((choice) => {
+          const known = ["save", "replace", "keep_both", "leave_out"];
+          if (typeof choice.index !== "number" || typeof choice.action !== "string" || !known.includes(choice.action)) return refuse(MALFORMED);
+          return { index: choice.index, action: choice.action };
+        });
+        const all = vault.items ?? [];
+        const place = sent.collection;
+        if (place !== null && !all.some((item) => item.id === place && item.kind === "collection" && !(item.trashed ?? false))) {
+          return refuse({ code: "core", kind: "invalid_input", what: "collection" });
+        }
+        // Every row named once, and no other; then what each choice may be, by the folder as it is now.
+        const named = choices.map((choice) => choice.index).sort((a, b) => a - b);
+        if (named.length !== held.rows.length || named.some((index, at) => index !== at)) return refuse(ENV_ROWS_CHANGED);
+        const clashes = envClashes(all, held.rows, place);
+        for (const choice of choices) {
+          const clashing = clashes.some((clash) => clash.index === choice.index);
+          if (choice.action === "save" && clashing) return refuse(ENV_ROWS_CHANGED);
+          if (choice.action === "keep_both" && !clashing) return refuse(ENV_ROWS_CHANGED);
+          const name = held.rows[choice.index]?.name;
+          if (choice.action === "replace" && liveKeys(all, place).filter((item) => item.title === name).length >= 2) return refuse(ENV_TWICE);
+        }
+        let written = 0;
+        const make = (title: string, value: string) => {
+          nextItem += 1;
+          vault.items = [...(vault.items ?? []), { id: itemId(nextItem), kind: "key", title, value, collection: place, notes: "", modified_at: nowText() }];
+        };
+        for (const choice of [...choices].sort((a, b) => a.index - b.index)) {
+          const row = held.rows[choice.index];
+          if (row === undefined || choice.action === "leave_out") continue;
+          if (choice.action === "save") make(row.name, row.value);
+          else if (choice.action === "keep_both") make(clashes.find((clash) => clash.index === row.index)?.saved_as ?? row.name, row.value);
+          else {
+            const there = liveKeys(vault.items ?? [], place).find((item) => item.title === row.name);
+            if (there === undefined) make(row.name, row.value);
+            else {
+              there.value = row.value;
+              bump(there);
+            }
+          }
+          written += 1;
+        }
+        return tagged(sent.session, sent.generation, written);
+      }
+      case "env_copy":
+      case "env_save_file": {
+        const sent = exactly(args, ["session", "generation", "collection"]) as { session: number; generation: number; collection: unknown };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (cmd === "env_save_file" && (vault.readOnly ?? false)) return refuse({ code: "read_only" });
+        if (typeof sent.collection !== "string") return refuse(MALFORMED);
+        const folder = vault.items?.find((item) => item.id === sent.collection && item.kind === "collection" && !(item.trashed ?? false));
+        if (folder === undefined) return refuse({ code: "not_found" });
+        // The folder's live keys by name, in byte order; two with one name stop it with nothing copied or written.
+        const keysHere = liveKeys(vault.items ?? [], folder.id).sort((a, b) => (a.title < b.title ? -1 : a.title > b.title ? 1 : 0));
+        if (keysHere.length === 0) return refuse(NO_KEYS);
+        const twice = keysHere.find((key, at) => at > 0 && keysHere[at - 1]?.title === key.title);
+        if (twice !== undefined) return tagged(sent.session, sent.generation, { Duplicate: { name: twice.title } });
+        if (cmd === "env_copy") {
+          envCopied.push(folder.id);
+          return tagged(sent.session, sent.generation, "Done");
+        }
+        if (dismissPdf) {
+          dismissPdf = false;
+          return tagged(sent.session, sent.generation, { Saved: "Dismissed" });
+        }
+        if (cloudPdf > 0) {
+          cloudPdf -= 1;
+          nextToken += 1;
+          const token = `env-file-token-${String(nextToken)}`;
+          pendingPdfs.set(token, { session: sent.session, generation: sent.generation, envFolder: folder.id });
+          return tagged(sent.session, sent.generation, { Saved: { Confirm: { CloudFolder: { token } } } });
+        }
+        envFiles.push(folder.id);
+        return tagged(sent.session, sent.generation, { Saved: { Done: { folder: SAVED_FOLDER } } });
       }
       case "list_printers":
         exactly(args ?? {}, []);
@@ -1184,7 +1385,10 @@ export function installFakeShell(
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
       return Promise.reject(refusal);
     }
-    if (heldPrint !== undefined && (cmd === "save_recovery_pdf" || cmd === "print_recovery_key" || cmd === "save_readable_confirm")) {
+    if (
+      heldPrint !== undefined &&
+      (cmd === "save_recovery_pdf" || cmd === "print_recovery_key" || cmd === "save_readable_confirm" || cmd === "env_save_file")
+    ) {
       // Decided when released, as the shell does: a lock in between leaves no file, and the answer is a refusal.
       const waiting = heldPrint;
       return new Promise((resolve, reject) => {
@@ -1251,6 +1455,15 @@ export function installFakeShell(
             resolve(result);
           });
         });
+      }
+      for (const [name, waiting] of [["env_read", heldEnvRead], ["env_save", heldEnvSave]] as const) {
+        if (cmd === name && waiting !== undefined) {
+          return new Promise((resolve) => {
+            waiting.push(() => {
+              resolve(result);
+            });
+          });
+        }
       }
       if (cmd === "reveal_password" && heldReveal !== undefined) {
         const release = heldReveal;
@@ -1427,5 +1640,27 @@ export function installFakeShell(
     refuseNext: (cmd, error) => {
       refusals.set(cmd, error);
     },
+    holdEnvRead: () => {
+      const waiting: (() => void)[] = [];
+      heldEnvRead = waiting;
+      return () => {
+        heldEnvRead = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdEnvSave: () => {
+      const waiting: (() => void)[] = [];
+      heldEnvSave = waiting;
+      return () => {
+        heldEnvSave = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    envHeld: () => envPastes.size,
+    expireEnvTokens: () => {
+      envPastes.clear();
+    },
+    envCopied,
+    envFiles,
   };
 }
