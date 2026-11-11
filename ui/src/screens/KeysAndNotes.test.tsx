@@ -424,12 +424,12 @@ test("word_secret_kept_from_notes", async () => {
 test("empty_vault_says_so_with_add", async () => {
   const { container } = await unlocked([{ id: 7, name: "My vault", items: [] }]);
   expect(screen.getByText("Your vault is empty")).toBeTruthy();
-  // 3e: Add is right there, with the three kinds that can be made; a file and a pasted .env come with their tasks.
+  // 3e: Add is right there, as drawn: the four kinds, then a whole .env after "or". Help comes with its own task.
   const list = screen.getByRole("main").querySelector<HTMLElement>(".lscroll");
   expect(list).not.toBeNull();
   const buttons = within(list as HTMLElement).getAllByRole("button");
-  expect(buttons.map((button) => button.textContent)).toEqual(["Login", "Key", "Note"]);
-  expect(within(list as HTMLElement).queryByRole("button", { name: /^(File|Paste|Help)/ })).toBeNull();
+  expect(buttons.map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
+  expect(within(list as HTMLElement).queryByRole("button", { name: /^Help/ })).toBeNull();
   await expectNoAxe(container);
 
   // A button opens that kind's form, and closing it gives focus back to the button that opened it.
@@ -454,10 +454,21 @@ test("empty_folder_says_so", async () => {
   const { container } = await unlocked([{ id: 7, name: "My vault", items: folderOnly }]);
   fireEvent.click(screen.getByRole("button", { name: /^Agency support agent/ }));
   expect(await screen.findByText("Nothing in Agency support agent yet.")).toBeTruthy();
-  expect(screen.getByText("Add a login, a key or a note.")).toBeTruthy();
+  // As drawn (3e): the four kinds, then a whole .env set apart with "or".
+  expect(screen.getByText("Add a login, a key, a note or a file, or paste a whole .env.")).toBeTruthy();
   const list = screen.getByRole("main").querySelector<HTMLElement>(".lscroll") as HTMLElement;
-  expect(within(list).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note"]);
+  expect(within(list).getAllByRole("button").map((button) => button.textContent)).toEqual([
+    "Login",
+    "Key",
+    "Note",
+    "File",
+    "Paste a .env",
+  ]);
   await expectNoAxe(container);
+  // Paste a .env opens the paste panel.
+  fireEvent.click(within(list).getByRole("button", { name: "Paste a .env" }));
+  const paste = await screen.findByRole("complementary", { name: "Paste a .env" });
+  fireEvent.click(within(paste).getByRole("button", { name: "Cancel" }));
   // The form opens in the folder on screen.
   fireEvent.click(within(list).getByRole("button", { name: "Note" }));
   const form = await screen.findByRole("complementary", { name: "New note" });

@@ -249,8 +249,9 @@ export function OpenFilesAsk() {
 }
 
 /**
- * The save shortcut (Ctrl+Shift+L) is off: another app holds it, or it could not be turned on for another reason. Words and a Close; shown on
- * the lock screen and in the vault until it is closed, and told again only when Lockbox starts again.
+ * The save shortcut (Ctrl+Shift+L unless changed in Settings) is off: another app holds it, or it could not be turned on for another reason.
+ * Words and a Close; shown on the lock screen and in the vault until it is closed or a shortcut is saved in Settings, and told again only when
+ * Lockbox starts again.
  */
 export function ShortcutAsk() {
   const { shortcut } = useNotices();

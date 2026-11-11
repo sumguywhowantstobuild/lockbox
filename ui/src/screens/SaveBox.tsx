@@ -11,6 +11,7 @@ import { ClearClipboardBox } from "./forms/ClearClipboard";
 import { NAME_RULE, refusedTheName } from "./forms/KeyForm";
 import { folderChoices, NO_FOLDER, useFocusOnOpen } from "./forms/shared";
 import { MANY_LINES, ValueField } from "./forms/ValueField";
+import { useValueGuard } from "../useValueGuard";
 import type { FolderEntry } from "./SideMenu";
 
 /** What the box says at its top when a later press found a different value: what was typed stays. */
@@ -23,6 +24,27 @@ const TOO_BIG = "What you copied is too big to save as a key. Paste or type the 
 /** "3 keys", "1 key". */
 function keysWords(count: number): string {
   return `${String(count)} ${count === 1 ? "key" : "keys"}`;
+}
+
+/**
+ * The copied value once shown: like every secret on the page, kept from a native copy, cut or drag (`useValueGuard`, not selectable), which
+ * would put a second copy on the clipboard without the marks that keep it out of Windows' clipboard history, its timer and its clear at a
+ * lock. It is on the clipboard already, so Ctrl+C on it copies nothing more.
+ */
+function ShownValue({ value }: { value: string }) {
+  const box = useRef<HTMLSpanElement>(null);
+  useValueGuard(box);
+  return (
+    <span
+      ref={box}
+      className="cshown"
+      onDragStart={(event) => {
+        event.preventDefault();
+      }}
+    >
+      {value}
+    </span>
+  );
 }
 
 /**
@@ -84,7 +106,7 @@ function CopiedValue({ captureId }: { captureId: string }) {
             ••••••••••••••
           </span>
         ) : (
-          <span>{value}</span>
+          <ShownValue value={value} />
         )}
       </div>
       {problem === null ? null : (

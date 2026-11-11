@@ -308,12 +308,20 @@ test("sort_by_name_and_date", async () => {
   expect(within(main).getByText("admin@example.com")).toBeTruthy();
   await expectNoAxe(container);
 
-  // By when it changed: the newest first, each row saying when (17b).
+  // By when it changed: the newest first, each row saying when (17b). A login keeps its username before the date, so two
+  // logins of one name still say which account each is (its Copy puts that account's password on the clipboard).
   await pick("sort", "Changed");
   expect(headings()).toEqual([]);
   expect(titles()).toEqual(["OPENAI_API_KEY", "WEBHOOK_SECRET", "Bot admin console", "Error tracker", "Rotation steps", "Client contract"]);
   const when = [...document.querySelectorAll("main li.lrow .rdet")].map((detail) => detail.textContent);
-  expect(when).toEqual(["today", "yesterday", "2 days ago", "last month", "in September", "in September"]);
+  expect(when).toEqual([
+    "today",
+    "yesterday",
+    "admin@example.com · 2 days ago",
+    "team@example.com · last month",
+    "in September",
+    "in September",
+  ]);
   expect(within(main).getByRole("button", { name: /^Key:\s*OPENAI_API_KEY\s+today/ })).toBeTruthy();
   await expectNoAxe(container);
 

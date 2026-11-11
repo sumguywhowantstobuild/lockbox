@@ -397,9 +397,12 @@
   line-height: 1.3;
 }
 
-/* The key, shown once: its 24 words in the fixed-width face, numbered down two columns (1 to 12, then 13 to 24). */
+/* The key, shown once: its 24 words in the fixed-width face, numbered down two columns (1 to 12, then 13 to 24).
+   Not selectable: a native copy would skip the marks that keep a secret out of Windows' clipboard history. */
 .fu-key {
   display: grid;
+  -webkit-user-select: none;
+  user-select: none;
   grid-template-columns: 1fr 1fr;
   gap: 0 20px;
   margin: 0;
@@ -1406,8 +1409,15 @@
 .le-a {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   margin-top: 14px;
+}
+
+/* "or", setting a whole .env apart from the kinds before it. */
+.le-or {
+  padding: 0 4px;
+  color: var(--ink2);
 }
 
 /* ---- The panel from the right ---- */
@@ -1771,6 +1781,10 @@
 }
 
 .menu {
+  /* Never taller than the room the window leaves it (Base UI sets this on the positioner): a long menu (Move, with many folders)
+     scrolls inside it, so its last choice can be reached at the smallest window. */
+  max-height: var(--available-height, 60vh);
+  overflow-y: auto;
   padding: 5px;
   background: var(--card);
   border-radius: 14px;
@@ -1815,6 +1829,7 @@
   min-width: 240px;
   /* Never taller than the room the window leaves it (Base UI sets this on the positioner): the lines scroll, not the action. */
   max-height: var(--available-height, 60vh);
+  overflow-y: hidden;
 }
 
 .mscroll {
@@ -2687,6 +2702,13 @@
 .cval .cdots {
   color: var(--ink2);
   letter-spacing: 1px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* The copied value once shown: not selectable, since a native copy would skip the marks that keep it out of Windows' clipboard
+   history (as `.kval`). */
+.cval .cshown {
   -webkit-user-select: none;
   user-select: none;
 }

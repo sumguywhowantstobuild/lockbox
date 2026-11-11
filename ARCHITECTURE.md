@@ -19,12 +19,14 @@ The public surface is what the shell uses, and nothing more:
   `CleanupReport`, `CreatedVault`, `Credential`, `JournalStep`, `JournalView`, `PreparedRestore`, `Recovery`,
   `RestoreDestination`, `RestoreOutcome`, `UnlockReport`, `dismiss_restore_journal`, `inspect_restore_journal`,
   `CopiedItem`, `folder_name`, `is_reserved_device_name`, `read_vault_id`, `read_vault_name`, `recover_restore`,
-  `verify_backup`, `version`;
-- `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef, MAX_ITEM_JSON}`; `recovery::RecoverySecret`;
+  `verify_backup`, `version`, `SearchHit` (what a search found: the item, and the attached file a match was in);
+- `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef, MAX_ITEM_JSON, PreviousPassword,
+  MAX_PREVIOUS_PASSWORDS, check_key_name}`; `recovery::RecoverySecret`; `env_file` (reading and writing `.env` files);
   `generator::{PasswordOptions, PassphraseOptions, generate_password, generate_passphrase}`;
   `blob::{CancelToken, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::{MIN_PASSWORD_CHARS, check_new_password}`;
   `fsio::{atomic_write, is_destination_taken, remove_dir_all_retry, remove_file_retry, rename_file_no_replace}` (the
-  shell's state files and sweeps).
+  shell's state files and sweeps), and `fsio::{hidden_temp_path, create_hidden_file, clear_hidden, publish_readable,
+  refuse_vault_folder}` (the one way the shell writes a readable file: a hidden temp, then a gated, flushed move).
 
 `Item`, `ItemKind` and `FileRef` have no serde: an item is only ever written sealed, through crate-private wire types,
 so no code outside the engine can serialise one to the screen. A `FileRef`'s key, nonce prefix, blob version and chunk
@@ -54,7 +56,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `aead.rs` | The one XChaCha20-Poly1305 call (encryption that also detects tampering) for whole buffers: key slots and items |
 | `slots.rs` | Key slots: wrap and unwrap the vault key under the password key or the recovery key |
 | `header.rs` | `vault.json` and its `.bak`: strict parse, header MAC (a tamper-evident stamp), writing both copies in order |
-| `item.rs` | The item model (login, note, file, collection) and its sealed file format, padded to 512 bytes; its JSON through crate-private wire types |
+| `item.rs` | The item model (login, key, note, file, collection; a login's earlier passwords) and its sealed file format, padded to 512 bytes; its JSON through crate-private wire types |
 | `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); `authenticate_copy` (copies a blob unchanged while checking every chunk); cancel token; output-journal hook |
 | `manifest.rs` | `backup-manifest.json`: the list of everything in a backup (path, size, SHA-256) with a MAC, and its strict parser |
 | `archive.rs` | The backup file (one stored ZIP64 archive): our own strict reader for the few shapes we write, and the writer |
@@ -75,6 +77,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out |
 | `search.rs` | The in-memory search index (returns item IDs, and the name of the attached file a match was in) |
 | `generator.rs` | Password and passphrase generator (EFF word list in `wordlists/`) |
+| `env_file.rs` | Reading and writing `.env` files (`NAME=value` lines) for keys; a line it can't read is reported by its number only, and every value is wiped |
 
 Tests: unit tests sit beside the code. `tests/` uses the public API, and `internals` where it must build or read what
 the API keeps private (those tests need `--features test-internals`): `vault_lifecycle.rs`, `files.rs`,
@@ -292,7 +295,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `settings.rs` | The app-wide settings with their bounds (`settings.json`): idle time, clipboard delay, theme, the save shortcut (two modifiers, a letter, digit or F1 to F12, never Ctrl with C, V or X) and capture protection |
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and the last backup |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values also when their own vault locks |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |

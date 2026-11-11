@@ -2,13 +2,17 @@ import { act, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   addReveal,
+  closeSearch,
   copyField,
+  copyFromSearch,
   debugState,
   getForm,
   getReveal,
   lockEverything,
   lockOneVault,
   openedItems,
+  openNewLogin,
+  openSearch,
   resetStoreForTests,
   selectItem,
   setForm,
@@ -295,6 +299,99 @@ test("an_old_lock_answer_does_not_close_the_vault_unlocked_again", async () => {
   // The new session is the one the person has now; the late answer is about the old one.
   expect(debugState().sessions).toHaveLength(1);
   expect(openedItems(session)?.length).toBeGreaterThan(0);
+});
+
+/**
+ * Holds the next answer to `cmd` until the returned function settles it with `answer`. Settled before the command is sent (the
+ * page asks something else first), the answer waits for it: either way it comes after everything the test did before settling.
+ */
+type HeldAnswer = (shellAnswer: () => Promise<unknown>) => Promise<unknown>;
+
+function holdNext(cmd: string): (answer: HeldAnswer) => void {
+  const real = invoke.getMockImplementation();
+  if (real === undefined) throw new Error("no fake shell");
+  let settle: ((answer: HeldAnswer) => void) | null = null;
+  let early: HeldAnswer | null = null;
+  let held = false;
+  invoke.mockImplementation((name: string, args?: unknown) => {
+    if (name !== cmd || held) return real(name, args) as Promise<unknown>;
+    held = true;
+    // The fake shell's own answer, asked only when the held answer is given: what it would say then.
+    const shellAnswer = () => real(name, args) as Promise<unknown>;
+    if (early !== null) return early(shellAnswer);
+    return new Promise((resolve, reject) => {
+      settle = (answer) => {
+        answer(shellAnswer).then(resolve, reject);
+      };
+    });
+  });
+  return (answer) => {
+    if (settle === null) early = answer;
+    else settle(answer);
+  };
+}
+
+test("a_late_locked_refusal_does_not_drop_the_vault_unlocked_again", async () => {
+  const { session } = await opened();
+  // A command asked before a lock is answered `locked` only after the vault was unlocked again (the same session, the next
+  // generation): the refusal is about the old generation, so the vault the person has now stays.
+  const answer = holdNext("copy_field");
+  const copying = copyField(session, itemId(1), "password");
+  act(() => {
+    shell.lock(session);
+  });
+  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  answer(refusedAsLocked);
+  await copying;
+  expect(debugState().sessions).toHaveLength(1);
+  expect(openedItems(session)?.length).toBeGreaterThan(0);
+});
+
+test("a_late_copy_from_search_leaves_a_newer_form_alone", async () => {
+  const { session } = await opened();
+  // Copy on a search result, then the person closes the search and starts a new login before the copy's answer comes: the
+  // copy is still told, but it does not open the old result over the form being typed.
+  openSearch();
+  const answer = holdNext("copy_field");
+  const copying = copyFromSearch(session, itemId(1), "password");
+  closeSearch();
+  openNewLogin(session);
+  setForm(session, "title", "typed by the person");
+  answer((shellAnswer) => shellAnswer());
+  await copying;
+  // Opening a result reads the item first: let that finish too.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(debugState().toast).toMatchObject({ kind: "copied", text: "Password copied" });
+  const entry = debugState().sessions[0];
+  expect(entry?.tool?.kind).toBe("new_login");
+  expect(entry?.openItem).toBeNull();
+  expect(getForm(session, "title")).toBe("typed by the person");
+  expect(debugState().search).toBeNull();
+});
+
+test("an_unlock_overtaken_by_a_lock_is_stale_not_an_error", async () => {
+  await startStore();
+  // Lock all, or the window's close, landed during the unlock: the shell refuses it as locked, and no session exists yet for
+  // a lock event to clear. Nothing to show, as for a stale answer.
+  answerWith("unlock_vault", refusedAsLocked);
+  await expect(unlock(7, PASSWORD)).resolves.toBe("stale");
+  expect(debugState().sessions).toEqual([]);
+  expect(debugState().toast).toBeNull();
+});
+
+test("a_late_lock_all_answer_does_not_drop_the_vault_unlocked_again", async () => {
+  const { session } = await opened();
+  // Lock all's events came first, the vault was unlocked again, and only then did Lock all's own answer arrive: it drops
+  // what the page held when it was pressed, not the vault unlocked since.
+  const answer = holdNext("lock_all");
+  const locking = lockEverything();
+  act(() => {
+    shell.lock(session);
+  });
+  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  answer(() => Promise.resolve(null));
+  await locking;
+  expect(debugState().sessions).toHaveLength(1);
 });
 
 test("a_lock_the_shell_refuses_is_said_and_the_vault_stays", async () => {

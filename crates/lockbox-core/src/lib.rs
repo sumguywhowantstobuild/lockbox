@@ -56,8 +56,8 @@ pub mod blob {
 pub mod fsio {
     pub(crate) use crate::fsio_impl::*;
     pub use crate::fsio_impl::{
-        atomic_write, hidden_temp_path, is_destination_taken, publish_readable,
-        remove_dir_all_retry, remove_file_retry, rename_file_no_replace,
+        atomic_write, clear_hidden, create_hidden_file, hidden_temp_path, is_destination_taken,
+        publish_readable, remove_dir_all_retry, remove_file_retry, rename_file_no_replace,
     };
     pub use crate::vault::refuse_vault_folder;
 }

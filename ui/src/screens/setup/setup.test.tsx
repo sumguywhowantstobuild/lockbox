@@ -373,6 +373,28 @@ test("key_shows_24_numbered_words_in_two_columns", async () => {
   await expectNoAxe(container);
 });
 
+test("the_key_words_cannot_be_copied_or_dragged_natively", async () => {
+  const { container } = start([]);
+  await toTheKey();
+  const box = container.querySelector(".fu-key") as HTMLElement;
+  const word = box.querySelector(".fu-w") as HTMLElement;
+  // As every other secret shown on the page: a native copy, cut or drag would put the key on the clipboard without the marks
+  // that keep it out of Windows' clipboard history, its timer and its clear at a lock. The key is written down by hand or printed.
+  const range = document.createRange();
+  range.selectNodeContents(box);
+  document.getSelection()?.removeAllRanges();
+  document.getSelection()?.addRange(range);
+  expect(fireEvent.copy(document.body)).toBe(false);
+  expect(fireEvent.cut(document.body)).toBe(false);
+  document.getSelection()?.removeAllRanges();
+  expect(fireEvent.dragStart(word)).toBe(false);
+  // Not selectable either, as the generator's value.
+  const css = readBeside(import.meta.url, "../../styles/components.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  expect(/\.fu-key\s*\{[^}]*user-select:\s*none/.test(css)).toBe(true);
+  // Text beside it stays the person's to copy.
+  expect(fireEvent.copy(screen.getByText(/If you lose both your password/))).toBe(true);
+});
+
 test("key_heading_says_not_a_wallet_phrase", async () => {
   const { container } = start([]);
   // On the new vault's key (21c) ...
@@ -770,13 +792,13 @@ test("ready_screen_says_what_to_do_first", async () => {
   expect(within(main).getByText("Your vault is empty")).toBeTruthy();
   expect(within(main).getByText("What to do first: add a login, or a key, a note or a file.")).toBeTruthy();
   // The key is gone from the page for good. Add is in the toolbar (Task 11) and right there in the empty vault (Task 12), with
-  // the three kinds that can be made; nothing else from a later task is offered.
+  // the kinds that can be made, as drawn; nothing else from a later task (Help) is offered.
   expect(keyWordsOnPage(key)).toEqual([]);
   expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /^(File|Help|Paste)/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Help/ })).toBeNull();
   const list = main.querySelector<HTMLElement>(".lscroll");
   expect(list).not.toBeNull();
-  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note"]);
+  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
   await expectNoAxe(container);
 });
 

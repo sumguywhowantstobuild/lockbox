@@ -30,7 +30,7 @@ const MAX_URLS: usize = 32;
 const MAX_NOTES: usize = 524_288;
 const MAX_PASSWORD: usize = 4096;
 /// A key's value: room for a certificate or a private key as well as a token.
-pub(super) const MAX_KEY_VALUE: usize = 16_384;
+pub(crate) const MAX_KEY_VALUE: usize = 16_384;
 /// The search query's limit, in characters.
 const MAX_QUERY_CHARS: usize = 256;
 /// The most results one vault gives a search.

@@ -354,6 +354,15 @@ test("a_key_that_makes_no_letter_is_refused_not_guessed", async () => {
   expect(commands("set_settings")).toEqual([]);
 });
 
+test("a_letter_is_the_letter_its_key_makes_wherever_that_key_sits", async () => {
+  await opened();
+  startListening();
+  // French AZERTY: M sits where a US keyboard has the semicolon. Windows names that key M (77), so Ctrl+Alt+M is what was pressed.
+  press("Semicolon", "m", { ctrl: true, alt: true });
+  expect(screen.queryByRole("alert")?.textContent ?? "").toBe("");
+  expect(screen.getByText("Ctrl+Alt+M", { selector: "kbd" })).toBeTruthy();
+});
+
 test("start_with_windows_written_but_not_read_back_shows_the_true_state", async () => {
   const { panel } = await opened();
   // The write went through, and reading it back failed: the shell's one fixed refusal. The page asks again and shows what Windows has.

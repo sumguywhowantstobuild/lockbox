@@ -18,13 +18,14 @@ export function shortcutText(shortcut: Shortcut): string {
 }
 
 /**
- * The Windows virtual-key code of the key pressed: a letter is the letter the key makes in the person's layout (Windows names a letter's
- * key by it, so the key marked A on a French keyboard is 65 whatever its place), `Digit0` to `Digit9` give 48 to 57 and `F1` to `F12` give
- * 112 to 123. A letter key that makes no letter (a symbol, as on Dvorak or with AltGr) is `null`: its place says nothing of the key Windows
- * would name, so it is refused, never guessed. Any other key is `null`.
+ * The Windows virtual-key code of the key pressed: a letter is the letter the key makes in the person's layout, wherever that key sits
+ * (Windows names a letter's key by it, so the key marked A on a French keyboard is 65, and its M, where a US keyboard has the semicolon,
+ * is 77), `Digit0` to `Digit9` give 48 to 57 and `F1` to `F12` give 112 to 123. A letter key that makes no letter (a symbol, as on Dvorak
+ * or with AltGr) is `null`: its place says nothing of the key Windows would name, so it is refused, never guessed. Any other key is `null`.
  */
 export function keyCodeOf(code: string, key: string): number | null {
-  if (code.startsWith("Key")) return /^[a-zA-Z]$/.test(key) ? key.toUpperCase().charCodeAt(0) : null;
+  if (/^[a-zA-Z]$/.test(key)) return key.toUpperCase().charCodeAt(0);
+  if (code.startsWith("Key")) return null;
   const digit = /^Digit([0-9])$/.exec(code);
   if (digit !== null) return (digit[1] ?? "").charCodeAt(0);
   const fn = /^F([1-9]|1[0-2])$/.exec(code);

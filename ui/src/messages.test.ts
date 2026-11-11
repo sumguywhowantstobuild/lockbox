@@ -36,6 +36,9 @@ test("every_shell_error_has_a_message", () => {
   // Each `what: "…"` anywhere in the crates: the words are decided, even if they are the kind's own.
   const whats = new Set<string>();
   for (const { text } of sources) for (const match of text.matchAll(/\bwhat: (?:Some\()?"([^"]*)"/g)) whats.add(match[1] ?? "");
+  // And the label a change passes as an argument (`write_change(session, generation, "…", …)`): it is a refusal's `what` too.
+  for (const { text } of sources) for (const match of text.matchAll(/\bwrite_change\(\s*\w+,\s*\w+,\s*"([^"]*)"/g)) whats.add(match[1] ?? "");
+  expect(whats, "a change's label was read").toContain("password");
   expect(whats.size, "the whats were read").toBeGreaterThan(50);
   for (const what of whats) if (!KNOWN_WHATS.includes(what)) missing.push(`what: ${what}`);
   expect(missing, "no message for these").toEqual([]);
@@ -57,6 +60,13 @@ test("every_shell_error_has_a_message", () => {
     const bare = `${message.title} ${message.body}`.replace(/\{(?:position|found|s|shortcut)\}/g, "1");
     expect(bare, id).not.toMatch(/[{}[\]]|undefined|null|\\/);
   }
+});
+
+test("a_new_recovery_key_a_lock_kept_from_the_screen_has_words_of_its_own", () => {
+  // Not "Unlock the vault to see it.": that key was never seen, and the next unlock makes another.
+  const message = messageFor({ code: "locked_after_change", what: "recovery key" });
+  expect(message.title).toBe("The vault locked before Lockbox could show your new recovery key.");
+  expect(message.body).toContain("make another one");
 });
 
 test("unknown_error_gets_the_generic_message", () => {

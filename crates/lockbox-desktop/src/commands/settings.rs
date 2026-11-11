@@ -25,7 +25,8 @@ pub const SHORTCUT_NOT_SET: ShellError = ShellError::InvalidInput {
 
 impl Shell {
     /// Puts `new` in effect, each change at once (the page saves on every change), in this order: checks it (a refusal
-    /// changes nothing); when the save shortcut differs from the saved one, registers it with Windows first, and when
+    /// changes nothing); when the save shortcut differs from the saved one (or is the one Windows refused at launch,
+    /// chosen again with nothing else changed), registers it with Windows first, and when
     /// Windows refuses it answers [`SHORTCUT_TAKEN`] (the keys are registered already) or [`SHORTCUT_NOT_SET`] (any
     /// other refusal), with nothing saved and the old shortcut still working; saves, and when the save fails after a new
     /// shortcut was registered, puts the old one back before answering the save's error; then, if capture protection
@@ -37,7 +38,11 @@ impl Shell {
         let _one_change = lock(&self.settings_change);
         let old = self.settings.get();
         let moved = new.shortcut != old.shortcut;
-        if moved {
+        // The shortcut Windows refused at launch, chosen again as it is (nothing else changes): asked for again, as a
+        // new one would be, so a refusal is said and a success ends the launch notice. A save that changes something
+        // else leaves it alone, or it would be asked for at every change of the theme.
+        let again = !moved && new == old && self.shortcut_failed_at_launch();
+        if moved || again {
             self.os
                 .hotkey
                 .set(Some(new.shortcut))
@@ -53,7 +58,7 @@ impl Shell {
             }
             return Err(error);
         }
-        if moved {
+        if moved || again {
             self.forget_shortcut_failure();
         }
         if new.capture_protected != old.capture_protected {
@@ -480,6 +485,59 @@ mod tests {
             assert_eq!(ts.shell.set_settings(changed), Ok(()));
         }
         assert_eq!(ts.hotkey.asked(), asked_at_launch);
+    }
+
+    /// The shortcut Windows refused at launch, chosen again as it is (a save that changes nothing else): it is asked for
+    /// again, as a new one would be. Refused again, the save answers the refusal and the launch notice stays, so the
+    /// page keeps saying the shortcut is off; taken, the notice goes. A save that changes something else still leaves it.
+    #[test]
+    fn the_same_shortcut_chosen_again_after_a_launch_failure_is_registered_again() {
+        use crate::session::Notice;
+        for (why, refusal) in [
+            (HotkeyTaken::Taken, SHORTCUT_TAKEN),
+            (HotkeyTaken::NotSet, SHORTCUT_NOT_SET),
+        ] {
+            let ts = TestShell::new();
+            ts.hotkey.refuse_next(why);
+            ts.shell.register_save_shortcut();
+            assert_eq!(ts.hotkey.registered(), None);
+            let failed = |ts: &TestShell| {
+                ts.shell
+                    .launch_notices()
+                    .iter()
+                    .any(|n| matches!(n, Notice::ShortcutTaken | Notice::ShortcutNotSet))
+            };
+            let before = ts.shell.settings.get();
+
+            // Another change leaves the shortcut alone (it would be asked for at every change of the theme).
+            let themed = Settings {
+                theme: Theme::Dark,
+                ..before
+            };
+            assert_eq!(ts.shell.set_settings(themed), Ok(()));
+            assert_eq!(ts.hotkey.asked(), [Some(Shortcut::default())]);
+            assert!(failed(&ts));
+
+            // Chosen again while still refused: said, and the notice stays.
+            ts.hotkey.refuse_next(why);
+            assert_eq!(ts.shell.set_settings(themed), Err(refusal), "{why:?}");
+            assert_eq!(ts.hotkey.registered(), None);
+            assert!(
+                failed(&ts),
+                "the page would stop saying the shortcut is off"
+            );
+
+            // Chosen again once the keys are free: registered, and the notice goes.
+            assert_eq!(ts.shell.set_settings(themed), Ok(()));
+            assert_eq!(ts.hotkey.registered(), Some(Shortcut::default()));
+            assert!(!failed(&ts));
+            assert_eq!(saved_on_disk(&ts), themed);
+
+            // Registered now, so the same shortcut chosen again asks Windows for nothing more.
+            let asked = ts.hotkey.asked().len();
+            assert_eq!(ts.shell.set_settings(themed), Ok(()));
+            assert_eq!(ts.hotkey.asked().len(), asked);
+        }
     }
 
     /// Capture protection is applied to the window at once when it changes, once per change, and not by a save that

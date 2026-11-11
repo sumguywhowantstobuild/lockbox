@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { messageFor, messageText } from "../../messages";
+import { useValueGuard } from "../../useValueGuard";
 import { makeNewKey, startPicking, useSettings, type SessionData } from "../../store";
 import { Frame, SAY_KEY } from "./Frame";
 import { KeyActions, type PrintRun } from "./KeyActions";
@@ -28,6 +29,11 @@ export function RecoveryKey({ data }: { data: SessionData }) {
   const [printing, setPrinting] = useState<PrintRun>(null);
   // Lockbox stays out of screen capture unless the person turned that off in Settings: the sentence about screenshots follows it.
   const { capture_protected: keptOutOfCapture } = useSettings();
+  // Like every secret on the page, the key is kept from a native copy, cut or drag (and is not selectable): that would put it on the
+  // clipboard without the marks that keep it out of Windows' clipboard history, its timer and its clear at a lock. It is written down
+  // by hand, printed or saved as a PDF, so Ctrl+C on it copies nothing.
+  const keyBox = useRef<HTMLDivElement>(null);
+  useValueGuard(keyBox);
   const step = data.recovery;
   if (step === null) return null;
 
@@ -70,7 +76,7 @@ export function RecoveryKey({ data }: { data: SessionData }) {
   const words = wordsOf(key);
   const half = Math.ceil(words.length / 2);
   // Two columns, 1 to 12 and 13 to 24, so the words can be copied by hand in order. Each word is its own element, and
-  // the key is in no attribute (a title, a label), so it is read out and selected as the words it is.
+  // the key is in no attribute (a title, a label), so it is read out as the words it is.
   const column = (from: number, to: number) => (
     <ol className="fu-col">
       {words.slice(from, to).map((word, place) => (
@@ -100,7 +106,13 @@ export function RecoveryKey({ data }: { data: SessionData }) {
       ) : null}
       <div className="fu-print" data-print-only>
         <h2 className="fu-kind">Lockbox recovery key, not a crypto wallet phrase</h2>
-        <div className="fu-key m">
+        <div
+          ref={keyBox}
+          className="fu-key m"
+          onDragStart={(event) => {
+            event.preventDefault();
+          }}
+        >
           {column(0, half)}
           {column(half, words.length)}
         </div>

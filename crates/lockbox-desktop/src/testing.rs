@@ -1,5 +1,6 @@
 //! Tests only: fakes for the OS calls (`os::{Env, Volumes, Dialogs, Launcher, IdleSource, Power, Clock, ClipboardCalls,
-//! Timer}`), a shell built on them inside a temp folder, and the lock that keeps key derivations off a timing test's CPU.
+//! Timer}`, the printer and its list, the save shortcut, the window, starting with Windows), a shell built on them inside
+//! a temp folder, and the lock that keeps key derivations off a timing test's CPU.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -18,10 +19,11 @@ use crate::capture::CaptureEvent;
 use crate::error::ShellResult;
 use crate::lock;
 use crate::os::{
-    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS,
-    Env, Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters, Job, KnownFolder,
-    Launcher, MainWindow, Os, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed,
-    PrintSteps, Shortcut, StartupEntry, TAG_FORMAT, Timer, Volumes,
+    CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Clock, Dialogs,
+    DriveType, EXCLUSION_FORMATS, Env, Hotkey, HotkeyTaken, IdleSource, InstalledPrinter,
+    InstalledPrinters, Job, KnownFolder, Launcher, MainWindow, Os, PRINTERS_UNREADABLE, Power,
+    PrintCalls, PrintDone, PrintFailed, PrintSteps, Shortcut, StartupEntry, TAG_FORMAT, Timer,
+    Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
@@ -397,6 +399,9 @@ struct Clip {
     fail_read: bool,
     /// Something that is not text is on the clipboard (a picture, a list of files).
     non_text: bool,
+    /// Put on the clipboard once, right after the next look at the text's size: a program that opens the clipboard with no
+    /// owner window, which Windows lets in during Lockbox's opening, replacing the text between the two steps.
+    after_size: Option<String>,
 }
 
 /// The format IDs the fake hands out: the exclusion formats from `0xC000`, the tag's format at [`FAKE_TAG_FORMAT`].
@@ -463,6 +468,12 @@ impl FakeClipboard {
     /// Whether something that is not text is on the clipboard.
     pub fn has_non_text(&self) -> bool {
         lock(&self.clip).non_text
+    }
+
+    /// Right after the next look at the text's size, `text` replaces what is on the clipboard, inside Lockbox's opening (a
+    /// program that opens it with no owner window).
+    pub fn replace_after_size(&self, text: &str) {
+        lock(&self.clip).after_size = Some(text.to_owned());
     }
 
     /// From now on, while `held`, another program keeps the clipboard open.
@@ -657,17 +668,25 @@ impl ClipboardCalls for FakeClipboard {
         if std::mem::take(&mut clip.fail_read) {
             return Err(CLIPBOARD_FAILED);
         }
-        // UTF-16 units and the terminator, two bytes each, as Windows holds it.
-        Ok(clip
-            .text
-            .as_ref()
-            .map(|text| (text.encode_utf16().count() + 1) * 2))
+        let size = clip.text.as_deref().map(block_size);
+        if let Some(text) = clip.after_size.take() {
+            clip.text = Some(text);
+        }
+        Ok(size)
     }
 
-    fn copy_text(&self) -> ShellResult<Option<Zeroizing<String>>> {
+    fn copy_text(&self, max_block: usize) -> ShellResult<Option<Zeroizing<String>>> {
         let (text, hook) = {
             let mut clip = lock(&self.clip);
             assert!(clip.open, "read while closed");
+            if clip
+                .text
+                .as_deref()
+                .is_some_and(|text| block_size(text) > max_block)
+            {
+                clip.events.push("text too large");
+                return Err(CLIPBOARD_TOO_LARGE);
+            }
             clip.events.push("read text");
             (clip.text.clone(), clip.during_read.take())
         };
@@ -676,6 +695,11 @@ impl ClipboardCalls for FakeClipboard {
         }
         Ok(text.map(Zeroizing::new))
     }
+}
+
+/// The size of `text`'s block on the clipboard: UTF-16 units and the terminator, two bytes each, as Windows holds it.
+fn block_size(text: &str) -> usize {
+    (text.encode_utf16().count() + 1) * 2
 }
 
 /// A timer that runs nothing by itself: the test runs the jobs whose time has come, with [`run_due`](Self::run_due).
@@ -1120,7 +1144,7 @@ pub struct StartedPrint {
 }
 
 /// Whether `path` is there and hidden (`FILE_ATTRIBUTE_HIDDEN`).
-fn is_hidden(path: Option<&Path>) -> bool {
+pub(crate) fn is_hidden(path: Option<&Path>) -> bool {
     path.and_then(|path| fs::symlink_metadata(path).ok())
         .is_some_and(|meta| std::os::windows::fs::MetadataExt::file_attributes(&meta) & 0x2 != 0)
 }

@@ -53,7 +53,7 @@ what they depend on ship with the installer (Plan 5); nothing is distributed bef
 | `rfd` | 0.17.2 | MIT | File dialogs |
 | `clipboard-win` | 5.4.3 | BSL-1.0 | Opening and reading the clipboard |
 | `error-code` (through `clipboard-win`) | 3.4.0 | BSL-1.0 | Windows error codes |
-| `webview2-com` | 0.39.1 | MIT | Turning off WebView2's external file drop |
+| `webview2-com` | 0.39.1 | MIT | WebView2's own settings: turning off external file drop, its menus and browser keys; printing and saving as PDF |
 | `windows-core`, `windows-sys` | 0.62.2, 0.61.2 | MIT or Apache-2.0 | Windows calls |
 | `getrandom` | 0.4.3 | MIT or Apache-2.0 | A clipboard copy's random tag |
 | `serde`, `serde_json` | 1.0.229, 1.0.151 | MIT or Apache-2.0 | Requests, answers and state files |

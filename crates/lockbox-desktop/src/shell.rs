@@ -196,6 +196,14 @@ impl Shell {
             .retain(|kept| !matches!(kept, Notice::ShortcutTaken | Notice::ShortcutNotSet));
     }
 
+    /// Whether the save shortcut is off since launch: Windows refused it then, and no shortcut has been registered and
+    /// saved since (the kept launch notice says so until [`forget_shortcut_failure`](Self::forget_shortcut_failure)).
+    pub(crate) fn shortcut_failed_at_launch(&self) -> bool {
+        lock(&self.launch_notices)
+            .iter()
+            .any(|kept| matches!(kept, Notice::ShortcutTaken | Notice::ShortcutNotSet))
+    }
+
     /// Where the shell's events go.
     pub(crate) fn notifier(&self) -> &dyn Notifier {
         &*self.notifier

@@ -36,6 +36,11 @@ export const MESSAGES: Record<string, Words> = {
     title: "Your new password was saved, but the vault locked before Lockbox could say so.",
     body: "Unlock with the new one.",
   },
+  // A new recovery key is shown only once: one the lock kept from the screen was never seen, and the next unlock makes another.
+  "code:locked_after_change:recovery key": {
+    title: "The vault locked before Lockbox could show your new recovery key.",
+    body: "Unlock the vault, and Lockbox will make another one to write down.",
+  },
   "code:not_found": { title: "Lockbox can't find that.", body: "It may have been moved or deleted." },
   "code:busy": { title: "That vault is busy.", body: "Wait for what it's doing to finish, then try again." },
   "code:read_only": { title: "This vault is read-only.", body: "It was opened from a backup, so nothing in it can change." },
@@ -246,6 +251,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "print",
   "printer",
   "printer name",
+  "recovery key",
   "removable drive",
   "request",
   "restore",

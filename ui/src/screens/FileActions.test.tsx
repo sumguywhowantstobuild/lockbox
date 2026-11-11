@@ -841,6 +841,38 @@ test("a_replace_that_comes_after_moving_on_does_not_change_the_panel", async () 
   expect(within(back).queryByText("contract-demo.pdf")).toBeNull();
 });
 
+test("an_attach_that_finishes_after_choosing_another_item_leaves_that_items_details_coming", async () => {
+  await unlocked();
+  const panel = await select("Bot admin console");
+  const releaseFiles = shell.holdFiles();
+  fireEvent.click(within(panel).getByRole("button", { name: "Attach a file" }));
+  await screen.findByText(PAUSE);
+  // The person chooses the note while the attach works, and its details have no answer yet when the attach finishes.
+  const releaseItems = shell.holdGetItem();
+  const before = sent("get_item").length;
+  fireEvent.click(await screen.findByRole("button", { name: /^Note:\s*Rotation steps/ }));
+  await waitFor(() => {
+    expect(sent("get_item")).toHaveLength(before + 1);
+  });
+  act(() => {
+    releaseFiles();
+  });
+  await waitFor(() => {
+    expect(shell.fileOps).toHaveLength(1);
+  });
+  await waitFor(() => {
+    expect(screen.queryByText(PAUSE)).toBeNull();
+  });
+  act(() => {
+    releaseItems();
+  });
+  // The note's details still arrive: the attach's refresh of the item left behind does not stand in front of them.
+  const other = await screen.findByRole("complementary", { name: "Rotation steps" });
+  await waitFor(() => {
+    expect(within(other).getByText("Made-up note")).toBeTruthy();
+  });
+});
+
 test("adding_a_file_does_not_take_the_panel_of_an_item_the_person_moved_to", async () => {
   await unlocked();
   const release = shell.holdFiles();
@@ -1196,6 +1228,64 @@ test("a_file_action_that_began_in_an_earlier_query_neither_closes_nor_blames_the
   expect(toast()).toContain(OPENED_NOTE);
   expect(screen.getByRole("dialog", { name: SEARCH })).toBeTruthy();
   expect(within(second).getByRole<HTMLInputElement>("textbox", { name: SEARCH }).value).toBe("rotation");
+});
+
+test("an_earlier_result_pressed_while_the_next_word_loads_never_closes_the_next_search", async () => {
+  await unlocked();
+  fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+  const dialog = await screen.findByRole("dialog", { name: SEARCH });
+  const box = within(dialog).getByRole("textbox", { name: SEARCH });
+  fireEvent.change(box, { target: { value: "contract" } });
+  const row = (await within(dialog).findByRole("button", { name: /^File:\s*Client contract/ })).closest("li") as HTMLElement;
+  // The person types another word; its results have not come yet, so the earlier ones are still on screen, and one of them is pressed.
+  const releaseSearch = shell.holdSearch();
+  fireEvent.change(box, { target: { value: "rotation" } });
+  const releaseFiles = shell.holdFiles();
+  fireEvent.click(within(row).getByRole("button", { name: "Open" }));
+  await screen.findByText(PAUSE);
+  // The new word's results arrive, then the open finishes: the open belongs to the earlier results, not the ones on screen now.
+  await act(async () => {
+    releaseSearch();
+    await Promise.resolve();
+  });
+  await within(dialog).findByRole("button", { name: /^Note:\s*Rotation steps/ });
+  act(() => {
+    releaseFiles();
+  });
+  await waitFor(() => {
+    expect(shell.fileOps).toHaveLength(1);
+  });
+  await waitFor(() => {
+    expect(screen.queryByText(PAUSE)).toBeNull();
+  });
+  // The copy opened (said once), and the search the person is using is still there with its word and results.
+  expect(toast()).toContain(OPENED_NOTE);
+  expect(screen.getByRole("dialog", { name: SEARCH })).toBeTruthy();
+  expect(within(dialog).getByRole<HTMLInputElement>("textbox", { name: SEARCH }).value).toBe("rotation");
+  expect(within(dialog).getByRole("button", { name: /^Note:\s*Rotation steps/ })).toBeTruthy();
+});
+
+test("a_result_pressed_while_its_results_are_still_on_screen_steps_aside_when_it_worked", async () => {
+  await unlocked();
+  fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+  const dialog = await screen.findByRole("dialog", { name: SEARCH });
+  const box = within(dialog).getByRole("textbox", { name: SEARCH });
+  fireEvent.change(box, { target: { value: "contract" } });
+  const row = (await within(dialog).findByRole("button", { name: /^File:\s*Client contract/ })).closest("li") as HTMLElement;
+  // Another word is typed, but the open finishes while the results pressed are still the ones on screen: it worked where it was pressed.
+  const releaseSearch = shell.holdSearch();
+  fireEvent.change(box, { target: { value: "rotation" } });
+  fireEvent.click(within(row).getByRole("button", { name: "Open" }));
+  await waitFor(() => {
+    expect(shell.fileOps).toHaveLength(1);
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog", { name: SEARCH })).toBeNull();
+  });
+  expect(toast()).toContain(OPENED_NOTE);
+  act(() => {
+    releaseSearch();
+  });
 });
 
 test("a_file_item_with_several_files_acts_on_the_file_that_matched", async () => {

@@ -298,7 +298,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 }}
               />
             ) : state === "ready" ? (
-              <Ready>{data.readOnly ? null : <EmptyAdd session={data.session} />}</Ready>
+              <Ready>{data.readOnly ? null : <EmptyAdd session={data.session} folder={data.folder} />}</Ready>
             ) : state === "empty" ? (
               <div className="grp lempty">
                 <p className="le-t">
@@ -306,8 +306,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 </p>
                 {data.readOnly ? null : (
                   <>
-                    <p className="le-b">Add a login, a key or a note.</p>
-                    <EmptyAdd session={data.session} />
+                    <p className="le-b">Add a login, a key, a note or a file, or paste a whole .env.</p>
+                    <EmptyAdd session={data.session} folder={data.folder} />
                   </>
                 )}
               </div>

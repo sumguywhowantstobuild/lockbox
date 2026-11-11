@@ -94,15 +94,18 @@ trusted than Rust.
   answer with text built from what the page sent, so screens must never pass a secret to them; that text goes only back
   to the page.
 - **Paths.** Commands take IDs and values, never paths. Rust opens every file dialog, so a chosen path never comes from
-  the page. Paths go to the page in one case only: a restore that cannot finish (its notice, and the question before
-  dismissing it) shows your own folders so you can act on them. Stored links are opened from Rust, and only for `http` and `https`.
+  the page. Paths go to the page in two cases only: a restore that cannot finish (its notice, and the question before
+  dismissing it) shows your own folders so you can act on them, and a readable file Lockbox saved where you chose (the
+  recovery key's PDF, a saved `.env`) names the folder it went to. Stored links are opened from Rust, and only for `http`
+  and `https`.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
   without a persistent profile, so typed titles, usernames and searches are not kept on disk.
-- **What crosses to the page.** Vault keys, file keys and file contents never do. A stored password does only on
-  "Reveal" or while editing: copying runs entirely in Rust. The recovery key crosses once, when it is made, for display,
-  and the generator's output crosses as a new value. Search runs in Rust and returns only what is shown.
+- **What crosses to the page.** Vault keys, file keys and file contents never do. A stored password or key value does only
+  on "Reveal" or while editing: copying runs entirely in Rust. What the save shortcut copied crosses only on "Show" in its
+  save box (saving it runs in Rust). The recovery key crosses once, when it is made, for display, and the generator's
+  output crosses as a new value. Search runs in Rust and returns only what is shown.
 
 ## Locking
 
@@ -213,8 +216,8 @@ in the code with a `shortcut:` comment.
   stays. They hold no secrets. *Accepted:* the same reasoning as the restore
   journal (see "Someone who can already write inside your vault folder").
 - **Cloud folders.** A vault in a OneDrive, Google Drive or Dropbox folder is not refused. The shell asks first when one is
-  created or added, and reports it at each unlock for the screen to warn (Plan 4; the screens do not show that warning
-  yet). They are found by asking Windows about sync roots, then by each provider's known location,
+  created or added, and reports it at each unlock, where the screen warns. They are found by asking Windows about sync
+  roots, then by each provider's known location,
   so a provider that does neither goes unnoticed. Syncing can leave conflicting copies of vault files, and old versions on
   the provider's servers. *Accepted:* v1 does not support these folders, and the warning says so.
 - **A USB hard drive that reports as fixed is accepted** (the checks use what Windows reports). Unplugging it locks its
@@ -376,8 +379,8 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   and clears the block. *Accepted:* the user may have to replace the unchecked credential first.
 - **A header changed outside Lockbox must be accepted before any other header change.** While the "changed outside
   Lockbox" warning is pending, changing the password or regenerating the recovery key is refused ("accept the header
-  change first"), so the authentic `.bak` is never overwritten by the edited header before the user agrees. There is
-  no "decline" yet; the app's screen for it comes in Plan 4.
+  change first"), so the authentic `.bak` is never overwritten by the edited header before the user agrees. The
+  screen's way to decline is "Lock this vault": nothing is written, and the question comes back at the next unlock.
 - **Both at once.** If the header was changed and a slot is unverified, accepting writes each file with the accepted
   name and date and a fresh stamp but keeps that file's OWN version of the unverified slot (the stamp does not cover
   slots, so nothing unchecked is thrown away and no copy is preferred). The consent clears; the slot block stays, and
@@ -535,14 +538,19 @@ Lockbox defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: most of the real screens and
-what they do (the wording of warnings, recovery-key printing), the end-to-end tests on the running app, and the
-installer. The first screens (unlock, the item list, copying a password) are built, and the page clears what it shows at
-a lock; the shell's other commands exist with no button yet. Unlocking a vault can still write to it (header repair and cleanup); to look at a vault or a backup without writing,
-open it read-only.
+These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plans 4B and 4C
+(backing up, testing and restoring a backup, opening one read-only, changing the password, "forgot password", a new
+recovery key from Settings, more than one vault, emptying the trash, export, Quit's questions, progress and a stop for long
+jobs, saving many files at once), the end-to-end tests on the running app, and the installer. Until backup and
+"forgot password" have screens, don't keep the only copy of anything important in Lockbox. Plan 4A's screens are built
+(first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
+folders and the trash, `.env` in and out, the save shortcut, stored files, settings), and the page clears what it shows at
+a lock; the shell's other commands exist with no button yet. Unlocking a vault can still write to it (header repair and
+cleanup); to look at a vault or a backup without writing, open it read-only.
 
-**Limits that come with the screens** ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)). None of this exists
-yet; each moves up to the sections above as it's built.
+### Limits that come with the screens
+
+These come with Plan 4A's screens, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
 
 - **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
   that value (the save box's tick box, and the same tick box in the paste panel for a `.env` you pasted): after the key is

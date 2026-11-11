@@ -2,8 +2,9 @@
    Every rule here is flat, one selector and plain declarations, because `tokens.contrast.test.ts` reads this file and
    measures the pairs the screens use. A change here is a change to what that test measures.
 
-   A screen's root carries a mode class (`mode-light` or `mode-dark`, from Windows' own setting) and a vault class
-   (`v-work`, `v-home` or `v-old`, from `vaultLook`). The mode sets the greys; the vault sets the accent. */
+   A screen's root carries a mode class (`mode-light` or `mode-dark`, from the Theme in Settings, which can follow
+   Windows' own setting) and a vault class (`v-work`, `v-home` or `v-old`, from `vaultLook`). The mode sets the greys;
+   the vault sets the accent. */
 
 .app {
   /* The five tile colours of the folders (red, green and blue). */

@@ -1,6 +1,8 @@
 //! Direct Windows and WebView2 calls: WebView2's file-drop setting, the hidden window that hears Windows lock,
 //! sleep, sign-out, shutdown and drive removal ([`spawn`]), and the real [`Os`]: volumes, known folders, file
-//! dialogs and opening links. Every `unsafe` block of the crate is here, each with a `// SAFETY:` comment.
+//! dialogs and opening links, the clipboard, the save shortcut, printing and the printer list, capture protection,
+//! the window, idle time and starting with Windows. Every `unsafe` block of the crate is here, each with a
+//! `// SAFETY:` comment.
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, OnceCell};
@@ -100,10 +102,10 @@ use windows_sys::core::PWSTR;
 
 use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
-    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, Hotkey, HotkeyTaken,
-    IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher, MainWindow, Os,
-    OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, Shortcut,
-    StartupEntry, SystemClock, ThreadTimer, Volumes,
+    CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env,
+    Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher,
+    MainWindow, Os, OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed,
+    PrintSteps, Shortcut, StartupEntry, SystemClock, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
 use crate::startup::{self, StartupState};
@@ -656,7 +658,7 @@ impl ClipboardCalls for WinClipboard {
         }
     }
 
-    fn copy_text(&self) -> ShellResult<Option<Zeroizing<String>>> {
+    fn copy_text(&self, max_block: usize) -> ShellResult<Option<Zeroizing<String>>> {
         #[cfg(test)]
         clipboard_step("read text");
         if !clipboard_win::raw::is_format_avail(CF_UNICODETEXT) {
@@ -669,6 +671,11 @@ impl ClipboardCalls for WinClipboard {
         }
         // SAFETY: as in `text_size`.
         let size = unsafe { GlobalSize(block) };
+        // The block read is the one measured here: `text_size` looked at a handle that a program opening with no owner
+        // window could have replaced since.
+        if size > max_block {
+            return Err(CLIPBOARD_TOO_LARGE);
+        }
         // SAFETY: `block` is the clipboard's global block, valid as described in `text_size`; locked here and unlocked
         // below, before anything else.
         let at = unsafe { GlobalLock(block) }.cast::<u16>().cast_const();
@@ -2413,7 +2420,6 @@ fn test_refuses(registration: Registration) -> bool {
     })
 }
 
-/// Test-only: waits at the hook's gate. It runs inside the window procedure, so it never panics.
 /// `IsReparseTagNameSurrogate`: the reparse tag's bit for "this names another file or folder".
 const NAME_SURROGATE: u32 = 0x2000_0000;
 
@@ -2455,6 +2461,7 @@ pub fn is_redirect(path: &Path) -> io::Result<bool> {
     Ok(redirects(info.FileAttributes, info.ReparseTag))
 }
 
+/// Test-only: waits at the hook's gate. It runs inside the window procedure, so it never panics.
 #[cfg(test)]
 fn wait_at_test_gate() {
     let _ = TEST_HOOK.try_with(|hook| {
@@ -3690,8 +3697,8 @@ mod tests {
         fn text_size(&self) -> ShellResult<Option<usize>> {
             WinClipboard.text_size()
         }
-        fn copy_text(&self) -> ShellResult<Option<Zeroizing<String>>> {
-            WinClipboard.copy_text()
+        fn copy_text(&self, max_block: usize) -> ShellResult<Option<Zeroizing<String>>> {
+            WinClipboard.copy_text(max_block)
         }
     }
 

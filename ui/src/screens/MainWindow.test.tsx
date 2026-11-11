@@ -360,7 +360,7 @@ test("an_empty_vault_says_so", async () => {
   // Add is right there too (Task 12): the three kinds that can be made, and nothing from a later task.
   const list = screen.getByRole("main").querySelector<HTMLElement>(".lscroll");
   expect(list).not.toBeNull();
-  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note"]);
+  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
   await expectNoAxe(container);
 });
 

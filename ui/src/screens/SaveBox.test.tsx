@@ -273,6 +273,26 @@ test("value_hidden_until_reveal", async () => {
   expectNoValue();
 });
 
+test("the_shown_value_cannot_be_copied_or_dragged_natively", async () => {
+  await startUnlocked();
+  await press({ text: COPIED });
+  const panel = await boxPanel();
+  fireEvent.click(within(panel).getByRole("button", { name: "Show" }));
+  const value = await within(panel).findByText(COPIED);
+  // As every other secret shown on the page: a native copy, cut or drag would put a second copy on the clipboard without the
+  // marks that keep it out of Windows' clipboard history, its timer and its clear at a lock.
+  const range = document.createRange();
+  range.selectNodeContents(value);
+  document.getSelection()?.removeAllRanges();
+  document.getSelection()?.addRange(range);
+  expect(fireEvent.copy(document.body)).toBe(false);
+  expect(fireEvent.cut(document.body)).toBe(false);
+  document.getSelection()?.removeAllRanges();
+  expect(fireEvent.dragStart(value)).toBe(false);
+  // Text beside it stays the person's to copy.
+  expect(fireEvent.copy(within(panel).getByText("Copied value"))).toBe(true);
+});
+
 test("stale_reveal_answer_dropped", async () => {
   await startUnlocked();
   await press({ text: COPIED });

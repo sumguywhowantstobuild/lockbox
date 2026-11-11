@@ -42,7 +42,8 @@ export type PageNotice =
   | { kind: "open_cleanup"; removed: number; still_open: number }
   | ({ kind: "restore" } & RestoreNotice)
   | { kind: "first_close"; explain: boolean }
-  /** Windows said the save shortcut (Ctrl+Shift+L) belongs to another app: it is off until Lockbox is started again. */
+  /** Windows said the save shortcut (Ctrl+Shift+L unless changed in Settings) belongs to another app: it is off until Lockbox is
+   * started again or another shortcut is chosen in Settings. */
   | { kind: "shortcut_taken" }
   /** The shortcut could not be turned on for a reason that is not another app holding it. */
   | { kind: "shortcut_not_set" };

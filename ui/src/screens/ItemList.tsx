@@ -32,6 +32,16 @@ function detailOf(item: ItemSummary): string {
   return "";
 }
 
+/**
+ * A row's detail when the list is in the order things changed: when, and for a login its username before it, so two logins of one
+ * name still say which account each is (the row's Copy puts that account's password on the clipboard).
+ */
+function changedDetail(item: ItemSummary, now: Date): string {
+  const when = agoWords(item.modified_at, now);
+  const username = item.kind === "login" ? item.username : null;
+  return username === null || username === "" ? when : `${username} · ${when}`;
+}
+
 // One comparer for every name, made once: a list of thousands is sorted with it on each change.
 const NAMES = new Intl.Collator(undefined, { sensitivity: "base" });
 
@@ -133,7 +143,7 @@ export function ItemList({
     <Row
       key={item.id}
       item={item}
-      detail={sort === "changed" ? agoWords(item.modified_at, now) : detailOf(item)}
+      detail={sort === "changed" ? changedDetail(item, now) : detailOf(item)}
       folder={item.collection === null ? undefined : folderNames?.get(item.collection)}
       open={item.id === openId}
       onOpen={onOpen}

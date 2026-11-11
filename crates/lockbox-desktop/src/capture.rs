@@ -15,6 +15,7 @@ use lockbox_core::env_file;
 use serde::Serialize;
 use zeroize::Zeroizing;
 
+use crate::commands::items::MAX_KEY_VALUE;
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
 use crate::os::CLIPBOARD_TOO_LARGE;
@@ -59,19 +60,27 @@ pub(crate) struct Read {
 impl Read {
     /// What a press makes of the clipboard's answer: a text with something in it is a value; a blank text, no text
     /// (a picture), a clipboard another program kept busy and any other failure are `empty`; a text over the item limit is
-    /// `too_large`. A value is looked at once for `.env` keys: only their count is kept.
+    /// `too_large`, and so is one whose trimmed text is over a key's limit unless it reads as a `.env` (it could only ever
+    /// be refused as a key; a `.env` goes to the paste). A value is looked at once for `.env` keys: only their count is kept.
     pub(crate) fn of(read: ShellResult<Option<Zeroizing<String>>>) -> Read {
+        const TOO_LARGE: Read = Read {
+            text: None,
+            state: CaptureState::TooLarge,
+            env_keys: None,
+        };
         match read {
-            Ok(Some(text)) if !text.trim().is_empty() => Read {
-                env_keys: env_keys(&text),
-                text: Some(text),
-                state: CaptureState::Value,
-            },
-            Err(error) if error == CLIPBOARD_TOO_LARGE => Read {
-                text: None,
-                state: CaptureState::TooLarge,
-                env_keys: None,
-            },
+            Ok(Some(text)) if !text.trim().is_empty() => {
+                let env_keys = env_keys(&text);
+                if env_keys.is_none() && text.trim().len() > MAX_KEY_VALUE {
+                    return TOO_LARGE;
+                }
+                Read {
+                    env_keys,
+                    text: Some(text),
+                    state: CaptureState::Value,
+                }
+            }
+            Err(error) if error == CLIPBOARD_TOO_LARGE => TOO_LARGE,
             _ => Read {
                 text: None,
                 state: CaptureState::Empty,
@@ -336,6 +345,7 @@ mod tests {
 
     use super::*;
     use crate::commands::capture::{OnClash, SaveWhat};
+
     use crate::os::{Clock, OsSignal};
     use crate::session::LockReason;
     use crate::testing::TestShell;
@@ -486,6 +496,34 @@ mod tests {
             "the box still opens, to take a typed value"
         );
         assert_eq!(ts.shell.capture.alive_texts(), 0, "a text was kept");
+    }
+
+    /// A text over a key's limit could never be saved as a key, so it opens as `too_large` (8c: a typed value instead), not as
+    /// a value every Save would refuse; nothing of it is kept. A `.env` of that size is still a value, for the paste.
+    #[test]
+    fn a_text_over_a_keys_limit_opens_too_large_unless_it_is_a_env() {
+        let ts = TestShell::new();
+        let trimmed_over = format!("  {}  ", "a".repeat(MAX_KEY_VALUE + 1));
+        copy_and_press(&ts, &trimmed_over);
+        let id = last_id(&ts);
+        assert_eq!(
+            captures(&ts),
+            [json!({ "capture_id": id, "state": "too_large", "changed": false, "env_keys": null })]
+        );
+        assert_eq!(ts.shell.capture.alive_texts(), 0, "a text was kept");
+
+        // At the limit once trimmed: a value.
+        copy_and_press(&ts, &format!(" {} ", "a".repeat(MAX_KEY_VALUE)));
+        assert_eq!(captures(&ts).last().unwrap()["state"], "value");
+
+        let env: String = (0..800)
+            .map(|n| format!("KEY_{n}=made-up-value-{n:020}\n"))
+            .collect();
+        assert!(env.len() > MAX_KEY_VALUE);
+        copy_and_press(&ts, &env);
+        let last = captures(&ts).last().unwrap().clone();
+        assert_eq!(last["state"], "value");
+        assert_eq!(last["env_keys"], 800);
     }
 
     /// Something that is not text (a picture), a blank text, an empty clipboard and a clipboard another program holds all

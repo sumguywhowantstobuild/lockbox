@@ -350,6 +350,11 @@ const listeners = new Set<() => void>();
 let started: Promise<void> | undefined;
 /** Which search is the latest asked (and 0 more each time the search closes): an older answer is dropped. */
 let searchRun = 0;
+/**
+ * Which search's results are on screen: the run of the last answer shown (or of the blank word or opening that cleared them). Until a newer
+ * word's answer comes, the results of the one before stay on screen, and an action pressed on one of them belongs to that one.
+ */
+let searchShown = 0;
 /** Which opening of the search is on screen: it moves on each time the search opens or closes, so a file action that began in one is known not to belong to the next. */
 let searchOpening = 0;
 
@@ -385,6 +390,15 @@ function update(session: number, change: (entry: SessionData) => SessionData): v
 /** Whether the session is still open in the generation the caller read it in. */
 function stillOpen(session: number, generation: number): boolean {
   return sessionOf(session)?.generation === generation;
+}
+
+/**
+ * A command asked in `generation` was refused as locked: the news of a lock the page may have missed, so the vault goes. Only
+ * while the page still holds that generation: unlocking again keeps the session's number with the next generation, and a late
+ * refusal of a command asked before must not drop the vault the person has now.
+ */
+function dropIfStillOpen(session: number, generation: number): void {
+  if (stillOpen(session, generation)) dropSession(session);
 }
 
 /**
@@ -457,7 +471,9 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
   try {
     answer = await api.unlockVault(vaultId, password);
   } catch (error) {
-    if (error instanceof api.StaleAnswer) return "stale";
+    // A lock of every vault, or the window's close, that lands during the unlock is refused as locked: no session exists yet
+    // for a lock event to clear, and it is no more an error to show than a stale answer (Review Focus 1).
+    if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
     throw error;
   }
   const { info } = answer.data;
@@ -631,7 +647,7 @@ export async function makeNewKey(session: number): Promise<void> {
       recovery: { phase: "show", key: answer.data, unfinished: true, missed: false },
     }));
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
     update(session, (current) => ({ ...current, recovery: { phase: "failed", error } }));
   }
@@ -686,7 +702,7 @@ export async function confirmRecovery(session: number): Promise<void> {
   try {
     await api.recoveryConfirmed({ session, generation });
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
     throw error;
   }
@@ -717,7 +733,7 @@ async function printCommand<T>(session: number, run: (vault: api.SessionRef) => 
     // A stale answer says the bridge has seen a later generation than this call began in, as a `locked` refusal does: a session the
     // page still holds at the generation the call started with is dropped; one that was opened again since is left alone.
     const missedLock = refusedAsLocked(error) || (error instanceof api.StaleAnswer && stillOpen(session, generation));
-    if (missedLock) dropSession(session);
+    if (missedLock) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || missedLock || !stillOpen(session, generation)) return "stale";
     throw error;
   }
@@ -852,7 +868,7 @@ async function loadItems(record: SessionData, options: { quiet?: boolean } = {})
   } catch (error) {
     // A lock that overtook the question: the bridge says so, and so does the shell ("locked"). If the page never heard
     // the lock, the refusal is the news of it: the vault goes.
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || refusedAsLocked(error) || !stillOpen(session, generation)) return "stale";
     if (!latest() || options.quiet === true) return "opened";
     update(session, (entry) => ({ ...entry, loadError: error }));
@@ -865,10 +881,11 @@ async function loadItems(record: SessionData, options: { quiet?: boolean } = {})
  * locked everything drops what the page held when Lock all was pressed. A refusal is shown as a message.
  */
 export async function lockEverything(): Promise<void> {
-  const held = state.sessions.map((entry) => entry.session);
+  // With their generations: a vault unlocked again before the answer came is not one this Lock all locked.
+  const held = state.sessions.map((entry) => ({ session: entry.session, generation: entry.generation }));
   try {
     await api.lockAll();
-    for (const session of held) dropSession(session);
+    for (const { session, generation } of held) dropIfStillOpen(session, generation);
   } catch (error) {
     set({ ...state, toast: { kind: "failed", session: null, error } });
   }
@@ -893,7 +910,7 @@ export async function acceptDetails(session: number): Promise<void> {
   try {
     await api.acceptHeader({ session, generation });
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
     updateAsks(session, (asks) => ({ ...asks, answering: false, detailsError: error }));
     return;
@@ -1140,7 +1157,7 @@ export async function selectItem(session: number, id: string | null, opened: Ope
       update(session, (current) => ({ ...current, openItem: { id, detail: answer.data, error: null, saved, focusEdit } }));
     }
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !shows()) return;
     // What was shown stays when only the second read failed.
     update(session, (current) => ({
@@ -1198,7 +1215,7 @@ export async function revealForEdit(session: number, id: string, field: "passwor
     const answer = await api.revealValue({ session, generation }, id, field);
     return current() ? { value: answer.data } : "gone";
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !current()) return "gone";
     return { failed: error };
   }
@@ -1393,7 +1410,7 @@ async function saveThen(
     if (sessionOf(session)?.tool === starter) void selectItem(session, id, opened);
     return "saved";
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     return { failed: error };
   }
@@ -1470,7 +1487,7 @@ async function copyThenTell(
     });
     return "done";
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     return { failed: error };
   }
@@ -1526,7 +1543,7 @@ export async function revealValue(session: number, id: string, field: api.Reveal
     // One value on screen at a time: this one takes the place of any other the item's details were showing.
     update(session, (record) => ({ ...record, reveals: { [revealKey(id, field)]: answer.data } }));
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !current()) return;
     set({ ...state, toast: { kind: "failed", session, error } });
   }
@@ -1546,7 +1563,7 @@ async function openAndTell(session: number, id: string, index: number): Promise<
     await api.openUrl({ session, generation }, id, index);
     return stillOpen(session, generation) ? "done" : "stale";
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     return { failed: error };
   }
@@ -1581,7 +1598,7 @@ async function change<T>(session: number, run: (vault: api.SessionRef) => Promis
     if (read === "stale" || !stillOpen(session, generation)) return "stale";
     return { done };
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     // A refusal can come after some of the change was written (a folder's items go one at a time), or after the write landed.
     // The list is read again so the page agrees with the vault, a panel that no longer belongs closes with its revealed value,
@@ -1628,7 +1645,9 @@ function nextDetailRun(session: number): number {
 /** Reads the open item's details again after a change to it, in place: what the panel shows stays, and Reveal's value too. */
 async function reloadOpen(session: number, id: string): Promise<void> {
   const entry = sessionOf(session);
-  if (entry === undefined) return;
+  // An item the person has moved away from is read again when they come back to it. Counting a read for it here would make the
+  // details of the item now open, still on their way, look older than this one, and they would never show.
+  if (entry === undefined || entry.openItem?.id !== id) return;
   const { generation } = entry;
   const run = nextDetailRun(session);
   try {
@@ -1640,7 +1659,7 @@ async function reloadOpen(session: number, id: string): Promise<void> {
     );
   } catch (error) {
     // What the panel shows stays; only a lock is news.
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
   }
 }
 
@@ -1748,20 +1767,23 @@ function noted(session: number, text: string): void {
 }
 
 /**
- * Where a file action began: the item panel it was pressed in, the search it was pressed in (the opening, and the query typed at that moment:
- * a result of a newer query is not the one that was pressed), or the window (Add).
+ * Where a file action began: the item panel it was pressed in, the search it was pressed in (the opening, the query whose results were on
+ * screen, and the word typed at that moment: a newer word typed, or a newer word's results shown, is not where it was pressed), or the
+ * window (Add).
  */
-type FileOrigin = { panel: string } | { search: number; query: number } | "anywhere";
+type FileOrigin = { panel: string } | { search: number; shown: number; typed: number } | "anywhere";
 
 /** The search as it is now, for an action that begins in it. */
 function searchOrigin(): FileOrigin {
-  return { search: searchOpening, query: searchRun };
+  return { search: searchOpening, shown: searchShown, typed: searchRun };
 }
 
 /** Whether the person is still where the action began. */
 function stillWhere(session: number, origin: FileOrigin): boolean {
   if (origin === "anywhere") return sessionOf(session) !== undefined;
-  if ("search" in origin) return state.search !== null && searchOpening === origin.search && searchRun === origin.query;
+  if ("search" in origin) {
+    return state.search !== null && searchOpening === origin.search && searchShown === origin.shown && searchRun === origin.typed;
+  }
   return sessionOf(session)?.openItem?.id === origin.panel;
 }
 
@@ -1825,7 +1847,7 @@ async function runFile<T>(
       const answer = await run({ session, generation });
       return stillOpen(session, generation) ? { outcome: answer.data } : "stale";
     } catch (error) {
-      if (refusedAsLocked(error)) dropSession(session);
+      if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
       if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
       refuseFile(session, origin, job, error);
       return "refused";
@@ -2087,7 +2109,7 @@ export async function readFolder(session: number, id: string): Promise<FolderRea
     const answer = await api.getItem({ session, generation }, id);
     return stillOpen(session, generation) ? { revision: answer.data.revision, notes: answer.data.notes } : "stale";
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     return { failed: error };
   }
@@ -2122,7 +2144,7 @@ export async function readEnv(session: number, text: string): Promise<EnvRead> {
     const answer = await api.envRead({ session, generation }, text);
     return stillOpen(session, generation) ? { rows: answer.data } : "stale";
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     return { failed: error };
   }
@@ -2137,7 +2159,7 @@ export function releaseEnv(session: number, generation: number, token: string, i
   if (!stillOpen(session, generation)) return;
   const choices = indexes.map((index): api.EnvChoice => ({ index, action: "leave_out" }));
   void api.envSave({ session, generation }, token, choices, null, false).then(undefined, (error: unknown) => {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
   });
 }
 
@@ -2451,7 +2473,7 @@ async function chooseCapture(session: number, generation: number, id: string): P
     return true;
   } catch (error) {
     if (refusedAsLocked(error)) {
-      dropSession(session);
+      dropIfStillOpen(session, generation);
       return false;
     }
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return false;
@@ -2553,7 +2575,7 @@ export async function saveCapture(session: number, save: api.CaptureSave, where:
     sayAfterSave(session, `${name} saved in ${where}`, clipboard);
     return "saved";
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     if (refusedWith(error, "not_found") && !(await copyStillThere(save.captureId))) return "gone";
     return { failed: error };
@@ -2589,7 +2611,7 @@ export async function captureAsEnv(session: number, id: string, folder: string):
     openTool(session, { kind: "paste_env", opening: pasteOpenings, rows, folder });
     return "opened";
   } catch (error) {
-    if (refusedAsLocked(error)) dropSession(session);
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
     if (refusedWith(error, "not_found")) {
       if (state.capture?.id === id) endCapture(false);
@@ -2605,6 +2627,7 @@ export async function captureAsEnv(session: number, id: string, folder: string):
 export function openSearch(): void {
   if (state.search !== null || state.sessions.length === 0) return;
   searchRun += 1;
+  searchShown = searchRun;
   searchOpening += 1;
   set({ ...state, search: { query: "", answered: null, hits: [], busy: [], error: null, asking: null } });
 }
@@ -2612,6 +2635,7 @@ export function openSearch(): void {
 /** Closes the search and forgets what was typed and found; an answer still on its way is dropped. */
 export function closeSearch(): void {
   searchRun += 1;
+  searchShown = searchRun;
   searchOpening += 1;
   if (state.search !== null) set({ ...state, search: null });
 }
@@ -2626,6 +2650,7 @@ export async function setSearchQuery(query: string): Promise<void> {
   searchRun += 1;
   const run = searchRun;
   const blank = query.trim() === "";
+  if (blank) searchShown = run;
   set({ ...state, search: { ...current, query, error: null, ...(blank ? { answered: null, hits: [], busy: [] } : {}) } });
   if (blank) return;
   try {
@@ -2636,9 +2661,11 @@ export async function setSearchQuery(query: string): Promise<void> {
       .filter((found) => stillOpen(found.session, found.generation))
       .map((found) => ({ session: found.session, generation: found.generation, items: found.data }));
     const busy = answer.busy.filter((session) => sessionOf(session) !== undefined);
+    searchShown = run;
     set({ ...state, search: { ...state.search, answered: query, hits, busy, error: null } });
   } catch (error) {
     if (run !== searchRun || state.search === null) return;
+    searchShown = run;
     set({ ...state, search: { ...state.search, answered: null, hits: [], busy: [], error } });
   }
 }
@@ -2661,7 +2688,11 @@ export function showResult(session: number, id: string): void {
  * with the message about the copy and its clear time. A refusal is said in the search, which stays.
  */
 export async function copyFromSearch(session: number, id: string, field: CopyableField): Promise<void> {
+  // As the file actions do: an answer that comes after the person left this search (closed it, typed another word, opened a
+  // form) still tells the copy, but neither opens the old result over what is on screen now nor says a refusal in a newer search.
+  const origin = searchOrigin();
   const done = await copyAndTell(session, id, field);
+  if (!stillWhere(session, origin)) return;
   if (done === "done") showResult(session, id);
   else if (typeof done === "object") sayInSearch(done.failed);
 }
@@ -2764,6 +2795,7 @@ export function resetStoreForTests(): void {
   converting = null;
   confirmingClose = false;
   searchRun = 0;
+  searchShown = 0;
   searchOpening = 0;
   retryingOpen = false;
   settingsLine = Promise.resolve();

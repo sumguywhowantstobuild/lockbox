@@ -188,8 +188,10 @@ pub trait ClipboardCalls: Send + Sync {
     /// some (or may) that could not be looked at.
     fn text_size(&self) -> ShellResult<Option<usize>>;
     /// Copies the text out of the clipboard, up to its first NUL. Called only after [`text_size`](Self::text_size)
-    /// found the block small enough. Whatever buffer holds the text on the way is wiped; `Ok(None)` as for `text_size`.
-    fn copy_text(&self) -> ShellResult<Option<Zeroizing<String>>>;
+    /// found the block small enough; the block copied is measured again first, and one over `max_block` bytes is
+    /// [`CLIPBOARD_TOO_LARGE`] with nothing copied (a program opening with no owner window can replace the text between
+    /// the two steps). Whatever buffer holds the text on the way is wiped; `Ok(None)` as for `text_size`.
+    fn copy_text(&self, max_block: usize) -> ShellResult<Option<Zeroizing<String>>>;
 }
 
 /// [`ClipboardBackend`] from single [`ClipboardCalls`] steps, waiting between tries on `clock`.
@@ -318,7 +320,7 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
         if size > MAX_CLIPBOARD_BLOCK {
             return Err(CLIPBOARD_TOO_LARGE);
         }
-        let Some(text) = self.calls.copy_text()? else {
+        let Some(text) = self.calls.copy_text(MAX_CLIPBOARD_BLOCK)? else {
             return Ok(None);
         };
         // Fewer UTF-16 units can still be more UTF-8 bytes; the copy is wiped as it goes.
@@ -353,8 +355,11 @@ impl<C: ClipboardCalls> ClipboardSteps<C> {
         if size > MAX_CLIPBOARD_BLOCK {
             return Ok(false);
         }
-        let Some(text) = self.calls.copy_text()? else {
-            return Ok(false);
+        let text = match self.calls.copy_text(MAX_CLIPBOARD_BLOCK) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Ok(false),
+            Err(error) if error == CLIPBOARD_TOO_LARGE => return Ok(false),
+            Err(error) => return Err(error),
         };
         if !matches(&text) {
             return Ok(false);
@@ -1281,6 +1286,37 @@ mod tests {
         assert_eq!(
             fake.take_events(),
             ["open", "text size", "read text", "close"]
+        );
+    }
+
+    /// A program that opens the clipboard with no owner window gets in during Lockbox's opening (Windows lets it), and
+    /// can put a bigger text there between the look at the size and the copy. The copy measures the block it reads, so
+    /// that text is refused before any of it is copied, by a read and by a clear alike.
+    #[test]
+    fn a_text_that_grew_after_its_size_was_read_is_never_copied() {
+        let (fake, steps) = fake_steps();
+        let big = "a".repeat(MAX_ITEM_JSON + 1);
+        assert!(fake.user_copy("small"));
+        fake.replace_after_size(&big);
+        assert_eq!(steps.read_text(None), Err(CLIPBOARD_TOO_LARGE));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "text too large", "close"],
+            "the grown text was copied"
+        );
+
+        assert!(fake.user_copy("small"));
+        fake.replace_after_size(&big);
+        assert_eq!(steps.clear_if_text("small", None), Ok(false));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "text too large", "close"],
+            "the grown text was copied"
+        );
+        assert_eq!(
+            fake.text().as_deref(),
+            Some(big.as_str()),
+            "a text that was not ours was cleared"
         );
     }
 

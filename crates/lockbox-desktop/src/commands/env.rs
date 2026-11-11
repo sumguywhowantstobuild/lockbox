@@ -13,15 +13,15 @@
 //! `ShellError`.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
 use lockbox_core::Vault;
 use lockbox_core::blob::{CancelToken, OutputJournal};
 use lockbox_core::env_file::{self, EnvEntry};
-use lockbox_core::fsio::{hidden_temp_path, publish_readable};
+use lockbox_core::fsio::{clear_hidden, create_hidden_file, hidden_temp_path, publish_readable};
 use lockbox_core::ids::ItemId;
 use lockbox_core::item::{Item, ItemKind};
 use serde::{Deserialize, Serialize};
@@ -475,10 +475,13 @@ fn save_rows(
     Ok(written)
 }
 
-/// Makes `bytes` the new file `path`, which must not exist.
-fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)
+/// Makes `bytes` the new hidden file `path`, which must not exist (spec 7.2: a crash while it is written leaves nothing in
+/// plain sight). The attribute is cleared just before the move, since Windows keeps it on the file moved into place, as the
+/// engine's own export does; a crash in the instant between the two leaves the temp visible until the next launch sweeps it.
+fn write_new(path: &Path, bytes: &[u8]) -> lockbox_core::Result<()> {
+    let mut file = create_hidden_file(path)?;
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 impl Shell {
@@ -727,6 +730,10 @@ impl Shell {
             self.discard_env_temp(&temp);
             return Err(ShellError::Locked);
         }
+        if let Err(error) = clear_hidden(&temp) {
+            self.discard_env_temp(&temp);
+            return Err(error.into());
+        }
         let published = journal.finish(publish_readable(&temp, dest, |attempt| {
             journal.publish(attempt)
         }));
@@ -874,7 +881,7 @@ mod tests {
     use super::*;
     use crate::error::Confirm;
     use crate::session::{Location, LockReason, OpenStep, Opened, SessionState};
-    use crate::testing::{TEST_PASSWORD, TestShell, heavy};
+    use crate::testing::{TEST_PASSWORD, TestShell, heavy, is_hidden};
 
     /// A made-up value that must never show up in an answer, an error or a `Debug`.
     const SECRET: &str = "S3NT1NEL-value";
@@ -1754,6 +1761,34 @@ mod tests {
         let answer = ts.shell.env_save_file(s, g, &prod).unwrap();
         assert!(matches!(answer.data, EnvOut::Saved(Outcome::Dismissed)));
         assert_eq!(fs::read(&dest).unwrap(), OLD);
+        nothing_but(&ts, &docs, &[".env"]);
+    }
+
+    /// The temp is written hidden beside the destination (spec 7.2's "journaled hidden temp file", as the recovery key's PDF
+    /// is), so a crash while it is written leaves no copy of the keys in plain sight until the next launch sweeps it; the
+    /// file moved into place is not hidden.
+    #[test]
+    fn save_file_writes_a_hidden_temp_and_publishes_a_visible_file() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let prod = folder(&ts, s, g, "Prod");
+        key(&ts, s, g, "KEY", "v", Some(&prod));
+        let (docs, dest) = docs_with_old_file(&ts);
+
+        let temps = Rc::new(RefCell::new(Vec::new()));
+        let (seen, look_in) = (Rc::clone(&temps), docs.clone());
+        at("file_written", move || {
+            for entry in fs::read_dir(&look_in).unwrap() {
+                let path = entry.unwrap().path();
+                if path.to_string_lossy().ends_with(".lockbox-partial") {
+                    seen.borrow_mut().push(is_hidden(Some(&path)));
+                }
+            }
+        });
+        ts.dialogs.answer(Some(dest.clone()));
+        saved(ts.shell.env_save_file(s, g, &prod));
+        assert_eq!(*temps.borrow(), [true], "the temp was not hidden");
+        assert!(!is_hidden(Some(&dest)), "the published file is hidden");
         nothing_but(&ts, &docs, &[".env"]);
     }
 
