@@ -3,13 +3,14 @@
 //! (`Sessions::lock_all`). A pasted `.env`'s values wait here too, tied to their vault, so a lock of that one vault
 //! drops them as well (`Pending::drop_env_pastes`, from a lock hook).
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lockbox_core::env_file::EnvEntry;
-use lockbox_core::ids::VaultId;
+use lockbox_core::ids::{ItemId, VaultId};
 use lockbox_core::{UnlockReport, Vault};
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
@@ -66,6 +67,10 @@ impl fmt::Debug for Token {
     }
 }
 
+/// The names a paste's answer showed Keep both: by place (a live folder, or none), each clashing row's number and the
+/// name it would be saved under there. The user's own names: never in an error or a log (R5).
+pub type ShownNames = HashMap<Option<ItemId>, HashMap<u32, String>>;
+
 /// What waits in [`Pending`] for the user's answer. Each task adds the variants it needs; a typed password is kept
 /// as a `Zeroizing<String>`. No `Debug`: it holds passwords, names and paths (R5).
 pub enum PendingChoice {
@@ -101,13 +106,19 @@ pub enum PendingChoice {
         job: ReadableJob,
         dest: PathBuf,
     },
-    /// `env_read`'s keys, waiting for `env_save`: the session and generation that read the paste (a save from any other
-    /// is refused), and each key read, in the paste's order, its value wiped when dropped. Dropped by the lock of that
-    /// one vault too ([`Pending::drop_env_pastes`]), not only by Lock all.
+    /// `env_read`'s keys (or `capture_env`'s), waiting for `env_save`: the session and generation that read the paste (a
+    /// save from any other is refused), and each key read, in the paste's order, its value wiped when dropped. Dropped
+    /// by the lock of that one vault too ([`Pending::drop_env_pastes`]), not only by Lock all.
     EnvPaste {
         session: SessionId,
         generation: u64,
         entries: Vec<EnvEntry>,
+        /// The text the keys were read from, wiped when dropped: what the clipboard is compared with when the save is
+        /// asked to clear it afterwards.
+        source: Zeroizing<String>,
+        /// The name Keep both was shown for each clashing row in each place, so the save can tell that the place has
+        /// changed since.
+        shown: ShownNames,
     },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
@@ -328,6 +339,8 @@ mod tests {
                 name: "API_KEY".to_owned(),
                 value: Zeroizing::new("made-up-value".to_owned()),
             }],
+            source: Zeroizing::new("API_KEY=made-up-value".to_owned()),
+            shown: ShownNames::new(),
         }
     }
 

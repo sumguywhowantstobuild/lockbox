@@ -6,6 +6,7 @@ import {
   callMany,
   callPlain,
   open,
+  type CaptureEvent,
   type Opened,
   type Outcome,
   type PageNotice,
@@ -14,8 +15,8 @@ import {
   type Tagged,
 } from "./bridge";
 
-export { onLocked, onNotice, StaleAnswer } from "./bridge";
-export type { Confirm, Opened, Outcome, PageNotice, SessionRef, Tagged } from "./bridge";
+export { onCapture, onLocked, onNotice, StaleAnswer } from "./bridge";
+export type { CaptureEvent, Confirm, Opened, Outcome, PageNotice, SessionRef, Tagged } from "./bridge";
 
 /** One vault on the list: no path, ever. `name` is null when its details cannot be read. */
 export interface VaultEntry {
@@ -581,20 +582,42 @@ export function envRead(vault: SessionRef, text: string): Promise<Tagged<EnvRows
 }
 
 /**
- * Saves the rows as key items in `collection` (a folder's id, or `null` for none) and answers how many keys were written.
- * `choices` names every row once. The token is used up whatever the answer. Refused, with nothing written, with
- * `not_found` when the token is gone (used, older than five minutes, or dropped by a lock), `invalid_input`
- * (`what: "env rows"`) when the choices do not fit the folder as it is now, and (`what: "env twice"`) when Replace finds
- * the name twice in the folder. Every row `leave_out` writes nothing and answers 0: that is how Cancel lets go of the
- * values at once.
+ * What became of the clipboard when a save was asked to clear it: `cleared` (it still held the copied text, and now holds nothing),
+ * `not_ours` (it no longer holds that text, or holds none: left alone), `failed` (the clear errored, busy or refused), `not_asked`
+ * (the clear was not asked for, or nothing was written, or what was saved did not come from the clipboard).
+ */
+export type ClipboardAfter = "cleared" | "not_ours" | "failed" | "not_asked";
+
+/** What a `.env` paste's save came to: how many keys were written, and what became of the clipboard. */
+export interface EnvSaved {
+  saved: number;
+  clipboard: ClipboardAfter;
+}
+
+/**
+ * Saves the rows as key items in `collection` (a folder's id, or `null` for none) and answers how many keys were written and what
+ * became of the clipboard. `choices` names every row once. The token is used up whatever the answer. With `clearClipboard`, and at
+ * least one key written, the clipboard is cleared if it still holds the pasted text (line endings read alike). Refused, with
+ * nothing written, with `not_found` when the token is gone (used, older than five minutes, or dropped by a lock),
+ * `invalid_input` (`what: "env rows"`) when the choices do not fit the folder as it is now, and (`what: "env twice"`) when Replace
+ * finds the name twice in the folder. Every row `leave_out` writes nothing and answers 0 and `not_asked`: that is how Cancel lets go
+ * of the values at once.
  */
 export function envSave(
   vault: SessionRef,
   token: string,
   choices: EnvChoice[],
   collection: string | null,
-): Promise<Tagged<number>> {
-  return call<number>("env_save", { session: vault.session, generation: vault.generation, token, choices, collection });
+  clearClipboard: boolean,
+): Promise<Tagged<EnvSaved>> {
+  return call<EnvSaved>("env_save", {
+    session: vault.session,
+    generation: vault.generation,
+    token,
+    choices,
+    collection,
+    clear_clipboard: clearClipboard,
+  });
 }
 
 /**
@@ -613,4 +636,85 @@ export function envCopy(vault: SessionRef, collection: string): Promise<Tagged<E
  */
 export function envSaveFile(vault: SessionRef, collection: string): Promise<Tagged<EnvOut>> {
   return call<EnvOut>("env_save_file", { session: vault.session, generation: vault.generation, collection });
+}
+
+/** What a clash does: `ask` stops at a name already there, `replace` puts the value in that key, `keep_both` saves under the name shown. */
+export type OnClash = "ask" | "replace" | { keep_both: string };
+
+/**
+ * What saving a copied key came to: `Saved` (the new key's id, the name it was saved under, and what became of the clipboard), or
+ * `Clash` (a live key of that name is in that place: nothing was written, and `saved_as` is the name Keep both would use).
+ */
+export type CaptureSaved =
+  | { Saved: { id: string; name: string; clipboard: ClipboardAfter } }
+  | { Clash: { saved_as: string } };
+
+/** What the page sends to save the copy: the key's name, the folder, what to do on a clash, whether to clear the clipboard, a typed value. */
+export interface CaptureSave {
+  captureId: string;
+  /** The key's name, as a key's title is checked (`invalid_input`, `what: "key name"`; `too_large`, `what: "title"`). */
+  name: string;
+  /** A live folder's id, or `null` for none; a folder that is not there is `not_found`. */
+  collection: string | null;
+  onClash: OnClash;
+  /** Honoured only when the shell holds a copied value; the clipboard is cleared after the write, and only if it still holds that text. */
+  clearClipboard: boolean;
+  /** `null` when the shell holds a copied value; the value when it holds none (`empty`, `too_large`). */
+  typed: string | null;
+}
+
+/**
+ * What the shortcut left waiting in the shell, as an event would say it (`changed` false), or `null` for nothing: asked once when
+ * the page starts, since a copy can be waiting from before the page loaded.
+ */
+export function captureState(): Promise<CaptureEvent | null> {
+  return callPlain<CaptureEvent | null>("capture_state", {});
+}
+
+/**
+ * Hands the copy to the unlocked vault `vault`: a lock of that vault lets it go. Refused `not_found` for an id that is not the
+ * waiting copy's any more, and stale or foreign as every command.
+ */
+export function captureChoose(vault: SessionRef, captureId: string): Promise<Tagged<null>> {
+  return call<null>("capture_choose", { session: vault.session, generation: vault.generation, capture_id: captureId });
+}
+
+/**
+ * The copied value, trimmed, for Reveal: the one way it reaches the page. Refused `not_found` for an old id or a copy that holds no
+ * value, and `locked` when the copy was not handed to a vault or that vault is no longer unlocked.
+ */
+export function captureReveal(captureId: string): Promise<string> {
+  return callPlain<string>("capture_reveal", { capture_id: captureId });
+}
+
+/**
+ * Saves the copy as a key (see `CaptureSave` and `CaptureSaved`), in one write; on success the shell clears the clipboard if asked,
+ * and lets go of the copy (`gone`). A refusal writes nothing: `read_only`, `not_found` (the copy or the folder), `invalid_input`
+ * (`what: "key name"`, `"capture value"` for a copy with nothing typed in its place, `"env twice"` for Replace finding the name
+ * twice), `too_large` (`"title"`, `"value"`).
+ */
+export function captureSave(vault: SessionRef, save: CaptureSave): Promise<Tagged<CaptureSaved>> {
+  return call<CaptureSaved>("capture_save", {
+    session: vault.session,
+    generation: vault.generation,
+    capture_id: save.captureId,
+    name: save.name,
+    collection: save.collection,
+    on_clash: save.onClash,
+    clear_clipboard: save.clearClipboard,
+    typed: save.typed,
+  });
+}
+
+/** Lets go of the copy at once. An id that is not the waiting copy's is a quiet no-op. */
+export async function captureCancel(captureId: string): Promise<void> {
+  await callPlain<null>("capture_cancel", { capture_id: captureId });
+}
+
+/**
+ * Reads the copy as a `.env` and parks it as a paste (`envRead`'s answer: names, bad lines and clashes, the values waiting in Rust
+ * under the token); the copy goes (`gone`). Refused as `envRead` is, and `not_found` for an old id or a copy that holds no value.
+ */
+export function captureEnv(vault: SessionRef, captureId: string): Promise<Tagged<EnvRows>> {
+  return call<EnvRows>("capture_env", { session: vault.session, generation: vault.generation, capture_id: captureId });
 }

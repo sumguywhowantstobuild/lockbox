@@ -81,6 +81,8 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:env rows": { title: "This folder changed while you were choosing.", body: "Paste the .env again." },
   "code:invalid_input:env twice": { title: "A key name is in this folder twice.", body: "Rename or move one, then try again." },
   "code:invalid_input:no keys": { title: "This folder has no keys.", body: "Add a key first." },
+  // A copied key saved with the shortcut (Task 18): the copy was empty or too big, and nothing was typed in its place.
+  "code:invalid_input:capture value": { title: "Paste or type the value first.", body: "" },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   "code:core": GENERIC,
 
@@ -168,6 +170,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "backup: unexpected file",
   "backup: wrong vault",
   "being deleted",
+  "capture value",
   "chunk",
   "clipboard",
   "clipboard delay",

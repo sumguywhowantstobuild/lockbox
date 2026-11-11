@@ -40,13 +40,16 @@ pub struct Os {
     pub window: Arc<dyn MainWindow>,
 }
 
-/// The app's one window, as the shell sends it to the tray. Looked up at each call: the window is built after the
-/// shell. Showing it again is not here: it goes through [`window::bring_to_front`](crate::window::bring_to_front),
-/// which puts the window's protections in place before it shows.
+/// The app's one window, as the shell sends it to the tray and brings it back. Looked up at each call: the window is
+/// built after the shell.
 pub trait MainWindow: Send + Sync {
     /// Hides the window, which keeps running in the tray. Best effort: a window that cannot be hidden stays on screen,
     /// already locked.
     fn hide(&self);
+    /// Brings the window forward after a press of the save shortcut: through
+    /// [`window::bring_to_front`](crate::window::bring_to_front), which puts the window's protections in place before it
+    /// shows, on the thread that must show it. Best effort, and never waits for the window.
+    fn bring_forward(&self);
 }
 
 /// A copy's own tag (spec §7.3): 16 random bytes from the OS, written beside the copy in [`TAG_FORMAT`]. Not secret
@@ -75,6 +78,10 @@ pub trait ClipboardBackend: Send + Sync {
     /// it did. Anything else (other text, no text, text too large to be `expected`) is left alone. This is for a
     /// value Lockbox did not copy itself, so it has no tag to check.
     fn clear_if_text(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool>;
+    /// Like [`clear_if_text`](Self::clear_if_text), reading a line break as one: CRLF and a lone CR count as LF on
+    /// both sides, and the text is otherwise compared exactly. For a text the page pasted, which may not have kept
+    /// Windows' CRLF.
+    fn clear_if_text_lines(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool>;
 }
 
 /// A write that failed.
@@ -295,9 +302,24 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
     }
 
     fn clear_if_text(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool> {
+        self.clear_if_text_that(until, |text| text == expected)
+    }
+
+    fn clear_if_text_lines(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool> {
+        self.clear_if_text_that(until, |text| same_lines(text, expected))
+    }
+}
+
+impl<C: ClipboardCalls> ClipboardSteps<C> {
+    /// One opening that empties the clipboard only while its text is one `matches` accepts. A block over the limit cannot be
+    /// the expected one (a value that came from the clipboard in the first place), so it is neither copied nor cleared. No
+    /// text at all is no match. The copy of the text is wiped when this returns.
+    fn clear_if_text_that(
+        &self,
+        until: Option<Instant>,
+        matches: impl FnOnce(&str) -> bool,
+    ) -> ShellResult<bool> {
         let _open = self.open(until)?;
-        // A block over the limit cannot be `expected` (a value that came from the clipboard in the first place), so it
-        // is neither copied nor cleared. No text at all is no match.
         let Some(size) = self.calls.text_size()? else {
             return Ok(false);
         };
@@ -307,7 +329,7 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
         let Some(text) = self.calls.copy_text()? else {
             return Ok(false);
         };
-        if *text != *expected {
+        if !matches(&text) {
             return Ok(false);
         }
         match self.calls.empty() {
@@ -315,6 +337,22 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
             false => Err(CLIPBOARD_FAILED),
         }
     }
+}
+
+/// Whether `a` and `b` are the same text with every line break read as one: CRLF and a lone CR count as LF, and the
+/// texts are otherwise compared exactly. Walks both without making a copy of either.
+fn same_lines(a: &str, b: &str) -> bool {
+    fn lines(text: &str) -> impl Iterator<Item = char> + '_ {
+        let mut chars = text.chars().peekable();
+        std::iter::from_fn(move || match chars.next()? {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                Some('\n')
+            }
+            other => Some(other),
+        })
+    }
+    lines(a).eq(lines(b))
 }
 
 /// Whether `held`, what [`TAG_FORMAT`] holds, is exactly `tag`: the 16 bytes, then nothing, or only zeros (a block
@@ -823,8 +861,6 @@ impl Default for Shortcut {
 /// Why [`SignalThread::set_hotkey`](win::SignalThread::set_hotkey) did not set the shortcut. Only Windows' own
 /// "already registered" answer is [`Taken`](Self::Taken); every other failure is [`NotSet`](Self::NotSet), so a
 /// shortcut is never called taken for a reason that is not that.
-// Nothing registers the shortcut yet: the save box's task must, and until then only the tests call `set_hotkey`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyTaken {
     /// Another program has registered the same keys (`ERROR_HOTKEY_ALREADY_REGISTERED`).
@@ -1309,6 +1345,113 @@ mod tests {
         assert_eq!(steps.clear_if_text(COPIED, None), Err(CLIPBOARD_FAILED));
         assert_eq!(fake.text().as_deref(), Some(COPIED));
         assert!(!fake.is_open(), "the clipboard was left open");
+    }
+
+    /// The clear for a pasted text reads a line break as one: CRLF, a lone CR and LF are the same on both sides, and
+    /// everything else is exact (case, spaces, a missing last break, a blank line more).
+    #[test]
+    fn clear_if_text_lines_reads_a_line_break_as_one() {
+        let (fake, steps) = fake_steps();
+        for (held, expected) in [
+            ("a\r\nb\r\n", "a\nb\n"),
+            ("a\nb\n", "a\r\nb\r\n"),
+            ("a\rb\r", "a\nb\n"),
+            ("a\r\nb", "a\rb"),
+            ("a\nb", "a\nb"),
+            ("a\r\r\nb", "a\n\nb"),
+            ("", ""),
+            ("one line", "one line"),
+        ] {
+            assert!(fake.user_copy(held));
+            assert_eq!(
+                steps.clear_if_text_lines(expected, None),
+                Ok(true),
+                "{held:?} vs {expected:?}"
+            );
+            assert_eq!(fake.text(), None, "{held:?} was not cleared");
+        }
+        for (held, expected) in [
+            ("a\nb", "a\nb\n"),
+            ("a\nb\n", "a\nb"),
+            ("A\nb", "a\nb"),
+            ("a\n\nb", "a\nb"),
+            ("a\nb ", "a\nb"),
+            ("a b", "a\nb"),
+            ("ab", "a\nb"),
+            ("a\r\nb", "a\n\nb"),
+            ("a\n", ""),
+            ("", "a"),
+        ] {
+            assert!(fake.user_copy(held));
+            assert_eq!(
+                steps.clear_if_text_lines(expected, None),
+                Ok(false),
+                "{held:?} vs {expected:?}"
+            );
+            assert_eq!(fake.text().as_deref(), Some(held), "{held:?} was cleared");
+        }
+        assert!(fake.user_copy_non_text());
+        assert_eq!(steps.clear_if_text_lines("a", None), Ok(false));
+        assert!(
+            fake.has_non_text(),
+            "something that is not text was cleared"
+        );
+    }
+
+    /// The same one opening as `clear_if_text`: nothing copies in between, a text too large to be the expected one is not
+    /// copied, a text that cannot be read or an empty that fails is an error and leaves the text, and a busy clipboard is
+    /// busy.
+    #[test]
+    fn clear_if_text_lines_is_one_opening() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy("a\r\nb"));
+        let other = Arc::clone(&fake);
+        let (refused, was_refused) = mpsc::channel();
+        fake.during_next_read(Box::new(move || {
+            refused.send(!other.user_copy("theirs")).unwrap();
+        }));
+        assert_eq!(steps.clear_if_text_lines("a\nb", None), Ok(true));
+        assert!(
+            was_refused.recv().unwrap(),
+            "a copy got in between the check and the clear"
+        );
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "empty", "close"]
+        );
+        assert_eq!(fake.text(), None);
+
+        assert!(fake.user_copy("theirs"));
+        assert_eq!(steps.clear_if_text_lines("a\nb", None), Ok(false));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"],
+            "a text that did not match was emptied"
+        );
+
+        assert!(fake.user_copy(&"a".repeat(MAX_ITEM_JSON + 1)));
+        fake.take_events();
+        assert_eq!(steps.clear_if_text_lines("a", None), Ok(false));
+        assert_eq!(fake.take_events(), ["open", "text size", "close"]);
+        assert!(fake.text().is_some(), "a large text was cleared");
+
+        assert!(fake.user_copy("a\nb"));
+        fake.fail_next_read();
+        assert_eq!(
+            steps.clear_if_text_lines("a\nb", None),
+            Err(CLIPBOARD_FAILED)
+        );
+        fake.fail_empty_at(0);
+        assert_eq!(
+            steps.clear_if_text_lines("a\nb", None),
+            Err(CLIPBOARD_FAILED)
+        );
+        assert_eq!(fake.text().as_deref(), Some("a\nb"));
+        assert!(!fake.is_open(), "the clipboard was left open");
+        fake.hold_open_elsewhere(true);
+        assert_eq!(steps.clear_if_text_lines("a\nb", None), Err(CLIPBOARD_BUSY));
+        fake.hold_open_elsewhere(false);
+        assert_eq!(steps.clear_if_text_lines("a\nb", None), Ok(true));
     }
 
     /// Windows lets a second opener with no owner window in while the first is open, so Lockbox's own threads take

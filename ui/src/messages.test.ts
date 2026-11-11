@@ -179,6 +179,13 @@ test("the_env_refusals_have_words_of_their_own", () => {
   expect(messageFor({ code: "too_large", what: "value" }).title).toBe("That is too big for Lockbox to keep.");
 });
 
+test("a_save_with_no_value_has_words_of_its_own", () => {
+  // Task 18: a copy that was empty or too big, saved with nothing typed in its place (the connection's new label).
+  expect(messageFor({ code: "invalid_input", what: "capture value" })).toEqual({ title: "Paste or type the value first.", body: "" });
+  expect(KNOWN_WHATS).toContain("capture value");
+  expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
+});
+
 test("no_message_contains_raw_error_text", () => {
   const SENTINEL = "SENTINEL-7f3a C:\\Users\\secret";
   const errors: unknown[] = [

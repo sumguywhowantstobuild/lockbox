@@ -18,6 +18,7 @@ use lockbox_core::blob::CancelToken;
 use lockbox_core::{ReadOnlyVault, Vault};
 use serde::{Deserialize, Serialize};
 
+use crate::capture::CaptureEvent;
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
 use crate::pending::{Pending, PendingChoice, Token};
 use crate::{lock, os};
@@ -142,14 +143,24 @@ pub enum Notice {
     /// button, or a second close) and the window hides. An event only: never kept by the shell or listed by
     /// `launch_notices`, since a reloaded page must not show it again.
     FirstClose { explain: bool },
+    /// Another program has the save shortcut's keys (Windows said they are registered already), so the shortcut is off
+    /// for this run: `{ "kind": "shortcut_taken" }`. Kept for `launch_notices`.
+    ShortcutTaken,
+    /// Windows refused the save shortcut for another reason, or did not answer: `{ "kind": "shortcut_not_set" }`. Never
+    /// called "taken" for a reason that is not that. Kept for `launch_notices`.
+    ShortcutNotSet,
 }
 
-/// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`).
+/// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`,
+/// `lockbox://capture`).
 pub trait Notifier: Send + Sync {
     fn locked(&self, session: SessionId, generation: u64, reason: LockReason);
     /// The long operations running for `session`, or for none (`None`: testing or restoring a backup).
     fn busy(&self, session: Option<SessionId>, operations: &[&'static str]);
     fn notice(&self, notice: &Notice);
+    /// The copied value waiting in the capture slot changed, or the slot emptied: what the page may know of it, never
+    /// the value.
+    fn capture(&self, event: &CaptureEvent);
 }
 
 /// What an opening closure gives back: a new session, or a question to ask first, whose state waits in [`Pending`]
@@ -1404,6 +1415,7 @@ mod tests {
         }
         fn busy(&self, _session: Option<SessionId>, _operations: &[&'static str]) {}
         fn notice(&self, _notice: &Notice) {}
+        fn capture(&self, _event: &CaptureEvent) {}
     }
 
     fn sessions() -> (Arc<Recorder>, Sessions) {
@@ -2305,6 +2317,7 @@ mod tests {
         }
         fn busy(&self, _session: Option<SessionId>, _operations: &[&'static str]) {}
         fn notice(&self, _notice: &Notice) {}
+        fn capture(&self, _event: &CaptureEvent) {}
     }
 
     #[test]

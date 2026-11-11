@@ -3,6 +3,7 @@
 
 mod args;
 pub mod backup;
+pub mod capture;
 pub mod env;
 pub mod files;
 mod generator;
@@ -77,6 +78,12 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         env::env_save,
         env::env_copy,
         env::env_save_file,
+        capture::capture_state,
+        capture::capture_choose,
+        capture::capture_reveal,
+        capture::capture_save,
+        capture::capture_cancel,
+        capture::capture_env,
         backup::backup_vault,
         backup::test_backup,
         backup::open_backup_read_only,

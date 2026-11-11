@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, type ReactNode, type Ref } from "react";
 import { Button } from "../../parts/Button";
 import { hasInnerLineBreak } from "./shared";
 
@@ -30,6 +30,7 @@ export function ValueField({
   disabled = false,
   busy = false,
   describedBy,
+  inputRef,
   children,
 }: {
   id: string;
@@ -42,6 +43,8 @@ export function ValueField({
   busy?: boolean;
   /** The ids of the lines under the box that describe it, for a screen reader. */
   describedBy?: string;
+  /** Reaches the box, for a form that puts focus on it when it opens. */
+  inputRef?: Ref<HTMLInputElement>;
   /** Lines under the box. */
   children?: ReactNode;
 }) {
@@ -73,6 +76,7 @@ export function ValueField({
         </Button>
       </div>
       <input
+        ref={inputRef}
         id={id}
         className="finp m"
         type={shown ? "text" : "password"}

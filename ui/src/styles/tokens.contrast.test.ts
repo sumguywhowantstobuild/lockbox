@@ -344,6 +344,14 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("generator value's focus ring on its card", c("--v"), card, 3);
       // The slider and the two checkboxes are drawn in the vault's colour on that block.
       check("generator slider and checkboxes on their block", c("--v"), genBlock, 3);
+      // The save box (Task 18): the copied value's box is a field on the panel, showing its dots or the value itself; the vault's name
+      // is a field too; the clear-the-clipboard tick box is drawn in the vault's colour on the panel, with its words and its hint beside it
+      // (the hint is the form hint above), and a note of the page's own (what the copy was, or that it changed) is the quiet words.
+      check("copied value, hidden dots on its box", c("--ink2"), card, 4.5);
+      check("copied value, shown, on its box", c("--ink"), card, 4.5);
+      check("clear the clipboard tick box on the panel", c("--v"), paper, 3);
+      check("clear the clipboard words on the panel", c("--ink"), paper, 4.5);
+      check("save box note on the panel", c("--ink2"), paper, 4.5);
       // Characters or Passphrase: the track is a tint on the block; the chosen one is a card with the vault's colour round
       // it, so the choice does not rest on a tint, and both kinds' words are the ordinary text colour on what they sit on.
       const segTrack = over([...rgbOf("--sh"), 0.08] as Rgba, genBlock);

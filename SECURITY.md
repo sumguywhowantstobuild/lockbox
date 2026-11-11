@@ -531,10 +531,16 @@ open it read-only.
 yet; each moves up to the sections above as it's built.
 
 - **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
-  that value: it compares what's on the clipboard, and drops it if it's different. The value waits in one wiped
-  slot in Rust until it's saved or the slot empties. Clearing it afterwards may not reach a copy Windows clipboard history already
+  that value (the save box's tick box, and the same tick box in the paste panel for a `.env` you pasted): after the key is
+  saved, it compares what's on the clipboard in one opening and empties it only if it's still the same text (the paste
+  panel counts CRLF and LF as one line break), and drops what it read otherwise. The value waits in one wiped
+  slot in Rust until it's saved, cancelled or the slot empties (every lock of all vaults, the window's close, idle time even
+  with no vault open, Windows lock and sleep, Quit, or a lock of the vault it was handed to); a read still running when
+  every vault locks keeps nothing. Clearing it afterwards may not reach a copy Windows clipboard history already
   took, because a value copied from another app usually carries none of Lockbox's marks. Tested on 2026-11-05: a value copied
-  from Notepad stayed in Win+V after the clear, so clear it from Win+V too (Win+V, then the entry's menu).
+  from Notepad stayed in Win+V after the clear, so clear it from Win+V too (Win+V, then the entry's menu). Another program
+  that empties the clipboard while it is being read can make the text in the box garbled; it can't make Lockbox keep or show
+  more than it read.
 - **An export, a saved `.env` and files saved out are readable by anyone who gets them.** They aren't encrypted. An export or a
   `.env` warns first, and saving a folder's files says so in the folder picker. Lockbox can't protect them or delete them afterwards. Deleting one may leave it in the Recycle Bin, on an SSD, or in a
   cloud provider's version history.

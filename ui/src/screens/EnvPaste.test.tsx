@@ -81,7 +81,9 @@ async function unlocked(options: { readOnly?: boolean; only?: FakeItem[] } = {})
   return view;
 }
 
-function sent(cmd: string): { token?: string; choices?: { index: number; action: string }[]; collection?: string | null; text?: string }[] {
+function sent(
+  cmd: string,
+): { token?: string; choices?: { index: number; action: string }[]; collection?: string | null; text?: string; clear_clipboard?: boolean }[] {
   return invoke.mock.calls.filter(([name]) => name === cmd).map(([, args]) => args as Record<string, never>);
 }
 
@@ -614,8 +616,10 @@ test("save_sends_one_choice_per_row_with_the_right_actions_and_the_folder", asyn
   const saves = sent("env_save");
   expect(saves).toHaveLength(1);
   const [save] = saves;
-  expect(Object.keys(save ?? {}).sort()).toEqual(["choices", "collection", "generation", "session", "token"]);
+  expect(Object.keys(save ?? {}).sort()).toEqual(["choices", "clear_clipboard", "collection", "generation", "session", "token"]);
   expect(save?.collection).toBe(FOLDER);
+  // The tick box ("Clear the clipboard after saving") is on to begin with, and is sent as it stands.
+  expect(save?.clear_clipboard).toBe(true);
   expect(save?.choices).toEqual([
     { index: 0, action: "replace" },
     { index: 1, action: "save" },

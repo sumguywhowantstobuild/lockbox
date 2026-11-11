@@ -7,6 +7,7 @@ import { CloseIcon } from "../parts/Icon";
 import { Panel } from "../parts/Panel";
 import { Select } from "../parts/Select";
 import { closeTool, readEnv, refusedAsEnvGone, releaseEnv, saveEnv, type SessionData } from "../store";
+import { ClearClipboardBox } from "./forms/ClearClipboard";
 import { folderChoices, NO_FOLDER, useFocusOnOpen } from "./forms/shared";
 import type { FolderEntry } from "./SideMenu";
 
@@ -49,15 +50,32 @@ function badLinesWords(lines: readonly number[]): string {
  * lets go at once. A lock sends nothing: the vault is gone, and the lock let go already. An answer to a read that comes after the
  * panel went, or after a newer paste, is dropped, and its token let go the same way. A refusal of the save is said in the panel,
  * and the panel goes back to the empty box (a save cut short can have written some, so the list is read again).
+ *
+ * "Clear the clipboard after saving" (15b) is on to begin with: it is sent with the save, and Rust clears the clipboard after the keys are
+ * written, only if it still holds the pasted text. The message after a save says what became of it.
+ *
+ * A panel opened on a copy that the save box read in Rust (`initialRows`, `initialFolder`) shows those rows as if they had been pasted, with no
+ * paste box. Its values wait under the rows' token like any paste's, and are let go the same way when the panel goes.
  */
-export function EnvPaste({ data, folders }: { data: SessionData; folders: readonly FolderEntry[] }) {
+export function EnvPaste({
+  data,
+  folders,
+  initialRows,
+  initialFolder,
+}: {
+  data: SessionData;
+  folders: readonly FolderEntry[];
+  initialRows?: EnvRows;
+  initialFolder?: string;
+}) {
   const id = useId();
-  const [found, setFound] = useState<EnvRows | null>(null);
+  const [found, setFound] = useState<EnvRows | null>(initialRows ?? null);
+  const [clear, setClear] = useState(true);
   /** The rows left out, by index. */
   const [left, setLeft] = useState<number[]>([]);
   /** What each clashing row was told to do in the folder chosen now, by index (a row not here starts on Replace). */
   const [picks, setPicks] = useState<Record<number, Pick>>({});
-  const [folder, setFolder] = useState(data.folder ?? NO_FOLDER);
+  const [folder, setFolder] = useState(initialFolder ?? data.folder ?? NO_FOLDER);
   const [problem, setProblem] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [reading, setReading] = useState(false);
@@ -70,7 +88,9 @@ export function EnvPaste({ data, folders }: { data: SessionData; folders: readon
   const heading = useRef<HTMLHeadingElement>(null);
   const leaveButtons = useRef(new Map<number, HTMLButtonElement>());
   /** The token the values wait under and the rows it covers, from the answer that is on screen until it is used up or let go. */
-  const held = useRef<{ token: string; indexes: number[] } | null>(null);
+  const held = useRef<{ token: string; indexes: number[] } | null>(
+    initialRows?.token == null ? null : { token: initialRows.token, indexes: initialRows.rows.map((row) => row.index) },
+  );
   /** The number of the latest paste: an older answer is late. */
   const run = useRef(0);
   const mounted = useRef(true);
@@ -85,9 +105,19 @@ export function EnvPaste({ data, folders }: { data: SessionData; folders: readon
       mounted.current = false;
       const waiting = held.current;
       held.current = null;
-      if (waiting !== null) releaseEnv(session, generation, waiting.token, waiting.indexes);
+      if (waiting === null) return;
+      if (initialRows === undefined) {
+        releaseEnv(session, generation, waiting.token, waiting.indexes);
+        return;
+      }
+      // Opened on rows that were waiting already: React runs an effect's cleanup and its setup again as a trial in development, with this same
+      // panel, and that must not let the values go. A panel still gone a moment later has left, and lets them go.
+      window.setTimeout(() => {
+        if (mounted.current) held.current = waiting;
+        else releaseEnv(session, generation, waiting.token, waiting.indexes);
+      }, 0);
     };
-  }, [session, generation]);
+  }, [session, generation, initialRows]);
 
   useEffect(() => {
     if (boxBack > 0) box.current?.focus();
@@ -169,7 +199,7 @@ export function EnvPaste({ data, folders }: { data: SessionData; folders: readon
     setSaving(true);
     setProblem(null);
     const where = folders.find((entry) => entry.id === place)?.name ?? "No folder";
-    const done = await saveEnv(session, waiting.token, choices, place, where, () => mounted.current);
+    const done = await saveEnv(session, waiting.token, choices, place, where, clear, () => mounted.current);
     if (done === "stale") return;
     if ("saved" in done) {
       // The store closed this panel as the save ended, and it was still the one on screen: focus goes back to where it was opened
@@ -329,6 +359,7 @@ export function EnvPaste({ data, folders }: { data: SessionData; folders: readon
               }}
             />
           </div>
+          <ClearClipboardBox checked={clear} onChange={setClear} />
         </>
       ) : (
         <div className="fbox">

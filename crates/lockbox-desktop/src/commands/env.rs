@@ -32,9 +32,10 @@ use zeroize::Zeroizing;
 use super::items::{MAX_KEY_VALUE, MAX_TITLE, at_most, collection_id, item_id};
 use super::readable::ReadableJob;
 use super::{args, blocking};
+use crate::capture::ClipboardAfter;
 use crate::error::{Outcome, ShellError, ShellResult};
 use crate::outputs::LAUNCH_OPEN_TRIES;
-use crate::pending::{PendingChoice, Token};
+use crate::pending::{PendingChoice, ShownNames, Token};
 use crate::restore::shown;
 use crate::session::{LockHook, SessionId, Sessions, Tagged, VaultRef};
 use crate::shell::Shell;
@@ -43,16 +44,16 @@ use crate::views::SavedView;
 /// The most pasted text `env_read` takes, in bytes.
 const MAX_TEXT: usize = 1_048_576;
 /// The most keys one paste may hold.
-const MAX_KEYS: usize = 500;
+pub(super) const MAX_KEYS: usize = 500;
 
 /// The pasted text is over [`MAX_TEXT`].
 const TEXT_TOO_LARGE: ShellError = ShellError::TooLarge { what: "env text" };
 /// The paste holds more than [`MAX_KEYS`] keys.
-const TOO_MANY_KEYS: ShellError = ShellError::TooLarge { what: "env keys" };
+pub(super) const TOO_MANY_KEYS: ShellError = ShellError::TooLarge { what: "env keys" };
 /// The choices do not fit the folder as it is now.
-const BAD_ROWS: ShellError = ShellError::InvalidInput { what: "env rows" };
+pub(super) const BAD_ROWS: ShellError = ShellError::InvalidInput { what: "env rows" };
 /// Replace found the name twice in the folder, or the folder gained a second key of one name.
-const TWICE: ShellError = ShellError::InvalidInput { what: "env twice" };
+pub(super) const TWICE: ShellError = ShellError::InvalidInput { what: "env twice" };
 /// The folder has no key to take out.
 const NO_KEYS: ShellError = ShellError::InvalidInput { what: "no keys" };
 
@@ -110,6 +111,13 @@ pub struct EnvChoice {
     pub action: EnvAction,
 }
 
+/// What saving a paste's rows came to: how many keys were written, and what became of the clipboard.
+#[derive(Serialize)]
+pub struct EnvSaved {
+    pub saved: u32,
+    pub clipboard: ClipboardAfter,
+}
+
 /// What taking a folder's keys out came to.
 #[derive(Serialize)]
 pub enum EnvOut {
@@ -123,16 +131,16 @@ pub enum EnvOut {
 
 /// The live key items of a vault by place (a live folder's id, or `None`), each name with the ids of the keys that have
 /// it, and the ids of the live folders. Keys and folders in the trash are left out.
-struct Places {
+pub(super) struct Places {
     keys: HashMap<Option<ItemId>, HashMap<String, Vec<ItemId>>>,
     /// The live folders, in id order.
-    folders: Vec<ItemId>,
+    pub(super) folders: Vec<ItemId>,
     /// What a place with no key has.
     none: HashMap<String, Vec<ItemId>>,
 }
 
 impl Places {
-    fn of<'a>(items: impl Iterator<Item = &'a Item>) -> Places {
+    pub(super) fn of<'a>(items: impl Iterator<Item = &'a Item>) -> Places {
         let mut places = Places {
             keys: HashMap::new(),
             folders: Vec::new(),
@@ -156,7 +164,7 @@ impl Places {
     }
 
     /// The live keys in `place` by name.
-    fn live(&self, place: Option<ItemId>) -> &HashMap<String, Vec<ItemId>> {
+    pub(super) fn live(&self, place: Option<ItemId>) -> &HashMap<String, Vec<ItemId>> {
         self.keys.get(&place).unwrap_or(&self.none)
     }
 }
@@ -167,7 +175,7 @@ fn row_number(row: usize) -> u32 {
 }
 
 /// The items of either kind of vault.
-fn all_items<'a>(vault: &'a VaultRef<'_>) -> Box<dyn Iterator<Item = &'a Item> + 'a> {
+pub(super) fn all_items<'a>(vault: &'a VaultRef<'_>) -> Box<dyn Iterator<Item = &'a Item> + 'a> {
     match vault {
         VaultRef::Writable(vault) => Box::new(vault.items()),
         VaultRef::ReadOnly(vault) => Box::new(vault.items()),
@@ -180,7 +188,7 @@ fn all_items<'a>(vault: &'a VaultRef<'_>) -> Box<dyn Iterator<Item = &'a Item> +
 /// the same name. `saved_as` is the first of `NAME_2`, `NAME_3`, ... that is not the name of a live key there, not the
 /// name of any row of the paste (`paste`: every row, later ones too) and not the name already given to an earlier row
 /// here. It depends only on the place's keys and the paste, never on the choices, so what a row shows is what the save does.
-fn clashes_in(
+pub(super) fn clashes_in(
     live: &HashMap<String, Vec<ItemId>>,
     names: &[&str],
     paste: &HashSet<&str>,
@@ -360,7 +368,7 @@ fn actions_for(choices: &[EnvChoice], rows: usize) -> ShellResult<Vec<EnvAction>
 }
 
 /// A new key `name` in `place`, with no notes.
-fn make_key(
+pub(super) fn make_key(
     vault: &mut Vault,
     name: &str,
     place: Option<ItemId>,
@@ -372,12 +380,16 @@ fn make_key(
 
 /// The whole save, in one write: every choice is checked against the place as it is now before anything is written, then
 /// the rows are written in index order. How many keys were written (a row left out is not one).
+///
+/// A Keep both row is saved only under the name the paste's answer showed for it in this place (`shown`): when the place
+/// has changed since, so that the name is another one now, the whole save is refused (`env rows`) and nothing is written.
 fn save_rows(
     vault: &mut Vault,
     cancel: &CancelToken,
     place: Option<ItemId>,
     entries: Vec<EnvEntry>,
     choices: &[EnvChoice],
+    shown: &ShownNames,
 ) -> ShellResult<u32> {
     if let Some(folder) = place {
         let live = vault.get_item(&folder).is_ok_and(|item| {
@@ -394,10 +406,19 @@ fn save_rows(
         let paste: HashSet<&str> = names.iter().copied().collect();
         let clashing = clashes_in(live, &names, &paste);
         let actions = actions_for(choices, entries.len())?;
-        for ((action, clash), name) in actions.iter().zip(&clashing).zip(&names) {
+        for (row, ((action, clash), name)) in actions.iter().zip(&clashing).zip(&names).enumerate()
+        {
             match (action, clash) {
                 (EnvAction::Save, Some(_)) | (EnvAction::KeepBoth, None) => return Err(BAD_ROWS),
-                (EnvAction::KeepBoth, Some(saved_as)) => at_most(saved_as, MAX_TITLE, "title")?,
+                (EnvAction::KeepBoth, Some(saved_as)) => {
+                    at_most(saved_as, MAX_TITLE, "title")?;
+                    let showed = shown
+                        .get(&place)
+                        .and_then(|by_row| by_row.get(&row_number(row)));
+                    if showed != Some(saved_as) {
+                        return Err(BAD_ROWS);
+                    }
+                }
                 (EnvAction::Replace, _) if live.get(*name).is_some_and(|ids| ids.len() > 1) => {
                     return Err(TWICE);
                 }
@@ -473,8 +494,6 @@ impl Shell {
             return Err(TEXT_TOO_LARGE);
         }
         let env_file::EnvParse { entries, bad_lines } = env_file::parse(&text);
-        // The pasted text goes as soon as it is read: what waits from here on is each value, in a buffer of its own.
-        drop(text);
         if entries.len() > MAX_KEYS {
             return Err(TOO_MANY_KEYS);
         }
@@ -490,7 +509,8 @@ impl Shell {
                 name: entry.name.clone(),
             })
             .collect();
-        let clashes = {
+        // What the answer shows, and the same names kept with the paste for the save to hold the folder to.
+        let (clashes, shown) = {
             let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
             let paste: HashSet<&str> = names.iter().copied().collect();
             self.sessions
@@ -498,24 +518,32 @@ impl Shell {
                     let places = Places::of(all_items(&vault));
                     let each =
                         std::iter::once(None).chain(places.folders.iter().copied().map(Some));
-                    Ok(each
+                    let mut shown = ShownNames::new();
+                    let clashes = each
                         .map(|place| {
                             let clashing = clashes_in(places.live(place), &names, &paste);
+                            let rows: Vec<EnvClash> = clashing
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(row, saved_as)| {
+                                    Some(EnvClash {
+                                        index: row_number(row),
+                                        saved_as: saved_as?,
+                                    })
+                                })
+                                .collect();
+                            let names_here = rows
+                                .iter()
+                                .map(|clash| (clash.index, clash.saved_as.clone()))
+                                .collect();
+                            shown.insert(place, names_here);
                             EnvClashes {
                                 collection: place.map(|id| id.to_hex()),
-                                rows: clashing
-                                    .into_iter()
-                                    .enumerate()
-                                    .filter_map(|(row, saved_as)| {
-                                        Some(EnvClash {
-                                            index: row_number(row),
-                                            saved_as: saved_as?,
-                                        })
-                                    })
-                                    .collect(),
+                                rows,
                             }
                         })
-                        .collect::<Vec<_>>())
+                        .collect::<Vec<_>>();
+                    Ok((clashes, shown))
                 })?
                 .data
         };
@@ -532,6 +560,8 @@ impl Shell {
                     session,
                     generation,
                     entries,
+                    source: text,
+                    shown,
                 };
                 Ok(self.sessions.pending().park(waiting))
             })?),
@@ -562,7 +592,8 @@ impl Shell {
         token: &Token,
         choices: Vec<EnvChoice>,
         collection: Option<String>,
-    ) -> ShellResult<Tagged<u32>> {
+        clear_clipboard: bool,
+    ) -> ShellResult<Tagged<EnvSaved>> {
         let live = self.live_writable(session, generation);
         // The token is used up whatever the answer, a refusal for the session included.
         let taken = self.sessions.pending().take(token);
@@ -571,6 +602,8 @@ impl Shell {
             session: owner,
             generation: made_in,
             entries,
+            source,
+            shown,
         } = taken?
         else {
             return Err(ShellError::NotFound);
@@ -583,8 +616,22 @@ impl Shell {
         // `write`: it waits up to half a second for another command using the vault (a long write would be `Busy` at
         // once, and the pasted values are already used up). Not `write_change`: its `LockedAfterChange` carries a label
         // of its own, and a lock that overtakes the save is answered `Locked`, which the page shows as nothing.
-        self.sessions.write(session, generation, |vault, cancel| {
-            save_rows(vault, cancel, place, entries, &choices)
+        let saved = self.sessions.write(session, generation, |vault, cancel| {
+            save_rows(vault, cancel, place, entries, &choices, &shown)
+        })?;
+        // The tick box: only after the writes succeeded and at least one key was written (a Cancel, every row left out,
+        // never clears), the clipboard is emptied if it still holds the pasted text. Another copy since is left alone.
+        let clipboard = match clear_clipboard && saved.data > 0 {
+            true => ClipboardAfter::of_clear(self.os.clipboard.clear_if_text_lines(&source, None)),
+            false => ClipboardAfter::NotAsked,
+        };
+        Ok(Tagged {
+            session: saved.session,
+            generation: saved.generation,
+            data: EnvSaved {
+                saved: saved.data,
+                clipboard,
+            },
         })
     }
 
@@ -721,6 +768,7 @@ struct SaveArgs {
     token: Token,
     choices: Vec<EnvChoice>,
     collection: Option<String>,
+    clear_clipboard: bool,
 }
 
 /// `env_copy` and `env_save_file`.
@@ -752,16 +800,27 @@ pub(super) async fn env_read(
 pub(super) async fn env_save(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
-) -> ShellResult<Tagged<u32>> {
+) -> ShellResult<Tagged<EnvSaved>> {
     let SaveArgs {
         session,
         generation,
         token,
         choices,
         collection,
+        clear_clipboard,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.env_save(session, generation, &token, choices, collection)).await
+    blocking(move || {
+        shell.env_save(
+            session,
+            generation,
+            &token,
+            choices,
+            collection,
+            clear_clipboard,
+        )
+    })
+    .await
 }
 
 /// Copies a folder's keys in `.env` form, in Rust.
@@ -876,9 +935,28 @@ mod tests {
         actions: &[EnvAction],
         collection: Option<&str>,
     ) -> ShellResult<Tagged<u32>> {
+        let saved = save_asking(ts, (s, g), rows, actions, collection, false)?;
+        Ok(Tagged {
+            session: saved.session,
+            generation: saved.generation,
+            data: saved.data.saved,
+        })
+    }
+
+    /// `env_save` as the page sends it, with the tick box on or off: the whole answer.
+    fn save_asking(
+        ts: &TestShell,
+        (s, g): (SessionId, u64),
+        rows: &EnvRows,
+        actions: &[EnvAction],
+        collection: Option<&str>,
+        clear_clipboard: bool,
+    ) -> ShellResult<Tagged<EnvSaved>> {
         let token = rows.token.as_ref().expect("a token");
         let place = collection.map(str::to_owned);
-        ts.shell.env_save(s, g, token, choices(actions), place)
+        let choices = choices(actions);
+        ts.shell
+            .env_save(s, g, token, choices, place, clear_clipboard)
     }
 
     /// Every live key in a place with its value, sorted by name then value.
@@ -1204,7 +1282,9 @@ mod tests {
             .sessions
             .pending()
             .put(PendingChoice::AddVault { dir });
-        let wrong = ts.shell.env_save(a, ga, &other, choices(&[Save]), None);
+        let wrong = ts
+            .shell
+            .env_save(a, ga, &other, choices(&[Save]), None, false);
         assert_eq!(wrong.err(), NOT_FOUND);
     }
 
@@ -1398,7 +1478,7 @@ mod tests {
             let token = rows.token.as_ref().unwrap();
             let refused = ts
                 .shell
-                .env_save(s, g, token, wrong, Some(place.to_owned()));
+                .env_save(s, g, token, wrong, Some(place.to_owned()), false);
             assert_eq!(refused.err(), Some(BAD_ROWS), "{what}");
             assert_eq!(
                 keys_in(&ts, s, g, Some(&prod)),
@@ -1897,7 +1977,10 @@ mod tests {
         let foreign = SessionId(s.0 + 100);
         let rows = read(&ts, s, g, "SOME_NAME=1\n");
         let token = rows.token.as_ref().unwrap();
-        let go = |sid, gen_| ts.shell.env_save(sid, gen_, token, choices(&[Save]), None);
+        let go = |sid, gen_| {
+            ts.shell
+                .env_save(sid, gen_, token, choices(&[Save]), None, false)
+        };
 
         assert_eq!(ts.shell.env_read(s, g + 1, text()).err(), LOCKED);
         assert_eq!(ts.shell.env_read(foreign, g, text()).err(), NOT_FOUND);
@@ -1905,7 +1988,10 @@ mod tests {
         assert_eq!(parked(&ts), 0, "a refused save still used the token up");
         let rows = read(&ts, s, g, "SOME_NAME=1\n");
         let token = rows.token.as_ref().unwrap();
-        let go = |sid, gen_| ts.shell.env_save(sid, gen_, token, choices(&[Save]), None);
+        let go = |sid, gen_| {
+            ts.shell
+                .env_save(sid, gen_, token, choices(&[Save]), None, false)
+        };
         assert_eq!(go(foreign, g).err(), NOT_FOUND);
         assert_eq!(parked(&ts), 0);
         assert_eq!(ts.shell.env_copy(s, g + 1, &prod).err(), LOCKED);
@@ -1920,7 +2006,9 @@ mod tests {
             Some(ShellError::ReadOnly)
         );
         let other = made_up_token();
-        let refused = ts.shell.env_save(r, gr, &other, choices(&[Save]), None);
+        let refused = ts
+            .shell
+            .env_save(r, gr, &other, choices(&[Save]), None, false);
         assert_eq!(refused.err(), Some(ShellError::ReadOnly));
         assert_eq!(
             ts.shell.env_save_file(r, gr, &prod).err(),
@@ -1992,6 +2080,175 @@ mod tests {
         );
     }
 
+    // ---- the tick box: clearing the clipboard after a save
+
+    /// A paste saved with the tick box on clears what the clipboard still holds of it, reading CRLF, a lone CR and LF as
+    /// one line break on both sides (the page's paste may not have kept Windows' CRLF) and exact otherwise.
+    #[test]
+    fn paste_clear_reads_line_breaks_as_one_and_is_exact_otherwise() {
+        type Variant = fn(&str) -> String;
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let lf: Variant = str::to_owned;
+        let crlf: Variant = |t| t.replace('\n', "\r\n");
+        let cr: Variant = |t| t.replace('\n', "\r");
+        // (the page's text, what the clipboard holds, whether the clear should match)
+        let cases: [(&str, Variant, Variant, bool); 9] = [
+            ("the same", lf, lf, true),
+            ("CRLF on the clipboard, LF pasted", lf, crlf, true),
+            ("LF on the clipboard, CRLF pasted", crlf, lf, true),
+            ("a lone CR on the clipboard", lf, cr, true),
+            ("one more space", lf, |t| format!("{t} "), false),
+            ("another case", lf, |t| t.to_lowercase(), false),
+            ("no last line break", lf, |t| t.trim_end().to_owned(), false),
+            ("a blank line more", lf, |t| t.replace('\n', "\n\n"), false),
+            ("other text", lf, |_| "something newer".to_owned(), false),
+        ];
+        for (n, (what, page, clipboard, matches)) in cases.into_iter().enumerate() {
+            let text = format!("FIRST_{n}=one\nSECOND_{n}=two\n");
+            assert!(ts.clipboard.user_copy(&clipboard(&text)), "{what}");
+            let rows = read(&ts, s, g, &page(&text));
+            let done = save_asking(&ts, (s, g), &rows, &[Save, Save], None, true).unwrap();
+            assert_eq!(done.data.saved, 2, "{what}");
+            let wanted = match matches {
+                true => ClipboardAfter::Cleared,
+                false => ClipboardAfter::NotOurs,
+            };
+            assert_eq!(done.data.clipboard, wanted, "{what}");
+            assert_eq!(ts.clipboard.text().is_none(), matches, "{what}");
+        }
+        // Something that is not text, an empty clipboard: not ours.
+        let text = "THIRD=3\n";
+        assert!(ts.clipboard.user_copy_non_text());
+        let rows = read(&ts, s, g, text);
+        let done = save_asking(&ts, (s, g), &rows, &[Save], None, true).unwrap();
+        assert_eq!(done.data.clipboard, ClipboardAfter::NotOurs);
+        assert!(ts.clipboard.has_non_text());
+    }
+
+    /// The clear is asked for, and runs only after a key was written: not without the tick box (the clipboard is not even
+    /// opened), not when every row was left out (Cancel), not when the save was refused; and a clipboard that stays busy,
+    /// or an empty Windows refuses, is told, with the keys saved all the same.
+    #[test]
+    fn paste_clear_runs_only_when_asked_and_after_a_write() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let at = (s, g);
+        let text = "A=1\nB=2\n";
+        let opens = || ts.clipboard.opens();
+
+        // The tick box off.
+        assert!(ts.clipboard.user_copy(text));
+        let rows = read(&ts, s, g, text);
+        let before = opens();
+        let done = save_asking(&ts, at, &rows, &[Save, Save], None, false).unwrap();
+        assert_eq!(done.data.clipboard, ClipboardAfter::NotAsked);
+        assert_eq!(
+            opens(),
+            before,
+            "the clipboard was opened without being asked"
+        );
+        assert_eq!(ts.clipboard.text().as_deref(), Some(text));
+
+        // Every row left out: nothing written, nothing cleared, whatever the tick box says.
+        let rows = read(&ts, s, g, "C=3\nD=4\n");
+        let before = opens();
+        let done = save_asking(&ts, at, &rows, &[LeaveOut, LeaveOut], None, true).unwrap();
+        assert_eq!(
+            (done.data.saved, done.data.clipboard),
+            (0, ClipboardAfter::NotAsked)
+        );
+        assert_eq!(opens(), before, "a Cancel opened the clipboard");
+
+        // A refused save writes nothing and clears nothing.
+        assert!(ts.clipboard.user_copy("C=3\nD=4\n"));
+        let rows = read(&ts, s, g, "C=3\nD=4\n");
+        let before = opens();
+        let refused = save_asking(&ts, at, &rows, &[Save], None, true);
+        assert_eq!(refused.err(), Some(BAD_ROWS));
+        assert_eq!(opens(), before, "a refused save opened the clipboard");
+        assert_eq!(ts.clipboard.text().as_deref(), Some("C=3\nD=4\n"));
+        assert_eq!(keys_in(&ts, s, g, None), pairs(&[("A", "1"), ("B", "2")]));
+
+        // A busy clipboard, and an empty Windows refuses: told as failed, and the keys are saved.
+        let rows = read(&ts, s, g, "C=3\nD=4\n");
+        ts.clipboard.hold_open_elsewhere(true);
+        let done = save_asking(&ts, at, &rows, &[Save, Save], None, true).unwrap();
+        ts.clipboard.hold_open_elsewhere(false);
+        assert_eq!(
+            (done.data.saved, done.data.clipboard),
+            (2, ClipboardAfter::Failed)
+        );
+        let rows = read(&ts, s, g, "E=5\n");
+        assert!(ts.clipboard.user_copy("E=5\n"));
+        ts.clipboard.fail_empty_at(0);
+        let done = save_asking(&ts, at, &rows, &[Save], None, true).unwrap();
+        assert_eq!(done.data.clipboard, ClipboardAfter::Failed);
+        assert_eq!(ts.clipboard.text().as_deref(), Some("E=5\n"));
+        assert_eq!(keys_in(&ts, s, g, None).len(), 5);
+    }
+
+    // ---- the names Keep both showed
+
+    /// Keep both is saved only under the name the rows showed: when the folder changed while the panel was open (another
+    /// key took the number, or the number was freed) the whole save is refused with `env rows`, and nothing is written.
+    #[test]
+    fn keep_both_is_refused_when_the_folder_changed_since_the_rows_showed() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let prod = folder(&ts, s, g, "Prod");
+        key(&ts, s, g, "TAKEN", "old", Some(&prod));
+        key(&ts, s, g, "TAKEN", "old", None);
+
+        // Another key takes the number the row was shown.
+        let rows = read(&ts, s, g, "TAKEN=again\nFRESH=new\n");
+        assert_eq!(saved_as(&rows, Some(&prod)), [(0, "TAKEN_2".to_owned())]);
+        key(&ts, s, g, "TAKEN_2", "newcomer", Some(&prod));
+        let refused = save(&ts, (s, g), &rows, &[KeepBoth, Save], Some(&prod));
+        assert_eq!(refused.err(), Some(BAD_ROWS));
+        assert_eq!(
+            keys_in(&ts, s, g, Some(&prod)),
+            pairs(&[("TAKEN", "old"), ("TAKEN_2", "newcomer")]),
+            "a key was written, or one was overwritten"
+        );
+        assert_eq!(parked(&ts), 0, "the token is used up");
+
+        // The same in no folder, where the number was freed instead (the name shown is no longer the one it would be).
+        key(&ts, s, g, "TAKEN_2", "x", None);
+        let rows = read(&ts, s, g, "TAKEN=again\n");
+        assert_eq!(saved_as(&rows, None), [(0, "TAKEN_3".to_owned())]);
+        let two = keys_in(&ts, s, g, None)
+            .into_iter()
+            .find(|(name, _)| name == "TAKEN_2");
+        assert!(two.is_some());
+        let freed = ts.shell.sessions.read(s, g, |vault, _| {
+            let found =
+                all_items(&vault).find(|item| item.title == "TAKEN_2" && item.collection.is_none());
+            Ok(found.map(|item| item.id.to_hex()))
+        });
+        ts.shell
+            .trash_item(s, g, &freed.unwrap().data.unwrap())
+            .unwrap();
+        let refused = save(&ts, (s, g), &rows, &[KeepBoth], None);
+        assert_eq!(
+            refused.err(),
+            Some(BAD_ROWS),
+            "the row showed TAKEN_3, which is not what Keep both would give now"
+        );
+        assert_eq!(keys_in(&ts, s, g, None), pairs(&[("TAKEN", "old")]));
+
+        // A folder nothing happened to still saves under the name that was shown, and Replace and Save are not affected
+        // by the number being taken.
+        let rows = read(&ts, s, g, "TAKEN=again\nFRESH=new\n");
+        key(&ts, s, g, "TAKEN_2", "newcomer", None);
+        let done = save(&ts, (s, g), &rows, &[Replace, Save], None).unwrap();
+        assert_eq!(done.data, 2);
+        let rows = read(&ts, s, g, "TAKEN=third\n");
+        assert_eq!(saved_as(&rows, None), [(0, "TAKEN_3".to_owned())]);
+        assert_eq!(save(&ts, (s, g), &rows, &[KeepBoth], None).unwrap().data, 1);
+        assert!(keys_in(&ts, s, g, None).contains(&("TAKEN_3".to_owned(), "third".to_owned())));
+    }
+
     /// Whatever the text, a read never panics, and neither the answer nor a refusal shows a value.
     #[test]
     fn any_paste_never_panics_and_never_leaks_a_value() {
@@ -2037,7 +2294,7 @@ mod tests {
         }
         let save = |extra: Value| {
             let mut base = json!({
-                "session": 1, "generation": 2, "token": token, "collection": null,
+                "session": 1, "generation": 2, "token": token, "collection": null, "clear_clipboard": true,
                 "choices": [{ "index": 0, "action": "keep_both" }, { "index": 1, "action": "leave_out" }],
             });
             base.as_object_mut()
@@ -2053,6 +2310,7 @@ mod tests {
             .collect();
         assert_eq!(actions, [(0, KeepBoth), (1, LeaveOut)]);
         assert_eq!(parsed_save.collection, None);
+        assert!(parsed_save.clear_clipboard);
         let with_folder = save(json!({ "collection": "00000000000000000000000000000001" }));
         assert!(
             parse::<SaveArgs>(&body(with_folder))
@@ -2067,9 +2325,18 @@ mod tests {
             save(json!({ "choices": [{ "index": 0, "action": "save", "value": "x" }] })),
             save(json!({ "choices": [{ "index": -1, "action": "save" }] })),
             json!({ "session": 1, "generation": 2, "token": token, "collection": null }),
+            save(json!({ "clear_clipboard": "yes" })),
         ] {
             assert_eq!(parse::<SaveArgs>(&body(bad)).err(), Some(MALFORMED));
         }
+        // The tick box is always sent: a save without it is refused rather than guessed.
+        let mut without = save(json!({}));
+        without.as_object_mut().unwrap().remove("clear_clipboard");
+        assert_eq!(
+            parse::<SaveArgs>(&body(without)).err(),
+            Some(MALFORMED),
+            "a save that does not say whether to clear"
+        );
         let folder = json!({ "session": 1, "generation": 2, "collection": "abc" });
         assert!(parse::<FolderArgs>(&body(folder)).is_ok());
         for bad in [
@@ -2080,6 +2347,14 @@ mod tests {
             assert_eq!(parse::<FolderArgs>(&body(bad)).err(), Some(MALFORMED));
         }
 
+        let saved = EnvSaved {
+            saved: 3,
+            clipboard: ClipboardAfter::NotOurs,
+        };
+        assert_eq!(
+            serde_json::to_value(saved).unwrap(),
+            json!({ "saved": 3, "clipboard": "not_ours" })
+        );
         assert_eq!(serde_json::to_value(EnvOut::Done).unwrap(), json!("Done"));
         let duplicate = EnvOut::Duplicate {
             name: "A".to_owned(),

@@ -647,8 +647,9 @@ test("idle_timer_not_paused_here", async () => {
   start([]);
   await toTheKey();
   // This screen sends nothing that would hold the idle timer back, and an idle lock takes the key away like any other.
-  // (`launch_notices` is the page's one question at start, asked of the shell with no vault; it holds nothing back either.)
-  const allowed = new Set(["list_vaults", "launch_notices", "create_vault", "list_items", "get_settings"]);
+  // (`launch_notices` is the page's one question at start, asked of the shell with no vault; it holds nothing back either, and neither does
+  // `capture_state`, which asks what the save shortcut left waiting.)
+  const allowed = new Set(["list_vaults", "launch_notices", "capture_state", "create_vault", "list_items", "get_settings"]);
   const sent = commandsSent().filter((cmd) => !cmd.startsWith("listen:"));
   expect(sent.filter((cmd) => !allowed.has(cmd))).toEqual([]);
   expect(sent.join()).not.toMatch(/idle|pause|hold|keep/);

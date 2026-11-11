@@ -21,7 +21,7 @@ import {
   type SessionData,
 } from "../store";
 import { AddMenu } from "./AddMenu";
-import { DetailsChangedAsk, LostOutputsAsk, VaultBanners } from "./Asks";
+import { DetailsChangedAsk, LostOutputsAsk, ShortcutAsk, VaultBanners } from "./Asks";
 import { EmptyAdd } from "./EmptyAdd";
 import { EnvFileDialog } from "./EnvOut";
 import { EnvPaste } from "./EnvPaste";
@@ -35,6 +35,7 @@ import { ItemList } from "./ItemList";
 import { FILTER, itemCount, kindCount, kindPlural, ListTools, showAll, useKind, useSort } from "./ListTools";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
+import { SaveBox } from "./SaveBox";
 import { SearchPanel } from "./SearchPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
 import { TrashPanel, TrashView } from "./TrashView";
@@ -211,6 +212,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             {locked === null ? null : <p className="lnote">{locked}</p>}
             <div className="asks">
               <LostOutputsAsk />
+              <ShortcutAsk />
               <VaultBanners data={data} />
             </div>
             <DetailsChangedAsk data={data} />
@@ -343,7 +345,17 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
           <NoteForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
         ) : null}
         {data.tool?.kind === "paste_env" ? (
-          <EnvPaste key={`${String(data.session)}:${String(data.generation)}:${String(data.tool.opening)}`} data={data} folders={folders} />
+          <EnvPaste
+            key={`${String(data.session)}:${String(data.generation)}:${String(data.tool.opening)}`}
+            data={data}
+            folders={folders}
+            initialRows={data.tool.rows}
+            initialFolder={data.tool.folder}
+          />
+        ) : null}
+        {data.tool?.kind === "save_box" ? (
+          // Not keyed by the copy: a new copy while the box is open keeps what was typed and chosen.
+          <SaveBox key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
         ) : null}
         {data.tool?.kind === "edit" ? (
           <EditForm

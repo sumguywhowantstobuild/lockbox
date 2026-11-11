@@ -41,7 +41,11 @@ export type PageNotice =
   | { kind: "output_sweep"; removed: number; kept: number; unreadable: boolean }
   | { kind: "open_cleanup"; removed: number; still_open: number }
   | ({ kind: "restore" } & RestoreNotice)
-  | { kind: "first_close"; explain: boolean };
+  | { kind: "first_close"; explain: boolean }
+  /** Windows said the save shortcut (Ctrl+Shift+L) belongs to another app: it is off until Lockbox is started again. */
+  | { kind: "shortcut_taken" }
+  /** The shortcut could not be turned on for a reason that is not another app holding it. */
+  | { kind: "shortcut_not_set" };
 
 /** What dismissing a restore journal leaves behind, for the user to act on. */
 export interface Leaves {
@@ -170,6 +174,26 @@ export async function open<T>(cmd: string, args?: InvokeArgs): Promise<Opened<T>
 /** Listens for `lockbox://notice`: each notice is handed over as it came (it holds no vault data, so it has no generation). */
 export function onNotice(handler: (notice: PageNotice) => void): Promise<UnlistenFn> {
   return listen<PageNotice>("lockbox://notice", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/**
+ * What the save shortcut left in the shell, as `lockbox://capture` and `capture_state` say it: the copy's id (32 lowercase hex
+ * characters, new for every press), what the clipboard held (`value`, `empty` for no text, `too_large`), or `gone` when the copy
+ * was let go. Never the value. `changed` is true when a copy was waiting and this one's value is different; `env_keys` is how many
+ * keys the copy reads as when it is a `.env` of at least one key and no line that can't be read, otherwise `null`.
+ */
+export interface CaptureEvent {
+  capture_id: string;
+  state: "value" | "empty" | "too_large" | "gone";
+  changed: boolean;
+  env_keys: number | null;
+}
+
+/** Listens for `lockbox://capture`: each event is handed over as it came (it holds no vault data, so it has no generation). */
+export function onCapture(handler: (event: CaptureEvent) => void): Promise<UnlistenFn> {
+  return listen<CaptureEvent>("lockbox://capture", ({ payload }) => {
     handler(payload);
   });
 }

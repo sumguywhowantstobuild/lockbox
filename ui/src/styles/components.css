@@ -2632,3 +2632,58 @@
   color: var(--ink2);
   overflow-wrap: anywhere;
 }
+
+/* ---- The save box: a key copied with the shortcut (Task 18) ---- */
+
+/* The copied value: a field that shows its dots, or the value itself once Show is pressed; it wraps, since a key can be long. */
+.cval {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 12px;
+  background: var(--card);
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--edge);
+  color: var(--ink);
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.cval .cdots {
+  color: var(--ink2);
+  letter-spacing: 1px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* A tick box with its words beside it, in a panel's form. */
+.fchk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.fchk input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--v);
+}
+
+.fbox .fchk + .fhint {
+  margin-top: 4px;
+}
+
+/* What the page says of the copy at the top of the box: a quiet line, and a line for a screen reader that is empty until it has something to say. */
+.cnote {
+  margin: 12px 2px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink2);
+}

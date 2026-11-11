@@ -6,6 +6,7 @@ import { Dialog } from "../parts/Dialog";
 import {
   acceptDetails,
   closeBanner,
+  dismissShortcutNotice,
   lockThisVault,
   setOutputRecordAside,
   useLockNote,
@@ -200,6 +201,25 @@ export function LostOutputsAsk() {
 }
 
 /**
+ * The save shortcut (Ctrl+Shift+L) is off: another app holds it, or it could not be turned on for another reason. Words and a Close; shown on
+ * the lock screen and in the vault until it is closed, and told again only when Lockbox starts again.
+ */
+export function ShortcutAsk() {
+  const { shortcut } = useNotices();
+  if (shortcut === null) return null;
+  return (
+    <Notice
+      text={
+        shortcut === "taken"
+          ? "Ctrl+Shift+L is used by another app, so the save shortcut is off. Close that app and restart Lockbox to use it."
+          : "The save shortcut couldn't be turned on. Restart Lockbox to try again."
+      }
+      actions={[{ name: "Close", onPress: dismissShortcutNotice }]}
+    />
+  );
+}
+
+/**
  * What the lock screen says beside the password: a restore that Lockbox finished at launch (words only; the lock
  * screen's own Unlock is its button, and unlocking is what clears it), and a refusal that the vault it was about has
  * locked before (Ask 16, "Locked before it could say"; words, no button).
@@ -217,6 +237,7 @@ export function LockScreenAsks() {
         />
       ) : null}
       <LostOutputsAsk />
+      <ShortcutAsk />
     </div>
   );
 }

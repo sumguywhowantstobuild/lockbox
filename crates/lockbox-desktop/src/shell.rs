@@ -15,13 +15,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
 use crate::autolock::AutoLock;
+use crate::capture::{Capture, CaptureEvent, Read};
 use crate::clipboard::Clipboard;
 use crate::commands::env;
 use crate::error::{ShellError, ShellResult};
 use crate::locations::{LocationCheck, check_location, is_within};
 use crate::lock;
 use crate::open::{OpenFolders, RemoveReport};
-use crate::os::{KnownFolder, Os};
+use crate::os::{HotkeyTaken, KnownFolder, Os};
 use crate::outputs::{Outputs, SweepReport};
 use crate::paths::{StatePaths, state_paths};
 use crate::registry::Registry;
@@ -37,6 +38,8 @@ pub const LOCKED_EVENT: &str = "lockbox://locked";
 pub const BUSY_EVENT: &str = "lockbox://busy";
 /// Launch recovery and sweep results: `{ kind, .. }`.
 pub const NOTICE_EVENT: &str = "lockbox://notice";
+/// The copied value waiting for the save box changed or went: `{ capture_id, state, changed, env_keys }`.
+pub const CAPTURE_EVENT: &str = "lockbox://capture";
 
 pub struct Shell {
     pub sessions: Arc<Sessions>,
@@ -54,6 +57,8 @@ pub struct Shell {
     pub open_folders: Arc<OpenFolders>,
     /// The one restore that may be alive (spec §6.8) and the pre-restore folders last listed.
     pub restore: Arc<Restores>,
+    /// The copied value the save shortcut read, waiting for the save box (one slot).
+    pub capture: Arc<Capture>,
     pub paths: StatePaths,
     pub(crate) os: Os,
     /// Where the launch sweep's notice goes.
@@ -68,8 +73,7 @@ pub struct Shell {
     /// One close of the window at a time; true while 5b, the first-close explanation, shows
     /// ([`close_window`](Self::close_window)).
     explaining: Mutex<bool>,
-    /// How many times the save shortcut has been pressed. The shortcut is not registered yet (the save box's task
-    /// registers it); the count is what the router's test watches.
+    /// How many times the save shortcut has been pressed: what the router's test watches.
     shortcut_presses: AtomicU64,
     /// Tests only: how many times a creation or addition had to wait for another.
     #[cfg(test)]
@@ -115,6 +119,9 @@ impl Shell {
         // Then the pasted `.env` values' (a lock of one vault drains nothing of `Pending` by itself, and a paste parked
         // while a lock was under way is dropped here).
         sessions.on_lock(env::lock_hook(Arc::downgrade(&sessions)));
+        // Then the capture slot's: every lock of all vaults empties it, and a lock of the vault it was handed to does.
+        let capture = Arc::new(Capture::default());
+        sessions.on_lock(capture.lock_hook(Arc::downgrade(&sessions), Arc::clone(&notifier)));
         Ok(Shell {
             sessions,
             settings,
@@ -125,6 +132,7 @@ impl Shell {
             outputs,
             open_folders,
             restore,
+            capture,
             paths,
             os,
             notifier,
@@ -140,11 +148,38 @@ impl Shell {
         })
     }
 
-    /// The save shortcut was pressed. For now it only counts the press: it reads nothing and keeps nothing, so no
-    /// copied text is held anywhere. The save box's task makes it read the clipboard once here, into its one capture slot. Runs on a
-    /// thread of its own (the clipboard may be held by another program), never the signal window's.
+    /// The save shortcut was pressed: reads the clipboard once, into the one capture slot (a text with something in it, or
+    /// nothing, or too much), tells the page its id and state, and brings the window forward, in that order. Runs on a thread
+    /// of its own (the clipboard may be held by another program), never the signal window's, so a read that waits holds up
+    /// no lock signal.
+    ///
+    /// The sessions' epoch is read before the read begins: when every vault locks while it runs (a lock, the window's
+    /// close, idle, Windows' lock or sleep, Quit), the slot keeps nothing and nothing is sent or shown.
     pub fn save_shortcut_pressed(&self) {
         self.shortcut_presses.fetch_add(1, Ordering::SeqCst);
+        let began = self.sessions.epoch();
+        let read = Read::of(self.os.clipboard.read_text(None));
+        if self
+            .capture
+            .fill(&*self.notifier, &self.sessions, began, read)
+        {
+            self.os.window.bring_forward();
+        }
+    }
+
+    /// What Windows answered when the save shortcut was registered at launch: a shortcut that is taken, or that could not
+    /// be set, is told to the page as a launch notice. The app runs either way.
+    pub fn shortcut_registered(&self, answer: Result<(), HotkeyTaken>) {
+        match answer {
+            Ok(()) => {}
+            Err(HotkeyTaken::Taken) => self.tell(Notice::ShortcutTaken),
+            Err(HotkeyTaken::NotSet) => self.tell(Notice::ShortcutNotSet),
+        }
+    }
+
+    /// Where the shell's events go.
+    pub(crate) fn notifier(&self) -> &dyn Notifier {
+        &*self.notifier
     }
 
     /// How many times the save shortcut has been pressed.
@@ -391,6 +426,10 @@ impl<R: Runtime> Notifier for Events<R> {
 
     fn notice(&self, notice: &Notice) {
         self.emit(NOTICE_EVENT, notice);
+    }
+
+    fn capture(&self, event: &CaptureEvent) {
+        self.emit(CAPTURE_EVENT, event);
     }
 }
 
@@ -769,18 +808,5 @@ mod tests {
         assert_eq!(answer.err(), Some(ShellError::Locked));
         assert_eq!(ts.window.hides(), 1);
         assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
-    }
-
-    /// A press counts and nothing else: the clipboard is not opened and is left as it was, so no copied text is held in
-    /// the shell between a press and the save box that will read it.
-    #[test]
-    fn a_press_only_counts_and_reads_nothing() {
-        let ts = TestShell::new();
-        assert!(ts.clipboard.user_copy(COPIED));
-        ts.shell.save_shortcut_pressed();
-        ts.shell.save_shortcut_pressed();
-        assert_eq!(ts.shell.shortcut_presses(), 2);
-        assert_eq!(ts.clipboard.opens(), 0, "the clipboard was opened");
-        assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
     }
 }

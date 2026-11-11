@@ -579,7 +579,9 @@ Unlocking a vault doesn't empty it.
 **Clearing a value Lockbox didn't copy:** the save box offers it. Only if the person asks, in one clipboard opening, Lockbox
 reads the text to compare it, and clears it only if it's still the same. A different value it reads there is dropped at once. A value copied from another app usually carries no exclusion formats, so Windows clipboard
 history may keep it, and the wording doesn't promise otherwise. Tested on 2026-11-05: after the clear, the value copied
-from Notepad was still in Win+V.
+from Notepad was still in Win+V. The save box compares the text exactly as it was read (the value saved is that text without the
+spaces and line breaks round it). The `.env` paste panel offers the same clear for the text it was given, after its keys are written,
+counting CRLF and LF as one line break, since the page may not keep Windows' CRLF; a save that writes no key never clears.
 
 The shortcut is registered Windows-wide on the hidden window, so it works with Lockbox minimised, hidden or behind another
 app (tested on 2026-11-05). The default is Ctrl+Shift+L (Ariel's pick). While Lockbox runs, other apps lose that key

@@ -11,6 +11,7 @@ compile_error!("lockbox-desktop is Windows-only");
 compile_error!("release builds need `--features custom-protocol` (cargo tauri build adds it)");
 
 pub mod autolock;
+pub mod capture;
 pub mod clipboard;
 pub mod commands;
 pub mod error;
@@ -83,10 +84,8 @@ pub fn run() {
                     "Lockbox will not run: it could not listen for Windows lock and sleep".into(),
                 );
             };
-            // No save shortcut is registered here yet: it takes a key from every other program for as long as it is
-            // registered, and nothing answers a press until the save box exists. That task must register it
-            // (`SignalThread::set_hotkey`, at launch or at an unlock), since the shortcut is what opens the save box.
-            // `manage` refuses (and drops, which closes the window) a second value of the same type.
+            // The save shortcut is registered below, once the shell exists to answer a press and to tell the page when
+            // Windows says no. `manage` refuses (and drops, which closes the window) a second value of the same type.
             if !app.manage(signal_thread) {
                 return Err(
                     "Lockbox will not run: its Windows lock and sleep listener could not be kept"
@@ -112,6 +111,10 @@ pub fn run() {
             }
             // Fail closed here too: never run without the auto-lock. Signals that came before this wait in the channel.
             route_signals(signals, Arc::clone(&shell))?;
+            // After the route, so a press that comes at once is answered. The app runs whatever Windows says.
+            register_save_shortcut(&shell, |shortcut| {
+                app.state::<os::win::SignalThread>().set_hotkey(shortcut)
+            });
             start_ticks(shell)?;
 
             // The icon by the clock, where the window hides to: fail closed, since a hidden window with no icon could
@@ -231,6 +234,15 @@ fn route_signals(signals: mpsc::Receiver<os::OsSignal>, shell: Arc<Shell>) -> io
             eprintln!("Lockbox debug: Windows signals stopped");
         })?;
     Ok(())
+}
+
+/// Registers the save shortcut (Ctrl+Shift+L) through `set_hotkey` and tells the shell what Windows answered: the page
+/// hears of a shortcut that is taken or could not be set ([`Shell::shortcut_registered`]). The app runs either way.
+fn register_save_shortcut(
+    shell: &Shell,
+    set_hotkey: impl FnOnce(Option<os::Shortcut>) -> Result<(), os::HotkeyTaken>,
+) {
+    shell.shortcut_registered(set_hotkey(Some(os::Shortcut::default())));
 }
 
 /// The auto-lock's timer: a tick every [`autolock::TICK`] for as long as the app runs.
@@ -379,10 +391,10 @@ mod tests {
         );
     }
 
-    /// A press of the shortcut, as the signal window sends it, ends in the shell: counted, and nothing is read or kept.
-    /// A lock signal still reaches the auto-lock, and a press never counts as a lock or a lock as a press. (The save box's
-    /// task must add the clipboard read to a press, and bring back the check that a stuck read does not hold up a lock
-    /// signal.)
+    /// A press of the shortcut, as the signal window sends it, ends in the shell, which reads the clipboard once and tells
+    /// the page. A lock signal still reaches the auto-lock, and a press never counts as a lock or a lock as a press.
+    /// A clipboard read that hangs (another program holds the clipboard) does not hold up a lock signal sent after the
+    /// press, and the press that began before that lock keeps nothing when it finishes.
     #[test]
     fn hotkey_signal_reaches_the_router() {
         let ts = TestShell::new();
@@ -394,7 +406,10 @@ mod tests {
         wait_until("the press never reached the shell", || {
             ts.shell.shortcut_presses() == 1
         });
-        assert_eq!(ts.clipboard.opens(), 0, "a press opened the clipboard");
+        wait_until("the press never told the page", || {
+            ts.events.captures().len() == 1
+        });
+        assert_eq!(ts.clipboard.opens(), 1, "a press opens the clipboard once");
 
         let (session, _) = ts.open_vault("Family");
         sink.send(OsSignal::SessionLocked).unwrap();
@@ -403,11 +418,92 @@ mod tests {
         });
         assert_eq!(ts.shell.shortcut_presses(), 1, "a lock counted as a press");
 
+        // A press whose read hangs, and a lock signal sent after it.
+        let (stuck, is_stuck) = mpsc::channel::<()>();
+        let (release, released) = mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        ts.clipboard.during_next_read(Box::new(move || {
+            let _ = stuck.send(());
+            let _ = lock(&released).recv_timeout(GIVE_UP);
+        }));
+        assert!(ts.clipboard.user_copy(COPIED));
         sink.send(OsSignal::SaveShortcut).unwrap();
-        wait_until("the second press never reached the shell", || {
-            ts.shell.shortcut_presses() == 2
+        is_stuck
+            .recv_timeout(GIVE_UP)
+            .expect("the press never reached the clipboard");
+        let (again, _) = ts.open_vault("Work");
+        sink.send(OsSignal::SessionLocked).unwrap();
+        wait_until("a hung read held up the lock signal", || {
+            ts.events.locked().iter().any(|locked| locked.0 == again)
         });
-        assert_eq!(ts.events.locked().len(), 1, "a press locked a vault");
+        assert_eq!(ts.shell.shortcut_presses(), 2);
+
+        // The read finishes after the lock: that press keeps nothing and tells nothing. The next press (read behind it)
+        // is the one the page hears of. The first capture was emptied by the first lock (`gone`), so the page was told:
+        // a value, its end, and the third press's value, in that order, and no value for the hung press.
+        release.send(()).unwrap();
+        wait_until("the hung press never ended", || !ts.clipboard.is_open());
+        sink.send(OsSignal::SaveShortcut).unwrap();
+        wait_until("the third press never told the page", || {
+            ts.shell.shortcut_presses() == 3 && ts.shell.capture_state().is_some()
+        });
+        let told: Vec<String> = ts
+            .events
+            .captures()
+            .iter()
+            .map(|event| event["state"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            told,
+            ["value", "gone", "value"],
+            "the hung press told the page after a lock"
+        );
+        assert_eq!(ts.events.locked().len(), 2, "a press locked a vault");
         assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+    }
+
+    /// The shortcut is asked for at launch (Ctrl+Shift+L), and what Windows says about it is told to the page as a launch
+    /// notice, kept for a page that loads later: "taken" only when Windows says the keys are registered already, and
+    /// "not set" for every other refusal. A shortcut that is set says nothing.
+    #[test]
+    fn taken_at_launch_is_told() {
+        let default = os::Shortcut::default();
+        assert_eq!(
+            (default.ctrl, default.shift, default.alt, default.key),
+            (true, true, false, u16::from(b'L'))
+        );
+        let cases = [
+            (Err(os::HotkeyTaken::Taken), Some("shortcut_taken")),
+            (Err(os::HotkeyTaken::NotSet), Some("shortcut_not_set")),
+            (Ok(()), None),
+        ];
+        for (answer, notice) in cases {
+            let ts = TestShell::new();
+            let mut asked = Vec::new();
+            register_save_shortcut(&ts.shell, |shortcut| {
+                asked.push(shortcut);
+                answer
+            });
+            assert_eq!(
+                asked,
+                [Some(default)],
+                "it was asked for once, with the default keys"
+            );
+            let told: Vec<serde_json::Value> = notice
+                .into_iter()
+                .map(|kind| serde_json::json!({ "kind": kind }))
+                .collect();
+            assert_eq!(ts.events.notices(), told, "{answer:?}");
+            let kept: Vec<serde_json::Value> = ts
+                .shell
+                .launch_notices()
+                .iter()
+                .map(|kept| serde_json::to_value(kept).unwrap())
+                .collect();
+            assert_eq!(
+                kept, told,
+                "a page that loads later must hear of it too: {answer:?}"
+            );
+        }
     }
 }

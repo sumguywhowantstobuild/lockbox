@@ -339,6 +339,40 @@ export interface FakeShell {
   envCopied: string[];
   /** The folders (by id) whose keys `env_save_file` wrote as a file, in order (a Dismissed or refused save is not here). */
   envFiles: string[];
+  /**
+   * The save shortcut pressed with `what` on the clipboard: a text (kept as read, the surrounding spaces and line breaks too), `"empty"`
+   * (no text: an image, say) or `"too_large"`. A new slot with a new id replaces the one waiting, as the shell does, and
+   * `lockbox://capture` is sent with `changed` and `env_keys` worked out by the connection's rules. The clipboard is left as it is.
+   */
+  press(what: { text: string } | "empty" | "too_large"): void;
+  /** What the clipboard holds now (`null` for no text): set it to what the person copied before pressing, or to something else after. */
+  setClipboard(text: string | null): void;
+  clipboard(): string | null;
+  /** The next clipboard clear (a save's, or the paste panel's) errors: the answer is `failed`, and the text stays. */
+  failClipboardClearNext(): void;
+  /** The slot the shell holds, as the page can only know it by asking: its id, state and the vault it was handed to. `null` for none. */
+  captureSlot(): { id: string; state: string; chosen: number | null } | null;
+  /** Empties the slot as a lock of its vault does: `lockbox://capture` with `gone` is sent. */
+  emptyCaptureSlot(): void;
+  /** Empties the slot and says nothing, as when the page missed the `gone` event: the next command about it is `not_found`. */
+  forgetCaptureSlot(): void;
+  /**
+   * Holds every `capture_reveal` answer until `release` is called: the value is read when the command arrives, as the shell reads
+   * it, and the answer comes later, so a new press or a lock can come in between.
+   */
+  holdCaptureReveal(): () => void;
+  /** How many times `capture_reveal` was answered with the value. */
+  captureReveals(): number;
+  /**
+   * Holds every `capture_state` answer until `release` is called: the slot is read when the command arrives, as the shell reads it, and the
+   * answer comes later, so a press or a `gone` can be heard before it.
+   */
+  holdCaptureState(): () => void;
+  /**
+   * Holds every `capture_choose` until `release` is called, and does it then: until it is done the shell has handed the copy to no vault, so
+   * a `capture_reveal` meanwhile is `locked`, as the shell answers it.
+   */
+  holdCaptureChoose(): () => void;
 }
 
 /** What the shell sends for a website that is not an `http` or `https` address (`NOT_A_WEBSITE`). */
@@ -439,6 +473,8 @@ function randomSource(seed: number): () => number {
 }
 
 let sessionRange = 0;
+/** How many times the save shortcut has been pressed in any fake of this test file (it makes each copy's id). */
+let pressesMade = 0;
 
 /** Refuses as the shell does: Tauri rejects with the plain object the error was serialised to, not an `Error`. */
 function refuse(error: object): never {
@@ -505,6 +541,30 @@ function envClashes(items: readonly FakeItem[], rows: readonly EnvPasted[], plac
     found.push({ index: row.index, saved_as: savedAs });
   });
   return found;
+}
+
+/** What the shell sends when a capture's value is missing: nothing was copied and nothing was typed (`what: "capture value"`). */
+export const CAPTURE_VALUE_NEEDED = { code: "invalid_input", what: "capture value" };
+
+/** The copy the shortcut left waiting in the shell: the text as it was read, and what the page may know of it. */
+interface FakeSlot {
+  id: string;
+  text: string | null;
+  state: "value" | "empty" | "too_large";
+  chosen: number | null;
+}
+
+/** The first free `NAME_2`, `NAME_3`, ... among the live keys of one place. */
+function freeName(items: readonly FakeItem[], place: string | null, name: string): string {
+  const taken = liveKeys(items, place).map((item) => item.title);
+  let number = 2;
+  while (taken.includes(`${name}_${String(number)}`)) number += 1;
+  return `${name}_${String(number)}`;
+}
+
+/** A clipboard text with every line ending read as a line feed, as the paste panel's clear compares them. */
+function linesOf(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
 }
 
 function exactly(args: unknown, keys: string[]): Record<string, unknown> {
@@ -582,11 +642,38 @@ export function installFakeShell(
   // of a `.env` file (null for the recovery key's PDF).
   const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null }>();
   // The pasted `.env`s the shell holds, by token: their rows, values included, which never leave the fake.
-  const envPastes = new Map<string, { session: number; generation: number; rows: EnvPasted[] }>();
+  const envPastes = new Map<string, { session: number; generation: number; rows: EnvPasted[]; text: string }>();
   let heldEnvRead: (() => void)[] | undefined;
   let heldEnvSave: (() => void)[] | undefined;
   const envCopied: string[] = [];
   const envFiles: string[] = [];
+  // The copy the shortcut left waiting (one at most), what the clipboard holds, and the holds a test can put on the reveal.
+  let slot: FakeSlot | undefined;
+  let clipboardText: string | null = null;
+  let failClear = false;
+  let heldCaptureReveal: (() => void)[] | undefined;
+  let heldCaptureState: (() => void)[] | undefined;
+  let heldCaptureChoose: (() => void)[] | undefined;
+  let captureRevealed = 0;
+
+  /** The slot as an event would describe it. */
+  const slotEvent = (made: FakeSlot, changed: boolean) => {
+    const read = made.state === "value" && made.text !== null ? readEnvText(made.text.trim()) : undefined;
+    return {
+      capture_id: made.id,
+      state: made.state,
+      changed,
+      env_keys: read !== undefined && read.rows.length >= 1 && read.bad.length === 0 ? read.rows.length : null,
+    };
+  };
+
+  /** Empties the slot (its text goes) and sends `gone` with its id. */
+  const emptySlot = (): void => {
+    if (slot === undefined) return;
+    const gone = slot.id;
+    slot = undefined;
+    emit("lockbox://capture", { capture_id: gone, state: "gone", changed: false, env_keys: null });
+  };
 
   listen.mockImplementation((event: string, handler: (event: { payload: unknown }) => void) => {
     calls.push({ cmd: `listen:${event}`, args: undefined });
@@ -602,6 +689,8 @@ export function installFakeShell(
     // A lock lets go of the values of every paste its vault held.
     for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
     emit("lockbox://locked", { session, generation: entry.generation, reason });
+    // The copy handed to this vault goes with its lock.
+    if (slot?.chosen === session) emptySlot();
   };
 
   /** 5b's button, or a second close while it shows: the flag is kept, `explain: false` is sent, the window hides. */
@@ -620,6 +709,28 @@ export function installFakeShell(
   };
 
   const tagged = (session: number, generation: number, data: unknown) => ({ session, generation, data });
+
+  /** Reads a `.env`'s text and parks its rows under a token, as `env_read` and `capture_env` do: names, bad lines and clashes come back. */
+  const parkPaste = (session: number, generation: number, vault: FakeVault, text: string): unknown => {
+    if (new TextEncoder().encode(text).length > MAX_ENV_TEXT) return refuse(ENV_TEXT_TOO_LARGE);
+    const { rows, bad } = readEnvText(text);
+    if (rows.length > MAX_ENV_KEYS) return refuse(ENV_KEYS_TOO_MANY);
+    let token: string | null = null;
+    if (rows.length > 0) {
+      nextToken += 1;
+      token = `env-token-${String(nextToken)}`;
+      envPastes.set(token, { session, generation, rows, text });
+    }
+    const all = vault.items ?? [];
+    const places = [...all.filter((item) => item.kind === "collection" && !(item.trashed ?? false)).map((folder) => folder.id), null];
+    // Names only: a value never comes back.
+    return tagged(session, generation, {
+      token,
+      rows: rows.map(({ index, name }) => ({ index, name })),
+      bad_lines: bad,
+      clashes: places.map((place) => ({ collection: place, rows: envClashes(all, rows, place) })),
+    });
+  };
 
   /**
    * One write of a command that makes several: runs it, unless `failPartwayNext` armed this command and its writes are used up,
@@ -854,33 +965,139 @@ export function installFakeShell(
         const vault = vaultFor(sent.session, sent.generation);
         if (typeof sent.text !== "string") return refuse(MALFORMED);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
-        if (new TextEncoder().encode(sent.text).length > MAX_ENV_TEXT) return refuse(ENV_TEXT_TOO_LARGE);
-        const { rows, bad } = readEnvText(sent.text);
-        if (rows.length > MAX_ENV_KEYS) return refuse(ENV_KEYS_TOO_MANY);
-        let token: string | null = null;
-        if (rows.length > 0) {
-          nextToken += 1;
-          token = `env-token-${String(nextToken)}`;
-          envPastes.set(token, { session: sent.session, generation: sent.generation, rows });
+        return parkPaste(sent.session, sent.generation, vault, sent.text);
+      }
+      case "capture_state":
+        exactly(args ?? {}, []);
+        return slot === undefined ? null : slotEvent(slot, false);
+      case "capture_choose": {
+        const sent = exactly(args, ["session", "generation", "capture_id"]) as { session: number; generation: number; capture_id: string };
+        vaultFor(sent.session, sent.generation);
+        if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
+        slot.chosen = sent.session;
+        return tagged(sent.session, sent.generation, null);
+      }
+      case "capture_reveal": {
+        const sent = exactly(args, ["capture_id"]) as { capture_id: string };
+        if (slot?.id !== sent.capture_id || slot.text === null || slot.state !== "value") return refuse({ code: "not_found" });
+        if (slot.chosen === null || live.get(slot.chosen)?.unlocked !== true) return refuse(LOCKED);
+        captureRevealed += 1;
+        // The value saved and shown is the text with its surrounding spaces and line breaks dropped.
+        return slot.text.trim();
+      }
+      case "capture_cancel": {
+        const sent = exactly(args, ["capture_id"]) as { capture_id: string };
+        if (slot?.id === sent.capture_id) emptySlot();
+        return null;
+      }
+      case "capture_env": {
+        const sent = exactly(args, ["session", "generation", "capture_id"]) as { session: number; generation: number; capture_id: string };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if (slot?.id !== sent.capture_id || slot.text === null || slot.state !== "value") return refuse({ code: "not_found" });
+        const rows = parkPaste(sent.session, sent.generation, vault, slot.text);
+        // The text moves into the paste: the slot is empty.
+        emptySlot();
+        return rows;
+      }
+      case "capture_save": {
+        const sent = exactly(args, ["session", "generation", "capture_id", "name", "collection", "on_clash", "clear_clipboard", "typed"]) as {
+          session: number;
+          generation: number;
+          capture_id: string;
+          name: unknown;
+          collection: unknown;
+          on_clash: unknown;
+          clear_clipboard: unknown;
+          typed: unknown;
+        };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
+        const name = sent.name;
+        const place = sent.collection;
+        const onClash = sent.on_clash;
+        const keepBoth =
+          typeof onClash === "object" && onClash !== null && Object.keys(onClash).join() === "keep_both" && typeof (onClash as { keep_both?: unknown }).keep_both === "string"
+            ? (onClash as { keep_both: string }).keep_both
+            : null;
+        if (
+          typeof name !== "string" ||
+          (place !== null && typeof place !== "string") ||
+          typeof sent.clear_clipboard !== "boolean" ||
+          (sent.typed !== null && typeof sent.typed !== "string") ||
+          (onClash !== "ask" && onClash !== "replace" && keepBoth === null)
+        ) {
+          return refuse(MALFORMED);
         }
+        // The name is a key's title, checked as `new_item` checks it.
+        if (new TextEncoder().encode(name).length > MAX_TITLE) return refuse({ code: "too_large", what: "title" });
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return refuse(BAD_KEY_NAME);
         const all = vault.items ?? [];
-        const places = [...all.filter((item) => item.kind === "collection" && !(item.trashed ?? false)).map((folder) => folder.id), null];
-        // Names only: a value never comes back.
-        return tagged(sent.session, sent.generation, {
-          token,
-          rows: rows.map(({ index, name }) => ({ index, name })),
-          bad_lines: bad,
-          clashes: places.map((place) => ({ collection: place, rows: envClashes(all, rows, place) })),
-        });
+        if (place !== null && !all.some((item) => item.id === place && item.kind === "collection" && !(item.trashed ?? false))) {
+          return refuse({ code: "not_found" });
+        }
+        // What is saved: the capture's own text, trimmed, or what was typed when nothing was captured.
+        let value: string;
+        if (slot.state === "value") {
+          if (sent.typed !== null) return refuse(CAPTURE_VALUE_NEEDED);
+          value = (slot.text ?? "").trim();
+        } else {
+          if (typeof sent.typed !== "string" || sent.typed.trim() === "") return refuse(CAPTURE_VALUE_NEEDED);
+          value = sent.typed.trim();
+        }
+        if (new TextEncoder().encode(value).length > MAX_KEY_VALUE) return refuse({ code: "too_large", what: "value" });
+        const there = liveKeys(all, place).filter((item) => item.title === name);
+        let saveAs = name;
+        let replacing: FakeItem | undefined;
+        if (there.length > 0) {
+          const given = freeName(all, place, name);
+          if (onClash === "ask") return tagged(sent.session, sent.generation, { Clash: { saved_as: given } });
+          if (onClash === "replace") {
+            if (there.length >= 2) return refuse(ENV_TWICE);
+            replacing = there[0];
+          } else if (keepBoth !== given) {
+            // The name the person saw is not the one the rule gives now: nothing is written.
+            return tagged(sent.session, sent.generation, { Clash: { saved_as: given } });
+          } else {
+            saveAs = given;
+          }
+        }
+        let id: string;
+        if (replacing === undefined) {
+          nextItem += 1;
+          id = itemId(nextItem);
+          vault.items = [...all, { id, kind: "key", title: saveAs, value, collection: place, notes: "", modified_at: nowText() }];
+        } else {
+          id = replacing.id;
+          replacing.value = value;
+          bump(replacing);
+        }
+        // Only after the write: the clipboard is cleared if it still holds what was copied; then the slot empties.
+        let clipboard: "cleared" | "not_ours" | "failed" | "not_asked" = "not_asked";
+        if (sent.clear_clipboard && slot.state === "value") {
+          if (clipboardText !== slot.text) clipboard = "not_ours";
+          else if (failClear) {
+            failClear = false;
+            clipboard = "failed";
+          } else {
+            clipboardText = null;
+            clipboard = "cleared";
+          }
+        }
+        emptySlot();
+        return tagged(sent.session, sent.generation, { Saved: { id, name: saveAs, clipboard } });
       }
       case "env_save": {
-        const sent = exactly(args, ["session", "generation", "token", "choices", "collection"]) as {
+        const sent = exactly(args, ["session", "generation", "token", "choices", "collection", "clear_clipboard"]) as {
           session: number;
           generation: number;
           token: unknown;
           choices: unknown;
           collection: unknown;
+          clear_clipboard: unknown;
         };
+        if (typeof sent.clear_clipboard !== "boolean") return refuse(MALFORMED);
         const vault = vaultFor(sent.session, sent.generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         if (typeof sent.token !== "string" || !Array.isArray(sent.choices) || (sent.collection !== null && typeof sent.collection !== "string")) {
@@ -931,7 +1148,20 @@ export function installFakeShell(
           }
           written += 1;
         }
-        return tagged(sent.session, sent.generation, written);
+        // The clear runs only when asked, after at least one key was written, and only when the clipboard still holds the pasted text
+        // (line endings read alike on both sides).
+        let clipboard: "cleared" | "not_ours" | "failed" | "not_asked" = "not_asked";
+        if (sent.clear_clipboard && written > 0) {
+          if (clipboardText === null || linesOf(clipboardText) !== linesOf(held.text)) clipboard = "not_ours";
+          else if (failClear) {
+            failClear = false;
+            clipboard = "failed";
+          } else {
+            clipboardText = null;
+            clipboard = "cleared";
+          }
+        }
+        return tagged(sent.session, sent.generation, { saved: written, clipboard });
       }
       case "env_copy":
       case "env_save_file": {
@@ -1377,6 +1607,8 @@ export function installFakeShell(
       case "lock_all":
         exactly(args ?? {}, []);
         for (const session of [...live.keys()]) lock(session);
+        // Every all-vault lock empties the slot, even with no vault open.
+        emptySlot();
         return null;
       default:
         throw new Error(`the fake shell has no command ${cmd}`);
@@ -1408,8 +1640,30 @@ export function installFakeShell(
         });
       });
     }
+    if (cmd === "capture_choose" && heldCaptureChoose !== undefined) {
+      // Done when released: until then the shell has not handed the copy to the vault.
+      const waiting = heldCaptureChoose;
+      return new Promise((resolve, reject) => {
+        waiting.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          }
+        });
+      });
+    }
     try {
       const result = answer(cmd, args);
+      if (cmd === "capture_state" && heldCaptureState !== undefined) {
+        const waiting = heldCaptureState;
+        return new Promise((resolve) => {
+          waiting.push(() => {
+            resolve(result);
+          });
+        });
+      }
       if (cmd === "list_printers" && heldPrinterList !== undefined) {
         const waiting = heldPrinterList;
         // Asked when released, so a list changed in between is the one that is read.
@@ -1435,7 +1689,7 @@ export function installFakeShell(
           });
         });
       }
-      if (cmd === "new_item" && heldNewItem !== undefined) {
+      if ((cmd === "new_item" || cmd === "capture_save") && heldNewItem !== undefined) {
         const release = heldNewItem;
         return new Promise((resolve) => {
           release.push(() => {
@@ -1462,7 +1716,7 @@ export function installFakeShell(
           });
         });
       }
-      for (const [name, waiting] of [["env_read", heldEnvRead], ["env_save", heldEnvSave]] as const) {
+      for (const [name, waiting] of [["env_read", heldEnvRead], ["capture_env", heldEnvRead], ["env_save", heldEnvSave]] as const) {
         if (cmd === name && waiting !== undefined) {
           return new Promise((resolve) => {
             waiting.push(() => {
@@ -1470,6 +1724,14 @@ export function installFakeShell(
             });
           });
         }
+      }
+      if (cmd === "capture_reveal" && heldCaptureReveal !== undefined) {
+        const release = heldCaptureReveal;
+        return new Promise((resolve) => {
+          release.push(() => {
+            resolve(result);
+          });
+        });
       }
       if (cmd === "reveal_password" && heldReveal !== undefined) {
         const release = heldReveal;
@@ -1578,6 +1840,7 @@ export function installFakeShell(
     outputJournalResets: () => outputResets,
     closeWindow: () => {
       for (const session of [...live.keys()]) lock(session);
+      emptySlot();
       if (explaining) {
         explained();
       } else if (closeExplained) {
@@ -1676,5 +1939,57 @@ export function installFakeShell(
     },
     envCopied,
     envFiles,
+    press: (what) => {
+      const text = typeof what === "object" ? what.text : null;
+      const state = typeof what === "object" ? (what.text.trim() === "" ? "empty" : "value") : what;
+      // The shell makes the id from the OS's random source: 32 lowercase hex characters, a new one for every press. Here a count that
+      // keeps going from one fake to the next, so an id never comes up twice in a test file.
+      pressesMade += 1;
+      const id = `${(0xca97).toString(16)}${pressesMade.toString(16).padStart(28, "0")}`;
+      const before = slot;
+      const value = (made: FakeSlot | undefined) => (made?.state === "value" ? (made.text ?? "").trim() : null);
+      const next: FakeSlot = { id, text: state === "value" ? text : null, state, chosen: before?.chosen ?? null };
+      // A copy was waiting and its value differs from this one's.
+      const changed = before !== undefined && value(before) !== value(next);
+      slot = next;
+      emit("lockbox://capture", slotEvent(next, changed));
+    },
+    setClipboard: (text) => {
+      clipboardText = text;
+    },
+    clipboard: () => clipboardText,
+    failClipboardClearNext: () => {
+      failClear = true;
+    },
+    captureSlot: () => (slot === undefined ? null : { id: slot.id, state: slot.state, chosen: slot.chosen }),
+    emptyCaptureSlot: emptySlot,
+    forgetCaptureSlot: () => {
+      slot = undefined;
+    },
+    holdCaptureReveal: () => {
+      const waiting: (() => void)[] = [];
+      heldCaptureReveal = waiting;
+      return () => {
+        heldCaptureReveal = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    captureReveals: () => captureRevealed,
+    holdCaptureState: () => {
+      const waiting: (() => void)[] = [];
+      heldCaptureState = waiting;
+      return () => {
+        heldCaptureState = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdCaptureChoose: () => {
+      const waiting: (() => void)[] = [];
+      heldCaptureChoose = waiting;
+      return () => {
+        heldCaptureChoose = undefined;
+        for (const release of waiting) release();
+      };
+    },
   };
 }

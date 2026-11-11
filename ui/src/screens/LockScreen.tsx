@@ -3,7 +3,7 @@ import type { VaultEntry } from "../api";
 import { messageFor, type Message } from "../messages";
 import { PasswordField } from "../parts/PasswordField";
 import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
-import { unlock, useStartError, useVaults } from "../store";
+import { cancelCapture, unlock, useCapture, useStartError, useVaults } from "../store";
 import { useMode } from "../theme";
 import { LockScreenAsks } from "./Asks";
 
@@ -16,10 +16,14 @@ function said(message: Message): string {
  * The lock screen: the vaults to pick from (with one, it is already chosen), the password, Unlock. Nothing here leads to
  * a screen a later plan builds. A wrong password says so and keeps what was typed, so a typo can be mended; once a vault
  * opens the field is emptied, and if the vault locked again before the answer came there is nothing to say.
+ *
+ * While a copy from the save shortcut waits (8b), it is the same screen with the save step's words: the heading says what the unlock is for,
+ * the button is "Unlock and continue" (the save box opens in the vault), and Cancel lets the copy go. The copy is held in the shell, never here.
  */
 export function LockScreen() {
   const vaults = useVaults();
   const startError = useStartError();
+  const capture = useCapture();
   const [chosenId, setChosenId] = useState<number | null>(null);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -72,13 +76,26 @@ export function LockScreen() {
   let heading = "Unlock a vault";
   if (vaults !== null && list.length === 0) heading = "No vaults yet";
   else if (list.length === 1 && chosen !== undefined) heading = `Unlock ${name(chosen)}`;
+  if (capture !== null) heading = "Save what you copied";
 
   return (
-    <div className="lock">
+    <div
+      className="lock"
+      onKeyDown={(event) => {
+        // Escape is Cancel on the save step, as it is in the box.
+        if (event.key === "Escape" && capture !== null && !event.defaultPrevented) cancelCapture();
+      }}
+    >
       <div className="field">
         <Pattern points={vaultLook(position, false).points} className="rose" />
         <p className="mark">Lockbox</p>
-        <p className="say">Your items stay encrypted until you enter the password.</p>
+        <p className="say">
+          {capture === null
+            ? "Your items stay encrypted until you enter the password."
+            : capture.state === "value"
+              ? "Your copied key is held here until you save it or cancel."
+              : "Unlock to paste or type a key and save it, or cancel."}
+        </p>
       </div>
       <main className="plate">
         <h1>{heading}</h1>
@@ -139,12 +156,18 @@ export function LockScreen() {
                 setError(null);
               }}
               error={error}
+              rule={capture === null ? undefined : "A locked vault's folders can't be read until you unlock it."}
               autoFocus
             />
             <div className="lacts">
               <button type="submit" className="prim" disabled={busy || password === ""}>
-                Unlock
+                {capture === null ? "Unlock" : "Unlock and continue"}
               </button>
+              {capture === null ? null : (
+                <button type="button" className="lnk" onClick={cancelCapture}>
+                  Cancel
+                </button>
+              )}
             </div>
           </form>
         )}

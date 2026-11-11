@@ -14,6 +14,7 @@ use lockbox_core::blob::CancelToken;
 use lockbox_core::internals::fsio::testutil::TempDir;
 use zeroize::Zeroizing;
 
+use crate::capture::CaptureEvent;
 use crate::error::ShellResult;
 use crate::lock;
 use crate::os::{
@@ -49,6 +50,8 @@ pub struct Events {
     busy: Mutex<Vec<(Option<SessionId>, Vec<&'static str>)>>,
     /// Each notice, as the page would receive it.
     notices: Mutex<Vec<serde_json::Value>>,
+    /// Each capture event, as the page would receive it.
+    captures: Mutex<Vec<serde_json::Value>>,
     /// Run once, inside the next `busy` event, before it is recorded.
     on_busy: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -70,6 +73,11 @@ impl Events {
     pub fn notices(&self) -> Vec<serde_json::Value> {
         lock(&self.notices).clone()
     }
+
+    /// Every capture event the shell sent, in order, as the page would receive it.
+    pub fn captures(&self) -> Vec<serde_json::Value> {
+        lock(&self.captures).clone()
+    }
 }
 
 impl Notifier for Events {
@@ -89,6 +97,11 @@ impl Notifier for Events {
         let notice = serde_json::to_value(notice).expect("a notice serialises");
         lock(&self.notices).push(notice);
     }
+
+    fn capture(&self, event: &CaptureEvent) {
+        let event = serde_json::to_value(event).expect("a capture event serialises");
+        lock(&self.captures).push(event);
+    }
 }
 
 /// Idle time the test sets: none until it does.
@@ -107,17 +120,29 @@ impl IdleSource for FakeIdle {
     }
 }
 
-/// The main window: counts the hides, and can run a step inside the next one.
+/// The main window: counts the hides and the times it was brought forward, and can run a step inside the next of each.
 #[derive(Default)]
 pub struct FakeWindow {
     hides: AtomicUsize,
     on_hide: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    forwards: AtomicUsize,
+    on_forward: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeWindow {
     /// How many times the shell hid the window.
     pub fn hides(&self) -> usize {
         self.hides.load(Ordering::SeqCst)
+    }
+
+    /// How many times the shell brought the window forward.
+    pub fn forwards(&self) -> usize {
+        self.forwards.load(Ordering::SeqCst)
+    }
+
+    /// Runs `hook` once, inside the next bring-forward, before it is counted.
+    pub fn during_next_forward(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_forward) = Some(Box::new(hook));
     }
 
     /// Runs `hook` once, inside the next hide, before it is counted: what it sees is what the shell had done by then.
@@ -133,6 +158,14 @@ impl MainWindow for FakeWindow {
             hook();
         }
         self.hides.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn bring_forward(&self) {
+        let hook = lock(&self.on_forward).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.forwards.fetch_add(1, Ordering::SeqCst);
     }
 }
 

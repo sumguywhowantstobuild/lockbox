@@ -10,7 +10,7 @@ import { MainWindow } from "./screens/MainWindow";
 import { FirstRun } from "./screens/setup/FirstRun";
 import { PickWords } from "./screens/setup/PickWords";
 import { RecoveryKey } from "./screens/setup/RecoveryKey";
-import { startNotices, startStore, useSessions, useStartError, useVaults } from "./store";
+import { startCapture, startNotices, startStore, useSessions, useStartError, useVaults } from "./store";
 import { useMode } from "./theme";
 import "./styles/tokens.css";
 import "./styles/base.css";
@@ -35,8 +35,11 @@ export default function App() {
 
   useEffect(() => {
     // Its refusals are kept in the store and said by the screens; nothing here is left unhandled. The notices that launch
-    // kept (a damaged record of opened files, a finished restore) are asked for once locks can be heard.
-    void startStore().then(() => startNotices());
+    // kept (a damaged record of opened files, a finished restore) are asked for once locks can be heard, and then the save shortcut's
+    // copy, if one is waiting from before the page loaded.
+    void startStore()
+      .then(() => startNotices())
+      .then(() => startCapture());
   }, []);
 
   const active = sessions.at(-1);
