@@ -38,8 +38,9 @@ terminals opened before the install need restarting to see `cargo`.
 | WebView2 Runtime | ships with Windows 11 | — | The web view the app's window draws its screens in |
 
 - **UI dependencies:** `npm ci --ignore-scripts` in `ui/` (no package needs an install script) installs the exact versions in `ui/package-lock.json` (every version in
-  `ui/package.json` is pinned, no `^`). Then `npm run lint`, `npm test`, `npm run build` (from the repo root:
-  `npm --prefix ui run lint` and so on).
+  `ui/package.json` is pinned, no `^`). Then `npm run lint`, `npm run build`, `npm test` (from the repo root:
+  `npm --prefix ui run lint` and so on), in that order: some tests read the built page and style sheet in `ui/dist`
+  (that no font became a `data:` URI, and that the page carries no inline script or style), and say so when it is missing.
 - **Run the app:** `cargo tauri dev` from `crates/lockbox-desktop`. It starts the Vite dev server on port 5173 (`npm
   run dev` in `ui/`, set in `tauri.conf.json` `build.beforeDevCommand`, whose `cwd` is relative to the folder holding
   `tauri.conf.json`) and opens the window on it. The port is fixed (`strictPort`): the window may only show the app's

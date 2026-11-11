@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import type { CopyableField } from "../api";
 import { rememberOpener } from "../focus";
 import { messageFor } from "../messages";
 import { Button } from "../parts/Button";
@@ -65,8 +66,9 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   const sort = useSort(data.session);
   // The folder's own question, while one is open: which, for which folder (kept as it was when asked).
   const [asking, setAsking] = useState<{ kind: "rename" | "delete" | "env_file"; folder: { id: string; name: string }; count: number } | null>(null);
-  const everything = data.items ?? [];
-  const items = everything.filter((item) => item.kind !== "collection" && !item.trashed);
+  const everything = useMemo(() => data.items ?? [], [data.items]);
+  // The lists below are kept between redraws while what they come from is unchanged, so the item list's rows are not drawn again.
+  const items = useMemo(() => everything.filter((item) => item.kind !== "collection" && !item.trashed), [everything]);
   const inTrash = everything.filter((item) => item.trashed);
   const folders = foldersOf(everything);
   const folderNames = new Map(folders.map((folder) => [folder.id, folder.name]));
@@ -87,17 +89,30 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
       : { id: folderId, name: folderName, count: folders.find((folder) => folder.id === folderId)?.count ?? 0 };
   // Taking keys out is offered only where there is a key to take: one in this folder that is not in the Trash (`items` has none of those).
   const folderHasKeys = folderId !== null && items.some((item) => item.kind === "key" && item.collection === folderId);
-  const inView = data.folder === null ? items : items.filter((item) => item.collection === data.folder);
+  const inView = useMemo(
+    () => (data.folder === null ? items : items.filter((item) => item.collection === data.folder)),
+    [items, data.folder],
+  );
   const needle = filter.trim().toLowerCase();
-  const matches = (text: string | null | undefined) => (text ?? "").toLowerCase().includes(needle);
-  const ofKind = kind === "all" ? inView : inView.filter((item) => item.kind === kind);
-  const shown =
-    needle === ""
-      ? ofKind
-      : ofKind.filter(
-          (item) =>
-            matches(item.title) || matches(item.username) || item.attachments.some((file) => matches(file.name)),
-        );
+  const ofKind = useMemo(() => (kind === "all" ? inView : inView.filter((item) => item.kind === kind)), [inView, kind]);
+  const shown = useMemo(() => {
+    if (needle === "") return ofKind;
+    const matches = (text: string | null | undefined) => (text ?? "").toLowerCase().includes(needle);
+    return ofKind.filter((item) => matches(item.title) || matches(item.username) || item.attachments.some((file) => matches(file.name)));
+  }, [ofKind, needle]);
+  // The row's two actions stay the same functions for one session, so a row that did not change is not drawn again.
+  const onOpen = useCallback(
+    (id: string) => {
+      void selectItem(data.session, id);
+    },
+    [data.session],
+  );
+  const onCopy = useCallback(
+    (id: string, field: CopyableField) => {
+      void copyField(data.session, id, field);
+    },
+    [data.session],
+  );
   // What is narrowed away, said in words: the kind, the typed word, or both.
   const word = filter.trim();
   const showing =
@@ -115,6 +130,28 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
       .map((vault) => vault.name ?? ""),
   );
   const problem = data.loadError === null ? null : messageFor(data.loadError);
+  // Which of the list's states is up, in the order they win.
+  const state =
+    problem !== null
+      ? "problem"
+      : data.items === null
+        ? "opening"
+        : data.trash
+          ? "trash"
+          : everything.length === 0 && data.folder === null && needle === ""
+            ? "ready"
+            : inView.length === 0
+              ? "empty"
+              : shown.length === 0 && needle !== ""
+                ? "no_match"
+                : shown.length === 0 && kind !== "all"
+                  ? "no_kind"
+                  : "list";
+  const narrowed = state === "list" && !(needle === "" && kind === "all");
+  // What narrowing left, for a screen reader, when it left nothing: the card below says it on screen, and this says it as it changes.
+  let leftNothing: string | null = null;
+  if (state === "no_match") leftNothing = `Nothing here matches “${word}”. ${holder} has ${itemCount(inView.length)}.`;
+  else if (state === "no_kind" && kind !== "all") leftNothing = `No ${kindPlural(kind)} here. ${holder} has ${itemCount(inView.length)}.`;
 
   return (
     <div className="win">
@@ -220,15 +257,39 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               <VaultBanners data={data} />
             </div>
             <DetailsChangedAsk data={data} />
-            {problem !== null ? (
+            {/* The place that says how the list is narrowed. It is always on the page, so a screen reader speaks the line when it
+                appears or changes (it speaks only changes in a place it already knows); a line that came with the change would be silent. */}
+            <div className="lsay" aria-live="polite" aria-atomic="true">
+              {narrowed ? (
+                <p className="lnote">
+                  {showing}
+                  {kind === "all" ? null : (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        className="lnk"
+                        onClick={() => {
+                          showAll(data.session);
+                        }}
+                      >
+                        Show all
+                      </button>
+                    </>
+                  )}
+                </p>
+              ) : null}
+              {leftNothing === null ? null : <span className="sr">{leftNothing}</span>}
+            </div>
+            {state === "problem" && problem !== null ? (
               <p className="err" role="alert">
                 {problem.title} {problem.body}
               </p>
-            ) : data.items === null ? (
+            ) : state === "opening" ? (
               <p className="note" aria-busy="true">
                 Opening…
               </p>
-            ) : data.trash ? (
+            ) : state === "trash" ? (
               <TrashView
                 items={inTrash}
                 openId={data.openItem?.id ?? null}
@@ -236,9 +297,9 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                   pickTrashed(data.session, id);
                 }}
               />
-            ) : everything.length === 0 && data.folder === null && needle === "" ? (
+            ) : state === "ready" ? (
               <Ready>{data.readOnly ? null : <EmptyAdd session={data.session} />}</Ready>
-            ) : inView.length === 0 ? (
+            ) : state === "empty" ? (
               <div className="grp lempty">
                 <p className="le-t">
                   {folderName === undefined ? "Nothing in this vault yet." : `Nothing in ${folderName} yet.`}
@@ -250,7 +311,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                   </>
                 )}
               </div>
-            ) : shown.length === 0 && needle !== "" ? (
+            ) : state === "no_match" ? (
               // Nothing matches the typed word (17c): what was typed, how many items there really are, and two ways on.
               <div className="grp lempty">
                 <p className="le-t">Nothing here matches “{word}”</p>
@@ -274,7 +335,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                   </Button>
                 </div>
               </div>
-            ) : shown.length === 0 && kind !== "all" ? (
+            ) : state === "no_kind" && kind !== "all" ? (
               // Nothing of the chosen kind here: the same card, in the kind's own word.
               <div className="grp lempty">
                 <p className="le-t">{`No ${kindPlural(kind)} here`}</p>
@@ -291,39 +352,14 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 </div>
               </div>
             ) : (
-              <>
-                {needle === "" && kind === "all" ? null : (
-                  <p className="lnote">
-                    {showing}
-                    {kind === "all" ? null : (
-                      <>
-                        {" "}
-                        <button
-                          type="button"
-                          className="lnk"
-                          onClick={() => {
-                            showAll(data.session);
-                          }}
-                        >
-                          Show all
-                        </button>
-                      </>
-                    )}
-                  </p>
-                )}
-                <ItemList
-                  items={shown}
-                  sort={sort}
-                  openId={data.openItem?.id ?? null}
-                  folderNames={data.folder === null ? folderNames : null}
-                  onOpen={(id) => {
-                    void selectItem(data.session, id);
-                  }}
-                  onCopy={(id, field) => {
-                    void copyField(data.session, id, field);
-                  }}
-                />
-              </>
+              <ItemList
+                items={shown}
+                sort={sort}
+                openId={data.openItem?.id ?? null}
+                folderNames={data.folder === null ? folderNames : null}
+                onOpen={onOpen}
+                onCopy={onCopy}
+              />
             )}
           </div>
         </main>

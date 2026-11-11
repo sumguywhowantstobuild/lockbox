@@ -207,6 +207,42 @@ test("until_shows_the_replaced_day", async () => {
   await expectNoAxe(container);
 });
 
+test("earlier_passwords_of_one_day_are_told_apart_by_number", async () => {
+  // Task 21's screen-reader pass: two passwords replaced on the same day both read "Until today", so a screen reader heard two rows
+  // with one name. Their buttons now carry the row's number too; a day said once keeps its plain name.
+  stored = items().map(
+    (item): FakeItem =>
+      item.id === itemId(2)
+        ? {
+            ...item,
+            password: "demo-tracker-now",
+            previous: [
+              { password: "demo-tracker-1", replaced_at: "2026-11-06T10:00:00Z" },
+              { password: "demo-tracker-2", replaced_at: "2026-11-06T08:00:00Z" },
+              { password: "demo-tracker-3", replaced_at: "2026-03-12T08:00:00Z" },
+            ],
+          }
+        : item,
+  );
+  shell = installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: stored }]);
+  render(<App />);
+  await unlockThroughTheScreen();
+  const panel = await select("Error tracker");
+  const group = within(panel).getByRole("heading", { level: 3, name: "Earlier passwords" }).closest("section") as HTMLElement;
+  // What is drawn stays as designed: the day.
+  expect(within(group).getAllByText("Until today")).toHaveLength(2);
+  expect(within(group).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+    "Copy earlier password 1, until today",
+    "Reveal earlier password 1, until today",
+    "Copy earlier password 2, until today",
+    "Reveal earlier password 2, until today",
+    "Copy earlier password, until 12 March",
+    "Reveal earlier password, until 12 March",
+  ]);
+  fireEvent.click(within(group).getByRole("button", { name: "Reveal earlier password 2, until today" }));
+  expect(await within(group).findByRole("textbox", { name: "Earlier password 2, until today" })).toBeTruthy();
+});
+
 test("an_earlier_password_is_revealed_one_at_a_time_copied_in_rust_and_wiped", async () => {
   await unlocked();
   const panel = await select("Bot admin console");

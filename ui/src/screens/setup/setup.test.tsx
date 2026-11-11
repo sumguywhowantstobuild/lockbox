@@ -437,6 +437,22 @@ test("the_key_can_be_shown_again_from_the_questions", async () => {
   expect(screen.getByText("Question 1 of 3")).toBeTruthy();
 });
 
+test("show_the_key_again_gives_focus_to_the_key_heading", async () => {
+  // Task 21's keyboard pass (from Task 6b): the button went with the questions, so focus fell to the top of the page and the next Tab
+  // started over. It goes to the key's heading, as after a wrong pick, with no "wrong word" note.
+  start([]);
+  await toTheKey();
+  await toTheQuestions();
+  const again = screen.getByRole("button", { name: "Show the key again" });
+  again.focus();
+  fireEvent.click(again);
+  const heading = await screen.findByRole("heading", { level: 1, name: "Save your recovery key" });
+  await vi.waitFor(() => {
+    expect(document.activeElement).toBe(heading);
+  });
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
 test("three_different_numbers_asked", async () => {
   start([]);
   await toTheKey();

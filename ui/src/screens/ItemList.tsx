@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import type { CopyableField, ItemKind, ItemSummary } from "../api";
 import { agoWords, formatBytes } from "../format";
 import { Clip } from "../parts/Clip";
@@ -47,9 +47,10 @@ function byChanged(a: ItemSummary, b: ItemSummary): number {
 
 /**
  * One row: it opens the item, and a login's has a button that copies its password, a key's one that copies its value (both
- * in Rust: the page never holds either). `detail` is what the row says after the title.
+ * in Rust: the page never holds either). `detail` is what the row says after the title. A row whose props did not change is
+ * not drawn again (`memo`): with thousands of items, a keystroke in the filter or a change of kind redraws only what changed.
  */
-function Row({
+const Row = memo(function Row({
   item,
   detail,
   folder,
@@ -102,7 +103,7 @@ function Row({
       </div>
     </li>
   );
-}
+});
 
 /**
  * The items of a list, in the order chosen (17b): in a group for each kind, by name inside it; or one list by name; or one
@@ -139,18 +140,27 @@ export function ItemList({
       onCopy={onCopy}
     />
   );
-  if (sort !== "kind") {
-    const ordered = [...items].sort(sort === "name" ? byTitle : byChanged);
+  // Sorted once for these items and this order, not again on every redraw of the window.
+  const ordered = useMemo(
+    () =>
+      sort === "kind"
+        ? {
+            grouped: true as const,
+            groups: GROUPS.map(({ kind, heading }) => ({ kind, heading, group: items.filter((item) => item.kind === kind).sort(byTitle) })),
+          }
+        : { grouped: false as const, rows: [...items].sort(sort === "name" ? byTitle : byChanged) },
+    [items, sort],
+  );
+  if (!ordered.grouped) {
     return (
       <div className="lgroups">
-        <ul className="grp lgrp">{ordered.map(row)}</ul>
+        <ul className="grp lgrp">{ordered.rows.map(row)}</ul>
       </div>
     );
   }
   return (
     <div className="lgroups">
-      {GROUPS.map(({ kind, heading }) => {
-        const group = items.filter((item) => item.kind === kind).sort(byTitle);
+      {ordered.groups.map(({ kind, heading, group }) => {
         if (group.length === 0) return null;
         return (
           <section key={kind}>

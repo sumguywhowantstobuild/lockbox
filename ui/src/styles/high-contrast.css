@@ -76,6 +76,13 @@
     border-color: GrayText !important;
   }
 
+  /* A quiet pill that can't be pressed now (Cancel while a file is written, or while a sent shortcut waits) says so in grey too:
+     its own grey words are replaced by Windows' colours here, so without this it would look live and do nothing. */
+  .app .pill[aria-disabled="true"] {
+    color: GrayText !important;
+    border-color: GrayText !important;
+  }
+
   /* What is selected uses Windows' own highlight. */
   .app :is(.nav.on, .lrow.on, .mi[data-highlighted]) {
     forced-color-adjust: none !important;

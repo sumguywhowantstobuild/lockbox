@@ -9,7 +9,7 @@ import { expect } from "vitest";
  * Colour contrast is switched off here: jsdom has no layout and no style sheet, so axe cannot measure it. The colours
  * are checked from the tokens by `tokens.contrast.test.ts` instead. Nothing else is switched off.
  */
-export async function expectNoAxe(container: Element): Promise<void> {
+export async function expectNoAxe(container: Element | axe.ContextObject): Promise<void> {
   const results = await axe.run(container, {
     rules: { "color-contrast": { enabled: false } },
     resultTypes: ["violations"],

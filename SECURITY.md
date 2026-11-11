@@ -65,17 +65,18 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 ## Where each requirement stands today
 
-The Rust core (Plans 1 and 2) and the desktop shell (Plan 3) exist. The real screens come in Plan 4 and have begun: the
-lock screen and the item list exist, and the rest follow task by task.
+The Rust core (Plans 1 and 2) and the desktop shell (Plan 3) exist, and the screens for daily use (Plan 4's first part,
+4A). Backup and restore screens come in 4B and the forgotten-password screens in 4C, so a vault kept only in this version
+has no way back through the app.
 
 | Requirement | State |
 |---|---|
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF is written like "Save a copy" (see "Printing the recovery key"); an export and a saved `.env` come with the screens (Plan 4) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the backup screens (4B) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
-| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) has begun with the first screens (Plan 4): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values and typed text at its lock event |
+| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box at its lock event |
 | R7 Documented limits | This file |
 
 ## How the app is locked down

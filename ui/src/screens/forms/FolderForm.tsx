@@ -48,9 +48,10 @@ export function NewFolderBox({ session, onDone }: { session: number; onDone: () 
   const save = async () => {
     if (saving) return;
     const typed = name.trim();
-    // Nothing typed is nothing to save: the box goes, as Escape would.
+    // Nothing typed is nothing to save: the box goes, as Escape would, and focus goes back to New folder with it.
     if (typed === "") {
       onDone();
+      focusButton(".rail .newf");
       return;
     }
     setSaving(true);

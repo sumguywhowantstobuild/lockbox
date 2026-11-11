@@ -2,8 +2,10 @@
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
 restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
-The real screens come in Plan 4, and have begun: `ui/` has the bridge to Rust, the lock screen and the main window (unlock,
-the item list, copying a password); creating a vault, adding items and the rest come in later tasks. The target design and the
+The real screens come in Plan 4, in three parts; the first, daily use (4A), is built: `ui/` has the bridge to Rust, first-time
+setup with the recovery key, the lock screen, and the main window with search, the item panel, the forms, the Trash, folders,
+`.env` in and out, the save shortcut's box and settings ([the UI design](docs/design/2026-11-05-user-interface-design.md)).
+Backups and the long jobs come in 4B, the rest in 4C. The target design and the
 reasons behind it are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as
 "spec 5.2" and so on.
 
@@ -305,7 +307,12 @@ Beside the code: `capabilities/main.json` (what the page may call), `tauri.conf.
 app settings), `tests/ipc.rs` (the bridge, through Tauri's own permission checks). In `ui/src/`: `bridge.ts`, the one
 place that calls Rust and drops stale answers; `api.ts`, the typed commands the screens use; `store.ts`, what the page
 keeps of each unlocked vault, wiped by a lock; `messages.ts`, the fixed words for every refusal; `dropGuard.ts`; `App.tsx`
-and `screens/`, the screens.
+and `screens/`, the screens; `parts/`, the shared parts (Base UI gives the behaviour and accessibility, plain CSS every
+pixel); `styles/`, the style sheets (tokens, components, the short-window, high-contrast and print rules); `testing/`, the
+pretend shell the screen tests run against and the axe-core check. `screens/everyScreen.test.tsx` reaches every screen as a
+person would and checks it with axe-core and for `<style>` elements; a component a screen file exports that no case reaches
+fails it, so a new screen can't go unchecked. `policy.test.ts` pins the Content Security Policy and checks the built page
+carries no inline script or style (Tauri would add a hash for one to the policy, letting it run).
 
 State lives in `%LOCALAPPDATA%\Lockbox\`: `vaults.json`, `settings.json`, `vault-state.json`, `pending-outputs.json`,
 `restore-journal.json` and `open\`. Vaults default to `%USERPROFILE%\Lockbox Vaults\`.

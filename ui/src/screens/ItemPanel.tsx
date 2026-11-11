@@ -157,7 +157,17 @@ function LoginFields({
           <h3 className="gh">Earlier passwords</h3>
           <div className="grp">
             {detail.previous.map((old) => (
-              <EarlierPassword key={old.index} data={data} summary={summary} index={old.index} replacedAt={old.replaced_at} now={now} />
+              <EarlierPassword
+                key={old.index}
+                data={data}
+                summary={summary}
+                index={old.index}
+                replacedAt={old.replaced_at}
+                now={now}
+                sameDayAsAnother={
+                  detail.previous.filter((other) => dayWords(other.replaced_at, now) === dayWords(old.replaced_at, now)).length > 1
+                }
+              />
             ))}
           </div>
         </section>
@@ -178,18 +188,23 @@ function EarlierPassword({
   index,
   replacedAt,
   now,
+  sameDayAsAnother,
 }: {
   data: SessionData;
   summary: ItemSummary;
   index: number;
   replacedAt: string;
   now: Date;
+  /** Another earlier password says the same day: the buttons' names carry the row's number too, so a screen reader tells them apart. */
+  sameDayAsAnother: boolean;
 }) {
   const field = { previous: index };
   const value = data.reveals[revealKey(summary.id, field)];
   const day = dayWords(replacedAt, now);
-  // Numbered when the date could not be read, so the rows still tell apart.
-  const which = day === "" ? `earlier password ${String(index + 1)}` : `earlier password, until ${day}`;
+  // Numbered when the date could not be read, or when another row says the same day, so the rows still tell apart.
+  const number = String(index + 1);
+  const which =
+    day === "" ? `earlier password ${number}` : sameDayAsAnother ? `earlier password ${number}, until ${day}` : `earlier password, until ${day}`;
   const copyIt = () => {
     void copyField(data.session, summary.id, field);
   };

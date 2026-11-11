@@ -441,6 +441,91 @@ test("undo_can_be_reached_and_used_by_keyboard", async () => {
   });
 });
 
+test("ctrl_z_undoes_the_trash_while_its_message_shows", async () => {
+  // Task 21's keyboard pass: Undo sits after the whole list in the Tab order, so in a long list its time could run out
+  // before the keyboard reaches it. Ctrl+Z does what Undo does, from anywhere, while the message is up.
+  await unlocked();
+  const panel = await openItem("Bot admin console");
+  fireEvent.click(within(panel).getByRole("button", { name: "Move to trash" }));
+  const undo = await screen.findByRole("button", { name: "Undo" });
+  // The button names its shortcut to a screen reader, the message shows it, and the place that announces it says it once.
+  expect(undo.getAttribute("aria-keyshortcuts")).toBe("Control+Z");
+  const hint = [...document.querySelectorAll(".tstack span")].find((span) => span.textContent === "Ctrl+Z");
+  expect(hint?.getAttribute("aria-hidden")).toBe("true");
+
+  // Inside a text box, Ctrl+Z is the box's own undo of typing: the item stays in the Trash.
+  const filter = screen.getByRole("searchbox");
+  filter.focus();
+  fireEvent.keyDown(filter, { key: "z", ctrlKey: true });
+  // With Shift or Alt it is another key.
+  fireEvent.keyDown(document.body, { key: "Z", ctrlKey: true, shiftKey: true });
+  fireEvent.keyDown(document.body, { key: "z", ctrlKey: true, altKey: true });
+  expect(sent("restore_item")).toHaveLength(0);
+
+  // Anywhere else: the item comes back, once, as Undo brings it back.
+  const row = await screen.findByRole("button", { name: /^Login:\s*Error tracker/ });
+  row.focus();
+  const notStopped = fireEvent.keyDown(row, { key: "z", ctrlKey: true });
+  expect(notStopped).toBe(false);
+  await screen.findByRole("button", { name: /^Login:\s*Bot admin console/ });
+  await waitFor(() => {
+    expect(toastText()).toContain("Restored");
+  });
+  expect(sent("restore_item")).toHaveLength(1);
+  // Focus was not in the message, so it stays where it was.
+  expect(document.activeElement).toBe(row);
+
+  // Once the message is gone, Ctrl+Z does nothing.
+  fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+  expect(sent("restore_item")).toHaveLength(1);
+});
+
+test("ctrl_z_held_or_pressed_twice_restores_once", async () => {
+  // From the review: the message stays up until the restore is answered, so a held key (repeats) or a second press meanwhile
+  // must not send a second restore for an item already on its way back. Undo pressed after Ctrl+Z neither.
+  await unlocked();
+  const panel = await openItem("Bot admin console");
+  fireEvent.click(within(panel).getByRole("button", { name: "Move to trash" }));
+  const undo = await screen.findByRole("button", { name: "Undo" });
+  const release = shell.holdTrash();
+  fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+  fireEvent.keyDown(document.body, { key: "z", ctrlKey: true, repeat: true });
+  fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+  fireEvent.click(undo);
+  release();
+  await screen.findByRole("button", { name: /^Login:\s*Bot admin console/ });
+  await waitFor(() => {
+    expect(toastText()).toContain("Restored");
+  });
+  expect(sent("restore_item")).toHaveLength(1);
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("ctrl_z_waits_while_a_question_is_up", async () => {
+  await unlocked();
+  const panel = await openItem("Bot admin console");
+  fireEvent.click(within(panel).getByRole("button", { name: "Move to trash" }));
+  await screen.findByRole("button", { name: "Undo" });
+  // A question over the page has the keyboard: Ctrl+Z is not an answer to it, and nothing behind it changes.
+  await openFolder("Agency support agent");
+  const menu = await openMenu(screen.getByRole("button", { name: "More for this folder" }));
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Rename folder" }));
+  const dialog = await screen.findByRole("dialog", { name: "Rename folder" });
+  // The message is still up behind the question (a role query can't see behind the dialog, so the page is read as it is).
+  expect(document.querySelector(".tstack")?.textContent).toContain("Moved to Trash");
+  fireEvent.keyDown(dialog, { key: "z", ctrlKey: true });
+  expect(sent("restore_item")).toHaveLength(0);
+  // Once the question is gone, Ctrl+Z works again.
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+  await waitFor(() => {
+    expect(sent("restore_item")).toHaveLength(1);
+  });
+});
+
 test("the_trash_message_is_spoken_once_through_the_place_that_announces_copies", async () => {
   await unlocked();
   const panel = await openItem("Bot admin console");
@@ -901,6 +986,10 @@ test("a_new_folder_box_is_cancelled_by_escape_or_by_leaving_it_empty", async () 
     fireEvent.change(box, { target: { value: typed } });
     fireEvent.keyDown(box, { key: "Enter" });
     expect(within(nav).queryByRole("textbox"), JSON.stringify(typed)).toBeNull();
+    // Focus goes back to New folder, as Escape gives it, not to the top of the page (Task 21's keyboard pass).
+    await waitFor(() => {
+      expect(document.activeElement, JSON.stringify(typed)).toBe(within(nav).getByRole("button", { name: "New folder" }));
+    });
   }
   fireEvent.click(within(nav).getByRole("button", { name: "New folder" }));
   box = within(nav).getByRole("textbox", { name: "New folder name" });

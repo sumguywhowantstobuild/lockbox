@@ -86,7 +86,8 @@ export function LockScreen() {
         if (event.key === "Escape" && capture !== null && !event.defaultPrevented) cancelCapture();
       }}
     >
-      <div className="field">
+      {/* The page's banner: its line says what the save step holds, so a screen reader moving by landmarks must reach it. */}
+      <header className="field">
         <Pattern points={vaultLook(position, false).points} className="rose" />
         <p className="mark">Lockbox</p>
         <p className="say">
@@ -96,7 +97,7 @@ export function LockScreen() {
               ? "Your copied key is held here until you save it or cancel."
               : "Unlock to paste or type a key and save it, or cancel."}
         </p>
-      </div>
+      </header>
       <main className="plate">
         <h1>{heading}</h1>
         <LockScreenAsks />

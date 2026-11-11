@@ -195,6 +195,42 @@ test("filter_shows_clearly_with_a_way_to_clear", async () => {
   expect(within(screen.getByRole("main")).getByText("Showing 2 keys of 4 items.")).toBeTruthy();
 });
 
+/** The place in the list that says how it is narrowed: read out politely, as a whole, whenever it changes. */
+function narrowedPlace(): HTMLElement {
+  const found = screen.getByRole("main").querySelectorAll<HTMLElement>('[aria-live="polite"]');
+  expect(found).toHaveLength(1);
+  return found[0] as HTMLElement;
+}
+
+test("a_narrowed_list_is_announced_as_it_changes", async () => {
+  // Task 21's keyboard pass: a screen reader speaks only changes in a place it already knows, so the place that says how the list is
+  // narrowed is on the page before anything is narrowed, and the same place says each change. It is not a second "status": the
+  // message at the foot of the window stays the one place that announces copies and saves.
+  await unlocked();
+  const place = narrowedPlace();
+  expect(place.getAttribute("aria-atomic")).toBe("true");
+  expect(place.textContent).toBe("");
+
+  fireEvent.change(filterBox(), { target: { value: "console" } });
+  expect(narrowedPlace()).toBe(place);
+  expect(place.textContent).toBe("Showing 1 of 6, filtered by “console”.");
+
+  await pick("kind", "Keys");
+  // Nothing of that kind matches: the card says so on screen, and the place says it too, with how many items there really are.
+  expect(narrowedPlace()).toBe(place);
+  expect(place.textContent).toBe("Nothing here matches “console”. My vault has 6 items.");
+
+  fireEvent.change(filterBox(), { target: { value: "" } });
+  expect(place.textContent).toBe("Showing 2 keys of 6 items. Show all");
+
+  const side = screen.getByRole("navigation", { name: "Vault and folders" });
+  fireEvent.click(within(side).getByRole("button", { name: /^Lineproof/ }));
+  expect(narrowedPlace().textContent).toBe("No keys here. Lineproof has 1 item.");
+
+  fireEvent.click(within(screen.getByRole("main")).getByRole("button", { name: "Show all" }));
+  expect(narrowedPlace().textContent).toBe("");
+});
+
 test("nothing_matching_says_so", async () => {
   const { container } = await unlocked();
   fireEvent.change(filterBox(), { target: { value: "zzz" } });

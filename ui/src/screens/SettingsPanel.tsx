@@ -30,11 +30,15 @@ const NOT_ALLOWED = { code: "invalid_input", what: "shortcut" };
 /** The rows that can say their own refusal (the shortcut and Start with Windows keep theirs apart). */
 type Row = "theme" | "idle" | "clipboard" | "capture";
 
-/** Where the page is in changing the shortcut: the combination last tried (none yet), its refusal, and whether a try is on its way. */
+/**
+ * Where the page is in changing the shortcut: the combination last tried (none yet), its refusal, whether a try is on its way, and
+ * whether it has reached the shell (`sent`), after which it can't be called back and Cancel says it is off until the answer.
+ */
 interface Listening {
   tried: api.Shortcut | null;
   error: unknown;
   saving: boolean;
+  sent?: boolean;
 }
 
 /** Start with Windows as the page knows it: what the shell last read, the change asked and not yet answered, and the refusal. */
@@ -225,7 +229,13 @@ export function SettingsPanel({ data }: { data: SessionData }) {
     attempt.current += 1;
     const mine = attempt.current;
     setListening({ tried, error: null, saving: true });
-    const mineTicket: SaveTicket = { cancelled: false, sent: false };
+    const mineTicket: SaveTicket = {
+      cancelled: false,
+      sent: false,
+      onSent: () => {
+        if (attempt.current === mine) setListening((now) => (now?.saving === true ? { ...now, sent: true } : now));
+      },
+    };
     ticket.current = mineTicket;
     void saveSettings({ shortcut: tried }, mineTicket).then((result) => {
       if (attempt.current !== mine || result === "cancelled") return;
@@ -373,6 +383,7 @@ export function SettingsPanel({ data }: { data: SessionData }) {
               )}
               <Button
                 ref={pill}
+                aria-disabled={listening?.sent === true ? true : undefined}
                 onClick={() => {
                   if (listening === null) setListening({ tried: null, error: null, saving: false });
                   else stopListening(true);

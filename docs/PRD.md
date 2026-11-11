@@ -174,12 +174,12 @@ Each story is one thing a person can do with a v1 feature. Engineering detail li
 ## Success measures
 
 Where the design spec states a number, it is used as written. Numbers marked "Plan 1" were set while building the core
-engine (Plan 1), not in the spec. Plan 3 is the desktop shell, and Plan 4 the UI (see the
-[README](../README.md#what-exists-today)).
+engine (Plan 1), not in the spec. Plan 3 is the desktop shell, and Plan 4 the UI, in three parts: 4A daily use, 4B files
+and long jobs, 4C the rest (see the [README](../README.md#what-exists-today)).
 
 | Measure | Target | Where it comes from | How it is checked |
 |---|---|---|---|
-| Opening a big vault | 5 000 items: unlock under 3 s (not counting the roughly 1 s password check), search under 50 ms, release build | Plan 1 | `five_thousand_items_fast` (run on purpose, see the [README](../README.md#build-and-test)) |
+| Opening a big vault | 5 000 items: unlock under 3 s (not counting the roughly 1 s password check), search under 50 ms, release build | Plan 1 | `five_thousand_items_fast` (run on purpose, see the [README](../README.md#build-and-test)) (the engine's own unlock and search). Measured on the real screens in the release build (4A Task 21, 2026-11-11, a vault of 5 000 made-up items), which add the bridge and drawing to the engine's times: unlock to the list drawn 1.1 to 1.2 s with the password check; search, from typing to the result drawn, 26 to 60 ms; a filter keystroke or a change of kind 10 to 60 ms; clearing the filter or sorting by name, which draw every row again, about 250 ms |
 | Big files | A file of 4 GiB + 1 byte goes in and comes out with the same SHA-256 (a fingerprint of its contents), and memory stays flat (peak under 200 MB) | [Scope](#scope) (256 GiB limit) and spec 9 (a multi-GB local test before release); the 4 GiB size and 200 MB limit are from Plan 1 | `large_file_round_trip_4_gib` and `backup_restore_over_4_gib` (both run on purpose) |
 | Cost of guessing a password | Each guess costs one Argon2id run (a deliberately slow password-to-key step) of at least 64 MiB, 3 iterations, parallelism 4, calibrated to about 1 s | Spec R3 and 5.2 | Unit tests on the settings and their bounds |
 | Typos in the recovery key | A word whose first four letters match no word in the list is always caught (a slip after the fourth letter still reads as the intended word), and a wrong but listed word about 255 times in 256, before any unlock attempt | Spec 5.2 | Tests in the core's recovery module (at least 250 in 256) |

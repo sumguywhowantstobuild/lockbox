@@ -6,7 +6,7 @@ import { KeyActions, type PrintRun } from "./KeyActions";
 import { asksFor, wordsOf } from "./keyWords";
 
 /**
- * Puts focus on the heading when it appears after a wrong pick: the button that had focus went with the questions, and
+ * Puts focus on the heading when it appears after the questions (a wrong pick, or "Show the key again"): the button that had focus went with them, and
  * without this the next Tab would start from the top of the page. (One function for good, so a later render of the screen
  * does not take focus again.)
  */
@@ -66,6 +66,7 @@ export function RecoveryKey({ data }: { data: SessionData }) {
 
   if (step.phase !== "show") return null;
   const { key, unfinished, missed } = step;
+  const back = step.back === true;
   const words = wordsOf(key);
   const half = Math.ceil(words.length / 2);
   // Two columns, 1 to 12 and 13 to 24, so the words can be copied by hand in order. Each word is its own element, and
@@ -83,7 +84,7 @@ export function RecoveryKey({ data }: { data: SessionData }) {
   return (
     <Frame say={SAY_KEY}>
       {unfinished ? null : <p className="fu-step">Step 2 of 2</p>}
-      <h1 tabIndex={missed ? -1 : undefined} ref={missed ? focusWhenShown : undefined}>
+      <h1 tabIndex={back ? -1 : undefined} ref={back ? focusWhenShown : undefined}>
         {unfinished ? "Finish your recovery key" : "Save your recovery key"}
       </h1>
       {unfinished ? (

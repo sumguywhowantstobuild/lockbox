@@ -14,11 +14,12 @@ export const SAY_KEY = "This key is the only way back in if you forget your pass
 export function Frame({ say, children }: { say: string; children: ReactNode }) {
   return (
     <div className="lock">
-      <div className="field">
+      {/* The page's banner: a screen reader moving by landmarks finds the name and its line, not only the steps. */}
+      <header className="field">
         <Pattern points={9} className="rose" />
         <p className="mark">Lockbox</p>
         <p className="say">{say}</p>
-      </div>
+      </header>
       <main className="plate">
         <div className="fu">{children}</div>
       </main>

@@ -590,7 +590,8 @@ login, with "Until" the day it was replaced. *If wrong:* a read-only vault has n
 
 **12. Move.** Move on the item, pick a folder or No folder. A short "Moved to..." message.
 
-**13. Delete and get back.** Move to trash goes at once, with Undo. Trash, pick, Restore; if its folder was trashed, that comes
+**13. Delete and get back.** Move to trash goes at once, with Undo, which Ctrl+Z also does while the message shows (added in
+4A Task 21: in a long list the keyboard could not reach Undo in time; not inside a text box, where Ctrl+Z undoes typing). Trash, pick, Restore; if its folder was trashed, that comes
 back too. Restoring a folder brings back what went with it. Delete for good asks first. Lockbox never empties the trash by
 itself.
 

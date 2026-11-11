@@ -293,6 +293,8 @@ test("cancelling_a_shortcut_that_waits_behind_a_save_sends_nothing", async () =>
   press("KeyK", "k", { ctrl: true, alt: true });
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(commands("set_settings")).toHaveLength(1);
+  // Still in line, so Cancel can take it back, and says nothing of being off.
+  expect(screen.getByRole("button", { name: "Cancel" }).getAttribute("aria-disabled")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(screen.getByRole("button", { name: "Change" })).toBeTruthy();
   release();
@@ -314,10 +316,15 @@ test("escape_and_cancel_wait_for_a_shortcut_already_sent", async () => {
   await vi.waitFor(() => {
     expect(commands("set_settings")).toHaveLength(1);
   });
-  // Sent: the shell has it, so it cannot be called back from here. The wait goes on until the answer.
+  // Sent: the shell has it, so it cannot be called back from here. The wait goes on until the answer, and Cancel says it is off
+  // (to a screen reader too) rather than doing nothing when pressed (Task 21).
+  const cancel = await screen.findByRole("button", { name: "Cancel" });
+  await vi.waitFor(() => {
+    expect(cancel.getAttribute("aria-disabled")).toBe("true");
+  });
   press("Escape", "Escape");
-  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-  expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+  fireEvent.click(cancel);
+  expect(screen.getByRole("button", { name: "Cancel" })).toBe(cancel);
   release();
   await screen.findByRole("button", { name: "Change" });
   expect(screen.getByText("Ctrl+Alt+K", { selector: "kbd" })).toBeTruthy();

@@ -101,9 +101,10 @@ export type RecoveryStep =
   | { phase: "failed"; error: unknown }
   /**
    * The key on screen, to be saved. `unfinished` is the key of an earlier step that never finished (21f); `missed` is
-   * that a wrong pick brought the person back here.
+   * that a wrong pick brought the person back here; `back` is that the questions did (a wrong pick or "Show the key again"),
+   * so focus goes to the heading.
    */
-  | { phase: "show"; key: string; unfinished: boolean; missed: boolean }
+  | { phase: "show"; key: string; unfinished: boolean; missed: boolean; back?: boolean }
   /** The key hidden, and three words to pick, one question at a time: `at` (from 0) is the one now asked. */
   | { phase: "pick"; key: string; unfinished: boolean; asks: readonly Ask[]; at: number };
 
@@ -658,16 +659,19 @@ export function missedPick(session: number, at: number): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "pick" || entry.recovery.at !== at) return entry;
     const { key, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "show", key, unfinished, missed: true } };
+    return { ...entry, recovery: { phase: "show", key, unfinished, missed: true, back: true } };
   });
 }
 
-/** Shows the key again, with no note: the questions are dropped, and new ones are made when the person goes on. */
+/**
+ * Shows the key again, with no note: the questions are dropped, and new ones are made when the person goes on. `back` gives focus to the
+ * key's heading, as a wrong pick does, since the button that had it went with the questions.
+ */
 export function showKeyAgain(session: number): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "pick") return entry;
     const { key, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "show", key, unfinished, missed: false } };
+    return { ...entry, recovery: { phase: "show", key, unfinished, missed: false, back: true } };
   });
 }
 
@@ -1254,6 +1258,8 @@ export type SettingsResult = "saved" | "cancelled" | { failed: unknown };
 export interface SaveTicket {
   cancelled: boolean;
   sent: boolean;
+  /** Called once, as it is sent, so the screen can say from then on that it can no longer be cancelled. */
+  onSent?: () => void;
 }
 
 /** The saves in line: each waits for the one before it, so an older answer can never land over a newer save. */
@@ -1272,7 +1278,10 @@ let shortcutNoticeVoid = false;
 export function saveSettings(change: Partial<api.Settings>, ticket?: SaveTicket): Promise<SettingsResult> {
   const turn = async (): Promise<SettingsResult> => {
     if (ticket?.cancelled === true) return "cancelled";
-    if (ticket !== undefined) ticket.sent = true;
+    if (ticket !== undefined) {
+      ticket.sent = true;
+      ticket.onSent?.();
+    }
     try {
       const next = { ...(state.settings ?? (await api.getSettings())), ...change };
       await api.setSettings(next);
