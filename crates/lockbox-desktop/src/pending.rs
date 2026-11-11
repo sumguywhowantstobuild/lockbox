@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lockbox_core::env_file::EnvEntry;
-use lockbox_core::ids::{ItemId, VaultId};
+use lockbox_core::ids::{FileId, ItemId, VaultId};
 use lockbox_core::{UnlockReport, Vault};
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
@@ -104,6 +104,18 @@ pub enum PendingChoice {
         session: SessionId,
         generation: u64,
         job: ReadableJob,
+        dest: PathBuf,
+    },
+    /// `save_file_copy` to a cloud folder, waiting for the user's yes (`Confirm::CloudFolder`): the session and generation
+    /// that asked (the yes goes on only while that session is still unlocked in that generation), the stored file by its
+    /// item and file IDs, and the destination (its folder canonical, as checked), so the dialog is not shown again. It
+    /// holds no secret, but it is the vault's: dropped by the lock of that one vault too
+    /// ([`Pending::drop_stored_copies`]), not only by Lock all.
+    StoredCopy {
+        session: SessionId,
+        generation: u64,
+        id: ItemId,
+        file_id: FileId,
         dest: PathBuf,
     },
     /// `env_read`'s keys (or `capture_env`'s), waiting for `env_save`: the session and generation that read the paste (a
@@ -205,6 +217,25 @@ impl Pending {
             gone
         };
         // Dropped here, with the mutex released: each value is wiped as it goes.
+        drop(dropped);
+    }
+
+    /// Drops the copies waiting in a cloud folder's question for `only` (those of every session when `None`), and nothing
+    /// else here: the lock hook's work, as for the pasted keys.
+    pub(crate) fn drop_stored_copies(&self, only: Option<SessionId>) {
+        let dropped = {
+            let mut parked = lock(&self.parked);
+            let ours = |p: &Parked| match &p.choice {
+                PendingChoice::StoredCopy { session, .. } => {
+                    only.is_none_or(|locked| locked == *session)
+                }
+                _ => false,
+            };
+            let (gone, kept): (Vec<Parked>, Vec<Parked>) =
+                std::mem::take(&mut *parked).into_iter().partition(ours);
+            *parked = kept;
+            gone
+        };
         drop(dropped);
     }
 

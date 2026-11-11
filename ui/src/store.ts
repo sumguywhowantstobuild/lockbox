@@ -10,8 +10,14 @@
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
 import { focusList } from "./focus";
-import type { CopyableField, CopyTarget, ItemDetail, ItemSummary, VaultEntry } from "./api";
+import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, SearchHit, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
+
+/** A stored file the shell refused to open or save as damaged, for the item panel to say beside that file. */
+export interface FileError {
+  fileId: string;
+  error: unknown;
+}
 
 /** The item open in the panel: its summary row's id, and what the shell said of it once it has. */
 export interface OpenItem {
@@ -19,6 +25,8 @@ export interface OpenItem {
   detail: ItemDetail | null;
   /** The shell's refusal, when it would not give the item. */
   error: unknown;
+  /** A stored file of this item that did not decrypt when it was opened or saved (10d); gone when the panel is opened again. */
+  fileError?: FileError | null;
   /** It was just saved from the new-login form: the panel takes focus when it opens, as the form's next step. */
   saved: boolean;
   /** It comes back from its Edit form (saved or cancelled): focus goes to Edit, the button that opened the form. */
@@ -153,6 +161,8 @@ export interface Notices {
    * person closes the message, and are told again only when Lockbox starts again.
    */
   shortcut: "taken" | "not_set" | null;
+  /** How many opened copies of stored files another program still holds after a cleanup (10e): the count of the last `open_cleanup`, 0 for none. */
+  openFiles: number;
 }
 
 /**
@@ -209,6 +219,20 @@ export interface SessionData {
   recovery: RecoveryStep | null;
   /** What the unlock found, still to be answered. */
   asks: SessionAsks;
+  /**
+   * The stored-file action this page began and has no answer to yet (Open, Save a copy, Replace, Attach, or Add), for the buttons to say
+   * they are working and the others to wait: one at a time. A lock takes it with the record.
+   */
+  fileJob: FileJob | null;
+  /** The long operations the shell says are running for this vault (`lockbox://busy`): while there are any, auto-lock waits and the window says so. */
+  operations: string[];
+}
+
+/** What a stored-file action is doing: its kind, and the item and file it is about (`null` where there is none: Add has neither, Attach has no file). */
+export interface FileJob {
+  kind: "open" | "save" | "replace" | "attach" | "add";
+  id: string | null;
+  fileId: string | null;
 }
 
 /** The message about the last copy (or the refusal of one), save, move or restore, and the vault that made it. */
@@ -227,13 +251,18 @@ export type Toast =
    * stays until it is dismissed or another message takes its place, since four seconds is too short to read it.
    */
   | { kind: "told"; session: number; text: string }
+  /**
+   * A sentence the person is told once and puts away with "Got it" (a file opened as a read-only copy, a saved copy that is not encrypted,
+   * a file added with its original still on the PC): it stays until then or until another message takes its place. It holds no file name.
+   */
+  | { kind: "noted"; session: number; text: string }
   | { kind: "failed"; session: number | null; error: unknown };
 
-/** What one vault answered to the search: its items, tagged with the generation they were read in. */
+/** What one vault answered to the search: its results, tagged with the generation they were read in. */
 export interface SearchHits {
   session: number;
   generation: number;
-  items: ItemSummary[];
+  items: SearchHit[];
 }
 
 /**
@@ -251,6 +280,11 @@ export interface SearchState {
   busy: number[];
   /** The shell's refusal of the last search, copy or open from the search, to say in words. */
   error: unknown;
+  /**
+   * A question the shell asked about a file result, on screen over the search: Open on a program file (`program`), or Save a copy to a
+   * cloud-synced folder (`cloud`, with the token the yes goes on with).
+   */
+  asking: { kind: "program"; session: number; id: string; file: FileView } | { kind: "cloud"; session: number; id: string; file: FileView; token: string } | null;
 }
 
 export interface StoreState {
@@ -287,7 +321,7 @@ const EMPTY: StoreState = {
   startError: null,
   sessions: [],
   toast: null,
-  notices: { lostOutputs: false, restoreFinished: false, firstClose: false, shortcut: null },
+  notices: { lostOutputs: false, restoreFinished: false, firstClose: false, shortcut: null, openFiles: 0 },
   lockNote: null,
   search: null,
   capture: null,
@@ -298,6 +332,8 @@ const listeners = new Set<() => void>();
 let started: Promise<void> | undefined;
 /** Which search is the latest asked (and 0 more each time the search closes): an older answer is dropped. */
 let searchRun = 0;
+/** Which opening of the search is on screen: it moves on each time the search opens or closes, so a file action that began in one is known not to belong to the next. */
+let searchOpening = 0;
 
 /** A session's record with every revealed value gone and the reveal token moved on, so no request still out can show one. */
 function endReveals(entry: SessionData): SessionData {
@@ -365,7 +401,10 @@ export function dropSession(session: number): void {
   const sessions = state.sessions.filter((entry) => entry.session !== session);
   const search = state.search;
   // The search goes with the last vault, and a vault's results with the vault: nothing said, no error.
-  if (sessions.length === 0) searchRun += 1;
+  if (sessions.length === 0) {
+    searchRun += 1;
+    searchOpening += 1;
+  }
   set({
     ...state,
     sessions,
@@ -377,6 +416,7 @@ export function dropSession(session: number): void {
             ...search,
             hits: search.hits.filter((found) => found.session !== session),
             busy: search.busy.filter((busy) => busy !== session),
+            asking: search.asking?.session === session ? null : search.asking,
           },
   });
   // The copy that was handed to this vault goes with its lock (the shell lets it go too, and says so with `gone`): none of it stays on screen.
@@ -447,6 +487,8 @@ function newRecord(
     forms: {},
     recovery,
     asks,
+    fileJob: null,
+    operations: [],
   };
 }
 
@@ -658,7 +700,7 @@ async function printCommand<T>(session: number, run: (vault: api.SessionRef) => 
  * five minutes as well as at a lock, so it says nothing of a lock. A real lock is heard as the lock event, or as the `locked` refusal of
  * the next command, and takes the session then. Carries only the words' key, never anything the shell sent.
  */
-function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired"): Error {
+function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired"): Error {
   return Object.assign(new Error(kind), { code: "page", kind });
 }
 
@@ -669,7 +711,7 @@ function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired"): Error {
  * off the page and comes back as `"stale"`: nothing is said. A session that is still live had only an old question: the page's refusal
  * (`expiredQuestion`) is thrown to say so. If the lookup itself fails another way, that failure is thrown to be said, and the session stays.
  */
-async function whyNotFound(session: number, kind: "key_pdf_expired" | "env_file_expired"): Promise<"stale"> {
+async function whyNotFound(session: number, kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired"): Promise<"stale"> {
   const seen = await printCommand(session, (vault) => api.listItems(vault));
   if (seen === "stale") return "stale";
   throw expiredQuestion(kind);
@@ -918,6 +960,42 @@ function takeNotice(notice: unknown): void {
     set({ ...state, notices: { ...state.notices, shortcut: "taken" } });
   } else if (notice.kind === "shortcut_not_set") {
     set({ ...state, notices: { ...state.notices, shortcut: "not_set" } });
+  } else if (notice.kind === "open_cleanup" && typeof notice.still_open === "number") {
+    // Opened copies another program still holds, after a lock's cleanup or at launch. The latest count is the one that counts; none says nothing.
+    cleanupNotices += 1;
+    set({ ...state, notices: { ...state.notices, openFiles: Math.max(0, Math.floor(notice.still_open)) } });
+  }
+}
+
+/**
+ * Takes in `lockbox://busy`: the long operations running for a vault, which the window says (auto-lock waits for them). It is kept in that
+ * vault's record, so a lock takes it away; an event for a vault the page does not hold, or for none, changes nothing. It holds only the
+ * shell's fixed names of operations: anything else is not kept.
+ */
+function takeBusy(event: unknown): void {
+  if (!isRecord(event) || typeof event.session !== "number" || !Array.isArray(event.operations)) return;
+  const operations = event.operations.filter((name): name is string => typeof name === "string");
+  update(event.session, (entry) => ({ ...entry, operations }));
+}
+
+let retryingOpen = false;
+/** How many `open_cleanup` notices have been heard: a Retry whose answer comes after a newer notice is older news and is not kept. */
+let cleanupNotices = 0;
+
+/**
+ * 10e's Retry: the shell tries again to remove the opened copies another program held, and answers how many it still cannot. The
+ * message goes when none are left. A second press before the answer does nothing. A refusal is thrown, for the message to say.
+ */
+export async function retryOpenFiles(): Promise<void> {
+  if (retryingOpen) return;
+  retryingOpen = true;
+  const heard = cleanupNotices;
+  try {
+    const report = await api.retryOpenCleanup();
+    // A notice that came while Retry was out (another vault's lock could not remove a copy) is newer than this answer.
+    if (cleanupNotices === heard) set({ ...state, notices: { ...state.notices, openFiles: Math.max(0, report.still_open) } });
+  } finally {
+    retryingOpen = false;
   }
 }
 
@@ -961,6 +1039,11 @@ export function startNotices(): Promise<void> {
       await api.onNotice(takeNotice);
     } catch {
       // Launch notices are still read below; only later ones are missed.
+    }
+    try {
+      await api.onBusy(takeBusy);
+    } catch {
+      // Without it the window does not say why auto-lock waits; the wait itself is the shell's, and unchanged.
     }
     try {
       for (const notice of await api.launchNotices()) takeNotice(notice);
@@ -1021,7 +1104,8 @@ export async function selectItem(session: number, id: string | null, opened: Ope
     trash: false,
     openItem: { id, detail: opened.detail ?? null, error: null, saved, focusEdit },
   }));
-  const shows = () => sessionOf(session)?.openItem?.id === id && stillOpen(session, generation);
+  const run = nextDetailRun(session);
+  const shows = () => sessionOf(session)?.openItem?.id === id && stillOpen(session, generation) && detailRuns.get(session) === run;
   try {
     const answer = await api.getItem({ session, generation }, id);
     if (shows()) {
@@ -1436,14 +1520,28 @@ function panelWasOurs(session: number, id: string, openAtStart: boolean): boolea
   return now === null ? openAtStart : now.id === id;
 }
 
+/**
+ * The number of the latest read of the open item's details asked of each session (by `selectItem` and `reloadOpen`): an answer is kept only
+ * while its number is still the latest, so a slow older answer never puts back details a newer one replaced.
+ */
+const detailRuns = new Map<number, number>();
+
+function nextDetailRun(session: number): number {
+  const run = (detailRuns.get(session) ?? 0) + 1;
+  detailRuns.set(session, run);
+  return run;
+}
+
 /** Reads the open item's details again after a change to it, in place: what the panel shows stays, and Reveal's value too. */
 async function reloadOpen(session: number, id: string): Promise<void> {
   const entry = sessionOf(session);
   if (entry === undefined) return;
   const { generation } = entry;
+  const run = nextDetailRun(session);
   try {
     const answer = await api.getItem({ session, generation }, id);
-    if (!stillOpen(session, generation) || sessionOf(session)?.openItem?.id !== id) return;
+    // An older read that comes after a newer one (two changes in a row, delayed answers) is not the details any more.
+    if (!stillOpen(session, generation) || sessionOf(session)?.openItem?.id !== id || detailRuns.get(session) !== run) return;
     update(session, (current) =>
       current.openItem?.id === id ? { ...current, openItem: { ...current.openItem, detail: answer.data, error: null } } : current,
     );
@@ -1536,6 +1634,298 @@ export async function undoTrash(session: number, id: string): Promise<void> {
   if ("failed" in done) sayFailure(session, done.failed);
   else say(session, "Restored");
   if (hadFocus) focusList();
+}
+
+// ---- Stored files (Task 19): open, save a copy, replace, attach, add ----
+//
+// Each is one long job in the shell, which opens the Windows picker or save dialog itself, so the page sends ids and never a path. One
+// job at a time per vault (`SessionData.fileJob`): a second press while one works sends nothing. What an answer does depends on where the
+// person is when it comes. A success is a fact about the vault (a copy was opened, a file stored) and is said whenever the vault is still
+// open; a refusal is said only where the action began (the item's panel, or the search it was pressed in), so a late refusal never lands on
+// something the person has moved on to. A lock, or a stale answer, says nothing at all.
+
+const OPENED_COPY = "Opened a temporary read-only copy. Edits there aren't saved back. To change the stored file, use Replace file.";
+const SAVED_COPY = "Saved a copy. It isn't encrypted. Delete it when you're finished.";
+const ORIGINAL_STAYS =
+  "The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
+
+/** Says something the person reads and puts away with "Got it", and that holds no file name. */
+function noted(session: number, text: string): void {
+  set({ ...state, toast: { kind: "noted", session, text } });
+}
+
+/**
+ * Where a file action began: the item panel it was pressed in, the search it was pressed in (the opening, and the query typed at that moment:
+ * a result of a newer query is not the one that was pressed), or the window (Add).
+ */
+type FileOrigin = { panel: string } | { search: number; query: number } | "anywhere";
+
+/** The search as it is now, for an action that begins in it. */
+function searchOrigin(): FileOrigin {
+  return { search: searchOpening, query: searchRun };
+}
+
+/** Whether the person is still where the action began. */
+function stillWhere(session: number, origin: FileOrigin): boolean {
+  if (origin === "anywhere") return sessionOf(session) !== undefined;
+  if ("search" in origin) return state.search !== null && searchOpening === origin.search && searchRun === origin.query;
+  return sessionOf(session)?.openItem?.id === origin.panel;
+}
+
+/** Whether the shell refused because the stored file does not decrypt (`damaged`, of the file, or one that is missing). */
+function damagedFile(error: unknown): boolean {
+  return refusedWith(error, "core") && isRecord(error) && error.kind === "damaged" && (error.what === "file" || error.what === "file missing");
+}
+
+function endFileJob(session: number, generation: number): void {
+  if (stillOpen(session, generation)) update(session, (current) => ({ ...current, fileJob: null }));
+}
+
+/** Says a refusal where the action began: a damaged file beside that file in the panel, anything else in the search or as a message. */
+function refuseFile(session: number, origin: FileOrigin, job: FileJob, error: unknown): void {
+  if (!stillWhere(session, origin)) return;
+  if (origin === "anywhere") sayFailure(session, error);
+  else if ("search" in origin) sayInSearch(error);
+  else if (damagedFile(error) && job.fileId !== null) {
+    const fileId = job.fileId;
+    update(session, (current) =>
+      current.openItem?.id === origin.panel ? { ...current, openItem: { ...current.openItem, fileError: { fileId, error } } } : current,
+    );
+  } else sayFailure(session, error);
+}
+
+/** What a stored-file action came to when it did not answer a plain yes: the shell's answer, the vault locked (nothing to say), another action is working, or a refusal that was said. */
+type FileRan<T> = { outcome: api.Outcome<T> } | "stale" | "busy" | "refused";
+
+/**
+ * Runs one stored-file job: marks the vault as working, asks the shell, and gives the answer back unless the vault locked meanwhile. With
+ * `reload` the list is read again after it (a change that writes), through the same path as every other change.
+ */
+async function runFile<T>(
+  session: number,
+  job: FileJob,
+  origin: FileOrigin,
+  reload: boolean,
+  run: (vault: api.SessionRef) => Promise<api.Tagged<api.Outcome<T>>>,
+): Promise<FileRan<T>> {
+  const entry = sessionOf(session);
+  if (entry === undefined) return "stale";
+  if (entry.fileJob !== null) return "busy";
+  const { generation } = entry;
+  // A new job takes away what the last one said about this item's files.
+  update(session, (current) => ({
+    ...current,
+    fileJob: job,
+    openItem: current.openItem !== null && current.openItem.id === job.id ? { ...current.openItem, fileError: null } : current.openItem,
+  }));
+  try {
+    if (reload) {
+      const done = await change(session, async (vault) => (await run(vault)).data);
+      if (done === "stale") return "stale";
+      if ("failed" in done) {
+        refuseFile(session, origin, job, done.failed);
+        return "refused";
+      }
+      return { outcome: done.done };
+    }
+    try {
+      const answer = await run({ session, generation });
+      return stillOpen(session, generation) ? { outcome: answer.data } : "stale";
+    } catch (error) {
+      if (refusedAsLocked(error)) dropSession(session);
+      if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+      refuseFile(session, origin, job, error);
+      return "refused";
+    }
+  } finally {
+    endFileJob(session, generation);
+  }
+}
+
+/** How Open came out. `asks`: a program file, and the question is the screen's to ask. */
+export type OpenResult = "done" | "asks" | "stale" | "busy" | "refused";
+
+function openResult(session: number, ran: FileRan<null>): OpenResult {
+  if (typeof ran === "string") return ran;
+  const { outcome } = ran;
+  if (typeof outcome === "object" && "Done" in outcome) {
+    noted(session, OPENED_COPY);
+    return "done";
+  }
+  if (typeof outcome === "object" && "Confirm" in outcome && outcome.Confirm === "Executable") return "asks";
+  sayFailure(session, UNEXPECTED);
+  return "refused";
+}
+
+/**
+ * Open on a stored file of the item open in the panel: the shell decrypts a read-only copy and opens it in its app, and says so (the
+ * copy is removed at the next lock, and edits to it are not kept). A program file answers `asks` first, before anything is decrypted; send
+ * it again with `confirmed` once the person says yes. A file that does not decrypt is said beside the file in the panel.
+ */
+export async function openStoredFile(session: number, id: string, fileId: string, confirmed = false): Promise<OpenResult> {
+  const ran = await runFile(session, { kind: "open", id, fileId }, { panel: id }, false, (vault) => api.openFile(vault, id, fileId, confirmed));
+  return openResult(session, ran);
+}
+
+/**
+ * How Save a copy came out: `dismissed` is a closed Windows dialog, which says nothing; `confirm` is a cloud-synced folder, with the token
+ * the yes goes on with (nothing was decrypted or written).
+ */
+export type CopyResult = "done" | "dismissed" | "stale" | "busy" | "refused" | { confirm: string };
+
+function saveResult(session: number, ran: FileRan<null>): CopyResult {
+  if (typeof ran === "string") return ran;
+  const { outcome } = ran;
+  if (outcome === "Dismissed") return "dismissed";
+  if (typeof outcome === "object" && "Done" in outcome) {
+    noted(session, SAVED_COPY);
+    return "done";
+  }
+  if (typeof outcome === "object" && "Confirm" in outcome && typeof outcome.Confirm === "object" && "CloudFolder" in outcome.Confirm) {
+    return { confirm: outcome.Confirm.CloudFolder.token };
+  }
+  sayFailure(session, UNEXPECTED);
+  return "refused";
+}
+
+/**
+ * Save a copy on a stored file of the item open in the panel: Rust opens the Windows save dialog and writes the copy, which is not encrypted.
+ * A cloud-synced folder answers `{ confirm }` first, for the screen to ask (21e); `confirmStoredCopy` goes on with it.
+ */
+export async function saveStoredFile(session: number, id: string, fileId: string): Promise<CopyResult> {
+  const ran = await runFile(session, { kind: "save", id, fileId }, { panel: id }, false, (vault) => api.saveFileCopy(vault, id, fileId));
+  return saveResult(session, ran);
+}
+
+/**
+ * The run of a cloud question's yes. The shell lets go of a parked copy after five minutes as well as at a lock, so `not_found` is not news of
+ * a lock by itself: the shell is asked about the session (`whyNotFound`). Locked: the session leaves the page and nothing is said. Still live:
+ * the page's own "that took too long" is the refusal, said where the save began.
+ */
+function confirmCopy(session: number, token: string): (vault: api.SessionRef) => Promise<api.Tagged<api.Outcome<null>>> {
+  return async () => {
+    try {
+      return await api.saveFileCopyConfirm(token);
+    } catch (error) {
+      if (refusedWith(error, "not_found")) await whyNotFound(session, "file_copy_expired");
+      throw error;
+    }
+  };
+}
+
+/** The person's yes to the cloud question of a copy saved from the item open in the panel: the shell goes on with the copy it parked. */
+export async function confirmStoredCopy(session: number, id: string, fileId: string, token: string): Promise<CopyResult> {
+  const ran = await runFile(session, { kind: "save", id, fileId }, { panel: id }, false, confirmCopy(session, token));
+  return saveResult(session, ran);
+}
+
+/** How a replace, attach or add came out: `dismissed` is a closed picker, which says nothing and changes nothing. */
+export type StoreResult = "done" | "dismissed" | "stale" | "busy" | "refused";
+
+/** What a stored file's import came to once it is said: the new item or file's ID, for the caller that needs it. */
+function storeResult(ran: FileRan<string>, done: (id: string) => void): StoreResult {
+  if (typeof ran === "string") return ran;
+  const { outcome } = ran;
+  if (outcome === "Dismissed") return "dismissed";
+  if (typeof outcome === "object" && "Done" in outcome) {
+    done(outcome.Done);
+    return "done";
+  }
+  return "refused";
+}
+
+/**
+ * Replace file on a stored file of the item open in the panel, once the person has said yes to the warning: Rust opens the Windows picker and
+ * puts the chosen file in the old one's place. The panel reads the item again only if it is still that item's; "File replaced" is said either way.
+ */
+export async function replaceStoredFile(session: number, id: string, fileId: string): Promise<StoreResult> {
+  const ran = await runFile(session, { kind: "replace", id, fileId }, { panel: id }, true, (vault) => api.replaceFile(vault, id, fileId));
+  return storeResult(ran, () => {
+    say(session, "File replaced");
+    void reloadOpen(session, id);
+  });
+}
+
+/** Attach a file on the login, key or note open in the panel: one file, picked in the Windows picker. It says the original is still on the PC. */
+export async function attachStoredFile(session: number, id: string): Promise<StoreResult> {
+  const ran = await runFile(session, { kind: "attach", id, fileId: null }, { panel: id }, true, (vault) => api.attachFile(vault, id));
+  return storeResult(ran, () => {
+    noted(session, `File attached. ${ORIGINAL_STAYS}`);
+    void reloadOpen(session, id);
+  });
+}
+
+/**
+ * Add, then File: one file picked in the Windows picker becomes an item in the folder on screen (`collection`, `null` for none). The new item
+ * opens in the panel only if the panel is as it was when Add was pressed; one the person has moved to is left as it is. It says the original is
+ * still on the PC.
+ */
+export async function addStoredFile(session: number, collection: string | null): Promise<StoreResult> {
+  const start = sessionOf(session);
+  const openId = start?.openItem?.id ?? null;
+  const tool = start?.tool ?? null;
+  const ran = await runFile(session, { kind: "add", id: null, fileId: null }, "anywhere", true, (vault) => api.addFile(vault, collection));
+  return storeResult(ran, (made) => {
+    noted(session, `File added. ${ORIGINAL_STAYS}`);
+    const now = sessionOf(session);
+    if (now !== undefined && (now.openItem?.id ?? null) === openId && now.tool === tool) void selectItem(session, made);
+  });
+}
+
+/** Open on a file result of the search: as the panel's, and the search steps aside once it worked. A program file is asked over the search. */
+export async function openFileFromSearch(session: number, id: string, file: FileView, confirmed = false): Promise<void> {
+  const origin = searchOrigin();
+  const ran = await runFile(session, { kind: "open", id, fileId: file.file_id }, origin, false, (vault) =>
+    api.openFile(vault, id, file.file_id, confirmed),
+  );
+  const result = openResult(session, ran);
+  if (!stillWhere(session, origin)) return;
+  if (result === "asks" && state.search !== null) {
+    set({ ...state, search: { ...state.search, asking: { kind: "program", session, id, file } } });
+  } else if (result === "done") closeSearch();
+}
+
+/** What a save from the search came to: the search steps aside once it worked, and a cloud folder is asked over the search. */
+function afterSearchSave(session: number, id: string, file: FileView, origin: FileOrigin, result: CopyResult): void {
+  if (!stillWhere(session, origin)) return;
+  if (result === "done") closeSearch();
+  else if (typeof result === "object" && state.search !== null) {
+    set({ ...state, search: { ...state.search, asking: { kind: "cloud", session, id, file, token: result.confirm } } });
+  }
+}
+
+/** Save a copy on a file result of the search: as the panel's, and the search steps aside once it worked. */
+export async function saveFileFromSearch(session: number, id: string, file: FileView): Promise<void> {
+  const origin = searchOrigin();
+  const ran = await runFile(session, { kind: "save", id, fileId: file.file_id }, origin, false, (vault) => api.saveFileCopy(vault, id, file.file_id));
+  afterSearchSave(session, id, file, origin, saveResult(session, ran));
+}
+
+/** The person's answer to a question asked over the search: yes goes on (Open anyway, or Continue to a cloud folder); no leaves it, with nothing done. */
+export function answerSearchQuestion(yes: boolean): void {
+  const search = state.search;
+  const asking = search?.asking ?? null;
+  if (search === null || asking === null) return;
+  set({ ...state, search: { ...search, asking: null } });
+  if (!yes) return;
+  if (asking.kind === "program") {
+    void openFileFromSearch(asking.session, asking.id, asking.file, true);
+    return;
+  }
+  const origin = searchOrigin();
+  const { session, id, file, token } = asking;
+  void (async () => {
+    const ran = await runFile(session, { kind: "save", id, fileId: file.file_id }, origin, false, confirmCopy(session, token));
+    afterSearchSave(session, id, file, origin, saveResult(session, ran));
+  })();
+}
+
+/** "Pick another folder" over the search: the question goes and Windows is asked for a folder again. */
+export function pickAnotherFolderFromSearch(): void {
+  const asking = state.search?.asking ?? null;
+  if (state.search === null || asking === null || asking.kind !== "cloud") return;
+  set({ ...state, search: { ...state.search, asking: null } });
+  void saveFileFromSearch(asking.session, asking.id, asking.file);
 }
 
 /**
@@ -2122,12 +2512,14 @@ export async function captureAsEnv(session: number, id: string, folder: string):
 export function openSearch(): void {
   if (state.search !== null || state.sessions.length === 0) return;
   searchRun += 1;
-  set({ ...state, search: { query: "", answered: null, hits: [], busy: [], error: null } });
+  searchOpening += 1;
+  set({ ...state, search: { query: "", answered: null, hits: [], busy: [], error: null, asking: null } });
 }
 
 /** Closes the search and forgets what was typed and found; an answer still on its way is dropped. */
 export function closeSearch(): void {
   searchRun += 1;
+  searchOpening += 1;
   if (state.search !== null) set({ ...state, search: null });
 }
 
@@ -2274,7 +2666,11 @@ export function resetStoreForTests(): void {
   converting = null;
   confirmingClose = false;
   searchRun = 0;
+  searchOpening = 0;
+  retryingOpen = false;
   listRuns.clear();
+  detailRuns.clear();
+  cleanupNotices = 0;
   state = EMPTY;
   for (const notify of listeners) notify();
 }

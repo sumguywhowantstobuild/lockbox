@@ -191,6 +191,23 @@ export interface CaptureEvent {
   env_keys: number | null;
 }
 
+/**
+ * What `lockbox://busy` says: the long operations now running for a session, by their fixed names (`import`, `save_copy`, `open`, and
+ * the ones later plans add), and none when the last has ended. `session` is `null` for one that belongs to no vault. No vault data, so
+ * no generation: the page keeps it in that session's record, which a lock drops.
+ */
+export interface BusyEvent {
+  session: number | null;
+  operations: string[];
+}
+
+/** Listens for `lockbox://busy`: each event is handed over as it came. */
+export function onBusy(handler: (event: BusyEvent) => void): Promise<UnlistenFn> {
+  return listen<BusyEvent>("lockbox://busy", ({ payload }) => {
+    handler(payload);
+  });
+}
+
 /** Listens for `lockbox://capture`: each event is handed over as it came (it holds no vault data, so it has no generation). */
 export function onCapture(handler: (event: CaptureEvent) => void): Promise<UnlistenFn> {
   return listen<CaptureEvent>("lockbox://capture", ({ payload }) => {

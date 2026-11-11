@@ -215,10 +215,10 @@ async function lockNow() {
 test("the_add_menu_lists_paste_a_env_after_note_set_apart", async () => {
   await unlocked();
   const menu = await openMenu(screen.getByRole("button", { name: "Add" }));
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note", "Paste a .env"]);
-  // Set apart as drawn: one divider, before it and after Note.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
+  // Set apart as drawn: one divider, before it and after File.
   const parts = Array.from(menu.querySelectorAll('[role="menuitem"], [role="separator"]')).map((part) => part.getAttribute("role"));
-  expect(parts).toEqual(["menuitem", "menuitem", "menuitem", "separator", "menuitem"]);
+  expect(parts).toEqual(["menuitem", "menuitem", "menuitem", "menuitem", "separator", "menuitem"]);
 });
 
 test("paste_a_env_opens_the_empty_box_in_the_panel", async () => {

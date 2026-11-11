@@ -101,7 +101,7 @@ test("add_then_login_opens_the_form", async () => {
   fireEvent.pointerDown(add, { button: 0 });
   fireEvent.click(add);
   const menu = await screen.findByRole("menu");
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note", "Paste a .env"]);
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "Login" }));
 
   const form = await screen.findByRole("complementary", { name: "New login" });

@@ -64,6 +64,8 @@ export interface FakeVault {
   newer?: boolean;
   /** A long change holds the vault past the short wait: a search reports it in `busy` and gives none of its items. */
   busy?: boolean;
+  /** Stored files (by file id) that do not decrypt: opening or saving one is refused as `damaged`. */
+  damagedFiles?: string[];
 }
 
 interface Live {
@@ -373,6 +375,33 @@ export interface FakeShell {
    * a `capture_reveal` meanwhile is `locked`, as the shell answers it.
    */
   holdCaptureChoose(): () => void;
+  /**
+   * Every stored-file command that got as far as working on a file, in order (`open_file`, `save_file_copy`, `add_file`,
+   * `attach_file`, `replace_file`), with the ids it was sent. A refused one, a question (a program file asks first) and a
+   * closed dialog are not here. No path is ever in it: the page sends none.
+   */
+  fileOps: { cmd: string; id?: string; file_id?: string; collection?: string | null }[];
+  /** The next file picker or save dialog (the next file command that opens one) is closed without a choice. */
+  dismissFileNext(): void;
+  /** The file the next picker chooses, by its name and size in bytes (a made-up name; a made-up one is chosen when none is set). */
+  pickNext(name: string, length?: number): void;
+  /**
+   * Holds every stored-file command's answer until `release` is called, as a big file would: `lockbox://busy` says the vault is
+   * working (`import`, `save_copy` or `open`) as the command arrives, and says it is not when the answer is decided, which is
+   * at release, as the shell decides it: a lock in between leaves a refusal (`locked`) and nothing done.
+   */
+  holdFiles(): () => void;
+  /** How many opened copies another program holds, as the last `lockbox://notice` of `open_cleanup` told. `retry_open_cleanup` leaves this many. */
+  retryLeaves(stillOpen: number): void;
+  /** How many times `retry_open_cleanup` reached the shell. */
+  retries(): number;
+  /** Holds every `retry_open_cleanup` answer until `release` is called: the count is read when it arrives, and the answer comes later. */
+  holdRetry(): () => void;
+  /**
+   * Holds every `get_item` answer until `release` is called, which lets the newest through first: what each answer says is read when the
+   * command arrives, so an older answer comes after a newer one, as it can on a busy shell.
+   */
+  holdGetItem(): () => void;
 }
 
 /** What the shell sends for a website that is not an `http` or `https` address (`NOT_A_WEBSITE`). */
@@ -554,6 +583,21 @@ interface FakeSlot {
   chosen: number | null;
 }
 
+/** What the engine sends for a file that does not decrypt (`Damaged { what: "file" }`), and for an item that holds no files. */
+export const FILE_DAMAGED = { code: "core", kind: "damaged", what: "file" };
+const CANNOT_HOLD_FILES = { code: "core", kind: "invalid_input", what: "item cannot hold files" };
+/** The types the shell asks about before it opens them (`is_executable`: a few of the many it knows). */
+const PROGRAM_FILE = /\.(exe|bat|cmd|msi|ps1|scr|com)$/i;
+/** What a stored-file command is called in `lockbox://busy`. */
+const OPERATION: Record<string, string> = {
+  open_file: "open",
+  save_file_copy: "save_copy",
+  save_file_copy_confirm: "save_copy",
+  add_file: "import",
+  attach_file: "import",
+  replace_file: "import",
+};
+
 /** The first free `NAME_2`, `NAME_3`, ... among the live keys of one place. */
 function freeName(items: readonly FakeItem[], place: string | null, name: string): string {
   const taken = liveKeys(items, place).map((item) => item.title);
@@ -640,7 +684,7 @@ export function installFakeShell(
   const printed: string[] = [];
   // The save a cloud question parked: its session and generation, to go on with it (`save_readable_confirm`), and the folder
   // of a `.env` file (null for the recovery key's PDF).
-  const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null }>();
+  const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null; copy?: { id: string; file_id: string } }>();
   // The pasted `.env`s the shell holds, by token: their rows, values included, which never leave the fake.
   const envPastes = new Map<string, { session: number; generation: number; rows: EnvPasted[]; text: string }>();
   let heldEnvRead: (() => void)[] | undefined;
@@ -655,6 +699,15 @@ export function installFakeShell(
   let heldCaptureState: (() => void)[] | undefined;
   let heldCaptureChoose: (() => void)[] | undefined;
   let captureRevealed = 0;
+  // Stored files: what the commands did, the picker's next choice, a closed dialog, the hold, and the opened copies left behind.
+  const fileOps: FakeShell["fileOps"] = [];
+  let dismissFile = false;
+  let pickedFile: { name: string; length: number } | undefined;
+  let heldFiles: (() => void)[] | undefined;
+  let heldRetry: (() => void)[] | undefined;
+  let heldGetItem: (() => void)[] | undefined;
+  let stillOpenAfterRetry = 0;
+  let retried = 0;
 
   /** The slot as an event would describe it. */
   const slotEvent = (made: FakeSlot, changed: boolean) => {
@@ -1194,6 +1247,87 @@ export function installFakeShell(
         envFiles.push(folder.id);
         return tagged(sent.session, sent.generation, { Saved: { Done: { folder: SAVED_FOLDER } } });
       }
+      case "open_file":
+      case "save_file_copy": {
+        const sent = exactly(args, cmd === "open_file" ? ["session", "generation", "id", "file_id", "confirmed_executable"] : ["session", "generation", "id", "file_id"]) as {
+          session: number;
+          generation: number;
+          id: string;
+          file_id: string;
+          confirmed_executable?: boolean;
+        };
+        const vault = vaultFor(sent.session, sent.generation);
+        const holder = vault.items?.find((item) => item.id === sent.id);
+        const file = holder?.attachments?.find((stored) => stored.file_id === sent.file_id);
+        if (file === undefined) return refuse({ code: "core", kind: "not_found" });
+        // A program file asks first, before anything is decrypted.
+        if (cmd === "open_file" && PROGRAM_FILE.test(file.name) && sent.confirmed_executable !== true) {
+          return tagged(sent.session, sent.generation, { Confirm: "Executable" });
+        }
+        if (cmd === "save_file_copy" && dismissFile) {
+          dismissFile = false;
+          return tagged(sent.session, sent.generation, "Dismissed");
+        }
+        // A cloud-synced folder asks first, before anything is decrypted: the copy waits under a token.
+        if (cmd === "save_file_copy" && cloudPdf > 0) {
+          cloudPdf -= 1;
+          nextToken += 1;
+          const token = `copy-token-${String(nextToken)}`;
+          pendingPdfs.set(token, { session: sent.session, generation: sent.generation, envFolder: null, copy: { id: sent.id, file_id: sent.file_id } });
+          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token } } });
+        }
+        if ((vault.damagedFiles ?? []).includes(sent.file_id)) return refuse(FILE_DAMAGED);
+        fileOps.push({ cmd, id: sent.id, file_id: sent.file_id });
+        return tagged(sent.session, sent.generation, { Done: null });
+      }
+      case "save_file_copy_confirm": {
+        const { token } = exactly(args, ["token"]) as { token: string };
+        const parked = pendingPdfs.get(token);
+        if (parked?.copy === undefined) return refuse({ code: "not_found" });
+        pendingPdfs.delete(token);
+        vaultFor(parked.session, parked.generation);
+        fileOps.push({ cmd: "save_file_copy", id: parked.copy.id, file_id: parked.copy.file_id });
+        return tagged(parked.session, parked.generation, { Done: null });
+      }
+      case "add_file":
+      case "attach_file":
+      case "replace_file": {
+        const keys = { add_file: ["session", "generation", "collection"], attach_file: ["session", "generation", "id"], replace_file: ["session", "generation", "id", "file_id"] };
+        const sent = exactly(args, keys[cmd]) as { session: number; generation: number; collection?: string | null; id?: string; file_id?: string };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const holder = cmd === "add_file" ? undefined : vault.items?.find((item) => item.id === sent.id);
+        if (cmd !== "add_file") {
+          if (holder === undefined) return refuse({ code: "core", kind: "not_found" });
+          if (holder.kind === "collection" || (cmd === "attach_file" && holder.kind === "file")) return refuse(CANNOT_HOLD_FILES);
+        }
+        const old = cmd === "replace_file" ? holder?.attachments?.find((stored) => stored.file_id === sent.file_id) : undefined;
+        if (cmd === "replace_file" && old === undefined) return refuse({ code: "core", kind: "not_found" });
+        if (dismissFile) {
+          dismissFile = false;
+          return tagged(sent.session, sent.generation, "Dismissed");
+        }
+        const picked = pickedFile ?? { name: "picked-file.pdf", length: 2048 };
+        pickedFile = undefined;
+        nextItem += 1;
+        const stored = { file_id: itemId(nextItem), name: picked.name, length: picked.length, media_type: "application/octet-stream" };
+        if (cmd === "add_file") {
+          const made: FakeItem = { id: itemId(nextItem + 0x100), kind: "file", title: picked.name, collection: sent.collection ?? null, attachments: [stored], modified_at: nowText() };
+          vault.items = [...(vault.items ?? []), made];
+          fileOps.push({ cmd, collection: sent.collection ?? null });
+          return tagged(sent.session, sent.generation, { Done: made.id });
+        }
+        if (holder === undefined) return refuse({ code: "core", kind: "not_found" });
+        holder.attachments = cmd === "replace_file" ? (holder.attachments ?? []).map((was) => (was === old ? stored : was)) : [...(holder.attachments ?? []), stored];
+        bump(holder);
+        fileOps.push({ cmd, id: sent.id, ...(cmd === "replace_file" ? { file_id: sent.file_id } : {}) });
+        return tagged(sent.session, sent.generation, { Done: stored.file_id });
+      }
+      case "retry_open_cleanup": {
+        exactly(args ?? {}, []);
+        retried += 1;
+        return { removed: 0, still_open: stillOpenAfterRetry };
+      }
       case "list_printers":
         exactly(args ?? {}, []);
         return { printers: [...printers], default: defaultPrinter !== null && printers.includes(defaultPrinter) ? defaultPrinter : null };
@@ -1300,21 +1434,24 @@ export function installFakeShell(
           }
           const all = vault.items ?? [];
           const folderTitle = (item: FakeItem) => all.find((other) => other.id === item.collection)?.title ?? "";
-          // The engine's index: a live item's title, a login's username and links, and its folder's title.
+          // The engine's index: a live item's title, a login's username and links, its folder's title and the names of its attached
+          // files. An item that matches in its own fields is a hit; each file name that matches (once) is a hit with that file, after it.
           // At most `SEARCH_LIMIT` come back from a vault, of every kind (`commands/items.rs`), whatever the page shows.
-          const found =
-            needle === ""
-              ? []
-              : all
-                  .filter(
-                    (item) =>
-                      !(item.trashed ?? false) &&
-                      [item.title, item.username ?? "", ...(item.urls ?? []), folderTitle(item)].some((text) =>
-                        text.toLowerCase().includes(needle),
-                      ),
-                  )
-                  .slice(0, SEARCH_LIMIT);
-          hits.push(tagged(session, entry.generation, found.map(summary)));
+          const found: unknown[] = [];
+          if (needle !== "") {
+            for (const item of all) {
+              if (item.trashed ?? false) continue;
+              const own = [item.title, item.username ?? "", ...(item.urls ?? []), folderTitle(item)].some((text) => text.toLowerCase().includes(needle));
+              if (own) found.push({ ...summary(item), matched_file: null });
+              const seen = new Set<string>();
+              for (const file of item.attachments ?? []) {
+                if (seen.has(file.name) || !file.name.toLowerCase().includes(needle)) continue;
+                seen.add(file.name);
+                found.push({ ...summary(item), matched_file: file });
+              }
+            }
+          }
+          hits.push(tagged(session, entry.generation, found.slice(0, SEARCH_LIMIT)));
         }
         return { hits, busy };
       }
@@ -1618,7 +1755,9 @@ export function installFakeShell(
   invoke.mockImplementation((cmd: string, args?: unknown) => {
     calls.push({ cmd, args });
     const refusal = refusals.get(cmd);
-    if (refusal !== undefined) {
+    // A stored-file command that is being held is refused when it is let go, as the shell decides it (a refusal that comes late).
+    const heldFile = heldFiles !== undefined && Object.hasOwn(OPERATION, cmd);
+    if (refusal !== undefined && !heldFile) {
       refusals.delete(cmd);
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
       return Promise.reject(refusal);
@@ -1654,6 +1793,32 @@ export function installFakeShell(
         });
       });
     }
+    if (heldFiles !== undefined && Object.hasOwn(OPERATION, cmd)) {
+      // The vault is working from the moment the command arrives; the answer is decided when it is let go.
+      const waiting = heldFiles;
+      // A command that carries a session names it; the cloud question's yes names it by the copy it parked.
+      const parkedFor = typeof args === "object" && args !== null && "token" in args ? pendingPdfs.get(args.token as string) : undefined;
+      const session = typeof args === "object" && args !== null && "session" in args ? (args.session as number) : (parkedFor?.session ?? null);
+      emit("lockbox://busy", { session, operations: [OPERATION[cmd]] });
+      return new Promise((resolve, reject) => {
+        waiting.push(() => {
+          emit("lockbox://busy", { session, operations: [] });
+          const late = refusals.get(cmd);
+          if (late !== undefined) {
+            refusals.delete(cmd);
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(late);
+            return;
+          }
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          }
+        });
+      });
+    }
     try {
       const result = answer(cmd, args);
       if (cmd === "capture_state" && heldCaptureState !== undefined) {
@@ -1672,6 +1837,15 @@ export function installFakeShell(
             resolve(answer(cmd, args));
           });
         });
+      }
+      for (const [name, waiting] of [["retry_open_cleanup", heldRetry], ["get_item", heldGetItem]] as const) {
+        if (cmd === name && waiting !== undefined) {
+          return new Promise((resolve) => {
+            waiting.push(() => {
+              resolve(result);
+            });
+          });
+        }
       }
       if (cmd === "list_items" && held !== undefined) {
         const release = held;
@@ -1916,6 +2090,41 @@ export function installFakeShell(
     },
     refuseNext: (cmd, error) => {
       refusals.set(cmd, error);
+    },
+    fileOps,
+    dismissFileNext: () => {
+      dismissFile = true;
+    },
+    pickNext: (name, length = 2048) => {
+      pickedFile = { name, length };
+    },
+    holdFiles: () => {
+      const waiting: (() => void)[] = [];
+      heldFiles = waiting;
+      return () => {
+        heldFiles = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    retryLeaves: (stillOpen) => {
+      stillOpenAfterRetry = stillOpen;
+    },
+    retries: () => retried,
+    holdRetry: () => {
+      const waiting: (() => void)[] = [];
+      heldRetry = waiting;
+      return () => {
+        heldRetry = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdGetItem: () => {
+      const waiting: (() => void)[] = [];
+      heldGetItem = waiting;
+      return () => {
+        heldGetItem = undefined;
+        for (const release of [...waiting].reverse()) release();
+      };
     },
     holdEnvRead: () => {
       const waiting: (() => void)[] = [];

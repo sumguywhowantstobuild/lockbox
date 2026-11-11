@@ -22,7 +22,7 @@ use crate::item::Item;
 use crate::kdf::{Argon2Params, check_new_password, derive_password_key};
 use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
-use crate::search::SearchIndex;
+use crate::search::{SearchHit, SearchIndex};
 use crate::secret::{Key32, random_bytes};
 use crate::slots::{KeySlot, SlotType, wrap_slot};
 use crate::{CoreError, Result};
@@ -413,7 +413,7 @@ impl Vault {
     }
 
     /// Items matching `q`, best first, at most `limit` (see [`SearchIndex::query`]).
-    pub fn search(&self, q: &str, limit: usize) -> Vec<ItemId> {
+    pub fn search(&self, q: &str, limit: usize) -> Vec<SearchHit> {
         self.index.query(q, limit)
     }
 

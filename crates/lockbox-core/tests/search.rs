@@ -54,7 +54,7 @@ fn five_thousand_items_fast() {
     let query = start.elapsed();
 
     println!("unlock (no Argon2) {unlock:?}, one query {query:?}");
-    assert_eq!(hits.first(), target.as_ref());
+    assert_eq!(hits.first().map(|hit| &hit.id), target.as_ref());
     assert!(unlock < Duration::from_secs(3), "{unlock:?}");
     assert!(query < Duration::from_millis(50), "{query:?}");
 }

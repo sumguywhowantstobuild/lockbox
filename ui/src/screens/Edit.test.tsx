@@ -190,8 +190,8 @@ test("until_shows_the_replaced_day", async () => {
   for (const old of [OLD_ONE, OLD_TWO, OLD_THREE, NOW_PW]) nowhereOnThePage(old);
   expect(labelsAndTitles()).not.toContain("demo-");
   expect(shell.revealed).toEqual([]);
-  // After the details the group is below the website, as drawn, and above "Move to trash" (a later task).
-  expect(Array.from(panel.querySelectorAll("h3")).map((heading) => heading.textContent)).toEqual(["Earlier passwords"]);
+  // After the details the group is below the website, as drawn, and above the attached files (Task 19) and "Move to trash".
+  expect(Array.from(panel.querySelectorAll("h3")).map((heading) => heading.textContent)).toEqual(["Earlier passwords", "Attached files"]);
 
   // A login with none has no group, and a key or a note neither.
   for (const [title, kind] of [

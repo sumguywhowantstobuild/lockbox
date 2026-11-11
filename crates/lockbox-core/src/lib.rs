@@ -179,6 +179,7 @@ pub mod internals {
 }
 
 pub use error::{CoreError, Result};
+pub use search::SearchHit;
 pub use vault::{
     BackupReport, BackupSummary, CleanupReport, CopiedItem, CreatedVault, Credential, JournalStep,
     JournalView, PreparedRestore, ReadOnlyVault, Recovery, RestoreDestination, RestoreOutcome,

@@ -15,8 +15,8 @@ import {
   type Tagged,
 } from "./bridge";
 
-export { onCapture, onLocked, onNotice, StaleAnswer } from "./bridge";
-export type { CaptureEvent, Confirm, Opened, Outcome, PageNotice, SessionRef, Tagged } from "./bridge";
+export { onBusy, onCapture, onLocked, onNotice, StaleAnswer } from "./bridge";
+export type { BusyEvent, CaptureEvent, Confirm, Opened, Outcome, PageNotice, SessionRef, Tagged } from "./bridge";
 
 /** One vault on the list: no path, ever. `name` is null when its details cannot be read. */
 export interface VaultEntry {
@@ -506,13 +506,86 @@ export function copyGenerated(vault: SessionRef, value: string): Promise<Tagged<
 }
 
 /**
- * Searches every unlocked vault for `query` (title, username, website, folder name): one answer per vault searched, each
- * tagged with the generation it was read in, and the sessions that were busy with a long change (their results are
+ * One search result: the item as a list shows it, and the attached file whose name matched, or `null` when the item matched in
+ * its own fields. An item that matched both ways is two results, its own first. The file's ID is what Open and Save a copy send.
+ */
+export interface SearchHit extends ItemSummary {
+  matched_file: FileView | null;
+}
+
+/**
+ * Searches every unlocked vault for `query` (title, username, website, folder name, attached file names): one answer per vault
+ * searched, each tagged with the generation it was read in, and the sessions that were busy with a long change (their results are
  * missing). A vault that locked meanwhile is in neither, and an answer from before a lock is dropped here. The query
  * is at most 256 characters; an empty one is not worth asking.
  */
-export function searchAll(query: string): Promise<SearchResults<ItemSummary[]>> {
-  return callMany<ItemSummary[]>("search_all", { query });
+export function searchAll(query: string): Promise<SearchResults<SearchHit[]>> {
+  return callMany<SearchHit[]>("search_all", { query });
+}
+
+// ---- Stored files (Task 19): open, save a copy, replace, attach and add, one file at a time ----
+//
+// Every one of these is a long operation in the shell: Rust opens the Windows picker or save dialog inside the command, so the page
+// sends ids and never a path, and the shell says it is working with `lockbox://busy` (`onBusy`). A lock while one runs makes its answer
+// stale (or the shell's `locked` refusal), and the screens say nothing of it.
+
+/**
+ * Opens the stored file `fileId` of the item `id` with its default app, as a read-only copy that is removed at the next lock. A type that
+ * can run code answers `{ Confirm: "Executable" }` before anything is decrypted: ask, then send this again with `confirmedExecutable`.
+ * A file that does not decrypt is refused as `damaged` (`what: "file"`, or `"file missing"`).
+ */
+export function openFile(vault: SessionRef, id: string, fileId: string, confirmedExecutable: boolean): Promise<Tagged<Outcome<null>>> {
+  return call<Outcome<null>>("open_file", {
+    session: vault.session,
+    generation: vault.generation,
+    id,
+    file_id: fileId,
+    confirmed_executable: confirmedExecutable,
+  });
+}
+
+/**
+ * Saves a decrypted copy of the stored file where the person picks, in the Windows save dialog Rust opens (`"Dismissed"` when it is
+ * closed). A cloud-synced folder answers `{ Confirm: { CloudFolder: { token } } }` first (`saveFileCopyConfirm` goes on with it). Allowed
+ * in a vault opened from a backup. Refused as `damaged` for a file that does not decrypt.
+ */
+export function saveFileCopy(vault: SessionRef, id: string, fileId: string): Promise<Tagged<Outcome<null>>> {
+  return call<Outcome<null>>("save_file_copy", { session: vault.session, generation: vault.generation, id, file_id: fileId });
+}
+
+/**
+ * The person's yes to saving the copy in a cloud-synced folder: `saveFileCopy` answered `{ Confirm: { CloudFolder: { token } } }` before
+ * decrypting or writing anything, and the shell parked the copy under the token. It goes on only while the vault is unlocked as it was
+ * when asked; a token that is used, old, or dropped by a lock is `not_found`.
+ */
+export function saveFileCopyConfirm(token: string): Promise<Tagged<Outcome<null>>> {
+  return call<Outcome<null>>("save_file_copy_confirm", { token });
+}
+
+/** Adds a file item holding one file the person picks, in the folder `collection` (`null`: none): the new item's ID. Read-only refuses. */
+export function addFile(vault: SessionRef, collection: string | null): Promise<Tagged<Outcome<string>>> {
+  return call<Outcome<string>>("add_file", { session: vault.session, generation: vault.generation, collection });
+}
+
+/** Attaches one file the person picks to the login, key or note `id`: the new file's ID. Read-only refuses. */
+export function attachFile(vault: SessionRef, id: string): Promise<Tagged<Outcome<string>>> {
+  return call<Outcome<string>>("attach_file", { session: vault.session, generation: vault.generation, id });
+}
+
+/** Replaces the stored file `fileId` of the item `id` with one the person picks: the new file's ID. Read-only refuses. */
+export function replaceFile(vault: SessionRef, id: string, fileId: string): Promise<Tagged<Outcome<string>>> {
+  return call<Outcome<string>>("replace_file", { session: vault.session, generation: vault.generation, id, file_id: fileId });
+}
+
+/** What a cleanup of opened copies did, as counts: the shell's `RemoveReport`. `still_open` counts every copy another program still holds. */
+export interface RemoveReport {
+  removed: number;
+  still_open: number;
+}
+
+/** Tries again to remove the opened copies a cleanup could not (10e's Retry): counts only. */
+export function retryOpenCleanup(): Promise<RemoveReport> {
+  return callPlain<RemoveReport>("retry_open_cleanup", {});
 }
 
 /**

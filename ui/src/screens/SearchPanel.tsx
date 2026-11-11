@@ -1,5 +1,5 @@
 import { useEffect, useRef, type KeyboardEvent } from "react";
-import type { ItemKind, ItemSummary } from "../api";
+import type { FileView, ItemKind, ItemSummary } from "../api";
 import { rememberOpener } from "../focus";
 import { messageFor } from "../messages";
 import { Button } from "../parts/Button";
@@ -7,12 +7,16 @@ import { Clip } from "../parts/Clip";
 import { KindIcon, SearchIcon } from "../parts/Icon";
 import { Palette } from "../parts/Palette";
 import {
+  answerSearchQuestion,
   closeSearch,
   copyFromSearch,
   lockEverything,
+  openFileFromSearch,
   openFromSearch,
   openNewLogin,
   openSearch,
+  pickAnotherFolderFromSearch,
+  saveFileFromSearch,
   setSearchQuery,
   showResult,
   useSearch,
@@ -20,6 +24,7 @@ import {
   useVaults,
   type SessionData,
 } from "../store";
+import { CloudCopyQuestion, ProgramQuestion } from "./FileActions";
 
 const LABEL = "Search every unlocked vault";
 
@@ -28,8 +33,8 @@ const SEARCH_LIMIT = 100;
 const TOO_MANY = "Too many matches. Type more of the name.";
 
 // A picture colour for each kind a search offers, as in the list.
-const TILE: Partial<Record<ItemKind, string>> = { login: "t0", key: "t3", note: "t2" };
-const WORD: Partial<Record<ItemKind, string>> = { login: "Login", key: "Key", note: "Note" };
+const TILE: Partial<Record<ItemKind, string>> = { login: "t0", key: "t3", note: "t2", file: "t1" };
+const WORD: Partial<Record<ItemKind, string>> = { login: "Login", key: "Key", note: "Note", file: "File" };
 
 /** Names in plain words: "Home", "Home and Work", "Home, Work and Old copy". */
 function listOf(names: readonly string[]): string {
@@ -37,11 +42,13 @@ function listOf(names: readonly string[]): string {
   return names.length < 2 ? last : `${names.slice(0, -1).join(", ")} and ${last}`;
 }
 
-/** One result: the item, and the vault it came from. */
+/** One result: the item, or one of its attached files whose name matched (`file`), and the vault it came from. */
 interface Result {
   session: SessionData;
   item: ItemSummary;
-  /** What tells one result from another: the username, the website's host and the vault, or the folder and the vault. */
+  /** The attached file that matched, when the result is a file's. */
+  file: FileView | null;
+  /** What tells one result from another: the username, the website's host and the vault, or the folder and the vault; for a file, whose it is. */
   detail: string;
 }
 
@@ -49,6 +56,11 @@ function detailOf(session: SessionData, item: ItemSummary): string {
   const folder = item.collection === null ? undefined : session.items?.find((other) => other.id === item.collection)?.title;
   const parts = item.kind === "login" ? [item.username, item.site, session.name] : [folder, session.name];
   return parts.filter((part) => part !== undefined && part !== null && part !== "").join(" · ");
+}
+
+/** Whose a matched file is (9g): "Attached to Bot admin console · My vault"; a file item's own file is "Stored in" it. */
+function fileDetailOf(session: SessionData, item: ItemSummary): string {
+  return `${item.kind === "file" ? "Stored in" : "Attached to"} ${item.title} · ${session.name}`;
 }
 
 /**
@@ -59,7 +71,9 @@ function detailOf(session: SessionData, item: ItemSummary): string {
  * login, so the message about the copy and its clear time is on screen. A lock takes its vault's results away with no
  * message; the last lock closes the search. A key's result has Copy key (the shell copies the value; a search never finds a
  * key by its value). New item (and the clause that offers a new login when nothing is found) opens the new-login form in
- * the vault on screen, its title started with what was typed. Files come with a later task.
+ * the vault on screen, its title started with what was typed. A file is found by its name (9g): its result says whose it is and the vault, and has
+ * Open and Save a copy, which are the item panel's own (a program file asks first, in the same words, over the search). A file item is found
+ * by its title and by its file's name as one result. The search steps aside once an open or a save worked; a refusal of one is said in it.
  */
 export function SearchPanel() {
   const search = useSearch();
@@ -86,17 +100,24 @@ export function SearchPanel() {
   }, [isOpen]);
 
   const results: Result[] = [];
-  // Whether a vault's answer was cut at the shell's limit: files and folders count toward it but are not shown, so a login
-  // that matches may be missing, and "nothing found" would be untrue. Below the limit nothing was cut.
+  // Whether a vault's answer was cut at the shell's limit: folders count toward it but are not shown, so an item that matches
+  // may be missing, and "nothing found" would be untrue. Below the limit nothing was cut.
   let tooMany = false;
   for (const found of search?.hits ?? []) {
     const session = sessions.find((entry) => entry.session === found.session);
     if (session === undefined) continue;
     if (found.items.length >= SEARCH_LIMIT) tooMany = true;
+    // A file item that matched by its own title already has Open and Save a copy for its first file (`FileResultActions` below): only that
+    // file's result would say the same twice. Another file of the item that matched by its name keeps its own result, acting on itself.
+    const asItem = new Set(found.items.filter((hit) => hit.matched_file === null && hit.kind === "file").map((hit) => hit.id));
     for (const item of found.items) {
-      // Files and folders are not offered here; a trashed item is not found at all.
-      if (item.trashed || (item.kind !== "login" && item.kind !== "key" && item.kind !== "note")) continue;
-      results.push({ session, item, detail: detailOf(session, item) });
+      // Folders are not offered here; a trashed item is not found at all.
+      if (item.trashed || item.kind === "collection") continue;
+      if (item.matched_file === null) {
+        results.push({ session, item, file: null, detail: detailOf(session, item) });
+      } else if (!(item.kind === "file" && asItem.has(item.id) && item.matched_file.file_id === item.attachments[0]?.file_id)) {
+        results.push({ session, item, file: item.matched_file, detail: fileDetailOf(session, item) });
+      }
     }
   }
 
@@ -180,8 +201,13 @@ export function SearchPanel() {
           {results.length > 0 ? (
             <div className="hlist">
               <ul ref={list}>
-                {results.map(({ session, item, detail }, index) => (
-                  <li key={`${String(session.session)}:${item.id}`} className={index === 0 ? "res first" : "res"}>
+                {results.map(({ session, item, file, detail }, index) => {
+                  // A file's result is named by the file; an item's own result by its title. A file item's own result has its file's buttons too.
+                  const shownKind = file === null ? item.kind : "file";
+                  const title = file === null ? item.title : file.name;
+                  const forFile = file ?? (item.kind === "file" ? (item.attachments[0] ?? null) : null);
+                  return (
+                  <li key={`${String(session.session)}:${item.id}:${file?.file_id ?? ""}`} className={index === 0 ? "res first" : "res"}>
                     <button
                       type="button"
                       className="hgo"
@@ -189,15 +215,18 @@ export function SearchPanel() {
                         showResult(session.session, item.id);
                       }}
                     >
-                      <span className={`ktile ${TILE[item.kind] ?? "t0"}`}>
-                        <KindIcon kind={item.kind} />
+                      <span className={`ktile ${TILE[shownKind] ?? "t0"}`}>
+                        <KindIcon kind={shownKind} />
                       </span>{" "}
-                      <span className="sr">{`${WORD[item.kind] ?? ""}:`}</span>{" "}
+                      <span className="sr">{`${WORD[shownKind] ?? ""}:`}</span>{" "}
                       <span className="hmeta">
-                        <Clip className="ht" text={item.title} /> <Clip className="hd" text={detail} />
+                        <Clip className="ht" text={title} /> <Clip className="hd" text={detail} />
                       </span>
                     </button>
-                    {item.kind === "login" ? (
+                    {forFile === null ? null : (
+                      <FileResultActions session={session} item={item} file={forFile} label={`${title}, ${detail}`} />
+                    )}
+                    {item.kind === "login" && file === null ? (
                       <div className="ra" role="group" aria-label={`${item.title}, ${detail}`}>
                         {(item.username ?? "") === "" ? null : (
                           <Button
@@ -226,7 +255,7 @@ export function SearchPanel() {
                         )}
                       </div>
                     ) : null}
-                    {item.kind === "key" ? (
+                    {item.kind === "key" && file === null ? (
                       <div className="ra" role="group" aria-label={`${item.title}, ${detail}`}>
                         <Button
                           onClick={() => {
@@ -238,7 +267,8 @@ export function SearchPanel() {
                       </div>
                     ) : null}
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             </div>
           ) : search.answered === null ? null : tooMany ? (
@@ -275,8 +305,60 @@ export function SearchPanel() {
             <span className="sp" />
             <Button onClick={closeSearch}>Close</Button>
           </div>
+          {/* Inside the search's own box, so the library treats it as a dialog over a dialog (one trap for focus, one for Escape). */}
+          <ProgramQuestion
+            name={search.asking?.kind === "program" ? search.asking.file.name : null}
+            onNo={() => {
+              answerSearchQuestion(false);
+            }}
+            onYes={() => {
+              answerSearchQuestion(true);
+            }}
+          />
+          <CloudCopyQuestion
+            open={search.asking?.kind === "cloud"}
+            onAnother={pickAnotherFolderFromSearch}
+            onContinue={() => {
+              answerSearchQuestion(true);
+            }}
+            onNo={() => {
+              answerSearchQuestion(false);
+            }}
+          />
         </>
       )}
     </Palette>
+  );
+}
+
+/**
+ * Open and Save a copy on a file's result: the panel's own actions, by the item and the file. While the vault works on a file the pressed
+ * one says so and both are off (`aria-disabled`); a press sends nothing then.
+ */
+function FileResultActions({ session, item, file, label }: { session: SessionData; item: ItemSummary; file: FileView; label: string }) {
+  const job = session.fileJob;
+  const mine = job !== null && job.id === item.id && job.fileId === file.file_id ? job.kind : null;
+  const off = job !== null ? true : undefined;
+  return (
+    <div className="ra" role="group" aria-label={label}>
+      <Button
+        aria-disabled={off}
+        aria-busy={mine === "open" ? true : undefined}
+        onClick={() => {
+          if (session.fileJob === null) void openFileFromSearch(session.session, item.id, file);
+        }}
+      >
+        {mine === "open" ? "Opening…" : "Open"}
+      </Button>
+      <Button
+        aria-disabled={off}
+        aria-busy={mine === "save" ? true : undefined}
+        onClick={() => {
+          if (session.fileJob === null) void saveFileFromSearch(session.session, item.id, file);
+        }}
+      >
+        {mine === "save" ? "Saving…" : "Save a copy"}
+      </Button>
+    </div>
   );
 }

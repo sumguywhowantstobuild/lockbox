@@ -1531,7 +1531,12 @@ mod tests {
         assert_eq!((item.title.as_str(), item.revision), ("Changed", 1));
         // Search follows memory, not the error.
         assert!(vault.search("plans", 10).is_empty());
-        assert_eq!(vault.search("changed", 10), [id]);
+        let found: Vec<_> = vault
+            .search("changed", 10)
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(found, [id]);
         // Work continues from that state, and a reload agrees.
         let mut next = item.clone();
         next.title = "Changed again".into();
@@ -1775,7 +1780,8 @@ mod tests {
         for query in ["demo-oldest", "oldest", "demo-newer", "secret"] {
             assert!(vault.search(query, 10).is_empty(), "{query}");
         }
-        assert_eq!(vault.search("mail", 10), [id], "the title is still found");
+        let found: Vec<_> = vault.search("mail", 10).into_iter().map(|h| h.id).collect();
+        assert_eq!(found, [id], "the title is still found");
 
         let item = vault.get_item(&id).unwrap();
         for out in [

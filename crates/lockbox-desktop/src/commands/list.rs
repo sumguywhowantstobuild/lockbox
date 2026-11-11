@@ -36,6 +36,7 @@ pub const COMMANDS: &[&str] = &[
     "list_orphans",
     "delete_orphans",
     "save_file_copy",
+    "save_file_copy_confirm",
     "add_file",
     "attach_file",
     "replace_file",

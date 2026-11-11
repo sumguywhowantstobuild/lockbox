@@ -104,12 +104,12 @@ test("selecting_shows_details_with_password_hidden", async () => {
     generation: live?.generation,
     id: itemId(1),
   });
-  // Edit is here (Task 13), and Move and Move to trash (Task 14), and nothing from a later task: no attach. The one Open is the
-  // website's (Task 10), through `open_url`.
+  // Edit is here (Task 13), and Move and Move to trash (Task 14), and Attach a file (Task 19, one file at a time). The one Open is the
+  // website's (Task 10), through `open_url`: this login has no stored file.
   expect(within(panel).getByRole("button", { name: "Edit" })).toBeTruthy();
   expect(within(panel).getByRole("button", { name: "Move" })).toBeTruthy();
   expect(within(panel).getByRole("button", { name: "Move to trash" })).toBeTruthy();
-  expect(within(panel).queryByRole("button", { name: /attach/i })).toBeNull();
+  expect(within(panel).getByRole("button", { name: "Attach a file" })).toBeTruthy();
   expect(within(panel).getAllByRole("button", { name: /^Open/ }).map((button) => button.getAttribute("aria-label"))).toEqual([
     "Open support.example.com",
   ]);

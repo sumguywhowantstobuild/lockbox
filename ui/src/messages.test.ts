@@ -186,6 +186,19 @@ test("a_save_with_no_value_has_words_of_its_own", () => {
   expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
 });
 
+test("a_damaged_stored_file_has_the_designs_words_and_no_backup_button_text", () => {
+  // Task 19, 10d: a stored file that does not decrypt, and one whose stored copy is gone, as the engine sends them. Any other damaged
+  // thing keeps the general message.
+  for (const what of ["file", "file missing"]) {
+    expect(KNOWN_WHATS).toContain(what);
+    const said = messageFor({ code: "core", kind: "damaged", what });
+    expect(said.title).toMatch(/so it can't be opened or saved\.$/);
+    expect(said.body).toBe("A backup may have a good copy.");
+  }
+  expect(messageFor({ code: "core", kind: "damaged", what: "file" }).title).toBe("This file is damaged, so it can't be opened or saved.");
+  expect(messageFor({ code: "core", kind: "damaged", what: "item" }).title).toBe("Lockbox can't read part of this vault.");
+});
+
 test("no_message_contains_raw_error_text", () => {
   const SENTINEL = "SENTINEL-7f3a C:\\Users\\secret";
   const errors: unknown[] = [

@@ -21,10 +21,11 @@ import {
   type SessionData,
 } from "../store";
 import { AddMenu } from "./AddMenu";
-import { DetailsChangedAsk, LostOutputsAsk, ShortcutAsk, VaultBanners } from "./Asks";
+import { DetailsChangedAsk, LostOutputsAsk, OpenFilesAsk, ShortcutAsk, VaultBanners } from "./Asks";
 import { EmptyAdd } from "./EmptyAdd";
 import { EnvFileDialog } from "./EnvOut";
 import { EnvPaste } from "./EnvPaste";
+import { BusyNote } from "./FileActions";
 import { EditForm } from "./forms/EditForm";
 import { DeleteFolderDialog, RenameFolderDialog } from "./forms/FolderForm";
 import { KeyForm } from "./forms/KeyForm";
@@ -203,7 +204,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 ]}
               />
             )}
-            {data.readOnly || data.trash ? null : <AddMenu session={data.session} />}
+            {data.readOnly || data.trash ? null : <AddMenu session={data.session} folder={data.folder} />}
           </div>
           <div className="lscroll">
             <h1 className="big" tabIndex={-1}>
@@ -211,6 +212,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             </h1>
             {locked === null ? null : <p className="lnote">{locked}</p>}
             <div className="asks">
+              <BusyNote data={data} />
+              <OpenFilesAsk />
               <LostOutputsAsk />
               <ShortcutAsk />
               <VaultBanners data={data} />

@@ -93,6 +93,7 @@ export const MESSAGES: Record<string, Words> = {
   },
   // A cloud question left open past the shell's five minutes: the shell let go of the save it had parked, so the yes finds nothing.
   "page:key_pdf_expired": { title: "That took too long, so nothing was saved. Press Save as PDF again.", body: "" },
+  "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
 
   "core:wrong_password": { title: "Wrong password.", body: "" },
@@ -103,6 +104,10 @@ export const MESSAGES: Record<string, Words> = {
   "core:recovery_key_word": { title: "Word {position} isn't a recovery key word.", body: "Check it against the key you saved." },
   "core:recovery_key_count": { title: "That's {found} word{s}; a recovery key has 24.", body: "Check none are missing or doubled." },
   "core:damaged": DAMAGED,
+  // A stored file that does not decrypt, or whose stored copy is gone (10d): Open and Save a copy are refused. The design offers a backup
+  // here; the button that opens one is 4B's, so only the sentence is shown.
+  "core:damaged:file": { title: "This file is damaged, so it can't be opened or saved.", body: "A backup may have a good copy." },
+  "core:damaged:file missing": { title: "This file is missing, so it can't be opened or saved.", body: "A backup may have a good copy." },
   // Ask 12: the list of vaults itself. The design's "Start a new list, then add each vault back" waits for the screen that does it (4C).
   "core:damaged:vault list": { title: "Lockbox lost its list of vaults.", body: "Your vaults are still in their folders." },
   "core:password_too_short": { title: "That password is too short.", body: "" },

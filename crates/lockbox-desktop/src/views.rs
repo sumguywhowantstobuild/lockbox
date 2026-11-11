@@ -183,12 +183,35 @@ impl ItemList {
     }
 }
 
+/// One search result: the item as a list shows it, and when the match was in the name of one of its attached files, that
+/// file as the item's details show it (its ID is what Open and Save a copy send back). `None` when the item matched in
+/// its own fields. No path, key or text of the file.
+#[derive(Serialize)]
+pub struct SearchHitView {
+    #[serde(flatten)]
+    pub item: ItemSummary,
+    pub matched_file: Option<FileView>,
+}
+
+impl SearchHitView {
+    /// The hit for `item`, the file being the one named `matched_file` (the first when two share the name). A name the
+    /// item no longer holds gives no file: the hit is then the item's own.
+    pub fn of(item: &Item, matched_file: Option<&str>) -> SearchHitView {
+        let file =
+            matched_file.and_then(|name| item.attachments.iter().find(|file| file.name == name));
+        SearchHitView {
+            item: ItemSummary::of(item),
+            matched_file: file.map(FileView::of),
+        }
+    }
+}
+
 /// What a search of every unlocked vault found: one tagged answer per vault searched, and the vaults that were busy
 /// (a long change held them past the short wait), which the page names so the user can search again. A vault that
 /// locked is in neither.
 #[derive(Serialize)]
 pub struct SearchResults {
-    pub hits: Vec<Tagged<Vec<ItemSummary>>>,
+    pub hits: Vec<Tagged<Vec<SearchHitView>>>,
     pub busy: Vec<SessionId>,
 }
 
@@ -443,6 +466,18 @@ mod tests {
             assert_eq!(fields.get(name), Some(&Value::Null), "{name}");
         }
         assert_eq!(fields["trashed"], json!(false));
+    }
+
+    /// A search hit is the summary's fields with the matched file beside them: `null` for an item's own match and for a
+    /// file name the item does not hold (it changed since the index was read), never an error.
+    #[test]
+    fn a_hit_is_the_summary_and_the_file_that_matched() {
+        let plain = serde_json::to_value(SearchHitView::of(&login(&[]), None)).unwrap();
+        let mut expected = serde_json::to_value(ItemSummary::of(&login(&[]))).unwrap();
+        expected["matched_file"] = Value::Null;
+        assert_eq!(plain, expected);
+        let gone = serde_json::to_value(SearchHitView::of(&login(&[]), Some("old.pdf"))).unwrap();
+        assert_eq!(gone, expected);
     }
 
     #[test]

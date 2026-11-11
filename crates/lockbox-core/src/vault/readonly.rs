@@ -14,7 +14,7 @@ use crate::fsio::parent_dir;
 use crate::header::{VaultHeader, verify_header_mac};
 use crate::ids::{FileId, ItemId, VaultId};
 use crate::item::{FileRef, Item, ItemKind};
-use crate::search::SearchIndex;
+use crate::search::{SearchHit, SearchIndex};
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
 use std::io;
@@ -108,7 +108,7 @@ impl ReadOnlyVault {
     }
 
     /// Items matching `q`, best first, at most `limit` (see [`SearchIndex::query`]).
-    pub fn search(&self, q: &str, limit: usize) -> Vec<ItemId> {
+    pub fn search(&self, q: &str, limit: usize) -> Vec<SearchHit> {
         self.index.query(q, limit)
     }
 

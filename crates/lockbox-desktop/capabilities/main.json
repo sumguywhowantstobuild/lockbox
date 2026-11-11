@@ -40,6 +40,7 @@
     "allow-list-orphans",
     "allow-delete-orphans",
     "allow-save-file-copy",
+    "allow-save-file-copy-confirm",
     "allow-add-file",
     "allow-attach-file",
     "allow-replace-file",

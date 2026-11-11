@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lockbox_core::blob::{CancelToken, OutputJournal};
+use lockbox_core::fsio::refuse_vault_folder;
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::{CoreError, Result as CoreResult, Vault};
 use serde::Deserialize;
@@ -13,7 +14,9 @@ use tauri::ipc::Request;
 
 use super::{NoArgs, args, blocking};
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
+use crate::locations::cloud_provider_of;
 use crate::open::{RemoveReport, is_executable, safe_name};
+use crate::pending::{PendingChoice, Token};
 use crate::session::{SessionId, Tagged, VaultRef};
 use crate::shell::Shell;
 
@@ -29,7 +32,9 @@ impl Shell {
     /// the engine's export, its temp written down in the output journal before it exists and each rename attempt
     /// only while the session is still unlocked in `generation`. An existing destination is touched only by the
     /// rename of a copy that has fully verified. `Dismissed` when the dialog is closed; `Locked` for a lock at any
-    /// point.
+    /// point. A destination inside a vault's folder is refused, and one a cloud provider syncs answers
+    /// [`Confirm::CloudFolder`] before anything is decrypted or written: the copy waits in [`Pending`](crate::pending),
+    /// for [`save_file_copy_confirm`](Self::save_file_copy_confirm).
     pub fn save_file_copy(
         &self,
         session: SessionId,
@@ -44,7 +49,59 @@ impl Shell {
         let Some(dest) = self.os.dialogs.save_file("Save a copy", &name, None) else {
             return self.still_current(session, generation, Outcome::Dismissed);
         };
-        let dest = self.output_destination(&dest)?;
+        self.copy_to(session, generation, id, file_id, &dest, false)
+    }
+
+    /// The user's yes to saving a copy in a cloud folder: goes on with the copy parked before, for the session that asked
+    /// (and only while it is still unlocked in the generation that asked), by the same long operation. Everything is
+    /// checked again, since the folder may have changed since. A token for another question is used up and refused.
+    pub fn save_file_copy_confirm(&self, token: &Token) -> ShellResult<Tagged<Outcome<()>>> {
+        match self.sessions.pending().take(token)? {
+            PendingChoice::StoredCopy {
+                session,
+                generation,
+                id,
+                file_id,
+                dest,
+            } => self.copy_to(session, generation, id, file_id, &dest, true),
+            _ => Err(ShellError::NotFound),
+        }
+    }
+
+    /// The rest of a copy, after the dialog or after a yes: the checks on the destination, the cloud question unless
+    /// `cloud_confirmed`, then the long operation.
+    fn copy_to(
+        &self,
+        session: SessionId,
+        generation: u64,
+        id: ItemId,
+        file_id: FileId,
+        dest: &Path,
+        cloud_confirmed: bool,
+    ) -> ShellResult<Tagged<Outcome<()>>> {
+        // Again: after the dialog, or after a yes, the journal may have been damaged.
+        self.outputs.usable()?;
+        let dest = self.output_destination(dest)?;
+        // Every time, the yes included: the folder may have become a vault's while the question waited.
+        refuse_vault_folder(&dest)?;
+        if !cloud_confirmed {
+            let folder = dest
+                .parent()
+                .ok_or(ShellError::InvalidInput { what: "file name" })?;
+            let provider =
+                cloud_provider_of(self.os.volumes.as_ref(), self.os.env.as_ref(), folder)?;
+            if provider.is_some() {
+                let token = self.sessions.pending().put(PendingChoice::StoredCopy {
+                    session,
+                    generation,
+                    id,
+                    file_id,
+                    dest,
+                });
+                let ask = Outcome::Confirm(Confirm::CloudFolder { token });
+                return self.still_current(session, generation, ask);
+            }
+        }
         self.sessions
             .read_long(session, generation, |vault, cancel| {
                 let _operation = self
@@ -314,6 +371,24 @@ pub(super) async fn save_file_copy(
     blocking(move || shell.save_file_copy(session, generation, &id, &file_id)).await
 }
 
+/// `save_file_copy_confirm`: the token the cloud question gave, and nothing else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmCopy {
+    token: Token,
+}
+
+/// The yes to saving a copy in a cloud-synced folder: the parked copy goes on.
+#[tauri::command]
+pub(super) async fn save_file_copy_confirm(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<Outcome<()>>> {
+    let ConfirmCopy { token } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.save_file_copy_confirm(&token)).await
+}
+
 #[tauri::command]
 pub(super) async fn add_file(
     shell: State<'_, Arc<Shell>>,
@@ -410,6 +485,7 @@ mod tests {
 
     use lockbox_core::internals::fsio::failpoint;
     use lockbox_core::internals::fsio::testutil::{make_dir_link, names};
+    use lockbox_core::{Credential, ReadOnlyVault};
     use serde_json::{Value, json};
     use tauri::ipc::InvokeBody;
 
@@ -417,8 +493,8 @@ mod tests {
     use super::*;
     use crate::error::ShellError;
     use crate::outputs::Attempt;
-    use crate::session::LockReason;
-    use crate::testing::{TestShell, quiet};
+    use crate::session::{Location, LockReason, OpenStep, Opened};
+    use crate::testing::{TEST_PASSWORD, TestShell, heavy, quiet};
 
     /// How long a test thread waits for the other before it fails instead of hanging.
     const GIVE_UP: Duration = Duration::from_secs(60);
@@ -798,6 +874,280 @@ mod tests {
         assert!(ts.launcher.opened().is_empty());
     }
 
+    /// A read-only session over the vault listed first, as a backup or a pre-restore copy opens. It locks every vault
+    /// first, so a session opened earlier is locked after it.
+    fn read_only_session(ts: &TestShell) -> (SessionId, u64) {
+        let dir = ts.shell.registry.entries()[0].1.clone();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let vault = heavy(|| {
+            ReadOnlyVault::open_folder(
+                &dir,
+                Credential::Password(TEST_PASSWORD),
+                &CancelToken::new(),
+            )
+        })
+        .unwrap();
+        let location = Location::folder(&dir).unwrap();
+        let opened = ts.shell.sessions.open(Some(location.clone()), None, |_| {
+            Ok(OpenStep::Session(location, Opened::ReadOnly(vault), ()))
+        });
+        let Ok(Outcome::Done(tagged)) = opened else {
+            panic!("the read-only session did not open");
+        };
+        (tagged.session, tagged.generation)
+    }
+
+    /// All five file commands are refused for a stale generation (`Locked`) and for a session that is not ours
+    /// (`NotFound`), before any dialog opens or anything is launched. The three that write are refused on a read-only
+    /// session before their dialog; Open and Save a copy are allowed there, since they write nothing into the vault. A
+    /// replace or an attach naming another vault's item or file is refused with nothing stored.
+    #[test]
+    fn file_commands_refused_stale_foreign_read_only() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let (id, file_id) = ts.stored_file(s, g, "report.pdf", b"contents");
+        let (other, go) = ts.open_vault("Work");
+        let (their_id, their_file) = ts.stored_file(other, go, "theirs.pdf", b"theirs");
+        let foreign = SessionId(s.0 + 100);
+        let dialogs = ts.dialogs.opened();
+
+        for (session, generation, wanted) in [
+            (s, g + 1, Some(ShellError::Locked)),
+            (foreign, g, Some(ShellError::NotFound)),
+        ] {
+            let opened = ts
+                .shell
+                .open_file(session, generation, &id, &file_id, false);
+            assert_eq!(opened.err(), wanted);
+            let saved = ts.shell.save_file_copy(session, generation, &id, &file_id);
+            assert_eq!(saved.err(), wanted);
+            assert_eq!(ts.shell.add_file(session, generation, None).err(), wanted);
+            assert_eq!(ts.shell.attach_file(session, generation, &id).err(), wanted);
+            let replaced = ts.shell.replace_file(session, generation, &id, &file_id);
+            assert_eq!(replaced.err(), wanted);
+        }
+        assert_eq!(ts.dialogs.opened(), dialogs, "no dialog before the check");
+        assert!(ts.launcher.opened().is_empty());
+
+        // Another vault's item, and my item with another vault's file: refused, nothing stored.
+        let path = ts.temp.path().join("new.pdf");
+        fs::write(&path, b"new").unwrap();
+        let not_found = Some(ShellError::from(CoreError::NotFound));
+        ts.dialogs.answer(Some(path.clone()));
+        let attached = ts.shell.attach_file(s, g, &their_id);
+        assert_eq!(attached.err(), not_found);
+        ts.dialogs.answer(Some(path));
+        let replaced = ts.shell.replace_file(s, g, &id, &their_file);
+        assert_eq!(replaced.err(), not_found);
+        let item = ts.shell.get_item(s, g, &id).unwrap();
+        let item = serde_json::to_value(item).unwrap();
+        assert_eq!(
+            item["data"]["summary"]["attachments"][0]["file_id"],
+            json!(file_id)
+        );
+        assert_eq!(
+            item["data"]["summary"]["attachments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let (r, gr) = read_only_session(&ts);
+        let dialogs = ts.dialogs.opened();
+        let refused = [
+            ts.shell.add_file(r, gr, None).err(),
+            ts.shell.attach_file(r, gr, &id).err(),
+            ts.shell.replace_file(r, gr, &id, &file_id).err(),
+        ];
+        assert_eq!(refused, [Some(ShellError::ReadOnly); 3]);
+        assert_eq!(ts.dialogs.opened(), dialogs, "no dialog before the check");
+        // A copy of a stored file may be saved and opened from it.
+        let dest = ts.folder("Documents").join("copy.pdf");
+        ts.dialogs.answer(Some(dest.clone()));
+        let saved = ts.shell.save_file_copy(r, gr, &id, &file_id).unwrap();
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&dest).unwrap(), b"contents");
+        let opened = ts.shell.open_file(r, gr, &id, &file_id, false).unwrap();
+        assert!(matches!(opened.data, Outcome::Done(())));
+    }
+
+    /// What `with_destination` stores, as the copy must read.
+    fn stored_bytes() -> Vec<u8> {
+        (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// Asks for a copy to the destination of `with_destination` and gets the cloud question: its token.
+    fn cloud_token(
+        ts: &TestShell,
+        session: SessionId,
+        generation: u64,
+        id: &str,
+        file_id: &str,
+        dest: &std::path::Path,
+    ) -> Token {
+        ts.dialogs.answer(Some(dest.to_path_buf()));
+        let Ok(Tagged {
+            data: Outcome::Confirm(Confirm::CloudFolder { token }),
+            ..
+        }) = ts.shell.save_file_copy(session, generation, id, file_id)
+        else {
+            panic!("a cloud folder asks first");
+        };
+        token
+    }
+
+    /// A destination a cloud provider syncs asks first, after the dialog and before anything is decrypted or written:
+    /// the destination is as it was, no temp, no long operation, and no second dialog.
+    #[test]
+    fn save_copy_to_a_cloud_folder_asks_first() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        ts.volumes.add_sync_root(dest.parent().unwrap());
+        let _token = cloud_token(&ts, s, g, &id, &file_id, &dest);
+        untouched(&dest);
+        assert_eq!(ts.dialogs.opened(), 1);
+        assert!(ts.events.busy().is_empty(), "nothing was decrypted");
+        assert!(ts.launcher.opened().is_empty());
+        // A folder no provider syncs is not asked about.
+        let plain = ts.folder("Plain").join("report.pdf");
+        ts.dialogs.answer(Some(plain.clone()));
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id).unwrap();
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&plain).unwrap(), stored_bytes());
+    }
+
+    /// The yes goes on with the parked copy: the same destination, no second dialog, the same long operation, and the
+    /// token is used up. It works on a vault opened read-only too, which can save a copy.
+    #[test]
+    fn save_copy_cloud_yes_writes_the_file() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        ts.volumes.add_sync_root(dest.parent().unwrap());
+        let token = cloud_token(&ts, s, g, &id, &file_id, &dest);
+        let saved = ts.shell.save_file_copy_confirm(&token).unwrap();
+        assert_eq!((saved.session, saved.generation), (s, g));
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&dest).unwrap(), stored_bytes());
+        assert_eq!(names(dest.parent().unwrap()), ["report.pdf"]);
+        assert_eq!(ts.dialogs.opened(), 1, "no second dialog");
+        let busy = ts.events.busy();
+        assert!(busy.contains(&(Some(s), vec!["save_copy"])), "{busy:?}");
+        assert_eq!(
+            ts.shell.save_file_copy_confirm(&token).err(),
+            Some(ShellError::NotFound),
+            "used up"
+        );
+
+        let (r, gr) = read_only_session(&ts);
+        let token = cloud_token(&ts, r, gr, &id, &file_id, &dest);
+        fs::write(&dest, b"old contents").unwrap();
+        let saved = ts.shell.save_file_copy_confirm(&token).unwrap();
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&dest).unwrap(), stored_bytes());
+    }
+
+    /// The parked copy is the vault's: a lock of that one vault drops it at once (a lock of another leaves it), as does
+    /// Lock all, five minutes and use. The yes then finds nothing, and writes nothing, even after the vault is unlocked
+    /// again (a new generation).
+    #[test]
+    fn save_copy_cloud_token_dropped_at_lock() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        ts.volumes.add_sync_root(dest.parent().unwrap());
+        let token = cloud_token(&ts, s, g, &id, &file_id, &dest);
+        let (other, _) = ts.open_vault("Work");
+        assert_eq!(ts.shell.sessions.pending().len(), 1);
+        ts.shell.sessions.lock(other, LockReason::Manual);
+        assert_eq!(ts.shell.sessions.pending().len(), 1, "another vault's lock");
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(ts.shell.sessions.pending().len(), 0, "its own lock");
+        assert_eq!(
+            ts.shell.save_file_copy_confirm(&token).err(),
+            Some(ShellError::NotFound)
+        );
+        untouched(&dest);
+
+        // Lock all drops it too.
+        let (s2, g2) = ts.open_vault("Again");
+        let (id2, file2) = ts.stored_file(s2, g2, "again.pdf", b"x");
+        let token = cloud_token(&ts, s2, g2, &id2, &file2, &dest);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert_eq!(
+            ts.shell.save_file_copy_confirm(&token).err(),
+            Some(ShellError::NotFound)
+        );
+        untouched(&dest);
+    }
+
+    /// The vault-folder refusal runs again on the yes: a folder that became a vault's while the question waited is
+    /// refused by the shell itself, before any long operation, journal entry or temp, with the destination as it was.
+    #[test]
+    fn save_copy_cloud_yes_refuses_a_folder_that_became_a_vault() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        ts.volumes.add_sync_root(dest.parent().unwrap());
+        let token = cloud_token(&ts, s, g, &id, &file_id, &dest);
+        fs::write(dest.parent().unwrap().join("vault.json"), b"not really").unwrap();
+        let refused = ts.shell.save_file_copy_confirm(&token);
+        assert_eq!(
+            refused.err(),
+            Some(ShellError::from(CoreError::InvalidInput {
+                what: "destination in a vault folder"
+            }))
+        );
+        assert!(ts.events.busy().is_empty(), "refused before the operation");
+        assert_eq!(fs::read(&dest).unwrap(), b"old contents");
+        assert_eq!(
+            names(dest.parent().unwrap()),
+            ["report.pdf", "vault.json"],
+            "no temp"
+        );
+    }
+
+    /// The confirming command takes a token and nothing else: a token never given, one used, one of another question (it
+    /// is used up and its choice dropped), and the cloud question's own after a lock are all refused with nothing
+    /// written. The question itself is refused for a stale generation and a foreign session, before the dialog.
+    #[test]
+    fn save_copy_cloud_confirm_refused_for_old_used_and_other_tokens() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        ts.volumes.add_sync_root(dest.parent().unwrap());
+        let made_up: Token =
+            serde_json::from_value(Value::String(["0123456789abcdef"; 2].concat())).unwrap();
+        let not_found = Some(ShellError::NotFound);
+        assert_eq!(ts.shell.save_file_copy_confirm(&made_up).err(), not_found);
+
+        let other = ts
+            .shell
+            .sessions
+            .pending()
+            .put(crate::pending::PendingChoice::AddVault {
+                dir: ts.temp.path().to_path_buf(),
+            });
+        assert_eq!(ts.shell.save_file_copy_confirm(&other).err(), not_found);
+        assert_eq!(ts.shell.sessions.pending().len(), 0, "used up");
+        // And the other way round: this token is no good to another question.
+        let token = cloud_token(&ts, s, g, &id, &file_id, &dest);
+        assert_eq!(ts.shell.save_readable_confirm(&token).err(), not_found);
+        assert_eq!(ts.shell.save_file_copy_confirm(&token).err(), not_found);
+        untouched(&dest);
+
+        let dialogs = ts.dialogs.opened();
+        let foreign = SessionId(s.0 + 100);
+        ts.dialogs.answer(Some(dest.clone()));
+        assert_eq!(
+            ts.shell.save_file_copy(s, g + 1, &id, &file_id).err(),
+            LOCKED
+        );
+        assert_eq!(
+            ts.shell.save_file_copy(foreign, g, &id, &file_id).err(),
+            not_found
+        );
+        assert_eq!(ts.dialogs.opened(), dialogs, "before the dialog");
+        assert_eq!(ts.shell.sessions.pending().len(), 0);
+    }
+
     fn refuses_a_path<T: serde::de::DeserializeOwned>(body: Value) {
         assert!(
             parse::<T>(&InvokeBody::Json(body.clone())).is_ok(),
@@ -818,6 +1168,7 @@ mod tests {
         refuses_a_path::<FileArgs>(
             json!({ "session": 1, "generation": 1, "id": id, "file_id": id }),
         );
+        refuses_a_path::<ConfirmCopy>(json!({ "token": id }));
         refuses_a_path::<AddFile>(json!({ "session": 1, "generation": 1, "collection": null }));
         refuses_a_path::<AttachFile>(json!({ "session": 1, "generation": 1, "id": id }));
         refuses_a_path::<OpenFile>(json!({

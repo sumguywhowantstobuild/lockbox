@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, useSyncExternalStore, type FocusEvent } from "react";
+import { focusList } from "../focus";
 import { messageFor } from "../messages";
 import { clearToast, undoTrash, useToast, type Toast } from "../store";
 import { CloseIcon } from "./Icon";
@@ -66,6 +67,7 @@ export function ToastStack() {
   const saved = toast?.kind === "saved" ? toast : null;
   const said = toast?.kind === "said" ? toast : null;
   const trashed = toast?.kind === "trashed" ? toast : null;
+  const noted = toast?.kind === "noted" ? toast : null;
   const left = useSecondsLeft(copied?.endsAt ?? null);
   const { holding, bind } = useHeld(trashed);
 
@@ -117,6 +119,24 @@ export function ToastStack() {
         {said !== null ? (
           <div className="toast">
             <span>{said.text}</span>
+          </div>
+        ) : null}
+        {noted !== null ? (
+          // A sentence to read (a file opened as a read-only copy, a saved copy that is not encrypted): it wraps, stays until "Got it", and takes
+          // focus back to the list if the button had it, so the keyboard is not left at the top of the page.
+          <div className="toast long">
+            <span>{noted.text}</span>
+            <button
+              type="button"
+              className="tb2"
+              onClick={(event) => {
+                const hadFocus = document.activeElement === event.currentTarget;
+                clearToast();
+                if (hadFocus) focusList();
+              }}
+            >
+              Got it
+            </button>
           </div>
         ) : null}
         {trashed !== null ? (

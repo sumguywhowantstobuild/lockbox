@@ -706,25 +706,25 @@ test("an_older_answer_never_replaces_a_newer_one", async () => {
 const TOO_MANY = "Too many matches. Type more of the name.";
 
 test("hidden_kinds_never_make_a_false_nothing_found", async () => {
-  // More files than the shell gives one search, all matching, and one login that matches too but ranks after them.
-  const files: FakeItem[] = Array.from({ length: SEARCH_LIMIT + 20 }, (_, n) => ({
+  // More folders than the shell gives one search, all matching, and one login that matches too but ranks after them. (A search shows
+  // logins, keys, notes and files, and a file by its name; a folder is the kind it does not show.)
+  const folders: FakeItem[] = Array.from({ length: SEARCH_LIMIT + 20 }, (_, n) => ({
     id: itemId(0x100 + n),
-    kind: "file",
-    title: `alpha file ${String(n)}`,
-    attachments: [{ file_id: itemId(0x400 + n), name: `a${String(n)}.pdf`, length: 10, media_type: "application/pdf" }],
+    kind: "collection",
+    title: `alpha folder ${String(n)}`,
   }));
   const login: FakeItem = { id: itemId(0x90), kind: "login", title: "alpha login", username: "ada", has_password: true };
-  await unlocked([{ id: 7, name: "My vault", items: [...files, login] }]);
+  await unlocked([{ id: 7, name: "My vault", items: [...folders, login] }]);
   const { dialog, box } = await searchFor("alpha");
-  // The shell's limit was spent on files, so the login is not among the answers: the page does not say there is nothing.
+  // The shell's limit was spent on folders, so the login is not among the answers: the page does not say there is nothing.
   expect(await within(dialog).findByText(TOO_MANY)).toBeTruthy();
   expect(within(dialog).queryByText(/Nothing for/)).toBeNull();
   expect(rowsOf(dialog)).toHaveLength(0);
 
   // Few matches, all of a kind the search does not show, and the limit not reached: nothing was cut, so it is the plain
-  // empty state (4A shows logins and notes).
-  fireEvent.change(box, { target: { value: "alpha file 7" } });
-  expect(await within(dialog).findByText('Nothing for "alpha file 7"')).toBeTruthy();
+  // empty state.
+  fireEvent.change(box, { target: { value: "alpha folder 7" } });
+  expect(await within(dialog).findByText('Nothing for "alpha folder 7"')).toBeTruthy();
   expect(within(dialog).queryByText(TOO_MANY)).toBeNull();
 
   // Nothing at all matching still says so.

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ItemDetail, ItemKind, ItemSummary } from "../api";
-import { changedText, dayWords, formatBytes } from "../format";
+import { changedText, dayWords } from "../format";
 import { messageFor } from "../messages";
 import { Button } from "../parts/Button";
 import { CopyIcon, KindIcon } from "../parts/Icon";
@@ -18,10 +18,10 @@ import {
   type SessionData,
 } from "../store";
 import { useValueGuard } from "../useValueGuard";
+import { AttachedFiles, FileRows } from "./FileActions";
 import type { FolderEntry } from "./SideMenu";
 
 const KIND_WORD: Record<ItemKind, string> = { login: "Login", key: "Key", note: "Note", file: "File", collection: "Folder" };
-const KIND_TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", key: "t3", collection: "t4" };
 
 /**
  * A stored website as an address the shell would open: it parses, and it is `http` or `https` (the shell's own rule, which
@@ -375,29 +375,13 @@ function NoteFields({ data, summary, detail }: { data: SessionData; summary: Ite
   );
 }
 
-/** A file's details: what is stored, and its note when it has one (Notes, as a key's details show theirs). */
-function FileFields({ summary, detail }: { summary: ItemSummary; detail: ItemDetail | null }) {
+/** A file's details: what is stored, with Open, Save a copy and Replace file on it (10f), and its note when it has one (Notes, as a key's details show theirs). */
+function FileFields({ data, summary, detail }: { data: SessionData; summary: ItemSummary; detail: ItemDetail | null }) {
   const note = detail !== null && detail.notes !== "";
   if (summary.attachments.length === 0 && !note) return null;
   return (
     <>
-      {summary.attachments.length === 0 ? null : (
-        <section className="gp">
-          <div className="grp">
-            {summary.attachments.map((file) => (
-              <div className="frow" key={file.file_id}>
-                <span className={`ftile ${KIND_TILE.file}`} aria-hidden="true">
-                  <KindIcon kind="file" />
-                </span>
-                <span className="fmeta">
-                  <b>{file.name}</b>
-                  <small>{formatBytes(file.length)}</small>
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
+      {summary.attachments.length === 0 ? null : <FileRows data={data} summary={summary} />}
       {note ? (
         <section className="gp">
           <div className="grp">
@@ -510,7 +494,10 @@ export function ItemPanel({
       {summary.kind === "login" ? <LoginFields data={data} summary={summary} detail={open.detail} now={openedAt} /> : null}
       {summary.kind === "key" ? <KeyFields data={data} summary={summary} detail={open.detail} /> : null}
       {summary.kind === "note" ? <NoteFields data={data} summary={summary} detail={open.detail} /> : null}
-      {summary.kind === "file" ? <FileFields summary={summary} detail={open.detail} /> : null}
+      {summary.kind === "file" ? <FileFields data={data} summary={summary} detail={open.detail} /> : null}
+      {open.detail !== null && (summary.kind === "login" || summary.kind === "key" || summary.kind === "note") ? (
+        <AttachedFiles data={data} summary={summary} />
+      ) : null}
       {data.readOnly ? null : (
         // At the foot of the details, as drawn (13a): it goes at once, with no question, and says where to find it.
         <div className="ptrash">

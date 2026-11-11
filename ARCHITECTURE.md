@@ -71,7 +71,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `vault/restore.rs` | Restore: check and extract into a hidden staging folder, the journaled swap into place, and recovery after a crash |
 | `vault/journal.rs` | The restore journal: its strict reader and validation, and the lock around it |
 | `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out |
-| `search.rs` | The in-memory search index (returns item IDs only) |
+| `search.rs` | The in-memory search index (returns item IDs, and the name of the attached file a match was in) |
 | `generator.rs` | Password and passphrase generator (EFF word list in `wordlists/`) |
 
 Tests: unit tests sit beside the code. `tests/` uses the public API, and `internals` where it must build or read what

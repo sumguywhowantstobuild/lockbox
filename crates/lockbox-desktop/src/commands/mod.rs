@@ -64,6 +64,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         items::list_orphans,
         items::delete_orphans,
         files::save_file_copy,
+        files::save_file_copy_confirm,
         files::add_file,
         files::attach_file,
         files::replace_file,

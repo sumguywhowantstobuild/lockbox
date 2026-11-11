@@ -1498,6 +1498,30 @@
   color: var(--ink2);
 }
 
+/* "Attached files" with its Attach button on the same line, as drawn. */
+.gfh {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 6px 0;
+}
+
+.gfh .gh {
+  margin: 0 0 0 14px;
+}
+
+/* A stored file's row: its buttons (or its refusal) take the whole line under the name. */
+.frow > .fact {
+  flex: 1 1 100%;
+  margin-top: 0;
+}
+
+.frow > .fact .err {
+  flex: 1 1 100%;
+  margin: 0 0 2px;
+}
+
 .fld {
   position: relative;
   display: flex;
@@ -1925,6 +1949,16 @@
     0 0 0 1px var(--line),
     0 16px 36px -12px var(--lift);
   animation: rise 0.24s var(--ease) both;
+}
+
+/* A sentence to read, not a few words (a file opened as a read-only copy): it wraps, and its button stays at the first line. */
+.toast.long {
+  align-items: flex-start;
+}
+
+.toast.long > span {
+  max-width: 54ch;
+  line-height: 1.45;
 }
 
 .tc {

@@ -127,8 +127,8 @@ test("the_add_menu_offers_login_key_and_note_equally", async () => {
   fireEvent.pointerDown(add, { button: 0 });
   fireEvent.click(add);
   const menu = await screen.findByRole("menu");
-  // As drawn: Login, Key and Note, and a pasted .env set apart after them. A file comes with its own task, and is not listed before it works.
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note", "Paste a .env"]);
+  // As drawn: Login, Key, Note and File (one file at a time), and a pasted .env set apart after them.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
 });
 
 test("keys_are_listed_in_a_group_with_a_copy_button_each", async () => {

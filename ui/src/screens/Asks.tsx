@@ -8,6 +8,7 @@ import {
   closeBanner,
   dismissShortcutNotice,
   lockThisVault,
+  retryOpenFiles,
   setOutputRecordAside,
   useLockNote,
   useNotices,
@@ -201,6 +202,51 @@ export function LostOutputsAsk() {
 }
 
 /**
+ * 10e, "Opened copies still in use": a lock's cleanup could not remove a copy of a stored file, because another program holds it open. The
+ * words are the design's, with the count, and Retry asks the shell to try again; the message goes when none are left. Shown on the lock
+ * screen, where the lock leaves the person, and in the vault. A refusal of Retry is said under the words, and the message stays. The copies
+ * are read-only and marked as from the internet, and stay on this PC until removed, which the words say.
+ */
+export function OpenFilesAsk() {
+  const { openFiles } = useNotices();
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (openFiles === 0) return null;
+  const retry = async () => {
+    setBusy(true);
+    setRefusal(null);
+    try {
+      await retryOpenFiles();
+    } catch (error) {
+      setRefusal(messageText(messageFor(error)));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Notice
+      text={`Couldn't remove ${String(openFiles)} opened ${count(openFiles, "file", "files")}.`}
+      actions={[
+        {
+          name: "Retry",
+          disabled: busy,
+          onPress: () => {
+            void retry();
+          },
+        },
+      ]}
+    >
+      <p>Close the app using them, then Retry. They stay readable on this PC until then.</p>
+      {refusal === null ? null : (
+        <p className="err" role="alert">
+          {refusal}
+        </p>
+      )}
+    </Notice>
+  );
+}
+
+/**
  * The save shortcut (Ctrl+Shift+L) is off: another app holds it, or it could not be turned on for another reason. Words and a Close; shown on
  * the lock screen and in the vault until it is closed, and told again only when Lockbox starts again.
  */
@@ -236,6 +282,7 @@ export function LockScreenAsks() {
           actions={[]}
         />
       ) : null}
+      <OpenFilesAsk />
       <LostOutputsAsk />
       <ShortcutAsk />
     </div>

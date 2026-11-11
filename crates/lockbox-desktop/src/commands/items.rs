@@ -10,7 +10,7 @@ use std::sync::Arc;
 use lockbox_core::Vault;
 use lockbox_core::ids::ItemId;
 use lockbox_core::item::{Item, ItemKind};
-use lockbox_core::{ReadOnlyVault, Result as CoreResult};
+use lockbox_core::{ReadOnlyVault, Result as CoreResult, SearchHit};
 use serde::Deserialize;
 use tauri::ipc::Request;
 use tauri::{State, Url};
@@ -20,7 +20,7 @@ use super::{args, blocking};
 use crate::error::{ShellError, ShellResult};
 use crate::session::{SessionId, SessionState, Tagged, VaultRef};
 use crate::shell::Shell;
-use crate::views::{ItemDetail, ItemList, ItemSummary, OrphanView, SearchResults, web_url};
+use crate::views::{ItemDetail, ItemList, OrphanView, SearchHitView, SearchResults, web_url};
 
 /// The page's limits (`TooLarge`), in bytes; the engine's own 1 MiB item cap stays behind them.
 pub(super) const MAX_TITLE: usize = 1024;
@@ -101,7 +101,7 @@ trait Items {
     fn item(&self, id: &ItemId) -> CoreResult<&Item>;
     fn all(&self) -> Box<dyn Iterator<Item = &Item> + '_>;
     fn damaged(&self) -> &[ItemId];
-    fn find(&self, query: &str, limit: usize) -> Vec<ItemId>;
+    fn find(&self, query: &str, limit: usize) -> Vec<SearchHit>;
 }
 
 impl Items for Vault {
@@ -114,7 +114,7 @@ impl Items for Vault {
     fn damaged(&self) -> &[ItemId] {
         self.damaged_items()
     }
-    fn find(&self, query: &str, limit: usize) -> Vec<ItemId> {
+    fn find(&self, query: &str, limit: usize) -> Vec<SearchHit> {
         self.search(query, limit)
     }
 }
@@ -129,7 +129,7 @@ impl Items for ReadOnlyVault {
     fn damaged(&self) -> &[ItemId] {
         self.damaged_items()
     }
-    fn find(&self, query: &str, limit: usize) -> Vec<ItemId> {
+    fn find(&self, query: &str, limit: usize) -> Vec<SearchHit> {
         self.search(query, limit)
     }
 }
@@ -691,11 +691,14 @@ impl Shell {
         for (session, generation) in self.unlocked() {
             let answer = self.sessions.read(session, generation, |vault, _| {
                 let vault = items(&vault);
-                let ids = vault.find(query, SEARCH_LIMIT);
-                let found = ids.iter().filter_map(|id| vault.item(id).ok());
-                let summaries = found.map(ItemSummary::of).collect();
+                let found = vault.find(query, SEARCH_LIMIT);
+                let hits = found.iter().filter_map(|hit| {
+                    let item = vault.item(&hit.id).ok()?;
+                    Some(SearchHitView::of(item, hit.matched_file.as_deref()))
+                });
+                let hits = hits.collect();
                 read_done()?;
-                Ok(summaries)
+                Ok(hits)
             });
             match answer {
                 Ok(tagged) => hits.push(tagged),
@@ -1228,10 +1231,10 @@ mod tests {
                 "has_password": true, "has_value": false, "previous": [],
             }))
         );
-        assert_eq!(
-            found,
-            json!({ "hits": [tagged(json!([summary]))], "busy": [] })
-        );
+        // A search hit is the summary and, beside it, the file that matched (none: the item matched in its own fields).
+        let mut hit = summary.clone();
+        hit["matched_file"] = Value::Null;
+        assert_eq!(found, json!({ "hits": [tagged(json!([hit]))], "busy": [] }));
 
         // The nonce prefix is never shown by the engine: an item built by hand, with a known key and prefix.
         let (file_key, nonce) = ([0xC3; 32], [0x5A; 19]);
@@ -1739,8 +1742,119 @@ mod tests {
         let found = ts.shell.search_all("bank").unwrap().hits;
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].session, found[0].generation), (work, gw));
-        let ids: Vec<&str> = found[0].data.iter().map(|item| item.id.as_str()).collect();
+        let ids: Vec<&str> = found[0]
+            .data
+            .iter()
+            .map(|hit| hit.item.id.as_str())
+            .collect();
         assert_eq!(ids, [work_bank.as_str()]);
+    }
+
+    /// Attaches a file named `name` holding `bytes` to the item `id`: the file's ID.
+    fn attach(ts: &TestShell, session: SessionId, generation: u64, id: &str, name: &str) -> String {
+        let src = ts.temp.path().join(name);
+        fs::write(&src, b"statement").unwrap();
+        let item_id = ItemId::from_hex(id).unwrap();
+        ts.shell
+            .sessions
+            .write(session, generation, |vault, cancel| {
+                Ok(vault.attach_file(&item_id, &src, cancel)?)
+            })
+            .unwrap()
+            .data
+            .to_hex()
+    }
+
+    /// A search finds a stored file by its name and says which file: the hit carries the file's ID (what Open sends
+    /// back), name, size and type and nothing else of it (no key, nonce or path); an item that matched in its own
+    /// fields says none; one that matched both ways is two hits, its own first; and a trashed item's files are not found.
+    #[test]
+    fn search_all_says_which_file_matched() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let id = login(&ts, s, g, "Bank");
+        let statement = attach(&ts, s, g, &id, "statement.pdf");
+        let copy = attach(&ts, s, g, &id, "bank-copy.pdf");
+        let hits = |query: &str| -> Vec<Value> {
+            let found = serde_json::to_value(ts.shell.search_all(query).unwrap()).unwrap();
+            found["hits"][0]["data"].as_array().unwrap().clone()
+        };
+
+        // A file name only: the one hit says which file, in the shape the details show a file in.
+        let by_file = hits("statement");
+        assert_eq!(by_file.len(), 1);
+        assert_eq!(by_file[0]["id"], json!(id));
+        assert_eq!(
+            by_file[0]["matched_file"],
+            json!({
+                "file_id": statement, "name": "statement.pdf", "length": 9,
+                "media_type": "application/octet-stream",
+            })
+        );
+        // The rest of the hit is the item as a list shows it.
+        let summary =
+            &serde_json::to_value(ts.shell.list_items(s, g).unwrap()).unwrap()["data"]["items"][0];
+        let mut rest = by_file[0].clone();
+        rest.as_object_mut().unwrap().remove("matched_file");
+        assert_eq!(&rest, summary);
+
+        // The item's own fields only: no file.
+        let own = hits("ada@example");
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0]["matched_file"], Value::Null);
+
+        // The title and a file name both: two hits, the item's own first.
+        let both = hits("bank");
+        let files: Vec<&Value> = both.iter().map(|hit| &hit["matched_file"]).collect();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0], &Value::Null);
+        assert_eq!(files[1]["file_id"], json!(copy));
+
+        // Nothing of the file's bytes, key or place is in any of it.
+        let text = serde_json::to_value(ts.shell.search_all("statement").unwrap())
+            .unwrap()
+            .to_string();
+        for field in [
+            "\"file_key\"",
+            "\"nonce_prefix\"",
+            "\"path\"",
+            "\"data_dir\"",
+        ] {
+            assert!(!text.contains(field), "a hit has a {field} field");
+        }
+
+        // A trashed item's files are not found.
+        ts.shell.trash_item(s, g, &id).unwrap();
+        assert!(hits("statement").is_empty());
+        assert!(hits("bank").is_empty());
+        ts.shell.restore_item(s, g, &id).unwrap();
+        assert_eq!(hits("statement").len(), 1);
+    }
+
+    /// A note's and a key's files are found by name like a login's, each hit with the file's ID for Open and Save a copy.
+    #[test]
+    fn search_all_finds_files_in_every_kind_of_item() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let note = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "Plans".into(), None, None)
+            .unwrap()
+            .data;
+        let key_id = key(&ts, s, g, "OPENAI_API_KEY");
+        let on_note = attach(&ts, s, g, &note, "plans-v2.pdf");
+        let on_key = attach(&ts, s, g, &key_id, "plans-key.txt");
+        let found = ts.shell.search_all("plans").unwrap();
+        let hits = &found.hits[0].data;
+        let files: Vec<Option<String>> = hits
+            .iter()
+            .map(|hit| hit.matched_file.as_ref().map(|file| file.file_id.clone()))
+            .collect();
+        // The note's own title first, then each file, ordered by its item's title (the key's before the note's).
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0], None);
+        assert_eq!(files[1], Some(on_key));
+        assert_eq!(files[2], Some(on_note));
     }
 
     /// Spec §4.2: only `http` and `https` links open, and the launcher gets the parsed URL, never the stored text.

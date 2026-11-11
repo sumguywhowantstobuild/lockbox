@@ -293,9 +293,11 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   affects deriving the recovery key and the header-stamp key. *Accepted:* wiping it means hand-writing HKDF (forbidden)
   or patching the crate; exploiting it needs a live memory read. We will upgrade when a release wipes them.
 - **Titles, usernames, URLs and attached file names are not wiped.** Item titles, login usernames and URLs, the names of
-  attached files (which can be revealing, such as a client's contract), and the search index built from the first three,
-  are ordinary strings and stay in memory until freed, even after locking. Passwords and notes are wiped. *Accepted:*
-  these are less secret than passwords, and wiping only the search copy would protect nothing.
+  attached files (which can be revealing, such as a client's contract), and the search index built from all four (it
+  holds each attached file's name as well, so a name is in memory twice, and a search result carries it to the page
+  for the one file that matched), are ordinary strings and stay in memory until freed, even after locking. Passwords
+  and notes are wiped. *Accepted:* these are less secret than passwords, and wiping only the search copy would protect
+  nothing.
 - **The cipher keeps its own copy of the key while it works.** Each encrypt or decrypt call builds a cipher object that
   holds a copy of the key (spec 5.6). Lockbox builds it for that one operation and drops it straight away, and the
   `chacha20poly1305` library's wiping option is on. *Accepted:* the copy lives only for the call and is wiped when
@@ -548,8 +550,9 @@ yet; each moves up to the sections above as it's built.
   it from a backup already made.
 - **Asking for the current password slows someone at an unlocked PC.** It isn't protection against malware (spec 5.6), and there's
   no lockout.
-- **File names in search.** The search index will hold attached file names, so they join the titles and usernames under "Titles,
-  usernames, URLs and attached file names are not wiped".
+- **File names in search.** The search index holds attached file names (never a file's contents, notes or a password), so they
+  join the titles and usernames under "Titles, usernames, URLs and attached file names are not wiped". Only live items'
+  files are in it: a trashed or half-deleted item's are left out.
 
 ## How this is checked
 

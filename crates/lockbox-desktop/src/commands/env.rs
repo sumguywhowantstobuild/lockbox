@@ -339,12 +339,14 @@ fn reached(step: &str) {
     }
 }
 
-/// A lock of one vault (or of all) drops the pasted keys parked for it, as Lock all does itself: a lock of one vault
-/// drains nothing of its own, and a paste parked while a lock was under way is dropped by its hook.
+/// A lock of one vault (or of all) drops the pasted keys, and the copies waiting in a cloud folder's question, parked for
+/// it, as Lock all does itself: a lock of one vault drains nothing of its own, and one parked while a lock was under way
+/// is dropped by its hook.
 pub(crate) fn lock_hook(sessions: Weak<Sessions>) -> LockHook {
     Box::new(move |only, _| {
         if let Some(sessions) = sessions.upgrade() {
             sessions.pending().drop_env_pastes(only);
+            sessions.pending().drop_stored_copies(only);
         }
     })
 }
