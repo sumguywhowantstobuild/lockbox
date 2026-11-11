@@ -62,11 +62,8 @@ body {
   font-family: "Geist Mono Variable", ui-monospace, monospace;
 }
 
-/* Thin scrollbars: Windows' own are wide and carry arrows, three at once in the main window. */
-.app * {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(var(--sh), 0.3) transparent;
-}
+/* No scrollbar style here: the window asks WebView2 for Windows 11's own overlay scroll bars (thin, shown while scrolling or
+   pointed at, and in Windows' high-contrast colours), and a style on the page would be drawn over them. */
 
 .sr {
   position: absolute;

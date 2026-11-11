@@ -2,6 +2,7 @@ import { useId, useRef, useState, type SyntheticEvent } from "react";
 import { focusBack } from "../../focus";
 import { messageFor } from "../../messages";
 import { Button } from "../../parts/Button";
+import { GeneratorIcon } from "../../parts/Icon";
 import { Panel } from "../../parts/Panel";
 import { Select } from "../../parts/Select";
 import { closeTool, saveNewLogin, type SessionData } from "../../store";
@@ -176,6 +177,7 @@ export function LoginForm({
                 setGenerating(!generating);
               }}
             >
+              <GeneratorIcon />
               Generate
             </Button>
           </div>

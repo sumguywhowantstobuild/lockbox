@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type SyntheticEvent } from "react";
 import type { ItemDetail, ItemEdit, ItemSummary } from "../../api";
 import { messageFor } from "../../messages";
 import { Button } from "../../parts/Button";
+import { GeneratorIcon } from "../../parts/Icon";
 import { Panel } from "../../parts/Panel";
 import { closeEdit, revealForEdit, saveEdit, type SessionData } from "../../store";
 import { GeneratorInForm } from "../GeneratorPanel";
@@ -226,6 +227,7 @@ export function EditForm({
                     setGenerating(!generating);
                   }}
                 >
+                  <GeneratorIcon />
                   Generate
                 </Button>
               </div>

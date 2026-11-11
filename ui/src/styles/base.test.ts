@@ -25,3 +25,13 @@ test("html_body_and_root_are_as_tall_as_the_window", () => {
   // The app itself fills what holds it.
   expect(declarationsFor(".app")?.replace(/\s+/g, " ")).toMatch(/height: 100%/);
 });
+
+test("the_page_leaves_the_scroll_bars_to_windows", () => {
+  // The window asks WebView2 for Windows 11's own overlay scroll bars (window.rs). A scrollbar style on the page is drawn over
+  // them (it brought back Windows' arrows and a full-height bar on the line between the list and the panel), so no style sheet
+  // of the app sets one.
+  for (const sheet of ["base", "components", "high-contrast", "print", "short-window", "tokens"]) {
+    const css = readBeside(import.meta.url, `./${sheet}.css`).replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css, `${sheet}.css`).not.toMatch(/scrollbar-(width|color|gutter)|::-webkit-scrollbar/);
+  }
+});

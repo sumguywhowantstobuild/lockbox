@@ -120,7 +120,11 @@ test("add_then_login_opens_the_form", async () => {
   const password = inputOf(form, "Password");
   expect(password.type).toBe("password");
   expect(password.autocomplete).toBe("off");
-  expect(within(form).getByRole("button", { name: "Generate" })).toBeTruthy();
+  // Generate is the drawn pill with its wand, beside the Password label (6b).
+  const generate = within(form).getByRole("button", { name: "Generate" });
+  expect(generate.classList.contains("pill")).toBe(true);
+  expect(generate.querySelector("svg[aria-hidden='true']")).not.toBeNull();
+  expect(generate.closest(".flrow")?.querySelector("label")?.textContent).toBe("Password");
   expect(within(form).getByRole("combobox", { name: "Folder" }).textContent).toBe("No folder");
   expect(within(form).getByRole("button", { name: "Cancel" })).toBeTruthy();
   expect(within(form).getByRole("button", { name: "Save" })).toBeTruthy();

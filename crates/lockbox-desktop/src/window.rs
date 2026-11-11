@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::webview::NewWindowResponse;
+use tauri::webview::{NewWindowResponse, ScrollBarStyle};
 use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
 
@@ -38,7 +38,9 @@ static EXTERNAL_DROP_OFF: AtomicBool = AtomicBool::new(false);
 /// Builds the main window, hidden. It navigates only within the app, opens no other windows, downloads nothing, keeps
 /// no autofill or profile data on disk (WebView2 would otherwise store typed titles, usernames and searches), and
 /// accepts no dropped files: Tauri's drag-and-drop handler is off (it would send dropped files' full paths to the
-/// page), and so is WebView2's own external drop (it would hand the files to the page).
+/// page), and so is WebView2's own external drop (it would hand the files to the page). Its scroll bars are Windows 11's
+/// own overlay ones (WebView2's Fluent overlay style: thin, shown while scrolling or pointed at; the page sets no
+/// scrollbar style, which would be drawn over them; an older WebView2 keeps its usual ones).
 ///
 /// The settings that need the webview itself (external drop, the browser keys and the default context menu, capture
 /// protection) are applied after the window exists, and only then is it shown: the caller runs [`start_main_window`]
@@ -58,6 +60,7 @@ pub fn main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindo
         .on_download(|_webview, _event| false)
         .general_autofill_enabled(false)
         .incognito(true)
+        .scroll_bar_style(ScrollBarStyle::FluentOverlay)
         .disable_drag_drop_handler()
         .build()
 }

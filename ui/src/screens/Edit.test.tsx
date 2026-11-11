@@ -385,7 +385,8 @@ test("password_shows_while_editing", async () => {
   expect(inputOf(form, "Website").value).toBe("https://support.example.com");
   expect(inputOf(form, "Note").value).toBe("");
   expect(within(form).getByText("https:// is added on save if it's missing.")).toBeTruthy();
-  expect(within(form).getByRole("button", { name: "Generate" })).toBeTruthy();
+  // Generate is the drawn pill with its wand, as on the new-login form.
+  expect(within(form).getByRole("button", { name: "Generate" }).querySelector("svg[aria-hidden='true']")).not.toBeNull();
   expect(within(form).getByRole("button", { name: "Cancel" })).toBeTruthy();
   expect(within(form).getByRole("button", { name: "Save" })).toBeTruthy();
   // The password is asked of Rust as the form opens and is in its box once it has come.

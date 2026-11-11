@@ -151,6 +151,9 @@ test("copy_calls_copy_field_and_shows_clear_time", async () => {
   });
   const live = shell.sessionOf(7);
   expect(shell.copied).toEqual([{ session: live?.session, generation: live?.generation, id: itemId(1), field: "password" }]);
+  // Messages have one place, the foot of the whole window: the stack sits in the window itself, not in the part beside the side
+  // menu, so an item or a tool opening or closing never moves it.
+  expect(container.querySelector(".tstack")?.parentElement?.classList.contains("win")).toBe(true);
   // The settings' own delay, counting down each second.
   const status = screen.getByRole("status");
   expect(status.textContent).toContain("Password copied");

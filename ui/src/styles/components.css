@@ -1927,17 +1927,20 @@
 
 /* ---- The message at the foot ---- */
 
+/* One place for every message: the bottom centre of the whole window (the stack is the window's own child), whatever is open, so
+   a save or a delete that opens or closes the panel never moves it. It lies over the list and the panel, under the scrim, search
+   and menus (so it never covers a result or takes their clicks), and is never so wide that it reaches the side menu. */
 .tstack {
   position: absolute;
   left: 50%;
   bottom: 52px;
-  z-index: 60;
+  z-index: 30;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
   width: max-content;
-  max-width: calc(100% - 44px);
+  max-width: min(540px, calc(100% - 44px));
   transform: translateX(-50%);
   pointer-events: none;
 }
@@ -1953,7 +1956,8 @@
   align-items: center;
   gap: 12px;
   min-height: 42px;
-  padding: 9px 10px 9px 16px;
+  /* The same room on both sides, so words alone ("Saved") sit in the middle; a button at the end takes 6px of it back. */
+  padding: 9px 16px;
   overflow: hidden;
   background-color: var(--toast);
   color: var(--toast-ink);
@@ -2002,6 +2006,10 @@
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
+}
+
+.toast > .tb2:last-child {
+  margin-right: -6px;
 }
 
 .tb2:hover {
@@ -2377,16 +2385,17 @@
   min-width: 0;
 }
 
+/* A label with a button beside it (Password and Generate): both centred on one row, 5px above the box, as 6b and 11a draw it. */
 .flrow {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-top: 6px;
+  margin: 6px 0 5px;
 }
 
 .flrow .flab {
-  margin-top: 0;
+  margin: 0 0 0 2px;
 }
 
 .fhint {
