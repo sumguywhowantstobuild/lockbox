@@ -38,6 +38,7 @@ import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
 import { SaveBox } from "./SaveBox";
 import { SearchPanel } from "./SearchPanel";
+import { SettingsPanel } from "./SettingsPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
 import { TrashPanel, TrashView } from "./TrashView";
 
@@ -370,6 +371,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
           />
         ) : null}
         {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+        {data.tool?.kind === "settings" ? <SettingsPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         <ToastStack />
       </div>
       <SearchPanel />

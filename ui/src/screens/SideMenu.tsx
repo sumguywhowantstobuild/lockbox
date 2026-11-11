@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ItemSummary } from "../api";
-import { GeneratorIcon, ListIcon, LockIcon, PlusIcon, SearchIcon, SideMenuIcon, TrashIcon } from "../parts/Icon";
+import { GeneratorIcon, ListIcon, LockIcon, PlusIcon, SearchIcon, SettingsIcon, SideMenuIcon, TrashIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
 import { VaultMark, type VaultLook } from "../parts/Pattern";
 import {
@@ -8,6 +8,7 @@ import {
   lockOneVault,
   openGenerator,
   openSearch,
+  openSettings,
   openTrash,
   selectFolder,
   useSessions,
@@ -29,7 +30,7 @@ const TILES = ["t0", "t1", "t2", "t3", "t4"];
 /**
  * The side menu: which vault is open (its name opens the vault menu: each vault and whether it is open, and Lock for this
  * one), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
- * its count, and Lock all. It closes to a strip of icons; then each icon carries its name for a screen reader, and for a hint
+ * its count, and Settings and Lock all side by side. It closes to a strip of icons; then each icon carries its name for a screen reader, and for a hint
  * when the pointer rests on it. The menu is only there while a vault is unlocked, so the Generator never shows on the lock screen.
  * A vault opened read-only has no "New folder".
  */
@@ -192,6 +193,18 @@ export function SideMenu({
           <span className="nn">{trashed}</span>
         </button>
         <div className="rbtns">
+          <button
+            type="button"
+            className="rbtn navset"
+            aria-label="Settings"
+            title={closed ? "Settings" : undefined}
+            onClick={() => {
+              openSettings(data.session);
+            }}
+          >
+            <SettingsIcon />
+            Settings
+          </button>
           <button
             type="button"
             className="rbtn lk"

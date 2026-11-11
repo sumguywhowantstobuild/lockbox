@@ -206,8 +206,10 @@ in the code with a `shortcut:` comment.
 - **State files can be edited by code running as you.** `vaults.json`, `settings.json`, `vault-state.json` and
   `pending-outputs.json` in `%LOCALAPPDATA%\Lockbox\` are not authenticated, only size-capped and strictly parsed. Such a
   program could add a vault to the list, raise the idle time or clipboard delay to their limits (a value out of range
-  gives the defaults), remove a vault's "recovery key not confirmed" note (a damaged `vault-state.json` also reads as
-  having none), or empty the output journal so a leftover stays. They hold no secrets. *Accepted:* the same reasoning as the restore
+  gives the defaults), turn capture protection off or change the save shortcut (`settings.json`; a shortcut the
+  Settings screen would refuse, or any other value out of range, gives the defaults), remove a vault's "recovery key not
+  confirmed" note (a damaged `vault-state.json` also reads as having none), or empty the output journal so a leftover
+  stays. They hold no secrets. *Accepted:* the same reasoning as the restore
   journal (see "Someone who can already write inside your vault folder").
 - **Cloud folders.** A vault in a OneDrive, Google Drive or Dropbox folder is not refused. The shell asks first when one is
   created or added, and reports it at each unlock for the screen to warn (Plan 4; the screens do not show that warning
@@ -240,13 +242,22 @@ in the code with a `shortcut:` comment.
   PDF it made is deleted then (with no answer the file and its hidden folder stay in the output journal and the next
   launch removes them). *Accepted:* the PDF is a copy you asked to have in plaintext, it is hidden until it is moved,
   and the sweep removes any leftover; a print the printer has already taken cannot be recalled.
-- **Staying out of screen capture isn't a guarantee.** At every start Lockbox asks Windows to leave its window out of
-  screenshots, recordings, screen sharing and Recall (`WDA_EXCLUDEFROMCAPTURE`), before the window shows. Tested on
-  2026-11-06: screenshots and Snipping Tool leave Lockbox out, and Magnifier still shows it in Full screen,
-  Docked and Lens, judged by eye, since a screenshot of Magnifier loses Lockbox too. Not tested yet: Quick Assist and remote
-  desktop (pre-release list). If asking fails, the window still shows. Microsoft says there's no guarantee, and a camera can
-  always get round it. *Accepted:* this is the strongest request Windows offers; a setting to turn it off comes with the
-  Settings screen.
+- **Staying out of screen capture isn't a guarantee.** It is on unless you turn it off in Settings ("Keep out of screen
+  capture", saved in `settings.json`, applied to the open window at once). Each time the window shows, Lockbox asks
+  Windows to leave it out of screenshots, recordings, screen sharing and Recall (`WDA_EXCLUDEFROMCAPTURE`), before it
+  shows. Tested on 2026-11-06: screenshots and Snipping Tool leave Lockbox out, and Magnifier still shows it in Full
+  screen, Docked and Lens, judged by eye, since a screenshot of Magnifier loses Lockbox too. Not tested yet: Quick Assist
+  and remote desktop (pre-release list). If asking fails, the window still shows. Microsoft says there's no guarantee, and
+  a camera can always get round it. With it off, the recovery key screens say that a screenshot would be a readable copy.
+  *Accepted:* this is the strongest request Windows offers, and turning it off is your choice.
+- **Start with Windows writes one value, and Windows' own setting wins.** Turning it on adds Lockbox's own value to the
+  current user's `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, named `Lockbox` as the installer's
+  uninstaller removes it), holding the program's full path in quotes and `--hidden`. Lockbox starts in the tray, with
+  every vault locked and the window hidden; a start with that argument and nothing else only ever changes whether the
+  window shows (other arguments are ignored, and a second copy started that way does nothing). Lockbox reads Windows' own
+  Startup setting for it (`...\Explorer\StartupApproved\Run`) and never writes it: if you turned it off there, Lockbox
+  says so. *Accepted:* a program running as you can already write that key, and could start itself the same way; the
+  value holds no secret.
 - **No isolation frame.** Tauri's isolation pattern (a sandboxed frame that checks every IPC message) is not used (Ariel's
   pick, 2026-11-05, against Tauri's own advice). Tauri 2.12.5's frame runs scripts only, with no same-origin access, and
   a reported bug hangs every call on Windows; its check also can't tell the app's own calls from a bad package's on the

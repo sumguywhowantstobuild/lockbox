@@ -19,10 +19,12 @@ use std::time::{Duration, Instant};
 
 use lockbox_core::blob::CancelToken;
 use lockbox_core::item::MAX_ITEM_JSON;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::error::{CoreErrorView, ShellError, ShellResult};
 use crate::lock;
+use crate::startup::StartupState;
 use crate::views::PrinterList;
 
 /// The OS calls the shell makes, behind their traits.
@@ -38,6 +40,8 @@ pub struct Os {
     pub timer: Arc<dyn Timer>,
     pub printer: Arc<dyn Printer>,
     pub window: Arc<dyn MainWindow>,
+    pub hotkey: Arc<dyn Hotkey>,
+    pub startup: Arc<dyn StartupEntry>,
 }
 
 /// The app's one window, as the shell sends it to the tray and brings it back. Looked up at each call: the window is
@@ -50,6 +54,29 @@ pub trait MainWindow: Send + Sync {
     /// [`window::bring_to_front`](crate::window::bring_to_front), which puts the window's protections in place before it
     /// shows, on the thread that must show it. Best effort, and never waits for the window.
     fn bring_forward(&self);
+    /// Keeps the window's contents out of screenshots, recordings and screen sharing (`on`), or lets them be captured:
+    /// the setting changed while the window is up. Best effort, as at the window's start
+    /// ([`window::set_capture_protection`](crate::window::set_capture_protection)): the request is made, and Windows
+    /// does not say whether it holds. A window that is not there has nothing to protect.
+    fn protect_from_capture(&self, on: bool);
+}
+
+/// The save shortcut as Windows holds it, behind a trait so `set_settings` is tested without a window.
+pub trait Hotkey: Send + Sync {
+    /// Registers `shortcut` as the save shortcut system-wide, replacing the one registered before (`None` releases it).
+    /// A shortcut Windows refuses leaves the one registered before working ([`HotkeyTaken`]).
+    fn set(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken>;
+}
+
+/// Whether Lockbox starts when the person signs in to Windows: the current user's `Run` entry, and Windows' own Startup
+/// settings, which can turn it off. Fails with the OS's error, which the shell turns into fixed text
+/// ([`STARTUP_FAILED`](crate::startup::STARTUP_FAILED)): no path or registry data is kept in it.
+pub trait StartupEntry: Send + Sync {
+    /// What the registry says now.
+    fn read(&self) -> io::Result<StartupState>;
+    /// Puts the `Run` entry there (`on`: for this program, started with `--hidden`) or removes it (an entry that is
+    /// already absent is fine). Windows' own on/off setting for it is never written.
+    fn write(&self, on: bool) -> io::Result<()>;
 }
 
 /// A copy's own tag (spec §7.3): 16 random bytes from the OS, written beside the copy in [`TAG_FORMAT`]. Not secret
@@ -837,8 +864,11 @@ pub enum OsSignal {
     SaveShortcut,
 }
 
-/// The save shortcut: modifier keys and a Windows virtual-key code (`RegisterHotKey`'s `vk`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The save shortcut: modifier keys and a Windows virtual-key code (`RegisterHotKey`'s `vk`). The page reads and sends
+/// it as `{ ctrl, shift, alt, key }` (the settings' `shortcut`); the settings check what is allowed
+/// ([`Settings::check`](crate::settings::Settings::check)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Shortcut {
     pub ctrl: bool,
     pub shift: bool,

@@ -32,6 +32,30 @@
     color: HighlightText !important;
   }
 
+  /* The settings' switches are a track and a knob in fixed colours: with the system's, the track has an edge and the knob and the
+     on track use Windows' own text and highlight, so on and off still differ by where the knob is and by the fill. */
+  .app .swt {
+    forced-color-adjust: none !important;
+    background: Canvas !important;
+    border: 2px solid CanvasText;
+  }
+
+  .app .swt::after {
+    background: CanvasText !important;
+  }
+
+  .app .swt:checked {
+    background: Highlight !important;
+  }
+
+  .app .swt:checked::after {
+    background: HighlightText !important;
+  }
+
+  .app .keycap {
+    border: 2px solid Highlight;
+  }
+
   .app .prim:disabled,
   .app .prim[aria-disabled="true"] {
     background: Canvas !important;

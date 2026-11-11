@@ -83,6 +83,14 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:no keys": { title: "This folder has no keys.", body: "Add a key first." },
   // A copied key saved with the shortcut (Task 18): the copy was empty or too big, and nothing was typed in its place.
   "code:invalid_input:capture value": { title: "Paste or type the value first.", body: "" },
+  // Settings (Task 20): the save shortcut, and Start with Windows. `{shortcut}` is the combination the page tried, put in by the page.
+  "code:invalid_input:shortcut": {
+    title: "Use at least two of Ctrl, Shift and Alt, with a letter, a digit or F1 to F12.",
+    body: "Ctrl with C, V or X is kept for copy and paste.",
+  },
+  "code:invalid_input:shortcut taken": { title: "Another app already uses {shortcut}.", body: "Press a different combination." },
+  "code:invalid_input:shortcut not set": { title: "Windows didn't take that shortcut.", body: "Try again." },
+  "core:io:startup": { title: "Lockbox couldn't change Start with Windows.", body: "Try again." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   "code:core": GENERIC,
 
@@ -251,9 +259,13 @@ export const KNOWN_WHATS: readonly string[] = [
   "sample",
   "search",
   "several copies of this vault",
+  "shortcut",
+  "shortcut not set",
+  "shortcut taken",
   "source size changed",
   "source vault",
   "stale revision",
+  "startup",
   "state file",
   "state folder",
   "too many before-restore copies",
@@ -309,7 +321,7 @@ function lookup(key: string): Words | undefined {
  * The words for a refusal, from the fixed table. Anything that is not a refusal the table knows gets
  * {@link GENERIC}. The refusal's own text is never part of the answer, whatever it holds.
  */
-export function messageFor(error: unknown): Message {
+export function messageFor(error: unknown, names: { shortcut?: string } = {}): Message {
   if (!isRecord(error)) return { ...GENERIC };
   const { code, kind, what } = error;
   if (typeof code !== "string") return { ...GENERIC };
@@ -329,7 +341,10 @@ export function messageFor(error: unknown): Message {
     if (typeof value === "number" && Number.isFinite(value)) numbers[field] = value;
   }
   // A message with a number's place in it needs that number as a whole number: without it, it is the generic message.
-  const said = filled(words, numbers);
-  if (said === undefined) return { ...GENERIC };
+  const counted = filled(words, numbers);
+  if (counted === undefined) return { ...GENERIC };
+  // The shortcut the page tried is the page's own text (never the shell's); a message that names one says "that shortcut" without it.
+  const named = (part: string) => part.replace("{shortcut}", () => names.shortcut ?? "that shortcut");
+  const said = { title: named(counted.title), body: named(counted.body) };
   return Object.keys(numbers).length > 0 ? { ...said, numbers } : { ...said };
 }

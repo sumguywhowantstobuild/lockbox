@@ -103,7 +103,9 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         generator::generate_passphrase,
         generator::copy_generated,
         settings::get_settings,
-        settings::set_settings
+        settings::set_settings,
+        settings::get_startup,
+        settings::set_startup
     ]
 }
 

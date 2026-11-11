@@ -73,6 +73,9 @@ pub struct Shell {
     /// One close of the window at a time; true while 5b, the first-close explanation, shows
     /// ([`close_window`](Self::close_window)).
     explaining: Mutex<bool>,
+    /// One change of the settings at a time, held from the shortcut's registration to the save
+    /// ([`set_settings`](Self::set_settings)).
+    pub(crate) settings_change: Mutex<()>,
     /// How many times the save shortcut has been pressed: what the router's test watches.
     shortcut_presses: AtomicU64,
     /// Tests only: how many times a creation or addition had to wait for another.
@@ -140,6 +143,7 @@ impl Shell {
             forbidden,
             creating: Mutex::default(),
             explaining: Mutex::default(),
+            settings_change: Mutex::default(),
             shortcut_presses: AtomicU64::new(0),
             #[cfg(test)]
             creating_waited: AtomicUsize::new(0),
@@ -167,6 +171,14 @@ impl Shell {
         }
     }
 
+    /// Registers the save shortcut the settings hold (Ctrl+Shift+L until the person changes it) and tells the page what
+    /// Windows answered ([`shortcut_registered`](Self::shortcut_registered)). Once, at launch, after the signals are
+    /// routed so that a press that comes at once is answered. The app runs whatever Windows says.
+    pub fn register_save_shortcut(&self) {
+        let saved = self.settings.get().shortcut;
+        self.shortcut_registered(self.os.hotkey.set(Some(saved)));
+    }
+
     /// What Windows answered when the save shortcut was registered at launch: a shortcut that is taken, or that could not
     /// be set, is told to the page as a launch notice. The app runs either way.
     pub fn shortcut_registered(&self, answer: Result<(), HotkeyTaken>) {
@@ -175,6 +187,13 @@ impl Shell {
             Err(HotkeyTaken::Taken) => self.tell(Notice::ShortcutTaken),
             Err(HotkeyTaken::NotSet) => self.tell(Notice::ShortcutNotSet),
         }
+    }
+
+    /// Forgets the kept launch notice that the save shortcut was taken or not set: a shortcut was registered and saved
+    /// since, so a page that asks again must not hear a failure that no longer holds. Other launch notices stay.
+    pub(crate) fn forget_shortcut_failure(&self) {
+        lock(&self.launch_notices)
+            .retain(|kept| !matches!(kept, Notice::ShortcutTaken | Notice::ShortcutNotSet));
     }
 
     /// Where the shell's events go.

@@ -23,7 +23,7 @@ import "./styles/print.css";
  * The whole app: first-time setup while there is no vault, the lock screen while none is open, the main window of the
  * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. The
  * store starts listening for locks before anything asks the shell for anything. The first close of the window is explained
- * over whichever of these is up (5b). Light or dark follows Windows.
+ * over whichever of these is up (5b). Light or dark follows the theme chosen in Settings, and Windows' own setting for System.
  */
 export default function App() {
   const mode = useMode();

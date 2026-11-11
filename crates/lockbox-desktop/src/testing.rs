@@ -19,12 +19,13 @@ use crate::error::ShellResult;
 use crate::lock;
 use crate::os::{
     CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS,
-    Env, IdleSource, InstalledPrinter, InstalledPrinters, Job, KnownFolder, Launcher, MainWindow,
-    Os, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, TAG_FORMAT,
-    Timer, Volumes,
+    Env, Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters, Job, KnownFolder,
+    Launcher, MainWindow, Os, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed,
+    PrintSteps, Shortcut, StartupEntry, TAG_FORMAT, Timer, Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
+use crate::startup::{StartupState, state_of};
 
 /// Each Argon2 run (creating, unlocking or opening a vault) keeps several cores busy for about a second. Every test
 /// of the crate shares this lock for reading while it derives a key; a timing test holds it for writing while it
@@ -127,9 +128,16 @@ pub struct FakeWindow {
     on_hide: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     forwards: AtomicUsize,
     on_forward: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Each time the shell asked for capture protection to change while the window was up, in order.
+    protections: Mutex<Vec<bool>>,
 }
 
 impl FakeWindow {
+    /// Each capture protection the shell asked the window for (`true`: kept out of captures), in order.
+    pub fn protections(&self) -> Vec<bool> {
+        lock(&self.protections).clone()
+    }
+
     /// How many times the shell hid the window.
     pub fn hides(&self) -> usize {
         self.hides.load(Ordering::SeqCst)
@@ -166,6 +174,155 @@ impl MainWindow for FakeWindow {
             hook();
         }
         self.forwards.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn protect_from_capture(&self, on: bool) {
+        lock(&self.protections).push(on);
+    }
+}
+
+/// The save shortcut as Windows holds it, in memory: the one registered, each ask in order, and an answer a test sets
+/// for the next ask (`HotkeyTaken::Taken` or `NotSet`, which leaves the one registered as it was, as Windows does).
+#[derive(Default)]
+pub struct FakeHotkey {
+    registered: Mutex<Option<Shortcut>>,
+    asked: Mutex<Vec<Option<Shortcut>>>,
+    refuse: Mutex<Vec<HotkeyTaken>>,
+    /// Run once, inside the next ask, before it is answered.
+    on_set: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl FakeHotkey {
+    /// Runs `hook` once, inside the next ask: it may block there.
+    pub fn during_next_set(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_set) = Some(Box::new(hook));
+    }
+
+    /// The shortcut registered now.
+    pub fn registered(&self) -> Option<Shortcut> {
+        *lock(&self.registered)
+    }
+
+    /// Every shortcut the shell asked for, in order (`None`: released).
+    pub fn asked(&self) -> Vec<Option<Shortcut>> {
+        lock(&self.asked).clone()
+    }
+
+    /// The next ask is refused with `why`; the ones after it go through unless refused too.
+    pub fn refuse_next(&self, why: HotkeyTaken) {
+        lock(&self.refuse).push(why);
+    }
+}
+
+impl Hotkey for FakeHotkey {
+    fn set(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken> {
+        lock(&self.asked).push(shortcut);
+        let hook = lock(&self.on_set).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        let mut refuse = lock(&self.refuse);
+        if !refuse.is_empty() {
+            return Err(refuse.remove(0));
+        }
+        *lock(&self.registered) = shortcut;
+        Ok(())
+    }
+}
+
+/// What the registry holds about starting with Windows, in memory: Lockbox's `Run` entry, and Windows' own on/off value
+/// for it. `read` counts and answers what is there now; an error a test sets is the OS's, with its own text, which the
+/// shell must never pass on.
+#[derive(Default)]
+pub struct FakeStartup {
+    inner: Mutex<StartupRegistry>,
+}
+
+#[derive(Default)]
+struct StartupRegistry {
+    entry: bool,
+    approved_off: bool,
+    reads: usize,
+    writes: Vec<bool>,
+    fail_read: Option<String>,
+    fail_write: Option<String>,
+}
+
+impl FakeStartup {
+    /// How many times the registry was read.
+    pub fn reads(&self) -> usize {
+        lock(&self.inner).reads
+    }
+
+    /// Each write asked for (`true`: the entry on), in order.
+    pub fn writes(&self) -> Vec<bool> {
+        lock(&self.inner).writes.clone()
+    }
+
+    /// Whether Lockbox's `Run` entry is there.
+    pub fn entry_present(&self) -> bool {
+        lock(&self.inner).entry
+    }
+
+    /// Something other than the shell adds or removes the entry.
+    pub fn set_entry_elsewhere(&self, present: bool) {
+        lock(&self.inner).entry = present;
+    }
+
+    /// The person turns Lockbox off in Windows' Startup settings.
+    pub fn turn_off_in_windows(&self) {
+        lock(&self.inner).approved_off = true;
+    }
+
+    /// The person turns it back on there.
+    pub fn turn_on_in_windows(&self) {
+        lock(&self.inner).approved_off = false;
+    }
+
+    /// The next read fails, with `message` as the OS's own words.
+    pub fn fail_next_read(&self, message: &str) {
+        lock(&self.inner).fail_read = Some(message.to_owned());
+    }
+
+    /// The next write fails, with `message` as the OS's own words; the entry is left as it was.
+    pub fn fail_next_write(&self, message: &str) {
+        lock(&self.inner).fail_write = Some(message.to_owned());
+    }
+}
+
+impl StartupEntry for FakeStartup {
+    fn read(&self) -> io::Result<StartupState> {
+        let mut registry = lock(&self.inner);
+        registry.reads += 1;
+        if let Some(message) = registry.fail_read.take() {
+            return Err(io::Error::other(message));
+        }
+        // Windows' own value as it is written: `03` for off, `02` for on, then a time. The same rule as the real read.
+        let approved: [u8; 12] = [
+            if registry.approved_off { 3 } else { 2 },
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        Ok(state_of(registry.entry, Some(&approved)))
+    }
+
+    fn write(&self, on: bool) -> io::Result<()> {
+        let mut registry = lock(&self.inner);
+        registry.writes.push(on);
+        if let Some(message) = registry.fail_write.take() {
+            return Err(io::Error::other(message));
+        }
+        registry.entry = on;
+        Ok(())
     }
 }
 
@@ -1213,6 +1370,8 @@ pub struct TestShell {
     pub timer: Arc<FakeTimer>,
     pub print: Arc<FakePrintCalls>,
     pub window: Arc<FakeWindow>,
+    pub hotkey: Arc<FakeHotkey>,
+    pub startup: Arc<FakeStartup>,
     /// The events the shell sent.
     pub events: Arc<Events>,
     /// Tauri's app-data folders, as the app passes them in.
@@ -1241,6 +1400,8 @@ impl TestShell {
         let timer = Arc::new(FakeTimer::default());
         let print = Arc::new(FakePrintCalls::default());
         let window = Arc::new(FakeWindow::default());
+        let hotkey = Arc::new(FakeHotkey::default());
+        let startup = Arc::new(FakeStartup::default());
         let events = Arc::new(Events::default());
         let app_dirs = vec![
             env.folder(KnownFolder::RoamingAppData)
@@ -1261,6 +1422,8 @@ impl TestShell {
             timer: timer.clone(),
             printer: Arc::new(PrintSteps::new(print.clone())),
             window: window.clone(),
+            hotkey: hotkey.clone(),
+            startup: startup.clone(),
         };
         let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone())?);
         Ok(TestShell {
@@ -1276,10 +1439,37 @@ impl TestShell {
             timer,
             print,
             window,
+            hotkey,
+            startup,
             events,
             app_dirs,
             temp,
         })
+    }
+
+    /// A second shell over the same state folder, vaults and fakes: the app after a restart. The first one is locked, as
+    /// a closed app's vaults are.
+    pub fn restarted(&self) -> Arc<Shell> {
+        self.shell.sessions.lock_all(LockReason::AppClosing);
+        let os = Os {
+            volumes: self.volumes.clone(),
+            env: self.env.clone(),
+            dialogs: self.dialogs.clone(),
+            launcher: self.launcher.clone(),
+            idle: self.idle.clone(),
+            power: self.power.clone(),
+            clock: self.clock.clone(),
+            clipboard: Arc::new(ClipboardSteps::new(
+                self.clipboard.clone(),
+                self.clock.clone(),
+            )),
+            timer: self.timer.clone(),
+            printer: Arc::new(PrintSteps::new(self.print.clone())),
+            window: self.window.clone(),
+            hotkey: self.hotkey.clone(),
+            startup: self.startup.clone(),
+        };
+        Arc::new(Shell::new(self.events.clone(), os, self.app_dirs.clone()).unwrap())
     }
 
     /// The folder for the test's own vaults.

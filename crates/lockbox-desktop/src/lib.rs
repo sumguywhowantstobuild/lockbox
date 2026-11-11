@@ -26,6 +26,7 @@ pub mod restore;
 pub mod session;
 pub mod settings;
 pub mod shell;
+pub mod startup;
 #[cfg(test)]
 mod testing;
 pub mod tray;
@@ -47,9 +48,10 @@ use crate::shell::{Events, Shell};
 pub fn run() {
     let app = tauri::Builder::default()
         // First: a second copy of the app hands over to this one and exits inside `build()`, before any setup runs.
-        // Its arguments and working directory are ignored (and never logged).
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            window::bring_to_front(app)
+        // Its working directory is ignored, and its arguments are only compared with `--hidden` (never logged): see
+        // [`second_launch`].
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            second_launch(&args, || window::bring_to_front(app))
         }))
         .invoke_handler(handler())
         .setup(|app| {
@@ -112,10 +114,8 @@ pub fn run() {
             // Fail closed here too: never run without the auto-lock. Signals that came before this wait in the channel.
             route_signals(signals, Arc::clone(&shell))?;
             // After the route, so a press that comes at once is answered. The app runs whatever Windows says.
-            register_save_shortcut(&shell, |shortcut| {
-                app.state::<os::win::SignalThread>().set_hotkey(shortcut)
-            });
-            start_ticks(shell)?;
+            shell.register_save_shortcut();
+            start_ticks(Arc::clone(&shell))?;
 
             // The icon by the clock, where the window hides to: fail closed, since a hidden window with no icon could
             // never be reached again.
@@ -125,9 +125,12 @@ pub fn run() {
 
             // The window is built hidden and shown only once its protections are in place. Fail closed as well: never
             // run with files droppable into the page, or with the browser's keys and menu (Ctrl+P, F12, the context
-            // menu) able to reach a revealed secret. The window stays hidden when either is not confirmed.
+            // menu) able to reach a revealed secret. The window stays hidden when either is not confirmed. A start from
+            // Windows' sign-in (`--hidden`, and nothing else) puts the same protections in place and leaves the window
+            // in the tray: the launch work above has run, and its notices wait for the page to ask.
             let window = window::main_window(app.handle())?;
-            if window::show_main_window(&window).is_err() {
+            let hidden = startup::hidden_launch(std::env::args_os());
+            if window::start_main_window(&window, &shell, hidden).is_err() {
                 return Err(match (
                     window::external_drop_is_off(),
                     window::browser_keys_are_off(),
@@ -146,6 +149,16 @@ pub fn run() {
         .expect("the Lockbox app could not start");
 
     app.run(on_run_event);
+}
+
+/// A second copy of the app was started and handed its arguments over (`args`, the program first): the window comes
+/// forward as it always has (`bring_forward`), unless the arguments are exactly `--hidden`, which is Windows starting
+/// Lockbox at sign-in while it already runs: that does nothing, and in particular never shows the window. Any other
+/// arguments change nothing.
+fn second_launch(args: &[String], bring_forward: impl FnOnce()) {
+    if !startup::hidden_launch(args) {
+        bring_forward();
+    }
 }
 
 /// What the app does with each event of its run. The window's close button never ends the app (it locks every vault
@@ -234,15 +247,6 @@ fn route_signals(signals: mpsc::Receiver<os::OsSignal>, shell: Arc<Shell>) -> io
             eprintln!("Lockbox debug: Windows signals stopped");
         })?;
     Ok(())
-}
-
-/// Registers the save shortcut (Ctrl+Shift+L) through `set_hotkey` and tells the shell what Windows answered: the page
-/// hears of a shortcut that is taken or could not be set ([`Shell::shortcut_registered`]). The app runs either way.
-fn register_save_shortcut(
-    shell: &Shell,
-    set_hotkey: impl FnOnce(Option<os::Shortcut>) -> Result<(), os::HotkeyTaken>,
-) {
-    shell.shortcut_registered(set_hotkey(Some(os::Shortcut::default())));
 }
 
 /// The auto-lock's timer: a tick every [`autolock::TICK`] for as long as the app runs.
@@ -462,9 +466,9 @@ mod tests {
         assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
     }
 
-    /// The shortcut is asked for at launch (Ctrl+Shift+L), and what Windows says about it is told to the page as a launch
-    /// notice, kept for a page that loads later: "taken" only when Windows says the keys are registered already, and
-    /// "not set" for every other refusal. A shortcut that is set says nothing.
+    /// The shortcut is asked for at launch (Ctrl+Shift+L unless the person chose another), and what Windows says about it
+    /// is told to the page as a launch notice, kept for a page that loads later: "taken" only when Windows says the
+    /// keys are registered already, and "not set" for every other refusal. A shortcut that is set says nothing.
     #[test]
     fn taken_at_launch_is_told() {
         let default = os::Shortcut::default();
@@ -473,19 +477,18 @@ mod tests {
             (true, true, false, u16::from(b'L'))
         );
         let cases = [
-            (Err(os::HotkeyTaken::Taken), Some("shortcut_taken")),
-            (Err(os::HotkeyTaken::NotSet), Some("shortcut_not_set")),
-            (Ok(()), None),
+            (Some(os::HotkeyTaken::Taken), Some("shortcut_taken")),
+            (Some(os::HotkeyTaken::NotSet), Some("shortcut_not_set")),
+            (None, None),
         ];
         for (answer, notice) in cases {
             let ts = TestShell::new();
-            let mut asked = Vec::new();
-            register_save_shortcut(&ts.shell, |shortcut| {
-                asked.push(shortcut);
-                answer
-            });
+            if let Some(refusal) = answer {
+                ts.hotkey.refuse_next(refusal);
+            }
+            ts.shell.register_save_shortcut();
             assert_eq!(
-                asked,
+                ts.hotkey.asked(),
                 [Some(default)],
                 "it was asked for once, with the default keys"
             );
@@ -505,5 +508,60 @@ mod tests {
                 "a page that loads later must hear of it too: {answer:?}"
             );
         }
+    }
+
+    /// A second launch brings the window forward as always; one whose arguments are exactly `--hidden` (Windows' own sign-in
+    /// start, while the app already runs) does nothing; other arguments change nothing.
+    #[test]
+    fn second_launch_with_hidden_does_nothing() {
+        let brought = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            let mut times = 0;
+            second_launch(&args, || times += 1);
+            times
+        };
+        assert_eq!(brought(&["lockbox.exe"]), 1);
+        assert_eq!(brought(&["lockbox.exe", "C:\\vault"]), 1);
+        assert_eq!(brought(&["lockbox.exe", "--HIDDEN"]), 1);
+        assert_eq!(brought(&["lockbox.exe", "--hidden", "--hidden"]), 1);
+        assert_eq!(brought(&["lockbox.exe", "--hidden", "x"]), 1);
+        assert_eq!(brought(&[]), 1);
+        assert_eq!(brought(&["lockbox.exe", "--hidden"]), 0);
+        assert_eq!(
+            brought(&["C:\\Program Files\\Lockbox\\lockbox.exe", "--hidden"]),
+            0
+        );
+    }
+
+    /// Launch registers the shortcut that was saved, not always the default: the person's choice survives a restart.
+    /// What Windows says of it is told the same way.
+    #[test]
+    fn launch_registers_the_saved_shortcut() {
+        let chosen = os::Shortcut {
+            ctrl: false,
+            shift: true,
+            alt: true,
+            key: u16::from(b'K'),
+        };
+        let ts = TestShell::new();
+        let settings = crate::settings::Settings {
+            shortcut: chosen,
+            ..ts.shell.settings.get()
+        };
+        ts.shell.settings.set(settings).unwrap();
+        // The next launch: the settings file is read again by a new shell over the same state folder.
+        ts.restarted().register_save_shortcut();
+        assert_eq!(ts.hotkey.asked(), [Some(chosen)]);
+        assert_eq!(ts.hotkey.registered(), Some(chosen));
+        assert!(ts.events.notices().is_empty());
+
+        // Taken: the notice says only that, with no keys in it.
+        ts.hotkey.refuse_next(os::HotkeyTaken::Taken);
+        ts.restarted().register_save_shortcut();
+        assert_eq!(ts.hotkey.asked(), [Some(chosen), Some(chosen)]);
+        assert_eq!(
+            ts.events.notices(),
+            [serde_json::json!({ "kind": "shortcut_taken" })]
+        );
     }
 }

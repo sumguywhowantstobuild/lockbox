@@ -32,9 +32,10 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 use webview2_com::{PrintCompletedHandler, PrintToPdfCompletedHandler};
 use windows_core::{BOOL, Interface, PCWSTR};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_HOTKEY_ALREADY_REGISTERED, ERROR_INSUFFICIENT_BUFFER,
-    ERROR_MORE_DATA, GetLastError, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT,
-    LocalFree, MAX_PATH, TRUE, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HOTKEY_ALREADY_REGISTERED,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError,
+    GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, LocalFree, MAX_PATH, TRUE,
+    WPARAM,
 };
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Graphics::Printing::{
@@ -70,6 +71,11 @@ use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED, HPOWERNOTIFY, RegisterSuspendResumeNotification,
     SetThreadExecutionState, UnregisterSuspendResumeNotification,
 };
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW,
+};
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
@@ -94,12 +100,13 @@ use windows_sys::core::PWSTR;
 
 use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
-    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, HotkeyTaken,
+    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, Hotkey, HotkeyTaken,
     IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher, MainWindow, Os,
     OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed, PrintSteps, Shortcut,
-    SystemClock, ThreadTimer, Volumes,
+    StartupEntry, SystemClock, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
+use crate::startup::{self, StartupState};
 use crate::{lock, window};
 
 #[cfg(test)]
@@ -524,6 +531,8 @@ impl Os {
             launcher: Arc::new(WinLauncher),
             idle: Arc::new(WinIdle),
             window: Arc::new(WinMainWindow { app: app.clone() }),
+            hotkey: Arc::new(WinHotkey { app: app.clone() }),
+            startup: Arc::new(WinStartup),
             power: Arc::new(WinPower { app }),
             clock: Arc::new(SystemClock),
             clipboard: Arc::new(ClipboardSteps::new(
@@ -854,6 +863,193 @@ impl<R: Runtime> MainWindow for WinMainWindow<R> {
         let _ = self
             .app
             .run_on_main_thread(move || window::bring_to_front(&app));
+    }
+
+    /// Tauri's own call (it queues the request for the event loop and does not wait): no `unsafe` here.
+    fn protect_from_capture(&self, on: bool) {
+        if let Some(main) = self.app.get_webview_window(window::MAIN) {
+            let _ = window::set_capture_protection(&main, on);
+        }
+    }
+}
+
+/// The save shortcut, registered through the signal window's thread ([`SignalThread::set_hotkey`]), which `RegisterHotKey`
+/// ties it to. Looked up at each call; with no signal thread (a failed start) nothing can be set.
+pub struct WinHotkey<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> Hotkey for WinHotkey<R> {
+    fn set(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken> {
+        match self.app.try_state::<SignalThread>() {
+            Some(signals) => signals.set_hotkey(shortcut),
+            None => Err(HotkeyTaken::NotSet),
+        }
+    }
+}
+
+/// The current user's `Run` key: a program whose value is here starts when the person signs in.
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// Where Windows' own Startup settings keep each program's on/off state, under the same value name as in [`RUN_KEY`].
+const STARTUP_APPROVED_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+/// The most of a `StartupApproved` value that is read. Windows writes 12 bytes (a flag byte and an 8-byte time, seen on
+/// Windows 11, 2026-11-11); one longer than this is not what Windows writes and reads as "not turned off".
+const STARTUP_APPROVED_READ: usize = 64;
+
+/// An open registry key, closed when dropped.
+struct RegistryKey(HKEY);
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from a successful `RegOpenKeyExW` or `RegCreateKeyExW` and is closed here, once.
+        unsafe { RegCloseKey(self.0) };
+    }
+}
+
+/// `text` as a NUL-terminated UTF-16 string, as the registry calls take it.
+fn registry_text(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain([0]).collect()
+}
+
+/// Windows' answer as an error. The code only: no key, value or data, and never Windows' own message.
+fn registry_error(code: u32) -> io::Error {
+    io::Error::from_raw_os_error(code as i32)
+}
+
+/// Opens `path` under the current user's registry root with `access`; `None` when the key is not there.
+fn open_registry_key(path: &str, access: u32) -> io::Result<Option<RegistryKey>> {
+    let path = registry_text(path);
+    let mut key: HKEY = ptr::null_mut();
+    // SAFETY: `path` is NUL-terminated and outlives the call; `key` is writable. The handle is only used if the call
+    // succeeded, and then belongs to the `RegistryKey` that closes it.
+    let code = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, access, &mut key) };
+    match code {
+        ERROR_SUCCESS => Ok(Some(RegistryKey(key))),
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(None),
+        other => Err(registry_error(other)),
+    }
+}
+
+/// Whether `key` has a value called `name`.
+fn registry_value_exists(key: &RegistryKey, name: &[u16]) -> io::Result<bool> {
+    // SAFETY: `name` is NUL-terminated and outlives the call. The type, data and size pointers may all be null when
+    // only the value's existence is asked.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    match code {
+        ERROR_SUCCESS => Ok(true),
+        ERROR_FILE_NOT_FOUND => Ok(false),
+        other => Err(registry_error(other)),
+    }
+}
+
+/// The binary data of the value `name` in `key`, up to [`STARTUP_APPROVED_READ`] bytes; `None` when there is no such
+/// value, it holds another kind of data, or it is longer than that.
+fn registry_binary(key: &RegistryKey, name: &[u16]) -> io::Result<Option<Vec<u8>>> {
+    let mut data = [0u8; STARTUP_APPROVED_READ];
+    let mut size = STARTUP_APPROVED_READ as u32;
+    let mut kind = 0;
+    // SAFETY: `name` is NUL-terminated and outlives the call; `kind` is writable; `data` is writable for `size` bytes,
+    // and `size` is the length it holds, which the call updates to the bytes it wrote.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            ptr::null(),
+            &mut kind,
+            data.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    match code {
+        ERROR_SUCCESS if kind == REG_BINARY => Ok(data.get(..size as usize).map(<[u8]>::to_vec)),
+        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_MORE_DATA => Ok(None),
+        other => Err(registry_error(other)),
+    }
+}
+
+/// Starting with Windows, in the registry (see [`StartupEntry`]): Lockbox's value in the current user's `Run` key
+/// ([`startup::RUN_VALUE`](crate::startup::RUN_VALUE)), and, read only, Windows' own on/off state for it.
+pub struct WinStartup;
+
+impl StartupEntry for WinStartup {
+    fn read(&self) -> io::Result<StartupState> {
+        let name = registry_text(startup::RUN_VALUE);
+        let on = match open_registry_key(RUN_KEY, KEY_QUERY_VALUE)? {
+            Some(key) => registry_value_exists(&key, &name)?,
+            None => false,
+        };
+        let approved = match open_registry_key(STARTUP_APPROVED_KEY, KEY_QUERY_VALUE)? {
+            Some(key) => registry_binary(&key, &name)?,
+            None => None,
+        };
+        Ok(startup::state_of(on, approved.as_deref()))
+    }
+
+    fn write(&self, on: bool) -> io::Result<()> {
+        let name = registry_text(startup::RUN_VALUE);
+        if !on {
+            // Nothing to remove when the key or the value is not there.
+            let Some(key) = open_registry_key(RUN_KEY, KEY_SET_VALUE)? else {
+                return Ok(());
+            };
+            // SAFETY: the key is open, and `name` is NUL-terminated and outlives the call.
+            return match unsafe { RegDeleteValueW(key.0, name.as_ptr()) } {
+                ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
+                other => Err(registry_error(other)),
+            };
+        }
+        let command = startup::run_command(&std::env::current_exe()?)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let data: Vec<u16> = command.encode_wide().chain([0]).collect();
+        let size = u32::try_from(data.len() * 2)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let path = registry_text(RUN_KEY);
+        let mut key: HKEY = ptr::null_mut();
+        // SAFETY: `path` is NUL-terminated and outlives the call; the class, security attributes and disposition are
+        // optional and null; `key` is writable, and is used only if the call succeeded.
+        let code = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                ptr::null(),
+                &mut key,
+                ptr::null_mut(),
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(registry_error(code));
+        }
+        let key = RegistryKey(key);
+        // SAFETY: the key is open; `name` is NUL-terminated and outlives the call; `data` holds `size` bytes (its
+        // UTF-16 units and the terminating NUL), which the call copies.
+        let code = unsafe {
+            RegSetValueExW(
+                key.0,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                data.as_ptr().cast::<u8>(),
+                size,
+            )
+        };
+        match code {
+            ERROR_SUCCESS => Ok(()),
+            other => Err(registry_error(other)),
+        }
     }
 }
 
@@ -1621,7 +1817,8 @@ impl SignalThread {
     /// Registers `shortcut` as the save shortcut system-wide (`None`: releases it), replacing the one registered
     /// before. `RegisterHotKey` ties the shortcut to the thread that calls it, and the press comes back to that
     /// thread's window, so the request is sent to the window and made on its own thread, and the answer comes back
-    /// here. A shortcut Windows refuses leaves the one registered before working. [`HotkeyTaken::Taken`] only when
+    /// here. A shortcut Windows refuses leaves the one registered before working, and is not remembered as the one asked
+    /// for: what the window finds if it is asked again is what it held before ([`SET_HOTKEY`]). [`HotkeyTaken::Taken`] only when
     /// Windows says the keys are registered already; any other refusal, and a window that does not answer in time, is
     /// [`HotkeyTaken::NotSet`].
     pub fn set_hotkey(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken> {
@@ -1653,7 +1850,13 @@ impl SignalThread {
             *lock(&self.shared.hotkey) = before;
             return Err(HotkeyTaken::NotSet);
         }
-        hotkey_answer(answer)
+        let answered = hotkey_answer(answer);
+        if answered.is_err() {
+            // Windows refused it: the shortcut registered is still the old one, and what the window finds if it is asked
+            // again (any program can post the message) must be that, not keys freed since.
+            *lock(&self.shared.hotkey) = before;
+        }
+        answered
     }
 }
 
@@ -3206,6 +3409,45 @@ mod tests {
 
         assert_eq!(first.set_hotkey(Some(combo(6))), Ok(()));
         assert_eq!(second.set_hotkey(Some(old)), Ok(()));
+    }
+
+    /// A shortcut Windows refuses is not remembered as the one asked for: the window re-reads what was asked last when it
+    /// gets `SET_HOTKEY` (any program can post that message to it), so a refusal must put the old shortcut back there as
+    /// a timeout does. Without that, the keys freed later would be registered by a message nobody meant, replacing the
+    /// shortcut the person has.
+    #[test]
+    fn shortcut_taken_keeps_the_old_one() {
+        let (first, first_signals) = started();
+        let (second, _second_signals) = started();
+        let (third, _third_signals) = started();
+        let window = window_of(&first);
+        let (old, wanted) = (combo(9), combo(10));
+        assert_eq!(first.set_hotkey(Some(old)), Ok(()));
+        assert_eq!(second.set_hotkey(Some(wanted)), Ok(()));
+
+        assert_eq!(first.set_hotkey(Some(wanted)), Err(HotkeyTaken::Taken));
+        // The keys are free again, and the window is told to look at what was asked last, as a stray message would.
+        assert_eq!(second.set_hotkey(None), Ok(()));
+        assert_eq!(send(window, SET_HOTKEY, 0), 0, "still the old shortcut");
+
+        // The old shortcut is the registered one: heard. The refused keys were not taken by the stray message.
+        press(window, HOTKEY_IDS[0]);
+        assert_eq!(first_signals.try_recv(), Ok(OsSignal::SaveShortcut));
+        assert_eq!(third.set_hotkey(Some(wanted)), Ok(()));
+        // And the old keys are still held by the first window.
+        assert_eq!(second.set_hotkey(Some(old)), Err(HotkeyTaken::Taken));
+
+        // A refusal with nothing registered before leaves nothing asked for either.
+        let (alone, _alone_signals) = started();
+        let alone_window = window_of(&alone);
+        assert_eq!(alone.set_hotkey(Some(wanted)), Err(HotkeyTaken::Taken));
+        assert_eq!(third.set_hotkey(None), Ok(()));
+        assert_eq!(send(alone_window, SET_HOTKEY, 0), 0);
+        assert_eq!(
+            second.set_hotkey(Some(wanted)),
+            Ok(()),
+            "the stray message registered the refused keys"
+        );
     }
 
     /// A window that does not answer in time is not "taken", and the change it never made is not made later either.

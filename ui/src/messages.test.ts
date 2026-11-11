@@ -50,10 +50,11 @@ test("every_shell_error_has_a_message", () => {
     if (what !== undefined) expect(KNOWN_WHATS, id).toContain(what);
   }
 
-  // Every message is words: a title, and a body that may be empty. The only braces are a number's place, `{position}`.
+  // Every message is words: a title, and a body that may be empty. The only braces are a number's place, `{position}`, and the
+  // place for the shortcut the page tried, `{shortcut}`.
   for (const [id, message] of Object.entries(MESSAGES)) {
     expect(message.title.length, id).toBeGreaterThan(0);
-    const bare = `${message.title} ${message.body}`.replace(/\{(?:position|found|s)\}/g, "1");
+    const bare = `${message.title} ${message.body}`.replace(/\{(?:position|found|s|shortcut)\}/g, "1");
     expect(bare, id).not.toMatch(/[{}[\]]|undefined|null|\\/);
   }
 });
@@ -183,6 +184,37 @@ test("a_save_with_no_value_has_words_of_its_own", () => {
   // Task 18: a copy that was empty or too big, saved with nothing typed in its place (the connection's new label).
   expect(messageFor({ code: "invalid_input", what: "capture value" })).toEqual({ title: "Paste or type the value first.", body: "" });
   expect(KNOWN_WHATS).toContain("capture value");
+  expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
+});
+
+test("the_settings_refusals_have_words_of_their_own", () => {
+  // Task 20's four labels, exactly as the shell sends them (the connection's table), each with its own words.
+  const words: [object, string, string][] = [
+    [
+      { code: "invalid_input", what: "shortcut" },
+      "Use at least two of Ctrl, Shift and Alt, with a letter, a digit or F1 to F12.",
+      "Ctrl with C, V or X is kept for copy and paste.",
+    ],
+    [{ code: "invalid_input", what: "shortcut not set" }, "Windows didn't take that shortcut.", "Try again."],
+    [{ code: "core", kind: "io", what: "startup" }, "Lockbox couldn't change Start with Windows.", "Try again."],
+  ];
+  for (const [error, title, body] of words) {
+    expect(messageFor(error), JSON.stringify(error)).toEqual({ title, body });
+    expect(KNOWN_WHATS).toContain((error as { what: string }).what);
+  }
+  // A taken shortcut names the combination the page tried (the page's own words, never the shell's); with none given it says "that shortcut".
+  expect(messageFor({ code: "invalid_input", what: "shortcut taken" }, { shortcut: "Ctrl+Shift+S" })).toEqual({
+    title: "Another app already uses Ctrl+Shift+S.",
+    body: "Press a different combination.",
+  });
+  expect(messageFor({ code: "invalid_input", what: "shortcut taken" }).title).toBe("Another app already uses that shortcut.");
+  expect(KNOWN_WHATS).toContain("shortcut taken");
+  // The name is only put in a place made for it: it does not turn other words into something else, and braces in it stay as they are.
+  expect(messageFor({ code: "invalid_input", what: "shortcut not set" }, { shortcut: "{found}" }).title).toBe("Windows didn't take that shortcut.");
+  expect(messageFor({ code: "invalid_input", what: "shortcut taken" }, { shortcut: "{found}" }).title).toBe("Another app already uses {found}.");
+  // The other refusals of these rows keep the general words.
+  expect(messageFor({ code: "invalid_input", what: "idle time" }).title).toBe("Lockbox can't use that.");
+  expect(messageFor({ code: "invalid_input", what: "clipboard delay" }).title).toBe("Lockbox can't use that.");
   expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
 });
 

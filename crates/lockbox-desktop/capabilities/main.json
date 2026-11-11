@@ -79,6 +79,8 @@
     "allow-generate-passphrase",
     "allow-copy-generated",
     "allow-get-settings",
-    "allow-set-settings"
+    "allow-set-settings",
+    "allow-get-startup",
+    "allow-set-startup"
   ]
 }

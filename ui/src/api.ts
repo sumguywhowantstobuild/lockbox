@@ -138,9 +138,38 @@ export interface ItemDetail {
   previous: PreviousView[];
 }
 
+/** How the window looks: Light, Dark, or whatever Windows is set to. */
+export type Theme = "system" | "light" | "dark";
+
+/** The save shortcut: which of Ctrl, Shift and Alt, and a Windows virtual-key code (65 to 90 for A to Z, 48 to 57 for 0 to 9, 112 to 123 for F1 to F12). */
+export interface Shortcut {
+  ctrl: boolean;
+  shift: boolean;
+  alt: boolean;
+  key: number;
+}
+
+/** The app's settings (`settings.rs`), all of them, always: a save sends the whole of it. */
 export interface Settings {
+  /** 1 to 60. */
   idle_minutes: number;
+  /** 10 to 300. */
   clipboard_seconds: number;
+  theme: Theme;
+  shortcut: Shortcut;
+  /** Lockbox is kept out of screenshots, recordings and screen sharing. */
+  capture_protected: boolean;
+}
+
+/** Start with Windows as the shell reads it: Lockbox's own entry, and whether Windows' Startup settings have turned it off. */
+export interface StartupState {
+  on: boolean;
+  turned_off_in_windows: boolean;
+}
+
+/** What `app_info` says of the app. */
+export interface AppInfo {
+  version: string;
 }
 
 /**
@@ -158,6 +187,29 @@ export function listVaults(): Promise<VaultEntry[]> {
 
 export function getSettings(): Promise<Settings> {
   return callPlain<Settings>("get_settings", {});
+}
+
+/**
+ * Saves the whole settings and puts them in effect at once. Refused (`invalid_input`) with `what` `idle time`, `clipboard delay`, `shortcut`
+ * (not allowed), `shortcut taken` (another app has it) or `shortcut not set` (Windows would not take it): nothing is saved and the old
+ * shortcut still works.
+ */
+export function setSettings(settings: Settings): Promise<null> {
+  return callPlain<null>("set_settings", { ...settings });
+}
+
+/** Whether Lockbox starts with Windows, as the shell reads it now. */
+export function getStartup(): Promise<StartupState> {
+  return callPlain<StartupState>("get_startup", {});
+}
+
+/** Turns Start with Windows on or off, and answers the state read back. */
+export function setStartup(on: boolean): Promise<StartupState> {
+  return callPlain<StartupState>("set_startup", { on });
+}
+
+export function appInfo(): Promise<AppInfo> {
+  return callPlain<AppInfo>("app_info", {});
 }
 
 /**

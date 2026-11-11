@@ -2,7 +2,7 @@
 // the page (the Add button in the toolbar, the Generator button in the side menu). The panel is gone by the time focus
 // moves, so a keyboard user is not left at the top of the page; the move waits one turn so a menu that is still giving
 // focus back to its own button has finished.
-const OPENERS = { add: ".addb", generator: ".navgen" } as const;
+const OPENERS = { add: ".addb", generator: ".navgen", settings: ".navset" } as const;
 
 /** The button on the page that opened the form now open, when it stays there (an empty list's own Add buttons), or `null`. */
 let opener: HTMLElement | null = null;

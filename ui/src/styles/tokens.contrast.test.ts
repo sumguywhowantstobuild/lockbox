@@ -445,6 +445,37 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("panel Save words, off, on a dialog's card", c("--ink2"), over(c("--line"), card), 4.5);
       // Cancel (the quiet pill) while a save runs, on a dialog's card: the quiet words over the pill's shade.
       check("quiet pill words, off, on a dialog's card", c("--ink2"), over([...rgbOf("--sh"), 0.07] as Rgba, card), 4.5);
+
+      // Settings (Task 20, 31a and 31b). The rows are on a group's card: a row's words, its hint, a refusal under it and the quiet pill
+      // (Change, Cancel, laid over the card at rest, hovered and pressed).
+      check("settings row words on the card", c("--ink"), card, 4.5);
+      check("settings row hint on the card", c("--ink2"), card, 4.5);
+      check("settings refusal line on the card", c("--danger"), card, 4.5);
+      check("version words on the card", c("--ink"), card, 4.5);
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`Change and Cancel words, ${state}, on the card`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
+      }
+      // The saved shortcut's key cap (quiet words on the ground's colour, laid on the card's row), and the one that waits for keys: its words and
+      // the vault's colour round it, which is its mark, against the card.
+      check("saved key cap words on the card's row", c("--ink2"), ground, 4.5);
+      check("waiting key cap words on the card", c("--ink"), card, 4.5);
+      check("waiting key cap edge on the card", c("--v"), card, 3);
+      // Light, Dark and System: the track is a tint on the card, the chosen one a card with the vault's colour round it.
+      const themeTrack = over([...rgbOf("--sh"), 0.08] as Rgba, card);
+      check("theme button words, not chosen, on the track", c("--ink"), themeTrack, 4.5);
+      check("theme button words, chosen, on its card", c("--ink"), card, 4.5);
+      check("chosen theme's outline against the track", c("--v"), themeTrack, 3);
+      check("chosen theme's outline against its card", c("--v"), card, 3);
+      // The two lists: words and arrows on the card, and the field's edge, which is what marks the box.
+      check("settings list words on the card", c("--ink"), card, 4.5);
+      check("settings list arrows on the card", c("--ink2"), card, 3);
+      check("settings list edge on the card", c("--edge"), card, 3);
+      // The switches: the off track, the knob on each track and the on track, all against the card (the track is the part that shows the state,
+      // and the knob's side says it as well). Its focus ring is the ordinary one, measured above.
+      check("settings switch, off track on the card", c("--switch-off"), card, 3);
+      check("settings switch, on track on the card", c("--add"), card, 3);
+      check("settings switch, knob on the off track", c("--switch-knob"), c("--switch-off"), 3);
+      check("settings switch, knob on the on track", c("--switch-knob"), c("--add"), 3);
     }
   }
 

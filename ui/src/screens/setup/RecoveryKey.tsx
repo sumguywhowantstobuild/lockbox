@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { messageFor, messageText } from "../../messages";
-import { makeNewKey, startPicking, type SessionData } from "../../store";
+import { makeNewKey, startPicking, useSettings, type SessionData } from "../../store";
 import { Frame, SAY_KEY } from "./Frame";
 import { KeyActions, type PrintRun } from "./KeyActions";
 import { asksFor, wordsOf } from "./keyWords";
@@ -26,6 +26,8 @@ export function RecoveryKey({ data }: { data: SessionData }) {
   // The print that is running, if any. Continue waits for it: going on takes the key off the page, and the page is what
   // the printer captures.
   const [printing, setPrinting] = useState<PrintRun>(null);
+  // Lockbox stays out of screen capture unless the person turned that off in Settings: the sentence about screenshots follows it.
+  const { capture_protected: keptOutOfCapture } = useSettings();
   const step = data.recovery;
   if (step === null) return null;
 
@@ -105,8 +107,10 @@ export function RecoveryKey({ data }: { data: SessionData }) {
         <p className="fu-lose">If you lose both your password and this key, nobody can get your data back.</p>
       </div>
       <p className="fu-hint">
-        Don&apos;t keep the saved key on this PC. Writing it down by hand is fine. Screenshots won&apos;t work, because
-        Lockbox stays out of screen capture.
+        Don&apos;t keep the saved key on this PC. Writing it down by hand is fine.{" "}
+        {keptOutOfCapture
+          ? "Screenshots won't work, because Lockbox stays out of screen capture."
+          : "Don't take a screenshot of it: that would be a readable copy."}
       </p>
       <div className="fu-row">
         <button

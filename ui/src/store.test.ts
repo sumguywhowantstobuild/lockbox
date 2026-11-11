@@ -59,7 +59,8 @@ test("lock_subscribes_before_any_command", async () => {
   expect(shell.calls.map((call) => call.cmd)).toEqual(["listen:lockbox://locked"]);
   subscribed();
   await started;
-  expect(shell.calls.map((call) => call.cmd)).toEqual(["listen:lockbox://locked", "list_vaults"]);
+  // Then the settings (so the first screen is drawn in the saved theme), then the vault list.
+  expect(shell.calls.map((call) => call.cmd)).toEqual(["listen:lockbox://locked", "get_settings", "list_vaults"]);
   // Started twice (React's strict mode does): subscribed once.
   await startStore();
   expect(shell.calls.filter((call) => call.cmd.startsWith("listen:"))).toHaveLength(1);

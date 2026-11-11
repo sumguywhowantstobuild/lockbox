@@ -402,7 +402,58 @@ export interface FakeShell {
    * command arrives, so an older answer comes after a newer one, as it can on a busy shell.
    */
   holdGetItem(): () => void;
+  /** The settings the shell holds now (what the last accepted `set_settings` sent), and every one it accepted, in order. */
+  settings(): FakeSettings;
+  settingsSaved: FakeSettings[];
+  /** Holds every `set_settings` answer until `release` is called: the settings are saved when the command arrives, the answer comes later. */
+  holdSettings(): () => void;
+  /** The state `get_startup` answers from now on (turned off in Windows, say), and what it is now. */
+  setStartup(state: FakeStartup): void;
+  startup(): FakeStartup;
+  /** The next `set_startup` writes, and then refuses (the readback failed), as the shell's one fixed refusal can mean. */
+  startupReadbackFailsNext(): void;
 }
+
+/** The settings as the shell sends them (`settings.rs`): the three new fields have the shell's defaults. */
+export interface FakeSettings {
+  idle_minutes: number;
+  clipboard_seconds: number;
+  theme: "system" | "light" | "dark";
+  shortcut: { ctrl: boolean; shift: boolean; alt: boolean; key: number };
+  capture_protected: boolean;
+}
+
+export const DEFAULT_SETTINGS: FakeSettings = {
+  idle_minutes: 5,
+  clipboard_seconds: 30,
+  theme: "system",
+  shortcut: { ctrl: true, shift: true, alt: false, key: 76 },
+  capture_protected: true,
+};
+
+/** Start with Windows as the shell reads it (`startup.rs`). */
+export interface FakeStartup {
+  on: boolean;
+  turned_off_in_windows: boolean;
+}
+
+/** What the shell sends for a shortcut that is not allowed, one another app has, and one Windows would not take (`Settings::check`, `set_settings`). */
+export const SHORTCUT_REFUSED = { code: "invalid_input", what: "shortcut" };
+export const SHORTCUT_TAKEN = { code: "invalid_input", what: "shortcut taken" };
+export const SHORTCUT_NOT_SET = { code: "invalid_input", what: "shortcut not set" };
+/** What the shell sends when Start with Windows could not be changed (`ShellError::Core` `io` with `what: "startup"`). */
+export const STARTUP_FAILED = { code: "core", kind: "io", what: "startup" };
+
+/** The shell's own check of a shortcut: at least two modifiers, a letter, a digit or F1 to F12, and never Ctrl with C, V or X. */
+function shortcutAllowed(shortcut: FakeSettings["shortcut"]): boolean {
+  const modifiers = [shortcut.ctrl, shortcut.shift, shortcut.alt].filter(Boolean).length;
+  const { key } = shortcut;
+  const known = (key >= 0x41 && key <= 0x5a) || (key >= 0x30 && key <= 0x39) || (key >= 0x70 && key <= 0x7b);
+  return modifiers >= 2 && known && !(shortcut.ctrl && (key === 0x43 || key === 0x56 || key === 0x58));
+}
+
+/** What the shell sends for a theme, an idle time or a clipboard delay it does not take. */
+const SETTINGS_FIELDS = ["idle_minutes", "clipboard_seconds", "theme", "shortcut", "capture_protected"];
 
 /** What the shell sends for a website that is not an `http` or `https` address (`NOT_A_WEBSITE`). */
 export const NOT_A_WEBSITE = { code: "invalid_input", what: "website" };
@@ -626,8 +677,14 @@ export function installFakeShell(
   invoke: Mock,
   listen: Mock,
   vaults: FakeVault[],
-  settings = { idle_minutes: 5, clipboard_seconds: 30 },
+  given: Partial<FakeSettings> = {},
 ): FakeShell {
+  // The settings the shell holds: what the person gave over the defaults. `set_settings` changes them, as the shell's save does.
+  let settings: FakeSettings = { ...DEFAULT_SETTINGS, shortcut: { ...DEFAULT_SETTINGS.shortcut }, ...given };
+  let startup: FakeStartup = { on: false, turned_off_in_windows: false };
+  let readbackFails = false;
+  const saved: FakeSettings[] = [];
+  let heldSettings: (() => void)[] | undefined;
   // The handlers each event has, as `listen` was given them.
   const handlers = new Map<string, ((event: { payload: unknown }) => void)[]>();
   const emit = (event: string, payload: unknown): void => {
@@ -869,7 +926,49 @@ export function installFakeShell(
         return vaults.map((v) => ({ id: v.id, name: v.name, available: v.available ?? true }));
       case "get_settings":
         exactly(args ?? {}, []);
-        return settings;
+        return { ...settings, shortcut: { ...settings.shortcut } };
+      case "set_settings": {
+        // The whole settings, flat, as the shell reads them: a missing or an extra field is malformed.
+        const raw = exactly(args, SETTINGS_FIELDS);
+        const wholeNumber = (value: unknown, low: number, high: number) => Number.isInteger(value) && (value as number) >= low && (value as number) <= high;
+        const shape: unknown = raw.shortcut;
+        if (
+          typeof shape !== "object" ||
+          shape === null ||
+          Object.keys(shape).sort().join() !== "alt,ctrl,key,shift" ||
+          typeof raw.capture_protected !== "boolean" ||
+          typeof raw.theme !== "string" ||
+          !["system", "light", "dark"].includes(raw.theme)
+        ) {
+          return refuse(MALFORMED);
+        }
+        const sent = raw as unknown as FakeSettings;
+        const { shortcut } = sent;
+        if (!wholeNumber(sent.idle_minutes, 1, 60)) return refuse({ code: "invalid_input", what: "idle time" });
+        if (!wholeNumber(sent.clipboard_seconds, 10, 300)) return refuse({ code: "invalid_input", what: "clipboard delay" });
+        if (!shortcutAllowed(shortcut)) return refuse(SHORTCUT_REFUSED);
+        settings = { ...sent, shortcut: { ...shortcut } };
+        saved.push(settings);
+        return null;
+      }
+      case "get_startup":
+        exactly(args ?? {}, []);
+        return { ...startup };
+      case "set_startup": {
+        const { on } = exactly(args, ["on"]);
+        if (typeof on !== "boolean") return refuse(MALFORMED);
+        // Windows' own switch is left as it is: writing the entry again does not turn it back on there.
+        startup = { ...startup, on };
+        // The write went through but reading it back failed: one fixed refusal, whichever half failed (`startup_failure_is_one_fixed_refusal`).
+        if (readbackFails) {
+          readbackFails = false;
+          return refuse(STARTUP_FAILED);
+        }
+        return { ...startup };
+      }
+      case "app_info":
+        exactly(args ?? {}, []);
+        return { version: "1.2.3" };
       case "unlock_vault": {
         const { id, password } = exactly(args, ["id", "password"]);
         const vault = vaults.find((v) => v.id === id);
@@ -1838,7 +1937,7 @@ export function installFakeShell(
           });
         });
       }
-      for (const [name, waiting] of [["retry_open_cleanup", heldRetry], ["get_item", heldGetItem]] as const) {
+      for (const [name, waiting] of [["retry_open_cleanup", heldRetry], ["get_item", heldGetItem], ["set_settings", heldSettings]] as const) {
         if (cmd === name && waiting !== undefined) {
           return new Promise((resolve) => {
             waiting.push(() => {
@@ -2090,6 +2189,23 @@ export function installFakeShell(
     },
     refuseNext: (cmd, error) => {
       refusals.set(cmd, error);
+    },
+    settings: () => ({ ...settings, shortcut: { ...settings.shortcut } }),
+    settingsSaved: saved,
+    holdSettings: () => {
+      const waiting: (() => void)[] = [];
+      heldSettings = waiting;
+      return () => {
+        heldSettings = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    setStartup: (state) => {
+      startup = { ...state };
+    },
+    startup: () => ({ ...startup }),
+    startupReadbackFailsNext: () => {
+      readbackFails = true;
     },
     fileOps,
     dismissFileNext: () => {

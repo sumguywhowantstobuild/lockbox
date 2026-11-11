@@ -59,7 +59,9 @@ export type Tool =
    */
   | { kind: "edit"; summary: ItemSummary; detail: ItemDetail }
   /** The Generator page (16a). */
-  | { kind: "generator" };
+  | { kind: "generator" }
+  /** Settings (31a, 31b): the app's, for every vault, so a read-only vault opens it too. What it shows is `StoreState.settings`. */
+  | { kind: "settings" };
 
 /** What the new-login form sends: the person's own text, as typed. The shell completes the website and checks the limits. */
 export interface LoginDraft {
@@ -302,7 +304,21 @@ export interface StoreState {
   search: SearchState | null;
   /** The copy the shortcut left waiting, or `null` for none. */
   capture: CaptureView | null;
+  /**
+   * The app's settings as the shell has them saved: read once at the start and made current by each save (`saveSettings`). `null` until
+   * they come, and when they could not be read; the screens then use `DEFAULT_SETTINGS`. Nothing secret is in them, so a lock leaves them.
+   */
+  settings: api.Settings | null;
 }
+
+/** What the settings are when the page has none yet: the shell's own defaults (`Settings::default`). */
+export const DEFAULT_SETTINGS: api.Settings = {
+  idle_minutes: 5,
+  clipboard_seconds: 30,
+  theme: "system",
+  shortcut: { ctrl: true, shift: true, alt: false, key: 76 },
+  capture_protected: true,
+};
 
 /** The page's own refusal for a lock listener that could not be set up; `messages.ts` has its words. */
 const LISTENER_FAILED = { code: "page", kind: "lock_listener" };
@@ -325,6 +341,7 @@ const EMPTY: StoreState = {
   lockNote: null,
   search: null,
   capture: null,
+  settings: null,
 };
 
 let state: StoreState = EMPTY;
@@ -384,6 +401,13 @@ export function startStore(): Promise<void> {
       // unlock. The screen says so in words (a fixed refusal of the page's own, never the listener's error).
       set({ ...state, startError: LISTENER_FAILED });
       return;
+    }
+    try {
+      // The settings first, so the first screen is drawn in the saved theme. When they can't be read the page uses the defaults.
+      const settings = await api.getSettings();
+      set({ ...state, settings });
+    } catch {
+      // Nothing to say: the screens that read them fall back to `DEFAULT_SETTINGS`, and Settings reads them again when it opens.
     }
     try {
       set({ ...state, vaults: await api.listVaults(), startError: null });
@@ -957,9 +981,9 @@ function takeNotice(notice: unknown): void {
   } else if (notice.kind === "first_close" && typeof notice.explain === "boolean") {
     set({ ...state, notices: { ...state.notices, firstClose: notice.explain } });
   } else if (notice.kind === "shortcut_taken") {
-    set({ ...state, notices: { ...state.notices, shortcut: "taken" } });
+    if (!shortcutNoticeVoid) set({ ...state, notices: { ...state.notices, shortcut: "taken" } });
   } else if (notice.kind === "shortcut_not_set") {
-    set({ ...state, notices: { ...state.notices, shortcut: "not_set" } });
+    if (!shortcutNoticeVoid) set({ ...state, notices: { ...state.notices, shortcut: "not_set" } });
   } else if (notice.kind === "open_cleanup" && typeof notice.still_open === "number") {
     // Opened copies another program still holds, after a lock's cleanup or at launch. The latest count is the one that counts; none says nothing.
     cleanupNotices += 1;
@@ -1213,6 +1237,66 @@ function openTool(session: number, tool: Tool): void {
 /** Opens the Generator page in the vault's panel. */
 export function openGenerator(session: number): void {
   update(session, (current) => ({ ...endReveals(current), openItem: null, tool: { kind: "generator" } }));
+}
+
+/** Opens Settings in the vault's panel. It is the app's, not the vault's, so a read-only vault opens it as well. */
+export function openSettings(session: number): void {
+  update(session, (current) => ({ ...endReveals(current), openItem: null, tool: { kind: "settings" } }));
+}
+
+/** What a settings save came to: saved (the page's copy has it now), or the shell's refusal, with the page's copy as it was. */
+export type SettingsResult = "saved" | "cancelled" | { failed: unknown };
+
+/**
+ * A save the screen may call back while it still waits in line (`cancelled`), until its turn comes and it is sent (`sent`): after that the
+ * shell has it, and it cannot be taken back from here.
+ */
+export interface SaveTicket {
+  cancelled: boolean;
+  sent: boolean;
+}
+
+/** The saves in line: each waits for the one before it, so an older answer can never land over a newer save. */
+let settingsLine: Promise<unknown> = Promise.resolve();
+
+/** Whether the launch notice that the save shortcut is off was made untrue by a shortcut saved since (it stays gone, and is not taken in again). */
+let shortcutNoticeVoid = false;
+
+/**
+ * Saves one change to the settings, as the whole settings: the saved ones with `change` over them, built when its turn comes so a refused
+ * change before it is not carried along. The shell applies it at once (the shortcut registered, the capture protection changed). On
+ * success the page's copy is the new settings; on a refusal it is left as it was and the refusal comes back for the screen to say. A
+ * `ticket` marked cancelled before its turn comes is not sent at all. A saved shortcut makes the launch notice (the shortcut is off) untrue,
+ * so it goes, and a kept copy of it that the shell tells again is not shown.
+ */
+export function saveSettings(change: Partial<api.Settings>, ticket?: SaveTicket): Promise<SettingsResult> {
+  const turn = async (): Promise<SettingsResult> => {
+    if (ticket?.cancelled === true) return "cancelled";
+    if (ticket !== undefined) ticket.sent = true;
+    try {
+      const next = { ...(state.settings ?? (await api.getSettings())), ...change };
+      await api.setSettings(next);
+      if (change.shortcut !== undefined) shortcutNoticeVoid = true;
+      set({ ...state, settings: next, notices: change.shortcut === undefined ? state.notices : { ...state.notices, shortcut: null } });
+      return "saved";
+    } catch (error) {
+      return { failed: error };
+    }
+  };
+  const result = settingsLine.then(turn);
+  settingsLine = result;
+  return result;
+}
+
+/** Reads the settings again when the page has none (they could not be read at the start); the screens fall back to the defaults meanwhile. */
+export function loadSettings(): void {
+  if (state.settings !== null) return;
+  api.getSettings().then(
+    (settings) => {
+      if (state.settings === null) set({ ...state, settings });
+    },
+    () => undefined,
+  );
 }
 
 /** Closes the form or tool in the panel; what was typed in it is gone. */
@@ -2631,6 +2715,11 @@ export function useSearch(): SearchState | null {
   return useSelect((current) => current.search);
 }
 
+/** The settings as the shell has them saved, or the defaults while the page has none. */
+export function useSettings(): api.Settings {
+  return useSelect((current) => current.settings ?? DEFAULT_SETTINGS);
+}
+
 /** The copy the save shortcut left waiting, or `null` for none. */
 export function useCapture(): CaptureView | null {
   return useSelect((current) => current.capture);
@@ -2668,6 +2757,8 @@ export function resetStoreForTests(): void {
   searchRun = 0;
   searchOpening = 0;
   retryingOpen = false;
+  settingsLine = Promise.resolve();
+  shortcutNoticeVoid = false;
   listRuns.clear();
   detailRuns.clear();
   cleanupNotices = 0;

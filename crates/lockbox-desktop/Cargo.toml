@@ -43,6 +43,8 @@ windows-core = { version = "0.62", default-features = false }
 # (the token's user, the folder's permissions), `Win32_System_Threading` (`OpenProcessToken`). `AssocIsDangerous` is
 # under `Win32_UI_Shell`.
 # The printer list for Print (`os::win`): `Win32_Graphics_Printing` (`EnumPrintersW`, `GetDefaultPrinterW`).
+# Start with Windows (`os::win`): `Win32_System_Registry`, the current user's `Run` value and, read only, Windows' own
+# Startup on/off value for it.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
@@ -57,6 +59,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Power",
+    "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

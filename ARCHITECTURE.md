@@ -287,15 +287,16 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `restore.rs` | One restore at a time: its state machine, launch recovery, pre-restore copies and their checks |
 | `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
 | `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
-| `settings.rs` | The idle time and clipboard delay, with their bounds (`settings.json`) |
+| `settings.rs` | The app-wide settings with their bounds (`settings.json`): idle time, clipboard delay, theme, the save shortcut (two modifiers, a letter, digit or F1 to F12, never Ctrl with C, V or X) and capture protection |
+| `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and the last backup |
 | `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
-| `window.rs` | The one window: what it may load, open, download or receive |
+| `window.rs` | The one window: what it may load, open, download or receive, and how it starts (shown, or hidden for a `--hidden` start) |
 | `commands/` | The `#[tauri::command]` wrappers. `list.rs` names every command; `args.rs` parses a request strictly |
-| `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock`, `Timer`, `ClipboardBackend`, `Volumes`, `Env`) and the shared clipboard steps |
+| `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock`, `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
 | `os/win.rs` | The real Windows calls, the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
 | `os/signals.rs` | Turns a window message into an `OsSignal` |
 | `testing.rs` | The fakes (test builds only) |

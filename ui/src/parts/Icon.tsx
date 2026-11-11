@@ -79,6 +79,16 @@ export function GeneratorIcon() {
   return <Drawing d="M12 4v3M12 17v3M4 12h3M17 12h3M6.5 6.5l2 2M15.5 15.5l2 2M17.5 6.5l-2 2M8.5 15.5l-2 2" />;
 }
 
+/** A cog with eight teeth: Settings. */
+export function SettingsIcon() {
+  return (
+    <svg className="i" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M19.11 9.96L21.48 10.5V13.5L19.11 14.04L18.47 15.59L19.77 17.64L17.64 19.77L15.59 18.47L14.04 19.11L13.5 21.48H10.5L9.96 19.11L8.41 18.47L6.36 19.77L4.23 17.64L5.53 15.59L4.89 14.04L2.52 13.5V10.5L4.89 9.96L5.53 8.41L4.23 6.36L6.36 4.23L8.41 5.53L9.96 4.89L10.5 2.52H13.5L14.04 4.89L15.59 5.53L17.64 4.23L19.77 6.36L18.47 8.41Z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
 /** A bin: the Trash. */
 export function TrashIcon() {
   return (

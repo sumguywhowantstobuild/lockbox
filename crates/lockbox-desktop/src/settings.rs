@@ -1,7 +1,9 @@
-//! The user's settings (spec §7.4): the auto-lock idle time and the clipboard clear delay, in `settings.json` in the
-//! state folder: `{ "version": 1, "idle_minutes": <1..=60>, "clipboard_seconds": <10..=300>, "close_explained": <bool> }`.
-//! The last is the shell's own note that the first close's explanation was seen; the page never reads or sets it, and a
-//! file without it (from before it existed) loads with `false`.
+//! The user's settings (spec §7.4), in `settings.json` in the state folder:
+//! `{ "version": 1, "idle_minutes": <1..=60>, "clipboard_seconds": <10..=300>, "theme": "system" | "light" | "dark",
+//! "shortcut": { "ctrl", "shift", "alt", "key" }, "capture_protected": <bool>, "close_explained": <bool> }`. The
+//! last is the shell's own note that the first close's explanation was seen; the page never reads or sets it. A file
+//! from before a field existed loads with that field's default: the theme follows Windows, the save shortcut is
+//! Ctrl+Shift+L, capture protection is on, and the first close was not yet explained.
 
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -13,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
+use crate::os::Shortcut;
 use crate::paths::{StateVersion, read_state, write_state};
 
 /// The auto-lock idle time's bounds, in minutes.
@@ -23,12 +26,55 @@ pub const CLIPBOARD_SECONDS: RangeInclusive<u16> = 10..=300;
 /// What `settings.json` is called in errors.
 const WHAT: &str = "settings";
 
+/// The virtual-key codes a save shortcut may use: A to Z, 0 to 9 and F1 to F12.
+const SHORTCUT_KEYS: [RangeInclusive<u16>; 3] = [0x41..=0x5A, 0x30..=0x39, 0x70..=0x7B];
+/// C, V and X: with Ctrl they are copy, paste and cut, which the save shortcut must never take from every program.
+const COPY_PASTE_KEYS: [u16; 3] = [0x43, 0x56, 0x58];
+
+/// Whether `shortcut` may be the save shortcut: at least two of Ctrl, Shift and Alt (a lone key or one modifier would
+/// steal ordinary typing from every program), a letter, a digit or F1 to F12, and never Ctrl with C, V or X, whatever
+/// else is held.
+fn shortcut_allowed(shortcut: Shortcut) -> bool {
+    let modifiers = [shortcut.ctrl, shortcut.shift, shortcut.alt]
+        .into_iter()
+        .filter(|held| *held)
+        .count();
+    modifiers >= 2
+        && SHORTCUT_KEYS
+            .iter()
+            .any(|keys| keys.contains(&shortcut.key))
+        && !(shortcut.ctrl && COPY_PASTE_KEYS.contains(&shortcut.key))
+}
+
+/// How the page looks: its own light or dark, or whichever Windows uses (the default).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// Capture protection is on unless the person turns it off (Plan 4A, Task 4).
+fn capture_protected_by_default() -> bool {
+    true
+}
+
 /// The settings as the page reads and sends them (`get_settings`, `set_settings`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub idle_minutes: u8,
     pub clipboard_seconds: u16,
+    #[serde(default)]
+    pub theme: Theme,
+    /// The save shortcut. Registered with Windows by `set_settings` and at launch, not by the store.
+    #[serde(default)]
+    pub shortcut: Shortcut,
+    /// Whether Windows is asked to leave the window out of screenshots, recordings and screen sharing.
+    #[serde(default = "capture_protected_by_default")]
+    pub capture_protected: bool,
 }
 
 impl Default for Settings {
@@ -36,12 +82,16 @@ impl Default for Settings {
         Settings {
             idle_minutes: 5,
             clipboard_seconds: 30,
+            theme: Theme::default(),
+            shortcut: Shortcut::default(),
+            capture_protected: capture_protected_by_default(),
         }
     }
 }
 
 impl Settings {
-    /// Refuses a value outside its bounds: `InvalidInput { what: "idle time" }` or `{ what: "clipboard delay" }`.
+    /// Refuses a value outside its bounds: `InvalidInput { what: "idle time" }`, `{ what: "clipboard delay" }` or, for a
+    /// shortcut that [`shortcut_allowed`] does not allow, `{ what: "shortcut" }`.
     pub fn check(&self) -> ShellResult<()> {
         if !IDLE_MINUTES.contains(&self.idle_minutes) {
             return Err(ShellError::InvalidInput { what: "idle time" });
@@ -50,6 +100,9 @@ impl Settings {
             return Err(ShellError::InvalidInput {
                 what: "clipboard delay",
             });
+        }
+        if !shortcut_allowed(self.shortcut) {
+            return Err(ShellError::InvalidInput { what: "shortcut" });
         }
         Ok(())
     }
@@ -66,13 +119,20 @@ impl Settings {
 }
 
 /// The file as written. `close_explained` is the shell's own note (the first close's explanation was seen): the page's
-/// [`Settings`] never carry it, and a file from before it existed loads with `false`.
+/// [`Settings`] never carry it, and a file from before it existed loads with `false`. The same goes for each field of
+/// the settings added since version 1 was first written: a file without it loads with its default.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SettingsFile {
     version: StateVersion,
     idle_minutes: u8,
     clipboard_seconds: u16,
+    #[serde(default)]
+    theme: Theme,
+    #[serde(default)]
+    shortcut: Shortcut,
+    #[serde(default = "capture_protected_by_default")]
+    capture_protected: bool,
     #[serde(default)]
     close_explained: bool,
 }
@@ -83,6 +143,9 @@ impl SettingsFile {
             version: StateVersion,
             idle_minutes: settings.idle_minutes,
             clipboard_seconds: settings.clipboard_seconds,
+            theme: settings.theme,
+            shortcut: settings.shortcut,
+            capture_protected: settings.capture_protected,
             close_explained,
         }
     }
@@ -114,6 +177,9 @@ impl SettingsStore {
                 let settings = Settings {
                     idle_minutes: saved.idle_minutes,
                     clipboard_seconds: saved.clipboard_seconds,
+                    theme: saved.theme,
+                    shortcut: saved.shortcut,
+                    capture_protected: saved.capture_protected,
                 };
                 (settings, saved.close_explained)
             })
@@ -229,6 +295,7 @@ mod tests {
         let chosen = Settings {
             idle_minutes: 1,
             clipboard_seconds: 300,
+            ..defaults
         };
         store.set(chosen).unwrap();
         assert_eq!(store.get(), chosen);
@@ -239,6 +306,9 @@ mod tests {
                 "version": 1,
                 "idle_minutes": 1,
                 "clipboard_seconds": 300,
+                "theme": "system",
+                "shortcut": { "ctrl": true, "shift": true, "alt": false, "key": 76 },
+                "capture_protected": true,
                 "close_explained": false
             })
         );
@@ -282,7 +352,8 @@ mod tests {
             store.get(),
             Settings {
                 idle_minutes: 7,
-                clipboard_seconds: 45
+                clipboard_seconds: 45,
+                ..Settings::default()
             }
         );
         assert!(!store.close_explained());
@@ -290,6 +361,195 @@ mod tests {
         store.set(store.get()).unwrap();
         assert_eq!(saved(&file)["close_explained"], false);
         assert!(!SettingsStore::load(file).close_explained());
+    }
+
+    /// A file from before the theme, the shortcut and capture protection existed (version 1, the two old values and
+    /// maybe the first-close note) loads with their defaults and keeps what it had; the next save writes them out.
+    #[test]
+    fn old_settings_file_gets_defaults() {
+        for old in [
+            r#"{ "version": 1, "idle_minutes": 7, "clipboard_seconds": 45 }"#,
+            r#"{ "version": 1, "idle_minutes": 7, "clipboard_seconds": 45, "close_explained": true }"#,
+        ] {
+            let temp = TempDir::new();
+            let file = temp.path().join("settings.json");
+            fs::write(&file, old).unwrap();
+            let store = SettingsStore::load(file.clone());
+            let got = store.get();
+            assert_eq!((got.idle_minutes, got.clipboard_seconds), (7, 45), "{old}");
+            assert_eq!(got.theme, Theme::System);
+            assert_eq!(got.shortcut, Shortcut::default());
+            assert_eq!(
+                (got.shortcut.ctrl, got.shortcut.shift, got.shortcut.alt),
+                (true, true, false)
+            );
+            assert_eq!(got.shortcut.key, 76, "Ctrl+Shift+L");
+            assert!(got.capture_protected, "capture protection defaults to on");
+            assert_eq!(
+                store.close_explained(),
+                old.contains("true"),
+                "the first-close note is kept"
+            );
+            // Read, not written: the file is as it was until a save.
+            assert_eq!(fs::read_to_string(&file).unwrap(), old);
+
+            store.set(got).unwrap();
+            let written = saved(&file);
+            assert_eq!(written["version"], 1);
+            assert_eq!(written["theme"], "system");
+            assert_eq!(written["capture_protected"], true);
+            assert_eq!(written["shortcut"]["key"], 76);
+        }
+    }
+
+    /// A field the file does not know is still refused (the whole file gives the defaults, and is left as it is), also
+    /// beside the new fields; so is a theme, a shortcut or a flag of a shape the settings cannot hold.
+    #[test]
+    fn unknown_field_still_refused() {
+        let defaults = Settings::default();
+        for damaged in [
+            r#"{ "version": 1, "idle_minutes": 7, "clipboard_seconds": 45, "theme": "dark", "extra": 1 }"#,
+            r#"{ "version": 1, "idle_minutes": 7, "clipboard_seconds": 45, "shortcut": { "ctrl": true, "shift": true, "alt": false, "key": 76, "extra": 1 } }"#,
+            r#"{ "version": 1, "idle_minutes": 7, "clipboard_seconds": 45, "theme": "purple" }"#,
+            r#"{ "version": 1, "idle_minutes": 7, "clipboard_seconds": 45, "capture_protected": "yes" }"#,
+            r#"{ "version": 1, "idle_minutes": 7, "clipboard_seconds": 45, "shortcut": { "ctrl": true, "shift": true, "alt": false, "key": 70000 } }"#,
+        ] {
+            let temp = TempDir::new();
+            let file = temp.path().join("settings.json");
+            fs::write(&file, damaged).unwrap();
+            assert_eq!(
+                SettingsStore::load(file.clone()).get(),
+                defaults,
+                "{damaged}"
+            );
+            assert_eq!(fs::read_to_string(&file).unwrap(), damaged);
+        }
+        // The page's own request is as strict.
+        for refused in [
+            serde_json::json!({ "idle_minutes": 5, "clipboard_seconds": 30, "extra": true }),
+            serde_json::json!({ "idle_minutes": 5, "clipboard_seconds": 30, "theme": "purple" }),
+            serde_json::json!({ "idle_minutes": 5, "clipboard_seconds": 30, "shortcut": { "ctrl": true } }),
+            serde_json::json!({ "idle_minutes": 5, "clipboard_seconds": 30, "shortcut": { "ctrl": true, "shift": true, "alt": false, "key": 76, "path": "C:\\" } }),
+            serde_json::json!({ "idle_minutes": 5, "clipboard_seconds": 30, "capture_protected": 1 }),
+        ] {
+            assert!(
+                serde_json::from_value::<Settings>(refused.clone()).is_err(),
+                "{refused}"
+            );
+        }
+    }
+
+    /// What the new fields hold is written, and read back by the next launch.
+    #[test]
+    fn new_settings_are_saved_and_read_back() {
+        let temp = TempDir::new();
+        let file = temp.path().join("Lockbox").join("settings.json");
+        let store = SettingsStore::load(file.clone());
+        let chosen = Settings {
+            theme: Theme::Dark,
+            shortcut: Shortcut {
+                ctrl: true,
+                shift: false,
+                alt: true,
+                key: 0x71,
+            },
+            capture_protected: false,
+            ..Settings::default()
+        };
+        store.set(chosen).unwrap();
+        let written = saved(&file);
+        assert_eq!(written["theme"], "dark");
+        assert_eq!(
+            written["shortcut"],
+            serde_json::json!({ "ctrl": true, "shift": false, "alt": true, "key": 113 })
+        );
+        assert_eq!(written["capture_protected"], false);
+        assert_eq!(SettingsStore::load(file).get(), chosen);
+
+        for (theme, word) in [
+            (Theme::System, "system"),
+            (Theme::Light, "light"),
+            (Theme::Dark, "dark"),
+        ] {
+            assert_eq!(serde_json::to_value(theme).unwrap(), word);
+            assert_eq!(serde_json::from_value::<Theme>(word.into()).unwrap(), theme);
+        }
+    }
+
+    /// A shortcut needs at least two of Ctrl, Shift and Alt, a key that is a letter, a digit or F1 to F12, and is never
+    /// Ctrl with C, V or X (whatever else is held): `InvalidInput { what: "shortcut" }`, and nothing is saved.
+    #[test]
+    fn shortcut_needs_two_modifiers() {
+        let refused = Err(ShellError::InvalidInput { what: "shortcut" });
+        let with = |ctrl, shift, alt, key| Settings {
+            shortcut: Shortcut {
+                ctrl,
+                shift,
+                alt,
+                key,
+            },
+            ..Settings::default()
+        };
+        let (a, zero, f1) = (0x41, 0x30, 0x70);
+        let table = [
+            // Two or three modifiers, any allowed key.
+            (with(true, true, false, a), Ok(())),
+            (with(true, false, true, a), Ok(())),
+            (with(false, true, true, a), Ok(())),
+            (with(true, true, true, a), Ok(())),
+            (with(true, true, false, 0x5A), Ok(())),
+            (with(true, true, false, zero), Ok(())),
+            (with(true, true, false, 0x39), Ok(())),
+            (with(true, true, false, f1), Ok(())),
+            (with(true, true, false, 0x7B), Ok(())),
+            // Fewer than two modifiers.
+            (with(false, false, false, a), refused),
+            (with(true, false, false, a), refused),
+            (with(false, true, false, a), refused),
+            (with(false, false, true, a), refused),
+            (with(false, false, false, f1), refused),
+            // A key that is not a letter, a digit or F1 to F12.
+            (with(true, true, false, 0), refused),
+            (with(true, true, false, 0x40), refused),
+            (with(true, true, false, 0x5B), refused),
+            (with(true, true, false, 0x2F), refused),
+            (with(true, true, false, 0x3A), refused),
+            (with(true, true, false, 0x6F), refused),
+            (with(true, true, false, 0x7C), refused),
+            (with(true, true, false, 0x0D), refused),
+            (with(true, true, false, 0x1B), refused),
+            (with(true, true, false, u16::MAX), refused),
+            // Ctrl with C, V or X, whatever else is held.
+            (with(true, true, false, 0x43), refused),
+            (with(true, true, false, 0x56), refused),
+            (with(true, true, false, 0x58), refused),
+            (with(true, false, true, 0x43), refused),
+            (with(true, true, true, 0x56), refused),
+            // The same keys without Ctrl are only a shortcut like another.
+            (with(false, true, true, 0x43), Ok(())),
+            (with(false, true, true, 0x56), Ok(())),
+            (with(false, true, true, 0x58), Ok(())),
+        ];
+        for (settings, expected) in table {
+            assert_eq!(settings.check(), expected, "{:?}", settings.shortcut);
+        }
+
+        // A refused shortcut is neither saved nor put in effect.
+        let temp = TempDir::new();
+        let file = temp.path().join("settings.json");
+        let store = SettingsStore::load(file.clone());
+        assert_eq!(store.set(with(true, false, false, a)), refused);
+        assert_eq!(store.get(), Settings::default());
+        assert!(!file.exists());
+        // The order of the checks: a refused idle time is named before a refused shortcut.
+        let both = Settings {
+            idle_minutes: 0,
+            ..with(true, false, false, a)
+        };
+        assert_eq!(
+            both.check(),
+            Err(ShellError::InvalidInput { what: "idle time" })
+        );
     }
 
     /// The note is saved in the settings file beside the page's settings, kept by every later save of them, read back by
@@ -309,6 +569,9 @@ mod tests {
                 "version": 1,
                 "idle_minutes": 5,
                 "clipboard_seconds": 30,
+                "theme": "system",
+                "shortcut": { "ctrl": true, "shift": true, "alt": false, "key": 76 },
+                "capture_protected": true,
                 "close_explained": true
             })
         );
@@ -318,6 +581,7 @@ mod tests {
         let chosen = Settings {
             idle_minutes: 2,
             clipboard_seconds: 60,
+            ..Settings::default()
         };
         store.set(chosen).unwrap();
         assert!(store.close_explained());
@@ -329,7 +593,13 @@ mod tests {
         let page = serde_json::to_value(chosen).unwrap();
         assert_eq!(
             page,
-            serde_json::json!({ "idle_minutes": 2, "clipboard_seconds": 60 })
+            serde_json::json!({
+                "idle_minutes": 2,
+                "clipboard_seconds": 60,
+                "theme": "system",
+                "shortcut": { "ctrl": true, "shift": true, "alt": false, "key": 76 },
+                "capture_protected": true
+            })
         );
         assert!(
             serde_json::from_value::<Settings>(serde_json::json!({

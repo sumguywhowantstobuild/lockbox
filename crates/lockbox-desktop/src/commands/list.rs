@@ -76,4 +76,6 @@ pub const COMMANDS: &[&str] = &[
     "copy_generated",
     "get_settings",
     "set_settings",
+    "get_startup",
+    "set_startup",
 ];

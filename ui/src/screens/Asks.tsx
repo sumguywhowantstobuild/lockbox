@@ -12,9 +12,11 @@ import {
   setOutputRecordAside,
   useLockNote,
   useNotices,
+  useSettings,
   type Banner,
   type SessionData,
 } from "../store";
+import { shortcutText } from "../shortcut";
 
 // The app's questions that an unlock, or the launch before it, has to tell (the design's "The app's questions"). Each
 // shows the design's words and only the buttons whose screen exists in 4A: a button that leads to a later plan's screen
@@ -252,12 +254,14 @@ export function OpenFilesAsk() {
  */
 export function ShortcutAsk() {
   const { shortcut } = useNotices();
+  // The shortcut Lockbox tried to take at launch is the saved one, which Settings can change.
+  const saved = shortcutText(useSettings().shortcut);
   if (shortcut === null) return null;
   return (
     <Notice
       text={
         shortcut === "taken"
-          ? "Ctrl+Shift+L is used by another app, so the save shortcut is off. Close that app and restart Lockbox to use it."
+          ? `${saved} is used by another app, so the save shortcut is off. Close that app and restart Lockbox to use it.`
           : "The save shortcut couldn't be turned on. Restart Lockbox to try again."
       }
       actions={[{ name: "Close", onPress: dismissShortcutNotice }]}

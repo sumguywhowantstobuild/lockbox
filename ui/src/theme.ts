@@ -1,5 +1,6 @@
-// Light or dark. The theme follows Windows' own setting until the settings screen lets a person choose.
+// Light or dark. The setting the person chose in Settings decides; Windows' own setting is followed only while it is "system".
 import { useSyncExternalStore } from "react";
+import { useSettings } from "./store";
 
 export type Mode = "light" | "dark";
 
@@ -22,7 +23,9 @@ function current(): Mode {
   return windowsSetting()?.matches === true ? "dark" : "light";
 }
 
-/** Windows' light or dark setting, kept up to date while the screen is open. */
+/** The saved theme, or Windows' light or dark setting (kept up to date while the screen is open) for "system". */
 export function useMode(): Mode {
-  return useSyncExternalStore(subscribe, current);
+  const windows = useSyncExternalStore(subscribe, current);
+  const { theme } = useSettings();
+  return theme === "system" ? windows : theme;
 }
