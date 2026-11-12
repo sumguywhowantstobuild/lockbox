@@ -337,7 +337,9 @@ test("filter_narrows_the_list_with_a_way_to_clear_it", async () => {
   expect(within(list).getByText("Bot admin console")).toBeTruthy();
   expect(within(list).queryByText("Error tracker")).toBeNull();
   // A filtered list must not look like missing items: it says how many of how many, and offers to clear.
-  expect(within(list).getByText("Showing 1 of 4, filtered by “console”.")).toBeTruthy();
+  // The line on screen, not the hidden place that says it aloud once typing pauses.
+  const line = list.querySelector<HTMLElement>("p.lnote");
+  expect(line?.textContent).toBe("Showing 1 of 4, filtered by “console”.");
   await expectNoAxe(container);
   fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
   expect(within(screen.getByRole("main")).getByText("Error tracker")).toBeTruthy();

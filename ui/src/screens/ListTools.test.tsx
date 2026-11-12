@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
+import { SAID_FOR_MS, SETTLE_MS } from "../useSpokenLine";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import {
@@ -114,6 +115,13 @@ function rows(): number {
   return document.querySelectorAll("main li.lrow").length;
 }
 
+/** The line on screen that says how the list is narrowed (not the hidden place that says it aloud). */
+function shownLine(): HTMLElement {
+  const line = screen.getByRole("main").querySelector<HTMLElement>("p.lnote");
+  if (line === null) throw new Error("no narrowed line on screen");
+  return line;
+}
+
 function filterBox(): HTMLInputElement {
   return screen.getByLabelText<HTMLInputElement>("Filter this list");
 }
@@ -161,23 +169,23 @@ test("filter_shows_clearly_with_a_way_to_clear", async () => {
   // Only the keys, and the list says it is narrowed, with a way back: it must not look like missing items.
   expect(titles()).toEqual(["OPENAI_API_KEY", "WEBHOOK_SECRET"]);
   const main = screen.getByRole("main");
-  expect(within(main).getByText("Showing 2 keys of 6 items.")).toBeTruthy();
+  expect(within(shownLine()).getByText("Showing 2 keys of 6 items.")).toBeTruthy();
   await expectNoAxe(container);
   fireEvent.click(within(main).getByRole("button", { name: "Show all" }));
   expect(rows()).toBe(6);
   expect(box("kind").textContent).toBe("All kinds");
-  expect(within(main).queryByText(/^Showing /)).toBeNull();
+  expect(main.querySelector("p.lnote")).toBeNull();
   expect(within(main).queryByRole("button", { name: "Show all" })).toBeNull();
 
   // One of a kind is said as one.
   await pick("kind", "Notes");
-  expect(within(main).getByText("Showing 1 note of 6 items.")).toBeTruthy();
+  expect(within(shownLine()).getByText("Showing 1 note of 6 items.")).toBeTruthy();
 
   // A typed filter on top of a kind: both are said, and Show all clears both.
   await pick("kind", "Logins");
   fireEvent.change(filterBox(), { target: { value: "console" } });
   expect(titles()).toEqual(["Bot admin console"]);
-  expect(within(main).getByText("Showing 1 login of 6 items, filtered by “console”.")).toBeTruthy();
+  expect(within(shownLine()).getByText("Showing 1 login of 6 items, filtered by “console”.")).toBeTruthy();
   fireEvent.click(within(main).getByRole("button", { name: "Show all" }));
   expect(rows()).toBe(6);
   expect(filterBox().value).toBe("");
@@ -185,50 +193,101 @@ test("filter_shows_clearly_with_a_way_to_clear", async () => {
 
   // A typed filter alone keeps its own words, and its own way to clear in the box.
   fireEvent.change(filterBox(), { target: { value: "console" } });
-  expect(within(main).getByText("Showing 1 of 6, filtered by “console”.")).toBeTruthy();
+  expect(within(shownLine()).getByText("Showing 1 of 6, filtered by “console”.")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
   expect(rows()).toBe(6);
 
   // In a folder the count is the folder's.
   fireEvent.click(within(screen.getByRole("navigation", { name: "Vault and folders" })).getByRole("button", { name: /^Agency support agent/ }));
   await pick("kind", "Keys");
-  expect(within(screen.getByRole("main")).getByText("Showing 2 keys of 4 items.")).toBeTruthy();
+  expect(within(shownLine()).getByText("Showing 2 keys of 4 items.")).toBeTruthy();
 });
 
-/** The place in the list that says how it is narrowed: read out politely, as a whole, whenever it changes. */
+/** The place in the list that says how it is narrowed: read out politely, as a whole, once the change has settled. */
 function narrowedPlace(): HTMLElement {
   const found = screen.getByRole("main").querySelectorAll<HTMLElement>('[aria-live="polite"]');
   expect(found).toHaveLength(1);
   return found[0] as HTMLElement;
 }
 
+/** From here on the page's timers are fake too (the vault's answers have already come, on real ones). */
+function fakePageTimers() {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  vi.setSystemTime(new Date("2026-11-06T12:00:00Z"));
+}
+
+/** Lets `ms` pass on the page's timers. */
+function wait(ms: number) {
+  act(() => {
+    vi.advanceTimersByTime(ms);
+  });
+}
+
 test("a_narrowed_list_is_announced_as_it_changes", async () => {
   // Task 21's keyboard pass: a screen reader speaks only changes in a place it already knows, so the place that says how the list is
-  // narrowed is on the page before anything is narrowed, and the same place says each change. It is not a second "status": the
-  // message at the foot of the window stays the one place that announces copies and saves.
+  // narrowed is on the page before anything is narrowed, and the same place says each change once it has settled. It is not a second
+  // "status": the message at the foot of the window stays the one place that announces copies and saves.
   await unlocked();
   const place = narrowedPlace();
   expect(place.getAttribute("aria-atomic")).toBe("true");
   expect(place.textContent).toBe("");
+  fakePageTimers();
 
   fireEvent.change(filterBox(), { target: { value: "console" } });
+  wait(SETTLE_MS);
   expect(narrowedPlace()).toBe(place);
   expect(place.textContent).toBe("Showing 1 of 6, filtered by “console”.");
 
   await pick("kind", "Keys");
+  wait(SETTLE_MS);
   // Nothing of that kind matches: the card says so on screen, and the place says it too, with how many items there really are.
   expect(narrowedPlace()).toBe(place);
   expect(place.textContent).toBe("Nothing here matches “console”. My vault has 6 items.");
 
   fireEvent.change(filterBox(), { target: { value: "" } });
-  expect(place.textContent).toBe("Showing 2 keys of 6 items. Show all");
+  wait(SETTLE_MS);
+  // The words only: "Show all" is a button on the line on screen, not part of what is said.
+  expect(place.textContent).toBe("Showing 2 keys of 6 items.");
 
   const side = screen.getByRole("navigation", { name: "Vault and folders" });
   fireEvent.click(within(side).getByRole("button", { name: /^Lineproof/ }));
+  wait(SETTLE_MS);
   expect(narrowedPlace().textContent).toBe("No keys here. Lineproof has 1 item.");
 
   fireEvent.click(within(screen.getByRole("main")).getByRole("button", { name: "Show all" }));
+  wait(SETTLE_MS);
   expect(narrowedPlace().textContent).toBe("");
+});
+
+test("the_narrowed_line_is_said_once_typing_pauses", async () => {
+  // Stage 7's NVDA check: a sentence per key typed ("Showing 11 of 19, filtered by d", "…by de", …) is noise. The list and the line
+  // on screen change at once; what is said waits until typing has paused, says the result once, and goes again a little later, so
+  // reading down the page doesn't meet it twice.
+  await unlocked();
+  const place = narrowedPlace();
+  const said: string[] = [];
+  const watcher = new MutationObserver(() => {
+    if (place.textContent !== "") said.push(place.textContent);
+  });
+  watcher.observe(place, { childList: true, characterData: true, subtree: true });
+  fakePageTimers();
+
+  for (const typed of ["c", "co", "con", "cons", "console"]) {
+    fireEvent.change(filterBox(), { target: { value: typed } });
+    wait(SETTLE_MS - 100);
+  }
+  // On screen at once, with nothing said yet.
+  expect(within(shownLine()).getByText("Showing 1 of 6, filtered by “console”.")).toBeTruthy();
+  expect(place.textContent).toBe("");
+
+  wait(100);
+  await Promise.resolve();
+  expect(place.textContent).toBe("Showing 1 of 6, filtered by “console”.");
+  expect(said).toEqual(["Showing 1 of 6, filtered by “console”."]);
+
+  wait(SAID_FOR_MS);
+  expect(place.textContent).toBe("");
+  watcher.disconnect();
 });
 
 test("nothing_matching_says_so", async () => {

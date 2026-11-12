@@ -7,6 +7,7 @@ import { CloseIcon, FilterIcon, MoreIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
 import type { VaultLook } from "../parts/Pattern";
 import { ToastStack } from "../parts/Toast";
+import { useSpokenLine } from "../useSpokenLine";
 import {
   copyEnv,
   copyField,
@@ -152,6 +153,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   let leftNothing: string | null = null;
   if (state === "no_match") leftNothing = `Nothing here matches “${word}”. ${holder} has ${itemCount(inView.length)}.`;
   else if (state === "no_kind" && kind !== "all") leftNothing = `No ${kindPlural(kind)} here. ${holder} has ${itemCount(inView.length)}.`;
+  const said = useSpokenLine(narrowed ? showing : leftNothing);
 
   return (
     <div className="win">
@@ -257,29 +259,31 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               <VaultBanners data={data} />
             </div>
             <DetailsChangedAsk data={data} />
-            {/* The place that says how the list is narrowed. It is always on the page, so a screen reader speaks the line when it
-                appears or changes (it speaks only changes in a place it already knows); a line that came with the change would be silent. */}
-            <div className="lsay" aria-live="polite" aria-atomic="true">
-              {narrowed ? (
-                <p className="lnote">
-                  {showing}
-                  {kind === "all" ? null : (
-                    <>
-                      {" "}
-                      <button
-                        type="button"
-                        className="lnk"
-                        onClick={() => {
-                          showAll(data.session);
-                        }}
-                      >
-                        Show all
-                      </button>
-                    </>
-                  )}
-                </p>
-              ) : null}
-              {leftNothing === null ? null : <span className="sr">{leftNothing}</span>}
+            {/* How the list is narrowed, on screen at once. */}
+            {narrowed ? (
+              <p className="lnote">
+                {showing}
+                {kind === "all" ? null : (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      className="lnk"
+                      onClick={() => {
+                        showAll(data.session);
+                      }}
+                    >
+                      Show all
+                    </button>
+                  </>
+                )}
+              </p>
+            ) : null}
+            {/* The place that says it. It is always on the page, so a screen reader speaks the line when it changes (it speaks only
+                changes in a place it already knows; a line that came with the change would be silent). It takes the line only once
+                typing has paused, so one sentence is said rather than one per key, and empties again a little later. */}
+            <div className="lsay sr" aria-live="polite" aria-atomic="true">
+              {said}
             </div>
             {state === "problem" && problem !== null ? (
               <p className="err" role="alert">
