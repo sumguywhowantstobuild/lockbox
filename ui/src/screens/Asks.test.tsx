@@ -446,7 +446,7 @@ test("a_restore_notice_of_4b_shows_nothing_and_no_path", async () => {
   expect(buttonNames()).toEqual(["Unlock"]);
 });
 
-test("damaged_vault_list_shows_a_message", async () => {
+test("damaged_vault_list_shows_its_own_screen_with_the_way_out", async () => {
   const { container } = start([vault()]);
   const real = invoke.getMockImplementation();
   if (real === undefined) throw new Error("no fake shell");
@@ -456,10 +456,10 @@ test("damaged_vault_list_shows_a_message", async () => {
         Promise.reject(VAULT_LIST_DAMAGED)
       : (real(cmd, args) as Promise<unknown>),
   );
-  const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toBe("Lockbox lost its list of vaults. Your vaults are still in their folders.");
-  // Starting a new list is 4C's: until then no button leads there.
-  expect(buttonNames()).toEqual([]);
+  // Ask 12 is its own first-run style screen (`setup/LostList.test.tsx` has its words and its button's work), not the lock screen's dead end.
+  await screen.findByRole("heading", { level: 1, name: "Lockbox lost its list of vaults" });
+  expect(buttonNames()).toEqual(["Start a new list"]);
+  expect(screen.queryByRole("alert")).toBeNull();
   await expectNoAxe(container);
 });
 

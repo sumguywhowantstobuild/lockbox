@@ -162,6 +162,16 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Lost list of vaults (Ask 12)",
+    shows: ["setup/LostList#LostList", "setup/Frame#Frame"],
+    reach: async () => {
+      shell = installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: sampleItems() }]);
+      shell.damageVaultList();
+      render(<App />);
+      await screen.findByRole("heading", { level: 1, name: "Lockbox lost its list of vaults" });
+    },
+  },
+  {
     name: "Create your vault (21b)",
     shows: ["setup/CreateVault#CreateVault"],
     reach: toTheForm,

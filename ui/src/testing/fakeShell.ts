@@ -244,6 +244,21 @@ export interface FakeShell {
   dismissPickerNext(): void;
   /** The vault the next `add_existing_vault` finds in the folder the person picks. */
   offerExisting(vault: FakeVault): void;
+  /**
+   * From now on the vault list can't be read: `list_vaults` is refused as damaged (`VAULT_LIST_DAMAGED`) until `start_new_vault_list`
+   * sets it aside, which leaves the list empty, as the shell's does. That command is refused (`invalid_input`, `vault list`) while the
+   * list is good.
+   */
+  damageVaultList(): void;
+  /**
+   * The next `start_new_vault_list` sets the damaged list aside and leaves an empty one, then is refused with `error`, as the shell's is
+   * when the move worked and writing the new list did not: the list reads as empty from then on, but the answer is a refusal.
+   */
+  startNewListFailsAfterMoveNext(error: object): void;
+  /** The damaged list is mended from outside: `list_vaults` reads it again (its vaults still there) with no command from the page. */
+  repairVaultList(): void;
+  /** Holds every `start_new_vault_list` answer until `release` is called: the list is set aside when the command arrives. */
+  holdStartNewList(): () => void;
   /** The folders a recovery key PDF was saved in, in order (a PDF the shell never wrote is not here). */
   pdfs: string[];
   /** The next Save as PDF, or Save as .env file, is closed without a choice. */
@@ -727,6 +742,9 @@ export function installFakeShell(
   let refuseMark = false;
   let dismissPicker = false;
   let existing: FakeVault | undefined;
+  let listDamaged = false;
+  let heldStartList: (() => void)[] | undefined;
+  let failAfterMove: object | undefined;
   let nextToken = 0;
   const pendingCreates = new Map<string, { name: string; password: string }>();
   const pendingAdds = new Set<string>();
@@ -923,7 +941,21 @@ export function installFakeShell(
     switch (cmd) {
       case "list_vaults":
         exactly(args ?? {}, []);
+        if (listDamaged) return refuse(VAULT_LIST_DAMAGED);
         return vaults.map((v) => ({ id: v.id, name: v.name, available: v.available ?? true }));
+      case "start_new_vault_list":
+        exactly(args ?? {}, []);
+        // Only a damaged list is started over: a good one is refused and left as it is.
+        if (!listDamaged) return refuse({ code: "invalid_input", what: "vault list" });
+        // The damaged file is set aside and a new, empty list is made: no vault is on it until each is added back.
+        listDamaged = false;
+        vaults.splice(0);
+        if (failAfterMove !== undefined) {
+          const failure = failAfterMove;
+          failAfterMove = undefined;
+          return refuse(failure);
+        }
+        return null;
       case "get_settings":
         exactly(args ?? {}, []);
         return { ...settings, shortcut: { ...settings.shortcut } };
@@ -1937,7 +1969,12 @@ export function installFakeShell(
           });
         });
       }
-      for (const [name, waiting] of [["retry_open_cleanup", heldRetry], ["get_item", heldGetItem], ["set_settings", heldSettings]] as const) {
+      for (const [name, waiting] of [
+        ["retry_open_cleanup", heldRetry],
+        ["get_item", heldGetItem],
+        ["set_settings", heldSettings],
+        ["start_new_vault_list", heldStartList],
+      ] as const) {
         if (cmd === name && waiting !== undefined) {
           return new Promise((resolve) => {
             waiting.push(() => {
@@ -2068,6 +2105,23 @@ export function installFakeShell(
     },
     offerExisting: (vault) => {
       existing = vault;
+    },
+    damageVaultList: () => {
+      listDamaged = true;
+    },
+    startNewListFailsAfterMoveNext: (error) => {
+      failAfterMove = error;
+    },
+    repairVaultList: () => {
+      listDamaged = false;
+    },
+    holdStartNewList: () => {
+      const waiting: (() => void)[] = [];
+      heldStartList = waiting;
+      return () => {
+        heldStartList = undefined;
+        for (const release of waiting) release();
+      };
     },
     pdfs,
     dismissPdfNext: () => {

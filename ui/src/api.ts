@@ -185,6 +185,16 @@ export function listVaults(): Promise<VaultEntry[]> {
   return callPlain<VaultEntry[]>("list_vaults", {});
 }
 
+/**
+ * Sets a damaged vault list aside (the shell keeps the file under another name, never deletes it) and starts a new, empty one
+ * (Ask 12). Refused when the list reads fine (`invalid_input`, `vault list`), when a hundred damaged lists are already set aside
+ * (`too_large`, `damaged vault lists`) or when the disk won't take the change (`core`, `io`); nothing is changed by a refusal that
+ * comes before the move.
+ */
+export function startNewVaultList(): Promise<null> {
+  return callPlain<null>("start_new_vault_list", {});
+}
+
 export function getSettings(): Promise<Settings> {
   return callPlain<Settings>("get_settings", {});
 }

@@ -8,9 +8,10 @@ import { FirstClose } from "./screens/FirstClose";
 import { LockScreen } from "./screens/LockScreen";
 import { MainWindow } from "./screens/MainWindow";
 import { FirstRun } from "./screens/setup/FirstRun";
+import { LostList } from "./screens/setup/LostList";
 import { PickWords } from "./screens/setup/PickWords";
 import { RecoveryKey } from "./screens/setup/RecoveryKey";
-import { startCapture, startNotices, startStore, useSessions, useStartError, useVaults } from "./store";
+import { startCapture, startNotices, startStore, useSessions, useStartError, useVaultListDamaged, useVaults } from "./store";
 import { useMode } from "./theme";
 import "./styles/tokens.css";
 import "./styles/base.css";
@@ -20,7 +21,7 @@ import "./styles/high-contrast.css";
 import "./styles/print.css";
 
 /**
- * The whole app: first-time setup while there is no vault, the lock screen while none is open, the main window of the
+ * The whole app: first-time setup while there is no vault, the lost-list screen while the list of vaults is damaged, the lock screen while none is open, the main window of the
  * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. The
  * store starts listening for locks before anything asks the shell for anything. The first close of the window is explained
  * over whichever of these is up (5b). Light or dark follows the theme chosen in Settings, and Windows' own setting for System.
@@ -30,6 +31,7 @@ export default function App() {
   const sessions = useSessions();
   const vaults = useVaults();
   const startError = useStartError();
+  const listDamaged = useVaultListDamaged();
   // The element the floating parts (dialogs, menus) are drawn in, so they carry the screen's colours.
   const [root, setRoot] = useState<HTMLElement | null>(null);
 
@@ -52,6 +54,9 @@ export default function App() {
     if (active.recovery === null) screen = <MainWindow data={active} look={look} />;
     else if (active.recovery.phase === "pick") screen = <PickWords data={active} />;
     else screen = <RecoveryKey data={active} />;
+  } else if (listDamaged) {
+    // The list of vaults can't be read (Ask 12): its own screen, with the way out, instead of the lock screen's red sentence.
+    screen = <LostList />;
   } else if (vaults !== null && vaults.length === 0 && startError === null) {
     // No vault at all: first-time setup (21a).
     screen = <FirstRun />;

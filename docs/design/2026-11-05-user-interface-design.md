@@ -379,7 +379,8 @@ for the vault's name. Moments with their own screen in a task (10d, 10e, 1c, 2c,
 | Printer gone | That printer isn't available any more. Pick another one. | OK |
 
 **New behind these:** today's code has no "no" answer to Ask 3. Lock this vault uses the lock that already exists, and the
-question comes back at the next unlock. The vault-list reset for Ask 12 doesn't exist yet either. The shell has to say which
+question comes back at the next unlock. The vault-list reset for Ask 12 is built: its own first-run style screen with
+Start a new list, which sets the damaged file aside as `vaults.damaged.json` and starts an empty list. The shell has to say which
 credential the copies disagree on, since the engine refuses the other one (`HeaderGuard`).
 
 **Where this differs from the pictures, the words here win:** Ask 3's message, and the refused-backup messages (the pictures

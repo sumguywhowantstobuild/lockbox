@@ -241,6 +241,17 @@ test("a_damaged_stored_file_has_the_designs_words_and_no_backup_button_text", ()
   expect(messageFor({ code: "core", kind: "damaged", what: "item" }).title).toBe("Lockbox can't read part of this vault.");
 });
 
+test("the_new_vault_list_refusals_say_no_more_than_the_plain_words", () => {
+  // `Start a new list` is refused for a list that reads fine (or none), and once a hundred damaged copies are already set aside.
+  expect(KNOWN_WHATS).toContain("damaged vault lists");
+  expect(KNOWN_WHATS).toContain("vault list");
+  expect(messageFor({ code: "invalid_input", what: "vault list" }).title).toBe("Lockbox can't use that.");
+  expect(messageFor({ code: "too_large", what: "damaged vault lists" }).title).toBe("That is too big for Lockbox to keep.");
+  // The damaged list itself keeps its own words, which the lost-list screen no longer needs but a refused add still can say.
+  expect(messageFor({ code: "core", kind: "damaged", what: "vault list" }).title).toBe("Lockbox lost its list of vaults.");
+  expect([...KNOWN_WHATS]).toEqual([...KNOWN_WHATS].sort());
+});
+
 test("no_message_contains_raw_error_text", () => {
   const SENTINEL = "SENTINEL-7f3a C:\\Users\\secret";
   const errors: unknown[] = [

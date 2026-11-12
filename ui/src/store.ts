@@ -548,6 +548,36 @@ export async function refreshVaults(): Promise<VaultEntry[] | null> {
   }
 }
 
+/**
+ * Whether the shell refused the vault list because the file is damaged (and only that: any other refusal is not this one). The
+ * words of the refusal never decide anything here, only its fixed code, kind and label.
+ */
+export function isVaultListDamaged(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "core" &&
+    (error as { kind?: unknown }).kind === "damaged" &&
+    (error as { what?: unknown }).what === "vault list"
+  );
+}
+
+/**
+ * Sets the damaged vault list aside and starts a new one (Ask 12), then reads the list again: it comes back empty, so the first
+ * screen opens, where each vault is added back. A refusal is thrown for the screen to say. Whatever the command came to, the list is
+ * read again: a refusal can come after the damaged file was moved (the new list could not be written, so the list now reads as
+ * empty), or because someone mended the list meanwhile. When the read is good the lost-list screen goes by itself; while the list
+ * still can't be read the screen stays, with the refusal in words.
+ */
+export async function startNewVaultList(): Promise<void> {
+  try {
+    await api.startNewVaultList();
+  } finally {
+    // `refreshVaults` catches its own errors, so the command's refusal is still what the caller gets.
+    await refreshVaults();
+  }
+}
+
 /** What a create, or an add of an existing vault, came to. */
 export type SetupResult =
   | "done"
@@ -2736,6 +2766,11 @@ export function useVaults(): VaultEntry[] | null {
 
 export function useStartError(): unknown {
   return useSelect((current) => current.startError);
+}
+
+/** Whether the vault list could not be read because the file is damaged (see `isVaultListDamaged`). */
+export function useVaultListDamaged(): boolean {
+  return useSelect((current) => isVaultListDamaged(current.startError));
 }
 
 export function useToast(): Toast | null {

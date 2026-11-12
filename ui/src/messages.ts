@@ -121,7 +121,8 @@ export const MESSAGES: Record<string, Words> = {
   // here; the button that opens one is 4B's, so only the sentence is shown.
   "core:damaged:file": { title: "This file is damaged, so it can't be opened or saved.", body: "A backup may have a good copy." },
   "core:damaged:file missing": { title: "This file is missing, so it can't be opened or saved.", body: "A backup may have a good copy." },
-  // Ask 12: the list of vaults itself. The design's "Start a new list, then add each vault back" waits for the screen that does it (4C).
+  // Ask 12: the list of vaults itself. The lost-list screen (`screens/setup/LostList.tsx`) has the design's own words and its
+  // "Start a new list" button; these are for any other place that meets the same refusal (a refused add, say).
   "core:damaged:vault list": { title: "Lockbox lost its list of vaults.", body: "Your vaults are still in their folders." },
   "core:password_too_short": { title: "That password is too short.", body: "" },
   "core:not_enough_space": { title: "There isn't enough room on that drive.", body: "" },
@@ -197,6 +198,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "collection has items",
   "collection inside a collection",
   "damaged output journals",
+  "damaged vault lists",
   "destination changed",
   "destination exists",
   "destination in a vault folder",

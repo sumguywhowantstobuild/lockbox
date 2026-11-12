@@ -12,6 +12,7 @@
     "allow-lock-all",
     "allow-close-explained-ok",
     "allow-list-vaults",
+    "allow-start-new-vault-list",
     "allow-add-existing-vault",
     "allow-add-existing-vault-confirm",
     "allow-forget-vault",

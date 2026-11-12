@@ -701,6 +701,18 @@ pub(super) async fn list_vaults(
     blocking(move || shell.registry.list()).await
 }
 
+/// The first screen's "Start a new list" (Ask 12): sets a damaged vault list aside and makes an empty one. Refused for a
+/// list that reads fine; takes no arguments, and the page never sees a path.
+#[tauri::command]
+pub(super) async fn start_new_vault_list(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let NoArgs {} = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.registry.start_new_list()).await
+}
+
 #[tauri::command]
 pub(super) async fn add_existing_vault(
     shell: State<'_, Arc<Shell>>,
@@ -2742,7 +2754,7 @@ mod tests {
         refuses_a_path::<CreateVault>(
             json!({ "name": "Family", "password": PW, "choose_folder": true }),
         );
-        // `add_existing_vault` and `list_vaults`.
+        // `add_existing_vault`, `list_vaults` and `start_new_vault_list`.
         refuses_a_path::<NoArgs>(json!({}));
         refuses_a_path::<VaultArg>(json!({ "id": 1 }));
         // `create_vault_confirm` and `add_existing_vault_confirm`.

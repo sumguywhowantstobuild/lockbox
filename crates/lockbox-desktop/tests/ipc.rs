@@ -356,6 +356,37 @@ fn capture_commands_are_granted_to_the_main_window_only() {
     }
 }
 
+/// `start_new_vault_list` (the lost-list screen's button) is listed, granted to the main window and reaches its handler
+/// from it; another window and a remote origin are refused by the ACL, before the handler. It takes no arguments, no session
+/// and no path, so the stale-generation, foreign-ID and read-only refusals do not apply to it (its own tests are in
+/// `registry`, and `commands::vaults` refuses a request with a field).
+#[test]
+fn start_new_vault_list_is_granted_to_the_main_window_only() {
+    let cmd = "start_new_vault_list";
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(granted.contains(&"allow-start-new-vault-list"));
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({}));
+    // Past the ACL and inside the handler: this test app keeps no shell state.
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
 #[test]
 fn remote_origin_is_refused() {
     let app = app();
