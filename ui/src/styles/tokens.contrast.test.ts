@@ -200,6 +200,24 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         const letter: Rgba = [mixed(0), mixed(1), mixed(2), 1];
         check(`folder letter ${tile}`, letter, over([...base, 0.15] as Rgba, rail), 4.5);
       }
+      // A list row's kind icon: a line drawing, the tile's colour mixed with the text colour, on its tint over the list
+      // and over a selected row. A picture, so 3 to 1.
+      const iconMix = Number.parseFloat(vars.get("--icon-mix") ?? "") / 100;
+      expect(iconMix, "--icon-mix is a percentage").toBeGreaterThan(0);
+      for (const tile of ["--t0", "--t1", "--t2", "--t3", "--t4"]) {
+        const base = rgbOf(tile);
+        const ink = c("--ink");
+        const mixed = (channel: 0 | 1 | 2) => base[channel] * iconMix + ink[channel] * (1 - iconMix);
+        const icon: Rgba = [mixed(0), mixed(1), mixed(2), 1];
+        for (const [name, surface] of [
+          ["a row", card],
+          ["a hovered row", hoveredRow],
+          ["a pressed row", pressedRow],
+          ["a selected row", selectedRow],
+        ] as const) {
+          check(`row icon ${tile} on ${name}`, icon, over([...base, 0.15] as Rgba, surface), 3);
+        }
+      }
 
       // Parts that show a state, 3 to 1.
       // The focus ring is the accent, drawn outside the part: against every surface behind it, and against the dark

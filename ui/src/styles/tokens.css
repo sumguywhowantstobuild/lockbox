@@ -39,6 +39,8 @@
   /* How much of its tile's colour the closed side menu's folder letter keeps; the rest is the text colour. The
      approved screens kept 68 per cent, which measures 3.7 to 1 on the amber tile; this keeps the letters at 4.5. */
   --tile-mix: 40%;
+  /* How much of its tile's colour a list row's kind icon keeps (a line drawing, so 3 to 1 is enough): as approved. */
+  --icon-mix: 68%;
 }
 
 .mode-dark {
@@ -63,6 +65,7 @@
   --switch-off: #a3a7ad;
   --switch-knob: #14171b;
   --tile-mix: 68%;
+  --icon-mix: 68%;
 }
 
 .v-work {

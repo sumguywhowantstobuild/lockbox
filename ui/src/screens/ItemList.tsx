@@ -96,10 +96,18 @@ const Row = memo(function Row({
         {/* Spaces between the parts, so the name a screen reader gets reads as words (flex ignores them). */}
         <span className="sr">{`${KIND_WORD[item.kind]}:`}</span>{" "}
         <span className="rn">
-          <Clip className="rname" text={item.title} />
+          {/* A key's name is a variable name, set in mono as drawn. */}
+          <Clip className={item.kind === "key" ? "rname m" : "rname"} text={item.title} />
           {item.attachments.length > 0 && item.kind !== "file" ? <PaperclipIcon /> : null}
         </span>{" "}
-        <Clip className="rdet" text={detail} />{" "}
+        {item.kind === "key" && detail === "" ? (
+          // As drawn: a key's row shows its value as hidden dots, a picture only (the row is heard as kind and name).
+          <span className="rdet dots" aria-hidden="true">
+            ••••••••••
+          </span>
+        ) : (
+          <Clip className="rdet" text={detail} />
+        )}{" "}
         {folder === undefined ? null : <span className="rfold">{folder}</span>}
       </button>
       <div className="cslot">

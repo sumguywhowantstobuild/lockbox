@@ -242,6 +242,18 @@ test("results_cover_every_unlocked_vault", async () => {
   });
 });
 
+test("a_keys_result_shows_its_name_in_mono_as_drawn", async () => {
+  // Found at stage 7: key names were in the body font in search too; the approved results set them in mono.
+  const withKey: FakeItem = { id: itemId(30), kind: "key", title: "TELEGRAM_BOT_TOKEN", value: "made-up-token", modified_at: "2026-11-04T09:00:00Z" };
+  await unlocked([{ ...MINE, items: [...sampleItems(), withKey] }]);
+  const { dialog } = await searchFor("telegram");
+  const key = await result(dialog, /TELEGRAM_BOT_TOKEN/);
+  expect(key.querySelector(".ht")?.classList.contains("m")).toBe(true);
+  fireEvent.change(within(dialog).getByRole("textbox", { name: SEARCH }), { target: { value: "console" } });
+  const login = await result(dialog, /Bot admin console/);
+  expect(login.querySelector(".ht")?.classList.contains("m")).toBe(false);
+});
+
 test("result_actions_copy_password_and_username", async () => {
   await unlocked();
   const { dialog } = await searchFor("support");

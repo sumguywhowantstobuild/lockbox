@@ -154,10 +154,19 @@ test("keys_are_listed_in_a_group_with_a_copy_button_each", async () => {
   await expectNoAxe(container);
 });
 
+test("only_a_keys_heading_is_in_mono", async () => {
+  await unlocked();
+  const note = await select("Rotation steps");
+  expect(within(note).getByRole("heading", { level: 2, name: "Rotation steps" }).classList.contains("m")).toBe(false);
+  const login = await select("Bot admin console");
+  expect(within(login).getByRole("heading", { level: 2, name: "Bot admin console" }).classList.contains("m")).toBe(false);
+});
+
 test("value_hidden_until_reveal", async () => {
   const { container } = await unlocked();
   const panel = await select("TELEGRAM_BOT_TOKEN");
-  expect(within(panel).getByRole("heading", { level: 2, name: "TELEGRAM_BOT_TOKEN" })).toBeTruthy();
+  // A key's name is a variable name: its heading is in mono, as drawn (3c).
+  expect(within(panel).getByRole("heading", { level: 2, name: "TELEGRAM_BOT_TOKEN" }).classList.contains("m")).toBe(true);
   expect(within(panel).getByText("Key · Agency support agent · changed 2 days ago")).toBeTruthy();
   // 3c: the value is hidden, with Copy key and Reveal; the shell said only that there is a value.
   const value = (await within(panel).findByText("Value")).closest("div");

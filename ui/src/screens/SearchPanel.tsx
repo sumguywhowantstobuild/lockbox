@@ -220,7 +220,7 @@ export function SearchPanel() {
                       </span>{" "}
                       <span className="sr">{`${WORD[shownKind] ?? ""}:`}</span>{" "}
                       <span className="hmeta">
-                        <Clip className="ht" text={title} /> <Clip className="hd" text={detail} />
+                        <Clip className={shownKind === "key" ? "ht m" : "ht"} text={title} /> <Clip className="hd" text={detail} />
                       </span>
                     </button>
                     {forFile === null ? null : (

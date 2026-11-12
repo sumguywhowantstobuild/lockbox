@@ -685,6 +685,20 @@ test("a_picked_trash_row_opens_a_panel_with_restore_and_delete_for_good_and_noth
   await expectNoAxe(document.body);
 });
 
+test("a_trashed_keys_name_is_in_mono_in_its_row_and_heading_as_in_the_list", async () => {
+  // The list, its details and search set a key's name in mono (as drawn); the Trash shows the same key the same way.
+  await unlocked({
+    extra: [{ id: itemId(61), kind: "key", title: "OLD_API_KEY", value: "made-up-old-key", trashed: true, trashedAt: "2026-11-09T09:00:00Z" }],
+  });
+  await openTrash();
+  expect(row("Key", "OLD_API_KEY").querySelector(".rname")?.classList.contains("m")).toBe(true);
+  expect(row("Login", "Old CRM login").querySelector(".rname")?.classList.contains("m")).toBe(false);
+  const panel = await openTrashed("Key", "OLD_API_KEY");
+  expect(within(panel).getByRole("heading", { level: 2, name: "OLD_API_KEY" }).classList.contains("m")).toBe(true);
+  const login = await openTrashed("Login", "Old CRM login");
+  expect(within(login).getByRole("heading", { level: 2, name: "Old CRM login" }).classList.contains("m")).toBe(false);
+});
+
 test("a_folder_that_is_gone_is_not_named_in_was_in", async () => {
   await unlocked({ extra: [{ id: itemId(60), kind: "note", title: "Orphan note", collection: itemId(99), trashed: true, trashedAt: "2026-11-09T09:00:00Z" }] });
   await openTrash();

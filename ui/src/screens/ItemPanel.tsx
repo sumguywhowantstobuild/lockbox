@@ -478,6 +478,7 @@ export function ItemPanel({
   return (
     <Panel
       title={summary.title}
+      titleClassName={summary.kind === "key" ? "m" : undefined}
       titleRef={justSaved ? title : undefined}
       subtitle={subtitle}
       icon={<KindIcon kind={summary.kind} />}

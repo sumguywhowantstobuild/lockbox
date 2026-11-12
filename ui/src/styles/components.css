@@ -1273,8 +1273,15 @@
   height: 30px;
   border-radius: 9px;
   background: rgba(var(--tc), 0.15);
-  color: var(--ink);
+  color: color-mix(in srgb, rgb(var(--tc)) var(--icon-mix), var(--ink));
   box-shadow: inset 0 0 0 0.5px rgba(var(--tc), 0.28);
+}
+
+/* The kind's drawing takes the tile's colour, as approved (amber for a key, blue for a login), not the vault's green. */
+.ktile .ki {
+  stroke: currentColor;
+  width: 16px;
+  height: 16px;
 }
 
 .ki {
@@ -1322,6 +1329,15 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.rdet.dots {
+  letter-spacing: 0.12em;
+}
+
+.rname.m {
+  font-size: 13.5px;
+  letter-spacing: -0.01em;
 }
 
 .stage.open .rdet {
@@ -1480,6 +1496,14 @@
   letter-spacing: -0.024em;
   text-wrap: balance;
   overflow-wrap: anywhere;
+}
+
+/* A key's name as the heading of its details, in mono at the drawn size (3c). */
+.ptitle.m {
+  font-size: 17.5px;
+  line-height: 1.3;
+  font-weight: 500;
+  letter-spacing: -0.015em;
 }
 
 .psub {
@@ -2244,6 +2268,12 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A key's result: its name in mono at the drawn size (4b). */
+.ht.m {
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .hd {

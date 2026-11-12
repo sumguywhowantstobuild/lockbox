@@ -82,7 +82,7 @@ export function TrashView({
                     {/* Spaces between the parts, so the name a screen reader gets reads as words (flex ignores them). */}
                     <span className="sr">{`${KIND_WORD[item.kind]}:`}</span>{" "}
                     <span className="rn">
-                      <Clip className="rname" text={item.title} />
+                      <Clip className={item.kind === "key" ? "rname m" : "rname"} text={item.title} />
                     </span>{" "}
                     <Clip className="rdet" text={detail} />
                   </button>
@@ -129,6 +129,7 @@ export function TrashPanel({ data, summary, items }: { data: SessionData; summar
   return (
     <Panel
       title={summary.title}
+      titleClassName={summary.kind === "key" ? "m" : undefined}
       subtitle={subtitle}
       icon={<KindIcon kind={summary.kind} />}
       onClose={() => {
