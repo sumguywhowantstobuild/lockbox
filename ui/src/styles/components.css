@@ -559,6 +559,8 @@
   position: relative;
   z-index: 2;
   flex: 0 0 clamp(212px, 18vw, 252px);
+  /* One width whatever the vault is called (21g): without this a flex part grows to its widest word. */
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -636,6 +638,18 @@
 
 .vname .chip {
   margin-top: 3px;
+}
+
+/* The up-down mark after the name: its button opens the vault menu. */
+.vsw .vchev {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ink2);
+}
+
+.rail.closed .vchev {
+  display: none;
 }
 
 .rside {
@@ -822,6 +836,15 @@
 
 .rbtn:active {
   transform: scale(0.97);
+}
+
+/* Settings while its panel is open, marked as the place you are (31a): the drawn tint, with an edge in the quiet text
+   colour so the mark is not a tint alone (3 to 1 against the side menu), open or closed to icons. */
+.rbtn.on,
+.rail.closed .rbtn.on {
+  background: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--ink2);
+  color: var(--ink);
 }
 
 /* The side menu closed to icons. */
@@ -1855,7 +1878,9 @@
 .menu.mwide {
   display: flex;
   flex-direction: column;
-  min-width: 240px;
+  /* The vault menu, as drawn (5a): wider than the side menu, so it floats out over the list. */
+  width: 292px;
+  max-width: calc(100vw - 16px);
   /* Never taller than the room the window leaves it (Base UI sets this on the positioner): the lines scroll, not the action. */
   max-height: var(--available-height, 60vh);
   overflow-y: hidden;
@@ -2128,9 +2153,11 @@
   height: 32px;
   margin: 0 8px 4px;
   padding: 0 6px 0 10px;
-  background: none;
+  /* A box of its own, as drawn (1d, 3h): the card's colour with a thin edge, like the buttons at the foot. */
+  background: var(--card);
   border: 0;
-  border-radius: 9px;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px var(--line);
   color: var(--ink2);
   text-align: left;
   font-size: 13.5px;

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ItemSummary } from "../api";
-import { GeneratorIcon, ListIcon, LockIcon, PlusIcon, SearchIcon, SettingsIcon, SideMenuIcon, TrashIcon } from "../parts/Icon";
+import { ChevronsIcon, GeneratorIcon, ListIcon, LockIcon, PlusIcon, SearchIcon, SettingsIcon, SideMenuIcon, TrashIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
 import { VaultMark, type VaultLook } from "../parts/Pattern";
 import {
@@ -74,6 +74,7 @@ export function SideMenu({
                 <b>{data.name}</b>
                 {data.readOnly ? <span className="chip">Read-only</span> : null}
               </span>
+              <ChevronsIcon className="i vchev" />
             </>
           }
           notes={notes}
@@ -170,7 +171,8 @@ export function SideMenu({
       <div className="rfoot">
         <button
           type="button"
-          className="nav util navgen"
+          // Marked while its panel is open, as Trash is (drawn so in 16a); a picture of where you are, the panel says the rest.
+          className={data.tool?.kind === "generator" ? "nav util navgen on" : "nav util navgen"}
           {...named("Generator")}
           onClick={() => {
             openGenerator(data.session);
@@ -195,7 +197,7 @@ export function SideMenu({
         <div className="rbtns">
           <button
             type="button"
-            className="rbtn navset"
+            className={data.tool?.kind === "settings" ? "rbtn navset on" : "rbtn navset"}
             aria-label="Settings"
             title={closed ? "Settings" : undefined}
             onClick={() => {

@@ -200,6 +200,8 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         const letter: Rgba = [mixed(0), mixed(1), mixed(2), 1];
         check(`folder letter ${tile}`, letter, over([...base, 0.15] as Rgba, rail), 4.5);
       }
+      // A marked button at the side menu's foot (Settings open): its edge against the side menu, as a state part.
+      check("marked side-menu button's edge", c("--ink2"), rail, 3);
       // A list row's kind icon: a line drawing, the tile's colour mixed with the text colour, on its tint over the list
       // and over a selected row. A picture, so 3 to 1.
       const iconMix = Number.parseFloat(vars.get("--icon-mix") ?? "") / 100;

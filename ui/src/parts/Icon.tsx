@@ -32,8 +32,9 @@ export function CopyIcon() {
   );
 }
 
-export function ChevronsIcon() {
-  return <Drawing d="M8 10l4-4 4 4M8 14l4 4 4-4" />;
+/** The up-down mark of a choice list, and after the vault's name (its button opens a menu: drawn "My vault ⌃⌄"). */
+export function ChevronsIcon({ className = "i" }: { className?: string }) {
+  return <Drawing d="M8 10l4-4 4 4M8 14l4 4 4-4" className={className} />;
 }
 
 export function SideMenuIcon() {

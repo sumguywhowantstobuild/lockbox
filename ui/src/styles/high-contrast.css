@@ -84,13 +84,13 @@
   }
 
   /* What is selected uses Windows' own highlight. */
-  .app :is(.nav.on, .lrow.on, .mi[data-highlighted]) {
+  .app :is(.nav.on, .lrow.on, .rbtn.on, .mi[data-highlighted]) {
     forced-color-adjust: none !important;
     background: Highlight !important;
     color: HighlightText !important;
   }
 
-  .app :is(.nav.on, .lrow.on, .mi[data-highlighted]) * {
+  .app :is(.nav.on, .lrow.on, .rbtn.on, .mi[data-highlighted]) * {
     color: inherit !important;
   }
 
