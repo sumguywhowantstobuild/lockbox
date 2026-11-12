@@ -20,6 +20,8 @@ export interface MenuItem {
   checked?: boolean;
   /** Set apart from the items before it by a divider line (a plain menu, not one of choices). */
   apart?: boolean;
+  /** A picture before the words (a plain menu): the kinds in Add, as drawn (6a). Hidden from a screen reader. */
+  icon?: ReactNode;
 }
 
 /** A line that tells how something stands, in words (a vault and `Unlocked`). It is read, not chosen. */
@@ -55,7 +57,11 @@ export function Menu({
 }) {
   const container = usePortalContainer();
   const chosen = items.find((item) => item.checked === true);
-  const entries = items.some((item) => item.checked !== undefined) ? (
+  const choices = items.some((item) => item.checked !== undefined);
+  // The vault menu (with notes) and a menu of choices (Move) each have their drawn width; a choice menu lines up with its
+  // button's right edge, as drawn (12a), so it stays inside the panel.
+  const popupClass = notes !== undefined ? "menu mwide" : choices ? "menu mpick" : "menu";
+  const entries = choices ? (
     <BaseMenu.RadioGroup value={chosen === undefined ? null : (chosen.id ?? chosen.label)}>
       {items.map((item) => (
         <BaseMenu.RadioItem
@@ -77,6 +83,7 @@ export function Menu({
       <Fragment key={item.label}>
         {item.apart === true ? <BaseMenu.Separator className="mline" /> : null}
         <BaseMenu.Item className={item.danger === true ? "mi dng" : "mi"} onClick={item.onSelect}>
+          {item.icon}
           {item.label}
         </BaseMenu.Item>
       </Fragment>
@@ -88,8 +95,8 @@ export function Menu({
         {icon ?? label}
       </BaseMenu.Trigger>
       <BaseMenu.Portal container={container}>
-        <BaseMenu.Positioner className="layer" sideOffset={6}>
-          <BaseMenu.Popup className={notes === undefined ? "menu" : "menu mwide"} aria-label={popupLabel}>
+        <BaseMenu.Positioner className="layer" sideOffset={6} align={choices ? "end" : "center"}>
+          <BaseMenu.Popup className={popupClass} aria-label={popupLabel}>
             {notes === undefined || notes.length === 0 ? (
               entries
             ) : (

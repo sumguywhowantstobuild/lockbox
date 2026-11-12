@@ -102,6 +102,14 @@ function ReplaceQuestion({ name, onNo, onYes }: { name: string | null; onNo: () 
   );
 }
 
+/** A file's type for its tile: the letters after the last dot, in capitals, when there are one to four of them ("PDF"). */
+export function typeWord(name: string): string | null {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const type = name.slice(dot + 1);
+  return /^[A-Za-z0-9]{1,4}$/.test(type) ? type.toUpperCase() : null;
+}
+
 /**
  * One stored file of an item: its name and size, and Open, Save a copy and Replace file (no Replace in a vault opened from a backup, which
  * can only save a copy and open). While the vault is working on a file the pressed button says so (`aria-busy`) and every file button in
@@ -142,8 +150,9 @@ function FileRow({ data, summary, file }: { data: SessionData; summary: ItemSumm
 
   return (
     <div className="frow">
+      {/* As drawn (10f): the tile names the file's type ("PDF"); a file with no short type keeps the file picture. */}
       <span className="ftile t1" aria-hidden="true">
-        <KindIcon kind="file" />
+        {typeWord(file.name) ?? <KindIcon kind="file" />}
       </span>
       <span className="fmeta">
         <b>{file.name}</b>

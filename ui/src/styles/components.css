@@ -407,9 +407,10 @@
   gap: 0 20px;
   margin: 0;
   padding: 14px 18px;
-  background: var(--card);
-  border: 1px solid var(--edge);
-  border-radius: 12px;
+  /* A soft grey box with a hairline round it, as drawn (21c). It holds words, not a control, so it needs no 3 to 1 edge. */
+  background: var(--well);
+  box-shadow: inset 0 0 0 1px var(--line);
+  border-radius: 10px;
   font-size: 16px;
   font-weight: 500;
   line-height: 1.55;
@@ -1103,6 +1104,24 @@
 
 .win .ssort:focus-visible {
   outline-offset: 0;
+}
+
+/* A list in a settings row (31a): filled with the quiet pill's shade, no edge, its own width, a down arrow. */
+.ssort.sfill {
+  width: auto;
+  flex: none;
+  padding: 0 8px 0 10px;
+  background: rgba(var(--sh), 0.07);
+  box-shadow: none;
+}
+
+.ssort.sfill:hover,
+.ssort.sfill[data-popup-open] {
+  background: rgba(var(--sh), 0.13);
+}
+
+.ssort.sfill:active {
+  background: rgba(var(--sh), 0.18);
 }
 
 .ib {
@@ -1884,6 +1903,19 @@
   /* Never taller than the room the window leaves it (Base UI sets this on the positioner): the lines scroll, not the action. */
   max-height: var(--available-height, 60vh);
   overflow-y: hidden;
+}
+
+/* A menu of choices (Move to folder), as drawn (12a): wide enough for a long folder name. It scrolls as any long menu does. */
+.menu.mpick {
+  width: 264px;
+  max-width: calc(100vw - 16px);
+}
+
+.menu.mpick .mt {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .mscroll {
@@ -2938,22 +2970,24 @@
   line-height: 1.4;
 }
 
-/* A list in a row: the toolbar's small box, with the field's edge, since it sits on a card. */
+/* A list in a row: it keeps its own width (the list inside is as wide as its words) and never shrinks. */
 .ssel {
   flex: none;
-  width: 132px;
 }
 
-.ssel .ssort {
-  box-shadow: inset 0 0 0 1px var(--edge);
+/* The save shortcut: the key cap and the pill that changes it. Its words keep at least 112px (the drawn 1280 window gives
+   them about 130), so in a narrower panel (1093 by 534) the key and pill drop to the line under the words, at the right,
+   instead of squeezing the words into a thin column. */
+.swords:has(+ .skeys) {
+  flex: 1 1 112px;
 }
 
-/* The save shortcut: the key cap and the pill that changes it. */
 .skeys {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  margin-left: auto;
 }
 
 .skeys .kc {

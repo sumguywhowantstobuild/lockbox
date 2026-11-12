@@ -173,6 +173,8 @@ test("value_hidden_until_reveal", async () => {
   expect(value?.textContent).toContain("••••");
   expect(within(panel).getByRole("button", { name: "Copy key" })).toBeTruthy();
   const reveal = within(panel).getByRole("button", { name: "Reveal" });
+  // Reveal carries the eye, as drawn (3c), a picture only.
+  expect(reveal.querySelector("svg[aria-hidden='true']")).not.toBeNull();
   expect(within(panel).queryByRole("textbox", { name: "Key value" })).toBeNull();
   expect(container.textContent).not.toContain(BOT_TOKEN);
   expect(sent("reveal_password")).toEqual([]);
@@ -472,6 +474,14 @@ test("empty_folder_says_so", async () => {
     "Note",
     "File",
     "Paste a .env",
+  ]);
+  // Each kind's button carries its picture, as drawn (3e); the .env, after "or", has none.
+  expect(within(list).getAllByRole("button").map((button) => button.querySelector("svg[aria-hidden='true']") !== null)).toEqual([
+    true,
+    true,
+    true,
+    true,
+    false,
   ]);
   await expectNoAxe(container);
   // Paste a .env opens the paste panel.

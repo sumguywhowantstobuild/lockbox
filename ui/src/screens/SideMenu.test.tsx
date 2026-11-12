@@ -100,4 +100,6 @@ test("the_side_menu_keeps_one_width_and_settings_marked_looks_picked", () => {
   expect(search).toMatch(/box-shadow: inset 0 0 0 1px var\(--line\)/);
   // The vault menu is drawn wider than the side menu (5a), floating out over the list rather than inside the side menu.
   expect(declarationsFor(".menu.mwide")).toMatch(/(^| )width: 292px/);
+  // A menu of choices (Move) is drawn 264px wide (12a), so a long folder name fits.
+  expect(declarationsFor(".menu.mpick")).toMatch(/(^| )width: 264px/);
 });

@@ -135,6 +135,8 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         ["rail", rail],
         ["card", card],
         ["panel", paper],
+        // The recovery key's soft grey box in setup (21c): its words and their numbers.
+        ["recovery key box", c("--well")],
       ];
       // The tints, as they look: laid over the surface they sit on.
       const selectedNav = over(c("--sel"), rail);

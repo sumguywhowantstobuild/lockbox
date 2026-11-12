@@ -102,6 +102,11 @@ test("add_then_login_opens_the_form", async () => {
   fireEvent.click(add);
   const menu = await screen.findByRole("menu");
   expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
+  // Each kind carries its picture, as drawn (6a); the .env, set apart, has none.
+  const pictured = within(menu)
+    .getAllByRole("menuitem")
+    .map((item) => item.querySelector("svg[aria-hidden='true']") !== null);
+  expect(pictured).toEqual([true, true, true, true, false]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "Login" }));
 
   const form = await screen.findByRole("complementary", { name: "New login" });

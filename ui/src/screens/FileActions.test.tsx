@@ -8,6 +8,7 @@ import App from "../App";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { FOLDER, installFakeShell, itemId, PASSWORD, sampleItems, type FakeItem, type FakeShell, type FakeVault } from "../testing/fakeShell";
+import { typeWord } from "./FileActions";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -114,9 +115,21 @@ function nothingOfTheFileIsOnScreen() {
   expect(screen.queryByRole("complementary")).toBeNull();
 }
 
+test("a_files_tile_names_a_short_type_and_otherwise_keeps_the_picture", () => {
+  expect(typeWord("contract-demo.pdf")).toBe("PDF");
+  expect(typeWord("setup-demo.exe")).toBe("EXE");
+  expect(typeWord("photo.jpeg")).toBe("JPEG");
+  // No type, a dot at the start only, a long or odd type: the file picture stays.
+  for (const name of ["README", ".env", "notes.markdown", "archive.tar.", "weird.p d f"]) expect(typeWord(name), name).toBeNull();
+});
+
 test("open_says_edits_arent_saved_back", async () => {
   const { container } = await unlocked();
   const panel = await select("Client contract");
+  // The file's tile says its type, as drawn (10f): "PDF", a picture only (the name beside it says the same).
+  const tile = panel.querySelector(".frow .ftile");
+  expect(tile?.textContent).toBe("PDF");
+  expect(tile?.getAttribute("aria-hidden")).toBe("true");
   const open = within(panel).getByRole("button", { name: "Open contract-demo.pdf" });
   expect(open.textContent).toBe("Open");
   // Nothing happens until it is pressed; the shell is asked once, with ids and no path.

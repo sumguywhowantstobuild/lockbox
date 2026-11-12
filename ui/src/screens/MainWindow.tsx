@@ -70,7 +70,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   const everything = useMemo(() => data.items ?? [], [data.items]);
   // The lists below are kept between redraws while what they come from is unchanged, so the item list's rows are not drawn again.
   const items = useMemo(() => everything.filter((item) => item.kind !== "collection" && !item.trashed), [everything]);
-  const inTrash = everything.filter((item) => item.trashed);
+  const inTrash = useMemo(() => everything.filter((item) => item.trashed), [everything]);
   const folders = foldersOf(everything);
   const folderNames = new Map(folders.map((folder) => [folder.id, folder.name]));
   const folderName = data.folder === null ? undefined : folderNames.get(data.folder);
@@ -90,9 +90,10 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
       : { id: folderId, name: folderName, count: folders.find((folder) => folder.id === folderId)?.count ?? 0 };
   // Taking keys out is offered only where there is a key to take: one in this folder that is not in the Trash (`items` has none of those).
   const folderHasKeys = folderId !== null && items.some((item) => item.kind === "key" && item.collection === folderId);
+  // What the list holds before it is narrowed: the Trash (folders included), All items, or one folder's items.
   const inView = useMemo(
-    () => (data.folder === null ? items : items.filter((item) => item.collection === data.folder)),
-    [items, data.folder],
+    () => (data.trash ? inTrash : data.folder === null ? items : items.filter((item) => item.collection === data.folder)),
+    [data.trash, inTrash, items, data.folder],
   );
   const needle = filter.trim().toLowerCase();
   const ofKind = useMemo(() => (kind === "all" ? inView : inView.filter((item) => item.kind === kind)), [inView, kind]);
@@ -120,8 +121,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
     kind === "all"
       ? `Showing ${String(shown.length)} of ${String(inView.length)}, filtered by “${word}”.`
       : `Showing ${kindCount(kind, shown.length)} of ${itemCount(inView.length)}${needle === "" ? "" : `, filtered by “${word}”`}.`;
-  // The place that holds the items, by name: the folder, or the vault for All items.
-  const holder = folderName ?? data.name;
+  // The place that holds the items, by name: the Trash, the folder, or the vault for All items.
+  const holder = data.trash ? "Trash" : (folderName ?? data.name);
   const rest = inView.length === 1 ? "it" : "them";
   const title = data.trash ? "Trash" : (folderName ?? "All items");
   const openVaults = new Set(sessions.map((session) => session.vaultId));
@@ -137,9 +138,9 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
       ? "problem"
       : data.items === null
         ? "opening"
-        : data.trash
+        : data.trash && (inView.length === 0 || shown.length > 0)
           ? "trash"
-          : everything.length === 0 && data.folder === null && needle === ""
+          : !data.trash && everything.length === 0 && data.folder === null && needle === ""
             ? "ready"
             : inView.length === 0
               ? "empty"
@@ -148,7 +149,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 : shown.length === 0 && kind !== "all"
                   ? "no_kind"
                   : "list";
-  const narrowed = state === "list" && !(needle === "" && kind === "all");
+  const narrowed = (state === "list" || (state === "trash" && inView.length > 0)) && !(needle === "" && kind === "all");
   // What narrowing left, for a screen reader, when it left nothing: the card below says it on screen, and this says it as it changes.
   let leftNothing: string | null = null;
   if (state === "no_match") leftNothing = `Nothing here matches “${word}”. ${holder} has ${itemCount(inView.length)}.`;
@@ -165,36 +166,35 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               {title}
             </span>
             <span className="sp" />
-            {data.trash ? null : (
-              <div className="fil">
-                <FilterIcon />
-                <input
-                  className="fin"
-                  type="search"
-                  aria-label="Filter this list"
-                  placeholder="Filter"
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={filter}
-                  onChange={(event) => {
-                    setForm(data.session, FILTER, event.currentTarget.value);
+            {/* The Filter, the kind and the order: on every list, the Trash included (13b). */}
+            <div className="fil">
+              <FilterIcon />
+              <input
+                className="fin"
+                type="search"
+                aria-label="Filter this list"
+                placeholder="Filter"
+                autoComplete="off"
+                spellCheck={false}
+                value={filter}
+                onChange={(event) => {
+                  setForm(data.session, FILTER, event.currentTarget.value);
+                }}
+              />
+              {filter === "" ? null : (
+                <button
+                  type="button"
+                  className="fx"
+                  aria-label="Clear filter"
+                  onClick={() => {
+                    setForm(data.session, FILTER, "");
                   }}
-                />
-                {filter === "" ? null : (
-                  <button
-                    type="button"
-                    className="fx"
-                    aria-label="Clear filter"
-                    onClick={() => {
-                      setForm(data.session, FILTER, "");
-                    }}
-                  >
-                    <CloseIcon />
-                  </button>
-                )}
-              </div>
-            )}
-            {data.trash ? null : <ListTools session={data.session} />}
+                >
+                  <CloseIcon />
+                </button>
+              )}
+            </div>
+            <ListTools session={data.session} />
             {folderMenu === null ? null : (
               // The folder's own menu (14b, 15d): Paste a .env, the two ways to take the keys out (only when the folder holds a key), then
               // Rename and Delete set apart, and nothing a later plan builds. Not on All items, not in the Trash, not in a read-only vault.
@@ -295,7 +295,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               </p>
             ) : state === "trash" ? (
               <TrashView
-                items={inTrash}
+                items={shown}
+                sort={sort}
                 openId={data.openItem?.id ?? null}
                 onOpen={(id) => {
                   pickTrashed(data.session, id);
@@ -329,14 +330,17 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                   >
                     Clear filter
                   </Button>
-                  <Button
-                    onClick={() => {
-                      openSearch();
-                      void setSearchQuery(word);
-                    }}
-                  >
-                    Search all vaults
-                  </Button>
+                  {/* Search looks through the vaults' items, not their Trash, so the Trash's card leaves it out. */}
+                  {data.trash ? null : (
+                    <Button
+                      onClick={() => {
+                        openSearch();
+                        void setSearchQuery(word);
+                      }}
+                    >
+                      Search all vaults
+                    </Button>
+                  )}
                 </div>
               </div>
             ) : state === "no_kind" && kind !== "all" ? (

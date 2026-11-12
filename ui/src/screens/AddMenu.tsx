@@ -1,5 +1,5 @@
 import { rememberOpener } from "../focus";
-import { PlusIcon } from "../parts/Icon";
+import { KindIcon, PlusIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
 import { addStoredFile, openNewKey, openNewLogin, openNewNote, openPasteEnv } from "../store";
 
@@ -24,6 +24,7 @@ export function AddMenu({ session, folder }: { session: number; folder: string |
         items={[
           {
             label: "Login",
+            icon: <KindIcon kind="login" className="i" />,
             onSelect: () => {
               rememberOpener(null);
               openNewLogin(session);
@@ -31,6 +32,7 @@ export function AddMenu({ session, folder }: { session: number; folder: string |
           },
           {
             label: "Key",
+            icon: <KindIcon kind="key" className="i" />,
             onSelect: () => {
               rememberOpener(null);
               openNewKey(session);
@@ -38,6 +40,7 @@ export function AddMenu({ session, folder }: { session: number; folder: string |
           },
           {
             label: "Note",
+            icon: <KindIcon kind="note" className="i" />,
             onSelect: () => {
               rememberOpener(null);
               openNewNote(session);
@@ -45,6 +48,7 @@ export function AddMenu({ session, folder }: { session: number; folder: string |
           },
           {
             label: "File",
+            icon: <KindIcon kind="file" className="i" />,
             onSelect: () => {
               void addStoredFile(session, folder);
             },

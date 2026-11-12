@@ -1,5 +1,6 @@
 import { rememberOpener } from "../focus";
 import { Button } from "../parts/Button";
+import { KindIcon } from "../parts/Icon";
 import { addStoredFile, openNewKey, openNewLogin, openNewNote, openPasteEnv } from "../store";
 
 /**
@@ -14,14 +15,24 @@ export function EmptyAdd({ session, folder }: { session: number; folder: string 
   };
   return (
     <div className="le-a">
-      <Button onClick={open(openNewLogin)}>Login</Button>
-      <Button onClick={open(openNewKey)}>Key</Button>
-      <Button onClick={open(openNewNote)}>Note</Button>
+      <Button onClick={open(openNewLogin)}>
+        <KindIcon kind="login" className="i" />
+        Login
+      </Button>
+      <Button onClick={open(openNewKey)}>
+        <KindIcon kind="key" className="i" />
+        Key
+      </Button>
+      <Button onClick={open(openNewNote)}>
+        <KindIcon kind="note" className="i" />
+        Note
+      </Button>
       <Button
         onClick={() => {
           void addStoredFile(session, folder);
         }}
       >
+        <KindIcon kind="file" className="i" />
         File
       </Button>
       <span className="le-or">or</span>

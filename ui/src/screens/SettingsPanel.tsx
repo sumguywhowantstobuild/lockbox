@@ -323,7 +323,7 @@ export function SettingsPanel({ data }: { data: SessionData }) {
           <SettingsRow label="Lock after idle" hidden error={errorOf("idle")}>
             <div className="ssel">
               <Select
-                compact
+                inRow
                 label="Lock after idle"
                 items={choices(IDLE_MINUTES, shown.idle_minutes, minutes)}
                 value={String(shown.idle_minutes)}
@@ -336,7 +336,7 @@ export function SettingsPanel({ data }: { data: SessionData }) {
           <SettingsRow label="Clear clipboard after" hidden error={errorOf("clipboard")}>
             <div className="ssel">
               <Select
-                compact
+                inRow
                 label="Clear clipboard after"
                 items={choices(CLIPBOARD_SECONDS, shown.clipboard_seconds, seconds)}
                 value={String(shown.clipboard_seconds)}

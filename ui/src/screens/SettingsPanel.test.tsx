@@ -197,6 +197,12 @@ test("the_lists_hold_the_sessions_choices_and_say_them_in_words", async () => {
   await opened();
   expect(await optionsOf("Lock after idle")).toEqual(["1 minute", "2 minutes", "5 minutes", "10 minutes", "15 minutes", "30 minutes", "60 minutes"]);
   expect(await optionsOf("Clear clipboard after")).toEqual(["10 seconds", "20 seconds", "30 seconds", "60 seconds", "90 seconds", "120 seconds", "300 seconds"]);
+  // As drawn (31a): a filled list in its row with a down arrow, not the toolbar's outlined list with an up-down mark.
+  for (const name of ["Lock after idle", "Clear clipboard after"]) {
+    const list = screen.getByRole("combobox", { name });
+    expect(list.classList.contains("sfill"), name).toBe(true);
+    expect(list.querySelector("svg.chev-down"), name).not.toBeNull();
+  }
   expect(screen.getByRole("combobox", { name: "Lock after idle" }).textContent).toContain("5 minutes");
   expect(screen.getByRole("combobox", { name: "Clear clipboard after" }).textContent).toContain("30 seconds");
 });

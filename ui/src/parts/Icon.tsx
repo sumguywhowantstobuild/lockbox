@@ -18,9 +18,19 @@ const KIND_PATHS: Record<ItemKind, string> = {
   collection: "M4 6.5A1.5 1.5 0 0 1 5.5 5h4l2 2.5h7A1.5 1.5 0 0 1 20 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5Z",
 };
 
-/** The picture of a kind of item, in the colour of the vault. */
-export function KindIcon({ kind }: { kind: ItemKind }) {
-  return <Drawing d={KIND_PATHS[kind]} className="ki" />;
+/** The picture of a kind of item: in the colour of the vault (`ki`), or of the words beside it on a button (`i`). */
+export function KindIcon({ kind, className = "ki" }: { kind: ItemKind; className?: string }) {
+  return <Drawing d={KIND_PATHS[kind]} className={className} />;
+}
+
+/** An eye: Reveal and Hide (drawn with it in 3c and 3d). */
+export function EyeIcon() {
+  return (
+    <svg className="i" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+      <circle cx="12" cy="12" r="2.8" />
+    </svg>
+  );
 }
 
 export function CopyIcon() {
@@ -30,6 +40,11 @@ export function CopyIcon() {
       <path d="M5 15V6.5A1.5 1.5 0 0 1 6.5 5H15" />
     </svg>
   );
+}
+
+/** A down arrow: a list in a settings row (drawn so in 31a). */
+export function ChevronDownIcon() {
+  return <Drawing d="M7 10l5 5 5-5" className="i chev-down" />;
 }
 
 /** The up-down mark of a choice list, and after the vault's name (its button opens a menu: drawn "My vault ⌃⌄"). */

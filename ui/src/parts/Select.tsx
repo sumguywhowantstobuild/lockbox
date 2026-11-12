@@ -1,6 +1,6 @@
 import { Select as BaseSelect } from "@base-ui/react/select";
 import type { Ref } from "react";
-import { CheckIcon, ChevronsIcon } from "./Icon";
+import { CheckIcon, ChevronDownIcon, ChevronsIcon } from "./Icon";
 import { usePortalContainer } from "./Portal";
 
 /** One thing to pick: what the box shows, and what the screen gets back (two folders may share a name). */
@@ -16,7 +16,8 @@ export interface SelectChoice {
  * to narrow by typing, use `Combobox`. `label` is the visible label, which also names the box for a screen reader.
  * `triggerRef` reaches the box, for a screen that puts focus on it. An item is a plain string (shown and returned as it
  * is), or a `SelectChoice` when what is shown is not what identifies it. `compact` is the toolbar's form: a small box with
- * no label in view (the label still names it for a screen reader).
+ * no label in view (the label still names it for a screen reader). `inRow` is a settings row's form (31a): small and filled, with
+ * a down arrow, its label in the row beside it (still named by `label` for a screen reader).
  */
 export function Select({
   label,
@@ -25,6 +26,7 @@ export function Select({
   onValueChange,
   triggerRef,
   compact = false,
+  inRow = false,
 }: {
   label: string;
   items: readonly (string | SelectChoice)[];
@@ -32,6 +34,7 @@ export function Select({
   onValueChange: (value: string) => void;
   triggerRef?: Ref<HTMLButtonElement>;
   compact?: boolean;
+  inRow?: boolean;
 }) {
   const container = usePortalContainer();
   const choices = items.map((item) => (typeof item === "string" ? { value: item, label: item } : item));
@@ -43,12 +46,10 @@ export function Select({
         if (next !== null) onValueChange(next);
       }}
     >
-      <BaseSelect.Label className={compact ? "sr" : "flab"}>{label}</BaseSelect.Label>
-      <BaseSelect.Trigger ref={triggerRef} className={compact ? "ssort sel" : "finp sel"}>
+      <BaseSelect.Label className={compact || inRow ? "sr" : "flab"}>{label}</BaseSelect.Label>
+      <BaseSelect.Trigger ref={triggerRef} className={inRow ? "ssort sfill sel" : compact ? "ssort sel" : "finp sel"}>
         <BaseSelect.Value />
-        <BaseSelect.Icon className="sel-i">
-          <ChevronsIcon />
-        </BaseSelect.Icon>
+        <BaseSelect.Icon className="sel-i">{inRow ? <ChevronDownIcon /> : <ChevronsIcon />}</BaseSelect.Icon>
       </BaseSelect.Trigger>
       <BaseSelect.Portal container={container}>
         <BaseSelect.Positioner className="layer" sideOffset={6} alignItemWithTrigger={false}>

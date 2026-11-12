@@ -156,10 +156,11 @@ test("the_kind_and_sort_lists_are_in_the_toolbar_and_named", async () => {
   expect(ownStyles(container)).toEqual([]);
   expect(container.querySelectorAll("style")).toHaveLength(0);
   await expectNoAxe(container);
-  // Not in the Trash, which has nothing to narrow or sort.
+  // In the Trash too, as drawn (13b): a long Trash can be narrowed and ordered like any list.
   fireEvent.click(within(screen.getByRole("navigation", { name: "Vault and folders" })).getByRole("button", { name: /^Trash/ }));
-  expect(screen.queryByRole("combobox", { name: "Show only one kind" })).toBeNull();
-  expect(screen.queryByRole("combobox", { name: "Sort" })).toBeNull();
+  expect(screen.getByRole("combobox", { name: "Show only one kind" })).toBeTruthy();
+  expect(screen.getByRole("combobox", { name: "Sort" })).toBeTruthy();
+  expect(screen.getByLabelText("Filter this list")).toBeTruthy();
 });
 
 test("filter_shows_clearly_with_a_way_to_clear", async () => {

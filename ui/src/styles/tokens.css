@@ -27,6 +27,8 @@
   --prs: rgba(38, 41, 49, 0.09);
   --sel: rgba(38, 41, 49, 0.07);
   --line: #ececee;
+  /* A soft grey box that holds words, not a control: the recovery key in setup (21c), as drawn. */
+  --well: #f7f7f8;
   --edge: #8a8f98;
   --toast: #262931;
   --toast-ink: #ffffff;
@@ -58,6 +60,7 @@
   --prs: rgba(255, 255, 255, 0.09);
   --sel: rgba(255, 255, 255, 0.08);
   --line: rgba(255, 255, 255, 0.08);
+  --well: #14171b;
   --edge: #6b7079;
   --toast: #1e2127;
   --toast-ink: #ffffff;

@@ -3,7 +3,7 @@ import type { ItemDetail, ItemKind, ItemSummary } from "../api";
 import { changedText, dayWords } from "../format";
 import { messageFor } from "../messages";
 import { Button } from "../parts/Button";
-import { CopyIcon, KindIcon } from "../parts/Icon";
+import { CopyIcon, EyeIcon, KindIcon } from "../parts/Icon";
 import { Menu, type MenuItem } from "../parts/Menu";
 import { Panel } from "../parts/Panel";
 import {
@@ -236,6 +236,7 @@ function EarlierPassword({
           else hideReveal(data.session);
         }}
       >
+        <EyeIcon />
         {value === undefined ? "Reveal" : "Hide"}
       </button>
     </div>
@@ -315,6 +316,7 @@ function SecretValue({
                 else hideReveal(data.session);
               }}
             >
+              <EyeIcon />
               {value === undefined ? "Reveal" : "Hide"}
             </Button>
           </div>

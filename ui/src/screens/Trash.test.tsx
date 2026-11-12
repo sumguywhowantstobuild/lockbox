@@ -187,6 +187,8 @@ test("move_shows_a_short_message", async () => {
   expect(move.parentElement).toBe(within(panel).getByRole("button", { name: "Edit" }).parentElement);
 
   const menu = await openMenu(move, "Move to folder");
+  // Wide enough for a long folder name, as drawn (12a): a menu of choices has its own width (components.css .menu.mpick).
+  expect(menu.classList.contains("mpick")).toBe(true);
   // No folder, then each folder by its name; the one the item is in is marked, in words and not by colour.
   const choices = within(menu).getAllByRole("menuitemradio");
   expect(choices.map((choice) => choice.textContent)).toEqual(["No folder", "Agency support agent", "Lineproof"]);
@@ -642,9 +644,8 @@ test("the_trash_view_lists_folders_first_then_newest_deleted_first", async () =>
     "Note: Earlier note Deleted last month",
     "Login: Old CRM login Deleted in September",
   ]);
-  // Items that went with a folder are rows too, and no filter, sort, Add or copy buttons are here.
+  // Items that went with a folder are rows too, and no Add or copy buttons are here (the Filter, kind and sort are: 13b).
   expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
-  expect(screen.queryByLabelText("Filter this list")).toBeNull();
   expect(screen.queryByRole("button", { name: /^Copy / })).toBeNull();
   expect(screen.queryByText(/Empty trash/)).toBeNull();
   await expectNoAxe(document.body);
@@ -682,6 +683,66 @@ test("a_picked_trash_row_opens_a_panel_with_restore_and_delete_for_good_and_noth
   fireEvent.click(row("Note", "Earlier note"));
   const earlier = await screen.findByRole("complementary", { name: "Earlier note" });
   expect(within(earlier).getByText("Note · was in Slotted · deleted last month")).toBeTruthy();
+  await expectNoAxe(document.body);
+});
+
+/** Picks `option` in the toolbar's list named `name`, as a click does. */
+async function choose(name: string, option: string) {
+  const open = ".layer:not([hidden]) [role=listbox]";
+  const box = screen.getByRole("combobox", { name });
+  fireEvent.pointerDown(box, { button: 0 });
+  fireEvent.click(box);
+  const choice = await waitFor(() => {
+    const found = [...document.querySelectorAll<HTMLElement>(`${open} [role=option]`)].find((entry) => entry.textContent === option);
+    if (found === undefined) throw new Error(`no option ${option}`);
+    return found;
+  });
+  fireEvent.pointerDown(choice);
+  fireEvent.click(choice);
+  await waitFor(() => {
+    expect(screen.getByRole("combobox", { name }).textContent).toBe(option);
+    expect(document.querySelector(open)).toBeNull();
+  });
+}
+
+/** The Trash rows' titles, top to bottom. */
+function trashTitles(): string[] {
+  return [...screen.getByRole("main").querySelectorAll("li.lrow .rname")].map((name) => name.textContent);
+}
+
+test("the_trash_can_be_filtered_by_word_and_kind_and_sorted_as_drawn", async () => {
+  // Found at stage 7: the Trash had no Filter, kind or sort, so a long Trash could not be narrowed (drawn with them in 13b).
+  // A folder deleted long ago, so by kind (folders first) and by when deleted (it goes last) give different orders.
+  await unlocked({ extra: [{ id: itemId(46), kind: "collection", title: "Archive", trashed: true, trashedAt: "2026-08-01T09:00:00Z" }] });
+  await openTrash();
+  // As before, by kind: folders first, then the one deleted last first.
+  expect(trashTitles()).toEqual(["Slotted", "Archive", "Slotted note A", "Slotted note B", "Slotted note C", "Old login in the trash", "Earlier note", "Old CRM login"]);
+  const all = trashTitles().length;
+  // A word narrows it, and the list says so, as the main list does.
+  fireEvent.change(screen.getByLabelText("Filter this list"), { target: { value: "slotted" } });
+  expect(trashTitles()).toEqual(["Slotted", "Slotted note A", "Slotted note B", "Slotted note C"]);
+  expect(screen.getByText(`Showing 4 of ${String(all)}, filtered by “slotted”.`)).toBeTruthy();
+  // A word that matches nothing says so, with the way back.
+  fireEvent.change(screen.getByLabelText("Filter this list"), { target: { value: "zzz" } });
+  expect(trashTitles()).toEqual([]);
+  expect(screen.getByText("Nothing here matches “zzz”")).toBeTruthy();
+  // Search doesn't look in the Trash, so its card doesn't offer it.
+  expect(screen.queryByRole("button", { name: "Search all vaults" })).toBeNull();
+  // The card's own Clear filter (the box's small one has the same name).
+  fireEvent.click(within(screen.getByRole("main").querySelector<HTMLElement>(".lempty") as HTMLElement).getByRole("button", { name: "Clear filter" }));
+  expect(trashTitles()).toHaveLength(all);
+  // One kind: logins only (a folder is not a kind, so it goes too).
+  await choose("Show only one kind", "Logins");
+  expect(trashTitles()).toEqual(["Old login in the trash", "Old CRM login"]);
+  await choose("Show only one kind", "All kinds");
+  // By name: every row, A to Z.
+  await choose("Sort", "Name");
+  const byName = trashTitles();
+  expect(byName).toEqual([...byName].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })));
+  expect(byName).toHaveLength(all);
+  // By when it went: the one deleted last first, folders among the rest (the old folder now last).
+  await choose("Sort", "Changed");
+  expect(trashTitles()).toEqual(["Slotted", "Slotted note A", "Slotted note B", "Slotted note C", "Old login in the trash", "Earlier note", "Old CRM login", "Archive"]);
   await expectNoAxe(document.body);
 });
 
@@ -1504,11 +1565,13 @@ test("every_new_part_passes_the_accessibility_check", async () => {
 test("no_style_element_or_inline_style_is_made_by_the_new_parts", async () => {
   const { container } = await unlocked();
   // The list's toolbar has the kind and sort lists (Task 15), each with the library's own hidden input inside it, set by script.
-  expect([...container.querySelectorAll("[style]")].filter((element) => element.closest(".tb .sortw") === null)).toEqual([]);
+  const ownStyles = () => [...container.querySelectorAll("[style]")].filter((element) => element.closest(".tb .sortw") === null);
+  expect(ownStyles()).toEqual([]);
   await openTrash();
   await openTrashed("Folder", "Slotted");
-  // The page itself, with the Trash view and its panel, writes none (what a part sets by script while a dialog is open is its own).
-  expect(container.querySelectorAll("[style]")).toHaveLength(0);
+  // The page itself, with the Trash view and its panel, writes none (what a part sets by script while a dialog is open is its own;
+  // the toolbar's lists are there in the Trash too).
+  expect(ownStyles()).toEqual([]);
   fireEvent.click(within(screen.getByRole("complementary", { name: "Slotted" })).getByRole("button", { name: "Delete for good" }));
   await screen.findByRole("dialog");
   expect(document.querySelectorAll("style")).toHaveLength(0);

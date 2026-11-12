@@ -7,6 +7,7 @@ import { Dialog } from "../parts/Dialog";
 import { KindIcon } from "../parts/Icon";
 import { Panel } from "../parts/Panel";
 import { pickTrashed, purgeTrashed, restoreTrashed, type SessionData } from "../store";
+import type { SortChoice } from "./ListTools";
 
 /** The line under the title: nothing is removed by the app on its own. */
 export const NOTHING_REMOVED = "Nothing here is removed until you say so. Lockbox never empties the trash by itself.";
@@ -14,13 +15,25 @@ export const NOTHING_REMOVED = "Nothing here is removed until you say so. Lockbo
 const KIND_WORD: Record<ItemKind, string> = { login: "Login", key: "Key", note: "Note", file: "File", collection: "Folder" };
 const TILE: Record<ItemKind, string> = { login: "t0", file: "t1", note: "t2", key: "t3", collection: "t4" };
 
-/** Folders first, then the one deleted last first (the dates are the engine's own fixed-format text, so their order is time's), then by name. */
-function inOrder(a: ItemSummary, b: ItemSummary): number {
-  const folders = Number(b.kind === "collection") - Number(a.kind === "collection");
-  if (folders !== 0) return folders;
+const byName = (a: ItemSummary, b: ItemSummary) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+
+/** The one deleted last first (the dates are the engine's own fixed-format text, so their order is time's), then by name. */
+function byWhenDeleted(a: ItemSummary, b: ItemSummary): number {
   const when = (b.trashed_at ?? "").localeCompare(a.trashed_at ?? "");
-  return when !== 0 ? when : a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+  return when !== 0 ? when : byName(a, b);
 }
+
+/** By kind: folders first, then the one deleted last first, then by name. */
+function byKind(a: ItemSummary, b: ItemSummary): number {
+  const folders = Number(b.kind === "collection") - Number(a.kind === "collection");
+  return folders !== 0 ? folders : byWhenDeleted(a, b);
+}
+
+const ORDER: Record<SortChoice, (a: ItemSummary, b: ItemSummary) => number> = {
+  kind: byKind,
+  name: byName,
+  changed: byWhenDeleted,
+};
 
 /** How many items a folder's restore brings back: those that went to the Trash with it, are still filed in it, and are not being deleted for good. The engine counts the same way. */
 export function wentWith(items: readonly ItemSummary[], folder: string): number {
@@ -30,24 +43,27 @@ export function wentWith(items: readonly ItemSummary[], folder: string): number 
 }
 
 /**
- * The Trash view (13b): the line that says nothing leaves by itself, then one row for each item in the trash, folders first and
- * then the one deleted last first, the items that went with a folder among them. A row says its kind, its title and when it was
- * deleted ("Deleted 2 days ago"; a folder's reads "Folder · deleted 2 days ago"). No Add, filter, sort or copy buttons here, and
- * nothing in it is removed by time. An empty Trash says so.
+ * The Trash view (13b): the line that says nothing leaves by itself, then one row for each item in the trash the toolbar's Filter and
+ * kind let through, in the order chosen (by kind: folders first, then the one deleted last first, the items that went with a folder
+ * among them). A row says its kind, its title and when it was deleted ("Deleted 2 days ago"; a folder's reads "Folder · deleted 2
+ * days ago"). No Add or copy buttons here, and nothing in it is removed by time. An empty Trash says so.
  */
 export function TrashView({
   items,
+  sort,
   openId,
   onOpen,
 }: {
-  /** Every item in the trash, folders included. */
+  /** The items in the trash the list shows (folders included), after the Filter and the kind. */
   items: readonly ItemSummary[];
+  /** The order chosen in the toolbar: by kind (folders first), by name, or the one deleted last first. */
+  sort: SortChoice;
   openId: string | null;
   onOpen: (id: string) => void;
 }) {
   // When the view opened: "deleted 2 days ago" is said from this.
   const [now] = useState(() => new Date());
-  const rows = [...items].sort(inOrder);
+  const rows = [...items].sort(ORDER[sort]);
   return (
     <>
       <p className="lnote">{NOTHING_REMOVED}</p>
