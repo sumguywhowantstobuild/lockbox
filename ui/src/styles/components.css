@@ -2491,9 +2491,14 @@
 
 /* ---- The Trash and the folders (Task 14) ---- */
 
-/* The words that delete are the error colour on the quiet pill: Delete, Delete for good, Move to trash. */
-.pill.dngb {
-  color: var(--danger);
+/* A question's dangerous answer (Delete for good, Delete, Open anyway): filled red, as drawn (13d, 10b, 14d). Cancel, the quiet
+   pill beside it, still has the focus when the question opens. */
+.pill.dfill,
+.pill.dfill:hover,
+.pill.dfill:active {
+  background: var(--danger-fill);
+  color: var(--danger-fill-ink);
+  font-weight: 600;
 }
 
 /* A short line of words in a panel, under what it explains. */
@@ -2504,10 +2509,65 @@
   color: var(--ink2);
 }
 
-/* Move to trash at the foot of an item's details, with its sentence under it. */
-.ptrash {
-  margin-top: 26px;
-  padding-top: 4px;
+/* A card set apart at the foot of a panel (2b, 13b): Move to trash, or the Trash's Restore and Delete for good, each a row
+   that fills the card, with a line between two rows; the sentence under it centred. */
+.gapart {
+  margin-top: 34px;
+}
+
+.dgr {
+  display: block;
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  background: none;
+  border: 0;
+  border-radius: 14px;
+  color: var(--danger);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+/* The focus ring sits inside the row, so on two stacked rows it does not cross the line between them. */
+.dgr:focus-visible {
+  outline-offset: -2px;
+}
+
+.dgr:hover {
+  background: var(--hov);
+}
+
+.dgr:active {
+  background: var(--prs);
+  transform: scale(0.985);
+}
+
+.dgr.calm {
+  color: var(--v);
+  font-weight: 600;
+}
+
+.dgr + .dgr {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.dgr:has(+ .dgr) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.dcap {
+  margin: 7px 0 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--ink2);
 }
 
 /* "New folder" in the side menu becomes a name box: its edge in the quiet text colour (the ordinary edge is a hair under 3 to 1
@@ -2594,8 +2654,8 @@
   display: flex;
 }
 
-/* Characters or Passphrase: two buttons side by side, the chosen one raised on a card with the vault's colour round it, so
-   the choice is not told by a tint alone. */
+/* Choices side by side (Characters or Passphrase, Replace or Keep both, the theme): the chosen one a filled card with a thin
+   edge, so the choice is not told by a tint alone. */
 .segs {
   display: flex;
   gap: 2px;
@@ -2625,9 +2685,11 @@
     box-shadow 0.2s var(--ease);
 }
 
+/* The picked choice: a filled pill, as drawn (15b, 16a, 31a), not an accent ring that reads as keyboard focus. Its thin edge in
+   the quiet text colour keeps the 3 to 1 a state needs against the bar. */
 .seg[aria-pressed="true"] {
   background: var(--card);
-  box-shadow: inset 0 0 0 2px var(--v);
+  box-shadow: 0 0 0 1px var(--ink2);
   font-weight: 600;
 }
 

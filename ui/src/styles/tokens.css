@@ -31,6 +31,9 @@
   --toast: #262931;
   --toast-ink: #ffffff;
   --danger: #a3200c;
+  /* A dangerous answer's filled button (13d), and its words. */
+  --danger-fill: #a3200c;
+  --danger-fill-ink: #ffffff;
   --lift: rgba(38, 41, 49, 0.22);
   --field: #1a1d22;
   --field-ink: #ffffff;
@@ -59,6 +62,8 @@
   --toast: #1e2127;
   --toast-ink: #ffffff;
   --danger: #ff9c8a;
+  --danger-fill: #ff9c8a;
+  --danger-fill-ink: #0b0d10;
   --lift: rgba(0, 0, 0, 0.8);
   --field: #1a1d22;
   --field-ink: #ffffff;

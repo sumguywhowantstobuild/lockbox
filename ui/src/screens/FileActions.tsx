@@ -37,7 +37,7 @@ export function ProgramQuestion({
       <Button ref={cancel} onClick={onNo}>
         Cancel
       </Button>
-      <Button className="dngb" onClick={onYes}>
+      <Button look="danger" onClick={onYes}>
         Open anyway
       </Button>
     </Dialog>

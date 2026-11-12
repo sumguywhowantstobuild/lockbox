@@ -515,17 +515,21 @@ export function ItemPanel({
         <AttachedFiles data={data} summary={summary} />
       ) : null}
       {data.readOnly ? null : (
-        // At the foot of the details, as drawn (13a): it goes at once, with no question, and says where to find it.
-        <div className="ptrash">
-          <Button
-            className="dngb"
-            onClick={() => {
-              void trashOpenItem(data.session);
-            }}
-          >
-            Move to trash
-          </Button>
-          <p className="tnote">You can restore it from Trash.</p>
+        // At the foot of the details, as drawn (2b, 13a): a card's full-width row in red that goes at once, with no question,
+        // and the words under it say where to find it.
+        <div className="gapart">
+          <div className="grp">
+            <button
+              type="button"
+              className="dgr"
+              onClick={() => {
+                void trashOpenItem(data.session);
+              }}
+            >
+              Move to trash
+            </button>
+          </div>
+          <p className="dcap">You can restore it from Trash.</p>
         </div>
       )}
     </Panel>

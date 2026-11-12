@@ -685,6 +685,29 @@ test("a_picked_trash_row_opens_a_panel_with_restore_and_delete_for_good_and_noth
   await expectNoAxe(document.body);
 });
 
+test("move_to_trash_and_the_trash_answers_are_full_width_rows_of_a_card_as_drawn", async () => {
+  // Found at stage 7: Move to trash was a small pill at the left, and the Trash's Restore and Delete for good two pills.
+  // Drawn (2b, 13b): a card whose rows fill its width, Move to trash in red with its note centred under it, and in the
+  // Trash, Restore in the accent above Delete for good in red.
+  await unlocked();
+  const panel = await openItem("Bot admin console");
+  const trash = within(panel).getByRole("button", { name: "Move to trash" });
+  expect(trash.classList.contains("dgr")).toBe(true);
+  expect(trash.parentElement?.classList.contains("grp")).toBe(true);
+  expect(trash.closest(".gapart")?.querySelector(".dcap")?.textContent).toBe("You can restore it from Trash.");
+  await openTrash();
+  const trashed = await openTrashed("Login", "Old CRM login");
+  const restore = within(trashed).getByRole("button", { name: "Restore" });
+  const forGood = within(trashed).getByRole("button", { name: "Delete for good" });
+  expect(restore.classList.contains("dgr")).toBe(true);
+  expect(restore.classList.contains("calm")).toBe(true);
+  expect(forGood.classList.contains("dgr")).toBe(true);
+  expect(forGood.classList.contains("calm")).toBe(false);
+  expect(restore.parentElement).toBe(forGood.parentElement);
+  expect(restore.parentElement?.classList.contains("grp")).toBe(true);
+  await expectNoAxe(document.body);
+});
+
 test("a_trashed_keys_name_is_in_mono_in_its_row_and_heading_as_in_the_list", async () => {
   // The list, its details and search set a key's name in mono (as drawn); the Trash shows the same key the same way.
   await unlocked({
@@ -826,6 +849,9 @@ test("delete_for_good_asks_first", async () => {
     expect(document.activeElement).toBe(cancel);
   });
   expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual(["Cancel", "Delete for good"]);
+  // The dangerous answer is a filled red button, as drawn (13d); Cancel is the quiet one, and has focus.
+  expect(within(dialog).getByRole("button", { name: "Delete for good" }).classList.contains("dfill")).toBe(true);
+  expect(cancel.classList.contains("dfill")).toBe(false);
   await expectNoAxe(document.body);
 
   // Cancel closes it, deletes nothing, and focus goes back to the panel's button.
@@ -1149,6 +1175,7 @@ test("delete_folder_says_how_many", async () => {
   const dialog = await screen.findByRole("dialog", { name: "Delete Agency support agent?" });
   expect(within(dialog).getByText("Its 2 items move to Trash, and you can restore them from there.")).toBeTruthy();
   expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual(["Cancel", "Delete"]);
+  expect(within(dialog).getByRole("button", { name: "Delete" }).classList.contains("dfill")).toBe(true);
   await expectNoAxe(document.body);
 
   // Cancel changes nothing, and focus goes back to the folder's menu.

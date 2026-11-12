@@ -281,7 +281,7 @@ export function DeleteFolderDialog({
         Cancel
       </Button>
       <Button
-        className="dngb"
+        look="danger"
         onClick={() => {
           onClose();
           void deleteFolderOnScreen(session, folder.id);

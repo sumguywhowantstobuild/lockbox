@@ -140,23 +140,28 @@ export function TrashPanel({ data, summary, items }: { data: SessionData; summar
       {data.readOnly ? null : (
         <>
           {restoreWords === null ? null : <p className="tnote">{restoreWords}</p>}
-          <div className="fact">
-            <Button
-              look="pill-main"
-              onClick={() => {
-                void restoreTrashed(data.session, summary.id);
-              }}
-            >
-              Restore
-            </Button>
-            <Button
-              className="dngb"
-              onClick={() => {
-                setAsking(true);
-              }}
-            >
-              Delete for good
-            </Button>
+          {/* As drawn (13b): one card, Restore in the accent above Delete for good in red, each row its full width. */}
+          <div className="gapart">
+            <div className="grp">
+              <button
+                type="button"
+                className="dgr calm"
+                onClick={() => {
+                  void restoreTrashed(data.session, summary.id);
+                }}
+              >
+                Restore
+              </button>
+              <button
+                type="button"
+                className="dgr"
+                onClick={() => {
+                  setAsking(true);
+                }}
+              >
+                Delete for good
+              </button>
+            </div>
           </div>
           {asking ? (
             <Dialog
@@ -177,7 +182,7 @@ export function TrashPanel({ data, summary, items }: { data: SessionData; summar
                 Cancel
               </Button>
               <Button
-                className="dngb"
+                look="danger"
                 onClick={() => {
                   setAsking(false);
                   void purgeTrashed(data.session, summary.id);

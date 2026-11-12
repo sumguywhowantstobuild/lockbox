@@ -180,6 +180,8 @@ test("program_file_asks_first", async () => {
   // Open anyway sends the shell its yes and opens.
   fireEvent.click(open);
   const third = await screen.findByRole("dialog", { name: "Open a program?" });
+  // The dangerous answer is a filled red button, as drawn (10b).
+  expect(within(third).getByRole("button", { name: "Open anyway" }).classList.contains("dfill")).toBe(true);
   fireEvent.click(within(third).getByRole("button", { name: "Open anyway" }));
   await waitFor(() => {
     expect(toast()).toContain(OPENED_NOTE);

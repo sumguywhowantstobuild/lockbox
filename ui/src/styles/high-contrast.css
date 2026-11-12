@@ -14,14 +14,20 @@
     border: 1px solid CanvasText !important;
   }
 
-  /* The main button stays the one that stands out. */
-  .app :is(.prim, .addb, .pill.t) {
+  /* The rows of a card (Move to trash, Restore, Delete for good) sit inside the card's edge: a line between two rows, not a
+     box round each. */
+  .app .dgr + .dgr {
+    border-top: 1px solid CanvasText !important;
+  }
+
+  /* The main button stays the one that stands out, and so does a question's dangerous answer, so it never looks like Cancel. */
+  .app :is(.prim, .addb, .pill.t, .pill.dfill) {
     forced-color-adjust: none !important;
     background: ButtonText !important;
     color: ButtonFace !important;
   }
 
-  .app :is(.prim, .addb, .pill.t) * {
+  .app :is(.prim, .addb, .pill.t, .pill.dfill) * {
     color: inherit !important;
   }
 

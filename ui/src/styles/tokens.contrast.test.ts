@@ -202,6 +202,8 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       }
       // A marked button at the side menu's foot (Settings open): its edge against the side menu, as a state part.
       check("marked side-menu button's edge", c("--ink2"), rail, 3);
+      // A dangerous answer: its words on its red fill.
+      check("danger button words", c("--danger-fill-ink"), c("--danger-fill"), 4.5);
       // A list row's kind icon: a line drawing, the tile's colour mixed with the text colour, on its tint over the list
       // and over a selected row. A picture, so 3 to 1.
       const iconMix = Number.parseFloat(vars.get("--icon-mix") ?? "") / 100;
@@ -376,16 +378,15 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("clear the clipboard tick box on the panel", c("--v"), paper, 3);
       check("clear the clipboard words on the panel", c("--ink"), paper, 4.5);
       check("save box note on the panel", c("--ink2"), paper, 4.5);
-      // Characters or Passphrase: the track is a tint on the block; the chosen one is a card with the vault's colour round
-      // it, so the choice does not rest on a tint, and both kinds' words are the ordinary text colour on what they sit on.
+      // Characters or Passphrase: the track is a tint on the block; the chosen one is a filled card with a thin edge in the quiet
+      // text colour, so the choice does not rest on a tint, and both kinds' words are the ordinary text colour on what they sit on.
       const segTrack = over([...rgbOf("--sh"), 0.08] as Rgba, genBlock);
       const segTrackOnPanel = over([...rgbOf("--sh"), 0.08] as Rgba, paper);
       check("kind button words, not chosen, on the track in the form", c("--ink"), segTrack, 4.5);
       check("kind button words, not chosen, on the track on the page", c("--ink"), segTrackOnPanel, 4.5);
       check("kind button words, chosen, on its card", c("--ink"), card, 4.5);
-      check("chosen kind's outline against the track in the form", c("--v"), segTrack, 3);
-      check("chosen kind's outline against the track on the page", c("--v"), segTrackOnPanel, 3);
-      check("chosen kind's outline against its card", c("--v"), card, 3);
+      check("chosen kind's edge against the track in the form", c("--ink2"), segTrack, 3);
+      check("chosen kind's edge against the track on the page", c("--ink2"), segTrackOnPanel, 3);
       // The form's quiet pills (Generate, Try another, Cancel) are the pill measured above, here on the panel and on the block.
       for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
         check(`quiet pill words on the generator block, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, genBlock), 4.5);
@@ -393,12 +394,12 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       }
       // "Saved" is the message bar's words, measured above.
 
-      // Move, trash and folders (Task 14). The Delete buttons (Delete, Delete for good, Move to trash) are the quiet pill with
-      // the error colour for their words, on a dialog's card and on the panel, laid over as the translucent shade looks then.
-      for (const [name, surface] of [["card", card], ["panel", paper]] as const) {
-        for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
-          check(`Delete button words, ${state}, on the ${name}`, c("--danger"), over([...rgbOf("--sh"), alpha] as Rgba, surface), 4.5);
-        }
+      // Move, trash and folders (Task 14). Move to trash and the Trash's two answers are rows of a card: Delete for good and Move
+      // to trash in the error colour, Restore in the vault's colour, at rest, hovered and pressed (the tints laid over the card).
+      // A question's dangerous answer is the filled red button, measured above.
+      for (const [state, fill] of [["rest", card], ["hover", over(c("--hov"), card)], ["pressed", over(c("--prs"), card)]] as const) {
+        check(`card row danger words, ${state}`, c("--danger"), fill, 4.5);
+        check(`card row Restore words, ${state}`, c("--v"), fill, 4.5);
       }
       // Undo on the message bar: white words on the white tint over the bar, at rest and hovered.
       for (const [state, alpha] of [["rest", 0.14], ["hover", 0.24]] as const) {
@@ -456,13 +457,12 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       for (const [state, fill] of [["rest", card], ["hover", over(c("--hov"), card)], ["pressed", over(c("--prs"), card)]] as const) {
         check(`leave out button icon, ${state}`, c("--ink2"), fill, 3);
       }
-      // Replace, Keep both, Cancel: the track is a tint on the card, the chosen one is a card with the vault's colour round it,
-      // so the choice rests on an outline and on "pressed" said to a screen reader, never on a tint alone.
+      // Replace, Keep both, Cancel: the track is a tint on the card, the chosen one a filled card with a thin edge in the quiet
+      // text colour, so the choice rests on an edge and on "pressed" said to a screen reader, never on a tint alone.
       const envTrack = over([...rgbOf("--sh"), 0.08] as Rgba, card);
       check("clash choice words, not chosen, on the track", c("--ink"), envTrack, 4.5);
       check("clash choice words, chosen, on its card", c("--ink"), card, 4.5);
-      check("chosen clash choice's outline against the track", c("--v"), envTrack, 3);
-      check("chosen clash choice's outline against its card", c("--v"), card, 3);
+      check("chosen clash choice's edge against the track", c("--ink2"), envTrack, 3);
       check("Saves as words on the card", c("--ink2"), card, 4.5);
       // Save while there is nothing to save: the panel's main pill, greyed (the shade of a disabled button), on the panel.
       check("panel Save words, off", c("--ink2"), over(c("--line"), paper), 4.5);
@@ -484,12 +484,11 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("saved key cap words on the card's row", c("--ink2"), ground, 4.5);
       check("waiting key cap words on the card", c("--ink"), card, 4.5);
       check("waiting key cap edge on the card", c("--v"), card, 3);
-      // Light, Dark and System: the track is a tint on the card, the chosen one a card with the vault's colour round it.
+      // Light, Dark and System: the track is a tint on the card, the chosen one a filled card with a thin edge in the quiet text colour.
       const themeTrack = over([...rgbOf("--sh"), 0.08] as Rgba, card);
       check("theme button words, not chosen, on the track", c("--ink"), themeTrack, 4.5);
       check("theme button words, chosen, on its card", c("--ink"), card, 4.5);
-      check("chosen theme's outline against the track", c("--v"), themeTrack, 3);
-      check("chosen theme's outline against its card", c("--v"), card, 3);
+      check("chosen theme's edge against the track", c("--ink2"), themeTrack, 3);
       // The two lists: words and arrows on the card, and the field's edge, which is what marks the box.
       check("settings list words on the card", c("--ink"), card, 4.5);
       check("settings list arrows on the card", c("--ink2"), card, 3);
