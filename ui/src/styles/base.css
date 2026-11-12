@@ -43,9 +43,21 @@ body {
   box-sizing: border-box;
 }
 
+/* Picked text, in the window and in every dialog and menu, takes a light wash of the vault's own colour (tokens.css). Windows'
+   contrast themes draw their own selection over it. */
 .app ::selection {
-  background: #f5b800;
-  color: #12211d;
+  background: var(--select);
+  color: var(--ink);
+}
+
+/* The two parts that are dark in both modes keep their light words when picked: the lock and setup screens' pattern side,
+   and the message bar. */
+.field ::selection {
+  color: var(--field-ink);
+}
+
+.toast ::selection {
+  color: var(--toast-ink);
 }
 
 :where(.app) :where(button, input, select, textarea) {

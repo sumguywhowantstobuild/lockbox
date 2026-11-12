@@ -70,6 +70,10 @@ const Row = memo(function Row({
 }: {
   item: ItemSummary;
   detail: string;
+  /**
+   * The folder's name when the list shows folders, "" for an item in none (the part stays, empty, so every row's columns
+   * fall in the same place), and `undefined` when the list is one folder and no row has the part.
+   */
   folder: string | undefined;
   open: boolean;
   onOpen: (id: string) => void;
@@ -95,7 +99,8 @@ const Row = memo(function Row({
           <Clip className="rname" text={item.title} />
           {item.attachments.length > 0 && item.kind !== "file" ? <PaperclipIcon /> : null}
         </span>{" "}
-        <Clip className="rdet" text={detail} /> {folder === undefined ? null : <span className="rfold">{folder}</span>}
+        <Clip className="rdet" text={detail} />{" "}
+        {folder === undefined ? null : <span className="rfold">{folder}</span>}
       </button>
       <div className="cslot">
         {copy !== undefined ? (
@@ -144,7 +149,7 @@ export function ItemList({
       key={item.id}
       item={item}
       detail={sort === "changed" ? changedDetail(item, now) : detailOf(item)}
-      folder={item.collection === null ? undefined : folderNames?.get(item.collection)}
+      folder={folderNames === null ? undefined : item.collection === null ? "" : (folderNames.get(item.collection) ?? "")}
       open={item.id === openId}
       onOpen={onOpen}
       onCopy={onCopy}

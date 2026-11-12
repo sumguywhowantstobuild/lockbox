@@ -286,6 +286,35 @@ test("a_panel_is_a_named_region_with_a_close_button", async () => {
   await expectNoAxe(container);
 });
 
+test("a_panel_with_no_picture_or_tools_has_its_heading_beside_close", () => {
+  // As drawn (6b, 7a, 16a, 31a): a form or a panel with nothing at its top left has its heading on the close button's line,
+  // not on a line of its own under an empty one (found at stage 7: a band about 35 pixels tall). The heading comes before
+  // Close, so a screen reader meets the panel's name first.
+  const { container, unmount } = render(
+    <Panel title="New login" subtitle="In Work, My vault." onClose={() => {}}>
+      <p>Fields</p>
+    </Panel>,
+  );
+  const heading = screen.getByRole("heading", { level: 2, name: "New login" });
+  const top = container.querySelector(".ptop");
+  expect(top?.contains(heading), "the heading is in the panel's top row").toBe(true);
+  const close = screen.getByRole("button", { name: "Close panel" });
+  expect(heading.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // The words under the heading stay with the fields, which scroll.
+  expect(container.querySelector(".pscroll")?.textContent).toContain("In Work, My vault.");
+  unmount();
+
+  // An item's panel has its picture and pills at the top, with the heading under them, as drawn (2b, 3c).
+  const item = render(
+    <Panel title="Bot admin console" icon={<span>i</span>} tools={<button type="button">Edit</button>} onClose={() => {}}>
+      <p>Details</p>
+    </Panel>,
+  );
+  const itemHeading = screen.getByRole("heading", { level: 2, name: "Bot admin console" });
+  expect(item.container.querySelector(".ptop")?.contains(itemHeading)).toBe(false);
+  expect(item.container.querySelector(".pscroll")?.contains(itemHeading)).toBe(true);
+});
+
 test("a_password_field_is_hidden_named_and_never_remembered", async () => {
   function Typed() {
     const [value, setValue] = useState("");

@@ -186,6 +186,10 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("message bar words", c("--toast-ink"), c("--toast"), 4.5);
       check("message bar countdown", over([255, 255, 255, 0.86], c("--toast")), c("--toast"), 4.5);
       check("lock screen words", c("--field-ink"), c("--field"), 4.5);
+      // Picked text: the vault's wash over what is behind it, with the words in that surface's own colour (base.css).
+      for (const [name, surface] of surfaces) check(`picked text on ${name}`, c("--ink"), over(c("--select"), surface), 4.5);
+      check("picked words on the lock screen's dark side", c("--field-ink"), over(c("--select"), c("--field")), 4.5);
+      check("picked words in the message bar", c("--toast-ink"), over(c("--select"), c("--toast")), 4.5);
       // The closed side menu's folder letters: the tile's colour mixed with the text colour, on its own tint.
       const mix = Number.parseFloat(vars.get("--tile-mix") ?? "") / 100;
       expect(mix, "--tile-mix is a percentage").toBeGreaterThan(0);

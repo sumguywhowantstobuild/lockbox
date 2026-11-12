@@ -6,7 +6,7 @@ import { CloseIcon } from "./Icon";
  * can find it; its title is the heading of what is in it. The close button is always there. A form puts its buttons in
  * `footer`, a bar that stays in view while the fields scroll. `titleRef` reaches the heading, which can take focus when
  * the panel opens as the next step of what the person just did. `tools` are the pills (or a label) at the top, before Close: an
- * item's Edit, or "Read-only".
+ * item's Edit, or "Read-only". With neither a picture nor tools, the heading takes their place on the close button's line.
  */
 export function Panel({
   title,
@@ -33,11 +33,23 @@ export function Panel({
   onKeyDown?: KeyboardEventHandler<HTMLElement>;
   children?: ReactNode;
 }) {
+  // A panel with nothing at its top left (a form, Settings, the generator) has its heading on the close button's line, as
+  // drawn; an item's panel has its picture and pills there, with the heading under them.
+  const headingOnTop = icon === undefined && tools === undefined;
+  const heading = (
+    <h2
+      ref={titleRef}
+      tabIndex={titleRef === undefined ? undefined : -1}
+      className={["ptitle", headingOnTop ? "ontop" : null, titleClassName].filter(Boolean).join(" ")}
+    >
+      {title}
+    </h2>
+  );
   return (
     <aside className="panel on" aria-label={title} onKeyDown={onKeyDown}>
       <div className="ptop">
         {icon === undefined ? null : <span className="pico">{icon}</span>}
-        <span className="sp" />
+        {headingOnTop ? heading : <span className="sp" />}
         {tools}
         <button type="button" className="ib" aria-label="Close panel" onClick={onClose}>
           <CloseIcon />
@@ -45,10 +57,8 @@ export function Panel({
       </div>
       <div className="pscroll">
         <div>
-          <h2 ref={titleRef} tabIndex={titleRef === undefined ? undefined : -1} className={["ptitle", titleClassName].filter(Boolean).join(" ")}>
-            {title}
-          </h2>
-          {subtitle === undefined || subtitle === "" ? null : <p className="psub">{subtitle}</p>}
+          {headingOnTop ? null : heading}
+          {subtitle === undefined || subtitle === "" ? null : <p className={headingOnTop ? "psub first" : "psub"}>{subtitle}</p>}
           {children}
         </div>
       </div>

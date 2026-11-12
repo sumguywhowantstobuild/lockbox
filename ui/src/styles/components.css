@@ -540,11 +540,6 @@
   outline-offset: 2px;
 }
 
-.win ::selection {
-  background: var(--sel);
-  color: var(--ink);
-}
-
 .chip {
   display: inline-flex;
   align-items: center;
@@ -1493,6 +1488,16 @@
   line-height: 1.4;
   color: var(--ink2);
   overflow-wrap: anywhere;
+}
+
+/* A panel with nothing at its top left has its heading on the close button's line (Panel.tsx); the words under it open the
+   part that scrolls. */
+.ptitle.ontop {
+  flex: 1 1 auto;
+}
+
+.psub.first {
+  margin-top: 0;
 }
 
 .gp {

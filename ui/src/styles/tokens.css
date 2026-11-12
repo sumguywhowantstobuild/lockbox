@@ -68,16 +68,19 @@
 .v-work {
   --vc: 34, 168, 102;
   --row-on: rgba(34, 168, 102, 0.14);
+  --select: rgba(34, 168, 102, 0.32);
 }
 
 .v-home {
   --vc: 132, 98, 234;
   --row-on: rgba(132, 98, 234, 0.14);
+  --select: rgba(132, 98, 234, 0.32);
 }
 
 .v-old {
   --vc: 221, 162, 30;
   --row-on: rgba(221, 162, 30, 0.14);
+  --select: rgba(221, 162, 30, 0.32);
 }
 
 .mode-light.v-work {
