@@ -149,7 +149,7 @@ test("a_bad_key_name_has_words_of_its_own", () => {
   const words = messageFor({ code: "core", kind: "invalid_input", what: "key name" });
   expect(words).toEqual({
     title: "That isn't a name Lockbox can use for a key.",
-    body: "Use letters, digits and _ only, and don't start with a digit.",
+    body: "Use letters, digits and underscores (_) only, and don't start with a digit.",
   });
   expect(KNOWN_WHATS).toContain("key name");
   // A key's value asked of another kind, or a login's field of a key, is a page mistake: the plain words, nothing of the kind.

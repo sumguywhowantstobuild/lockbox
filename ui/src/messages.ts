@@ -136,7 +136,7 @@ export const MESSAGES: Record<string, Words> = {
   // A key's name is a variable name, since a `.env` file is where keys go out: the engine refuses any other.
   "core:invalid_input:key name": {
     title: "That isn't a name Lockbox can use for a key.",
-    body: "Use letters, digits and _ only, and don't start with a digit.",
+    body: "Use letters, digits and underscores (_) only, and don't start with a digit.",
   },
   // An edit made from a read of the item that is no longer the stored one: the design has no words for it, so these are
   // the session's own. The engine refuses the whole edit, so nothing was saved.

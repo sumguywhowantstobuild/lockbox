@@ -136,6 +136,24 @@ function rowOf(panel: HTMLElement, name: string): HTMLElement {
   return found;
 }
 
+/**
+ * The bad-line sentence when rows were found: the results heading's description, read with the heading as it takes focus.
+ * It is not an alert as well, or a screen reader says it twice (heard in NVDA, stage 7).
+ */
+async function badLineNote(panel: HTMLElement): Promise<HTMLElement> {
+  const heading = within(panel).getByRole("heading", { level: 3 });
+  // Read only because the heading takes focus: without that, the sentence would not be heard at all.
+  await waitFor(() => {
+    expect(document.activeElement).toBe(heading);
+  });
+  const id = heading.getAttribute("aria-describedby");
+  expect(id, "the results heading has a description").not.toBeNull();
+  const note = document.getElementById(id ?? "");
+  expect(note, "its description is on the page").not.toBeNull();
+  expect(within(panel).queryAllByRole("alert"), "and no alert says it again").toEqual([]);
+  return note as HTMLElement;
+}
+
 function rowNames(panel: HTMLElement): string[] {
   return within(panel)
     .queryAllByRole("listitem")
@@ -351,9 +369,8 @@ test("bad_line_by_number", async () => {
   const panel = await openPanel();
   const lines = ["A_ONE=1", "A_TWO=2", "# a comment", BAD_LINE, "A_THREE=3"].join("\n");
   await pasteRows(panel, lines);
-  const alert = within(panel).getByRole("alert");
   // The number only: never what the line said.
-  expect(alert.textContent).toBe("Line 4 can't be read, so it was left out. Check it in your .env.");
+  expect((await badLineNote(panel)).textContent).toBe("Line 4 can't be read, so it was left out. Check it in your .env.");
   expect(rowNames(panel)).toEqual(["A_ONE", "A_TWO", "A_THREE"]);
   expectNoValue();
   await expectNoAxe(container);
@@ -374,7 +391,7 @@ test("several_bad_lines_say_their_numbers_up_to_five_and_then_how_many_more", as
     const total = Math.max(...bad) + 1;
     const text = Array.from({ length: total }, (_, at) => (bad.includes(at + 1) ? BAD_LINE : `KEY_${String(at + 1)}=${valueOf("K")}`)).join("\n");
     await pasteRows(panel, text);
-    expect(within(panel).getByRole("alert").textContent, JSON.stringify(bad)).toBe(words);
+    expect((await badLineNote(panel)).textContent, JSON.stringify(bad)).toBe(words);
     fireEvent.click(within(panel).getByRole("button", { name: "Cancel" }));
     await waitFor(() => {
       expect(screen.queryByRole("complementary")).toBeNull();
@@ -910,7 +927,7 @@ test("reopening_paste_from_another_folder_starts_afresh_and_lets_go_of_the_old_r
   expect(stored().some((item) => item.title === "FIRST_ROWS")).toBe(false);
 });
 
-test("the_results_heading_takes_focus_and_the_bad_lines_are_still_announced", async () => {
+test("the_results_heading_takes_focus_and_the_bad_lines_are_read_once_with_it", async () => {
   await unlocked();
   const panel = await openPanel();
   await pasteRows(panel, ["A_ONE=1", BAD_LINE, "A_TWO=2"].join("\n"));
@@ -919,11 +936,11 @@ test("the_results_heading_takes_focus_and_the_bad_lines_are_still_announced", as
   await waitFor(() => {
     expect(document.activeElement).toBe(heading);
   });
-  // The sentence about the line is an alert, and the heading carries it as its description, so it is read with the heading.
-  const alert = within(panel).getByRole("alert");
-  expect(alert.textContent).toBe("Line 2 can't be read, so it was left out. Check it in your .env.");
-  expect(heading.getAttribute("aria-describedby")).toBe(alert.id);
-  expect(alert.id).not.toBe("");
+  // The heading carries the sentence about the line as its description, so it is read once, with the heading; an alert as
+  // well made NVDA say it twice.
+  const note = await badLineNote(panel);
+  expect(note.textContent).toBe("Line 2 can't be read, so it was left out. Check it in your .env.");
+  expect(note.id).not.toBe("");
   // Without a bad line there is nothing to describe, and the focus is still on the heading.
   fireEvent.click(within(panel).getByRole("button", { name: "Cancel" }));
   const again = await openPanel();

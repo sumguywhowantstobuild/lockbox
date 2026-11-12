@@ -686,7 +686,7 @@ test("a_name_the_shell_refuses_is_marked_and_the_box_stays", async () => {
   typeName(panel, "9 bad name");
   fireEvent.click(saveButton(panel));
   const alert = await within(panel).findByRole("alert");
-  expect(alert.textContent).toBe("That isn't a name Lockbox can use for a key. Use letters, digits and _ only, and don't start with a digit.");
+  expect(alert.textContent).toBe("That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.");
   expect(nameBox(panel).getAttribute("aria-invalid")).toBe("true");
   expect(shell.captureSlot()).not.toBeNull();
   // Nothing typed at all is asked for before anything is sent.

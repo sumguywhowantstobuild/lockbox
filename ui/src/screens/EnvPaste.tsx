@@ -124,7 +124,8 @@ export function EnvPaste({
   }, [boxBack]);
 
   // The rows came and the box that had focus went: focus goes to the results heading ("3 keys found"), so it is read, and the page
-  // does not get it. A sentence about lines that could not be read is the heading's description, so it is read with it.
+  // does not get it. A sentence about lines that could not be read is the heading's description, so it is read with it, and
+  // only then: an alert as well made NVDA say it twice.
   useEffect(() => {
     if (found !== null && found.rows.length > 0) heading.current?.focus();
   }, [found]);
@@ -260,7 +261,8 @@ export function EnvPaste({
         </p>
       ) : null}
       {found !== null && found.bad_lines.length > 0 ? (
-        <p className="err" id={`${id}-bad`} role="alert">
+        // An alert only when no heading takes focus to read it (see the focus effect above).
+        <p className="err" id={`${id}-bad`} role={showRows ? undefined : "alert"}>
           {badLinesWords(found.bad_lines)}
         </p>
       ) : null}

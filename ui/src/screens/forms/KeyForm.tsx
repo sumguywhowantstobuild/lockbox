@@ -10,7 +10,7 @@ import { folderChoices, NO_FOLDER, useFocusOnOpen, whereWords } from "./shared";
 import { MANY_LINES, ValueField } from "./ValueField";
 
 /** What a key's name may be, said once under its box and again when the shell refuses a name. */
-export const NAME_RULE = "Letters, digits and _ only. It can't start with a digit.";
+export const NAME_RULE = "Letters, digits and underscores (_) only. It can't start with a digit.";
 
 /** Whether the shell refused the name itself (the engine's `key name`), so the Name box is the one to mark. */
 export function refusedTheName(error: unknown): boolean {

@@ -561,7 +561,7 @@ test("key_edit_changes_value", async () => {
   expect(within(form).getByRole("heading", { level: 2, name: "Edit key" })).toBeTruthy();
   // Name with its rule, Value, and the note the key has (7a); no Folder.
   expect(Array.from(form.querySelectorAll("label")).map((label) => label.textContent)).toEqual(["Name", "Value", "Note"]);
-  expect(within(form).getByText("Letters, digits and _ only. It can't start with a digit.")).toBeTruthy();
+  expect(within(form).getByText("Letters, digits and underscores (_) only. It can't start with a digit.")).toBeTruthy();
   expect(inputOf(form, "Name").value).toBe("TELEGRAM_BOT_TOKEN");
   expect(inputOf(form, "Note").value).toBe("rotate monthly");
   const value = inputOf(form, "Value");
@@ -614,7 +614,7 @@ test("key_edit_changes_value", async () => {
   typeInto(again, "Name", "bad name");
   saveForm(again);
   expect((await within(again).findByRole("alert")).textContent).toBe(
-    "That isn't a name Lockbox can use for a key. Use letters, digits and _ only, and don't start with a digit.",
+    "That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.",
   );
   expect(inputOf(again, "Name").getAttribute("aria-invalid")).toBe("true");
   expect(inputOf(again, "Value").value).toBe(NEW_TOKEN);

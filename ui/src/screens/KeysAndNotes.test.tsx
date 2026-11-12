@@ -495,7 +495,7 @@ test("key_form_hides_value", async () => {
   expect(name.type).toBe("text");
   expect(name.autocomplete).toBe("off");
   // The rule for a name is shown as help, and the box points at it.
-  const help = within(form).getByText("Letters, digits and _ only. It can't start with a digit.");
+  const help = within(form).getByText("Letters, digits and underscores (_) only. It can't start with a digit.");
   expect(name.getAttribute("aria-describedby")).toBe(help.id);
   // The value is hidden, kept by nothing, and shown only when asked.
   const value = inputOf(form, "Value");
@@ -585,7 +585,7 @@ test("a_name_that_is_not_a_variable_name_is_refused_in_words_and_the_form_stays"
   fireEvent.click(within(form).getByRole("button", { name: "Save" }));
   const alert = await within(form).findByRole("alert");
   expect(alert.textContent).toBe(
-    "That isn't a name Lockbox can use for a key. Use letters, digits and _ only, and don't start with a digit.",
+    "That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.",
   );
   expect(inputOf(form, "Name").getAttribute("aria-invalid")).toBe("true");
   // Nothing was made, and the form kept what was typed, to be put right.
@@ -687,7 +687,7 @@ test("a_changed_value_does_not_clear_the_words_save_put_in_place_of_a_refused_pa
   await unlocked();
   const form = await openForm("Key");
   const refusedName =
-    "That isn't a name Lockbox can use for a key. Use letters, digits and _ only, and don't start with a digit.";
+    "That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.";
   // A refused paste, then Save with no name: Save's words take the line over from the paste's.
   expect(pasteInto(inputOf(form, "Value"), "a\nb")).toBe(false);
   expect((await within(form).findByRole("alert")).textContent).toBe(ONE_LINE_ONLY);
