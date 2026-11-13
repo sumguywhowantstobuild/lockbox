@@ -857,10 +857,17 @@ pub struct WinMainWindow<R: Runtime> {
 }
 
 impl<R: Runtime> MainWindow for WinMainWindow<R> {
-    fn hide(&self) {
-        if let Some(main) = self.app.get_webview_window(window::MAIN) {
-            let _ = main.hide();
-        }
+    /// On the main thread, which also shows the window: the check and the hide run there together, so a reopen cannot
+    /// come between them. Queued, so a close never waits for the event loop.
+    fn hide_if(&self, still_closing: Box<dyn FnOnce() -> bool + Send>) {
+        let app = self.app.clone();
+        let _ = self.app.run_on_main_thread(move || {
+            if still_closing()
+                && let Some(main) = app.get_webview_window(window::MAIN)
+            {
+                let _ = main.hide();
+            }
+        });
     }
 
     /// On the main thread, which must show the window ([`window::bring_to_front`]): queued there, so a press never

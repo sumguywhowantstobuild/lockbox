@@ -47,9 +47,11 @@ pub struct Os {
 /// The app's one window, as the shell sends it to the tray and brings it back. Looked up at each call: the window is
 /// built after the shell.
 pub trait MainWindow: Send + Sync {
-    /// Hides the window, which keeps running in the tray. Best effort: a window that cannot be hidden stays on screen,
-    /// already locked.
-    fn hide(&self);
+    /// Hides the window, which keeps running in the tray, if `still_closing` says so when the window's own thread runs
+    /// the hide: the thread that shows the window ([`window::bring_to_front`](crate::window::bring_to_front)), so a
+    /// reopen is never in the middle of it. A close that a reopen has overtaken leaves the window shown. Best effort:
+    /// a window that cannot be hidden stays on screen, already locked. Never waits for the window.
+    fn hide_if(&self, still_closing: Box<dyn FnOnce() -> bool + Send>);
     /// Brings the window forward after a press of the save shortcut: through
     /// [`window::bring_to_front`](crate::window::bring_to_front), which puts the window's protections in place before it
     /// shows, on the thread that must show it. Best effort, and never waits for the window.

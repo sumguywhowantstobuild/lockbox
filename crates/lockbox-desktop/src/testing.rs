@@ -130,6 +130,10 @@ pub struct FakeWindow {
     on_hide: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     forwards: AtomicUsize,
     on_forward: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// While set, a hide is queued as the real window queues it on its own thread, and runs only at
+    /// [`run_queued_hides`](Self::run_queued_hides): its check is made then, not when the shell asked.
+    defer_hides: AtomicBool,
+    queued_hides: Mutex<Vec<Box<dyn FnOnce() -> bool + Send>>>,
     /// Each time the shell asked for capture protection to change while the window was up, in order.
     protections: Mutex<Vec<bool>>,
 }
@@ -159,15 +163,47 @@ impl FakeWindow {
     pub fn during_next_hide(&self, hook: impl FnOnce() + Send + 'static) {
         *lock(&self.on_hide) = Some(Box::new(hook));
     }
-}
 
-impl MainWindow for FakeWindow {
-    fn hide(&self) {
+    /// From now on, hides wait in a queue, as on the real window's busy thread, until
+    /// [`run_queued_hides`](Self::run_queued_hides).
+    pub fn defer_hides(&self) {
+        self.defer_hides.store(true, Ordering::SeqCst);
+    }
+
+    /// How many hides wait in the queue.
+    pub fn queued_hides(&self) -> usize {
+        lock(&self.queued_hides).len()
+    }
+
+    /// Runs the queued hides in order, each making its check now.
+    pub fn run_queued_hides(&self) {
+        let queued = std::mem::take(&mut *lock(&self.queued_hides));
+        for still_closing in queued {
+            self.hide_now_if(still_closing);
+        }
+    }
+
+    fn hide_now_if(&self, still_closing: Box<dyn FnOnce() -> bool + Send>) {
+        if !still_closing() {
+            return;
+        }
         let hook = lock(&self.on_hide).take();
         if let Some(hook) = hook {
             hook();
         }
         self.hides.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl MainWindow for FakeWindow {
+    /// At once, on the caller's thread (the check, then the hide when it still holds), or queued while
+    /// [`defer_hides`](FakeWindow::defer_hides) is set.
+    fn hide_if(&self, still_closing: Box<dyn FnOnce() -> bool + Send>) {
+        if self.defer_hides.load(Ordering::SeqCst) {
+            lock(&self.queued_hides).push(still_closing);
+        } else {
+            self.hide_now_if(still_closing);
+        }
     }
 
     fn bring_forward(&self) {

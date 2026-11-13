@@ -73,6 +73,10 @@ pub struct Shell {
     /// One close of the window at a time; true while 5b, the first-close explanation, shows
     /// ([`close_window`](Self::close_window)).
     explaining: Mutex<bool>,
+    /// How many times the window was shown again ([`window_shown`](Self::window_shown)). Held while the window gate is
+    /// sealed for a hide or lifted by a show, so a close knows whether a reopen came after its seal
+    /// ([`lock_and_hide`](Self::lock_and_hide)). Never held across a lock or a call to the window.
+    window_shows: Arc<Mutex<u64>>,
     /// One change of the settings at a time, held from the shortcut's registration to the save
     /// ([`set_settings`](Self::set_settings)).
     pub(crate) settings_change: Mutex<()>,
@@ -143,6 +147,7 @@ impl Shell {
             forbidden,
             creating: Mutex::default(),
             explaining: Mutex::default(),
+            window_shows: Arc::default(),
             settings_change: Mutex::default(),
             shortcut_presses: AtomicU64::new(0),
             #[cfg(test)]
@@ -297,8 +302,11 @@ impl Shell {
         self.finish_explanation(&mut explaining);
     }
 
-    /// The window is shown again (Open Lockbox, a second launch): unlocks are accepted again.
+    /// The window is shown again (Open Lockbox, a second launch, the save shortcut): unlocks are accepted again, and a
+    /// close still waiting to hide will not ([`lock_and_hide`](Self::lock_and_hide)).
     pub fn window_shown(&self) {
+        let mut shows = lock(&self.window_shows);
+        *shows += 1;
         self.sessions.unseal();
     }
 
@@ -306,23 +314,41 @@ impl Shell {
     /// starts or finishes, so none opens in the wait for the lock hooks or after it, and one that finished before is
     /// locked by the lock that follows. The gate stays sealed while the window is hidden, until
     /// [`window_shown`](Self::window_shown); a person who pressed Unlock just before the close is answered `Locked`,
-    /// which the page treats as a stale answer. Only then does the window hide.
+    /// which the page treats as a stale answer. Only then does the window hide, and only if it was not shown again in
+    /// the meantime: a reopen during the wait lifts the gate, and is the later wish (Greptile, PR 4). The window then
+    /// stays shown, so no vault opened after the reopen is left in a hidden window.
     fn lock_and_hide(&self) {
-        self.sessions.seal();
+        let sealed_at = self.seal_for_hide();
         self.lock_all();
-        self.os.window.hide();
+        self.hide_unless_shown_since(sealed_at);
     }
 
     fn finish_explanation(&self, explaining: &mut bool) {
         *explaining = false;
-        self.sessions.seal();
+        let sealed_at = self.seal_for_hide();
         self.lock_all();
         if self.settings.mark_close_explained().is_err() {
             // No detail: the settings file's path and the error are not logged (R5).
             eprintln!("Lockbox: the first-close note could not be saved");
         }
         self.notify(&Notice::FirstClose { explain: false });
-        self.os.window.hide();
+        self.hide_unless_shown_since(sealed_at);
+    }
+
+    /// Seals the window gate for a hide and says how many shows there had been by then: the seal and the count are
+    /// taken together, so a show is either counted before the seal or comes after it and lifts it.
+    fn seal_for_hide(&self) -> u64 {
+        let shows = lock(&self.window_shows);
+        self.sessions.seal();
+        *shows
+    }
+
+    /// Hides the window, on its own thread, unless it was shown again since `sealed_at` ([`seal_for_hide`](Self::seal_for_hide)).
+    fn hide_unless_shown_since(&self, sealed_at: u64) {
+        let shows = Arc::clone(&self.window_shows);
+        self.os
+            .window
+            .hide_if(Box::new(move || *lock(&shows) == sealed_at));
     }
 
     /// Closing the app (the main window's close request, the app's exit, or Windows ending the session): locks every
@@ -835,5 +861,164 @@ mod tests {
         assert_eq!(answer.err(), Some(ShellError::Locked));
         assert_eq!(ts.window.hides(), 1);
         assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+    }
+
+    /// Greptile's race on PR 4: the close waits for a slow lock hook, and in that wait the window is brought back (Open
+    /// Lockbox in the tray, or the save shortcut), which lifts the gate. The reopen is the later wish and wins: the
+    /// older close does not hide the window, so no vault can be unlocked in a window that then hides. The close's own
+    /// lock still ran: what was open before the reopen is locked.
+    #[test]
+    fn a_reopen_while_the_close_waits_for_hooks_keeps_the_window_shown() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        let (started, release) = hold_the_hooks(&ts);
+        let closer = {
+            let shell = Arc::clone(&ts.shell);
+            thread::spawn(move || shell.close_window())
+        };
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        ts.shell.window_shown();
+        release.send(()).unwrap();
+        closer.join().unwrap();
+
+        assert_eq!(
+            ts.window.hides(),
+            0,
+            "an older close hid the window the person had just brought back"
+        );
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        assert!(
+            !unlock_is_refused(&ts, "After"),
+            "the shown window refuses unlocks"
+        );
+    }
+
+    /// The same race on 5b's button ("Got it"): a reopen in its wait keeps the window shown, and unlocks work there.
+    #[test]
+    fn a_reopen_while_got_it_waits_for_hooks_keeps_the_window_shown() {
+        let ts = TestShell::new();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        assert_eq!(ts.events.notices(), [first_close(true)]);
+
+        let (started, release) = hold_the_hooks(&ts);
+        let ok = {
+            let shell = Arc::clone(&ts.shell);
+            thread::spawn(move || shell.close_explained_ok())
+        };
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        ts.shell.window_shown();
+        release.send(()).unwrap();
+        ok.join().unwrap();
+
+        assert_eq!(
+            ts.window.hides(),
+            0,
+            "an older close hid the window the person had just brought back"
+        );
+        assert!(ts.shell.settings.close_explained());
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        assert!(
+            !unlock_is_refused(&ts, "After"),
+            "the shown window refuses unlocks"
+        );
+    }
+
+    /// The race one step later (Codex, on the fix): the close has locked and queued its hide on the window's busy
+    /// thread, and the reopen and an unlock come before that thread runs it. The queued hide checks then, sees the
+    /// reopen, and leaves the window shown with the new vault open in it.
+    #[test]
+    fn a_reopen_after_the_hide_is_queued_keeps_the_window_shown() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        ts.window.defer_hides();
+        ts.shell.close_window();
+        assert_eq!(ts.window.queued_hides(), 1);
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+
+        ts.shell.window_shown();
+        let (after, _) = ts.open_vault("After");
+        ts.window.run_queued_hides();
+
+        assert_eq!(
+            ts.window.hides(),
+            0,
+            "a queued hide ran after the window was shown again"
+        );
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .any(|s| s.session == after && s.state == SessionState::Unlocked)
+        );
+    }
+
+    /// The same on 5b's button: its queued hide is overtaken by a reopen and does not run.
+    #[test]
+    fn a_reopen_after_got_it_queued_its_hide_keeps_the_window_shown() {
+        let ts = TestShell::new();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        ts.window.defer_hides();
+        ts.shell.close_explained_ok();
+        assert_eq!(ts.window.queued_hides(), 1);
+
+        ts.shell.window_shown();
+        let (after, _) = ts.open_vault("After");
+        ts.window.run_queued_hides();
+
+        assert_eq!(
+            ts.window.hides(),
+            0,
+            "a queued hide ran after the window was shown again"
+        );
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .any(|s| s.session == after && s.state == SessionState::Unlocked)
+        );
+    }
+
+    /// A queued hide with no reopen before it runs: it hides, and the gate stays sealed.
+    #[test]
+    fn a_queued_hide_with_no_reopen_hides_and_keeps_the_gate_sealed() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        ts.window.defer_hides();
+        ts.shell.close_window();
+        ts.window.run_queued_hides();
+        assert_eq!(ts.window.hides(), 1);
+        assert!(
+            unlock_is_refused(&ts, "Hidden"),
+            "the hidden window accepts unlocks"
+        );
+    }
+
+    /// A reopen that comes after the hide changes nothing about it: the close hid, and the reopen lifts the gate.
+    #[test]
+    fn a_reopen_after_the_hide_lifts_the_gate() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        assert_eq!(ts.window.hides(), 1);
+        assert!(
+            unlock_is_refused(&ts, "Hidden"),
+            "the hidden window accepts unlocks"
+        );
+
+        ts.shell.window_shown();
+        assert!(
+            !unlock_is_refused(&ts, "Shown"),
+            "the shown window refuses unlocks"
+        );
     }
 }
