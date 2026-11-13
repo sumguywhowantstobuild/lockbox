@@ -14,6 +14,10 @@ fn main() {
 /// that manifest in the app itself but not in test programs, which then fail to start with
 /// `STATUS_ENTRYPOINT_NOT_FOUND`. This gives the test programs the same manifest (Tauri's own workaround, from its
 /// `crates/tauri/build.rs`).
+///
+/// The unit tests of the library need it too, since the tray's menu library (`tray-icon`) calls Common Controls 6
+/// functions: Cargo's `-tests` link arguments reach only the integration tests, so the arguments go to every target,
+/// and the app itself, which already has the manifest from tauri-build, is told to embed none of its own.
 fn embed_test_manifest() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
@@ -23,11 +27,9 @@ fn embed_test_manifest() {
     let manifest = std::path::Path::new(&std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"))
         .join("test-manifest.xml");
     std::fs::write(&manifest, COMMON_CONTROLS_6_MANIFEST).expect("write the test manifest");
-    println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
-    println!(
-        "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
-        manifest.display()
-    );
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+    println!("cargo:rustc-link-arg-bins=/MANIFEST:NO");
 }
 
 /// The same text as tauri-build's `src/windows-app-manifest.xml` (2.7.4).

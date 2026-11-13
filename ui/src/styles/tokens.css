@@ -1,0 +1,143 @@
+/* The colours, from the approved screens' style sheet (the neutral look with each vault's own accent), as variables.
+   Every rule here is flat, one selector and plain declarations, because `tokens.contrast.test.ts` reads this file and
+   measures the pairs the screens use. A change here is a change to what that test measures.
+
+   A screen's root carries a mode class (`mode-light` or `mode-dark`, from the Theme in Settings, which can follow
+   Windows' own setting) and a vault class (`v-work`, `v-home` or `v-old`, from `vaultLook`). The mode sets the greys;
+   the vault sets the accent. */
+
+.app {
+  /* The five tile colours of the folders (red, green and blue). */
+  --t0: 59, 127, 234;
+  --t1: 132, 98, 234;
+  --t2: 34, 168, 102;
+  --t3: 200, 140, 20;
+  --t4: 224, 80, 143;
+}
+
+.mode-light {
+  --ink: #262931;
+  --ink2: #5b626d;
+  --ground: #ffffff;
+  --rail: #f3f3f4;
+  --card: #ffffff;
+  --paper: #ffffff;
+  --sh: 38, 41, 49;
+  --hov: rgba(38, 41, 49, 0.045);
+  --prs: rgba(38, 41, 49, 0.09);
+  --sel: rgba(38, 41, 49, 0.07);
+  --line: #ececee;
+  /* A soft grey box that holds words, not a control: the recovery key in setup (21c), as drawn. */
+  --well: #f7f7f8;
+  --edge: #8a8f98;
+  --toast: #262931;
+  --toast-ink: #ffffff;
+  --danger: #a3200c;
+  /* A dangerous answer's filled button (13d), and its words. */
+  --danger-fill: #a3200c;
+  --danger-fill-ink: #ffffff;
+  --lift: rgba(38, 41, 49, 0.22);
+  --field: #1a1d22;
+  --field-ink: #ffffff;
+  --switch-off: #5b626d;
+  --switch-knob: #ffffff;
+  /* How much of its tile's colour the closed side menu's folder letter keeps; the rest is the text colour. The
+     approved screens kept 68 per cent, which measures 3.7 to 1 on the amber tile; this keeps the letters at 4.5. */
+  --tile-mix: 40%;
+  /* How much of its tile's colour a list row's kind icon keeps (a line drawing, so 3 to 1 is enough): as approved. */
+  --icon-mix: 68%;
+}
+
+.mode-dark {
+  --ink: #ecedef;
+  --ink2: #a3a7ad;
+  --ground: #0b0d10;
+  --rail: #0e1014;
+  --card: #14171b;
+  --paper: #14171b;
+  --sh: 255, 255, 255;
+  --hov: rgba(255, 255, 255, 0.05);
+  --prs: rgba(255, 255, 255, 0.09);
+  --sel: rgba(255, 255, 255, 0.08);
+  --line: rgba(255, 255, 255, 0.08);
+  --well: #14171b;
+  --edge: #6b7079;
+  --toast: #1e2127;
+  --toast-ink: #ffffff;
+  --danger: #ff9c8a;
+  --danger-fill: #ff9c8a;
+  --danger-fill-ink: #0b0d10;
+  --lift: rgba(0, 0, 0, 0.8);
+  --field: #1a1d22;
+  --field-ink: #ffffff;
+  --switch-off: #a3a7ad;
+  --switch-knob: #14171b;
+  --tile-mix: 68%;
+  --icon-mix: 68%;
+}
+
+.v-work {
+  --vc: 34, 168, 102;
+  --row-on: rgba(34, 168, 102, 0.14);
+  --select: rgba(34, 168, 102, 0.32);
+}
+
+.v-home {
+  --vc: 132, 98, 234;
+  --row-on: rgba(132, 98, 234, 0.14);
+  --select: rgba(132, 98, 234, 0.32);
+}
+
+.v-old {
+  --vc: 221, 162, 30;
+  --row-on: rgba(221, 162, 30, 0.14);
+  --select: rgba(221, 162, 30, 0.32);
+}
+
+.mode-light.v-work {
+  --v: #14663f;
+  --add: #14663f;
+  --addh: #1a7a4c;
+  --addp: #0f5433;
+  --addi: #ffffff;
+}
+
+.mode-dark.v-work {
+  --v: #4fd08a;
+  --add: #4fd08a;
+  --addh: #63d899;
+  --addp: #3fc27c;
+  --addi: #06281a;
+}
+
+.mode-light.v-home {
+  --v: #4e2fa8;
+  --add: #4e2fa8;
+  --addh: #5c3bbe;
+  --addp: #412691;
+  --addi: #ffffff;
+}
+
+.mode-dark.v-home {
+  --v: #b49cf5;
+  --add: #b49cf5;
+  --addh: #c2aef8;
+  --addp: #a68bf0;
+  --addi: #1e1140;
+}
+
+.mode-light.v-old {
+  --v: #7a5a00;
+  --add: #7a5a00;
+  --addh: #8c6800;
+  --addp: #664b00;
+  --addi: #ffffff;
+}
+
+.mode-dark.v-old {
+  --v: #f2c14e;
+  --add: #f2c14e;
+  --addh: #f5cc6b;
+  --addp: #e8b53a;
+  --addi: #2b2000;
+}

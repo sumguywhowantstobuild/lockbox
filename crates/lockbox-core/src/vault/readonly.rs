@@ -14,7 +14,7 @@ use crate::fsio::parent_dir;
 use crate::header::{VaultHeader, verify_header_mac};
 use crate::ids::{FileId, ItemId, VaultId};
 use crate::item::{FileRef, Item, ItemKind};
-use crate::search::SearchIndex;
+use crate::search::{SearchHit, SearchIndex};
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
 use std::io;
@@ -108,7 +108,7 @@ impl ReadOnlyVault {
     }
 
     /// Items matching `q`, best first, at most `limit` (see [`SearchIndex::query`]).
-    pub fn search(&self, q: &str, limit: usize) -> Vec<ItemId> {
+    pub fn search(&self, q: &str, limit: usize) -> Vec<SearchHit> {
         self.index.query(q, limit)
     }
 
@@ -262,6 +262,7 @@ impl Vault {
         item.created_at = now.clone();
         item.modified_at = now;
         item.trashed_at = None;
+        item.trashed_with = None;
         item.purging = false;
         item.retired_blobs = Vec::new();
         Ok(item)
@@ -461,6 +462,7 @@ mod tests {
             username: "ariel".to_owned(),
             password: Zeroizing::new("hunter22".to_owned()),
             urls: vec!["https://bank.example".to_owned()],
+            previous_passwords: Vec::new(),
         };
         f.vault.new_item(login, "Bank", None).unwrap();
         let (item, file) = f.file_item(b"hello world");
@@ -1006,6 +1008,7 @@ mod tests {
             username: "ariel".to_owned(),
             password: Zeroizing::new("hunter22".to_owned()),
             urls: vec!["https://bank.example".to_owned()],
+            previous_passwords: Vec::new(),
         };
         let item = f.vault.new_item(kind, "Bank", None).unwrap();
         let small = f.attach(&item, SMALL);
@@ -1059,6 +1062,7 @@ mod tests {
                 username,
                 password,
                 urls,
+                ..
             } => (username.clone(), (**password).clone(), urls.clone()),
             other => panic!("not a login: {other:?}"),
         }
@@ -1158,6 +1162,17 @@ mod tests {
         let copy = f.vault.get_item(&new).unwrap();
         assert_eq!(copy.collection, None);
         assert!(copy.trashed_at.is_none());
+
+        // A backup made after the folder was deleted holds the note trashed with it; the copy is not trashed, and goes
+        // with nothing.
+        let later = f.backup("b.lockbox-backup");
+        let ro = open_backup(&later).unwrap();
+        let from = ro.get_item(&note).unwrap();
+        assert!(from.trashed_at.is_some() && from.trashed_with == Some(c));
+        let (_parent, mut other) = live_vault();
+        let new = other.copy_item_from(&ro, &note, false, &cancel).unwrap().id;
+        let copy = other.get_item(&new).unwrap();
+        assert!(copy.trashed_at.is_none() && copy.trashed_with.is_none());
     }
 
     #[test]
@@ -1539,6 +1554,7 @@ mod tests {
             username: "ariel".to_owned(),
             password: Zeroizing::new("hunter22".to_owned()),
             urls: Vec::new(),
+            previous_passwords: Vec::new(),
         };
         let item = f.vault.new_item(kind, "Three files", None).unwrap();
         let big = big_bytes();
@@ -1703,6 +1719,7 @@ mod tests {
             username: "ariel".to_owned(),
             password: Zeroizing::new("hunter22".to_owned()),
             urls: Vec::new(),
+            previous_passwords: Vec::new(),
         };
         let item = f.vault.new_item(kind, "Four files", None).unwrap();
         // IDs that fall as the attachments go on: ff.., ee.., dd.., cc..

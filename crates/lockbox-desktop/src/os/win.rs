@@ -1,6 +1,8 @@
 //! Direct Windows and WebView2 calls: WebView2's file-drop setting, the hidden window that hears Windows lock,
 //! sleep, sign-out, shutdown and drive removal ([`spawn`]), and the real [`Os`]: volumes, known folders, file
-//! dialogs and opening links. Every `unsafe` block of the crate is here, each with a `// SAFETY:` comment.
+//! dialogs and opening links, the clipboard, the save shortcut, printing and the printer list, capture protection,
+//! the window, idle time and starting with Windows. Every `unsafe` block of the crate is here, each with a
+//! `// SAFETY:` comment.
 #![allow(unsafe_code)]
 
 use std::cell::{Cell, OnceCell};
@@ -11,6 +13,7 @@ use std::num::NonZeroU32;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -18,19 +21,29 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::{ptr, slice};
 
+use lockbox_core::blob::CancelToken;
 use tauri::{AppHandle, Manager, Runtime};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2Controller, ICoreWebView2Controller4,
+    COREWEBVIEW2_PRINT_STATUS, COREWEBVIEW2_PRINT_STATUS_SUCCEEDED, ICoreWebView2_2,
+    ICoreWebView2_7, ICoreWebView2_16, ICoreWebView2Controller, ICoreWebView2Controller4,
+    ICoreWebView2Environment6, ICoreWebView2PrintSettings, ICoreWebView2PrintSettings2,
+    ICoreWebView2Settings3,
 };
-use windows_core::{BOOL, Interface};
+use webview2_com::{PrintCompletedHandler, PrintToPdfCompletedHandler};
+use windows_core::{BOOL, Interface, PCWSTR};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, GetLastError,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HOTKEY_ALREADY_REGISTERED,
+    ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError,
     GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, LocalFree, MAX_PATH, TRUE,
     WPARAM,
 };
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+use windows_sys::Win32::Graphics::Printing::{
+    EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+    PRINTER_INFO_2W,
+};
 #[cfg(test)]
 use windows_sys::Win32::Security::Authorization::SE_FILE_OBJECT;
 use windows_sys::Win32::Security::Authorization::{
@@ -44,27 +57,36 @@ use windows_sys::Win32::Storage::CloudFilters::{
     CF_SYNC_ROOT_INFO_PROVIDER, CF_SYNC_ROOT_PROVIDER_INFO, CfGetSyncRootInfoByPath,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    CreateDirectoryW, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, GetDriveTypeW,
-    GetFileInformationByHandleEx, GetVolumeInformationW, GetVolumePathNameW,
+    GetFileAttributesW, GetFileInformationByHandleEx, GetVolumeInformationW, GetVolumePathNameW,
+    INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
 };
 use windows_sys::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
-use windows_sys::Win32::System::DataExchange::SetClipboardData;
+use windows_sys::Win32::System::DataExchange::{GetClipboardData, SetClipboardData};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows_sys::Win32::System::Power::{
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED, HPOWERNOTIFY, RegisterSuspendResumeNotification,
     SetThreadExecutionState, UnregisterSuspendResumeNotification,
+};
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
+    RegSetValueExW,
 };
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetLastInputInfo, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
+    UnregisterHotKey,
+};
 use windows_sys::Win32::UI::Shell::{
     AssocIsDangerous, FOLDERID_LocalAppData, FOLDERID_Profile, FOLDERID_RoamingAppData,
     KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW,
@@ -73,17 +95,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR, DEV_BROADCAST_VOLUME,
     DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_SHOWNORMAL,
-    SendMessageTimeoutW, UnregisterClassW, WM_APP, WM_CLOSE, WM_DESTROY, WM_NULL, WNDCLASSW,
-    WS_OVERLAPPED,
+    SendMessageTimeoutW, UnregisterClassW, WM_APP, WM_CLOSE, WM_DESTROY, WM_HOTKEY, WM_NULL,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 use windows_sys::core::PWSTR;
 
-use super::signals::{DeviceHeader, classify, wants_device_header};
+use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
-    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env, IdleSource,
-    KnownFolder, Launcher, Os, OsSignal, Power, SystemClock, ThreadTimer, Volumes,
+    CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env,
+    Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher,
+    MainWindow, Os, OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed,
+    PrintSteps, Shortcut, StartupEntry, SystemClock, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
+use crate::startup::{self, StartupState};
 use crate::{lock, window};
 
 #[cfg(test)]
@@ -112,6 +137,379 @@ pub fn turn_off_external_drop(controller: &ICoreWebView2Controller) -> bool {
     confirmed && !allowed.as_bool()
 }
 
+/// Turns off WebView2's browser accelerator keys (Ctrl+P, F12, Ctrl+Shift+I, F5, Ctrl+R, Ctrl+U and the rest) and its
+/// default context menu, then reads both settings back. Returns `true` only when WebView2 confirms both are off.
+///
+/// Wry's defaults leave both on (`browser_accelerator_keys` and `default_context_menus` are true "as WebView2's
+/// default"), and Tauri 2.12.5 offers no setting for either, so they are turned off here, after the window exists
+/// (security risk 3: Ctrl+P on a revealed password would reach the print spooler).
+pub fn turn_off_browser_keys(controller: &ICoreWebView2Controller) -> bool {
+    // SAFETY: `controller` is a live COM interface that Tauri hands us on the thread that owns the webview
+    // (`with_webview`); the getter only returns a new reference to the webview it owns.
+    let Ok(webview) = (unsafe { controller.CoreWebView2() }) else {
+        return false;
+    };
+    // SAFETY: as above, on the webview just obtained.
+    let Ok(settings) = (unsafe { webview.Settings() }) else {
+        return false;
+    };
+    // A WebView2 runtime too old for `ICoreWebView2Settings3` cannot turn the keys off: that counts as failure.
+    let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() else {
+        return false;
+    };
+    let (mut menus, mut keys) = (BOOL::from(true), BOOL::from(true));
+    // SAFETY: `settings` and `settings3` are live COM interfaces on the thread that owns the webview. The four calls
+    // are plain property accessors; `menus` and `keys` are valid, writable `BOOL`s for the getters.
+    let confirmed = unsafe {
+        settings.SetAreDefaultContextMenusEnabled(false).is_ok()
+            && settings3.SetAreBrowserAcceleratorKeysEnabled(false).is_ok()
+            && settings.AreDefaultContextMenusEnabled(&mut menus).is_ok()
+            && settings3
+                .AreBrowserAcceleratorKeysEnabled(&mut keys)
+                .is_ok()
+    };
+    confirmed && !menus.as_bool() && !keys.as_bool()
+}
+
+/// The real printer's call: WebView2's own print-to-PDF of the main window's page (`ICoreWebView2_7::PrintToPdf`), with
+/// its default print settings.
+pub struct WinPrint<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> PrintCalls for WinPrint<R> {
+    fn start(&self, path: &Path, cancel: CancelToken, done: PrintDone) -> Result<(), PrintFailed> {
+        let not_started = PrintFailed::NotStarted { code: 0 };
+        let wide = wide_path(path).map_err(|_| not_started)?;
+        let window = self
+            .app
+            .get_webview_window(window::MAIN)
+            .ok_or(not_started)?;
+        // WebView2 is called on the thread that owns it. If the call cannot be queued, the closure (and `done` in it) is
+        // dropped, and the caller is told by this return instead.
+        window
+            .with_webview(move |webview| print_page(&webview.controller(), &wide, &cancel, done))
+            .map_err(|_| not_started)
+    }
+
+    fn start_on_printer(
+        &self,
+        printer: &str,
+        cancel: CancelToken,
+        done: PrintDone,
+    ) -> Result<(), PrintFailed> {
+        let not_started = PrintFailed::NotStarted { code: 0 };
+        let wide = wide_text(OsStr::new(printer)).map_err(|_| not_started)?;
+        let window = self
+            .app
+            .get_webview_window(window::MAIN)
+            .ok_or(not_started)?;
+        // As for `start`: on the webview's own thread, and a call that cannot be queued drops `done` and is told by this
+        // return instead.
+        window
+            .with_webview(move |webview| {
+                print_page_to_printer(&webview.controller(), &wide, &cancel, done)
+            })
+            .map_err(|_| not_started)
+    }
+
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters> {
+        installed_printers()
+    }
+}
+
+/// Prints the page straight to the printer named `printer` (a NUL-terminated UTF-16 name) on the webview's own thread:
+/// print settings made by the webview's environment (`ICoreWebView2Environment6::CreatePrintSettings`), named for the
+/// printer (`ICoreWebView2PrintSettings2::SetPrinterName`) with backgrounds off, handed to `ICoreWebView2_16::Print`,
+/// which opens no Windows window. `done` goes to WebView2's completion handler or, when the call is refused, is called
+/// with why.
+fn print_page_to_printer(
+    controller: &ICoreWebView2Controller,
+    printer: &[u16],
+    cancel: &CancelToken,
+    done: PrintDone,
+) {
+    // Whichever of the handler and the refusal below comes first takes it.
+    let done = Rc::new(Cell::new(Some(done)));
+    let started = (|| -> windows_core::Result<()> {
+        // SAFETY: `controller` is a live COM interface on the thread that owns the webview (`with_webview`).
+        let webview = unsafe { controller.CoreWebView2() }?;
+        // SAFETY: `webview` is a live COM interface on that same thread; the getter returns a new reference.
+        let environment = unsafe { webview.cast::<ICoreWebView2_2>()?.Environment() }?;
+        // SAFETY: `environment` is a live COM interface on that thread; the call returns new print settings.
+        let settings = unsafe {
+            environment
+                .cast::<ICoreWebView2Environment6>()?
+                .CreatePrintSettings()
+        }?;
+        let named = settings.cast::<ICoreWebView2PrintSettings2>()?;
+        // SAFETY: `printer` is a NUL-terminated UTF-16 string (from `wide_text`) that outlives the call, which copies
+        // it; both settings are live COM interfaces of the one settings object, on the webview's thread.
+        unsafe {
+            named.SetPrinterName(PCWSTR(printer.as_ptr()))?;
+            settings.SetShouldPrintBackgrounds(false)?;
+        }
+        let handler = {
+            let done = Rc::clone(&done);
+            PrintCompletedHandler::create(Box::new(move |error, status| {
+                if let Some(done) = done.take() {
+                    done(printer_job_answer(error, status));
+                }
+                Ok(())
+            }))
+        };
+        let webview = webview.cast::<ICoreWebView2_16>()?;
+        // The last look before WebView2 is asked: a session that locked while this was queued is not printed.
+        if revoked(cancel, &done) {
+            return Ok(());
+        }
+        // SAFETY: `webview` and `settings` are live COM interfaces on the webview's thread; `handler` is a live COM
+        // object, which WebView2 holds its own reference to for as long as it needs it.
+        unsafe { webview.Print(&settings, &handler) }
+    })();
+    if let Err(error) = started
+        && let Some(done) = done.take()
+    {
+        done(Err(PrintFailed::NotStarted {
+            code: error.code().0,
+        }));
+    }
+}
+
+/// The check that stands right before WebView2's `Print` or `PrintToPdf`, on the webview's thread: when `cancel` is
+/// cancelled (the session locked while the job was queued), the job ends here with [`PrintFailed::Revoked`] through the
+/// `done` it holds and `true` is returned, so WebView2 is never called. A submitted print cannot be recalled, so this is
+/// the last point where a lock still stops one.
+fn revoked(cancel: &CancelToken, done: &Rc<Cell<Option<PrintDone>>>) -> bool {
+    if !cancel.is_cancelled() {
+        return false;
+    }
+    if let Some(done) = done.take() {
+        done(Err(PrintFailed::Revoked));
+    }
+    true
+}
+
+/// How a print to a printer ended, from what WebView2's completion handler was given: sent only when there was no
+/// error and the status is "succeeded". "Printer unavailable" and every other status are the same answer (the shell
+/// tells the person one thing for all of them), with the `HRESULT` kept as a number when there was one.
+fn printer_job_answer(
+    error: windows_core::Result<()>,
+    status: COREWEBVIEW2_PRINT_STATUS,
+) -> Result<(), PrintFailed> {
+    match error {
+        Err(error) => Err(PrintFailed::NotWritten {
+            code: error.code().0,
+        }),
+        Ok(()) if status != COREWEBVIEW2_PRINT_STATUS_SUCCEEDED => {
+            Err(PrintFailed::NotWritten { code: 0 })
+        }
+        Ok(()) => Ok(()),
+    }
+}
+
+/// The printers Windows has for this user (`EnumPrintersW` at level 2, the local ones and the connections) and its
+/// default (`GetDefaultPrinterW`). A name that is not valid UTF-16 cannot go to the page and back, so its printer is
+/// left out. Fixed errors only: never a name or Windows' message.
+fn installed_printers() -> ShellResult<InstalledPrinters> {
+    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+    // The bytes of the answer, in `u64`s so the structures in them are 8-aligned. A printer added between the two calls
+    // makes the first size too small: asked again, a few times.
+    let mut buffer: Vec<u64> = Vec::new();
+    for _ in 0..4 {
+        let capacity = buffer.len() * size_of::<u64>();
+        let Ok(capacity_u32) = u32::try_from(capacity) else {
+            return Err(PRINTERS_UNREADABLE);
+        };
+        let (mut needed, mut returned) = (0u32, 0u32);
+        let target = if capacity == 0 {
+            ptr::null_mut()
+        } else {
+            buffer.as_mut_ptr().cast::<u8>()
+        };
+        // SAFETY: `target` is null with a size of 0, or points to `capacity` writable bytes (the buffer, 8-aligned) that
+        // outlive the call; `needed` and `returned` are writable; no name is given, so the local ones are listed.
+        let done = unsafe {
+            EnumPrintersW(
+                flags,
+                ptr::null(),
+                2,
+                target,
+                capacity_u32,
+                &mut needed,
+                &mut returned,
+            )
+        };
+        if done != 0 {
+            // SAFETY: the buffer's `capacity` bytes are initialised (zero-filled, then written by Windows), and the view
+            // ends where the buffer does.
+            let bytes = unsafe { slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), capacity) };
+            return Ok(InstalledPrinters {
+                printers: printers_in(bytes, returned as usize)?,
+                default: default_printer(),
+            });
+        }
+        // SAFETY: reads the calling thread's last error, straight after the call that failed.
+        if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+            return Err(PRINTERS_UNREADABLE);
+        }
+        buffer = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
+    }
+    Err(PRINTERS_UNREADABLE)
+}
+
+/// The `count` `PRINTER_INFO_2W` structures at the start of `bytes` (8-aligned, as `EnumPrintersW` filled them), with
+/// the strings they point to, which lie later in the same bytes. A pointer outside `bytes`, or a string with no
+/// terminator before the end, is `PRINTERS_UNREADABLE`: nothing is read from beyond what Windows filled in.
+fn printers_in(bytes: &[u8], count: usize) -> ShellResult<Vec<InstalledPrinter>> {
+    let size = size_of::<PRINTER_INFO_2W>();
+    if count
+        .checked_mul(size)
+        .is_none_or(|total| total > bytes.len())
+    {
+        return Err(PRINTERS_UNREADABLE);
+    }
+    let base = bytes.as_ptr() as usize;
+    // A string at `pointer`: empty for NULL, else the UTF-16 units up to the terminator, all inside `bytes`.
+    let text_at = |pointer: *mut u16| -> ShellResult<Vec<u16>> {
+        if pointer.is_null() {
+            return Ok(Vec::new());
+        }
+        let start = (pointer as usize)
+            .checked_sub(base)
+            .filter(|start| start % align_of::<u16>() == 0 && *start < bytes.len())
+            .ok_or(PRINTERS_UNREADABLE)?;
+        let (pairs, _) = bytes[start..].as_chunks::<{ size_of::<u16>() }>();
+        let units: Vec<u16> = pairs
+            .iter()
+            .map(|pair| u16::from_ne_bytes(*pair))
+            .take_while(|&unit| unit != 0)
+            .collect();
+        // Ended by a terminator, not by the end of the bytes.
+        let end = start + (units.len() + 1) * size_of::<u16>();
+        if end > bytes.len() {
+            return Err(PRINTERS_UNREADABLE);
+        }
+        Ok(units)
+    };
+    let mut printers = Vec::with_capacity(count);
+    for index in 0..count {
+        // SAFETY: the check above makes `count * size` bytes of `bytes` readable; the bytes start 8-aligned (a `Vec<u64>`
+        // in the caller), as `PRINTER_INFO_2W` needs, and every field is plain data that Windows filled in.
+        let info = unsafe {
+            bytes
+                .as_ptr()
+                .add(index * size)
+                .cast::<PRINTER_INFO_2W>()
+                .read()
+        };
+        let Ok(name) = String::from_utf16(&text_at(info.pPrinterName)?) else {
+            continue;
+        };
+        printers.push(InstalledPrinter {
+            name,
+            port: String::from_utf16_lossy(&text_at(info.pPortName)?),
+            driver: String::from_utf16_lossy(&text_at(info.pDriverName)?),
+            attributes: info.Attributes,
+        });
+    }
+    Ok(printers)
+}
+
+/// The name of the default printer (`GetDefaultPrinterW`), or `None` when there is none or Windows will not say.
+fn default_printer() -> Option<String> {
+    let mut len = 0u32;
+    // SAFETY: a null buffer with a length of 0 only asks for the size, which is written to `len`, a writable `u32`.
+    let asked = unsafe { GetDefaultPrinterW(ptr::null_mut(), &mut len) };
+    // SAFETY: reads the calling thread's last error, straight after the call.
+    if asked != 0 || len == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return None;
+    }
+    let mut buffer = vec![0u16; len as usize];
+    // SAFETY: `buffer` has `len` writable UTF-16 units, and `len` says so.
+    if unsafe { GetDefaultPrinterW(buffer.as_mut_ptr(), &mut len) } == 0 {
+        return None;
+    }
+    let end = buffer.iter().position(|&unit| unit == 0)?;
+    String::from_utf16(&buffer[..end]).ok()
+}
+
+/// Starts the print on the webview's own thread and hands `done` to WebView2's completion handler, or, when the call
+/// is refused, calls it with why.
+fn print_page(
+    controller: &ICoreWebView2Controller,
+    path: &[u16],
+    cancel: &CancelToken,
+    done: PrintDone,
+) {
+    // Whichever of the handler and the refusal below comes first takes it.
+    let done = Rc::new(Cell::new(Some(done)));
+    let started = (|| {
+        // SAFETY: `controller` is a live COM interface on the thread that owns the webview (`with_webview`).
+        let webview = unsafe { controller.CoreWebView2() }?;
+        let webview = webview.cast::<ICoreWebView2_7>()?;
+        let handler = {
+            let done = Rc::clone(&done);
+            PrintToPdfCompletedHandler::create(Box::new(move |error, successful| {
+                if let Some(done) = done.take() {
+                    done(print_answer(error, successful));
+                }
+                Ok(())
+            }))
+        };
+        // The last look before WebView2 is asked: a session that locked while this was queued is not printed.
+        if revoked(cancel, &done) {
+            return Ok(());
+        }
+        // SAFETY: `path` is a NUL-terminated UTF-16 string (from `wide_path`) that outlives the call; `handler` is a
+        // live COM object, which WebView2 holds its own reference to for as long as it needs it; no print settings
+        // are given, which WebView2 reads as its defaults.
+        unsafe {
+            webview.PrintToPdf(
+                PCWSTR(path.as_ptr()),
+                None::<&ICoreWebView2PrintSettings>,
+                &handler,
+            )
+        }
+    })();
+    if let Err(error) = started
+        && let Some(done) = done.take()
+    {
+        done(Err(PrintFailed::NotStarted {
+            code: error.code().0,
+        }));
+    }
+}
+
+/// How a finished print job ended, from what WebView2's completion handler was given: a PDF only when there was no
+/// error and WebView2 says it succeeded. The `HRESULT` is kept as a number.
+fn print_answer(error: windows_core::Result<()>, successful: bool) -> Result<(), PrintFailed> {
+    match error {
+        Err(error) => Err(PrintFailed::NotWritten {
+            code: error.code().0,
+        }),
+        Ok(()) if !successful => Err(PrintFailed::NotWritten { code: 0 }),
+        Ok(()) => Ok(()),
+    }
+}
+
+/// Adds the hidden attribute to the file or folder at `path`; every other attribute stays. The recovery key's PDF is
+/// printed into a new hidden folder (the design's results table: WebView2 refuses an existing hidden file), which this
+/// hides.
+pub fn set_hidden(path: &Path) -> io::Result<()> {
+    let wide = wide_path(path)?;
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 path; the call only reads it.
+    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the same `wide` path; the new attributes are passed by value.
+    if unsafe { SetFileAttributesW(wide.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Whether `a` and `b` are equal as Windows compares file names: ordinal, ignoring case (`CompareStringOrdinal`,
 /// which uppercases each UTF-16 unit with the system's table, the same per-unit rule NTFS applies to names).
 pub fn equal_ignoring_case(a: &OsStr, b: &OsStr) -> bool {
@@ -131,8 +529,12 @@ impl Os {
             volumes: Arc::new(WinVolumes),
             env: Arc::new(WinEnv),
             dialogs: Arc::new(WinDialogs { app: app.clone() }),
+            printer: Arc::new(PrintSteps::new(Arc::new(WinPrint { app: app.clone() }))),
             launcher: Arc::new(WinLauncher),
             idle: Arc::new(WinIdle),
+            window: Arc::new(WinMainWindow { app: app.clone() }),
+            hotkey: Arc::new(WinHotkey { app: app.clone() }),
+            startup: Arc::new(WinStartup),
             power: Arc::new(WinPower { app }),
             clock: Arc::new(SystemClock),
             clipboard: Arc::new(ClipboardSteps::new(
@@ -230,6 +632,88 @@ impl ClipboardCalls for WinClipboard {
         clipboard_win::raw::get_vec(format.get(), &mut held).map_err(|_| CLIPBOARD_FAILED)?;
         Ok(Some(held))
     }
+
+    fn text_size(&self) -> ShellResult<Option<usize>> {
+        #[cfg(test)]
+        clipboard_step("text size");
+        // `Ok(None)` only when Windows says there is no text (it also offers text for plain ANSI and OEM text).
+        if !clipboard_win::raw::is_format_avail(CF_UNICODETEXT) {
+            return Ok(None);
+        }
+        // SAFETY: only inside an opening on this thread (`ClipboardSteps`); the handle is the clipboard's own block,
+        // read here for its size only and never freed or kept. Windows says the handle is good only until the
+        // clipboard is emptied or closed. Lockbox's own threads cannot do either meanwhile (`ClipboardSteps` gives
+        // one opening at a time), and a program with an owner window is refused by Windows while this opening is
+        // open. A third program that also opens with no owner window is let in by Windows, and could empty the
+        // clipboard: Lockbox cannot stop that.
+        let block = unsafe { GetClipboardData(CF_UNICODETEXT) };
+        if block.is_null() {
+            return Err(CLIPBOARD_FAILED);
+        }
+        // SAFETY: `block` is the global block the call above returned, good for as long as the clipboard is neither
+        // emptied nor closed (see above for who can and cannot do that during this opening).
+        match unsafe { GlobalSize(block) } {
+            0 => Err(CLIPBOARD_FAILED),
+            size => Ok(Some(size)),
+        }
+    }
+
+    fn copy_text(&self, max_block: usize) -> ShellResult<Option<Zeroizing<String>>> {
+        #[cfg(test)]
+        clipboard_step("read text");
+        if !clipboard_win::raw::is_format_avail(CF_UNICODETEXT) {
+            return Ok(None);
+        }
+        // SAFETY: as in `text_size`.
+        let block = unsafe { GetClipboardData(CF_UNICODETEXT) };
+        if block.is_null() {
+            return Err(CLIPBOARD_FAILED);
+        }
+        // SAFETY: as in `text_size`.
+        let size = unsafe { GlobalSize(block) };
+        // The block read is the one measured here: `text_size` looked at a handle that a program opening with no owner
+        // window could have replaced since.
+        if size > max_block {
+            return Err(CLIPBOARD_TOO_LARGE);
+        }
+        // SAFETY: `block` is the clipboard's global block, valid as described in `text_size`; locked here and unlocked
+        // below, before anything else.
+        let at = unsafe { GlobalLock(block) }.cast::<u16>().cast_const();
+        if at.is_null() || size == 0 {
+            if !at.is_null() {
+                // SAFETY: undoes the lock just taken.
+                unsafe { GlobalUnlock(block) };
+            }
+            return Err(CLIPBOARD_FAILED);
+        }
+        // Read unit by unit straight from the block (no alignment assumed, and no copy of the units): the text is
+        // built once, in a string made the right size first, so it never moves and leaves an unwiped part behind.
+        let units = (0..size / size_of::<u16>()).map(|index| {
+            // SAFETY: the block is locked and `size` bytes long, so the `size / 2` units from `at` are readable, and
+            // `index` is below that. The block stays as long as the clipboard is neither emptied nor closed, which
+            // Lockbox's own threads and programs with an owner window cannot do during this opening; a third program
+            // opening with no owner window could (see `text_size`).
+            unsafe { at.add(index).read_unaligned() }
+        });
+        let text = utf8_from_utf16(units);
+        // SAFETY: undoes the lock taken above; `at` is not used after it.
+        unsafe { GlobalUnlock(block) };
+        Ok(Some(text))
+    }
+}
+
+/// The text in `units` (UTF-16) up to its first NUL, as UTF-8. The string is made exactly as long as the text first, so
+/// it never grows (a growing string leaves its old, unwiped buffer behind), and it is wiped when dropped. A unit that
+/// is half of a surrogate pair with no other half becomes U+FFFD.
+fn utf8_from_utf16(units: impl Iterator<Item = u16> + Clone) -> Zeroizing<String> {
+    let units = units.take_while(|&unit| unit != 0);
+    let letters = |units| {
+        char::decode_utf16(units).map(|letter| letter.unwrap_or(char::REPLACEMENT_CHARACTER))
+    };
+    let len = letters(units.clone()).map(char::len_utf8).sum();
+    let mut text = Zeroizing::new(String::with_capacity(len));
+    text.extend(letters(units));
+    text
 }
 
 /// A movable, zero-filled global block (`GHND`), locked from its allocation until it is given to the clipboard or
@@ -363,6 +847,222 @@ impl<R: Runtime> Power for WinPower<R> {
     fn keep_awake(&self, on: bool) {
         if let Some(signal_thread) = self.app.try_state::<SignalThread>() {
             signal_thread.keep_awake(on);
+        }
+    }
+}
+
+/// The main window, hidden to the tray by Tauri's own call (no `unsafe` here).
+pub struct WinMainWindow<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> MainWindow for WinMainWindow<R> {
+    /// On the main thread, which also shows the window: the check and the hide run there together, so a reopen cannot
+    /// come between them. Queued, so a close never waits for the event loop.
+    fn hide_if(&self, still_closing: Box<dyn FnOnce() -> bool + Send>) {
+        let app = self.app.clone();
+        let _ = self.app.run_on_main_thread(move || {
+            if still_closing()
+                && let Some(main) = app.get_webview_window(window::MAIN)
+            {
+                let _ = main.hide();
+            }
+        });
+    }
+
+    /// On the main thread, which must show the window ([`window::bring_to_front`]): queued there, so a press never
+    /// waits for the event loop.
+    fn bring_forward(&self) {
+        let app = self.app.clone();
+        let _ = self
+            .app
+            .run_on_main_thread(move || window::bring_to_front(&app));
+    }
+
+    /// Tauri's own call (it queues the request for the event loop and does not wait): no `unsafe` here.
+    fn protect_from_capture(&self, on: bool) {
+        if let Some(main) = self.app.get_webview_window(window::MAIN) {
+            let _ = window::set_capture_protection(&main, on);
+        }
+    }
+}
+
+/// The save shortcut, registered through the signal window's thread ([`SignalThread::set_hotkey`]), which `RegisterHotKey`
+/// ties it to. Looked up at each call; with no signal thread (a failed start) nothing can be set.
+pub struct WinHotkey<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> Hotkey for WinHotkey<R> {
+    fn set(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken> {
+        match self.app.try_state::<SignalThread>() {
+            Some(signals) => signals.set_hotkey(shortcut),
+            None => Err(HotkeyTaken::NotSet),
+        }
+    }
+}
+
+/// The current user's `Run` key: a program whose value is here starts when the person signs in.
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// Where Windows' own Startup settings keep each program's on/off state, under the same value name as in [`RUN_KEY`].
+const STARTUP_APPROVED_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+/// The most of a `StartupApproved` value that is read. Windows writes 12 bytes (a flag byte and an 8-byte time, seen on
+/// Windows 11, 2026-11-11); one longer than this is not what Windows writes and reads as "not turned off".
+const STARTUP_APPROVED_READ: usize = 64;
+
+/// An open registry key, closed when dropped.
+struct RegistryKey(HKEY);
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from a successful `RegOpenKeyExW` or `RegCreateKeyExW` and is closed here, once.
+        unsafe { RegCloseKey(self.0) };
+    }
+}
+
+/// `text` as a NUL-terminated UTF-16 string, as the registry calls take it.
+fn registry_text(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain([0]).collect()
+}
+
+/// Windows' answer as an error. The code only: no key, value or data, and never Windows' own message.
+fn registry_error(code: u32) -> io::Error {
+    io::Error::from_raw_os_error(code as i32)
+}
+
+/// Opens `path` under the current user's registry root with `access`; `None` when the key is not there.
+fn open_registry_key(path: &str, access: u32) -> io::Result<Option<RegistryKey>> {
+    let path = registry_text(path);
+    let mut key: HKEY = ptr::null_mut();
+    // SAFETY: `path` is NUL-terminated and outlives the call; `key` is writable. The handle is only used if the call
+    // succeeded, and then belongs to the `RegistryKey` that closes it.
+    let code = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, access, &mut key) };
+    match code {
+        ERROR_SUCCESS => Ok(Some(RegistryKey(key))),
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(None),
+        other => Err(registry_error(other)),
+    }
+}
+
+/// Whether `key` has a value called `name`.
+fn registry_value_exists(key: &RegistryKey, name: &[u16]) -> io::Result<bool> {
+    // SAFETY: `name` is NUL-terminated and outlives the call. The type, data and size pointers may all be null when
+    // only the value's existence is asked.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    match code {
+        ERROR_SUCCESS => Ok(true),
+        ERROR_FILE_NOT_FOUND => Ok(false),
+        other => Err(registry_error(other)),
+    }
+}
+
+/// The binary data of the value `name` in `key`, up to [`STARTUP_APPROVED_READ`] bytes; `None` when there is no such
+/// value, it holds another kind of data, or it is longer than that.
+fn registry_binary(key: &RegistryKey, name: &[u16]) -> io::Result<Option<Vec<u8>>> {
+    let mut data = [0u8; STARTUP_APPROVED_READ];
+    let mut size = STARTUP_APPROVED_READ as u32;
+    let mut kind = 0;
+    // SAFETY: `name` is NUL-terminated and outlives the call; `kind` is writable; `data` is writable for `size` bytes,
+    // and `size` is the length it holds, which the call updates to the bytes it wrote.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            ptr::null(),
+            &mut kind,
+            data.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    match code {
+        ERROR_SUCCESS if kind == REG_BINARY => Ok(data.get(..size as usize).map(<[u8]>::to_vec)),
+        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_MORE_DATA => Ok(None),
+        other => Err(registry_error(other)),
+    }
+}
+
+/// Starting with Windows, in the registry (see [`StartupEntry`]): Lockbox's value in the current user's `Run` key
+/// ([`startup::RUN_VALUE`](crate::startup::RUN_VALUE)), and, read only, Windows' own on/off state for it.
+pub struct WinStartup;
+
+impl StartupEntry for WinStartup {
+    fn read(&self) -> io::Result<StartupState> {
+        let name = registry_text(startup::RUN_VALUE);
+        let on = match open_registry_key(RUN_KEY, KEY_QUERY_VALUE)? {
+            Some(key) => registry_value_exists(&key, &name)?,
+            None => false,
+        };
+        let approved = match open_registry_key(STARTUP_APPROVED_KEY, KEY_QUERY_VALUE)? {
+            Some(key) => registry_binary(&key, &name)?,
+            None => None,
+        };
+        Ok(startup::state_of(on, approved.as_deref()))
+    }
+
+    fn write(&self, on: bool) -> io::Result<()> {
+        let name = registry_text(startup::RUN_VALUE);
+        if !on {
+            // Nothing to remove when the key or the value is not there.
+            let Some(key) = open_registry_key(RUN_KEY, KEY_SET_VALUE)? else {
+                return Ok(());
+            };
+            // SAFETY: the key is open, and `name` is NUL-terminated and outlives the call.
+            return match unsafe { RegDeleteValueW(key.0, name.as_ptr()) } {
+                ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
+                other => Err(registry_error(other)),
+            };
+        }
+        let command = startup::run_command(&std::env::current_exe()?)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let data: Vec<u16> = command.encode_wide().chain([0]).collect();
+        let size = u32::try_from(data.len() * 2)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let path = registry_text(RUN_KEY);
+        let mut key: HKEY = ptr::null_mut();
+        // SAFETY: `path` is NUL-terminated and outlives the call; the class, security attributes and disposition are
+        // optional and null; `key` is writable, and is used only if the call succeeded.
+        let code = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                ptr::null(),
+                &mut key,
+                ptr::null_mut(),
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(registry_error(code));
+        }
+        let key = RegistryKey(key);
+        // SAFETY: the key is open; `name` is NUL-terminated and outlives the call; `data` holds `size` bytes (its
+        // UTF-16 units and the terminating NUL), which the call copies.
+        let code = unsafe {
+            RegSetValueExW(
+                key.0,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                data.as_ptr().cast::<u8>(),
+                size,
+            )
+        };
+        match code {
+            ERROR_SUCCESS => Ok(()),
+            other => Err(registry_error(other)),
         }
     }
 }
@@ -992,6 +1692,14 @@ impl<R: Runtime> Dialogs for WinDialogs<R> {
 /// answers with the thread's previous execution state.
 const KEEP_AWAKE: u32 = WM_APP + 1;
 
+/// Sent by [`SignalThread::set_hotkey`]: the window registers the shortcut the owner last asked for
+/// ([`Shared::hotkey`]) and answers 0, or the error code Windows gave.
+const SET_HOTKEY: u32 = WM_APP + 3;
+
+/// How long [`SignalThread::set_hotkey`] waits for the window's answer, in milliseconds (as `SendMessageTimeoutW`
+/// takes it).
+const HOTKEY_WAIT_MS: u32 = 1_000;
+
 /// How long `Drop` waits for the window to take its close request, in milliseconds (as `SendMessageTimeoutW` takes
 /// it), and then again for the window's thread to end.
 const STOP_WAIT_MS: u32 = 1_000;
@@ -1017,6 +1725,9 @@ struct Shared {
     /// send that times out). `Drop` never sets it before that send, so its own request cannot leave the window's
     /// thread out of the loop and waiting for the slot lock that `Drop` holds while it sends.
     stopping: AtomicBool,
+    /// The save shortcut the owner last asked for ([`SignalThread::set_hotkey`]); the window reads it when it gets
+    /// [`SET_HOTKEY`]. A leaf lock: nothing is called while it is held.
+    hotkey: Mutex<Option<Shortcut>>,
 }
 
 /// What the window procedure needs: where signals go, and what the window shares with its owner.
@@ -1032,6 +1743,8 @@ thread_local! {
     static SESSION_NOTICE: Cell<bool> = const { Cell::new(false) };
     /// The window's suspend-and-resume registration (0: none), undone just before it is destroyed.
     static POWER_NOTICE: Cell<HPOWERNOTIFY> = const { Cell::new(0) };
+    /// The save shortcut as registered with Windows, if it is; undone just before the window is destroyed.
+    static HOTKEY: Cell<Option<Registered>> = const { Cell::new(None) };
 }
 
 /// The thread that owns Lockbox's hidden signal window ([`spawn`]). Only dropping it closes the window or undoes its
@@ -1064,6 +1777,7 @@ pub fn spawn(sink: Sender<OsSignal>) -> io::Result<SignalThread> {
         window: Mutex::new(0),
         close_asked: AtomicBool::new(false),
         stopping: AtomicBool::new(false),
+        hotkey: Mutex::new(None),
     });
     let context = Context {
         sink,
@@ -1111,6 +1825,142 @@ impl SignalThread {
             unsafe { PostMessageW(*window as HWND, KEEP_AWAKE, usize::from(on), 0) };
         }
     }
+}
+
+impl SignalThread {
+    /// Registers `shortcut` as the save shortcut system-wide (`None`: releases it), replacing the one registered
+    /// before. `RegisterHotKey` ties the shortcut to the thread that calls it, and the press comes back to that
+    /// thread's window, so the request is sent to the window and made on its own thread, and the answer comes back
+    /// here. A shortcut Windows refuses leaves the one registered before working, and is not remembered as the one asked
+    /// for: what the window finds if it is asked again is what it held before ([`SET_HOTKEY`]). [`HotkeyTaken::Taken`] only when
+    /// Windows says the keys are registered already; any other refusal, and a window that does not answer in time, is
+    /// [`HotkeyTaken::NotSet`].
+    pub fn set_hotkey(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken> {
+        // Held across the send, as `Drop` does: the window's thread clears the handle under this lock before it
+        // destroys the window, and it takes no lock while it handles the request. It also makes two changes take turns.
+        let window = lock(&self.shared.window);
+        if *window == 0 {
+            return Err(HotkeyTaken::NotSet);
+        }
+        // The message carries nothing: the window reads the request from here, so a message from another program can
+        // only ask again for what was asked last.
+        let before = std::mem::replace(&mut *lock(&self.shared.hotkey), shortcut);
+        let mut answer = 0;
+        // SAFETY: the message carries no pointers, and `answer` is writable. The handle is live for the whole call:
+        // the window's thread clears the slot, under the lock held here, before it destroys the window.
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                *window as HWND,
+                SET_HOTKEY,
+                0,
+                0,
+                SMTO_BLOCK | SMTO_ABORTIFHUNG,
+                HOTKEY_WAIT_MS,
+                &mut answer,
+            )
+        } != 0;
+        if !sent {
+            // The window did not take the request in time: what it would find if it took it later is what it had.
+            *lock(&self.shared.hotkey) = before;
+            return Err(HotkeyTaken::NotSet);
+        }
+        let answered = hotkey_answer(answer);
+        if answered.is_err() {
+            // Windows refused it: the shortcut registered is still the old one, and what the window finds if it is asked
+            // again (any program can post the message) must be that, not keys freed since.
+            *lock(&self.shared.hotkey) = before;
+        }
+        answered
+    }
+}
+
+/// What the window answered to [`SET_HOTKEY`]: 0 for done, else the Win32 error code `RegisterHotKey` gave.
+fn hotkey_answer(answer: usize) -> Result<(), HotkeyTaken> {
+    match u32::try_from(answer) {
+        Ok(0) => Ok(()),
+        Ok(ERROR_HOTKEY_ALREADY_REGISTERED) => Err(HotkeyTaken::Taken),
+        _ => Err(HotkeyTaken::NotSet),
+    }
+}
+
+/// What the save shortcut is registered as on the window's thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Registered {
+    id: i32,
+    shortcut: Shortcut,
+}
+
+/// The `RegisterHotKey` modifiers for `shortcut`. `MOD_NOREPEAT`: holding the keys down presses once, not many times.
+fn hotkey_modifiers(shortcut: Shortcut) -> u32 {
+    [
+        (shortcut.ctrl, MOD_CONTROL),
+        (shortcut.shift, MOD_SHIFT),
+        (shortcut.alt, MOD_ALT),
+    ]
+    .into_iter()
+    .filter(|(held, _)| *held)
+    .fold(MOD_NOREPEAT, |all, (_, modifier)| all | modifier)
+}
+
+/// `WM_HOTKEY`: whether `id` is the ID the save shortcut is registered under right now. Anything else, from another
+/// program or from a shortcut released a moment ago, is not a press.
+fn is_registered_hotkey(id: WPARAM) -> bool {
+    HOTKEY
+        .try_with(|registered| registered.get())
+        .ok()
+        .flatten()
+        .is_some_and(|registered| i32::try_from(id) == Ok(registered.id))
+}
+
+/// [`SET_HOTKEY`], on the window's thread: makes the shortcut asked for the registered one. The new keys are
+/// registered under the ID the old ones do not use, and only then are the old ones released, so a refusal leaves the
+/// old shortcut as it was. Returns 0, or the error code Windows gave.
+fn apply_hotkey(window: HWND) -> LRESULT {
+    let wanted = CONTEXT
+        .try_with(|context| {
+            context
+                .get()
+                .and_then(|context| *lock(&context.shared.hotkey))
+        })
+        .ok()
+        .flatten();
+    let current = HOTKEY.get();
+    if current.map(|registered| registered.shortcut) == wanted {
+        return 0;
+    }
+    let new = match wanted {
+        None => None,
+        Some(shortcut) => {
+            let Some(id) = HOTKEY_IDS
+                .into_iter()
+                .find(|id| Some(*id) != current.map(|registered| registered.id))
+            else {
+                return 1;
+            };
+            // SAFETY: `window` is this thread's live window; the ID, modifiers and key are plain numbers.
+            let registered = unsafe {
+                RegisterHotKey(
+                    window,
+                    id,
+                    hotkey_modifiers(shortcut),
+                    u32::from(shortcut.key),
+                )
+            } != 0;
+            if !registered {
+                // Read at once, before anything else can change it. A failure with no code is still a failure.
+                // SAFETY: reads this thread's last error.
+                let code = unsafe { GetLastError() };
+                return code.max(1) as LRESULT;
+            }
+            Some(Registered { id, shortcut })
+        }
+    };
+    if let Some(old) = current {
+        // SAFETY: `old` is this thread's registration for this window, released once (replaced below).
+        unsafe { UnregisterHotKey(window, old.id) };
+    }
+    HOTKEY.set(new);
+    0
 }
 
 impl Drop for SignalThread {
@@ -1319,6 +2169,9 @@ unsafe extern "system" fn window_procedure(
 ) -> LRESULT {
     match msg {
         KEEP_AWAKE => return set_keep_awake(wparam != 0),
+        SET_HOTKEY => return apply_hotkey(window),
+        // A press only under the ID the shortcut is registered with now; another program can post any message here.
+        WM_HOTKEY if !is_registered_hotkey(wparam) => return 0,
         WM_CLOSE => {
             take_close_request();
             return 0;
@@ -1402,8 +2255,12 @@ fn destroy_window(window: HWND) {
     unsafe { DestroyWindow(window) };
 }
 
-/// Undoes whichever of the window's session and suspend registrations were made.
+/// Undoes whichever of the window's session, suspend and shortcut registrations were made.
 fn stop_notices(window: HWND) {
+    if let Some(registered) = HOTKEY.replace(None) {
+        // SAFETY: `registered` is this thread's registration for this window, undone once (it was replaced by `None`).
+        unsafe { UnregisterHotKey(window, registered.id) };
+    }
     if SESSION_NOTICE.replace(false) {
         // SAFETY: `window` is the live window that registered, on its own thread.
         let undone = unsafe { WTSUnRegisterSessionNotification(window) } != 0;
@@ -1570,7 +2427,6 @@ fn test_refuses(registration: Registration) -> bool {
     })
 }
 
-/// Test-only: waits at the hook's gate. It runs inside the window procedure, so it never panics.
 /// `IsReparseTagNameSurrogate`: the reparse tag's bit for "this names another file or folder".
 const NAME_SURROGATE: u32 = 0x2000_0000;
 
@@ -1612,6 +2468,7 @@ pub fn is_redirect(path: &Path) -> io::Result<bool> {
     Ok(redirects(info.FileAttributes, info.ReparseTag))
 }
 
+/// Test-only: waits at the hook's gate. It runs inside the window procedure, so it never panics.
 #[cfg(test)]
 fn wait_at_test_gate() {
     let _ = TEST_HOOK.try_with(|hook| {
@@ -1638,14 +2495,213 @@ mod tests {
         DBT_DEVICEREMOVECOMPLETE, DBT_DEVTYP_PORT, DBT_DEVTYP_VOLUME, DEV_BROADCAST_HDR,
         DEV_BROADCAST_VOLUME, GA_PARENT, GetAncestor, GetClassInfoW, GetDesktopWindow,
         GetWindowThreadProcessId, IsWindow, IsWindowVisible, PBT_APMSUSPEND, PostMessageW,
-        PostThreadMessageW, SendMessageW, WM_CLOSE, WM_DESTROY, WM_DEVICECHANGE, WM_NULL,
-        WM_POWERBROADCAST, WM_QUIT, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK,
+        PostThreadMessageW, SendMessageW, WM_CLOSE, WM_DESTROY, WM_DEVICECHANGE, WM_HOTKEY,
+        WM_NULL, WM_POWERBROADCAST, WM_QUIT, WM_WTSSESSION_CHANGE, WNDCLASSW, WTS_SESSION_LOCK,
     };
 
     use super::*;
 
     /// The deadline for every wait in these tests: a slow or stuck window fails a test instead of hanging it.
     const WAIT: Duration = Duration::from_secs(1);
+
+    /// The hidden attribute is added to a file or a folder and nothing else changes (the read-only attribute and the
+    /// content stay); a path that is not there is an error.
+    #[test]
+    fn set_hidden_adds_only_the_hidden_attribute() {
+        use std::os::windows::fs::MetadataExt;
+
+        use lockbox_core::internals::fsio::testutil::TempDir;
+        let temp = TempDir::new();
+        let file = temp.path().join("file.txt");
+        std::fs::write(&file, b"content").unwrap();
+        let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions).unwrap();
+        let folder = temp.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+
+        let before = std::fs::metadata(&file).unwrap().file_attributes();
+        assert_eq!(before & FILE_ATTRIBUTE_HIDDEN, 0);
+        set_hidden(&file).unwrap();
+        set_hidden(&folder).unwrap();
+        let after = std::fs::metadata(&file).unwrap().file_attributes();
+        assert_eq!(after, before | FILE_ATTRIBUTE_HIDDEN);
+        assert_ne!(
+            std::fs::metadata(&folder).unwrap().file_attributes() & FILE_ATTRIBUTE_HIDDEN,
+            0
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"content");
+        assert!(set_hidden(&temp.path().join("missing")).is_err());
+
+        // The temp folder cannot remove a read-only file.
+        let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&file, permissions).unwrap();
+    }
+
+    /// What WebView2's completion handler is given becomes a fixed answer: only "no error and successful" is a PDF.
+    /// The `HRESULT` it carries is kept, as a number.
+    #[test]
+    fn print_answer_is_a_pdf_only_when_webview2_says_so() {
+        const ACCESS_DENIED: i32 = 0x8007_0005_u32 as i32;
+        assert_eq!(print_answer(Ok(()), true), Ok(()));
+        assert_eq!(
+            print_answer(Ok(()), false),
+            Err(PrintFailed::NotWritten { code: 0 })
+        );
+        for successful in [true, false] {
+            let refused = windows_core::Error::from(windows_core::HRESULT(ACCESS_DENIED));
+            assert_eq!(
+                print_answer(Err(refused), successful),
+                Err(PrintFailed::NotWritten {
+                    code: ACCESS_DENIED
+                }),
+                "successful: {successful}"
+            );
+        }
+    }
+
+    /// What WebView2's print completion is given becomes a fixed answer: only "no error and succeeded" is a job the
+    /// printer took; "printer unavailable" and any other status are not, and an `HRESULT` is kept as a number.
+    #[test]
+    fn printer_job_answer_is_sent_only_when_webview2_says_so() {
+        const ACCESS_DENIED: i32 = 0x8007_0005_u32 as i32;
+        let status = COREWEBVIEW2_PRINT_STATUS;
+        assert_eq!(printer_job_answer(Ok(()), status(0)), Ok(()));
+        for unsuccessful in [status(1), status(2), status(99)] {
+            assert_eq!(
+                printer_job_answer(Ok(()), unsuccessful),
+                Err(PrintFailed::NotWritten { code: 0 })
+            );
+        }
+        let refused = windows_core::Error::from(windows_core::HRESULT(ACCESS_DENIED));
+        assert_eq!(
+            printer_job_answer(Err(refused), status(0)),
+            Err(PrintFailed::NotWritten {
+                code: ACCESS_DENIED
+            })
+        );
+    }
+
+    /// The check before WebView2's call: a live token lets the job go on (its `done` is untouched); a cancelled one
+    /// ends it with `Revoked` through that `done`, once, and says so, so the caller never reaches WebView2.
+    #[test]
+    fn a_cancelled_token_ends_the_job_before_webview2_is_called() {
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let job = |answers: &Arc<Mutex<Vec<Result<(), PrintFailed>>>>| {
+            let answers = Arc::clone(answers);
+            let done: PrintDone = Box::new(move |result| lock(&answers).push(result));
+            Rc::new(Cell::new(Some(done)))
+        };
+        let cancel = CancelToken::new();
+        let live = job(&answers);
+        assert!(!revoked(&cancel, &live));
+        assert!(lock(&answers).is_empty());
+        assert!(live.take().is_some(), "still there for WebView2's handler");
+
+        cancel.cancel();
+        let stopped = job(&answers);
+        assert!(revoked(&cancel, &stopped));
+        assert_eq!(*lock(&answers), [Err(PrintFailed::Revoked)]);
+        assert!(stopped.take().is_none(), "answered once");
+    }
+
+    /// A buffer as `EnumPrintersW` fills it: the structures first, the strings after them, all inside the bytes.
+    /// `strings` gives each printer's (name, port, driver); `attributes` its attributes.
+    fn printer_bytes(strings: &[(&str, &str, &str)], attributes: &[u32]) -> Vec<u64> {
+        let size = size_of::<PRINTER_INFO_2W>();
+        let mut text: Vec<u16> = Vec::new();
+        let mut at = Vec::new();
+        for (name, port, driver) in strings {
+            let mut place = |value: &str| {
+                let start = text.len();
+                text.extend(value.encode_utf16());
+                text.push(0);
+                start
+            };
+            at.push((place(name), place(port), place(driver)));
+        }
+        let head = strings.len() * size;
+        let total = (head + text.len() * 2).div_ceil(8);
+        let mut buffer = vec![0u64; total];
+        let base = buffer.as_mut_ptr().cast::<u8>();
+        for (index, (name, port, driver)) in at.into_iter().enumerate() {
+            let pointer = |start: usize| (base as usize + head + start * 2) as *mut u16;
+            // SAFETY: the buffer is 8-aligned and `head` bytes long for the structures; `index` is in range.
+            let info = unsafe { &mut *base.add(index * size).cast::<PRINTER_INFO_2W>() };
+            info.pPrinterName = pointer(name);
+            info.pPortName = pointer(port);
+            info.pDriverName = pointer(driver);
+            info.Attributes = attributes[index];
+        }
+        // SAFETY: the buffer is 8-aligned and has room for `text` after the structures.
+        unsafe {
+            ptr::copy_nonoverlapping(text.as_ptr().cast::<u8>(), base.add(head), text.len() * 2);
+        }
+        buffer
+    }
+
+    fn bytes_of(buffer: &[u64]) -> &[u8] {
+        // SAFETY: a view of the buffer's own bytes.
+        unsafe { slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), buffer.len() * 8) }
+    }
+
+    /// The printers are read from the bytes `EnumPrintersW` fills, by the pointers in them, and nothing outside the
+    /// bytes is ever read: a pointer out of range, or a string with no end, is a fixed error, not a read.
+    #[test]
+    fn printers_are_read_from_the_filled_buffer_and_only_from_it() {
+        let buffer = printer_bytes(
+            &[
+                ("Office", "IP_10.0.0.8", "HP Universal"),
+                ("Fax \u{e9}", "SHRFAX:", ""),
+            ],
+            &[0, 0x4000],
+        );
+        let read = printers_in(bytes_of(&buffer), 2).unwrap();
+        assert_eq!(read[0].name, "Office");
+        assert_eq!(read[0].port, "IP_10.0.0.8");
+        assert_eq!(read[0].driver, "HP Universal");
+        assert_eq!(read[1].name, "Fax \u{e9}");
+        assert_eq!((read[1].driver.as_str(), read[1].attributes), ("", 0x4000));
+        assert!(printers_in(bytes_of(&buffer), 0).unwrap().is_empty());
+
+        // More structures than the bytes hold.
+        assert_eq!(
+            printers_in(bytes_of(&buffer), 1_000_000).err(),
+            Some(PRINTERS_UNREADABLE)
+        );
+        // A name pointer into the structures' own area is fine (inside), one far outside is refused.
+        let mut wild = printer_bytes(&[("Office", "P", "D")], &[0]);
+        let info = wild.as_mut_ptr().cast::<PRINTER_INFO_2W>();
+        // SAFETY: the buffer is 8-aligned and holds one structure.
+        unsafe { (*info).pPrinterName = 8 as *mut u16 };
+        assert_eq!(
+            printers_in(bytes_of(&wild), 1).err(),
+            Some(PRINTERS_UNREADABLE)
+        );
+        // A string whose terminator is missing before the bytes end.
+        let mut endless = printer_bytes(&[("Office", "P", "D")], &[0]);
+        let last = endless.len() - 1;
+        endless[last] = u64::MAX;
+        assert_eq!(
+            printers_in(bytes_of(&endless), 1).err(),
+            Some(PRINTERS_UNREADABLE)
+        );
+    }
+
+    /// Windows' real list, on this machine: it can be read, and the default Lockbox offers is always one of the
+    /// printers it offers. Needs the print spooler running, so it is run by hand: `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "needs the Windows print spooler"]
+    fn this_pcs_printers_can_be_listed() {
+        let installed = installed_printers().expect("Windows lists its printers");
+        let offered = installed.offered();
+        if let Some(default) = &offered.default {
+            assert!(offered.printers.contains(default));
+        }
+        assert!(offered.printers.len() <= installed.printers.len());
+    }
 
     /// Fix round 1 follow-up: only name-surrogate reparse points lead elsewhere. The tags are Windows' own
     /// (`winnt.h`). A cloud-file folder cannot be made here without a registered sync provider, so its tag is checked
@@ -2263,6 +3319,184 @@ mod tests {
         );
     }
 
+    /// Ctrl+Alt+Shift with a function key beyond F12 (`n` 1 to 12 is F13 to F24): keys no program has a use for. Each
+    /// test takes its own, so tests running side by side never meet.
+    fn combo(n: u16) -> Shortcut {
+        Shortcut {
+            ctrl: true,
+            shift: true,
+            alt: true,
+            key: 0x7B + n,
+        }
+    }
+
+    /// The signal a press of the shortcut makes, as Windows sends it: `WM_HOTKEY` with the shortcut's ID.
+    fn press(window: usize, id: i32) {
+        send(window, WM_HOTKEY, id as usize);
+    }
+
+    /// Nothing is waiting in `signals`: a suspend notice posted now is the next thing it hears.
+    fn assert_no_signal(window: usize, signals: &Receiver<OsSignal>) {
+        flush(window, signals);
+    }
+
+    /// Windows' own answer to a second window asking for keys that are registered: seen live, two windows of this
+    /// process, so "taken" is what Windows said and not what a stand-in said. (Windows also answers it for keys it
+    /// keeps for itself, such as F12 alone, seen live while building this.)
+    #[test]
+    fn hotkey_taken_is_reported() {
+        let (first, _first_signals) = started();
+        let (second, _second_signals) = started();
+        let shortcut = combo(1);
+        assert_eq!(first.set_hotkey(Some(shortcut)), Ok(()));
+        assert_eq!(second.set_hotkey(Some(shortcut)), Err(HotkeyTaken::Taken));
+        // The same keys again from the window that holds them change nothing, and are not "taken".
+        assert_eq!(first.set_hotkey(Some(shortcut)), Ok(()));
+        // Released, they are free for the other window.
+        assert_eq!(first.set_hotkey(None), Ok(()));
+        assert_eq!(second.set_hotkey(Some(shortcut)), Ok(()));
+    }
+
+    /// The error codes, as Microsoft documents them (`winerror.h`): 1409 is `ERROR_HOTKEY_ALREADY_REGISTERED`, the
+    /// only one that means taken; 87 is `ERROR_INVALID_PARAMETER`, 1400 `ERROR_INVALID_WINDOW_HANDLE`, and 1419
+    /// `ERROR_HOTKEY_NOT_REGISTERED`.
+    #[test]
+    fn only_already_registered_means_taken() {
+        assert_eq!(hotkey_answer(0), Ok(()));
+        assert_eq!(hotkey_answer(1409), Err(HotkeyTaken::Taken));
+        for other in [87, 1400, 1419, 5, 1] {
+            assert_eq!(hotkey_answer(other), Err(HotkeyTaken::NotSet), "{other}");
+        }
+        // A code beyond a Win32 error's size is nothing Windows said about this.
+        assert_eq!(hotkey_answer(usize::MAX), Err(HotkeyTaken::NotSet));
+    }
+
+    /// A press of the registered shortcut reaches the sink as `SaveShortcut`; the same message under an ID that is
+    /// not registered, or with nothing registered, does not (another program can post any message to the window).
+    #[test]
+    fn registered_hotkey_message_reaches_the_sink() {
+        let (signal_thread, signals) = started();
+        let window = window_of(&signal_thread);
+        let [first, second] = HOTKEY_IDS;
+
+        press(window, first);
+        assert_no_signal(window, &signals);
+
+        assert_eq!(signal_thread.set_hotkey(Some(combo(2))), Ok(()));
+        press(window, second);
+        assert_no_signal(window, &signals);
+        press(window, first);
+        assert_eq!(signals.try_recv(), Ok(OsSignal::SaveShortcut));
+        assert_no_signal(window, &signals);
+
+        // A change moves the shortcut to the other ID: the old ID is nothing now.
+        assert_eq!(signal_thread.set_hotkey(Some(combo(3))), Ok(()));
+        press(window, first);
+        assert_no_signal(window, &signals);
+        press(window, second);
+        assert_eq!(signals.try_recv(), Ok(OsSignal::SaveShortcut));
+
+        // Cleared: no ID is accepted.
+        assert_eq!(signal_thread.set_hotkey(None), Ok(()));
+        for id in HOTKEY_IDS {
+            press(window, id);
+        }
+        assert_no_signal(window, &signals);
+    }
+
+    /// A change Windows refuses leaves the old shortcut working: still registered (a second window cannot take its
+    /// keys), still heard. A change that goes through frees the old keys.
+    #[test]
+    fn a_refused_change_keeps_the_old_shortcut() {
+        let (first, first_signals) = started();
+        let (second, _second_signals) = started();
+        let window = window_of(&first);
+        let (old, new) = (combo(4), combo(5));
+        assert_eq!(first.set_hotkey(Some(old)), Ok(()));
+        assert_eq!(second.set_hotkey(Some(new)), Ok(()));
+
+        assert_eq!(first.set_hotkey(Some(new)), Err(HotkeyTaken::Taken));
+        assert_eq!(second.set_hotkey(Some(old)), Err(HotkeyTaken::Taken));
+        press(window, HOTKEY_IDS[0]);
+        assert_eq!(first_signals.try_recv(), Ok(OsSignal::SaveShortcut));
+        assert_no_signal(window, &first_signals);
+
+        assert_eq!(first.set_hotkey(Some(combo(6))), Ok(()));
+        assert_eq!(second.set_hotkey(Some(old)), Ok(()));
+    }
+
+    /// A shortcut Windows refuses is not remembered as the one asked for: the window re-reads what was asked last when it
+    /// gets `SET_HOTKEY` (any program can post that message to it), so a refusal must put the old shortcut back there as
+    /// a timeout does. Without that, the keys freed later would be registered by a message nobody meant, replacing the
+    /// shortcut the person has.
+    #[test]
+    fn shortcut_taken_keeps_the_old_one() {
+        let (first, first_signals) = started();
+        let (second, _second_signals) = started();
+        let (third, _third_signals) = started();
+        let window = window_of(&first);
+        let (old, wanted) = (combo(9), combo(10));
+        assert_eq!(first.set_hotkey(Some(old)), Ok(()));
+        assert_eq!(second.set_hotkey(Some(wanted)), Ok(()));
+
+        assert_eq!(first.set_hotkey(Some(wanted)), Err(HotkeyTaken::Taken));
+        // The keys are free again, and the window is told to look at what was asked last, as a stray message would.
+        assert_eq!(second.set_hotkey(None), Ok(()));
+        assert_eq!(send(window, SET_HOTKEY, 0), 0, "still the old shortcut");
+
+        // The old shortcut is the registered one: heard. The refused keys were not taken by the stray message.
+        press(window, HOTKEY_IDS[0]);
+        assert_eq!(first_signals.try_recv(), Ok(OsSignal::SaveShortcut));
+        assert_eq!(third.set_hotkey(Some(wanted)), Ok(()));
+        // And the old keys are still held by the first window.
+        assert_eq!(second.set_hotkey(Some(old)), Err(HotkeyTaken::Taken));
+
+        // A refusal with nothing registered before leaves nothing asked for either.
+        let (alone, _alone_signals) = started();
+        let alone_window = window_of(&alone);
+        assert_eq!(alone.set_hotkey(Some(wanted)), Err(HotkeyTaken::Taken));
+        assert_eq!(third.set_hotkey(None), Ok(()));
+        assert_eq!(send(alone_window, SET_HOTKEY, 0), 0);
+        assert_eq!(
+            second.set_hotkey(Some(wanted)),
+            Ok(()),
+            "the stray message registered the refused keys"
+        );
+    }
+
+    /// A window that does not answer in time is not "taken", and the change it never made is not made later either.
+    #[test]
+    fn a_window_that_does_not_answer_is_not_reported_as_taken() {
+        let (_seen, gate) = gated();
+        let (signal_thread, signals) = started();
+        let window = window_of(&signal_thread);
+        let (other, _other_signals) = started();
+        let shortcut = combo(8);
+        gate.hold(window);
+        assert_eq!(
+            signal_thread.set_hotkey(Some(shortcut)),
+            Err(HotkeyTaken::NotSet)
+        );
+        let _ = gate.open.send(());
+        flush(window, &signals);
+        // Nothing was registered by the late message: another window gets the keys.
+        assert_eq!(other.set_hotkey(Some(shortcut)), Ok(()));
+        press(window, HOTKEY_IDS[0]);
+        assert_no_signal(window, &signals);
+    }
+
+    /// Closing the window releases the shortcut: another window can take its keys at once.
+    #[test]
+    fn hotkey_is_released_when_the_window_closes() {
+        let (first, _first_signals) = started();
+        let (second, _second_signals) = started();
+        let shortcut = combo(7);
+        assert_eq!(first.set_hotkey(Some(shortcut)), Ok(()));
+        assert_eq!(second.set_hotkey(Some(shortcut)), Err(HotkeyTaken::Taken));
+        drop_within(first, WAIT);
+        assert_eq!(second.set_hotkey(Some(shortcut)), Ok(()));
+    }
+
     use std::time::Instant;
 
     use crate::os::{CLIPBOARD_BUSY, ClipboardBackend, CopyTag, WriteFailed};
@@ -2305,6 +3539,101 @@ mod tests {
             Some(vec![0; 16]),
             "the tag block was not wiped"
         );
+    }
+
+    /// The text from a block of UTF-16 is the same text in UTF-8, in a string made exactly its size (so it never grew,
+    /// and left no unwiped buffer behind); it ends at the first NUL; a half of a surrogate pair alone is U+FFFD.
+    #[test]
+    fn utf16_text_becomes_exactly_sized_utf8() {
+        let units = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+        let mut with_nul = units("ab");
+        with_nul.extend([0, u16::from(b'c')]);
+        let table: [(Vec<u16>, &str); 8] = [
+            (units(""), ""),
+            (units("Pw-0123"), "Pw-0123"),
+            (
+                units("Pw-\u{e9}\u{4e2d}\u{1F600}-7f3a"),
+                "Pw-\u{e9}\u{4e2d}\u{1F600}-7f3a",
+            ),
+            (with_nul, "ab"),
+            (vec![0xD83D], "\u{FFFD}"),
+            (vec![0xDE00, u16::from(b'x')], "\u{FFFD}x"),
+            (vec![u16::from(b'x'), 0xD83D, u16::from(b'y')], "x\u{FFFD}y"),
+            (vec![u16::from(b'x'), 0xD83D], "x\u{FFFD}"),
+        ];
+        for (units, expected) in table {
+            let text = utf8_from_utf16(units.iter().copied());
+            assert_eq!(text.as_str(), expected, "{units:x?}");
+            assert_eq!(text.capacity(), text.len(), "{units:x?} grew");
+        }
+    }
+
+    #[test]
+    #[ignore = "touches the real clipboard; run in the hands-on check"]
+    fn real_clipboard_reads_text_in_one_opening_and_clears_only_a_match() {
+        use lockbox_core::item::MAX_ITEM_JSON;
+
+        let _turn = lock(&REAL_CLIPBOARD);
+        let clipboard = real_clipboard();
+        let unicode = "Pw-\u{e9}\u{4e2d}\u{1F600}-7f3a";
+        for sample in [SAMPLE, unicode] {
+            clipboard_win::set_clipboard_string(sample).unwrap();
+            CLIPBOARD_STEPS.take();
+            let read = clipboard.read_text(None).unwrap();
+            assert_eq!(read.as_ref().map(|text| text.as_str()), Some(sample));
+            assert_eq!(
+                CLIPBOARD_STEPS.take(),
+                ["open", "text size", "read text", "close"],
+                "the read is not one opening"
+            );
+            assert_eq!(
+                clipboard_text().as_deref(),
+                Some(sample),
+                "the read changed it"
+            );
+            assert_eq!(clipboard.clear_if_text("something else", None), Ok(false));
+            assert_eq!(
+                clipboard.clear_if_text(&format!("{sample} "), None),
+                Ok(false)
+            );
+            assert_eq!(
+                clipboard_text().as_deref(),
+                Some(sample),
+                "a mismatch cleared it"
+            );
+            CLIPBOARD_STEPS.take();
+            assert_eq!(clipboard.clear_if_text(sample, None), Ok(true));
+            assert_eq!(
+                CLIPBOARD_STEPS.take(),
+                ["open", "text size", "read text", "empty", "close"],
+                "the check and the clear are not one opening"
+            );
+            assert_eq!(clipboard_text(), None);
+        }
+
+        // No text at all: nothing to read, nothing to clear.
+        {
+            let _open = clipboard_win::Clipboard::new_attempts(10).unwrap();
+            clipboard_win::raw::empty().unwrap();
+        }
+        assert_eq!(clipboard.read_text(None), Ok(None));
+        assert_eq!(clipboard.clear_if_text(SAMPLE, None), Ok(false));
+
+        // Over the limit: refused, and left on the clipboard.
+        let large = "a".repeat(MAX_ITEM_JSON + 1);
+        clipboard_win::set_clipboard_string(&large).unwrap();
+        assert_eq!(
+            clipboard.read_text(None),
+            Err(crate::os::CLIPBOARD_TOO_LARGE)
+        );
+        assert_eq!(clipboard.clear_if_text(SAMPLE, None), Ok(false));
+        assert_eq!(clipboard_text().map(|text| text.len()), Some(large.len()));
+        let exact = "a".repeat(MAX_ITEM_JSON);
+        clipboard_win::set_clipboard_string(&exact).unwrap();
+        let read = clipboard.read_text(None).unwrap().unwrap();
+        assert_eq!(read.len(), MAX_ITEM_JSON);
+        assert_eq!(clipboard.clear_if_text(&exact, None), Ok(true));
+        assert_eq!(clipboard_text(), None);
     }
 
     #[test]
@@ -2371,6 +3700,12 @@ mod tests {
                 step();
             }
             held
+        }
+        fn text_size(&self) -> ShellResult<Option<usize>> {
+            WinClipboard.text_size()
+        }
+        fn copy_text(&self, max_block: usize) -> ShellResult<Option<Zeroizing<String>>> {
+            WinClipboard.copy_text(max_block)
         }
     }
 

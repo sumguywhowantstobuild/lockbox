@@ -3,10 +3,13 @@
 
 mod args;
 pub mod backup;
+pub mod capture;
+pub mod env;
 pub mod files;
 mod generator;
 pub mod items;
 mod list;
+pub mod readable;
 mod sessions;
 mod settings;
 pub mod vaults;
@@ -31,7 +34,9 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         sessions::list_sessions,
         sessions::lock_vault,
         sessions::lock_all,
+        sessions::close_explained_ok,
         vaults::list_vaults,
+        vaults::start_new_vault_list,
         vaults::add_existing_vault,
         vaults::add_existing_vault_confirm,
         vaults::forget_vault,
@@ -42,6 +47,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         vaults::recover_vault_confirm,
         vaults::change_password,
         vaults::regenerate_recovery,
+        vaults::recovery_confirmed,
         vaults::accept_header,
         items::list_items,
         items::get_item,
@@ -59,12 +65,27 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         items::list_orphans,
         items::delete_orphans,
         files::save_file_copy,
+        files::save_file_copy_confirm,
         files::add_file,
         files::attach_file,
         files::replace_file,
         files::open_file,
         files::retry_open_cleanup,
         files::reset_output_journal,
+        readable::save_recovery_pdf,
+        readable::save_readable_confirm,
+        readable::list_printers,
+        readable::print_recovery_key,
+        env::env_read,
+        env::env_save,
+        env::env_copy,
+        env::env_save_file,
+        capture::capture_state,
+        capture::capture_choose,
+        capture::capture_reveal,
+        capture::capture_save,
+        capture::capture_cancel,
+        capture::capture_env,
         backup::backup_vault,
         backup::test_backup,
         backup::open_backup_read_only,
@@ -81,8 +102,11 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         backup::open_pre_restore_read_only,
         generator::generate_password,
         generator::generate_passphrase,
+        generator::copy_generated,
         settings::get_settings,
-        settings::set_settings
+        settings::set_settings,
+        settings::get_startup,
+        settings::set_startup
     ]
 }
 

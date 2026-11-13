@@ -11,13 +11,21 @@ use std::io;
 use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lockbox_core::blob::CancelToken;
+use lockbox_core::item::MAX_ITEM_JSON;
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
 use crate::error::{CoreErrorView, ShellError, ShellResult};
 use crate::lock;
+use crate::startup::StartupState;
+use crate::views::PrinterList;
 
 /// The OS calls the shell makes, behind their traits.
 pub struct Os {
@@ -30,6 +38,47 @@ pub struct Os {
     pub clock: Arc<dyn Clock>,
     pub clipboard: Arc<dyn ClipboardBackend>,
     pub timer: Arc<dyn Timer>,
+    pub printer: Arc<dyn Printer>,
+    pub window: Arc<dyn MainWindow>,
+    pub hotkey: Arc<dyn Hotkey>,
+    pub startup: Arc<dyn StartupEntry>,
+}
+
+/// The app's one window, as the shell sends it to the tray and brings it back. Looked up at each call: the window is
+/// built after the shell.
+pub trait MainWindow: Send + Sync {
+    /// Hides the window, which keeps running in the tray, if `still_closing` says so when the window's own thread runs
+    /// the hide: the thread that shows the window ([`window::bring_to_front`](crate::window::bring_to_front)), so a
+    /// reopen is never in the middle of it. A close that a reopen has overtaken leaves the window shown. Best effort:
+    /// a window that cannot be hidden stays on screen, already locked. Never waits for the window.
+    fn hide_if(&self, still_closing: Box<dyn FnOnce() -> bool + Send>);
+    /// Brings the window forward after a press of the save shortcut: through
+    /// [`window::bring_to_front`](crate::window::bring_to_front), which puts the window's protections in place before it
+    /// shows, on the thread that must show it. Best effort, and never waits for the window.
+    fn bring_forward(&self);
+    /// Keeps the window's contents out of screenshots, recordings and screen sharing (`on`), or lets them be captured:
+    /// the setting changed while the window is up. Best effort, as at the window's start
+    /// ([`window::set_capture_protection`](crate::window::set_capture_protection)): the request is made, and Windows
+    /// does not say whether it holds. A window that is not there has nothing to protect.
+    fn protect_from_capture(&self, on: bool);
+}
+
+/// The save shortcut as Windows holds it, behind a trait so `set_settings` is tested without a window.
+pub trait Hotkey: Send + Sync {
+    /// Registers `shortcut` as the save shortcut system-wide, replacing the one registered before (`None` releases it).
+    /// A shortcut Windows refuses leaves the one registered before working ([`HotkeyTaken`]).
+    fn set(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken>;
+}
+
+/// Whether Lockbox starts when the person signs in to Windows: the current user's `Run` entry, and Windows' own Startup
+/// settings, which can turn it off. Fails with the OS's error, which the shell turns into fixed text
+/// ([`STARTUP_FAILED`](crate::startup::STARTUP_FAILED)): no path or registry data is kept in it.
+pub trait StartupEntry: Send + Sync {
+    /// What the registry says now.
+    fn read(&self) -> io::Result<StartupState>;
+    /// Puts the `Run` entry there (`on`: for this program, started with `--hidden`) or removes it (an entry that is
+    /// already absent is fine). Windows' own on/off setting for it is never written.
+    fn write(&self, on: bool) -> io::Result<()>;
 }
 
 /// A copy's own tag (spec §7.3): 16 random bytes from the OS, written beside the copy in [`TAG_FORMAT`]. Not secret
@@ -38,7 +87,8 @@ pub type CopyTag = [u8; 16];
 
 /// The clipboard as Lockbox uses it (spec §7.3). Each method is one clipboard opening: tried every
 /// [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times, then [`CLIPBOARD_BUSY`]. The clipboard is opened with no
-/// owner window, so a program that holds it open with no window of its own does not make it busy (Windows' rule).
+/// owner window, so a program that holds it open with no window of its own does not make it busy (Windows' rule);
+/// Lockbox's own openings take turns ([`ClipboardSteps`]), so none overlaps another.
 pub trait ClipboardBackend: Send + Sync {
     /// Puts `text` on the clipboard with `tag` in [`TAG_FORMAT`] and the three [`EXCLUSION_FORMATS`] that keep it out
     /// of clipboard history, cloud sync and clipboard monitors, all in one opening. The text goes last, so it is never
@@ -49,6 +99,18 @@ pub trait ClipboardBackend: Send + Sync {
     /// whether it did. Anything copied since (which empties the clipboard, tag included) is left alone. With
     /// `until` (the app close's deadline), no try at opening starts at or after it and no wait runs past it.
     fn clear_if(&self, tag: &CopyTag, until: Option<Instant>) -> ShellResult<bool>;
+    /// The clipboard's text, read in one opening (tried as for [`clear_if`](Self::clear_if), with `until` the same).
+    /// `Ok(None)` when it holds no text. The size of the text's block is checked before any of it is copied into
+    /// memory: over [`MAX_CLIPBOARD_BLOCK`], or over [`MAX_ITEM_JSON`] bytes once read as UTF-8, is `TooLarge`.
+    fn read_text(&self, until: Option<Instant>) -> ShellResult<Option<Zeroizing<String>>>;
+    /// Empties the clipboard only while its text is exactly `expected`, read and emptied in the same opening: whether
+    /// it did. Anything else (other text, no text, text too large to be `expected`) is left alone. This is for a
+    /// value Lockbox did not copy itself, so it has no tag to check.
+    fn clear_if_text(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool>;
+    /// Like [`clear_if_text`](Self::clear_if_text), reading a line break as one: CRLF and a lone CR count as LF on
+    /// both sides, and the text is otherwise compared exactly. For a text the page pasted, which may not have kept
+    /// Windows' CRLF.
+    fn clear_if_text_lines(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool>;
 }
 
 /// A write that failed.
@@ -80,7 +142,16 @@ pub const CLIPBOARD_FAILED: ShellError = ShellError::Core(CoreErrorView {
     available: None,
     max_file: None,
     min: None,
+    position: None,
+    found: None,
 });
+/// The clipboard holds more text than an item can (the engine's [`MAX_ITEM_JSON`]). Fixed text only: never the text.
+pub const CLIPBOARD_TOO_LARGE: ShellError = ShellError::TooLarge {
+    what: "clipboard text",
+};
+/// The largest text block [`ClipboardBackend::read_text`] copies: room for [`MAX_ITEM_JSON`] UTF-16 units and the
+/// terminator. A text of fewer units can still be longer once it is UTF-8, which the read checks after the copy.
+pub const MAX_CLIPBOARD_BLOCK: usize = (MAX_ITEM_JSON + 1) * size_of::<u16>();
 /// How many times one opening is tried.
 pub const CLIPBOARD_TRIES: u32 = 10;
 /// The wait between two tries (Chromium's).
@@ -114,28 +185,63 @@ pub trait ClipboardCalls: Send + Sync {
     /// What `format` holds on the clipboard: `Ok(None)` only when it is confirmed not there, an error when it is there
     /// (or may be) but could not be read.
     fn read_bytes(&self, format: NonZeroU32) -> ShellResult<Option<Vec<u8>>>;
+    /// The size in bytes of the text block on the clipboard (`CF_UNICODETEXT`), its terminator included, without
+    /// copying any of it: `Ok(None)` only when the clipboard is confirmed to hold no text, an error when it holds
+    /// some (or may) that could not be looked at.
+    fn text_size(&self) -> ShellResult<Option<usize>>;
+    /// Copies the text out of the clipboard, up to its first NUL. Called only after [`text_size`](Self::text_size)
+    /// found the block small enough; the block copied is measured again first, and one over `max_block` bytes is
+    /// [`CLIPBOARD_TOO_LARGE`] with nothing copied (a program opening with no owner window can replace the text between
+    /// the two steps). Whatever buffer holds the text on the way is wiped; `Ok(None)` as for `text_size`.
+    fn copy_text(&self, max_block: usize) -> ShellResult<Option<Zeroizing<String>>>;
 }
 
 /// [`ClipboardBackend`] from single [`ClipboardCalls`] steps, waiting between tries on `clock`.
 pub struct ClipboardSteps<C> {
     calls: Arc<C>,
     clock: Arc<dyn Clock>,
+    /// Held for as long as one of Lockbox's own openings is: Windows lets a second opener with no owner window in
+    /// while the first is open, so Lockbox's threads (the timer's clear, a lock hook, a copy, the save shortcut's read)
+    /// take turns here instead.
+    turn: Mutex<()>,
+}
+
+/// An open clipboard and the turn that goes with it. The clipboard is closed first (fields drop in order), then the
+/// turn is given back.
+struct Opening<'a, O> {
+    _opened: O,
+    _turn: MutexGuard<'a, ()>,
 }
 
 impl<C: ClipboardCalls> ClipboardSteps<C> {
     pub fn new(calls: Arc<C>, clock: Arc<dyn Clock>) -> ClipboardSteps<C> {
-        ClipboardSteps { calls, clock }
+        ClipboardSteps {
+            calls,
+            clock,
+            turn: Mutex::new(()),
+        }
     }
 
-    /// One opening: tried every [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times. With `until`, no try starts
-    /// at or after it and no wait runs past it: [`CLIPBOARD_BUSY`] once it has come.
-    fn open(&self, until: Option<Instant>) -> ShellResult<C::Opened> {
+    /// One opening: tried every [`CLIPBOARD_RETRY`], at most [`CLIPBOARD_TRIES`] times. A try needs the turn (so one
+    /// of Lockbox's own openings under way makes it fail, like a program holding the clipboard) and then Windows' open.
+    /// With `until`, no try starts at or after it and no wait runs past it: [`CLIPBOARD_BUSY`] once it has come.
+    fn open(&self, until: Option<Instant>) -> ShellResult<Opening<'_, C::Opened>> {
         for tried in 1..=CLIPBOARD_TRIES {
             if until.is_some_and(|until| self.clock.now() >= until) {
                 return Err(CLIPBOARD_BUSY);
             }
-            if let Some(opened) = self.calls.open() {
-                return Ok(opened);
+            let turn = match self.turn.try_lock() {
+                Ok(turn) => Some(turn),
+                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => None,
+            };
+            if let Some(turn) = turn
+                && let Some(opened) = self.calls.open()
+            {
+                return Ok(Opening {
+                    _opened: opened,
+                    _turn: turn,
+                });
             }
             if tried < CLIPBOARD_TRIES {
                 let left = until.map_or(CLIPBOARD_RETRY, |until| {
@@ -206,6 +312,81 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
             false => Err(CLIPBOARD_FAILED),
         }
     }
+
+    fn read_text(&self, until: Option<Instant>) -> ShellResult<Option<Zeroizing<String>>> {
+        let _open = self.open(until)?;
+        // The size first: a block over the limit is never copied.
+        let Some(size) = self.calls.text_size()? else {
+            return Ok(None);
+        };
+        if size > MAX_CLIPBOARD_BLOCK {
+            return Err(CLIPBOARD_TOO_LARGE);
+        }
+        let Some(text) = self.calls.copy_text(MAX_CLIPBOARD_BLOCK)? else {
+            return Ok(None);
+        };
+        // Fewer UTF-16 units can still be more UTF-8 bytes; the copy is wiped as it goes.
+        if text.len() > MAX_ITEM_JSON {
+            return Err(CLIPBOARD_TOO_LARGE);
+        }
+        Ok(Some(text))
+    }
+
+    fn clear_if_text(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool> {
+        self.clear_if_text_that(until, |text| text == expected)
+    }
+
+    fn clear_if_text_lines(&self, expected: &str, until: Option<Instant>) -> ShellResult<bool> {
+        self.clear_if_text_that(until, |text| same_lines(text, expected))
+    }
+}
+
+impl<C: ClipboardCalls> ClipboardSteps<C> {
+    /// One opening that empties the clipboard only while its text is one `matches` accepts. A block over the limit cannot be
+    /// the expected one (a value that came from the clipboard in the first place), so it is neither copied nor cleared. No
+    /// text at all is no match. The copy of the text is wiped when this returns.
+    fn clear_if_text_that(
+        &self,
+        until: Option<Instant>,
+        matches: impl FnOnce(&str) -> bool,
+    ) -> ShellResult<bool> {
+        let _open = self.open(until)?;
+        let Some(size) = self.calls.text_size()? else {
+            return Ok(false);
+        };
+        if size > MAX_CLIPBOARD_BLOCK {
+            return Ok(false);
+        }
+        let text = match self.calls.copy_text(MAX_CLIPBOARD_BLOCK) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Ok(false),
+            Err(error) if error == CLIPBOARD_TOO_LARGE => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !matches(&text) {
+            return Ok(false);
+        }
+        match self.calls.empty() {
+            true => Ok(true),
+            false => Err(CLIPBOARD_FAILED),
+        }
+    }
+}
+
+/// Whether `a` and `b` are the same text with every line break read as one: CRLF and a lone CR count as LF, and the
+/// texts are otherwise compared exactly. Walks both without making a copy of either.
+fn same_lines(a: &str, b: &str) -> bool {
+    fn lines(text: &str) -> impl Iterator<Item = char> + '_ {
+        let mut chars = text.chars().peekable();
+        std::iter::from_fn(move || match chars.next()? {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                Some('\n')
+            }
+            other => Some(other),
+        })
+    }
+    lines(a).eq(lines(b))
 }
 
 /// Whether `held`, what [`TAG_FORMAT`] holds, is exactly `tag`: the 16 bytes, then nothing, or only zeros (a block
@@ -214,6 +395,239 @@ impl<C: ClipboardCalls> ClipboardBackend for ClipboardSteps<C> {
 fn is_tag(held: &[u8], tag: &CopyTag) -> bool {
     held.split_at_checked(tag.len())
         .is_some_and(|(head, rest)| head == tag && rest.iter().all(|&byte| byte == 0))
+}
+
+/// The printer attribute that marks a fax printer (`PRINTER_ATTRIBUTE_FAX`).
+pub const PRINTER_ATTRIBUTE_FAX: u32 = 0x4000;
+
+/// Windows could not list its printers. Fixed text only: never a printer's name or Windows' message.
+pub const PRINTERS_UNREADABLE: ShellError = ShellError::Core(CoreErrorView {
+    kind: "io",
+    what: Some("printer"),
+    needed: None,
+    available: None,
+    max_file: None,
+    min: None,
+    position: None,
+    found: None,
+});
+
+/// One printer as Windows lists it (`PRINTER_INFO_2`): its name, the port it prints to (a list, comma-separated, for a
+/// pool), its driver, and its attributes. Names are the person's own and are never put in an error or a log (R5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPrinter {
+    pub name: String,
+    pub port: String,
+    pub driver: String,
+    pub attributes: u32,
+}
+
+impl InstalledPrinter {
+    /// Whether this printer makes a file through a save box or a window of its own instead of sending a page to a device,
+    /// which Lockbox does not offer: that box (opened by WebView2's own process) would keep the job outside Lockbox
+    /// after a lock, and the recovery key's page with it. Save as PDF is Lockbox's own way to make a file.
+    ///
+    /// Chosen from what Windows says about the printer, by Microsoft's documentation, in this order of evidence:
+    /// - its port: `PORTPROMPT:` (the port of Microsoft Print to PDF and the Microsoft XPS Document Writer) and `FILE:`
+    ///   (the local port monitor's "ask for a file name") both open a save box. A pool is left out when any of its
+    ///   ports is one of these;
+    /// - its attributes: `PRINTER_ATTRIBUTE_FAX`, and a driver named for fax (Microsoft's Shared Fax Driver), since a
+    ///   fax printer opens the fax window;
+    /// - OneNote's printers ("Send to Microsoft OneNote ..." and "OneNote (Desktop)"), which open OneNote: by a driver
+    ///   or port that names OneNote.
+    ///
+    /// A third-party PDF printer on a port of its own cannot be told from a real printer here and stays listed.
+    pub fn writes_a_file_of_its_own(&self) -> bool {
+        let named = |text: &str, word: &str| text.to_ascii_lowercase().contains(word);
+        let own_box_port = self.port.split(',').any(|port| {
+            let port = port.trim();
+            port.eq_ignore_ascii_case("PORTPROMPT:") || port.eq_ignore_ascii_case("FILE:")
+        });
+        own_box_port
+            || self.attributes & PRINTER_ATTRIBUTE_FAX != 0
+            || named(&self.driver, "fax")
+            || named(&self.driver, "onenote")
+            || named(&self.port, "onenote")
+    }
+}
+
+/// The printers Windows has, and the one it uses by default (its name, whether or not it is among them).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstalledPrinters {
+    pub printers: Vec<InstalledPrinter>,
+    pub default: Option<String>,
+}
+
+impl InstalledPrinters {
+    /// What Lockbox offers: the printers that are not [`writes_a_file_of_its_own`](InstalledPrinter::writes_a_file_of_its_own),
+    /// in Windows' order, and the default only when it is among them (`None` when it was left out, or there is none).
+    pub fn offered(&self) -> PrinterList {
+        let printers: Vec<String> = self
+            .printers
+            .iter()
+            .filter(|printer| !printer.name.is_empty() && !printer.writes_a_file_of_its_own())
+            .map(|printer| printer.name.clone())
+            .collect();
+        let default = self.default.clone().filter(|name| printers.contains(name));
+        PrinterList { printers, default }
+    }
+}
+
+/// A print job that did not go through. Fixed shapes and numbers only: never the path, a printer's name or what was
+/// on the page (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintFailed {
+    /// A job of Lockbox's own is still running; WebView2 was not asked. (Microsoft's reference says a second job at
+    /// once fails; Lockbox answers before it gets that far.)
+    Busy,
+    /// WebView2 was not asked, or refused to start the job. `code` is the `HRESULT` it gave; 0 when there was no
+    /// window to ask.
+    NotStarted { code: i32 },
+    /// The job began and ended without a file (a PDF) or without the printer taking it. `code` is the `HRESULT` the
+    /// completion gave; 0 when it gave none and only said it had not succeeded, or when the answer never came.
+    NotWritten { code: i32 },
+    /// The session's token was cancelled (it locked) between the job being queued for the webview and WebView2 being
+    /// asked: WebView2 was never called, so nothing was printed and no file was made.
+    Revoked,
+}
+
+/// What a print job tells when it ends, called once. Dropped without being called when the webview goes first.
+pub type PrintDone = Box<dyn FnOnce(Result<(), PrintFailed>) + Send>;
+
+/// Printing the app's page, so the shell can print without a window and tests can use a fake: to a PDF file
+/// ([`print_to_pdf`](Self::print_to_pdf)) or straight to a printer ([`print_to_printer`](Self::print_to_printer)), and
+/// the list of printers to pick from. One job at a time, the two kinds sharing the one rule.
+pub trait Printer: Send + Sync {
+    /// Prints the main window's page to the PDF file at `path`. WebView2 writes straight over the path it is given,
+    /// and it refuses to write over an existing hidden file: the job then ends without an error and without a file
+    /// (`print_answer` reads that as [`PrintFailed::NotWritten`]), so `path` must be a new file, or a visible one. The
+    /// recovery key's PDF is a new file inside a new hidden folder. The one answer comes on the receiver; a receiver
+    /// that finds its sender gone has had no answer (the webview went first). While a job runs, another is refused at
+    /// once with [`PrintFailed::Busy`].
+    ///
+    /// `cancel` is the session's token. A job is queued for the webview's own thread and WebView2 is asked there, some
+    /// time later; `cancel` is checked on that thread right before WebView2's call, and a cancelled token ends the job
+    /// with [`PrintFailed::Revoked`] without WebView2 being called (a print cannot be recalled once it is submitted).
+    fn print_to_pdf(
+        &self,
+        path: &Path,
+        cancel: &CancelToken,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>>;
+
+    /// Prints the main window's page straight to the printer named `printer`, with no Windows window (WebView2's
+    /// `Print` with print settings that name it, backgrounds off). The one answer comes when WebView2 says the job
+    /// ended: `Ok` when the printer took it, otherwise why not (a printer that is not available among them). The job
+    /// counts as running until then, and refuses another with [`PrintFailed::Busy`] as
+    /// [`print_to_pdf`](Self::print_to_pdf) does, and `cancel` is checked right before WebView2's call as it is there.
+    /// The caller checks `printer` against [`installed_printers`](Self::installed_printers).
+    fn print_to_printer(
+        &self,
+        printer: &str,
+        cancel: &CancelToken,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>>;
+
+    /// The printers Windows has (the local ones and the ones this user is connected to) and its default one, read now.
+    /// Slow when a network printer's server does not answer, so it is called off the async runtime. Fixed errors only
+    /// ([`PRINTERS_UNREADABLE`]).
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters>;
+}
+
+/// The printing calls themselves, as Windows offers them. [`PrintSteps`] puts the one-at-a-time rule around them, so
+/// the rule is the same for the real printer and the tests' fake.
+pub trait PrintCalls: Send + Sync {
+    /// Begins a job for `path` and returns. `done` is called once with how it ended, from any thread. On an `Err`
+    /// the job never began and `done` is not called. `cancel` is checked on the webview's thread right before
+    /// WebView2's call; cancelled, `done` gets [`PrintFailed::Revoked`] and WebView2 is not called.
+    fn start(&self, path: &Path, cancel: CancelToken, done: PrintDone) -> Result<(), PrintFailed>;
+
+    /// Begins a job for the printer named `printer` and returns. `done` is called once, from any thread, when WebView2's
+    /// completion handler has run. On an `Err` the job never began and `done` is not called. `cancel` is checked as for
+    /// [`start`](Self::start).
+    fn start_on_printer(
+        &self,
+        printer: &str,
+        cancel: CancelToken,
+        done: PrintDone,
+    ) -> Result<(), PrintFailed>;
+
+    /// The printers Windows has and its default one, read now.
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters>;
+}
+
+/// [`Printer`] from a [`PrintCalls`]: one job at a time.
+pub struct PrintSteps<C> {
+    calls: Arc<C>,
+    running: Arc<AtomicBool>,
+}
+
+/// Held by a running job (inside its `done`): gives the printer back when the job ends, or when `done` is dropped
+/// without being called.
+struct Running(Arc<AtomicBool>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl<C: PrintCalls> PrintSteps<C> {
+    pub fn new(calls: Arc<C>) -> PrintSteps<C> {
+        PrintSteps {
+            calls,
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl<C: PrintCalls> PrintSteps<C> {
+    /// One job of either kind: refused at once while another runs, otherwise `begin` gets the `done` that gives the
+    /// printer back and answers.
+    fn one_job(
+        &self,
+        begin: impl FnOnce(PrintDone) -> Result<(), PrintFailed>,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>> {
+        let (answer, answers) = mpsc::channel();
+        // Taking the flag is the whole check: a second caller finds it taken.
+        if self.running.swap(true, Ordering::SeqCst) {
+            let _ = answer.send(Err(PrintFailed::Busy));
+            return answers;
+        }
+        let running = Running(Arc::clone(&self.running));
+        let ends = answer.clone();
+        let done: PrintDone = Box::new(move |result| {
+            // Given back first: whoever reads the answer may start the next job at once.
+            drop(running);
+            let _ = ends.send(result);
+        });
+        // On an `Err` the job never began and `done` was dropped (which gave the printer back): the refusal is the
+        // answer. A `done` dropped later without being called leaves the receiver with no answer.
+        if let Err(failed) = begin(done) {
+            let _ = answer.send(Err(failed));
+        }
+        answers
+    }
+}
+
+impl<C: PrintCalls> Printer for PrintSteps<C> {
+    fn print_to_pdf(
+        &self,
+        path: &Path,
+        cancel: &CancelToken,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>> {
+        self.one_job(|done| self.calls.start(path, cancel.clone(), done))
+    }
+
+    fn print_to_printer(
+        &self,
+        printer: &str,
+        cancel: &CancelToken,
+    ) -> mpsc::Receiver<Result<(), PrintFailed>> {
+        self.one_job(|done| self.calls.start_on_printer(printer, cancel.clone(), done))
+    }
+
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters> {
+        self.calls.installed_printers()
+    }
 }
 
 /// Work a [`Timer`] runs later.
@@ -453,14 +867,53 @@ pub enum OsSignal {
     DriveRemoved { mask: u32 },
     /// Windows is signing out or shutting down, and may end the process as soon as the window has the message.
     Ending,
+    /// The save shortcut was pressed (`WM_HOTKEY`). Not a lock signal: the router hands it to the shell.
+    SaveShortcut,
+}
+
+/// The save shortcut: modifier keys and a Windows virtual-key code (`RegisterHotKey`'s `vk`). The page reads and sends
+/// it as `{ ctrl, shift, alt, key }` (the settings' `shortcut`); the settings check what is allowed
+/// ([`Settings::check`](crate::settings::Settings::check)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shortcut {
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub key: u16,
+}
+
+impl Default for Shortcut {
+    /// Ctrl+Shift+L.
+    fn default() -> Shortcut {
+        Shortcut {
+            ctrl: true,
+            shift: true,
+            alt: false,
+            key: u16::from(b'L'),
+        }
+    }
+}
+
+/// Why [`SignalThread::set_hotkey`](win::SignalThread::set_hotkey) did not set the shortcut. Only Windows' own
+/// "already registered" answer is [`Taken`](Self::Taken); every other failure is [`NotSet`](Self::NotSet), so a
+/// shortcut is never called taken for a reason that is not that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyTaken {
+    /// Another program has registered the same keys (`ERROR_HOTKEY_ALREADY_REGISTERED`).
+    Taken,
+    /// Windows refused for another reason, or the window did not answer.
+    NotSet,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::TryRecvError;
 
     use super::*;
-    use crate::testing::{FakeClipboard, FakeClock};
+    use crate::testing::{FakeClipboard, FakeClock, FakePrintCalls};
 
     /// How long a test waits for the timer thread before it fails instead of hanging.
     const GIVE_UP: Duration = Duration::from_secs(60);
@@ -769,6 +1222,625 @@ mod tests {
         assert_eq!(steps.clear_if(&TAG, None), Err(CLIPBOARD_FAILED));
         assert_eq!(fake.opens(), 0);
         assert_eq!(fake.text().as_deref(), Some("theirs"));
+    }
+
+    /// A made-up text, never a real secret.
+    const COPIED: &str = "Pw-0123456789-xyz";
+
+    /// The read is one opening: opened, the text's size looked at, the text copied, closed. Nothing else.
+    #[test]
+    fn read_text_opens_once() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy(COPIED));
+        let read = steps.read_text(None).unwrap();
+        assert_eq!(read.as_deref().map(String::as_str), Some(COPIED));
+        assert_eq!(fake.opens(), 1);
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"]
+        );
+        assert!(!fake.is_open(), "the clipboard was left open");
+        // Reading changes nothing on the clipboard.
+        assert_eq!(fake.text().as_deref(), Some(COPIED));
+    }
+
+    /// An empty clipboard and one holding something that is not text both answer `None`, and the text is never read.
+    #[test]
+    fn read_text_is_none_for_non_text() {
+        let (fake, steps) = fake_steps();
+        assert_eq!(steps.read_text(None), Ok(None));
+        assert_eq!(fake.take_events(), ["open", "text size", "close"]);
+        assert!(fake.user_copy_non_text());
+        assert_eq!(steps.read_text(None), Ok(None));
+        assert_eq!(fake.take_events(), ["open", "text size", "close"]);
+        assert!(fake.has_non_text(), "the read touched what it found");
+    }
+
+    /// The size is checked before any of the text is copied: a text one unit over the limit is refused with no copy
+    /// step at all, and one exactly at the limit is read. The refusal holds nothing of the text.
+    #[test]
+    fn read_text_checks_size_before_copying() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy(&"a".repeat(MAX_ITEM_JSON + 1)));
+        let refused = steps.read_text(None);
+        assert_eq!(refused, Err(CLIPBOARD_TOO_LARGE));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "close"],
+            "the text was copied before its size was checked"
+        );
+        assert_eq!(
+            serde_json::to_value(CLIPBOARD_TOO_LARGE).unwrap(),
+            serde_json::json!({ "code": "too_large", "what": "clipboard text" })
+        );
+
+        assert!(fake.user_copy(&"a".repeat(MAX_ITEM_JSON)));
+        let read = steps.read_text(None).unwrap().unwrap();
+        assert_eq!(read.len(), MAX_ITEM_JSON);
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"]
+        );
+
+        // Fewer UTF-16 units than the limit, more UTF-8 bytes (two each): copied, then refused, and not kept.
+        assert!(fake.user_copy(&"é".repeat(MAX_ITEM_JSON / 2 + 1)));
+        assert_eq!(steps.read_text(None), Err(CLIPBOARD_TOO_LARGE));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"]
+        );
+    }
+
+    /// A program that opens the clipboard with no owner window gets in during Lockbox's opening (Windows lets it), and
+    /// can put a bigger text there between the look at the size and the copy. The copy measures the block it reads, so
+    /// that text is refused before any of it is copied, by a read and by a clear alike.
+    #[test]
+    fn a_text_that_grew_after_its_size_was_read_is_never_copied() {
+        let (fake, steps) = fake_steps();
+        let big = "a".repeat(MAX_ITEM_JSON + 1);
+        assert!(fake.user_copy("small"));
+        fake.replace_after_size(&big);
+        assert_eq!(steps.read_text(None), Err(CLIPBOARD_TOO_LARGE));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "text too large", "close"],
+            "the grown text was copied"
+        );
+
+        assert!(fake.user_copy("small"));
+        fake.replace_after_size(&big);
+        assert_eq!(steps.clear_if_text("small", None), Ok(false));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "text too large", "close"],
+            "the grown text was copied"
+        );
+        assert_eq!(
+            fake.text().as_deref(),
+            Some(big.as_str()),
+            "a text that was not ours was cleared"
+        );
+    }
+
+    /// A text that cannot be looked at is an error, never the same as no text; nothing is cleared on it.
+    #[test]
+    fn unreadable_text_is_an_error_not_none() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy(COPIED));
+        fake.fail_next_read();
+        assert_eq!(steps.read_text(None), Err(CLIPBOARD_FAILED));
+        fake.fail_next_read();
+        assert_eq!(steps.clear_if_text(COPIED, None), Err(CLIPBOARD_FAILED));
+        assert_eq!(fake.text().as_deref(), Some(COPIED));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(true));
+    }
+
+    /// Only a text equal to the expected one is cleared: not a longer or shorter one, not another case, not the same
+    /// letters with something added, not something that is not text, not a text too large to be the expected one.
+    #[test]
+    fn clear_if_text_clears_only_a_match() {
+        let (fake, steps) = fake_steps();
+        for other in [
+            "Pw-0123456789-xy",
+            "Pw-0123456789-xyz ",
+            "pw-0123456789-xyz",
+            "Pw-0123456789-xyZ",
+            "",
+        ] {
+            assert!(fake.user_copy(other));
+            assert_eq!(steps.clear_if_text(COPIED, None), Ok(false), "{other:?}");
+            assert_eq!(fake.text().as_deref(), Some(other), "{other:?} was cleared");
+        }
+        assert!(fake.user_copy_non_text());
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert!(
+            fake.has_non_text(),
+            "something that is not text was cleared"
+        );
+        assert_eq!(steps.clear_if_text("", None), Ok(false));
+        assert!(fake.has_non_text());
+
+        // A text too large to be the expected one is not even copied.
+        assert!(fake.user_copy(&"a".repeat(MAX_ITEM_JSON + 1)));
+        fake.take_events();
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert_eq!(fake.take_events(), ["open", "text size", "close"]);
+        assert!(fake.text().is_some(), "a large text was cleared");
+
+        // The match, and only that: cleared, and the copy that comes after it is left alone.
+        assert!(fake.user_copy(COPIED));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(true));
+        assert_eq!(fake.text(), None);
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert!(fake.user_copy("newer"));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert_eq!(fake.text().as_deref(), Some("newer"));
+    }
+
+    /// The check and the clear share one opening, and a copy by another program in between is refused until the clear
+    /// is done; a mismatch empties nothing; an empty that fails is an error and leaves the text.
+    #[test]
+    fn clear_if_text_is_one_opening() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy(COPIED));
+        let other = Arc::clone(&fake);
+        let (refused, was_refused) = mpsc::channel();
+        fake.during_next_read(Box::new(move || {
+            refused.send(!other.user_copy("theirs")).unwrap();
+        }));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(true));
+        assert!(
+            was_refused.recv().unwrap(),
+            "a copy got in between the check and the clear"
+        );
+        assert_eq!(fake.opens(), 1);
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "empty", "close"]
+        );
+        assert_eq!(fake.text(), None);
+
+        assert!(fake.user_copy("theirs"));
+        assert_eq!(steps.clear_if_text(COPIED, None), Ok(false));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"],
+            "a text that did not match was emptied"
+        );
+
+        assert!(fake.user_copy(COPIED));
+        fake.fail_empty_at(0);
+        assert_eq!(steps.clear_if_text(COPIED, None), Err(CLIPBOARD_FAILED));
+        assert_eq!(fake.text().as_deref(), Some(COPIED));
+        assert!(!fake.is_open(), "the clipboard was left open");
+    }
+
+    /// The clear for a pasted text reads a line break as one: CRLF, a lone CR and LF are the same on both sides, and
+    /// everything else is exact (case, spaces, a missing last break, a blank line more).
+    #[test]
+    fn clear_if_text_lines_reads_a_line_break_as_one() {
+        let (fake, steps) = fake_steps();
+        for (held, expected) in [
+            ("a\r\nb\r\n", "a\nb\n"),
+            ("a\nb\n", "a\r\nb\r\n"),
+            ("a\rb\r", "a\nb\n"),
+            ("a\r\nb", "a\rb"),
+            ("a\nb", "a\nb"),
+            ("a\r\r\nb", "a\n\nb"),
+            ("", ""),
+            ("one line", "one line"),
+        ] {
+            assert!(fake.user_copy(held));
+            assert_eq!(
+                steps.clear_if_text_lines(expected, None),
+                Ok(true),
+                "{held:?} vs {expected:?}"
+            );
+            assert_eq!(fake.text(), None, "{held:?} was not cleared");
+        }
+        for (held, expected) in [
+            ("a\nb", "a\nb\n"),
+            ("a\nb\n", "a\nb"),
+            ("A\nb", "a\nb"),
+            ("a\n\nb", "a\nb"),
+            ("a\nb ", "a\nb"),
+            ("a b", "a\nb"),
+            ("ab", "a\nb"),
+            ("a\r\nb", "a\n\nb"),
+            ("a\n", ""),
+            ("", "a"),
+        ] {
+            assert!(fake.user_copy(held));
+            assert_eq!(
+                steps.clear_if_text_lines(expected, None),
+                Ok(false),
+                "{held:?} vs {expected:?}"
+            );
+            assert_eq!(fake.text().as_deref(), Some(held), "{held:?} was cleared");
+        }
+        assert!(fake.user_copy_non_text());
+        assert_eq!(steps.clear_if_text_lines("a", None), Ok(false));
+        assert!(
+            fake.has_non_text(),
+            "something that is not text was cleared"
+        );
+    }
+
+    /// The same one opening as `clear_if_text`: nothing copies in between, a text too large to be the expected one is not
+    /// copied, a text that cannot be read or an empty that fails is an error and leaves the text, and a busy clipboard is
+    /// busy.
+    #[test]
+    fn clear_if_text_lines_is_one_opening() {
+        let (fake, steps) = fake_steps();
+        assert!(fake.user_copy("a\r\nb"));
+        let other = Arc::clone(&fake);
+        let (refused, was_refused) = mpsc::channel();
+        fake.during_next_read(Box::new(move || {
+            refused.send(!other.user_copy("theirs")).unwrap();
+        }));
+        assert_eq!(steps.clear_if_text_lines("a\nb", None), Ok(true));
+        assert!(
+            was_refused.recv().unwrap(),
+            "a copy got in between the check and the clear"
+        );
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "empty", "close"]
+        );
+        assert_eq!(fake.text(), None);
+
+        assert!(fake.user_copy("theirs"));
+        assert_eq!(steps.clear_if_text_lines("a\nb", None), Ok(false));
+        assert_eq!(
+            fake.take_events(),
+            ["open", "text size", "read text", "close"],
+            "a text that did not match was emptied"
+        );
+
+        assert!(fake.user_copy(&"a".repeat(MAX_ITEM_JSON + 1)));
+        fake.take_events();
+        assert_eq!(steps.clear_if_text_lines("a", None), Ok(false));
+        assert_eq!(fake.take_events(), ["open", "text size", "close"]);
+        assert!(fake.text().is_some(), "a large text was cleared");
+
+        assert!(fake.user_copy("a\nb"));
+        fake.fail_next_read();
+        assert_eq!(
+            steps.clear_if_text_lines("a\nb", None),
+            Err(CLIPBOARD_FAILED)
+        );
+        fake.fail_empty_at(0);
+        assert_eq!(
+            steps.clear_if_text_lines("a\nb", None),
+            Err(CLIPBOARD_FAILED)
+        );
+        assert_eq!(fake.text().as_deref(), Some("a\nb"));
+        assert!(!fake.is_open(), "the clipboard was left open");
+        fake.hold_open_elsewhere(true);
+        assert_eq!(steps.clear_if_text_lines("a\nb", None), Err(CLIPBOARD_BUSY));
+        fake.hold_open_elsewhere(false);
+        assert_eq!(steps.clear_if_text_lines("a\nb", None), Ok(true));
+    }
+
+    /// Windows lets a second opener with no owner window in while the first is open, so Lockbox's own threads take
+    /// turns: an opening tried from inside another (the save shortcut's read landing in the middle of a clear or a
+    /// copy) is busy, whichever calls are involved, and the outer opening is not disturbed.
+    #[test]
+    fn a_second_opening_from_inside_one_is_busy() {
+        let fake = Arc::new(FakeClipboard::default());
+        let steps = Arc::new(ClipboardSteps::new(
+            Arc::clone(&fake),
+            Arc::new(FakeClock::default()),
+        ));
+        steps.write_secret("ours", &TAG).unwrap();
+        let (inner, answers) = mpsc::channel();
+        let again = Arc::clone(&steps);
+        fake.during_next_read(Box::new(move || {
+            inner.send(again.read_text(None).err()).unwrap();
+            inner.send(again.clear_if_text("ours", None).err()).unwrap();
+            inner.send(again.clear_if(&TAG, None).err()).unwrap();
+            inner
+                .send(
+                    again
+                        .write_secret("theirs", &OTHER_TAG)
+                        .err()
+                        .map(|failed| failed.error),
+                )
+                .unwrap();
+        }));
+        assert_eq!(steps.clear_if_text("ours", None), Ok(true));
+        let answers: Vec<_> = answers.try_iter().collect();
+        assert_eq!(answers, [Some(CLIPBOARD_BUSY); 4]);
+        assert_eq!(fake.text(), None, "the inner calls disturbed the clear");
+        assert!(!fake.is_open());
+        // The turn is given back with the clipboard: the next opening is not busy.
+        assert_eq!(steps.read_text(None), Ok(None));
+    }
+
+    /// Both reads keep to a deadline as the tag's clear does, and a busy clipboard is `Busy` after ten tries.
+    #[test]
+    fn text_reads_try_ten_times_and_keep_to_the_deadline() {
+        let (fake, clock) = (
+            Arc::new(FakeClipboard::default()),
+            Arc::new(FakeClock::default()),
+        );
+        let steps = ClipboardSteps::new(Arc::clone(&fake), clock.clone());
+        assert!(fake.user_copy(COPIED));
+        fake.hold_open_elsewhere(true);
+        assert_eq!(steps.read_text(None), Err(CLIPBOARD_BUSY));
+        assert_eq!(steps.clear_if_text(COPIED, None), Err(CLIPBOARD_BUSY));
+        assert_eq!(fake.opens(), 20);
+
+        // A deadline that has come: not one try.
+        let past = clock.now();
+        assert_eq!(steps.read_text(Some(past)), Err(CLIPBOARD_BUSY));
+        assert_eq!(steps.clear_if_text(COPIED, Some(past)), Err(CLIPBOARD_BUSY));
+        assert_eq!(fake.opens(), 20, "tried at or after the deadline");
+
+        fake.hold_open_elsewhere(false);
+        assert_eq!(fake.text().as_deref(), Some(COPIED));
+    }
+
+    fn fake_printer() -> (Arc<FakePrintCalls>, PrintSteps<FakePrintCalls>) {
+        let fake = Arc::new(FakePrintCalls::default());
+        (Arc::clone(&fake), PrintSteps::new(fake))
+    }
+
+    fn started_paths(fake: &FakePrintCalls) -> Vec<PathBuf> {
+        fake.started().into_iter().map(|job| job.path).collect()
+    }
+
+    /// WebView2 takes one print job at a time (Microsoft's reference says a second fails). While one runs, another is
+    /// refused at once, without WebView2 being asked, however often it is tried; the refusal frees nothing; once the
+    /// first ends, the next one starts.
+    #[test]
+    fn print_to_pdf_refuses_a_second_job_while_one_runs() {
+        let (fake, printer) = fake_printer();
+        let first = printer.print_to_pdf(Path::new("first.pdf"), &CancelToken::new());
+        assert_eq!(first.try_recv(), Err(TryRecvError::Empty), "answered early");
+
+        for name in ["second.pdf", "third.pdf"] {
+            let refused = printer.print_to_pdf(Path::new(name), &CancelToken::new());
+            assert_eq!(refused.try_recv(), Ok(Err(PrintFailed::Busy)), "{name}");
+        }
+        assert_eq!(started_paths(&fake), [PathBuf::from("first.pdf")]);
+
+        assert!(fake.finish(Ok(())));
+        assert_eq!(first.try_recv(), Ok(Ok(())));
+        assert!(!fake.finish(Ok(())), "a refused job was started");
+
+        let after = printer.print_to_pdf(Path::new("after.pdf"), &CancelToken::new());
+        assert_eq!(after.try_recv(), Err(TryRecvError::Empty));
+        assert_eq!(
+            started_paths(&fake),
+            [PathBuf::from("first.pdf"), PathBuf::from("after.pdf")]
+        );
+    }
+
+    /// A job that WebView2 refuses to start, one that ends without a file, and one whose webview goes away before
+    /// it answers are each reported (the last as a receiver with no answer), and each gives the printer back.
+    #[test]
+    fn print_failure_is_reported() {
+        let (fake, printer) = fake_printer();
+        let access_denied = 0x8007_0005_u32 as i32;
+
+        fake.refuse_next(PrintFailed::NotStarted {
+            code: access_denied,
+        });
+        let refused = printer.print_to_pdf(Path::new("a.pdf"), &CancelToken::new());
+        assert_eq!(
+            refused.try_recv(),
+            Ok(Err(PrintFailed::NotStarted {
+                code: access_denied
+            }))
+        );
+
+        let failed = printer.print_to_pdf(Path::new("b.pdf"), &CancelToken::new());
+        assert_eq!(failed.try_recv(), Err(TryRecvError::Empty));
+        let ended = PrintFailed::NotWritten { code: 7 };
+        assert!(fake.finish(Err(ended)));
+        assert_eq!(failed.try_recv(), Ok(Err(ended)));
+
+        let gone = printer.print_to_pdf(Path::new("c.pdf"), &CancelToken::new());
+        fake.drop_running_jobs();
+        assert_eq!(gone.try_recv(), Err(TryRecvError::Disconnected));
+
+        let free = printer.print_to_pdf(Path::new("d.pdf"), &CancelToken::new());
+        assert_eq!(free.try_recv(), Err(TryRecvError::Empty), "still busy");
+        assert_eq!(
+            started_paths(&fake),
+            ["a.pdf", "b.pdf", "c.pdf", "d.pdf"].map(PathBuf::from)
+        );
+    }
+
+    /// A job for a printer and a PDF job share the one job at a time: while either runs, the other is refused at once,
+    /// in both orders, without WebView2 being asked; the printer job ends when WebView2's completion says so.
+    #[test]
+    fn printer_job_and_pdf_share_one_job_at_a_time() {
+        let (fake, printer) = fake_printer();
+        let pdf = printer.print_to_pdf(Path::new("first.pdf"), &CancelToken::new());
+        assert_eq!(pdf.try_recv(), Err(TryRecvError::Empty));
+        let refused = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(refused.try_recv(), Ok(Err(PrintFailed::Busy)));
+        assert!(fake.printed_to().is_empty(), "WebView2 was not asked");
+
+        assert!(fake.finish(Ok(())));
+        assert_eq!(pdf.try_recv(), Ok(Ok(())));
+        let job = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(job.try_recv(), Err(TryRecvError::Empty));
+        let refused = printer.print_to_pdf(Path::new("second.pdf"), &CancelToken::new());
+        assert_eq!(refused.try_recv(), Ok(Err(PrintFailed::Busy)));
+        assert_eq!(started_paths(&fake), [PathBuf::from("first.pdf")]);
+
+        assert!(fake.finish(Ok(())));
+        assert_eq!(job.try_recv(), Ok(Ok(())));
+        assert_eq!(fake.printed_to(), ["Office"]);
+        let after = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(after.try_recv(), Err(TryRecvError::Empty), "free again");
+    }
+
+    /// A printer job that cannot start is reported with its `HRESULT` and gives the printer back.
+    #[test]
+    fn printer_job_failure_is_reported() {
+        let (fake, printer) = fake_printer();
+        let refusal = PrintFailed::NotStarted {
+            code: 0x8000_4005_u32 as i32,
+        };
+        fake.refuse_next(refusal);
+        assert_eq!(
+            printer
+                .print_to_printer("Office", &CancelToken::new())
+                .try_recv(),
+            Ok(Err(refusal))
+        );
+        let free = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(
+            free.try_recv(),
+            Err(TryRecvError::Empty),
+            "the refusal freed it"
+        );
+    }
+
+    /// A job is queued for the webview and WebView2 is asked later. A token cancelled in between ends the job with
+    /// `Revoked` and WebView2 is never asked (for a PDF and for a printer alike); the printer is free again; a token
+    /// still live at that point goes through.
+    #[test]
+    fn a_token_cancelled_before_submission_stops_the_job() {
+        let (fake, printer) = fake_printer();
+        fake.hold_submission();
+        let cancel = CancelToken::new();
+        let pdf = printer.print_to_pdf(Path::new("a.pdf"), &cancel);
+        assert_eq!(fake.queued(), 1);
+        cancel.cancel();
+        assert_eq!(fake.submit_queued(), 0, "nothing reached WebView2");
+        assert_eq!(pdf.try_recv(), Ok(Err(PrintFailed::Revoked)));
+
+        let job = printer.print_to_printer("Office", &cancel);
+        assert_eq!(job.try_recv(), Err(TryRecvError::Empty), "queued, not busy");
+        assert_eq!(fake.submit_queued(), 0);
+        assert_eq!(job.try_recv(), Ok(Err(PrintFailed::Revoked)));
+        assert!(fake.submitted().is_empty());
+
+        let live = printer.print_to_printer("Office", &CancelToken::new());
+        assert_eq!(fake.submit_queued(), 1);
+        assert_eq!(fake.submitted(), ["Office"]);
+        assert!(fake.finish(Ok(())));
+        assert_eq!(live.try_recv(), Ok(Ok(())));
+    }
+
+    fn installed(name: &str, port: &str, driver: &str, attributes: u32) -> InstalledPrinter {
+        InstalledPrinter {
+            name: name.to_owned(),
+            port: port.to_owned(),
+            driver: driver.to_owned(),
+            attributes,
+        }
+    }
+
+    /// The printers Lockbox offers are the ones that send a page to a device: not one on the file prompt's ports, not a
+    /// fax printer (by attribute, or by a driver named for fax), not a OneNote printer (by driver or port). A pool is
+    /// left out when any port in it is a file port. Case does not matter, and names that only look alike stay.
+    #[test]
+    fn printers_with_a_box_of_their_own_are_left_out() {
+        let kept = [
+            installed("Office", "IP_192.168.1.5", "HP Universal Printing PCL 6", 0),
+            installed("Pool", "LPT1:,USB001", "Generic / Text Only", 0),
+            installed("Portable", "PORTPROMPTER:", "Generic", 0),
+            installed("Notes", "USB002", "Notebook Printer", 0),
+        ];
+        let left_out = [
+            installed(
+                "Microsoft Print to PDF",
+                "PORTPROMPT:",
+                "Microsoft Print To PDF",
+                0,
+            ),
+            installed(
+                "Microsoft XPS Document Writer",
+                "portprompt:",
+                "Microsoft XPS Document Writer v4",
+                0,
+            ),
+            installed("File", "FILE:", "Generic / Text Only", 0),
+            installed("Pooled to a file", "LPT1:, PORTPROMPT:", "Generic", 0),
+            installed(
+                "Fax",
+                "SHRFAX:",
+                "Microsoft Shared Fax Driver",
+                PRINTER_ATTRIBUTE_FAX,
+            ),
+            installed("Office fax queue", "USB003", "Some Printer FAX", 0),
+            installed(
+                "By attribute",
+                "USB004",
+                "Generic",
+                PRINTER_ATTRIBUTE_FAX | 0x2,
+            ),
+            installed(
+                "Send to OneNote 16",
+                "nul:",
+                "Send to Microsoft OneNote 16 Driver",
+                0,
+            ),
+            installed(
+                "OneNote (Desktop)",
+                "Microsoft.Office.OneNote_16001_x64__8wekyb3d8bbwe_microsoft.onenoteim_S-1-5-21",
+                "Microsoft Software Printer Driver",
+                0,
+            ),
+        ];
+        for printer in &kept {
+            assert!(!printer.writes_a_file_of_its_own(), "{}", printer.name);
+        }
+        for printer in &left_out {
+            assert!(printer.writes_a_file_of_its_own(), "{}", printer.name);
+        }
+        let all = InstalledPrinters {
+            printers: left_out.iter().chain(&kept).cloned().collect(),
+            default: Some("Notes".to_owned()),
+        };
+        let offered = all.offered();
+        assert_eq!(offered.printers, ["Office", "Pool", "Portable", "Notes"]);
+        assert_eq!(offered.default.as_deref(), Some("Notes"));
+    }
+
+    /// WebView2 refuses to write over an existing hidden file (no error, no file), and the fake does the same, so a
+    /// test that hands it such a path fails as the real printer would. A new file, and an existing visible file (which
+    /// it writes over), work.
+    #[test]
+    fn fake_printer_refuses_an_existing_hidden_file() {
+        let (fake, printer) = fake_printer();
+        fake.write_on_success(b"pdf");
+        let dir = lockbox_core::internals::fsio::testutil::TempDir::new();
+
+        let hidden = dir.path().join("hidden.pdf");
+        fs::write(&hidden, b"mine").unwrap();
+        lockbox_core::internals::fsio::set_hidden(&hidden).unwrap();
+        let refused = printer.print_to_pdf(&hidden, &CancelToken::new());
+        assert!(fake.finish(Ok(())));
+        assert_eq!(
+            refused.try_recv(),
+            Ok(Err(PrintFailed::NotWritten { code: 0 })),
+            "ended unsuccessful"
+        );
+        assert_eq!(
+            fs::read(&hidden).unwrap(),
+            b"mine",
+            "no file written over it"
+        );
+
+        let visible = dir.path().join("visible.pdf");
+        fs::write(&visible, b"mine").unwrap();
+        let written = printer.print_to_pdf(&visible, &CancelToken::new());
+        assert!(fake.finish(Ok(())));
+        assert_eq!(written.try_recv(), Ok(Ok(())));
+        assert_eq!(fs::read(&visible).unwrap(), b"pdf");
+
+        let new = dir.path().join("new.pdf");
+        let made = printer.print_to_pdf(&new, &CancelToken::new());
+        assert!(fake.finish(Ok(())));
+        assert_eq!(made.try_recv(), Ok(Ok(())));
+        assert_eq!(fs::read(&new).unwrap(), b"pdf");
     }
 
     /// Fix round 3 (H3): what `same_path` treats as one folder, and what it keeps apart. The registry, `Location`

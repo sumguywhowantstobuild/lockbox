@@ -30,6 +30,24 @@ export type RestoreNotice =
   | { state: "pending"; paths: JournalPaths }
   | { state: "unclear"; journal: string; paths: JournalPaths | null };
 
+/**
+ * What launch, or a running app, has to tell (`launch_notices`, and `lockbox://notice`): flat objects tagged `kind`, with
+ * counts and flags only. The output sweep's `unreadable` is true when the record of opened files could not be read.
+ * `first_close` comes only as an event, never from `launch_notices`: `explain: true` when the window was closed for the
+ * first time (every vault is locked and the window stayed visible: show 5b), `explain: false` once the explanation is
+ * done, by 5b's button (`closeExplainedOk`) or by a second close while it showed (the window hides either way).
+ */
+export type PageNotice =
+  | { kind: "output_sweep"; removed: number; kept: number; unreadable: boolean }
+  | { kind: "open_cleanup"; removed: number; still_open: number }
+  | ({ kind: "restore" } & RestoreNotice)
+  | { kind: "first_close"; explain: boolean }
+  /** Windows said the save shortcut (Ctrl+Shift+L unless changed in Settings) belongs to another app: it is off until Lockbox is
+   * started again or another shortcut is chosen in Settings. */
+  | { kind: "shortcut_taken" }
+  /** The shortcut could not be turned on for a reason that is not another app holding it. */
+  | { kind: "shortcut_not_set" };
+
 /** What dismissing a restore journal leaves behind, for the user to act on. */
 export interface Leaves {
   staging: string | null;
@@ -152,6 +170,50 @@ export async function open<T>(cmd: string, args?: InvokeArgs): Promise<Opened<T>
   const tagged = "Done" in answer ? answer.Done : answer;
   if (!advance(tagged.session, tagged.generation)) throw new StaleAnswer();
   return tagged;
+}
+
+/** Listens for `lockbox://notice`: each notice is handed over as it came (it holds no vault data, so it has no generation). */
+export function onNotice(handler: (notice: PageNotice) => void): Promise<UnlistenFn> {
+  return listen<PageNotice>("lockbox://notice", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/**
+ * What the save shortcut left in the shell, as `lockbox://capture` and `capture_state` say it: the copy's id (32 lowercase hex
+ * characters, new for every press), what the clipboard held (`value`, `empty` for no text, `too_large`), or `gone` when the copy
+ * was let go. Never the value. `changed` is true when a copy was waiting and this one's value is different; `env_keys` is how many
+ * keys the copy reads as when it is a `.env` of at least one key and no line that can't be read, otherwise `null`.
+ */
+export interface CaptureEvent {
+  capture_id: string;
+  state: "value" | "empty" | "too_large" | "gone";
+  changed: boolean;
+  env_keys: number | null;
+}
+
+/**
+ * What `lockbox://busy` says: the long operations now running for a session, by their fixed names (`import`, `save_copy`, `open`, and
+ * the ones later plans add), and none when the last has ended. `session` is `null` for one that belongs to no vault. No vault data, so
+ * no generation: the page keeps it in that session's record, which a lock drops.
+ */
+export interface BusyEvent {
+  session: number | null;
+  operations: string[];
+}
+
+/** Listens for `lockbox://busy`: each event is handed over as it came. */
+export function onBusy(handler: (event: BusyEvent) => void): Promise<UnlistenFn> {
+  return listen<BusyEvent>("lockbox://busy", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/** Listens for `lockbox://capture`: each event is handed over as it came (it holds no vault data, so it has no generation). */
+export function onCapture(handler: (event: CaptureEvent) => void): Promise<UnlistenFn> {
+  return listen<CaptureEvent>("lockbox://capture", ({ payload }) => {
+    handler(payload);
+  });
 }
 
 /**

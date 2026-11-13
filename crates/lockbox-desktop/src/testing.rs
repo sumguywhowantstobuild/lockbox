@@ -1,5 +1,6 @@
 //! Tests only: fakes for the OS calls (`os::{Env, Volumes, Dialogs, Launcher, IdleSource, Power, Clock, ClipboardCalls,
-//! Timer}`), a shell built on them inside a temp folder, and the lock that keeps key derivations off a timing test's CPU.
+//! Timer}`, the printer and its list, the save shortcut, the window, starting with Windows), a shell built on them inside
+//! a temp folder, and the lock that keeps key derivations off a timing test's CPU.
 
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
@@ -10,16 +11,23 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 
+use lockbox_core::blob::CancelToken;
 use lockbox_core::internals::fsio::testutil::TempDir;
+use zeroize::Zeroizing;
 
+use crate::capture::CaptureEvent;
 use crate::error::ShellResult;
 use crate::lock;
 use crate::os::{
-    CLIPBOARD_FAILED, ClipboardCalls, ClipboardSteps, Clock, Dialogs, DriveType, EXCLUSION_FORMATS,
-    Env, IdleSource, Job, KnownFolder, Launcher, Os, Power, TAG_FORMAT, Timer, Volumes,
+    CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Clock, Dialogs,
+    DriveType, EXCLUSION_FORMATS, Env, Hotkey, HotkeyTaken, IdleSource, InstalledPrinter,
+    InstalledPrinters, Job, KnownFolder, Launcher, MainWindow, Os, PRINTERS_UNREADABLE, Power,
+    PrintCalls, PrintDone, PrintFailed, PrintSteps, Shortcut, StartupEntry, TAG_FORMAT, Timer,
+    Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
 use crate::shell::Shell;
+use crate::startup::{StartupState, state_of};
 
 /// Each Argon2 run (creating, unlocking or opening a vault) keeps several cores busy for about a second. Every test
 /// of the crate shares this lock for reading while it derives a key; a timing test holds it for writing while it
@@ -45,6 +53,8 @@ pub struct Events {
     busy: Mutex<Vec<(Option<SessionId>, Vec<&'static str>)>>,
     /// Each notice, as the page would receive it.
     notices: Mutex<Vec<serde_json::Value>>,
+    /// Each capture event, as the page would receive it.
+    captures: Mutex<Vec<serde_json::Value>>,
     /// Run once, inside the next `busy` event, before it is recorded.
     on_busy: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -66,6 +76,11 @@ impl Events {
     pub fn notices(&self) -> Vec<serde_json::Value> {
         lock(&self.notices).clone()
     }
+
+    /// Every capture event the shell sent, in order, as the page would receive it.
+    pub fn captures(&self) -> Vec<serde_json::Value> {
+        lock(&self.captures).clone()
+    }
 }
 
 impl Notifier for Events {
@@ -85,6 +100,11 @@ impl Notifier for Events {
         let notice = serde_json::to_value(notice).expect("a notice serialises");
         lock(&self.notices).push(notice);
     }
+
+    fn capture(&self, event: &CaptureEvent) {
+        let event = serde_json::to_value(event).expect("a capture event serialises");
+        lock(&self.captures).push(event);
+    }
 }
 
 /// Idle time the test sets: none until it does.
@@ -100,6 +120,247 @@ impl FakeIdle {
 impl IdleSource for FakeIdle {
     fn since_last_input(&self) -> Duration {
         *lock(&self.0)
+    }
+}
+
+/// The main window: counts the hides and the times it was brought forward, and can run a step inside the next of each.
+#[derive(Default)]
+pub struct FakeWindow {
+    hides: AtomicUsize,
+    on_hide: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    forwards: AtomicUsize,
+    on_forward: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// While set, a hide is queued as the real window queues it on its own thread, and runs only at
+    /// [`run_queued_hides`](Self::run_queued_hides): its check is made then, not when the shell asked.
+    defer_hides: AtomicBool,
+    queued_hides: Mutex<Vec<Box<dyn FnOnce() -> bool + Send>>>,
+    /// Each time the shell asked for capture protection to change while the window was up, in order.
+    protections: Mutex<Vec<bool>>,
+}
+
+impl FakeWindow {
+    /// Each capture protection the shell asked the window for (`true`: kept out of captures), in order.
+    pub fn protections(&self) -> Vec<bool> {
+        lock(&self.protections).clone()
+    }
+
+    /// How many times the shell hid the window.
+    pub fn hides(&self) -> usize {
+        self.hides.load(Ordering::SeqCst)
+    }
+
+    /// How many times the shell brought the window forward.
+    pub fn forwards(&self) -> usize {
+        self.forwards.load(Ordering::SeqCst)
+    }
+
+    /// Runs `hook` once, inside the next bring-forward, before it is counted.
+    pub fn during_next_forward(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_forward) = Some(Box::new(hook));
+    }
+
+    /// Runs `hook` once, inside the next hide, before it is counted: what it sees is what the shell had done by then.
+    pub fn during_next_hide(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_hide) = Some(Box::new(hook));
+    }
+
+    /// From now on, hides wait in a queue, as on the real window's busy thread, until
+    /// [`run_queued_hides`](Self::run_queued_hides).
+    pub fn defer_hides(&self) {
+        self.defer_hides.store(true, Ordering::SeqCst);
+    }
+
+    /// How many hides wait in the queue.
+    pub fn queued_hides(&self) -> usize {
+        lock(&self.queued_hides).len()
+    }
+
+    /// Runs the queued hides in order, each making its check now.
+    pub fn run_queued_hides(&self) {
+        let queued = std::mem::take(&mut *lock(&self.queued_hides));
+        for still_closing in queued {
+            self.hide_now_if(still_closing);
+        }
+    }
+
+    fn hide_now_if(&self, still_closing: Box<dyn FnOnce() -> bool + Send>) {
+        if !still_closing() {
+            return;
+        }
+        let hook = lock(&self.on_hide).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.hides.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl MainWindow for FakeWindow {
+    /// At once, on the caller's thread (the check, then the hide when it still holds), or queued while
+    /// [`defer_hides`](FakeWindow::defer_hides) is set.
+    fn hide_if(&self, still_closing: Box<dyn FnOnce() -> bool + Send>) {
+        if self.defer_hides.load(Ordering::SeqCst) {
+            lock(&self.queued_hides).push(still_closing);
+        } else {
+            self.hide_now_if(still_closing);
+        }
+    }
+
+    fn bring_forward(&self) {
+        let hook = lock(&self.on_forward).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.forwards.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn protect_from_capture(&self, on: bool) {
+        lock(&self.protections).push(on);
+    }
+}
+
+/// The save shortcut as Windows holds it, in memory: the one registered, each ask in order, and an answer a test sets
+/// for the next ask (`HotkeyTaken::Taken` or `NotSet`, which leaves the one registered as it was, as Windows does).
+#[derive(Default)]
+pub struct FakeHotkey {
+    registered: Mutex<Option<Shortcut>>,
+    asked: Mutex<Vec<Option<Shortcut>>>,
+    refuse: Mutex<Vec<HotkeyTaken>>,
+    /// Run once, inside the next ask, before it is answered.
+    on_set: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl FakeHotkey {
+    /// Runs `hook` once, inside the next ask: it may block there.
+    pub fn during_next_set(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_set) = Some(Box::new(hook));
+    }
+
+    /// The shortcut registered now.
+    pub fn registered(&self) -> Option<Shortcut> {
+        *lock(&self.registered)
+    }
+
+    /// Every shortcut the shell asked for, in order (`None`: released).
+    pub fn asked(&self) -> Vec<Option<Shortcut>> {
+        lock(&self.asked).clone()
+    }
+
+    /// The next ask is refused with `why`; the ones after it go through unless refused too.
+    pub fn refuse_next(&self, why: HotkeyTaken) {
+        lock(&self.refuse).push(why);
+    }
+}
+
+impl Hotkey for FakeHotkey {
+    fn set(&self, shortcut: Option<Shortcut>) -> Result<(), HotkeyTaken> {
+        lock(&self.asked).push(shortcut);
+        let hook = lock(&self.on_set).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        let mut refuse = lock(&self.refuse);
+        if !refuse.is_empty() {
+            return Err(refuse.remove(0));
+        }
+        *lock(&self.registered) = shortcut;
+        Ok(())
+    }
+}
+
+/// What the registry holds about starting with Windows, in memory: Lockbox's `Run` entry, and Windows' own on/off value
+/// for it. `read` counts and answers what is there now; an error a test sets is the OS's, with its own text, which the
+/// shell must never pass on.
+#[derive(Default)]
+pub struct FakeStartup {
+    inner: Mutex<StartupRegistry>,
+}
+
+#[derive(Default)]
+struct StartupRegistry {
+    entry: bool,
+    approved_off: bool,
+    reads: usize,
+    writes: Vec<bool>,
+    fail_read: Option<String>,
+    fail_write: Option<String>,
+}
+
+impl FakeStartup {
+    /// How many times the registry was read.
+    pub fn reads(&self) -> usize {
+        lock(&self.inner).reads
+    }
+
+    /// Each write asked for (`true`: the entry on), in order.
+    pub fn writes(&self) -> Vec<bool> {
+        lock(&self.inner).writes.clone()
+    }
+
+    /// Whether Lockbox's `Run` entry is there.
+    pub fn entry_present(&self) -> bool {
+        lock(&self.inner).entry
+    }
+
+    /// Something other than the shell adds or removes the entry.
+    pub fn set_entry_elsewhere(&self, present: bool) {
+        lock(&self.inner).entry = present;
+    }
+
+    /// The person turns Lockbox off in Windows' Startup settings.
+    pub fn turn_off_in_windows(&self) {
+        lock(&self.inner).approved_off = true;
+    }
+
+    /// The person turns it back on there.
+    pub fn turn_on_in_windows(&self) {
+        lock(&self.inner).approved_off = false;
+    }
+
+    /// The next read fails, with `message` as the OS's own words.
+    pub fn fail_next_read(&self, message: &str) {
+        lock(&self.inner).fail_read = Some(message.to_owned());
+    }
+
+    /// The next write fails, with `message` as the OS's own words; the entry is left as it was.
+    pub fn fail_next_write(&self, message: &str) {
+        lock(&self.inner).fail_write = Some(message.to_owned());
+    }
+}
+
+impl StartupEntry for FakeStartup {
+    fn read(&self) -> io::Result<StartupState> {
+        let mut registry = lock(&self.inner);
+        registry.reads += 1;
+        if let Some(message) = registry.fail_read.take() {
+            return Err(io::Error::other(message));
+        }
+        // Windows' own value as it is written: `03` for off, `02` for on, then a time. The same rule as the real read.
+        let approved: [u8; 12] = [
+            if registry.approved_off { 3 } else { 2 },
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        Ok(state_of(registry.entry, Some(&approved)))
+    }
+
+    fn write(&self, on: bool) -> io::Result<()> {
+        let mut registry = lock(&self.inner);
+        registry.writes.push(on);
+        if let Some(message) = registry.fail_write.take() {
+            return Err(io::Error::other(message));
+        }
+        registry.entry = on;
+        Ok(())
     }
 }
 
@@ -163,14 +424,20 @@ struct Clip {
     /// Counts the coming empties down: the one reaching zero fails.
     fail_empty_in: Option<usize>,
     refuse_registration: bool,
-    /// Each step, in order: `open`, `close`, `empty`, `set tag`, `set mark`, `set text`, `read tag`.
+    /// Each step, in order: `open`, `close`, `empty`, `set tag`, `set mark`, `set text`, `read tag`, `text size`,
+    /// `read text`.
     events: Vec<&'static str>,
     /// Run once, right after the next close, with the clipboard free again.
     after_close: Option<Hook>,
     /// Run once, inside the next read of the tag, with the clipboard still open.
     during_read: Option<Hook>,
-    /// The next read of the tag fails, though the tag is there.
+    /// The next read of the tag, or look at the text's size, fails, though what it reads is there.
     fail_read: bool,
+    /// Something that is not text is on the clipboard (a picture, a list of files).
+    non_text: bool,
+    /// Put on the clipboard once, right after the next look at the text's size: a program that opens the clipboard with no
+    /// owner window, which Windows lets in during Lockbox's opening, replacing the text between the two steps.
+    after_size: Option<String>,
 }
 
 /// The format IDs the fake hands out: the exclusion formats from `0xC000`, the tag's format at [`FAKE_TAG_FORMAT`].
@@ -217,7 +484,32 @@ impl FakeClipboard {
         clip.text = Some(text.to_owned());
         clip.tag = None;
         clip.formats.clear();
+        clip.non_text = false;
         true
+    }
+
+    /// The user (another program) copies something that is not text. Refused while the clipboard is open (false).
+    pub fn user_copy_non_text(&self) -> bool {
+        let mut clip = lock(&self.clip);
+        if clip.open {
+            return false;
+        }
+        clip.text = None;
+        clip.tag = None;
+        clip.formats.clear();
+        clip.non_text = true;
+        true
+    }
+
+    /// Whether something that is not text is on the clipboard.
+    pub fn has_non_text(&self) -> bool {
+        lock(&self.clip).non_text
+    }
+
+    /// Right after the next look at the text's size, `text` replaces what is on the clipboard, inside Lockbox's opening (a
+    /// program that opens it with no owner window).
+    pub fn replace_after_size(&self, text: &str) {
+        lock(&self.clip).after_size = Some(text.to_owned());
     }
 
     /// From now on, while `held`, another program keeps the clipboard open.
@@ -354,6 +646,7 @@ impl ClipboardCalls for FakeClipboard {
         clip.text = None;
         clip.tag = None;
         clip.formats.clear();
+        clip.non_text = false;
         true
     }
 
@@ -403,6 +696,46 @@ impl ClipboardCalls for FakeClipboard {
             false => Ok(held),
         }
     }
+
+    fn text_size(&self) -> ShellResult<Option<usize>> {
+        let mut clip = lock(&self.clip);
+        assert!(clip.open, "looked at while closed");
+        clip.events.push("text size");
+        if std::mem::take(&mut clip.fail_read) {
+            return Err(CLIPBOARD_FAILED);
+        }
+        let size = clip.text.as_deref().map(block_size);
+        if let Some(text) = clip.after_size.take() {
+            clip.text = Some(text);
+        }
+        Ok(size)
+    }
+
+    fn copy_text(&self, max_block: usize) -> ShellResult<Option<Zeroizing<String>>> {
+        let (text, hook) = {
+            let mut clip = lock(&self.clip);
+            assert!(clip.open, "read while closed");
+            if clip
+                .text
+                .as_deref()
+                .is_some_and(|text| block_size(text) > max_block)
+            {
+                clip.events.push("text too large");
+                return Err(CLIPBOARD_TOO_LARGE);
+            }
+            clip.events.push("read text");
+            (clip.text.clone(), clip.during_read.take())
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(text.map(Zeroizing::new))
+    }
+}
+
+/// The size of `text`'s block on the clipboard: UTF-16 units and the terminator, two bytes each, as Windows holds it.
+fn block_size(text: &str) -> usize {
+    (text.encode_utf16().count() + 1) * 2
 }
 
 /// A timer that runs nothing by itself: the test runs the jobs whose time has come, with [`run_due`](Self::run_due).
@@ -699,9 +1032,26 @@ pub struct FakeDialogs {
     starts: Mutex<Vec<Option<PathBuf>>>,
     /// The name each save dialog suggested, in order.
     suggested: Mutex<Vec<String>>,
+    /// The title each save dialog was given, in order.
+    titles: Mutex<Vec<String>>,
+    /// The filter each save dialog was given, in order: its name and extensions, or `None` for no filter.
+    filters: Mutex<Vec<Filter>>,
 }
 
+/// A dialog's filter as the fake records it: a name and the extensions it shows, or none.
+pub type Filter = Option<(String, Vec<String>)>;
+
 impl FakeDialogs {
+    /// The filter each save dialog was opened with, in order (`None`: no filter, so a real dialog adds no extension).
+    pub fn filters(&self) -> Vec<Filter> {
+        lock(&self.filters).clone()
+    }
+
+    /// The title each save dialog was opened with, in order.
+    pub fn titles(&self) -> Vec<String> {
+        lock(&self.titles).clone()
+    }
+
     /// The start folder each folder dialog was opened with (`None`: none given), in order.
     pub fn folder_starts(&self) -> Vec<Option<PathBuf>> {
         lock(&self.starts).clone()
@@ -746,10 +1096,17 @@ impl Dialogs for FakeDialogs {
 
     fn save_file(
         &self,
-        _title: &str,
+        title: &str,
         suggested: &str,
-        _filter: Option<(&str, &[&str])>,
+        filter: Option<(&str, &[&str])>,
     ) -> Option<PathBuf> {
+        lock(&self.filters).push(filter.map(|(name, extensions)| {
+            (
+                name.to_owned(),
+                extensions.iter().map(|e| (*e).to_owned()).collect(),
+            )
+        }));
+        lock(&self.titles).push(title.to_owned());
         lock(&self.suggested).push(suggested.to_owned());
         self.next()
     }
@@ -810,6 +1167,254 @@ impl Launcher for FakeLauncher {
     }
 }
 
+/// What a fake print job found at its path when it began.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedPrint {
+    pub path: PathBuf,
+    /// The file was already there (WebView2 writes over the path it is given).
+    pub existed: bool,
+    /// ...and was hidden.
+    pub hidden: bool,
+    /// Its folder was hidden.
+    pub folder_hidden: bool,
+}
+
+/// Whether `path` is there and hidden (`FILE_ATTRIBUTE_HIDDEN`).
+pub(crate) fn is_hidden(path: Option<&Path>) -> bool {
+    path.and_then(|path| fs::symlink_metadata(path).ok())
+        .is_some_and(|meta| std::os::windows::fs::MetadataExt::file_attributes(&meta) & 0x2 != 0)
+}
+
+/// The printing calls as the test sees them: records each job, holds its `done` until the test ends the job, and can
+/// refuse to begin one. Like WebView2, a PDF job refuses to write over an existing hidden file: it ends unsuccessful,
+/// writing nothing.
+#[derive(Default)]
+pub struct FakePrintCalls {
+    started: Mutex<Vec<StartedPrint>>,
+    /// Jobs begun and not ended, oldest first, each with its path (empty for a job for a printer).
+    waiting: Mutex<VecDeque<(PathBuf, PrintDone)>>,
+    /// The next `start` or `start_on_printer` refuses with this.
+    refuse_next: Mutex<Option<PrintFailed>>,
+    /// What a job that ends well leaves in its file (it opens the file that is there and writes over it, as WebView2
+    /// does); `None` writes nothing.
+    pdf: Mutex<Option<Vec<u8>>>,
+    /// The printers the fake Windows has, and its default.
+    installed: Mutex<InstalledPrinters>,
+    /// Listing the printers fails (once) with this.
+    list_fails: Mutex<bool>,
+    /// Run once, inside the next listing, before it answers: a test locks the session there.
+    on_list: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The name each printer job was begun for, in order (and not refused as busy: the calls are what is counted).
+    printed_to: Mutex<Vec<String>>,
+    /// Run once, when the next PDF job begins, on the thread that begins it.
+    on_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Jobs queued for the webview's thread and not yet submitted to WebView2, oldest first.
+    queued: Mutex<VecDeque<QueuedPrint>>,
+    /// Jobs wait in `queued` until the test calls `submit_queued`.
+    held: AtomicBool,
+    /// The printers' names, and every job's path, of the jobs that reached WebView2.
+    submitted: Mutex<Vec<String>>,
+    submitted_jobs: Mutex<Vec<PathBuf>>,
+}
+
+impl FakePrintCalls {
+    pub fn started(&self) -> Vec<StartedPrint> {
+        lock(&self.started).clone()
+    }
+
+    /// The next job is refused when it starts.
+    pub fn refuse_next(&self, failed: PrintFailed) {
+        *lock(&self.refuse_next) = Some(failed);
+    }
+
+    /// A job that ends well writes `bytes` over its file first (a new file, or a visible one that is there).
+    pub fn write_on_success(&self, bytes: &[u8]) {
+        *lock(&self.pdf) = Some(bytes.to_vec());
+    }
+
+    /// `hook` runs once, on the thread that begins the next job, when it is begun: a test arms a failpoint there that
+    /// the same thread reaches later (failpoints are per thread).
+    pub fn on_start(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_start) = Some(Box::new(hook));
+    }
+
+    /// How many jobs have begun and not ended.
+    pub fn running(&self) -> usize {
+        lock(&self.waiting).len()
+    }
+
+    /// The printers the fake Windows has, and the default one's name.
+    pub fn set_printers(&self, printers: Vec<InstalledPrinter>, default: Option<&str>) {
+        *lock(&self.installed) = InstalledPrinters {
+            printers,
+            default: default.map(str::to_owned),
+        };
+    }
+
+    /// The next listing of printers fails.
+    pub fn fail_listing(&self) {
+        *lock(&self.list_fails) = true;
+    }
+
+    /// `hook` runs inside the next listing of printers, before it answers.
+    pub fn on_listing(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_list) = Some(Box::new(hook));
+    }
+
+    /// The names the printer jobs were begun for, in order.
+    pub fn printed_to(&self) -> Vec<String> {
+        lock(&self.printed_to).clone()
+    }
+
+    /// Ends the oldest running job with `result`; false when none runs.
+    pub fn finish(&self, result: Result<(), PrintFailed>) -> bool {
+        let Some((path, done)) = lock(&self.waiting).pop_front() else {
+            return false;
+        };
+        let mut result = result;
+        // A PDF job (a job for a printer has no path). WebView2 ends one that meets an existing hidden file without an error
+        // and without a file.
+        if result.is_ok() && !path.as_os_str().is_empty() {
+            if is_hidden(Some(&path)) {
+                result = Err(PrintFailed::NotWritten { code: 0 });
+            } else if let Some(pdf) = lock(&self.pdf).clone() {
+                // Writes over the file that is there (truncating it), or makes the file when there is none.
+                let mut file = match fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&path)
+                {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .unwrap(),
+                    Err(error) => panic!("the fake print could not open its file: {error}"),
+                };
+                io::Write::write_all(&mut file, &pdf).unwrap();
+            }
+        }
+        done(result);
+        true
+    }
+
+    /// The webview goes away: every running job is dropped without an answer.
+    pub fn drop_running_jobs(&self) {
+        lock(&self.waiting).clear();
+    }
+
+    /// From now on a job waits in the queue, as it does for the webview's own thread, until [`submit_queued`](Self::submit_queued):
+    /// a test locks the session in between.
+    pub fn hold_submission(&self) {
+        self.held.store(true, Ordering::SeqCst);
+    }
+
+    /// How many jobs are queued and not yet submitted to WebView2.
+    pub fn queued(&self) -> usize {
+        lock(&self.queued).len()
+    }
+
+    /// The webview's thread gets to the queued jobs: each one whose token is cancelled ends with
+    /// [`PrintFailed::Revoked`] and WebView2 is not asked; each other is submitted (it runs until
+    /// [`finish`](Self::finish)). How many were submitted.
+    pub fn submit_queued(&self) -> usize {
+        let mut submitted = 0;
+        loop {
+            let Some(job) = lock(&self.queued).pop_front() else {
+                return submitted;
+            };
+            if job.cancel.is_cancelled() {
+                (job.done)(Err(PrintFailed::Revoked));
+                continue;
+            }
+            if !job.label.is_empty() {
+                lock(&self.submitted).push(job.label);
+            }
+            lock(&self.submitted_jobs).push(job.path.clone());
+            lock(&self.waiting).push_back((job.path, job.done));
+            submitted += 1;
+        }
+    }
+
+    /// The names of the printers whose jobs reached WebView2 (past the token's check), in order.
+    pub fn submitted(&self) -> Vec<String> {
+        lock(&self.submitted).clone()
+    }
+
+    /// The paths of the PDF jobs (and an empty path for each job for a printer) that reached WebView2, in order.
+    pub fn submitted_jobs(&self) -> Vec<PathBuf> {
+        lock(&self.submitted_jobs).clone()
+    }
+
+    /// Queues a job for the webview's thread and, unless held, runs that thread's step at once.
+    fn queue(&self, path: PathBuf, label: String, cancel: CancelToken, done: PrintDone) {
+        lock(&self.queued).push_back(QueuedPrint {
+            path,
+            label,
+            cancel,
+            done,
+        });
+        if !self.held.load(Ordering::SeqCst) {
+            self.submit_queued();
+        }
+    }
+}
+
+/// A job queued for the webview's thread, not yet submitted to WebView2.
+struct QueuedPrint {
+    path: PathBuf,
+    /// The printer's name for a job for a printer; empty for a PDF.
+    label: String,
+    cancel: CancelToken,
+    done: PrintDone,
+}
+
+impl PrintCalls for FakePrintCalls {
+    fn start(&self, path: &Path, cancel: CancelToken, done: PrintDone) -> Result<(), PrintFailed> {
+        let hook = lock(&self.on_start).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        lock(&self.started).push(StartedPrint {
+            path: path.to_path_buf(),
+            existed: fs::symlink_metadata(path).is_ok(),
+            hidden: is_hidden(Some(path)),
+            folder_hidden: is_hidden(path.parent()),
+        });
+        if let Some(failed) = lock(&self.refuse_next).take() {
+            return Err(failed);
+        }
+        self.queue(path.to_path_buf(), String::new(), cancel, done);
+        Ok(())
+    }
+
+    fn start_on_printer(
+        &self,
+        printer: &str,
+        cancel: CancelToken,
+        done: PrintDone,
+    ) -> Result<(), PrintFailed> {
+        lock(&self.printed_to).push(printer.to_owned());
+        if let Some(failed) = lock(&self.refuse_next).take() {
+            return Err(failed);
+        }
+        self.queue(PathBuf::new(), printer.to_owned(), cancel, done);
+        Ok(())
+    }
+
+    fn installed_printers(&self) -> ShellResult<InstalledPrinters> {
+        let hook = lock(&self.on_list).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        if std::mem::take(&mut *lock(&self.list_fails)) {
+            return Err(PRINTERS_UNREADABLE);
+        }
+        Ok(lock(&self.installed).clone())
+    }
+}
+
 /// A shell on fake OS calls, inside its own temp folder: the known folders in `profile`, `local` and `roaming`, and
 /// a `vaults` folder for the test's own vaults.
 pub struct TestShell {
@@ -823,6 +1428,10 @@ pub struct TestShell {
     pub clock: Arc<FakeClock>,
     pub clipboard: Arc<FakeClipboard>,
     pub timer: Arc<FakeTimer>,
+    pub print: Arc<FakePrintCalls>,
+    pub window: Arc<FakeWindow>,
+    pub hotkey: Arc<FakeHotkey>,
+    pub startup: Arc<FakeStartup>,
     /// The events the shell sent.
     pub events: Arc<Events>,
     /// Tauri's app-data folders, as the app passes them in.
@@ -849,6 +1458,10 @@ impl TestShell {
         let clipboard = Arc::new(FakeClipboard::default());
         clipboard.watch_clock(clock.clone());
         let timer = Arc::new(FakeTimer::default());
+        let print = Arc::new(FakePrintCalls::default());
+        let window = Arc::new(FakeWindow::default());
+        let hotkey = Arc::new(FakeHotkey::default());
+        let startup = Arc::new(FakeStartup::default());
         let events = Arc::new(Events::default());
         let app_dirs = vec![
             env.folder(KnownFolder::RoamingAppData)
@@ -867,6 +1480,10 @@ impl TestShell {
             clock: clock.clone(),
             clipboard: Arc::new(ClipboardSteps::new(clipboard.clone(), clock.clone())),
             timer: timer.clone(),
+            printer: Arc::new(PrintSteps::new(print.clone())),
+            window: window.clone(),
+            hotkey: hotkey.clone(),
+            startup: startup.clone(),
         };
         let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone())?);
         Ok(TestShell {
@@ -880,10 +1497,39 @@ impl TestShell {
             clock,
             clipboard,
             timer,
+            print,
+            window,
+            hotkey,
+            startup,
             events,
             app_dirs,
             temp,
         })
+    }
+
+    /// A second shell over the same state folder, vaults and fakes: the app after a restart. The first one is locked, as
+    /// a closed app's vaults are.
+    pub fn restarted(&self) -> Arc<Shell> {
+        self.shell.sessions.lock_all(LockReason::AppClosing);
+        let os = Os {
+            volumes: self.volumes.clone(),
+            env: self.env.clone(),
+            dialogs: self.dialogs.clone(),
+            launcher: self.launcher.clone(),
+            idle: self.idle.clone(),
+            power: self.power.clone(),
+            clock: self.clock.clone(),
+            clipboard: Arc::new(ClipboardSteps::new(
+                self.clipboard.clone(),
+                self.clock.clone(),
+            )),
+            timer: self.timer.clone(),
+            printer: Arc::new(PrintSteps::new(self.print.clone())),
+            window: self.window.clone(),
+            hotkey: self.hotkey.clone(),
+            startup: self.startup.clone(),
+        };
+        Arc::new(Shell::new(self.events.clone(), os, self.app_dirs.clone()).unwrap())
     }
 
     /// The folder for the test's own vaults.

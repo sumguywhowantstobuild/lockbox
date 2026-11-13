@@ -1,0 +1,8 @@
+/* What Base UI's own `<style>` element would have said, which the page's policy refuses (see LockboxParts.tsx). */
+.base-ui-disable-scrollbar {
+  scrollbar-width: none;
+}
+
+.base-ui-disable-scrollbar::-webkit-scrollbar {
+  display: none;
+}

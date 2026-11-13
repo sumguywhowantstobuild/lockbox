@@ -12,16 +12,19 @@ documented and honest about its limits.
 
 ## What exists today
 
-The first three of five planned stages are built. There are no real screens yet: you can build and run the desktop app,
-but it shows only a bare test page, one button per check. Together the five plans make up Phase 1, the Windows app (see
-the [phases](docs/PRD.md#phases)).
+The first three of five planned stages are built, and the first part of the fourth, the screens for daily use (4A): you
+can build and run the desktop app, set up a vault with its recovery key, and keep logins, keys, notes, files and `.env`s
+in it: search, reveal and copy, add and edit, move, trash and restore, folders, a folder's `.env` in and out, a shortcut
+that saves a copied key, and settings. Backups and the forgotten-password screens come in the next parts (4B and 4C), so
+a vault kept only in this version has no way back through the app if something goes wrong. Together the five plans make
+up Phase 1, the Windows app (see the [phases](docs/PRD.md#phases)).
 
 | Plan | What it delivers | State |
 |---|---|---|
 | 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
 | 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built |
 | 3 | Desktop shell (built with Tauri, a toolkit for desktop apps), `crates/lockbox-desktop`: sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Built |
-| 4 | The user interface (clickable design mockups first) | Not started |
+| 4 | The user interface, from clickable design mockups, in three parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C the rest | 4A built; 4B and 4C to come |
 | 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
 
 The core can already create and unlock vaults (with the password, or with the recovery key: a long code shown once that
@@ -54,7 +57,7 @@ cargo test --locked          # most tests; it runs real password hashing, so all
 cargo test -p lockbox-core --locked --features test-internals   # every engine test, the internal ones too
 ```
 
-To run the app with its test page, use `cargo tauri dev` from `crates/lockbox-desktop` (the Tauri command-line tool is
+To run the app, use `cargo tauri dev` from `crates/lockbox-desktop` (the Tauri command-line tool is
 in [docs/SETUP.md](docs/SETUP.md#desktop-app-tauri)).
 
 The same checks that CI runs on every push:
@@ -66,8 +69,8 @@ cargo clippy -p lockbox-core --locked --all-targets --features test-internals --
 cargo test --locked
 cargo test -p lockbox-core --locked --features test-internals
 npm --prefix ui run lint
+npm --prefix ui run build    # before the UI tests: some of them read the built page and style sheet
 npm --prefix ui test
-npm --prefix ui run build
 cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc   # after the UI build, which it embeds
 node --test "scripts/*.test.mjs"   # the scanner's own tests
 node scripts/scan.mjs        # security scan; needs gitleaks, semgrep and osv-scanner, see docs/SETUP.md

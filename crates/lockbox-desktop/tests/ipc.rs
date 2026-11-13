@@ -2,9 +2,9 @@
 //! The app is built from the real `tauri.conf.json` and `capabilities/main.json`, so the real ACL applies.
 //!
 //! The test runtime (`MockRuntime`) ignores the window's webview settings. Navigation, downloads and dropped files
-//! are checked by the hands-on probes on the test page. The popup probe checks only the outcome: wry refuses new
-//! windows even without Tauri's handler. Autofill and the in-private profile cannot be observed from the page; they
-//! are covered only by review of `window::main_window`.
+//! were checked by hand on a release build (the hands-on probes of Plan 4A's first tasks, since removed). A popup's
+//! outcome is the only thing observable: wry refuses new windows even without Tauri's handler. Autofill and the
+//! in-private profile cannot be observed from the page; they are covered only by review of `window::main_window`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -15,7 +15,7 @@ use lockbox_desktop::window::{allowed_navigation, main_window};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder};
-use tauri::utils::config::{Csp, FrontendDist};
+use tauri::utils::config::{Csp, FrontendDist, PatternKind};
 use tauri::webview::InvokeRequest;
 use tauri::{App, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -100,6 +100,36 @@ fn every_listed_command_reaches_its_handler() {
     }
 }
 
+/// The hands-on probes of Plan 4A's first tasks are gone from what ships: not in the list of commands, not granted to
+/// the window, not in the invoke handler, and no source file of theirs. (The word is built from two pieces so this
+/// file does not match itself.)
+#[test]
+fn no_probe_command_ships() {
+    let word = ["pro", "be"].concat();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("commands");
+    assert!(
+        !COMMANDS.iter().any(|cmd| cmd.contains(&word)),
+        "a probe command is in COMMANDS"
+    );
+    let capability = read_json("capabilities/main.json").to_string();
+    assert!(
+        !capability.contains(&word),
+        "a probe is granted to the window"
+    );
+    let handler = std::fs::read_to_string(source.join("mod.rs")).expect("commands/mod.rs exists");
+    assert!(!handler.contains(&word), "a probe is in the invoke handler");
+    let files: Vec<String> = std::fs::read_dir(&source)
+        .expect("commands/ exists")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !files.iter().any(|name| name.contains(&word)),
+        "a probe source file is left: {files:?}"
+    );
+}
+
 #[test]
 fn other_window_is_refused() {
     let app = app();
@@ -110,6 +140,251 @@ fn other_window_is_refused() {
         "app_info",
         invoke(&probe, APP_ORIGIN, "app_info", InvokeBody::Json(json!({}))),
     );
+}
+
+/// `list_printers` is listed, granted to the main window and reaches its handler from it (it takes no arguments and no
+/// session: a plain read of the printers Windows has); another window and a remote origin are refused by the ACL.
+#[test]
+fn list_printers_command_is_listed() {
+    let cmd = "list_printers";
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(granted.contains(&"allow-list-printers"));
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({}));
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
+/// `close_explained_ok` (5b's button) is listed, granted to the main window and reaches its handler from it; another
+/// window and a remote origin are refused by the ACL, before the handler. It takes no session and no generation, so the
+/// stale-generation, foreign-ID and read-only refusals do not apply to it (its own tests are in `commands::sessions`).
+#[test]
+fn close_explained_ok_is_granted_to_the_main_window_only() {
+    let cmd = "close_explained_ok";
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(granted.contains(&"allow-close-explained-ok"));
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({}));
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
+/// The commands that write a readable file or print the recovery key (Task 7) are listed, granted to the main window and
+/// reach their handler from it; another window and a remote origin are refused by the ACL, before the handler. The page
+/// sends no path and no key to any of them: their bodies are a session and a generation (and a printer's name, for
+/// Print), or a token (checked in `commands::readable`'s own tests).
+#[test]
+fn readable_file_commands_are_granted_to_the_main_window_only() {
+    let commands = [
+        "save_recovery_pdf",
+        "save_readable_confirm",
+        "print_recovery_key",
+    ];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for cmd in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(json!({}));
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
+/// The settings and Start with Windows commands (Task 20) are listed, granted to the main window and reach their handler
+/// from it; another window and a remote origin are refused by the ACL, before the handler. None takes a session, a
+/// generation or a path: the settings, or `{ on }`, are all they are sent (their bodies are checked in
+/// `commands::settings`'s own tests, so the stale-generation, foreign-ID and read-only refusals do not apply).
+#[test]
+fn settings_and_startup_commands_are_granted_to_the_main_window_only() {
+    let commands = ["get_settings", "set_settings", "get_startup", "set_startup"];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for cmd in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(json!({}));
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
+/// The `.env` commands (Task 17) are listed, granted to the main window and reach their handler from it; another window
+/// and a remote origin are refused by the ACL, before the handler. The page sends the pasted text to `env_read` once and
+/// no path to any of them (their bodies are checked in `commands::env`'s own tests).
+#[test]
+fn env_commands_are_granted_to_the_main_window_only() {
+    let commands = ["env_read", "env_save", "env_copy", "env_save_file"];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for cmd in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(json!({}));
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
+/// The save box's commands (Task 18) are listed, granted to the main window and reach their handler from it; another window
+/// and a remote origin are refused by the ACL, before the handler. None of them sends a value to Rust except a typed one
+/// to `capture_save`, and none returns one except `capture_reveal` (checked in `commands::capture`'s own tests).
+#[test]
+fn capture_commands_are_granted_to_the_main_window_only() {
+    let commands = [
+        "capture_state",
+        "capture_choose",
+        "capture_reveal",
+        "capture_save",
+        "capture_cancel",
+        "capture_env",
+    ];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for cmd in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(json!({}));
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
+/// `start_new_vault_list` (the lost-list screen's button) is listed, granted to the main window and reaches its handler
+/// from it; another window and a remote origin are refused by the ACL, before the handler. It takes no arguments, no session
+/// and no path, so the stale-generation, foreign-ID and read-only refusals do not apply to it (its own tests are in
+/// `registry`, and `commands::vaults` refuses a request with a field).
+#[test]
+fn start_new_vault_list_is_granted_to_the_main_window_only() {
+    let cmd = "start_new_vault_list";
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(granted.contains(&"allow-start-new-vault-list"));
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({}));
+    // Past the ACL and inside the handler: this test app keeps no shell state.
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
 }
 
 #[test]
@@ -232,6 +507,13 @@ fn security_config_is_pinned() {
     assert_eq!(compiled.app.security.csp, Some(Csp::Policy(CSP.into())));
     assert!(!compiled.app.with_global_tauri);
     assert!(compiled.app.security.freeze_prototype);
+    assert_eq!(
+        compiled.app.security.pattern,
+        PatternKind::Brownfield,
+        "Tauri's isolation pattern is off by decision (2026-11-05): its sandboxed frame is reported to hang \
+         every call on Windows (tauri-apps/tauri issue 16219) and its hook cannot tell the app's calls from a bad \
+         package's"
+    );
     assert!(compiled.app.windows.is_empty());
     assert!(compiled.app.security.capabilities.is_empty());
     assert_eq!(

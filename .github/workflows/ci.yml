@@ -95,10 +95,11 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Lint
         run: npm run lint
-      - name: Test
-        run: npm test
+      # Before Test: a test reads the built style sheet to check that no font became a data: URI.
       - name: Build
         run: npm run build
+      - name: Test
+        run: npm test
 
   scan:
     name: Security scan

@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 // Public as a whole: every item is part of the surface.
+pub mod env_file;
 pub mod generator;
 pub mod ids;
 
@@ -55,16 +56,20 @@ pub mod blob {
 pub mod fsio {
     pub(crate) use crate::fsio_impl::*;
     pub use crate::fsio_impl::{
-        atomic_write, is_destination_taken, remove_dir_all_retry, remove_file_retry,
-        rename_file_no_replace,
+        atomic_write, clear_hidden, create_hidden_file, hidden_temp_path, is_destination_taken,
+        publish_readable, remove_dir_all_retry, remove_file_retry, rename_file_no_replace,
     };
+    pub use crate::vault::refuse_vault_folder;
 }
 
 /// Saved entries. No serde: an item's JSON (password and file keys included) is only ever written
 /// sealed.
 pub mod item {
     pub(crate) use crate::item_impl::*;
-    pub use crate::item_impl::{FileRef, Item, ItemKind};
+    pub use crate::item_impl::{
+        FileRef, Item, ItemKind, MAX_ITEM_JSON, MAX_PREVIOUS_PASSWORDS, PreviousPassword,
+        check_key_name,
+    };
 }
 
 /// Password rules.
@@ -174,6 +179,7 @@ pub mod internals {
 }
 
 pub use error::{CoreError, Result};
+pub use search::SearchHit;
 pub use vault::{
     BackupReport, BackupSummary, CleanupReport, CopiedItem, CreatedVault, Credential, JournalStep,
     JournalView, PreparedRestore, ReadOnlyVault, Recovery, RestoreDestination, RestoreOutcome,
@@ -235,6 +241,19 @@ mod surface {
     /// fn g() { f::<lockbox_core::item::Item>() }
     /// ```
     pub fn item_is_not_deserialize() {}
+
+    /// The shell publishes a readable file through `publish_readable` only: the raw gated rename and the durability
+    /// step stay private, so no weaker copy of either can be written outside the engine.
+    ///
+    /// ```compile_fail
+    /// use lockbox_core::fsio::rename_replace_gated;
+    /// ```
+    pub fn raw_rename_is_private() {}
+
+    /// ```compile_fail
+    /// use lockbox_core::fsio::sync_after_replace;
+    /// ```
+    pub fn sync_after_replace_is_private() {}
 }
 
 #[cfg(test)]

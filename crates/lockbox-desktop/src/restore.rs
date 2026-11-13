@@ -111,7 +111,7 @@ impl fmt::Debug for JournalPaths {
 }
 
 /// A path as the user knows it: Lockbox spells a drive path `\\?\C:\..`, which Explorer does not.
-fn shown(path: &Path) -> String {
+pub(crate) fn shown(path: &Path) -> String {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
         Some(plain) if !plain.starts_with(r"UNC\") => plain.to_owned(),
@@ -1505,7 +1505,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
-    use crate::os::{ClipboardSteps, Clock, DriveType, KnownFolder, Os, OsSignal};
+    use crate::os::{Clock, DriveType, KnownFolder, OsSignal};
     use crate::session::SessionState;
     use crate::testing::{FakeVolume, TEST_PASSWORD, TestShell, heavy};
 
@@ -1626,22 +1626,9 @@ mod tests {
         assert_eq!(error, restore_pending());
     }
 
-    /// A second shell over the same state folder and vaults: the app after a restart. The first one is locked, as a
-    /// closed app's vaults are.
+    /// A second shell over the same state folder and vaults: the app after a restart ([`TestShell::restarted`]).
     fn restarted(ts: &TestShell) -> Arc<Shell> {
-        ts.shell.sessions.lock_all(LockReason::AppClosing);
-        let os = Os {
-            volumes: ts.volumes.clone(),
-            env: ts.env.clone(),
-            dialogs: ts.dialogs.clone(),
-            launcher: ts.launcher.clone(),
-            idle: ts.idle.clone(),
-            power: ts.power.clone(),
-            clock: ts.clock.clone(),
-            clipboard: Arc::new(ClipboardSteps::new(ts.clipboard.clone(), ts.clock.clone())),
-            timer: ts.timer.clone(),
-        };
-        Arc::new(Shell::new(ts.events.clone(), os, ts.app_dirs.clone()).unwrap())
+        ts.restarted()
     }
 
     /// The `kind` and `state` of each notice the page was sent, in order.
@@ -2348,6 +2335,7 @@ mod tests {
                 crate::commands::items::NewKind::Note,
                 "Later".into(),
                 None,
+                None,
             )
             .unwrap();
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
@@ -2815,6 +2803,7 @@ mod tests {
                 g,
                 crate::commands::items::NewKind::Note,
                 "Newer".into(),
+                None,
                 None,
             )
             .unwrap();

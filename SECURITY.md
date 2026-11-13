@@ -65,17 +65,18 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 ## Where each requirement stands today
 
-The Rust core (Plans 1 and 2) and the desktop shell (Plan 3) exist. The real screens come in Plan 4; the app shows a
-bare test page until then.
+The Rust core (Plans 1 and 2) and the desktop shell (Plan 3) exist, and the screens for daily use (Plan 4's first part,
+4A). Backup and restore screens come in 4B and the forgotten-password screens in 4C, so a vault kept only in this version
+has no way back through the app.
 
 | Requirement | State |
 |---|---|
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. Recovery-key printing comes with the screens (Plan 4) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the backup screens (4B) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
-| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) comes with the screens (Plan 4); today's test page and the bridge drop stale answers |
+| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box at its lock event |
 | R7 Documented limits | This file |
 
 ## How the app is locked down
@@ -93,15 +94,18 @@ trusted than Rust.
   answer with text built from what the page sent, so screens must never pass a secret to them; that text goes only back
   to the page.
 - **Paths.** Commands take IDs and values, never paths. Rust opens every file dialog, so a chosen path never comes from
-  the page. Paths go to the page in one case only: a restore that cannot finish (its notice, and the question before
-  dismissing it) shows your own folders so you can act on them. Stored links are opened from Rust, and only for `http` and `https`.
+  the page. Paths go to the page in two cases only: a restore that cannot finish (its notice, and the question before
+  dismissing it) shows your own folders so you can act on them, and a readable file Lockbox saved where you chose (the
+  recovery key's PDF, a saved `.env`) names the folder it went to. Stored links are opened from Rust, and only for `http`
+  and `https`.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
   without a persistent profile, so typed titles, usernames and searches are not kept on disk.
-- **What crosses to the page.** Vault keys, file keys and file contents never do. A stored password does only on
-  "Reveal" or while editing: copying runs entirely in Rust. The recovery key crosses once, when it is made, for display,
-  and the generator's output crosses as a new value. Search runs in Rust and returns only what is shown.
+- **What crosses to the page.** Vault keys, file keys and file contents never do. A stored password or key value does only
+  on "Reveal" or while editing: copying runs entirely in Rust. What the save shortcut copied crosses only on "Show" in its
+  save box (saving it runs in Rust). The recovery key crosses once, when it is made, for display, and the generator's
+  output crosses as a new value. Search runs in Rust and returns only what is shown.
 
 ## Locking
 
@@ -129,8 +133,11 @@ it (IDs, the extra context each encryption is bound to, base64). Exact versions 
   text typed on different keyboards unlocks the same vault.
 - **Vault key:** 256 random bits from the operating system (`getrandom`), made once per vault. It is stored only
   wrapped (encrypted) in two **key slots**, one opened by the password key and one by the recovery key.
-- **Recovery key:** 256 random bits plus a 4-bit typo check, shown as 52 characters. The key is derived from it with
-  HKDF-SHA256 (a standard way to derive keys from a secret), crates `hkdf` and `sha2`.
+- **Recovery key:** 256 random bits, shown as 24 words from the BIP39 English list, with an 8-bit typo check. The key
+  is derived from it with HKDF-SHA256 (a standard way to derive keys from a secret), crates `hkdf` and `sha2`. The
+  earlier 52-character form is no longer accepted; it was never released. The 24 words look like a crypto wallet's
+  recovery phrase, which malware and scams hunt for, so every screen and PDF that shows it is headed "Lockbox recovery
+  key, not a crypto wallet phrase". Keep a saved copy off this PC.
 - **Encryption:** XChaCha20-Poly1305 (encryption that also detects tampering), crate `chacha20poly1305`. Key slots
   and items use it directly with a fresh random 24-byte nonce (a one-time value) each time.
 - **Files:** each stored file has its own random key, kept inside its encrypted item. File contents are encrypted in
@@ -188,22 +195,29 @@ in the code with a `shortcut:` comment.
   another program needs a file on disk; full-disk encryption covers the rest.
 - **What the launch sweep deletes.** Every temp plaintext file is recorded in `pending-outputs.json` (by its random temp
   path, never the original name) before it is created. At launch, an entry is deleted only if it has Lockbox's own temp
-  name (`.<16 hex>.lockbox-partial`, `.<16 hex>.lockbox-backup-partial`) or is a folder directly inside `open\`, and only
-  if no link is anywhere along its path. Anything else is dropped from the list and left on disk. An entry on a drive that
+  name (`.<16 hex>.lockbox-partial`, `.<16 hex>.lockbox-backup-partial`) or is a folder directly inside `open\`, or is the
+  hidden folder a recovery key PDF is printed in (`.<16 hex>.lockbox-partial-folder`, beside the place you saved to: the
+  PDF is a new file inside a new folder, since WebView2 refuses to write over an existing hidden file), and only
+  if no link is anywhere along its path. That PDF folder is never emptied by the sweep: it removes the journaled file
+  first, then the folder only if it is empty (never a recursive delete), so a folder that holds anything else is left on
+  disk and dropped from the list. Anything else is dropped from the list and left on disk. An entry on a drive that
   is not connected is kept for later. A damaged journal blocks new decrypted output until you let Lockbox set it aside;
   after that, any "Save a copy" temp files it listed are no longer swept and may need deleting by hand (they are hidden,
   named as above, and beside the place you saved to). The launch also lists `open\` itself, damaged journal or not, and removes folders named exactly 32 lowercase hex under the
   same no-link rule. The check runs again before each delete attempt, but it is a check followed by a delete, not one step:
   a program already running as you could swap something in between, and only a victim carrying one of those names could be hit.
   *Accepted:* such a program can already delete your files.
-- **State files can be edited by code running as you.** `vaults.json`, `settings.json` and `pending-outputs.json` in
-  `%LOCALAPPDATA%\Lockbox\` are not authenticated, only size-capped and strictly parsed. Such a program could add a vault
-  to the list, raise the idle time or clipboard delay to their limits (a value out of range gives the defaults), or
-  empty the output journal so a leftover stays. They hold no secrets. *Accepted:* the same reasoning as the restore
+- **State files can be edited by code running as you.** `vaults.json`, `settings.json`, `vault-state.json` and
+  `pending-outputs.json` in `%LOCALAPPDATA%\Lockbox\` are not authenticated, only size-capped and strictly parsed. Such a
+  program could add a vault to the list, raise the idle time or clipboard delay to their limits (a value out of range
+  gives the defaults), turn capture protection off or change the save shortcut (`settings.json`; a shortcut the
+  Settings screen would refuse, or any other value out of range, gives the defaults), remove a vault's "recovery key not
+  confirmed" note (a damaged `vault-state.json` also reads as having none), or empty the output journal so a leftover
+  stays. They hold no secrets. *Accepted:* the same reasoning as the restore
   journal (see "Someone who can already write inside your vault folder").
 - **Cloud folders.** A vault in a OneDrive, Google Drive or Dropbox folder is not refused. The shell asks first when one is
-  created or added, and reports it at each unlock for the screen to warn (Plan 4; the test page does not show that
-  one). They are found by asking Windows about sync roots, then by each provider's known location,
+  created or added, and reports it at each unlock, where the screen warns. They are found by asking Windows about sync
+  roots, then by each provider's known location,
   so a provider that does neither goes unnoticed. Syncing can leave conflicting copies of vault files, and old versions on
   the provider's servers. *Accepted:* v1 does not support these folders, and the warning says so.
 - **A USB hard drive that reports as fixed is accepted** (the checks use what Windows reports). Unplugging it locks its
@@ -212,11 +226,48 @@ in the code with a `shortcut:` comment.
   the parent folder is present, not that it is the same disk. *Accepted:* rare, and recovery's checks on names and folders still hold.
 - **Windows' lock signals are tested on one PC.** It has S3 sleep only; Modern Standby is on the pre-release list for
   another laptop. *Accepted for now:* the app is not released.
-- **Printing and browser shortcuts.** Ctrl+P on a revealed password could reach the print spooler, and WebView2's context
-  menus and shortcuts are still at their defaults, until the screens are built. Plan 4 turns off what is left. *Accepted for now:* there are no
-  real screens yet, and there is no release.
-- **No isolation frame.** Tauri's isolation pattern (a sandboxed frame that checks every IPC message) is not used. Plan 4
-  decides, when the UI brings in third-party packages.
+- **Browser shortcuts and menus are off, but only as far as WebView2 offers.** The window is built hidden, and shows only
+  after WebView2 confirms its browser keys and default context menu are off; if it can't confirm, Lockbox stops. Tested on
+  2026-11-06: Ctrl+P, F12, Ctrl+Shift+I, F5, Ctrl+R, Ctrl+U and right-click open nothing, while Ctrl+F, copy and paste still
+  reach the page. Lockbox prints only through its own code (the recovery key's screen), and anything printed
+  can pass through the print spooler (see above). *Accepted:* this is WebView2's documented switch; there is no stronger one.
+- **Printing the recovery key.** "Save as PDF" has WebView2 print the page as it shows into a file Lockbox then moves to
+  the place you picked, by "Save a copy"'s rules (a vault folder and Lockbox's own folder are refused, a cloud folder asks
+  first, an existing file is replaced only after Windows asked, and nothing is moved after a lock). "Print" shows a short
+  list of your printers inside Lockbox and sends the page straight to the one you pick, with no Windows print window,
+  and Lockbox writes no file there. Either way the page goes to Windows' print spooler (the queue of print jobs), which
+  may keep its own copy until the job is done, and Lockbox cannot clear that. Printers that make a file through a save box
+  of their own (Microsoft Print to PDF, the XPS writer, any printer on the file prompt's port, OneNote's printers and fax
+  printers) are not offered, and Lockbox refuses to print to them even by name: such a box would belong to another
+  program and would keep the page after a lock, which Lockbox cannot close. A third-party PDF printer on a port of its
+  own looks like a real printer to Windows and is offered; it is yours to avoid. A lock that comes before Lockbox hands
+  the page to WebView2 stops the print (checked right before the call, on the thread that makes it). WebView2 cannot
+  cancel a print, so after a lock Lockbox waits up to 30 seconds for the printer to answer; a print it already sent is the printer's, and a
+  PDF it made is deleted then (with no answer the file and its hidden folder stay in the output journal and the next
+  launch removes them). *Accepted:* the PDF is a copy you asked to have in plaintext, it is hidden until it is moved,
+  and the sweep removes any leftover; a print the printer has already taken cannot be recalled.
+- **Staying out of screen capture isn't a guarantee.** It is on unless you turn it off in Settings ("Keep out of screen
+  capture", saved in `settings.json`, applied to the open window at once). Each time the window shows, Lockbox asks
+  Windows to leave it out of screenshots, recordings, screen sharing and Recall (`WDA_EXCLUDEFROMCAPTURE`), before it
+  shows. Tested on 2026-11-06: screenshots and Snipping Tool leave Lockbox out, and Magnifier still shows it in Full
+  screen, Docked and Lens, judged by eye, since a screenshot of Magnifier loses Lockbox too. Not tested yet: Quick Assist
+  and remote desktop (pre-release list). If asking fails, the window still shows. Microsoft says there's no guarantee, and
+  a camera can always get round it. With it off, the recovery key screens say that a screenshot would be a readable copy.
+  *Accepted:* this is the strongest request Windows offers, and turning it off is your choice.
+- **Start with Windows writes one value, and Windows' own setting wins.** Turning it on adds Lockbox's own value to the
+  current user's `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, named `Lockbox` as the installer's
+  uninstaller removes it), holding the program's full path in quotes and `--hidden`. Lockbox starts in the tray, with
+  every vault locked and the window hidden; a start with that argument and nothing else only ever changes whether the
+  window shows (other arguments are ignored, and a second copy started that way does nothing). Lockbox reads Windows' own
+  Startup setting for it (`...\Explorer\StartupApproved\Run`) and never writes it: if you turned it off there, Lockbox
+  says so. *Accepted:* a program running as you can already write that key, and could start itself the same way; the
+  value holds no secret.
+- **No isolation frame.** Tauri's isolation pattern (a sandboxed frame that checks every IPC message) is not used (Ariel's
+  pick, 2026-11-05, against Tauri's own advice). Tauri 2.12.5's frame runs scripts only, with no same-origin access, and
+  a reported bug hangs every call on Windows; its check also can't tell the app's own calls from a bad package's on the
+  same page. Instead: exact versions, install scripts off, the lockfile in the dependency scan, and no packages beyond
+  the reviewed ones. A test pins the setting. *Accepted:* a compromised package in the page could send commands the page
+  can send; keys never leave Rust.
 - **Small windows we chose not to close.**
   - A lock arriving during the very last write of an item copy does not stop it. The page hears "locked", and the item is
     in the destination vault as you asked, even if only the source vault locked; it can be read there while that vault
@@ -257,9 +308,11 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   affects deriving the recovery key and the header-stamp key. *Accepted:* wiping it means hand-writing HKDF (forbidden)
   or patching the crate; exploiting it needs a live memory read. We will upgrade when a release wipes them.
 - **Titles, usernames, URLs and attached file names are not wiped.** Item titles, login usernames and URLs, the names of
-  attached files (which can be revealing, such as a client's contract), and the search index built from the first three,
-  are ordinary strings and stay in memory until freed, even after locking. Passwords and notes are wiped. *Accepted:*
-  these are less secret than passwords, and wiping only the search copy would protect nothing.
+  attached files (which can be revealing, such as a client's contract), and the search index built from all four (it
+  holds each attached file's name as well, so a name is in memory twice, and a search result carries it to the page
+  for the one file that matched), are ordinary strings and stay in memory until freed, even after locking. Passwords
+  and notes are wiped. *Accepted:* these are less secret than passwords, and wiping only the search copy would protect
+  nothing.
 - **The cipher keeps its own copy of the key while it works.** Each encrypt or decrypt call builds a cipher object that
   holds a copy of the key (spec 5.6). Lockbox builds it for that one operation and drops it straight away, and the
   `chacha20poly1305` library's wiping option is on. *Accepted:* the copy lives only for the call and is wiped when
@@ -304,7 +357,11 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
 - **A new recovery key can be lost if the process dies right after writing it.** If Lockbox is killed after both header
   files are written but before the caller shows the new recovery key, the old key no longer works and the new one was
   never seen (the password still works and a new recovery key can be made). *Accepted:* a very narrow window, the same
-  kind as the "Concurrent vault creation in one folder" case below.
+  kind as the "Concurrent vault creation in one folder" case below. The app narrows it: before it makes a key (a new
+  vault's, or a new one for an open vault) it writes "recovery key not confirmed" for that vault's folder in
+  `vault-state.json`, and makes no key if that note cannot be saved; the note is cleared only once the person has typed
+  part of the key back. If the app closes or the vault locks first, the next unlock makes a new key before anything
+  else. Someone who can edit that file can remove the note (see "State files can be edited").
 - **A foreign `.bak` can take over an unreadable `vault.json`.** If `vault.json` is missing or unparseable and the `.bak` is from
   a different vault that has the same password, it unlocks and repairs `vault.json`; the items then show as damaged.
   *Accepted:* the original header was already unreadable and it needs the same password.
@@ -322,8 +379,8 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   and clears the block. *Accepted:* the user may have to replace the unchecked credential first.
 - **A header changed outside Lockbox must be accepted before any other header change.** While the "changed outside
   Lockbox" warning is pending, changing the password or regenerating the recovery key is refused ("accept the header
-  change first"), so the authentic `.bak` is never overwritten by the edited header before the user agrees. There is
-  no "decline" yet; the app's screen for it comes in Plan 4.
+  change first"), so the authentic `.bak` is never overwritten by the edited header before the user agrees. The
+  screen's way to decline is "Lock this vault": nothing is written, and the question comes back at the next unlock.
 - **Both at once.** If the header was changed and a slot is unverified, accepting writes each file with the accepted
   name and date and a fresh stamp but keeps that file's OWN version of the unverified slot (the stamp does not cover
   slots, so nothing unchecked is thrown away and no copy is preferred). The consent clears; the slot block stays, and
@@ -400,8 +457,9 @@ Lockbox defends.
   password back (spec 5.3). *Accepted:* a backup has to open with the credentials it was made with, and changing them
   does not change the vault key; full revocation needs "Rotate vault key" (v1.1). Delete backups you no longer want
   reachable.
-- **Some recovery-key typos are not caught.** The 4-bit check catches a mistyped symbol about 15 times in 16 (the test
-  requires at least 14 in 16); the rest simply fail to unlock. *Accepted:* a short check keeps the key easy to type.
+- **Some recovery-key typos are not caught.** The 8-bit check catches a wrong but listed word 255 times in 256 (the test
+  requires at least 250 in 256); the rest simply fail to unlock. A word whose first four letters match no listed word,
+  and a wrong count, are always caught. *Accepted:* a short check keeps the key easy to write down.
 - **Guess cost can end up below the 1-second target.** Calibration times each size once, so a noisy PC can pick
   settings that are cheaper than intended, but never below the minimum (64 MiB, 3 passes). A password change keeps the
   vault's existing settings rather than calibrating again. *Accepted:* the floor is the guarantee; the target is a goal.
@@ -480,11 +538,41 @@ Lockbox defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the real screens and
-everything they do (the wording of warnings, recovery-key printing, clearing what is shown at a lock), the end-to-end
-tests on the running app, and the installer. Today's bare test page exposes selected checks; the shell's other commands
-exist with no button yet. Unlocking a vault can still write to it (header repair and cleanup); to look at a vault or a backup without writing,
-open it read-only.
+These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plans 4B and 4C
+(backing up, testing and restoring a backup, opening one read-only, changing the password, "forgot password", a new
+recovery key from Settings, more than one vault, emptying the trash, export, Quit's questions, progress and a stop for long
+jobs, saving many files at once), the end-to-end tests on the running app, and the installer. Until backup and
+"forgot password" have screens, don't keep the only copy of anything important in Lockbox. Plan 4A's screens are built
+(first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
+folders and the trash, `.env` in and out, the save shortcut, stored files, settings), and the page clears what it shows at
+a lock; the shell's other commands exist with no button yet. Unlocking a vault can still write to it (header repair and
+cleanup); to look at a vault or a backup without writing, open it read-only.
+
+### Limits that come with the screens
+
+These come with Plan 4A's screens, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
+
+- **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
+  that value (the save box's tick box, and the same tick box in the paste panel for a `.env` you pasted): after the key is
+  saved, it compares what's on the clipboard in one opening and empties it only if it's still the same text (the paste
+  panel counts CRLF and LF as one line break), and drops what it read otherwise. The value waits in one wiped
+  slot in Rust until it's saved, cancelled or the slot empties (every lock of all vaults, the window's close, idle time even
+  with no vault open, Windows lock and sleep, Quit, or a lock of the vault it was handed to); a read still running when
+  every vault locks keeps nothing. Clearing it afterwards may not reach a copy Windows clipboard history already
+  took, because a value copied from another app usually carries none of Lockbox's marks. Tested on 2026-11-05: a value copied
+  from Notepad stayed in Win+V after the clear, so clear it from Win+V too (Win+V, then the entry's menu). Another program
+  that empties the clipboard while it is being read can make the text in the box garbled; it can't make Lockbox keep or show
+  more than it read.
+- **An export, a saved `.env` and files saved out are readable by anyone who gets them.** They aren't encrypted. An export or a
+  `.env` warns first, and saving a folder's files says so in the folder picker. Lockbox can't protect them or delete them afterwards. Deleting one may leave it in the Recycle Bin, on an SSD, or in a
+  cloud provider's version history.
+- **Earlier passwords stay in old backups.** They're encrypted like everything else, and dropping one from a login doesn't remove
+  it from a backup already made.
+- **Asking for the current password slows someone at an unlocked PC.** It isn't protection against malware (spec 5.6), and there's
+  no lockout.
+- **File names in search.** The search index holds attached file names (never a file's contents, notes or a password), so they
+  join the titles and usernames under "Titles, usernames, URLs and attached file names are not wiped". Only live items'
+  files are in it: a trashed or half-deleted item's are left out.
 
 ## How this is checked
 

@@ -13,7 +13,7 @@ use lockbox_core::internals::header::{HEADER_FILE, parse_header};
 use lockbox_core::internals::item::{FileRefParts, open_item, same_item, seal_item};
 use lockbox_core::internals::recovery;
 use lockbox_core::internals::secret::{Key32, random_bytes};
-use lockbox_core::item::{FileRef, Item, ItemKind};
+use lockbox_core::item::{FileRef, Item, ItemKind, PreviousPassword};
 use lockbox_core::recovery::RecoverySecret;
 use lockbox_core::{CoreError, Vault};
 use proptest::collection::vec;
@@ -51,12 +51,26 @@ fn random_bytes_of(len: impl Strategy<Value = usize>) -> impl Strategy<Value = V
 
 fn kind() -> impl Strategy<Value = ItemKind> {
     prop_oneof![
-        (text(200), text(200), vec(text(200), 0..4)).prop_map(|(username, password, urls)| {
-            ItemKind::Login {
+        (
+            text(200),
+            text(200),
+            vec(text(200), 0..4),
+            vec((text(100), text(30)), 0..4),
+        )
+            .prop_map(|(username, password, urls, earlier)| ItemKind::Login {
                 username,
                 password: Zeroizing::new(password),
                 urls,
-            }
+                previous_passwords: earlier
+                    .into_iter()
+                    .map(|(password, replaced_at)| PreviousPassword {
+                        password: Zeroizing::new(password),
+                        replaced_at,
+                    })
+                    .collect(),
+            }),
+        text(200).prop_map(|value| ItemKind::Key {
+            value: Zeroizing::new(value),
         }),
         Just(ItemKind::Note),
         Just(ItemKind::File),
@@ -107,6 +121,7 @@ fn item() -> impl Strategy<Value = Item> {
         ),
         (
             option::of(text(40)),
+            option::of(any::<[u8; 16]>()),
             any::<bool>(),
             vec(any::<[u8; 16]>(), 0..4),
         ),
@@ -114,7 +129,7 @@ fn item() -> impl Strategy<Value = Item> {
         .prop_map(|(head, middle, tail)| {
             let (id, kind, title, notes) = head;
             let (collection, attachments, revision, created_at, modified_at) = middle;
-            let (trashed_at, purging, retired) = tail;
+            let (trashed_at, trashed_with, purging, retired) = tail;
             Item {
                 id: ItemId(id),
                 kind,
@@ -126,6 +141,7 @@ fn item() -> impl Strategy<Value = Item> {
                 created_at,
                 modified_at,
                 trashed_at,
+                trashed_with: trashed_with.map(ItemId),
                 purging,
                 retired_blobs: retired.into_iter().map(FileId).collect(),
             }
@@ -204,6 +220,7 @@ static VALID_ITEM: LazyLock<Vec<u8>> = LazyLock::new(|| {
             username: "ariel".into(),
             password: Zeroizing::new("hunter2".into()),
             urls: vec!["https://example.com".into()],
+            previous_passwords: vec![],
         },
         title: "Example".into(),
         notes: Zeroizing::new("a note".into()),
@@ -213,6 +230,7 @@ static VALID_ITEM: LazyLock<Vec<u8>> = LazyLock::new(|| {
         created_at: "2026-10-13T00:00:00Z".into(),
         modified_at: "2026-10-13T00:00:00Z".into(),
         trashed_at: None,
+        trashed_with: None,
         purging: false,
         retired_blobs: vec![],
     };
@@ -235,6 +253,82 @@ static VALID_HEADER: LazyLock<Vec<u8>> = LazyLock::new(|| {
 
 static VALID_RECOVERY: LazyLock<String> =
     LazyLock::new(|| recovery::generate().to_display().to_string());
+
+/// Every answer the recovery key parser can give, written out here on its own, so a change to one
+/// in `error.rs` is seen. Each is a fixed sentence.
+const RECOVERY_REFUSALS: [&str; 4] = [
+    "recovery key has a typing mistake",
+    "invalid recovery key",
+    "recovery key has a word that is not in the list",
+    "recovery key has the wrong number of words",
+];
+
+/// Whether `text` holds any 8 bytes in a row that one of `messages` holds too.
+fn shares_eight_bytes(text: &[u8], messages: &[&str]) -> bool {
+    messages.iter().any(|message| {
+        message
+            .as_bytes()
+            .windows(8)
+            .any(|window| text.windows(8).any(|part| part == window))
+    })
+}
+
+/// The answer to a recovery key that did not read is one of the fixed sentences, whole, in both
+/// forms: then nothing of the input can be in it. The byte check alone can't be used here. A key
+/// is made of ordinary words and a few of them are in the sentences too ("number", "mistake",
+/// "wrong", "word"), so an input can share 8 bytes with a sentence though nothing was repeated from
+/// it, and the check then fails by chance (seen in CI on 2026-11-10 with " number "). The byte
+/// check still runs on every input that shares nothing with the sentences.
+fn assert_recovery_refusal_is_fixed(error: &CoreError, input: &[u8]) -> Result<(), TestCaseError> {
+    let display = error.to_string();
+    prop_assert!(
+        RECOVERY_REFUSALS.contains(&display.as_str()),
+        "the answer {display:?} is not one of the fixed sentences"
+    );
+    prop_assert_eq!(format!("{error:?}"), display, "Debug says something else");
+    if !shares_eight_bytes(input, &RECOVERY_REFUSALS) {
+        assert_text_is_fixed(error, input)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_key_with_a_word_from_a_fixed_sentence_is_not_a_leak() {
+    // The case CI met: a key with "number" in it and one word too few, answered with "recovery key
+    // has the wrong number of words". The byte check calls that a repeat; the sentence is fixed.
+    let met = "athlete quick rose cloud siren alley atom hen lonely!know people cover number \
+               illness turkey struggle front father arrange regret stay fragile velvet leopard";
+    // The same input is two changed bytes away from words that share nothing with any sentence,
+    // so choosing the key with care would not be enough: "lumber" to "number", and a space to "!".
+    let clean = met.replace("number", "lumber").replace('!', " ");
+    assert!(!shares_eight_bytes(clean.as_bytes(), &RECOVERY_REFUSALS));
+    let mut changed = clean.clone().into_bytes();
+    changed[clean.find("lumber").unwrap()] = b'n';
+    changed[clean.find("lonely know").unwrap() + "lonely".len()] = b'!';
+    assert_eq!(changed, met.as_bytes());
+    for input in [met, "lonely mistake people", "cover wrong number"] {
+        let Err(error) = RecoverySecret::parse(input) else {
+            panic!("a made-up key read as a real one");
+        };
+        assert!(shares_eight_bytes(input.as_bytes(), &RECOVERY_REFUSALS));
+        assert!(assert_recovery_refusal_is_fixed(&error, input.as_bytes()).is_ok());
+    }
+    let Err(count) = RecoverySecret::parse(met) else {
+        panic!("a made-up key read as a real one");
+    };
+    assert!(
+        assert_text_is_fixed(&count, met.as_bytes()).is_err(),
+        "the byte check alone fails on it, which is why it is not used alone"
+    );
+    // Words that are in no sentence share nothing, so the byte check runs on them as before.
+    assert!(!shares_eight_bytes(
+        b"athlete quick rose cloud siren alley",
+        &RECOVERY_REFUSALS
+    ));
+    // An answer that is not one of the fixed sentences is refused, whatever the input.
+    let other = CoreError::WrongPassword;
+    assert!(assert_recovery_refusal_is_fixed(&other, b"athlete quick rose").is_err());
+}
 
 /// Error text is fixed (rule R5): neither `Display` nor `Debug` of the error may contain the
 /// input, as text or as any 8 bytes of it. Inputs under 8 bytes are skipped; they could match
@@ -366,7 +460,7 @@ proptest! {
         // one-in-16 checksum match), so only the error text is checked.
         let input = String::from_utf8_lossy(&bytes);
         if let Err(error) = RecoverySecret::parse(&input) {
-            assert_text_is_fixed(&error, input.as_bytes())?;
+            assert_recovery_refusal_is_fixed(&error, input.as_bytes())?;
         }
     }
 }

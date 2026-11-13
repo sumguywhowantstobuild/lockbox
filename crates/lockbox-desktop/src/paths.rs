@@ -28,6 +28,8 @@ pub struct StatePaths {
     /// The output journal (`pending-outputs.json`).
     pub outputs: PathBuf,
     pub settings: PathBuf,
+    /// What the shell notes about each vault folder (`vault-state.json`).
+    pub vault_state: PathBuf,
     /// The "Open" folders' parent (`open\`).
     pub open: PathBuf,
 }
@@ -40,6 +42,7 @@ pub fn state_paths(env: &dyn Env) -> io::Result<StatePaths> {
         registry: root.join("vaults.json"),
         outputs: root.join("pending-outputs.json"),
         settings: root.join("settings.json"),
+        vault_state: root.join("vault-state.json"),
         open: root.join("open"),
         root,
     })
@@ -159,6 +162,7 @@ mod tests {
         assert_eq!(paths.registry, paths.root.join("vaults.json"));
         assert_eq!(paths.outputs, paths.root.join("pending-outputs.json"));
         assert_eq!(paths.settings, paths.root.join("settings.json"));
+        assert_eq!(paths.vault_state, paths.root.join("vault-state.json"));
         assert_eq!(paths.open, paths.root.join("open"));
     }
 

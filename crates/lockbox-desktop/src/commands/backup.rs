@@ -650,7 +650,7 @@ mod tests {
         ts.stored_file(s, g, "report.pdf", b"report");
         let login = ts
             .shell
-            .new_item(s, g, NewKind::Login, "Bank".into(), None)
+            .new_item(s, g, NewKind::Login, "Bank".into(), None, None)
             .unwrap()
             .data;
         let dest = backup_file(&ts, "family.lockbox-backup");
@@ -672,6 +672,7 @@ mod tests {
                     username: None,
                     password: None,
                     urls: None,
+                    key_value: None,
                 };
                 let edited = shell.update_item(s, g, edit).err();
                 dialogs.answer(Some(source.clone()));
@@ -1005,11 +1006,11 @@ mod tests {
 
         // The live vault takes a change; the backup refuses one, and a backup of itself, before any dialog.
         ts.shell
-            .new_item(s, g, NewKind::Note, "Note".into(), None)
+            .new_item(s, g, NewKind::Note, "Note".into(), None, None)
             .unwrap();
         assert_eq!(
             ts.shell
-                .new_item(bs, bg, NewKind::Note, "Note".into(), None)
+                .new_item(bs, bg, NewKind::Note, "Note".into(), None, None)
                 .err(),
             Some(ShellError::ReadOnly)
         );

@@ -1,0 +1,115 @@
+/* The ground every screen stands on: the root, type, focus, and the few helpers the rest use. From the approved screens'
+   style sheet, with nothing written in the page: no style element, no style attribute (the Content Security Policy
+   refuses both). The colours are variables from tokens.css. */
+
+/* Every box from the window down to the app is as tall as the window: without a height on #root the app is only as
+   tall as its content (found in the release build). */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html,
+body {
+  margin: 0;
+  background: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  html,
+  body {
+    background: #0b0d10;
+  }
+}
+
+.app {
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  /* The side panel's slide and the list making room for it: this curve does most of its travel at the start, so a shorter
+     time reads as a snap (styles/panels.test.ts). */
+  --slide: 0.4s;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: "Geist Variable", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.app *,
+.layer,
+.layer * {
+  box-sizing: border-box;
+}
+
+/* Picked text, in the window and in every dialog and menu, takes a light wash of the vault's own colour (tokens.css). Windows'
+   contrast themes draw their own selection over it. */
+.app ::selection {
+  background: var(--select);
+  color: var(--ink);
+}
+
+/* The two parts that are dark in both modes keep their light words when picked: the lock and setup screens' pattern side,
+   and the message bar. */
+.field ::selection {
+  color: var(--field-ink);
+}
+
+.toast ::selection {
+  color: var(--toast-ink);
+}
+
+:where(.app) :where(button, input, select, textarea) {
+  font: inherit;
+  color: inherit;
+}
+
+.app :focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.app .m {
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+}
+
+/* No scrollbar style here: the window asks WebView2 for Windows 11's own overlay scroll bars (thin, shown while scrolling or
+   pointed at, and in Windows' high-contrast colours), and a style on the page would be drawn over them. */
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.sp {
+  flex: 1 1 auto;
+}
+
+/* A line picture. */
+.i {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app *,
+  .layer,
+  .layer * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

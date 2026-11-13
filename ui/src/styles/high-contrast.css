@@ -1,0 +1,143 @@
+/* What the screens need in Windows' high contrast mode, which removes backgrounds and shadows and picks all the colours
+   itself. Without this, buttons and fields are bare words, cards and dialogs have no edge, the selected row looks like
+   any other, and the small marks vanish. It applies only while high contrast is on, so nothing changes otherwise. It uses
+   Windows' own colour names, so it follows whichever contrast theme is chosen. From the approved style sheet, with the
+   class names of the real parts. */
+
+@media (forced-colors: active) {
+  /* What had only a background or a shadow gets a real edge. */
+  .app :is(.pill, .prim, .addb, .seg, .rbtn, .tb2, .ib, .ex, .fin, .ssort, .inp, .finp, .cval, .vbtn, .srch, .nav.on, .lrow.on) {
+    border: 1px solid CanvasText !important;
+  }
+
+  .app :is(.grp, .panel, .pal, .menu, .toast, .chip, .ask, .fu-key, .fu-pick button, .gen, .gout) {
+    border: 1px solid CanvasText !important;
+  }
+
+  /* The rows of a card (Move to trash, Restore, Delete for good) sit inside the card's edge: a line between two rows, not a
+     box round each. */
+  .app .dgr + .dgr {
+    border-top: 1px solid CanvasText !important;
+  }
+
+  /* The main button stays the one that stands out, and so does a question's dangerous answer, so it never looks like Cancel. */
+  .app :is(.prim, .addb, .pill.t, .pill.dfill) {
+    forced-color-adjust: none !important;
+    background: ButtonText !important;
+    color: ButtonFace !important;
+  }
+
+  .app :is(.prim, .addb, .pill.t, .pill.dfill) * {
+    color: inherit !important;
+  }
+
+  /* The kind chosen in the generator uses Windows' own highlight, as a chosen row does. */
+  .app .seg[aria-pressed="true"] {
+    forced-color-adjust: none !important;
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+
+  /* The settings' switches are a track and a knob in fixed colours: with the system's, the track has an edge and the knob and the
+     on track use Windows' own text and highlight, so on and off still differ by where the knob is and by the fill. */
+  .app .swt {
+    forced-color-adjust: none !important;
+    background: Canvas !important;
+    border: 2px solid CanvasText;
+  }
+
+  .app .swt::after {
+    background: CanvasText !important;
+  }
+
+  .app .swt:checked {
+    background: Highlight !important;
+  }
+
+  .app .swt:checked::after {
+    background: HighlightText !important;
+  }
+
+  .app .keycap {
+    border: 2px solid Highlight;
+  }
+
+  .app .prim:disabled,
+  .app .prim[aria-disabled="true"] {
+    background: Canvas !important;
+    color: GrayText !important;
+    border-color: GrayText !important;
+  }
+
+  /* A panel's main pill with nothing to do (Paste a .env's Save) is greyed like a disabled main button, not left standing out. */
+  .app .pill.t[aria-disabled="true"] {
+    background: Canvas !important;
+    color: GrayText !important;
+    border-color: GrayText !important;
+  }
+
+  /* The quiet buttons of the key screen keep their own edge; one that waits for another print is greyed like a disabled one. */
+  .app .fu-sec[aria-disabled="true"] {
+    color: GrayText !important;
+    border-color: GrayText !important;
+  }
+
+  /* A quiet pill that can't be pressed now (Cancel while a file is written, or while a sent shortcut waits) says so in grey too:
+     its own grey words are replaced by Windows' colours here, so without this it would look live and do nothing. */
+  .app .pill[aria-disabled="true"] {
+    color: GrayText !important;
+    border-color: GrayText !important;
+  }
+
+  /* What is selected uses Windows' own highlight. */
+  .app :is(.nav.on, .lrow.on, .rbtn.on, .mi[data-highlighted]) {
+    forced-color-adjust: none !important;
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+
+  .app :is(.nav.on, .lrow.on, .rbtn.on, .mi[data-highlighted]) * {
+    color: inherit !important;
+  }
+
+  .app .lrow.on .ktile,
+  .app .nav.on .ptile {
+    background: none !important;
+    box-shadow: none !important;
+  }
+
+  .app .nav.on::before,
+  .app .lrow.on::after {
+    background: HighlightText !important;
+  }
+
+  .app .vbtn.on {
+    border: 3px solid Highlight !important;
+  }
+
+  /* Marks drawn in a fixed colour would disappear on a dark or a light contrast theme. */
+  .app :is(.vmini, .rose, .vprint) path {
+    stroke: CanvasText !important;
+  }
+
+  .app .ki {
+    stroke: CanvasText !important;
+  }
+
+  .app .lrow.on .ki {
+    stroke: HighlightText !important;
+  }
+
+  /* The search: the box marks focus with a line under it, and a result with a tint behind it; both are removed here, so
+     each gets an outline of a system colour. (The buttons and result openers keep their own focus ring.) */
+  .app .stop:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  .app .res:hover,
+  .app .res:focus-within {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}

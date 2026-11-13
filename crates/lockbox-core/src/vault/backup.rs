@@ -466,6 +466,7 @@ mod tests {
             username: "u".to_owned(),
             password: zeroize::Zeroizing::new("p".to_owned()),
             urls: Vec::new(),
+            previous_passwords: Vec::new(),
         };
         vault.new_item(login, "b", None).unwrap();
         let (id, empty) = file_item(&parent, &mut vault, b"");

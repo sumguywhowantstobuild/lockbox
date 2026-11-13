@@ -32,6 +32,7 @@ fn five_thousand_items_fast() {
             username: format!("user{n}@example.com"),
             password: Zeroizing::new(format!("pw-{n}")),
             urls: vec![format!("https://site{n}.example.org/login")],
+            previous_passwords: Vec::new(),
         };
         let folder = (n % 3 == 0).then(|| folders[n % folders.len()]);
         let id = vault
@@ -53,7 +54,7 @@ fn five_thousand_items_fast() {
     let query = start.elapsed();
 
     println!("unlock (no Argon2) {unlock:?}, one query {query:?}");
-    assert_eq!(hits.first(), target.as_ref());
+    assert_eq!(hits.first().map(|hit| &hit.id), target.as_ref());
     assert!(unlock < Duration::from_secs(3), "{unlock:?}");
     assert!(query < Duration::from_millis(50), "{query:?}");
 }

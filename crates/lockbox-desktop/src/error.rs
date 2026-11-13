@@ -32,6 +32,12 @@ pub enum ShellError {
         what: &'static str,
     },
     Cancelled,
+    /// A print of the page did not happen: `"pdf"` when no PDF came (nothing is left on disk), `"print"` when the
+    /// job could not be sent to the printer that was picked. A print already running is `Busy { what: "printer" }`
+    /// instead.
+    PrintFailed {
+        what: &'static str,
+    },
     Core(CoreErrorView),
 }
 
@@ -50,9 +56,32 @@ pub struct CoreErrorView {
     pub max_file: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min: Option<usize>,
+    /// Where in the typed recovery key the word that is not in the list stands, counting from 1. A `u32` (not `usize`)
+    /// so that the refusal stays under clippy's size limit for an `Err` (`result_large_err`) across the whole shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+    /// How many words the typed recovery key had (a `u32` for the same reason).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found: Option<u32>,
+}
+
+/// A count of words for the page: saturates, which a pasted text of four billion words is the only way to reach.
+fn small(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 pub type ShellResult<T> = Result<T, ShellError>;
+
+/// A print of Lockbox's own is still running (WebView2 takes one at a time): try again once it ends.
+pub const PRINTER_BUSY: ShellError = ShellError::Busy { what: "printer" };
+/// The recovery key PDF did not come: nothing was saved and nothing is left on disk.
+pub const PDF_NOT_MADE: ShellError = ShellError::PrintFailed { what: "pdf" };
+/// The print job could not be sent to the printer that was picked.
+pub const PRINT_NOT_SENT: ShellError = ShellError::PrintFailed { what: "print" };
+/// The printer that was picked is not among the ones Lockbox lists any more.
+pub const PRINTER_GONE: ShellError = ShellError::InvalidInput {
+    what: "printer name",
+};
 
 /// A create whose vault the vault list could not take, and that could not be removed again: the vault is on disk,
 /// in the folder the user chose, but not on the list and its recovery key never shown. The page tells the user to add
@@ -78,6 +107,8 @@ impl CoreErrorView {
             available: None,
             max_file: None,
             min: None,
+            position: None,
+            found: None,
         }
     }
 }
@@ -91,6 +122,14 @@ impl From<CoreError> for ShellError {
             CoreError::WrongPassword => view("wrong_password"),
             CoreError::RecoveryKeyTypo => view("recovery_key_typo"),
             CoreError::InvalidRecoveryKey => view("invalid_recovery_key"),
+            CoreError::RecoveryKeyWord { position } => CoreErrorView {
+                position: Some(small(position)),
+                ..view("recovery_key_word")
+            },
+            CoreError::RecoveryKeyCount { found } => CoreErrorView {
+                found: Some(small(found)),
+                ..view("recovery_key_count")
+            },
             CoreError::Damaged { what } => CoreErrorView {
                 what: Some(what),
                 ..view("damaged")
@@ -206,6 +245,23 @@ mod tests {
         assert_eq!(
             json(CoreError::WrongPassword),
             json!({ "code": "core", "kind": "wrong_password" })
+        );
+        // The recovery key's refusals carry numbers only: the word's place, how many words were found.
+        assert_eq!(
+            json(CoreError::RecoveryKeyWord { position: 7 }),
+            json!({ "code": "core", "kind": "recovery_key_word", "position": 7 })
+        );
+        assert_eq!(
+            json(CoreError::RecoveryKeyCount { found: 23 }),
+            json!({ "code": "core", "kind": "recovery_key_count", "found": 23 })
+        );
+        assert_eq!(
+            json(CoreError::RecoveryKeyTypo),
+            json!({ "code": "core", "kind": "recovery_key_typo" })
+        );
+        assert_eq!(
+            json(CoreError::InvalidRecoveryKey),
+            json!({ "code": "core", "kind": "invalid_recovery_key" })
         );
         // An I/O error's message can carry a path or text from a reader: only its kind crosses.
         let io = json(CoreError::from(std::io::Error::other("C:\\SECRET-7f3a")));

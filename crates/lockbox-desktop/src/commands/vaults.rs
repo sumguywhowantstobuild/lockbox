@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use lockbox_core::blob::CancelToken;
 use lockbox_core::fsio::remove_dir_all_retry;
+use lockbox_core::ids::VaultId;
 use lockbox_core::kdf::check_new_password;
 use lockbox_core::recovery::RecoverySecret;
-use lockbox_core::{CleanupReport, UnlockReport, Vault};
+use lockbox_core::{CleanupReport, UnlockReport, Vault, folder_name};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Request;
@@ -51,24 +52,20 @@ pub struct UnlockView {
     /// §6.10), so the page warns. A fixed name (`"OneDrive"`, `"GoogleDrive"`, `"Dropbox"`, `"Other"`), never a path;
     /// `null` too when the vault was already unlocked.
     pub cloud: Option<CloudProvider>,
+    /// A recovery key was made for this vault and never confirmed (the app closed, or the vault locked, before the
+    /// person typed part of it back): the page makes a new key before anything else. True only for a writable, live
+    /// vault whose folder has the mark in the shell's vault state; a read-only copy never has it. Worked out afresh on
+    /// every answer, the "already unlocked" one included.
+    pub recovery_unconfirmed: bool,
 }
 
-/// What an unlock's opening closure gives back: the engine's report, and the cloud provider its location check found.
-type Unlocked = (UnlockReport, Option<CloudProvider>);
+/// What an unlock's opening closure gives back: the engine's report, the cloud provider its location check found,
+/// and whether the folder has the "recovery key not confirmed" mark.
+type Unlocked = (UnlockReport, Option<CloudProvider>, bool);
 
-/// The view of an unlock (`unlock_vault`, `recover_vault`): `None` when the vault was already unlocked, every flag
-/// then false.
-fn unlock_view(info: SessionInfo, unlocked: Option<Unlocked>) -> UnlockView {
-    let Some((report, cloud)) = unlocked else {
-        return UnlockView {
-            info,
-            used_backup_header: false,
-            header_mac_mismatch: false,
-            header_repair_failed: false,
-            cleanup: CleanupView::default(),
-            cloud: None,
-        };
-    };
+/// The view of an unlock (`unlock_vault`, `recover_vault`, `recover_vault_confirm`).
+fn unlock_view(info: SessionInfo, unlocked: Unlocked) -> UnlockView {
+    let (report, cloud, recovery_unconfirmed) = unlocked;
     let UnlockReport {
         used_backup_header,
         header_mac_mismatch,
@@ -82,6 +79,21 @@ fn unlock_view(info: SessionInfo, unlocked: Option<Unlocked>) -> UnlockView {
         header_repair_failed,
         cleanup: cleanup.into(),
         cloud,
+        recovery_unconfirmed,
+    }
+}
+
+/// The view of an unlock of a vault that was already unlocked: the warnings went with the first unlock, so every one
+/// is false, but the mark is read again, so the page cannot miss it.
+fn already_unlocked_view(info: SessionInfo, recovery_unconfirmed: bool) -> UnlockView {
+    UnlockView {
+        info,
+        used_backup_header: false,
+        header_mac_mismatch: false,
+        header_repair_failed: false,
+        cleanup: CleanupView::default(),
+        cloud: None,
+        recovery_unconfirmed,
     }
 }
 
@@ -190,7 +202,7 @@ fn recovered(answer: OpenAnswer<Unlocked>) -> ShellResult<Outcome<Tagged<UnlockV
         }) => Outcome::Done(Tagged {
             session,
             generation,
-            data: unlock_view(info, Some(unlocked)),
+            data: unlock_view(info, unlocked),
         }),
         Outcome::Done(_) => return Err(UNLOCKED),
         Outcome::Confirm(question) => Outcome::Confirm(question),
@@ -330,7 +342,19 @@ impl Shell {
         not_cancelled(cancel)?;
         // The default vaults folder is made on first use; a folder the user picked exists already.
         fs::create_dir_all(&parent)?;
-        let created = Vault::create(&parent, &name, &password)?;
+        // The mark first: from here until the person has typed part of the key back, the vault's folder is noted as
+        // having a key nobody confirmed. If the mark cannot be written, no vault and no key are made. The ID is chosen
+        // here so the folder, and so the mark's key, is known before the vault exists.
+        let id = VaultId::random();
+        let place = parent.join(folder_name(&name, &id));
+        self.vault_state.mark_unconfirmed(&place)?;
+        let created = match Vault::create_with_id(&parent, &name, &password, id) {
+            Ok(created) => created,
+            Err(e) => {
+                self.take_back_mark_if_not_made(&place);
+                return Err(e.into());
+            }
+        };
         let listed = fs::canonicalize(created.vault.dir())
             .map_err(ShellError::from)
             .and_then(|dir| self.registry.add(&dir).map(|_| dir));
@@ -341,11 +365,15 @@ impl Shell {
                 // Not on the list (its write failed, or it would grow too large): removed again, so no vault is left
                 // that Lockbox cannot show and whose recovery key was never shown. The vault closes first, freeing its
                 // `.lock`; only the folder this create made is removed. If that fails too, the vault (or part of
-                // it) stays on disk: `VAULT_NOT_LISTED` tells the user, who knows its password, to add it.
+                // it) stays on disk: `VAULT_NOT_LISTED` tells the user, who knows its password, to add it. Its mark
+                // stays: the key was never shown.
                 let made = created.vault.dir().to_path_buf();
                 drop(created);
                 return Err(match remove_dir_all_retry(&made) {
-                    Ok(()) => e,
+                    Ok(()) => {
+                        self.take_back_mark_if_not_made(&place);
+                        e
+                    }
                     Err(_) => VAULT_NOT_LISTED,
                 });
             }
@@ -355,6 +383,17 @@ impl Shell {
             Opened::Writable(created.vault),
             created.recovery.to_display(),
         ))
+    }
+}
+
+impl Shell {
+    /// Takes back the mark written for a vault `create_in` then failed to make: only when the folder is not there.
+    /// A vault that was made (and so a key nobody saw) keeps its mark. Best effort: a mark for a folder that never
+    /// existed is harmless, so a failure to take it back is not reported.
+    fn take_back_mark_if_not_made(&self, place: &Path) {
+        if !place.exists() {
+            let _ = self.vault_state.clear_unconfirmed(place);
+        }
     }
 }
 
@@ -393,13 +432,15 @@ impl Shell {
         password: Zeroizing<String>,
     ) -> ShellResult<Tagged<UnlockView>> {
         let (dir, location) = self.registered(id)?;
+        let again = location.clone();
         let answer = self.sessions.open(Some(location.clone()), None, |_| {
             #[cfg(test)]
             test_step(CHECKING)?;
             let check = self.check_location(&dir)?;
             same_place(&check, &location)?;
             let (vault, report) = Vault::unlock_with_password(&check.path, &password)?;
-            let unlocked = (report, check.cloud);
+            let unconfirmed = self.recovery_unconfirmed(&location, false);
+            let unlocked = (report, check.cloud, unconfirmed);
             Ok(OpenStep::Session(
                 location,
                 Opened::Writable(vault),
@@ -411,11 +452,27 @@ impl Shell {
             generation,
             data: (info, unlocked),
         } = opened(answer)?;
+        let data = match unlocked {
+            Some(unlocked) => unlock_view(info, unlocked),
+            None => {
+                let unconfirmed = self.recovery_unconfirmed(&again, info.read_only);
+                already_unlocked_view(info, unconfirmed)
+            }
+        };
         Ok(Tagged {
             session,
             generation,
-            data: unlock_view(info, unlocked),
+            data,
         })
+    }
+
+    /// Whether the vault folder at `location` has the "recovery key not confirmed" mark and is open to write: a
+    /// read-only copy (a backup, a pre-restore folder) never shows it, and its location is not the folder's anyway.
+    /// A mark that cannot be read for a reason other than damage counts as there (see `is_unconfirmed`).
+    fn recovery_unconfirmed(&self, location: &Location, read_only: bool) -> bool {
+        !read_only
+            && matches!(location, Location::Folder(_))
+            && self.vault_state.is_unconfirmed(location.path())
     }
 
     /// Unlocks the vault `id` with its recovery key and sets `new_password` before the session can be used (spec
@@ -458,7 +515,8 @@ impl Shell {
                 vault.change_password(&new_password)?;
                 #[cfg(test)]
                 test_step(PASSWORD_SET)?;
-                let unlocked = (report, check.cloud);
+                let unconfirmed = self.recovery_unconfirmed(&location, false);
+                let unlocked = (report, check.cloud, unconfirmed);
                 Ok(OpenStep::Session(
                     location,
                     Opened::Writable(vault),
@@ -514,7 +572,8 @@ impl Shell {
                 test_step(PASSWORD_SET)?;
                 // The changed header the report found is accepted now.
                 report.header_mac_mismatch = false;
-                let unlocked = (report, check.cloud);
+                let unconfirmed = self.recovery_unconfirmed(&location, false);
+                let unlocked = (report, check.cloud, unconfirmed);
                 Ok(OpenStep::Session(
                     location,
                     Opened::Writable(vault),
@@ -537,7 +596,12 @@ impl Shell {
             })
     }
 
-    /// A new recovery key, shown once; the old one stops working.
+    /// A new recovery key, shown once; the old one stops working. The vault's "recovery key not confirmed" mark is
+    /// written first, so a crash or lock before the person has typed part of the key back leaves the mark, and the
+    /// next unlock makes another. If the mark cannot be written, no key is made (`TooLarge { what: "vault state" }`
+    /// or an I/O refusal). No password is asked: the person is already inside, and this is the way out of a key they
+    /// never saw. A mark stays if the engine then fails: the old key may still work, and one more new key costs less
+    /// than a key nobody saw.
     pub fn regenerate_recovery(
         &self,
         session: SessionId,
@@ -545,8 +609,22 @@ impl Shell {
     ) -> ShellResult<Tagged<Zeroizing<String>>> {
         self.sessions
             .write_change(session, generation, "recovery key", |vault, _| {
+                self.vault_state.mark_unconfirmed(vault.dir())?;
                 Ok(vault.regenerate_recovery()?.to_display())
             })
+    }
+
+    /// The person typed part of the new recovery key back: clears the "recovery key not confirmed" mark of the
+    /// session's vault. Clearing a mark that is not there is a success. Refused, as any change is, on a stale
+    /// generation, a session that is not there, and a read-only copy.
+    pub fn recovery_confirmed(
+        &self,
+        session: SessionId,
+        generation: u64,
+    ) -> ShellResult<Tagged<()>> {
+        self.sessions.write(session, generation, |vault, _| {
+            self.vault_state.clear_unconfirmed(vault.dir())
+        })
     }
 
     /// Accepts a header changed outside Lockbox (after `header_mac_mismatch`), once the user agreed.
@@ -621,6 +699,18 @@ pub(super) async fn list_vaults(
     let NoArgs {} = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.registry.list()).await
+}
+
+/// The first screen's "Start a new list" (Ask 12): sets a damaged vault list aside and makes an empty one. Refused for a
+/// list that reads fine; takes no arguments, and the page never sees a path.
+#[tauri::command]
+pub(super) async fn start_new_vault_list(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let NoArgs {} = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.registry.start_new_list()).await
 }
 
 #[tauri::command]
@@ -736,6 +826,19 @@ pub(super) async fn regenerate_recovery(
     } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.regenerate_recovery(session, generation)).await
+}
+
+#[tauri::command]
+pub(super) async fn recovery_confirmed(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<()>> {
+    let SessionArg {
+        session,
+        generation,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.recovery_confirmed(session, generation)).await
 }
 
 #[tauri::command]
@@ -2082,6 +2185,552 @@ mod tests {
         assert_eq!(view.cleanup.partials_removed, 1);
     }
 
+    // ---- The "recovery key not confirmed" mark (Plan 4A, Task 6) ----
+
+    /// The shell's vault-state file, read as JSON.
+    fn state_file(ts: &TestShell) -> Value {
+        serde_json::from_slice(&fs::read(&ts.shell.paths.vault_state).unwrap()).unwrap()
+    }
+
+    /// The vault the test shell lists first.
+    fn listed_dir(ts: &TestShell) -> PathBuf {
+        ts.shell.registry.entries()[0].1.clone()
+    }
+
+    /// A state file 100 bytes short of its cap, so one more note cannot be saved: its text.
+    fn nearly_full_state(ts: &TestShell) -> String {
+        let base = fs::canonicalize(ts.temp.path()).unwrap();
+        let seed = |chars: usize| {
+            let path = base.join("x".repeat(chars));
+            json!({
+                "version": 1,
+                "vaults": [ { "path": path, "unconfirmed": false, "last_backup": "d" } ]
+            })
+            .to_string()
+        };
+        let overhead = seed(1).len() - 1;
+        let seed = seed(MAX_STATE_FILE as usize - 100 - overhead);
+        assert_eq!(seed.len() as u64, MAX_STATE_FILE - 100);
+        fs::create_dir_all(&ts.shell.paths.root).unwrap();
+        fs::write(&ts.shell.paths.vault_state, &seed).unwrap();
+        seed
+    }
+
+    /// The mark is on disk before the engine makes the vault, in the place the vault is then made in.
+    #[test]
+    fn mark_written_before_create() {
+        let ts = TestShell::new();
+        let seen: Rc<RefCell<Option<(Value, bool)>>> = Rc::default();
+        let (file, record) = (ts.shell.paths.vault_state.clone(), Rc::clone(&seen));
+        failpoint::observe(
+            "create.before_rename",
+            Box::new(move || {
+                let state: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+                let place = PathBuf::from(state["vaults"][0]["path"].as_str().unwrap());
+                *record.borrow_mut() = Some((state, place.exists()));
+            }),
+        );
+        let created = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
+        failpoint::disarm_all();
+        let tagged = done(created.unwrap());
+        let (state, existed) = seen.borrow_mut().take().expect("the engine's create ran");
+        assert!(!existed, "the vault was not there yet");
+        assert_eq!(state["vaults"].as_array().unwrap().len(), 1);
+        assert_eq!(state["vaults"][0]["unconfirmed"], true);
+
+        // The mark names the folder the vault was made in, the one on the list and the session's.
+        let dir = listed_dir(&ts);
+        let marked = PathBuf::from(state["vaults"][0]["path"].as_str().unwrap());
+        assert!(crate::os::same_path(&marked, &dir));
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir));
+        assert_eq!(read_vault_name(&dir).unwrap(), "Family");
+        // It stays until the key is confirmed: another unlock says so.
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let id = ts.shell.registry.entries()[0].0;
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(view.data.recovery_unconfirmed);
+        assert_eq!(view.session, tagged.session);
+    }
+
+    /// A refusal to write the mark stops the create before anything is made: no vault, no staging folder, no list
+    /// entry, no session, so no key was ever made.
+    #[test]
+    fn no_key_made_if_mark_cannot_be_written() {
+        let ts = TestShell::new();
+        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let reached = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&reached);
+        failpoint::observe("create.before_rename", Box::new(move || seen.set(true)));
+        let nothing_made = |ts: &TestShell| {
+            assert!(!reached.get(), "the engine never started a vault");
+            assert_eq!(fs::read_dir(&default).unwrap().count(), 0, "nothing made");
+            assert!(ts.shell.registry.entries().is_empty());
+            assert!(ts.shell.sessions.list().is_empty());
+        };
+
+        // The write fails.
+        failpoint::arm("atomic_write.before_replace");
+        let answer = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
+        failpoint::disarm_all();
+        assert!(matches!(answer, Err(ShellError::Core(view)) if view.kind == "io"));
+        nothing_made(&ts);
+        assert!(!ts.shell.paths.vault_state.exists());
+
+        // The note would not fit.
+        let seed = nearly_full_state(&ts);
+        let answer = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
+        assert_eq!(
+            answer.err(),
+            Some(ShellError::TooLarge {
+                what: "vault state"
+            })
+        );
+        nothing_made(&ts);
+        assert_eq!(
+            fs::read_to_string(&ts.shell.paths.vault_state).unwrap(),
+            seed
+        );
+        failpoint::disarm_all();
+    }
+
+    /// A cloud folder still asks first: the mark is written only on the yes, with the vault.
+    #[test]
+    fn cloud_folder_asks_before_the_mark_is_written() {
+        let ts = TestShell::new();
+        let synced = ts.vaults();
+        ts.volumes.add_sync_root(&synced);
+        ts.dialogs.answer(Some(synced.clone()));
+        let answer = ts.shell.create_vault("Family".into(), secret(PW), true);
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) = answer else {
+            panic!("a cloud folder asks first");
+        };
+        assert!(
+            !ts.shell.paths.vault_state.exists(),
+            "no mark before the yes"
+        );
+        done(heavy(|| ts.shell.create_vault_confirm(&token)).unwrap());
+        assert!(ts.shell.vault_state.is_unconfirmed(&listed_dir(&ts)));
+    }
+
+    /// A create that makes nothing leaves no mark behind; one that leaves a vault (not listed, or a lock that came
+    /// after it was made) keeps its mark, since its key was never shown.
+    #[test]
+    fn a_create_that_made_nothing_leaves_no_mark() {
+        let ts = TestShell::new();
+        // The engine refuses (a name that is only spaces): refused after the mark, so the mark is taken back.
+        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let answer = heavy(|| ts.shell.create_vault("   ".into(), secret(PW), false));
+        assert!(answer.is_err());
+        assert_eq!(state_file(&ts)["vaults"], json!([]));
+
+        // The vault list cannot take the vault (100 bytes short of its cap), and it is removed again: nothing made,
+        // no mark.
+        let base = fs::canonicalize(ts.temp.path()).unwrap();
+        let seed = |chars: usize| {
+            let path = base.join("x".repeat(chars));
+            json!({ "version": 1, "vaults": [ { "id": 1, "path": path } ] }).to_string()
+        };
+        let overhead = seed(1).len() - 1;
+        fs::write(
+            &ts.shell.paths.registry,
+            seed(MAX_STATE_FILE as usize - 100 - overhead),
+        )
+        .unwrap();
+        let answer = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
+        assert_eq!(
+            answer.map(|_| ()),
+            Err(ShellError::TooLarge { what: "vault list" })
+        );
+        assert!(vault_folders(&default).is_empty(), "the vault is removed");
+        assert_eq!(state_file(&ts)["vaults"], json!([]));
+        fs::remove_file(&ts.shell.paths.registry).unwrap();
+
+        // A lock right after the vault was made: it exists, is listed, was never shown its key. The mark stays.
+        let shell = Arc::clone(&ts.shell);
+        failpoint::observe(
+            "create.before_rename",
+            Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
+        );
+        let answer = heavy(|| ts.shell.create_vault("Work".into(), secret(PW), false));
+        failpoint::disarm_all();
+        assert_eq!(
+            answer.err(),
+            Some(ShellError::LockedAfterChange {
+                what: "vault created"
+            })
+        );
+        assert!(ts.shell.vault_state.is_unconfirmed(&listed_dir(&ts)));
+        assert_eq!(state_file(&ts)["vaults"].as_array().unwrap().len(), 1);
+    }
+
+    /// A new key's mark is on disk before the header changes.
+    #[test]
+    fn mark_written_before_new_key() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let dir = listed_dir(&ts);
+        ts.shell.recovery_confirmed(session, generation).unwrap();
+        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
+
+        let seen = Rc::new(Cell::new(None));
+        let (shell, record, dir_seen) = (Arc::clone(&ts.shell), Rc::clone(&seen), dir.clone());
+        failpoint::observe(
+            "write_headers.before_first",
+            Box::new(move || record.set(Some(shell.vault_state.is_unconfirmed(&dir_seen)))),
+        );
+        let key = heavy(|| ts.shell.regenerate_recovery(session, generation));
+        failpoint::disarm_all();
+        key.unwrap();
+        assert_eq!(seen.get(), Some(true), "marked when the header was written");
+        assert!(
+            ts.shell.vault_state.is_unconfirmed(&dir),
+            "and stays marked"
+        );
+    }
+
+    /// A refusal to write the mark stops the new key before the header is touched: the old key still works.
+    #[test]
+    fn no_new_key_if_mark_cannot_be_written() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let dir = listed_dir(&ts);
+        ts.shell.recovery_confirmed(session, generation).unwrap();
+        let before = headers(&dir);
+        let reached = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&reached);
+        failpoint::observe(
+            "write_headers.before_first",
+            Box::new(move || seen.set(true)),
+        );
+
+        // The write fails.
+        failpoint::arm("atomic_write.before_replace");
+        let answer = heavy(|| ts.shell.regenerate_recovery(session, generation));
+        failpoint::disarm_all();
+        assert!(matches!(answer.err(), Some(ShellError::Core(view)) if view.kind == "io"));
+        assert!(!reached.get());
+        assert_eq!(headers(&dir), before, "no new key");
+        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
+
+        // The note would not fit.
+        let seed = nearly_full_state(&ts);
+        let answer = heavy(|| ts.shell.regenerate_recovery(session, generation));
+        assert_eq!(
+            answer.err(),
+            Some(ShellError::TooLarge {
+                what: "vault state"
+            })
+        );
+        assert!(!reached.get());
+        assert_eq!(headers(&dir), before, "no new key");
+        assert_eq!(
+            fs::read_to_string(&ts.shell.paths.vault_state).unwrap(),
+            seed
+        );
+        failpoint::disarm_all();
+    }
+
+    /// A stale generation, a foreign session and a read-only copy make no key and write no mark.
+    #[test]
+    fn new_key_refused_stale_foreign_and_read_only_writes_no_mark() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let dir = listed_dir(&ts);
+        ts.shell.recovery_confirmed(session, generation).unwrap();
+        let before = headers(&dir);
+        assert_eq!(
+            ts.shell.regenerate_recovery(session, generation + 1).err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(
+            ts.shell
+                .regenerate_recovery(SessionId(session.0 + 100), generation)
+                .err(),
+            Some(ShellError::NotFound)
+        );
+        assert_eq!(headers(&dir), before);
+        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
+
+        // A read-only copy: refused, and no mark is written for it (nor for anything else).
+        let backup = ts.folder("Backups").join("Family.lockbox-backup");
+        ts.dialogs.answer(Some(backup.clone()));
+        done(
+            heavy(|| ts.shell.backup_vault(session, generation))
+                .unwrap()
+                .data,
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        ts.dialogs.answer(Some(backup));
+        let credential = super::super::backup::CredentialArg::Password(secret(PW));
+        let copy = done(heavy(|| ts.shell.open_backup_read_only(credential)).unwrap());
+        assert!(copy.data.read_only);
+        let state_before = fs::read(&ts.shell.paths.vault_state).unwrap();
+        assert_eq!(
+            heavy(|| ts.shell.regenerate_recovery(copy.session, copy.generation)).err(),
+            Some(ShellError::ReadOnly)
+        );
+        assert_eq!(
+            fs::read(&ts.shell.paths.vault_state).unwrap(),
+            state_before,
+            "the state file is unchanged"
+        );
+        assert_eq!(headers(&dir), before);
+    }
+
+    /// A mark that cannot be read for a reason other than damage (another program holds the file) is taken for a mark,
+    /// not for none: the unlock then makes a new key rather than letting the person fill a vault whose key they never
+    /// saw. A damaged file is another matter (it reads as empty; see `damaged_state_file_starts_empty`).
+    #[test]
+    fn an_unreadable_state_file_counts_as_a_mark() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        ts.shell.recovery_confirmed(session, generation).unwrap();
+        let id = ts.shell.registry.entries()[0].0;
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(
+            !view.data.recovery_unconfirmed,
+            "a confirmed key shows nothing"
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // A folder where the file should be: opening it for reading fails, and it is not a damaged file.
+        fs::remove_file(&ts.shell.paths.vault_state).unwrap();
+        fs::create_dir(&ts.shell.paths.vault_state).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(view.data.recovery_unconfirmed);
+        // Unlocking again while unlocked reads it again.
+        assert!(
+            ts.shell
+                .unlock_vault(id, secret(PW))
+                .unwrap()
+                .data
+                .recovery_unconfirmed
+        );
+        // A read-only copy still shows nothing, whatever the file.
+        let folder = Location::folder(&listed_dir(&ts)).unwrap();
+        assert!(!ts.shell.recovery_unconfirmed(&folder, true));
+    }
+
+    /// Closing the app (or any lock) at the key screen leaves the mark: the next unlock, with the password, with the
+    /// recovery key, or by a yes to a changed header, says so, and so does an unlock of a vault already unlocked.
+    #[test]
+    fn unconfirmed_mark_makes_a_new_key_at_next_unlock() {
+        let ts = TestShell::new();
+        let created = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
+        let created = done(created.unwrap());
+        let key = created.data.recovery_key.clone();
+        let dir = listed_dir(&ts);
+        let id = ts.shell.registry.entries()[0].0;
+        // The app closes at the key screen.
+        ts.shell.sessions.lock_all(LockReason::AppClosing);
+
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(view.data.recovery_unconfirmed);
+        assert_eq!(
+            serde_json::to_value(&view.data).unwrap()["recovery_unconfirmed"],
+            true
+        );
+        // Unlocking again while unlocked: no other warning, and the mark is read again.
+        let again = ts.shell.unlock_vault(id, secret(PW)).unwrap();
+        assert_eq!(again.session, view.session);
+        assert!(!again.data.used_backup_header && again.data.cleanup == CleanupView::default());
+        assert!(again.data.recovery_unconfirmed);
+
+        // The new key needs no password; once confirmed, the next unlock says nothing.
+        let (session, generation) = (view.session, view.generation);
+        let fresh = heavy(|| ts.shell.regenerate_recovery(session, generation)).unwrap();
+        assert_ne!(fresh.data.as_str(), key.as_str());
+        let after = ts.shell.unlock_vault(id, secret(PW)).unwrap();
+        assert!(after.data.recovery_unconfirmed, "still unconfirmed");
+        ts.shell.recovery_confirmed(session, generation).unwrap();
+        assert!(
+            !ts.shell
+                .unlock_vault(id, secret(PW))
+                .unwrap()
+                .data
+                .recovery_unconfirmed
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(!view.data.recovery_unconfirmed);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // A mark again (a vault the person made a new key for and never confirmed): by the recovery key.
+        ts.shell.vault_state.mark_unconfirmed(&dir).unwrap();
+        let recovered = heavy(|| {
+            ts.shell
+                .recover_vault(id, fresh.data.clone(), secret(NEW_PW))
+        });
+        assert!(done(recovered.unwrap()).data.recovery_unconfirmed);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // And through the changed header's yes.
+        change_header(&dir);
+        let asked = heavy(|| ts.shell.recover_vault(id, fresh.data.clone(), secret(PW))).unwrap();
+        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
+            panic!("the changed header asks first");
+        };
+        let view = done(heavy(|| ts.shell.recover_vault_confirm(&token, true)).unwrap());
+        assert!(view.data.recovery_unconfirmed);
+    }
+
+    /// A read-only copy never shows the mark, however it is spelled to the rule, and cannot clear the folder's.
+    #[test]
+    fn read_only_copy_with_same_id_never_shows_the_mark() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let dir = listed_dir(&ts);
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir));
+        let backups = ts.folder("Backups");
+        let backup = backups.join("Family.lockbox-backup");
+        ts.dialogs.answer(Some(backup.clone()));
+        done(
+            heavy(|| ts.shell.backup_vault(session, generation))
+                .unwrap()
+                .data,
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // The copy holds the vault's ID and is opened read-only.
+        ts.dialogs.answer(Some(backup.clone()));
+        let credential = super::super::backup::CredentialArg::Password(secret(PW));
+        let opened = done(heavy(|| ts.shell.open_backup_read_only(credential)).unwrap());
+        assert!(opened.data.read_only);
+        let copy = Location::backup(&backup).unwrap();
+        assert!(!ts.shell.recovery_unconfirmed(&copy, true));
+        assert!(!ts.shell.vault_state.is_unconfirmed(copy.path()));
+        // Even asked about the marked folder, a read-only session shows nothing.
+        let folder = Location::folder(&dir).unwrap();
+        assert!(ts.shell.recovery_unconfirmed(&folder, false));
+        assert!(!ts.shell.recovery_unconfirmed(&folder, true));
+        // And it cannot clear the folder's mark.
+        assert_eq!(
+            ts.shell
+                .recovery_confirmed(opened.session, opened.generation)
+                .err(),
+            Some(ShellError::ReadOnly)
+        );
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir));
+    }
+
+    #[test]
+    fn recovery_confirmed_clears_the_mark() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let other = ts.open_vault("Work");
+        let (dir, other_dir) = (
+            ts.shell.registry.entries()[0].1.clone(),
+            ts.shell.registry.entries()[1].1.clone(),
+        );
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir));
+        let answer = ts.shell.recovery_confirmed(session, generation).unwrap();
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            json!({ "session": session.0, "generation": generation, "data": null })
+        );
+        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
+        assert!(
+            ts.shell.vault_state.is_unconfirmed(&other_dir),
+            "only this session's vault"
+        );
+        // Clearing a mark that is not there is a success.
+        ts.shell.recovery_confirmed(session, generation).unwrap();
+        ts.shell.recovery_confirmed(other.0, other.1).unwrap();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let id = ts.shell.registry.entries()[0].0;
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(!view.data.recovery_unconfirmed);
+    }
+
+    #[test]
+    fn recovery_confirmed_refused_stale_and_read_only() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let dir = listed_dir(&ts);
+        // A stale generation, a session that is not there, and a session that has locked since.
+        assert_eq!(
+            ts.shell.recovery_confirmed(session, generation + 1).err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(
+            ts.shell
+                .recovery_confirmed(SessionId(session.0 + 100), generation)
+                .err(),
+            Some(ShellError::NotFound)
+        );
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir), "nothing cleared");
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert_eq!(
+            ts.shell.recovery_confirmed(session, generation).err(),
+            Some(ShellError::Locked)
+        );
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir));
+        // A read-only copy is refused (also in `read_only_copy_with_same_id_never_shows_the_mark`).
+        let (session, generation) = ts.open_vault("Work");
+        let backup = ts.folder("Backups").join("Work.lockbox-backup");
+        ts.dialogs.answer(Some(backup.clone()));
+        done(
+            heavy(|| ts.shell.backup_vault(session, generation))
+                .unwrap()
+                .data,
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        ts.dialogs.answer(Some(backup));
+        let credential = super::super::backup::CredentialArg::Password(secret(PW));
+        let copy = done(heavy(|| ts.shell.open_backup_read_only(credential)).unwrap());
+        let refused = ts.shell.recovery_confirmed(copy.session, copy.generation);
+        assert_eq!(refused.err(), Some(ShellError::ReadOnly));
+        let json = serde_json::to_value(ShellError::ReadOnly).unwrap();
+        assert_eq!(json, json!({ "code": "read_only" }));
+    }
+
+    /// The answer of an unlock, with the new field last.
+    #[test]
+    fn unlock_view_json_is_pinned() {
+        let info = SessionInfo {
+            session: SessionId(7),
+            generation: 3,
+            name: "Family".to_owned(),
+            read_only: false,
+            state: SessionState::Unlocked,
+        };
+        let cleanup = r#"{"partials_removed":0,"temps_removed":0,"retired_deleted":0,"purges_finished":0,"orphans_quarantined":0,"orphans_restored":0,"skipped_damaged":0,"failed":0}"#;
+        let expected = |mark: bool| {
+            format!(
+                r#"{{"info":{{"session":7,"generation":3,"name":"Family","read_only":false,"state":"unlocked"}},"used_backup_header":false,"header_mac_mismatch":false,"header_repair_failed":false,"cleanup":{cleanup},"cloud":null,"recovery_unconfirmed":{mark}}}"#
+            )
+        };
+        for mark in [true, false] {
+            let view = already_unlocked_view(info.clone(), mark);
+            assert_eq!(serde_json::to_string(&view).unwrap(), expected(mark));
+        }
+        let report = UnlockReport {
+            used_backup_header: false,
+            header_mac_mismatch: false,
+            header_repair_failed: false,
+            cleanup: CleanupReport::default(),
+        };
+        let view = unlock_view(info, (report, None, true));
+        assert_eq!(serde_json::to_string(&view).unwrap(), expected(true));
+    }
+
+    /// `recovery_confirmed`'s answer, and its request.
+    #[test]
+    fn recovery_confirmed_answer_and_request_are_pinned() {
+        let answer = Tagged {
+            session: SessionId(7),
+            generation: 3,
+            data: (),
+        };
+        assert_eq!(
+            serde_json::to_string(&answer).unwrap(),
+            r#"{"session":7,"generation":3,"data":null}"#
+        );
+        // The same request as `regenerate_recovery` and `accept_header`, with nothing else allowed.
+        refuses_a_path::<SessionArg>(json!({ "session": 7, "generation": 3 }));
+    }
+
     /// `body` parses as the request `T`, and the same body with a `path` added is refused with the fixed answer.
     /// `commands::args` runs this same parser on every command's request; a Tauri test app cannot run inside this
     /// test program (it lacks the Common Controls 6 manifest that `build.rs` gives only `tests/`), and
@@ -2105,7 +2754,7 @@ mod tests {
         refuses_a_path::<CreateVault>(
             json!({ "name": "Family", "password": PW, "choose_folder": true }),
         );
-        // `add_existing_vault` and `list_vaults`.
+        // `add_existing_vault`, `list_vaults` and `start_new_vault_list`.
         refuses_a_path::<NoArgs>(json!({}));
         refuses_a_path::<VaultArg>(json!({ "id": 1 }));
         // `create_vault_confirm` and `add_existing_vault_confirm`.

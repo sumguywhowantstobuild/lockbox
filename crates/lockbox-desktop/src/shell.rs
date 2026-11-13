@@ -6,25 +6,30 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::TryLockError;
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
 use crate::autolock::AutoLock;
+use crate::capture::{Capture, CaptureEvent, Read};
 use crate::clipboard::Clipboard;
+use crate::commands::env;
 use crate::error::{ShellError, ShellResult};
 use crate::locations::{LocationCheck, check_location, is_within};
 use crate::lock;
 use crate::open::{OpenFolders, RemoveReport};
-use crate::os::{KnownFolder, Os};
+use crate::os::{HotkeyTaken, KnownFolder, Os};
 use crate::outputs::{Outputs, SweepReport};
 use crate::paths::{StatePaths, state_paths};
 use crate::registry::Registry;
 use crate::restore::Restores;
 use crate::session::{LockReason, Notice, Notifier, SessionId, Sessions};
 use crate::settings::SettingsStore;
+use crate::vault_state::VaultStateStore;
 use crate::window;
 
 /// A session locked: `{ session, generation, reason }`.
@@ -33,6 +38,8 @@ pub const LOCKED_EVENT: &str = "lockbox://locked";
 pub const BUSY_EVENT: &str = "lockbox://busy";
 /// Launch recovery and sweep results: `{ kind, .. }`.
 pub const NOTICE_EVENT: &str = "lockbox://notice";
+/// The copied value waiting for the save box changed or went: `{ capture_id, state, changed, env_keys }`.
+pub const CAPTURE_EVENT: &str = "lockbox://capture";
 
 pub struct Shell {
     pub sessions: Arc<Sessions>,
@@ -42,12 +49,16 @@ pub struct Shell {
     /// Locks the vaults on idle, Windows' signals, vanished folders and app exit.
     pub autolock: AutoLock,
     pub registry: Registry,
+    /// What is noted about each vault folder: the "recovery key not confirmed" mark, the last backup.
+    pub vault_state: VaultStateStore,
     /// The output journal (spec §7.2): every temporary plaintext file, written down before it exists.
     pub outputs: Arc<Outputs>,
     /// The "Open" folders (spec §7.2), removed at a lock of their vault and at app close.
     pub open_folders: Arc<OpenFolders>,
     /// The one restore that may be alive (spec §6.8) and the pre-restore folders last listed.
     pub restore: Arc<Restores>,
+    /// The copied value the save shortcut read, waiting for the save box (one slot).
+    pub capture: Arc<Capture>,
     pub paths: StatePaths,
     pub(crate) os: Os,
     /// Where the launch sweep's notice goes.
@@ -59,9 +70,25 @@ pub struct Shell {
     forbidden: Vec<PathBuf>,
     /// One vault creation or addition at a time ([`creating`](Self::creating)).
     creating: Mutex<()>,
+    /// One close of the window at a time; true while 5b, the first-close explanation, shows
+    /// ([`close_window`](Self::close_window)).
+    explaining: Mutex<bool>,
+    /// How many times the window was shown again ([`window_shown`](Self::window_shown)). Held while the window gate is
+    /// sealed for a hide or lifted by a show, so a close knows whether a reopen came after its seal
+    /// ([`lock_and_hide`](Self::lock_and_hide)). Never held across a lock or a call to the window.
+    window_shows: Arc<Mutex<u64>>,
+    /// One change of the settings at a time, held from the shortcut's registration to the save
+    /// ([`set_settings`](Self::set_settings)).
+    pub(crate) settings_change: Mutex<()>,
+    /// How many times the save shortcut has been pressed: what the router's test watches.
+    shortcut_presses: AtomicU64,
     /// Tests only: how many times a creation or addition had to wait for another.
     #[cfg(test)]
     creating_waited: AtomicUsize,
+    /// Tests only: how long a PDF job waits for the printer's answer, in place of
+    /// [`PRINT_ANSWER_WAIT`](crate::commands::readable::PRINT_ANSWER_WAIT).
+    #[cfg(test)]
+    pub(crate) print_wait: Mutex<Option<std::time::Duration>>,
 }
 
 impl Shell {
@@ -96,24 +123,100 @@ impl Shell {
         // Then the restore's: a restore that is not swapping ends with a lock (it drops its staged restore on a worker).
         let restore = Arc::new(Restores::new());
         sessions.on_lock(restore.lock_hook(Arc::downgrade(&sessions)));
+        // Then the pasted `.env` values' (a lock of one vault drains nothing of `Pending` by itself, and a paste parked
+        // while a lock was under way is dropped here).
+        sessions.on_lock(env::lock_hook(Arc::downgrade(&sessions)));
+        // Then the capture slot's: every lock of all vaults empties it, and a lock of the vault it was handed to does.
+        let capture = Arc::new(Capture::default());
+        sessions.on_lock(capture.lock_hook(Arc::downgrade(&sessions), Arc::clone(&notifier)));
         Ok(Shell {
             sessions,
             settings,
             clipboard,
             autolock,
             registry: Registry::new(paths.registry.clone(), Arc::clone(&os.volumes)),
+            vault_state: VaultStateStore::new(paths.vault_state.clone()),
             outputs,
             open_folders,
             restore,
+            capture,
             paths,
             os,
             notifier,
             launch_notices: Mutex::default(),
             forbidden,
             creating: Mutex::default(),
+            explaining: Mutex::default(),
+            window_shows: Arc::default(),
+            settings_change: Mutex::default(),
+            shortcut_presses: AtomicU64::new(0),
             #[cfg(test)]
             creating_waited: AtomicUsize::new(0),
+            #[cfg(test)]
+            print_wait: Mutex::default(),
         })
+    }
+
+    /// The save shortcut was pressed: reads the clipboard once, into the one capture slot (a text with something in it, or
+    /// nothing, or too much), tells the page its id and state, and brings the window forward, in that order. Runs on a thread
+    /// of its own (the clipboard may be held by another program), never the signal window's, so a read that waits holds up
+    /// no lock signal.
+    ///
+    /// The sessions' epoch is read before the read begins: when every vault locks while it runs (a lock, the window's
+    /// close, idle, Windows' lock or sleep, Quit), the slot keeps nothing and nothing is sent or shown.
+    pub fn save_shortcut_pressed(&self) {
+        self.shortcut_presses.fetch_add(1, Ordering::SeqCst);
+        let began = self.sessions.epoch();
+        let read = Read::of(self.os.clipboard.read_text(None));
+        if self
+            .capture
+            .fill(&*self.notifier, &self.sessions, began, read)
+        {
+            self.os.window.bring_forward();
+        }
+    }
+
+    /// Registers the save shortcut the settings hold (Ctrl+Shift+L until the person changes it) and tells the page what
+    /// Windows answered ([`shortcut_registered`](Self::shortcut_registered)). Once, at launch, after the signals are
+    /// routed so that a press that comes at once is answered. The app runs whatever Windows says.
+    pub fn register_save_shortcut(&self) {
+        let saved = self.settings.get().shortcut;
+        self.shortcut_registered(self.os.hotkey.set(Some(saved)));
+    }
+
+    /// What Windows answered when the save shortcut was registered at launch: a shortcut that is taken, or that could not
+    /// be set, is told to the page as a launch notice. The app runs either way.
+    pub fn shortcut_registered(&self, answer: Result<(), HotkeyTaken>) {
+        match answer {
+            Ok(()) => {}
+            Err(HotkeyTaken::Taken) => self.tell(Notice::ShortcutTaken),
+            Err(HotkeyTaken::NotSet) => self.tell(Notice::ShortcutNotSet),
+        }
+    }
+
+    /// Forgets the kept launch notice that the save shortcut was taken or not set: a shortcut was registered and saved
+    /// since, so a page that asks again must not hear a failure that no longer holds. Other launch notices stay.
+    pub(crate) fn forget_shortcut_failure(&self) {
+        lock(&self.launch_notices)
+            .retain(|kept| !matches!(kept, Notice::ShortcutTaken | Notice::ShortcutNotSet));
+    }
+
+    /// Whether the save shortcut is off since launch: Windows refused it then, and no shortcut has been registered and
+    /// saved since (the kept launch notice says so until [`forget_shortcut_failure`](Self::forget_shortcut_failure)).
+    pub(crate) fn shortcut_failed_at_launch(&self) -> bool {
+        lock(&self.launch_notices)
+            .iter()
+            .any(|kept| matches!(kept, Notice::ShortcutTaken | Notice::ShortcutNotSet))
+    }
+
+    /// Where the shell's events go.
+    pub(crate) fn notifier(&self) -> &dyn Notifier {
+        &*self.notifier
+    }
+
+    /// How many times the save shortcut has been pressed.
+    pub fn shortcut_presses(&self) -> u64 {
+        self.shortcut_presses.load(Ordering::SeqCst)
     }
 
     /// Held from the vault list's room check to the new vault's place on it (a create), or from a folder's check to
@@ -150,6 +253,102 @@ impl Shell {
         if let Some(hooks) = hooks {
             hooks.wait();
         }
+    }
+
+    /// Runs `work` on a thread of its own, so it never holds up the thread that asked (the window's event loop: a lock
+    /// waits for the hooks). A thread that cannot start runs it here instead: a lock is never skipped.
+    pub(crate) fn run_in_background(self: &Arc<Self>, work: fn(&Shell)) {
+        let shell = Arc::clone(self);
+        let started = thread::Builder::new()
+            .name("lockbox-window".into())
+            .spawn(move || work(&shell));
+        if started.is_err() {
+            work(self);
+        }
+    }
+
+    /// The window's close button (design, "The window"): it never ends the app. Locks every vault, exactly as the page's
+    /// "Lock all" does and with the reason a person's own lock has (the app keeps running, so the lock hooks must act as
+    /// they do for a lock, not for an exit); then, once the explanation was seen, hides the window to the tray. The first
+    /// time it leaves the window visible and tells the page to show 5b (`first_close`, `explain: true`). A second close
+    /// while 5b shows counts as 5b's button ([`close_explained_ok`](Self::close_explained_ok)). Never calls
+    /// [`shutdown`](Self::shutdown), which shuts the closing gate for good. Waits for the lock hooks, so the caller runs
+    /// it off the event loop's thread ([`run_in_background`](Self::run_in_background)).
+    ///
+    /// Every path that hides the window ends the same way ([`lock_and_hide`](Self::lock_and_hide)): the window never
+    /// hides with a vault unlocked, however an unlock races the close. The first close, which leaves the window visible,
+    /// only locks.
+    ///
+    /// One close at a time, so two presses at once explain once. That gate is taken before any session lock and is not
+    /// held by anything a lock hook calls.
+    pub fn close_window(&self) {
+        let mut explaining = lock(&self.explaining);
+        if *explaining {
+            self.finish_explanation(&mut explaining);
+        } else if self.settings.close_explained() {
+            self.lock_and_hide();
+        } else {
+            self.lock_all();
+            *explaining = true;
+            self.notify(&Notice::FirstClose { explain: true });
+        }
+    }
+
+    /// 5b's button: notes that the explanation was seen (saved with the settings; when that fails it is remembered for
+    /// this run only, and nothing is shown), tells the page it is done (`first_close`, `explain: false`) and hides the
+    /// window, after locking again: a vault opened while 5b showed is locked here.
+    pub fn close_explained_ok(&self) {
+        let mut explaining = lock(&self.explaining);
+        self.finish_explanation(&mut explaining);
+    }
+
+    /// The window is shown again (Open Lockbox, a second launch, the save shortcut): unlocks are accepted again, and a
+    /// close still waiting to hide will not ([`lock_and_hide`](Self::lock_and_hide)).
+    pub fn window_shown(&self) {
+        let mut shows = lock(&self.window_shows);
+        *shows += 1;
+        self.sessions.unseal();
+    }
+
+    /// Hides the window with every vault locked. The sessions' window gate is sealed first: from then on no unlock
+    /// starts or finishes, so none opens in the wait for the lock hooks or after it, and one that finished before is
+    /// locked by the lock that follows. The gate stays sealed while the window is hidden, until
+    /// [`window_shown`](Self::window_shown); a person who pressed Unlock just before the close is answered `Locked`,
+    /// which the page treats as a stale answer. Only then does the window hide, and only if it was not shown again in
+    /// the meantime: a reopen during the wait lifts the gate, and is the later wish (Greptile, PR 4). The window then
+    /// stays shown, so no vault opened after the reopen is left in a hidden window.
+    fn lock_and_hide(&self) {
+        let sealed_at = self.seal_for_hide();
+        self.lock_all();
+        self.hide_unless_shown_since(sealed_at);
+    }
+
+    fn finish_explanation(&self, explaining: &mut bool) {
+        *explaining = false;
+        let sealed_at = self.seal_for_hide();
+        self.lock_all();
+        if self.settings.mark_close_explained().is_err() {
+            // No detail: the settings file's path and the error are not logged (R5).
+            eprintln!("Lockbox: the first-close note could not be saved");
+        }
+        self.notify(&Notice::FirstClose { explain: false });
+        self.hide_unless_shown_since(sealed_at);
+    }
+
+    /// Seals the window gate for a hide and says how many shows there had been by then: the seal and the count are
+    /// taken together, so a show is either counted before the seal or comes after it and lifts it.
+    fn seal_for_hide(&self) -> u64 {
+        let shows = lock(&self.window_shows);
+        self.sessions.seal();
+        *shows
+    }
+
+    /// Hides the window, on its own thread, unless it was shown again since `sealed_at` ([`seal_for_hide`](Self::seal_for_hide)).
+    fn hide_unless_shown_since(&self, sealed_at: u64) {
+        let shows = Arc::clone(&self.window_shows);
+        self.os
+            .window
+            .hide_if(Box::new(move || *lock(&shows) == sealed_at));
     }
 
     /// Closing the app (the main window's close request, the app's exit, or Windows ending the session): locks every
@@ -280,5 +479,546 @@ impl<R: Runtime> Notifier for Events<R> {
 
     fn notice(&self, notice: &Notice) {
         self.emit(NOTICE_EVENT, notice);
+    }
+
+    fn capture(&self, event: &CaptureEvent) {
+        self.emit(CAPTURE_EVENT, event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::{Arc, Barrier, Mutex, mpsc};
+    use std::thread;
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+    use zeroize::Zeroizing;
+
+    use crate::error::ShellError;
+    use crate::lock;
+    use crate::session::{LockReason, SessionState};
+    use crate::settings::SettingsStore;
+    use crate::testing::{TEST_PASSWORD, TestShell, heavy};
+
+    /// A made-up text, never a real secret.
+    const COPIED: &str = "Pw-0123456789-xyz";
+
+    fn first_close(explain: bool) -> Value {
+        json!({ "kind": "first_close", "explain": explain })
+    }
+
+    /// Every session the shell lists, locked or not.
+    fn states(ts: &TestShell) -> Vec<SessionState> {
+        ts.shell.sessions.list().iter().map(|s| s.state).collect()
+    }
+
+    /// Two unlocked vaults and a Lockbox copy on the clipboard, which a close must clear.
+    fn two_vaults_and_a_copy(ts: &TestShell) -> [(crate::session::SessionId, u64); 2] {
+        let vaults = [ts.open_vault("Family"), ts.open_vault("Work")];
+        let (session, generation) = vaults[0];
+        ts.shell
+            .clipboard
+            .copy(
+                &ts.shell.sessions,
+                session,
+                generation,
+                Zeroizing::new(COPIED.to_owned()),
+            )
+            .unwrap();
+        assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+        vaults
+    }
+
+    fn assert_all_locked_by_a_manual_lock(
+        ts: &TestShell,
+        vaults: &[(crate::session::SessionId, u64)],
+    ) {
+        assert!(states(ts).iter().all(|s| *s == SessionState::Locked));
+        let locked: Vec<_> = ts
+            .events
+            .locked()
+            .into_iter()
+            .map(|(session, _, reason)| (session, reason))
+            .collect();
+        for (session, _) in vaults {
+            assert!(
+                locked.contains(&(*session, LockReason::Manual)),
+                "a vault was not locked as a person's own lock"
+            );
+        }
+        assert_eq!(locked.len(), vaults.len());
+        assert_eq!(
+            ts.clipboard.text(),
+            None,
+            "the copy was left on the clipboard"
+        );
+    }
+
+    /// The window's close button, once the explanation was seen: every vault locks (with the reason a person's own lock
+    /// uses, since the app keeps running), the clipboard copy is cleared, the window hides and the page is told nothing.
+    /// The window is hidden only after the locks: what the window's hide sees is a locked app.
+    #[test]
+    fn close_request_locks_every_vault_and_hides() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let vaults = two_vaults_and_a_copy(&ts);
+        let at_hide = Arc::new(Mutex::new(None));
+        let (seen, shell) = (Arc::clone(&at_hide), Arc::clone(&ts.shell));
+        ts.window.during_next_hide(move || {
+            *lock(&seen) = Some(
+                shell
+                    .sessions
+                    .list()
+                    .iter()
+                    .map(|s| s.state)
+                    .collect::<Vec<_>>(),
+            );
+        });
+
+        ts.shell.close_window();
+
+        assert_all_locked_by_a_manual_lock(&ts, &vaults);
+        assert_eq!(ts.window.hides(), 1);
+        assert_eq!(*lock(&at_hide), Some(vec![SessionState::Locked; 2]));
+        assert_eq!(ts.events.notices(), Vec::<Value>::new());
+    }
+
+    /// The first close: every vault locks, the window stays visible and the page is told to show 5b. The note is not
+    /// saved yet (nothing is written until 5b's button), and `first_close` is an event only: `launch_notices` never has it.
+    #[test]
+    fn first_close_locks_and_stays_visible() {
+        let ts = TestShell::new();
+        let vaults = two_vaults_and_a_copy(&ts);
+
+        ts.shell.close_window();
+
+        assert_all_locked_by_a_manual_lock(&ts, &vaults);
+        assert_eq!(ts.window.hides(), 0, "the window hid before 5b was shown");
+        assert_eq!(ts.events.notices(), [first_close(true)]);
+        assert!(ts.shell.launch_notices().is_empty());
+        assert!(!ts.shell.settings.close_explained());
+        assert!(
+            !ts.shell.paths.settings.exists(),
+            "the note was saved too soon"
+        );
+    }
+
+    /// 5b's button: the note is saved (the next launch reads it), the page is told the explanation is done, and the
+    /// window hides, in that order; later closes hide at once and say nothing.
+    #[test]
+    fn ok_on_first_close_sets_the_flag_and_hides() {
+        let ts = TestShell::new();
+        let vaults = two_vaults_and_a_copy(&ts);
+        ts.shell.close_window();
+        assert_eq!(ts.window.hides(), 0);
+
+        let at_hide = Arc::new(Mutex::new(None));
+        let (seen, shell, events, file) = (
+            Arc::clone(&at_hide),
+            Arc::clone(&ts.shell),
+            Arc::clone(&ts.events),
+            ts.shell.paths.settings.clone(),
+        );
+        ts.window.during_next_hide(move || {
+            *lock(&seen) = Some((
+                shell.settings.close_explained(),
+                SettingsStore::load(file).close_explained(),
+                events.notices(),
+            ));
+        });
+        ts.shell.close_explained_ok();
+
+        assert_eq!(ts.window.hides(), 1);
+        assert_eq!(
+            *lock(&at_hide),
+            Some((true, true, vec![first_close(true), first_close(false)]))
+        );
+        assert!(ts.shell.launch_notices().is_empty());
+        assert_all_locked_by_a_manual_lock(&ts, &vaults);
+
+        // The window is shown again, a vault is opened, and the next close hides at once, says nothing and locks it.
+        ts.shell.window_shown();
+        let (again, _) = ts.open_vault("Later");
+        ts.shell.close_window();
+        assert_eq!(ts.window.hides(), 2);
+        assert_eq!(ts.events.notices().len(), 2, "a later close said something");
+        let info = ts.shell.sessions.list();
+        assert_eq!(
+            info.iter().find(|s| s.session == again).map(|s| s.state),
+            Some(SessionState::Locked)
+        );
+    }
+
+    /// A second close while 5b shows counts as its button: the same three effects, and no second 5b.
+    #[test]
+    fn second_close_during_5b_counts_as_ok() {
+        let ts = TestShell::new();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        assert_eq!(ts.events.notices(), [first_close(true)]);
+
+        // A vault opened while 5b was up is locked by the second close too.
+        let (later, _) = ts.open_vault("Work");
+        ts.shell.close_window();
+
+        assert_eq!(ts.events.notices(), [first_close(true), first_close(false)]);
+        assert!(ts.shell.settings.close_explained());
+        assert!(SettingsStore::load(ts.shell.paths.settings.clone()).close_explained());
+        assert_eq!(ts.window.hides(), 1);
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .find(|s| s.session == later)
+                .is_some_and(|s| s.state == SessionState::Locked)
+        );
+    }
+
+    /// Two closes at the same moment explain once: one of them shows 5b and the other counts as its button.
+    #[test]
+    fn two_closes_at_once_explain_once() {
+        let ts = TestShell::new();
+        ts.open_vault("Family");
+        let closers: Vec<_> = (0..2)
+            .map(|_| {
+                let shell = Arc::clone(&ts.shell);
+                thread::spawn(move || shell.close_window())
+            })
+            .collect();
+        for closer in closers {
+            closer.join().unwrap();
+        }
+        assert_eq!(ts.events.notices(), [first_close(true), first_close(false)]);
+        assert_eq!(ts.window.hides(), 1);
+    }
+
+    /// The note cannot be saved: it is remembered for this run, the window still hides, the page is still told, and
+    /// the next close hides without the explanation. Nothing the person sees is an error.
+    #[test]
+    fn ok_when_the_note_cannot_be_saved_is_remembered_for_this_run() {
+        let ts = TestShell::new();
+        // The state folder's place is taken by a file, so the settings file cannot be written.
+        let root = ts.shell.paths.root.clone();
+        fs::create_dir_all(root.parent().unwrap()).unwrap();
+        fs::write(&root, "a file where the state folder goes").unwrap();
+
+        ts.shell.close_window();
+        ts.shell.close_explained_ok();
+
+        assert!(ts.shell.settings.close_explained());
+        assert!(!SettingsStore::load(ts.shell.paths.settings.clone()).close_explained());
+        assert_eq!(ts.events.notices(), [first_close(true), first_close(false)]);
+        assert_eq!(ts.window.hides(), 1);
+
+        ts.shell.close_window();
+        assert_eq!(ts.window.hides(), 2);
+        assert_eq!(ts.events.notices().len(), 2);
+    }
+
+    /// A close is not the app's end: the shell's closing gate stays open, so once the window is shown again (from the
+    /// tray) a vault opens, and the sessions still lock for the real exit later.
+    #[test]
+    fn close_does_not_end_the_app() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        assert_eq!(ts.window.hides(), 1);
+
+        ts.shell.window_shown();
+        let (again, _) = ts.open_vault("Again");
+        assert_eq!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .find(|s| s.session == again)
+                .map(|s| s.state),
+            Some(SessionState::Unlocked),
+            "a close shut the gate that only the exit may shut"
+        );
+        ts.shell.shutdown();
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        assert!(
+            ts.events
+                .locked()
+                .iter()
+                .any(|(session, _, reason)| *session == again && *reason == LockReason::AppClosing)
+        );
+    }
+
+    /// A lock hook that stops the lock's hooks where they are: `started` says it is running (the vaults are revoked by
+    /// then), and sending on `release` lets it go. The lock call waits for hooks, so this holds the whole close.
+    fn hold_the_hooks(ts: &TestShell) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started, running) = mpsc::channel::<()>();
+        let (release, released) = mpsc::channel::<()>();
+        let (started, released) = (Mutex::new(started), Mutex::new(released));
+        ts.shell.sessions.on_lock(Box::new(move |_, _| {
+            let _ = lock(&started).send(());
+            let _ = lock(&released).recv_timeout(Duration::from_secs(60));
+        }));
+        (running, release)
+    }
+
+    /// A person presses Unlock now: whether the new vault was refused, and nothing is left unlocked either way.
+    fn unlock_is_refused(ts: &TestShell, name: &str) -> bool {
+        let password = Zeroizing::new(TEST_PASSWORD.to_owned());
+        let answer = heavy(|| ts.shell.create_vault(name.into(), password, false));
+        answer.is_err()
+    }
+
+    /// The reviewer's race: the vaults are revoked and the close waits for a slow lock hook. A person who presses Unlock
+    /// in that wait is refused (`Locked`, a stale answer to the page), so the window hides with every vault locked.
+    #[test]
+    fn unlock_while_the_close_waits_for_hooks_is_refused_and_the_window_hides_locked() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        let (started, release) = hold_the_hooks(&ts);
+        let closer = {
+            let shell = Arc::clone(&ts.shell);
+            thread::spawn(move || shell.close_window())
+        };
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(ts.window.hides(), 0, "hid before the hooks finished");
+
+        assert!(unlock_is_refused(&ts, "Late"), "a vault opened in the wait");
+
+        release.send(()).unwrap();
+        closer.join().unwrap();
+        assert_eq!(ts.window.hides(), 1);
+        assert_eq!(ts.shell.sessions.list().len(), 1);
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+    }
+
+    /// The same race on 5b's button ("Got it"): it locks again before it hides, and an unlock in that wait is refused.
+    /// A vault opened while 5b was showing is locked by it.
+    #[test]
+    fn got_it_locks_a_vault_opened_while_5b_showed_and_refuses_an_unlock_in_its_wait() {
+        let ts = TestShell::new();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        assert_eq!(ts.events.notices(), [first_close(true)]);
+        // 5b is up and nothing is hidden: a vault can still be opened behind it.
+        let (work, _) = ts.open_vault("Work");
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .any(|s| s.session == work && s.state == SessionState::Unlocked)
+        );
+
+        let (started, release) = hold_the_hooks(&ts);
+        let ok = {
+            let shell = Arc::clone(&ts.shell);
+            thread::spawn(move || shell.close_explained_ok())
+        };
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(ts.window.hides(), 0, "hid before the hooks finished");
+        assert!(unlock_is_refused(&ts, "Late"), "a vault opened in the wait");
+
+        release.send(()).unwrap();
+        ok.join().unwrap();
+        assert_eq!(ts.window.hides(), 1);
+        assert_eq!(ts.shell.sessions.list().len(), 2);
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+    }
+
+    /// An unlock whose password check is under way when the window closes: the close cancels it and the vault is
+    /// discarded, so the window hides with nothing unlocked.
+    #[test]
+    fn unlock_in_flight_when_the_window_closes_does_not_survive_the_hide() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let vault = heavy(|| {
+            lockbox_core::Vault::create(&ts.vaults(), "Inflight", TEST_PASSWORD)
+                .unwrap()
+                .vault
+        });
+        let location = crate::session::Location::folder(vault.dir()).unwrap();
+        let (checked, closed) = (Barrier::new(2), Barrier::new(2));
+        let answer = thread::scope(|s| {
+            let opening = s.spawn(|| {
+                ts.shell.sessions.open(Some(location.clone()), None, |_| {
+                    checked.wait();
+                    closed.wait();
+                    Ok(crate::session::OpenStep::Session(
+                        location.clone(),
+                        crate::session::Opened::Writable(vault),
+                        (),
+                    ))
+                })
+            });
+            checked.wait();
+            ts.shell.close_window();
+            closed.wait();
+            opening.join().unwrap()
+        });
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert_eq!(ts.window.hides(), 1);
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+    }
+
+    /// Greptile's race on PR 4: the close waits for a slow lock hook, and in that wait the window is brought back (Open
+    /// Lockbox in the tray, or the save shortcut), which lifts the gate. The reopen is the later wish and wins: the
+    /// older close does not hide the window, so no vault can be unlocked in a window that then hides. The close's own
+    /// lock still ran: what was open before the reopen is locked.
+    #[test]
+    fn a_reopen_while_the_close_waits_for_hooks_keeps_the_window_shown() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        let (started, release) = hold_the_hooks(&ts);
+        let closer = {
+            let shell = Arc::clone(&ts.shell);
+            thread::spawn(move || shell.close_window())
+        };
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        ts.shell.window_shown();
+        release.send(()).unwrap();
+        closer.join().unwrap();
+
+        assert_eq!(
+            ts.window.hides(),
+            0,
+            "an older close hid the window the person had just brought back"
+        );
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        assert!(
+            !unlock_is_refused(&ts, "After"),
+            "the shown window refuses unlocks"
+        );
+    }
+
+    /// The same race on 5b's button ("Got it"): a reopen in its wait keeps the window shown, and unlocks work there.
+    #[test]
+    fn a_reopen_while_got_it_waits_for_hooks_keeps_the_window_shown() {
+        let ts = TestShell::new();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        assert_eq!(ts.events.notices(), [first_close(true)]);
+
+        let (started, release) = hold_the_hooks(&ts);
+        let ok = {
+            let shell = Arc::clone(&ts.shell);
+            thread::spawn(move || shell.close_explained_ok())
+        };
+        started.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        ts.shell.window_shown();
+        release.send(()).unwrap();
+        ok.join().unwrap();
+
+        assert_eq!(
+            ts.window.hides(),
+            0,
+            "an older close hid the window the person had just brought back"
+        );
+        assert!(ts.shell.settings.close_explained());
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        assert!(
+            !unlock_is_refused(&ts, "After"),
+            "the shown window refuses unlocks"
+        );
+    }
+
+    /// The race one step later (Codex, on the fix): the close has locked and queued its hide on the window's busy
+    /// thread, and the reopen and an unlock come before that thread runs it. The queued hide checks then, sees the
+    /// reopen, and leaves the window shown with the new vault open in it.
+    #[test]
+    fn a_reopen_after_the_hide_is_queued_keeps_the_window_shown() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        ts.window.defer_hides();
+        ts.shell.close_window();
+        assert_eq!(ts.window.queued_hides(), 1);
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+
+        ts.shell.window_shown();
+        let (after, _) = ts.open_vault("After");
+        ts.window.run_queued_hides();
+
+        assert_eq!(
+            ts.window.hides(),
+            0,
+            "a queued hide ran after the window was shown again"
+        );
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .any(|s| s.session == after && s.state == SessionState::Unlocked)
+        );
+    }
+
+    /// The same on 5b's button: its queued hide is overtaken by a reopen and does not run.
+    #[test]
+    fn a_reopen_after_got_it_queued_its_hide_keeps_the_window_shown() {
+        let ts = TestShell::new();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        ts.window.defer_hides();
+        ts.shell.close_explained_ok();
+        assert_eq!(ts.window.queued_hides(), 1);
+
+        ts.shell.window_shown();
+        let (after, _) = ts.open_vault("After");
+        ts.window.run_queued_hides();
+
+        assert_eq!(
+            ts.window.hides(),
+            0,
+            "a queued hide ran after the window was shown again"
+        );
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .any(|s| s.session == after && s.state == SessionState::Unlocked)
+        );
+    }
+
+    /// A queued hide with no reopen before it runs: it hides, and the gate stays sealed.
+    #[test]
+    fn a_queued_hide_with_no_reopen_hides_and_keeps_the_gate_sealed() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        ts.window.defer_hides();
+        ts.shell.close_window();
+        ts.window.run_queued_hides();
+        assert_eq!(ts.window.hides(), 1);
+        assert!(
+            unlock_is_refused(&ts, "Hidden"),
+            "the hidden window accepts unlocks"
+        );
+    }
+
+    /// A reopen that comes after the hide changes nothing about it: the close hid, and the reopen lifts the gate.
+    #[test]
+    fn a_reopen_after_the_hide_lifts_the_gate() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.open_vault("Family");
+        ts.shell.close_window();
+        assert_eq!(ts.window.hides(), 1);
+        assert!(
+            unlock_is_refused(&ts, "Hidden"),
+            "the hidden window accepts unlocks"
+        );
+
+        ts.shell.window_shown();
+        assert!(
+            !unlock_is_refused(&ts, "Shown"),
+            "the shown window refuses unlocks"
+        );
     }
 }

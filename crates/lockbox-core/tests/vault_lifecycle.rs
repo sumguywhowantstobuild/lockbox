@@ -2,12 +2,13 @@
 //! unlock, change password, regenerate recovery, and the header fallbacks. Every create and
 //! unlock runs a real ~1 s Argon2id derivation, so each test keeps its derivations to a minimum.
 
+use lockbox_core::ids::VaultId;
 use lockbox_core::internals::header::{
     HEADER_BACKUP, HEADER_FILE, VaultHeader, parse_header, serialize_header,
 };
 use lockbox_core::internals::slots::SlotType;
 use lockbox_core::recovery::RecoverySecret;
-use lockbox_core::{CoreError, Vault, read_vault_name};
+use lockbox_core::{CoreError, Vault, folder_name, read_vault_id, read_vault_name};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -44,6 +45,24 @@ fn create_then_unlock() {
     assert_eq!(vault.name(), "Family");
     assert_eq!(vault.dir(), dir);
     assert!(!report.used_backup_header && !report.header_mac_mismatch);
+}
+
+/// The public surface: a caller outside the engine chooses the vault's ID, so it can write down the new folder's
+/// place (the shell's "recovery key not confirmed" mark) before the vault exists.
+#[test]
+fn create_with_id_is_public_and_keeps_the_id() {
+    let parent = tempfile::tempdir().unwrap();
+    let id = VaultId::random();
+    let expected = parent.path().join(folder_name("Family", &id));
+    assert!(!expected.exists());
+    let created = Vault::create_with_id(parent.path(), "Family", PW, id).unwrap();
+    assert_eq!(created.vault.id(), id);
+    assert_eq!(created.vault.dir(), expected);
+    let dir = created.vault.dir().to_path_buf();
+    drop(created);
+    assert_eq!(read_vault_id(&dir).unwrap(), id);
+    let (vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+    assert_eq!(vault.id(), id);
 }
 
 #[test]

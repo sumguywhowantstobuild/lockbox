@@ -2,7 +2,10 @@
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
 restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
-The real screens come in Plan 4: `ui/` holds only the bridge to Rust and a bare test page. The target design and the
+The real screens come in Plan 4, in three parts; the first, daily use (4A), is built: `ui/` has the bridge to Rust, first-time
+setup with the recovery key, the lock screen, and the main window with search, the item panel, the forms, the Trash, folders,
+`.env` in and out, the save shortcut's box and settings ([the UI design](docs/design/2026-11-05-user-interface-design.md)).
+Backups and the long jobs come in 4B, the rest in 4C. The target design and the
 reasons behind it are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as
 "spec 5.2" and so on.
 
@@ -16,12 +19,14 @@ The public surface is what the shell uses, and nothing more:
   `CleanupReport`, `CreatedVault`, `Credential`, `JournalStep`, `JournalView`, `PreparedRestore`, `Recovery`,
   `RestoreDestination`, `RestoreOutcome`, `UnlockReport`, `dismiss_restore_journal`, `inspect_restore_journal`,
   `CopiedItem`, `folder_name`, `is_reserved_device_name`, `read_vault_id`, `read_vault_name`, `recover_restore`,
-  `verify_backup`, `version`;
-- `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef}`; `recovery::RecoverySecret`;
+  `verify_backup`, `version`, `SearchHit` (what a search found: the item, and the attached file a match was in);
+- `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef, MAX_ITEM_JSON, PreviousPassword,
+  MAX_PREVIOUS_PASSWORDS, check_key_name}`; `recovery::RecoverySecret`; `env_file` (reading and writing `.env` files);
   `generator::{PasswordOptions, PassphraseOptions, generate_password, generate_passphrase}`;
   `blob::{CancelToken, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::{MIN_PASSWORD_CHARS, check_new_password}`;
   `fsio::{atomic_write, is_destination_taken, remove_dir_all_retry, remove_file_retry, rename_file_no_replace}` (the
-  shell's state files and sweeps).
+  shell's state files and sweeps), and `fsio::{hidden_temp_path, create_hidden_file, clear_hidden, publish_readable,
+  refuse_vault_folder}` (the one way the shell writes a readable file: a hidden temp, then a gated, flushed move).
 
 `Item`, `ItemKind` and `FileRef` have no serde: an item is only ever written sealed, through crate-private wire types,
 so no code outside the engine can serialise one to the screen. A `FileRef`'s key, nonce prefix, blob version and chunk
@@ -47,11 +52,11 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `serde_b64.rs` | Base64 for binary fields in JSON (non-secret fields only) |
 | `secret.rs` | `Key32`, a key that wipes itself and never prints; the one OS random source; the one HKDF helper (HKDF makes new keys from a secret) |
 | `kdf.rs` | Password to key with Argon2id (a slow, memory-hungry password hash); accepted settings; calibration; the 12-character minimum |
-| `recovery.rs` | The recovery secret: generate, 52-symbol display, parse with typo check, derive its key |
+| `recovery.rs` | The recovery secret: generate, 24-word display, parse with typo check, derive its key |
 | `aead.rs` | The one XChaCha20-Poly1305 call (encryption that also detects tampering) for whole buffers: key slots and items |
 | `slots.rs` | Key slots: wrap and unwrap the vault key under the password key or the recovery key |
 | `header.rs` | `vault.json` and its `.bak`: strict parse, header MAC (a tamper-evident stamp), writing both copies in order |
-| `item.rs` | The item model (login, note, file, collection) and its sealed file format, padded to 512 bytes; its JSON through crate-private wire types |
+| `item.rs` | The item model (login, key, note, file, collection; a login's earlier passwords) and its sealed file format, padded to 512 bytes; its JSON through crate-private wire types |
 | `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); `authenticate_copy` (copies a blob unchanged while checking every chunk); cancel token; output-journal hook |
 | `manifest.rs` | `backup-manifest.json`: the list of everything in a backup (path, size, SHA-256) with a MAC, and its strict parser |
 | `archive.rs` | The backup file (one stored ZIP64 archive): our own strict reader for the few shapes we write, and the writer |
@@ -59,7 +64,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `fsio/mod.rs` | Safe file operations: `atomic_write` (all or nothing), `replace_file`, `rename_dir_no_replace`, retries, hidden temps, space checks |
 | `fsio/windows.rs` | The Win32 calls. The only place `unsafe` is allowed |
 | `fsio/portable.rs` | The same small surface for non-Windows systems |
-| `vault/mod.rs` | `Vault`: create, change password, regenerate recovery key, accept a changed header, search |
+| `vault/mod.rs` | `Vault`: create (`create_with_id` when the caller must know the folder first), change password, regenerate recovery key, accept a changed header, search |
 | `vault/unlock.rs` | Opening a vault: header fallback and repair |
 | `vault/items.rs` | Items in an open vault: add, edit, trash, restore, collections |
 | `vault/files.rs` | Files in an open vault: import, replace, save a decrypted copy, purge |
@@ -70,8 +75,9 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `vault/restore.rs` | Restore: check and extract into a hidden staging folder, the journaled swap into place, and recovery after a crash |
 | `vault/journal.rs` | The restore journal: its strict reader and validation, and the lock around it |
 | `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out |
-| `search.rs` | The in-memory search index (returns item IDs only) |
+| `search.rs` | The in-memory search index (returns item IDs, and the name of the attached file a match was in) |
 | `generator.rs` | Password and passphrase generator (EFF word list in `wordlists/`) |
+| `env_file.rs` | Reading and writing `.env` files (`NAME=value` lines) for keys; a line it can't read is reported by its number only, and every value is wiped |
 
 Tests: unit tests sit beside the code. `tests/` uses the public API, and `internals` where it must build or read what
 the API keeps private (those tests need `--features test-internals`): `vault_lifecycle.rs`, `files.rs`,
@@ -138,6 +144,13 @@ must give an error with fixed wording, never a panic.
   and the quarantine (never one another item still attaches; refused while `files/` or `files/orphaned/` is a link),
   then delete the item file. A crash in between is finished at the next unlock. Refused while `items/` is a link,
   checked before the mark and again before the item file is deleted.
+- **Trash and folders** (`trash_item`, `restore_item`, `delete_collection`): each trash or restore of an item is one
+  item write. `delete_collection` writes the items first and the folder last, and each item it newly trashes records the
+  folder in `trashed_with` in that same write; an item already in the trash is left as it is, and a retry after a crash
+  writes the same value on the items still to go. `restore_item` on a folder brings back the items in the trash that
+  name it (still filed in it, and not being purged), items first and the folder last, so a crash leaves the folder in the
+  trash and restoring it again finishes the job; a folder being purged is refused whole. Restoring any other item clears
+  its own `trashed_with` and brings back its folder alone, folder first.
 
 ### Restore a backup (`PreparedRestore::prepare`, `commit`; spec 6.8)
 1. `prepare` refuses while anything is at the journal path, then opens the archive with its own parser, unlocks it
@@ -279,23 +292,32 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `restore.rs` | One restore at a time: its state machine, launch recovery, pre-restore copies and their checks |
 | `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
 | `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
-| `settings.rs` | The idle time and clipboard delay, with their bounds (`settings.json`) |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock |
+| `settings.rs` | The app-wide settings with their bounds (`settings.json`): idle time, clipboard delay, theme, the save shortcut (two modifiers, a letter, digit or F1 to F12, never Ctrl with C, V or X) and capture protection |
+| `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
+| `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and the last backup |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values also when their own vault locks |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
-| `window.rs` | The one window: what it may load, open, download or receive |
+| `window.rs` | The one window: what it may load, open, download or receive, and how it starts (shown, or hidden for a `--hidden` start) |
 | `commands/` | The `#[tauri::command]` wrappers. `list.rs` names every command; `args.rs` parses a request strictly |
-| `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock`, `Timer`, `ClipboardBackend`, `Volumes`, `Env`) and the shared clipboard steps |
+| `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock`, `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
 | `os/win.rs` | The real Windows calls, the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
 | `os/signals.rs` | Turns a window message into an `OsSignal` |
 | `testing.rs` | The fakes (test builds only) |
 
 Beside the code: `capabilities/main.json` (what the page may call), `tauri.conf.json` (the Content Security Policy and
 app settings), `tests/ipc.rs` (the bridge, through Tauri's own permission checks). In `ui/src/`: `bridge.ts`, the one
-place that calls Rust and drops stale answers; `dropGuard.ts`; `App.tsx`, the test page, which Plan 4 throws away.
+place that calls Rust and drops stale answers; `api.ts`, the typed commands the screens use; `store.ts`, what the page
+keeps of each unlocked vault, wiped by a lock; `messages.ts`, the fixed words for every refusal; `dropGuard.ts`; `App.tsx`
+and `screens/`, the screens; `parts/`, the shared parts (Base UI gives the behaviour and accessibility, plain CSS every
+pixel); `styles/`, the style sheets (tokens, components, the short-window, high-contrast and print rules); `testing/`, the
+pretend shell the screen tests run against and the axe-core check. `screens/everyScreen.test.tsx` reaches every screen as a
+person would and checks it with axe-core and for `<style>` elements; a component a screen file exports that no case reaches
+fails it, so a new screen can't go unchecked. `policy.test.ts` pins the Content Security Policy and checks the built page
+carries no inline script or style (Tauri would add a hash for one to the policy, letting it run).
 
-State lives in `%LOCALAPPDATA%\Lockbox\`: `vaults.json`, `settings.json`, `pending-outputs.json`,
+State lives in `%LOCALAPPDATA%\Lockbox\`: `vaults.json`, `settings.json`, `vault-state.json`, `pending-outputs.json`,
 `restore-journal.json` and `open\`. Vaults default to `%USERPROFILE%\Lockbox Vaults\`.
 
 ### How data flows

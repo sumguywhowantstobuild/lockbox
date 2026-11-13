@@ -1,0 +1,3051 @@
+/* The parts and screens of the first working path, from the approved screens' style sheet (the neutral look, the flat
+   side menu, each vault's own accent). Everything the pictures wrote into the page as style attributes is a class here.
+   The colours are variables from tokens.css; the small-window rules are in short-window.css and the high contrast block
+   in high-contrast.css. */
+
+/* ---- The lock screen ---- */
+
+.lock {
+  display: flex;
+  flex-wrap: wrap;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.field {
+  position: relative;
+  overflow: hidden;
+  flex: 999 1 500px;
+  min-height: 320px;
+  padding: 40px;
+  background: var(--field);
+  color: var(--field-ink);
+}
+
+.field :focus-visible {
+  outline-color: var(--field-ink);
+}
+
+.rose {
+  position: absolute;
+  right: -120px;
+  bottom: -140px;
+  width: 760px;
+  height: 760px;
+  opacity: 0.5;
+}
+
+.rose path {
+  fill: none;
+  stroke: var(--field-ink);
+  stroke-width: 0.22;
+}
+
+.mark {
+  position: relative;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.say {
+  position: absolute;
+  left: 40px;
+  bottom: 64px;
+  max-width: 440px;
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.2;
+  font-weight: 500;
+}
+
+.plate {
+  position: relative;
+  flex: 1 1 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  justify-content: center;
+  padding: 56px 48px;
+  background: var(--ground);
+  color: var(--ink);
+}
+
+.plate h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
+
+.plate form label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.plate form {
+  display: flex;
+  flex-direction: column;
+}
+
+.vlist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.vbtn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  text-align: left;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.vbtn:hover {
+  background: var(--hov);
+}
+
+.vbtn:active {
+  background: var(--prs);
+}
+
+.vbtn.on {
+  padding: 9px 11px;
+  border: 2px solid var(--ink);
+}
+
+.vbtn:has(:focus-visible) {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.vbtn.off {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.vradio {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.vmini {
+  width: 36px;
+  height: 36px;
+  flex: none;
+}
+
+/* 36px for 200 units: 8.3 units is a line of about a pixel and a half. */
+.vmini path {
+  fill: none;
+  stroke: var(--v);
+  stroke-width: 8.3;
+}
+
+.vbtn b {
+  display: block;
+  font-weight: 600;
+}
+
+.vbtn small {
+  display: block;
+  color: var(--ink2);
+  font-size: 12px;
+}
+
+.inp {
+  display: block;
+  width: 100%;
+  height: 42px;
+  padding: 0 12px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+}
+
+.lacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.prim {
+  height: 42px;
+  padding: 0 20px;
+  background: var(--ink);
+  color: var(--ground);
+  border: 0;
+  border-radius: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.prim:hover {
+  background: var(--ink2);
+}
+
+.prim:active {
+  transform: scale(0.97);
+}
+
+/* `aria-disabled` is for a main button that must keep focus while it waits (the key screen's Continue during a print). */
+.prim[disabled],
+.prim[aria-disabled="true"] {
+  background: var(--line);
+  color: var(--ink2);
+  cursor: not-allowed;
+}
+
+.prim[disabled]:active,
+.prim[aria-disabled="true"]:active {
+  transform: none;
+}
+
+.err {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.note {
+  margin: 6px 0 0;
+  color: var(--ink2);
+  font-size: 13px;
+}
+
+/* ---- First use and the recovery key ---- */
+
+/* The steps on the lock screen's light side: a column of the heading, the fields and the buttons. */
+.fu {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.fu label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.fu-step {
+  margin: 0;
+  color: var(--ink2);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.fu-sub {
+  margin: -4px 0 0;
+  color: var(--ink2);
+}
+
+.fu-sub.strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.fu-hint {
+  margin: 6px 0 0;
+  color: var(--ink2);
+  font-size: 13px;
+}
+
+/* A rule that is met: a check mark in the vault's colour, and the words in the ordinary text colour. */
+.fu-hint.ok {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--ink);
+}
+
+.fu-hint.ok .i {
+  color: var(--v);
+}
+
+.fu-where {
+  margin: 0;
+}
+
+.fu-lose {
+  margin: 0;
+  font-weight: 500;
+}
+
+.fu-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+}
+
+/* What prints is one element (`data-print-only`: the key's heading, its words and its warning); on screen it lays out as
+   the steps do, one under another. */
+.fu-print {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* The key's second-level buttons (Print, Save as PDF) and what they say: the screen's own, never on paper. */
+.fu-actions {
+  min-width: 0;
+}
+
+.fu-actions .err {
+  margin-top: 10px;
+}
+
+/* A quiet button on the plate: an edge you can see, and the card's colour. While another print runs it is greyed but
+   stays where focus is (`aria-disabled`, not `disabled`, which would drop focus to the page). */
+.fu-sec {
+  height: 42px;
+  padding: 0 18px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s var(--ease);
+}
+
+.fu-sec:hover {
+  background: var(--hov);
+}
+
+.fu-sec:active {
+  background: var(--prs);
+}
+
+.fu-sec[aria-disabled="true"] {
+  color: var(--ink2);
+  cursor: not-allowed;
+}
+
+.fu-sec[aria-disabled="true"]:hover,
+.fu-sec[aria-disabled="true"]:active {
+  background: var(--card);
+}
+
+/* Where a PDF was saved. Empty until it is, so the screen reader has the line before it says anything. */
+.fu-status {
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.fu-status:not(:empty) {
+  margin-top: 10px;
+}
+
+/* Lockbox's own printer picker, under the two buttons: the printers in a short list with the default picked, then Print
+   and Cancel; or one sentence and Cancel when there is no printer. Screen only, like the buttons above it. */
+.fu-picker {
+  margin-top: 14px;
+  max-width: 360px;
+}
+
+.fu-picker .flab {
+  margin-top: 0;
+}
+
+.fu-picker .fu-row {
+  margin-top: 12px;
+}
+
+.fu-none {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+/* What the key is: said above the words, so it is not mistaken for a crypto wallet's phrase. */
+.fu-kind {
+  margin: 0 0 -6px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+/* The key, shown once: its 24 words in the fixed-width face, numbered down two columns (1 to 12, then 13 to 24).
+   Not selectable: a native copy would skip the marks that keep a secret out of Windows' clipboard history. */
+.fu-key {
+  display: grid;
+  -webkit-user-select: none;
+  user-select: none;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 20px;
+  margin: 0;
+  padding: 14px 18px;
+  /* A soft grey box with a hairline round it, as drawn (21c). It holds words, not a control, so it needs no 3 to 1 edge. */
+  background: var(--well);
+  box-shadow: inset 0 0 0 1px var(--line);
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.fu-col {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fu-col li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+/* The number is as wide as "24" so the words line up, and quieter than the word. */
+.fu-n {
+  flex: 0 0 2ch;
+  color: var(--ink2);
+  text-align: right;
+  font-weight: 400;
+}
+
+.fu-w {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* One question of the check: the number asked, and four words to pick from, two by two. */
+.fu-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fu-q {
+  margin: 0;
+  font-weight: 500;
+}
+
+.fu-pick {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.fu-pick button {
+  height: 44px;
+  padding: 0 12px;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s var(--ease);
+}
+
+.fu-pick button:hover {
+  background: var(--hov);
+}
+
+.fu-pick button:active {
+  background: var(--prs);
+}
+
+.fu-pick button[disabled] {
+  color: var(--ink2);
+  cursor: not-allowed;
+}
+
+/* A quiet button that reads as a link: the second way out of a step. */
+.lnk {
+  height: 36px;
+  padding: 0 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.lnk:hover {
+  background: var(--hov);
+}
+
+.lnk:active {
+  background: var(--prs);
+}
+
+.lnk[disabled] {
+  color: var(--ink2);
+  cursor: not-allowed;
+}
+
+.lnk[disabled]:hover {
+  background: transparent;
+}
+
+.inp[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+/* ---- The window ---- */
+
+.win {
+  --gut: clamp(20px, 2.6vw, 36px);
+  --pw: clamp(340px, 30vw, 420px);
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  /* clip, not hidden: a hidden box can still be scrolled, and focus moving into the panel as it slides in scrolled it
+     sideways (styles/panels.test.ts). */
+  overflow: clip;
+  background: var(--ground);
+  color: var(--ink);
+}
+
+.win :focus-visible {
+  outline: 2px solid var(--v);
+  outline-offset: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px rgba(var(--sh), 0.34);
+}
+
+/* The side menu: which vault, its folders, and Lock all. */
+
+.rail {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 clamp(212px, 18vw, 252px);
+  /* One width whatever the vault is called (21g): without this a flex part grows to its widest word. */
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--rail);
+  border-right: 1px solid var(--line);
+}
+
+.rtop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 8px 8px 4px;
+}
+
+.vhead {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+}
+
+/* The vault's name as the button that opens the vault menu. */
+.vsw {
+  min-width: 0;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.vsw:hover {
+  background: var(--hov);
+}
+
+.vsw:active {
+  background: var(--prs);
+}
+
+.vprint {
+  width: 32px;
+  height: 32px;
+  flex: none;
+}
+
+.vprint path {
+  fill: none;
+  stroke: var(--v);
+  stroke-width: 5.4;
+}
+
+.vname {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+}
+
+.vname b {
+  display: block;
+  font-size: 15px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vname .chip {
+  margin-top: 3px;
+}
+
+/* The up-down mark after the name: its button opens the vault menu. */
+.vsw .vchev {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--ink2);
+}
+
+.rail.closed .vchev {
+  display: none;
+}
+
+.rside {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  color: var(--ink2);
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.rside:hover {
+  background: var(--hov);
+}
+
+.rside:active {
+  transform: scale(0.97);
+}
+
+.rside .i {
+  width: 17px;
+  height: 17px;
+}
+
+.projs {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 8px 8px;
+}
+
+.nav {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  margin-top: 1px;
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.nav:hover {
+  background: var(--hov);
+}
+
+.nav:active {
+  transform: scale(0.97);
+}
+
+.nav.on {
+  background: var(--sel);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* The mark of the one chosen: a bar at its edge, so it does not rest on a tint alone. */
+.nav.on::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--add);
+}
+
+.nt {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nn {
+  flex: none;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+
+.rlab {
+  margin: 12px 0 2px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink2);
+}
+
+.ptile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: none;
+  color: var(--ink2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.t0 {
+  --tc: var(--t0);
+}
+
+.t1 {
+  --tc: var(--t1);
+}
+
+.t2 {
+  --tc: var(--t2);
+}
+
+.t3 {
+  --tc: var(--t3);
+}
+
+.t4 {
+  --tc: var(--t4);
+}
+
+.rfoot {
+  flex: none;
+  padding: 4px 8px 10px;
+}
+
+.rbtns {
+  display: flex;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.rbtn {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  background: var(--card);
+  border: 0;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.rbtn:hover {
+  background: var(--hov);
+}
+
+.rbtn:active {
+  transform: scale(0.97);
+}
+
+/* Settings while its panel is open, marked as the place you are (31a): the drawn tint, with an edge in the quiet text
+   colour so the mark is not a tint alone (3 to 1 against the side menu), open or closed to icons. */
+.rbtn.on,
+.rail.closed .rbtn.on {
+  background: var(--sel);
+  box-shadow: inset 0 0 0 1px var(--ink2);
+  color: var(--ink);
+}
+
+/* The side menu closed to icons. */
+
+.rail.closed {
+  flex: 0 0 60px;
+}
+
+.rail.closed :is(.nt, .nn, .rlab) {
+  display: none;
+}
+
+/* The vault's name is hidden from the eye but not from a screen reader. */
+.rail.closed .vname {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.rail.closed .rtop {
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 8px 8px;
+}
+
+.rail.closed .vhead {
+  flex: none;
+  justify-content: center;
+  width: 100%;
+  padding: 4px 0;
+}
+
+.rail.closed .projs {
+  padding: 0 8px 8px;
+}
+
+.rail.closed .nav {
+  justify-content: center;
+  padding: 0;
+  height: 40px;
+  margin-top: 3px;
+}
+
+.rail.closed .ptile {
+  background: rgba(var(--tc), 0.15);
+  color: color-mix(in srgb, rgb(var(--tc)) var(--tile-mix), var(--ink));
+  box-shadow: inset 0 0 0 0.5px rgba(var(--tc), 0.28);
+  border-radius: 7px;
+}
+
+.rail.closed .rbtns {
+  flex-direction: column;
+  margin-top: 6px;
+}
+
+.rail.closed .rbtn {
+  font-size: 0;
+  gap: 0;
+  height: 40px;
+  padding: 0;
+  flex: none;
+  background: none;
+  box-shadow: none;
+}
+
+/* ---- The right side: the toolbar, the list, and the panel ---- */
+
+.stage {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  /* clip, as .win: nothing can scroll the list sideways while the panel slides in. */
+  overflow: clip;
+  timeline-scope: --l;
+}
+
+.mainpane {
+  position: absolute;
+  inset: 0;
+}
+
+.tb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 56px;
+  padding: 0 var(--gut);
+}
+
+.tb::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: color-mix(in srgb, var(--ground) 76%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  backdrop-filter: blur(20px) saturate(1.8);
+  box-shadow: 0 1px 0 var(--line);
+  opacity: 0;
+  animation: appear linear both;
+  animation-timeline: --l;
+  animation-range: 0 12px;
+}
+
+.tb-t {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  animation: appear linear both;
+  animation-timeline: --l;
+  animation-range: 8px 36px;
+}
+
+@keyframes appear {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@supports not (animation-timeline: scroll()) {
+  .tb::before {
+    opacity: 1;
+  }
+}
+
+.fil {
+  position: relative;
+  flex: 0 1 clamp(120px, 14vw, 172px);
+  min-width: 96px;
+}
+
+.fil > .i {
+  position: absolute;
+  left: 9px;
+  top: 7px;
+  color: var(--ink2);
+  pointer-events: none;
+}
+
+.fin {
+  width: 100%;
+  height: 30px;
+  padding: 0 28px 0 30px;
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 13px;
+  appearance: none;
+  transition:
+    background-color 0.2s var(--ease),
+    box-shadow 0.2s var(--ease);
+}
+
+.fin::-webkit-search-cancel-button {
+  display: none;
+}
+
+.fin::placeholder {
+  color: var(--ink2);
+  opacity: 1;
+}
+
+.fin:hover {
+  background: var(--hov);
+}
+
+.fin:focus {
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px rgba(var(--sh), 0.34);
+}
+
+.win .fin:focus-visible {
+  outline-offset: 0;
+}
+
+.fx {
+  position: absolute;
+  right: 5px;
+  top: 5px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: rgba(var(--sh), 0.1);
+  border: 0;
+  border-radius: 50%;
+  color: var(--ink2);
+  cursor: pointer;
+}
+
+.fx:hover {
+  background: rgba(var(--sh), 0.18);
+}
+
+.fx:active {
+  background: rgba(var(--sh), 0.26);
+}
+
+.fx .i {
+  width: 12px;
+  height: 12px;
+}
+
+/* The kind and sort lists beside the filter (17a, 17b): small boxes in the filter box's look, each showing its choice with
+   the arrow pair. The kind list is a little wider, for "All kinds". Their list is the select part's. */
+.sortw {
+  position: relative;
+  flex: 0 0 90px;
+}
+
+.sortw.k {
+  flex-basis: 104px;
+}
+
+.ssort {
+  width: 100%;
+  height: 30px;
+  padding: 0 5px 0 10px;
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background-color 0.2s var(--ease);
+}
+
+.ssort:hover,
+.ssort[data-popup-open] {
+  background: var(--hov);
+}
+
+.ssort:active {
+  background: var(--prs);
+}
+
+.win .ssort:focus-visible {
+  outline-offset: 0;
+}
+
+/* A list in a settings row (31a): filled with the quiet pill's shade, no edge, its own width, a down arrow. */
+.ssort.sfill {
+  width: auto;
+  flex: none;
+  padding: 0 8px 0 10px;
+  background: rgba(var(--sh), 0.07);
+  box-shadow: none;
+}
+
+.ssort.sfill:hover,
+.ssort.sfill[data-popup-open] {
+  background: rgba(var(--sh), 0.13);
+}
+
+.ssort.sfill:active {
+  background: rgba(var(--sh), 0.18);
+}
+
+.ib {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink);
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.ib:hover {
+  background: var(--hov);
+}
+
+.ib:active {
+  transform: scale(0.97);
+}
+
+/* The list. */
+
+.lscroll {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-timeline: --l block;
+  padding: 56px var(--gut) 28px;
+  transition: right var(--slide) var(--ease);
+}
+
+.stage.open .lscroll {
+  right: calc(var(--pw) + 8px);
+  padding-right: 20px;
+}
+
+.big {
+  margin: 6px 0 20px;
+  font-size: 36px;
+  line-height: 1.15;
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+.lnote {
+  max-width: 62ch;
+  margin: -10px 0 16px;
+  font-size: 13.5px;
+  color: var(--ink2);
+}
+
+/* "Show all" at the end of that line: a link in the sentence, so it keeps the line's height and size. */
+.lnote .lnk {
+  height: auto;
+  margin: -2px -4px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-size: inherit;
+}
+
+.sech {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 22px 2px 8px;
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.3;
+  font-weight: 400;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink2);
+}
+
+.lgroups > section:first-child .sech {
+  margin-top: 4px;
+}
+
+.grp {
+  position: relative;
+  margin: 0;
+  background: var(--card);
+  border-radius: 16px;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 1px 2px rgba(0, 0, 0, 0.03),
+    0 18px 32px -28px var(--lift);
+}
+
+.lgrp {
+  padding: 4px;
+  list-style: none;
+}
+
+.lrow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 50px;
+  border-radius: 10px;
+  scroll-margin-top: 60px;
+  scroll-margin-bottom: 12px;
+  transition: background-color 0.2s var(--ease);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 50px;
+}
+
+.lrow + .lrow::before {
+  content: "";
+  position: absolute;
+  left: 54px;
+  right: 12px;
+  top: 0;
+  height: 1px;
+  background: var(--line);
+}
+
+.lrow:hover::before,
+.lrow.on::before,
+.lrow:hover + .lrow::before,
+.lrow.on + .lrow::before {
+  opacity: 0;
+}
+
+.lrow:hover {
+  background-color: var(--hov);
+}
+
+.lrow:has(.rgo:active) {
+  background-color: var(--prs);
+}
+
+.lrow.on,
+.lrow.on:hover {
+  background-color: var(--row-on);
+}
+
+/* The mark of the one open: a bar at its edge, so it does not rest on a tint alone. */
+.lrow.on::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--add);
+}
+
+.rgo {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 50px;
+  padding: 0 8px 0 12px;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.win .rgo:focus-visible {
+  outline-offset: -2px;
+}
+
+.ktile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: rgba(var(--tc), 0.15);
+  color: color-mix(in srgb, rgb(var(--tc)) var(--icon-mix), var(--ink));
+  box-shadow: inset 0 0 0 0.5px rgba(var(--tc), 0.28);
+}
+
+/* The kind's drawing takes the tile's colour, as approved (amber for a key, blue for a login), not the vault's green. */
+.ktile .ki {
+  stroke: currentColor;
+  width: 16px;
+  height: 16px;
+}
+
+.ki {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: none;
+  stroke: var(--v);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rn {
+  flex: 5 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rname {
+  min-width: 0;
+  font-size: 14.5px;
+  line-height: 1.3;
+  font-weight: 500;
+  letter-spacing: -0.006em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rclip {
+  width: 13px;
+  height: 13px;
+  color: var(--ink2);
+}
+
+.rdet {
+  flex: 4 1 0;
+  min-width: 0;
+  font-size: 13.5px;
+  line-height: 1.3;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rdet.dots {
+  letter-spacing: 0.12em;
+}
+
+.rname.m {
+  font-size: 13.5px;
+  letter-spacing: -0.01em;
+}
+
+.stage.open .rdet {
+  display: none;
+}
+
+.rfold {
+  flex: 0 0 132px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage.open .rfold {
+  display: none;
+}
+
+.cslot {
+  flex: none;
+  width: 76px;
+  display: flex;
+  justify-content: flex-end;
+  padding-right: 6px;
+}
+
+.cpy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  background: none;
+  border: 0;
+  border-radius: 9px;
+  color: var(--ink2);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.cpy:hover {
+  background: var(--prs);
+  color: var(--v);
+}
+
+.cpy:active {
+  transform: scale(0.97);
+}
+
+.lempty {
+  padding: 26px 24px 28px;
+}
+
+.lempty p {
+  margin: 0;
+}
+
+.le-t {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+  overflow-wrap: anywhere;
+}
+
+.le-b {
+  margin-top: 6px;
+  color: var(--ink2);
+}
+
+/* Add, right there in an empty vault or folder: a button for each kind that can be made. */
+.le-a {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* "or", setting a whole .env apart from the kinds before it. */
+.le-or {
+  padding: 0 4px;
+  color: var(--ink2);
+}
+
+/* ---- The panel from the right ---- */
+
+.panel {
+  position: absolute;
+  z-index: 10;
+  top: 60px;
+  right: 8px;
+  bottom: 8px;
+  width: var(--pw);
+  display: flex;
+  flex-direction: column;
+  border-radius: 18px;
+  background-color: var(--paper);
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 24px 48px -28px var(--lift);
+  animation: slide var(--slide) var(--ease) both;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(calc(100% + 16px));
+  }
+
+  to {
+    transform: none;
+  }
+}
+
+.ptop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 56px;
+  padding: 12px 12px 4px 20px;
+}
+
+.pico {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+}
+
+.pscroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 6px 20px 24px;
+}
+
+.ptitle {
+  min-width: 0;
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: -0.024em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+/* A key's name as the heading of its details, in mono at the drawn size (3c). */
+.ptitle.m {
+  font-size: 17.5px;
+  line-height: 1.3;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+
+.psub {
+  margin: 5px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink2);
+  overflow-wrap: anywhere;
+}
+
+/* A panel with nothing at its top left has its heading on the close button's line (Panel.tsx); the words under it open the
+   part that scrolls. */
+.ptitle.ontop {
+  flex: 1 1 auto;
+}
+
+.psub.first {
+  margin-top: 0;
+}
+
+.gp {
+  margin-top: 18px;
+}
+
+/* A heading over a group of fields in the panel ("Earlier passwords"): the colour of a field's label. */
+.gh {
+  margin: 0 0 6px 14px;
+  font-size: 12.5px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--ink2);
+}
+
+/* "Attached files" with its Attach button on the same line, as drawn. */
+.gfh {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 6px 0;
+}
+
+.gfh .gh {
+  margin: 0 0 0 14px;
+}
+
+/* A stored file's row: its buttons (or its refusal) take the whole line under the name. */
+.frow > .fact {
+  flex: 1 1 100%;
+  margin-top: 0;
+}
+
+.frow > .fact .err {
+  flex: 1 1 100%;
+  margin: 0 0 2px;
+}
+
+.fld {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 10px 10px 10px 14px;
+}
+
+.fld.col {
+  display: block;
+  padding: 12px 12px 12px 14px;
+}
+
+.fld + .fld::before,
+.frow + .frow::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: var(--line);
+}
+
+.fv {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fl {
+  display: block;
+  font-size: 12.5px;
+  line-height: 1.3;
+  font-weight: 500;
+  color: var(--ink2);
+}
+
+.fval {
+  display: block;
+  margin-top: 2px;
+  font-size: 14.5px;
+  line-height: 1.35;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  overflow-wrap: anywhere;
+}
+
+.fnote {
+  display: block;
+  margin-top: 2px;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.sec {
+  display: block;
+  margin-top: 3px;
+  font-size: 16px;
+  line-height: 1.4;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.sec.hid {
+  letter-spacing: 0.09em;
+}
+
+/* A key's value, once revealed: in Geist Mono, and not selectable, since a native copy would skip the marks that keep it out
+   of Windows' clipboard history (Ctrl+C on it is Copy key, through the shell). */
+.kval {
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 14px;
+  /* What was saved is what shows: runs of spaces, tabs and line breaks stay, and a long line wraps at the edge. */
+  white-space: pre-wrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.fact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 12px;
+  background: rgba(var(--sh), 0.07);
+  border: 0;
+  border-radius: 15px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.pill:hover {
+  background: rgba(var(--sh), 0.13);
+}
+
+.pill:active {
+  transform: scale(0.97);
+  background: rgba(var(--sh), 0.18);
+}
+
+.pill .i {
+  width: 15px;
+  height: 15px;
+}
+
+.pill.t {
+  background: var(--add);
+  color: var(--addi);
+  font-weight: 600;
+}
+
+.pill.t:hover {
+  background: var(--addh);
+}
+
+.pill.t:active {
+  background: var(--addp);
+}
+
+.pill.cp {
+  min-width: 112px;
+}
+
+.frow {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  padding: 12px 12px 12px 14px;
+}
+
+.ftile {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: rgba(var(--tc), 0.15);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.fmeta {
+  flex: 1 1 120px;
+  min-width: 0;
+  display: block;
+}
+
+.fmeta b {
+  display: block;
+  font-size: 14px;
+  line-height: 1.3;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.fmeta small {
+  display: block;
+  margin-top: 1px;
+  font-size: 12.5px;
+  color: var(--ink2);
+}
+
+/* ---- Floating parts: dialogs, menus, lists ---- */
+
+.layer {
+  z-index: 50;
+}
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(var(--sh), 0.24);
+}
+
+.mode-dark .scrim {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.pal {
+  position: fixed;
+  z-index: 41;
+  top: 120px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 640px;
+  max-width: calc(100% - 32px);
+  background: var(--card);
+  border-radius: 18px;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 32px 80px -20px var(--lift);
+  overflow: hidden;
+}
+
+.pal.sm {
+  width: 480px;
+}
+
+.dlg {
+  padding: 22px 24px 18px;
+}
+
+.dlg h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.dlg p {
+  margin: 8px 0 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink2);
+}
+
+.dbtns {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.menu {
+  /* Never taller than the room the window leaves it (Base UI sets this on the positioner): a long menu (Move, with many folders)
+     scrolls inside it, so its last choice can be reached at the smallest window. */
+  max-height: var(--available-height, 60vh);
+  overflow-y: auto;
+  padding: 5px;
+  background: var(--card);
+  border-radius: 14px;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 20px 48px -14px var(--lift);
+}
+
+.mi {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 10px;
+  background: none;
+  border: 0;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mi:hover,
+.mi[data-highlighted] {
+  background: var(--hov);
+}
+
+.mi:active {
+  background: var(--prs);
+}
+
+.mi.dng {
+  color: var(--danger);
+}
+
+/* A menu that opens with lines saying how things stand (the vault menu: each vault, and Unlocked or Locked). */
+.menu.mwide {
+  display: flex;
+  flex-direction: column;
+  /* The vault menu, as drawn (5a): wider than the side menu, so it floats out over the list. */
+  width: 292px;
+  max-width: calc(100vw - 16px);
+  /* Never taller than the room the window leaves it (Base UI sets this on the positioner): the lines scroll, not the action. */
+  max-height: var(--available-height, 60vh);
+  overflow-y: hidden;
+}
+
+/* A menu of choices (Move to folder), as drawn (12a): wide enough for a long folder name. It scrolls as any long menu does. */
+.menu.mpick {
+  width: 264px;
+  max-width: calc(100vw - 16px);
+}
+
+.menu.mpick .mt {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mscroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.menu.mwide > :is(.mline, [role="group"]) {
+  flex: none;
+}
+
+.mnote {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.mnote .mt {
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mnote .ms {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--ink2);
+}
+
+.mline {
+  margin: 5px 6px;
+  border-top: 1px solid var(--line);
+}
+
+.flab {
+  display: block;
+  margin: 16px 0 5px 2px;
+  font-size: 12.5px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--ink2);
+}
+
+.finp {
+  display: block;
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  background: var(--card);
+  border: 0;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--edge);
+  font-size: 14px;
+}
+
+.finp:hover {
+  box-shadow: inset 0 0 0 1px var(--ink2);
+}
+
+/* The select part's box: a field that is a button, showing the chosen one with a small arrow pair; its list is the menu's
+   look, as wide as the box at least. */
+.sel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sel-i {
+  display: inline-flex;
+  color: var(--ink2);
+}
+
+.sel-pop {
+  min-width: var(--anchor-width);
+  max-height: min(var(--available-height), 280px);
+  overflow-y: auto;
+}
+
+.sel-on {
+  display: inline-flex;
+  margin-left: auto;
+}
+
+/* ---- The message at the foot ---- */
+
+/* One place for every message: the bottom centre of the whole window (the stack is the window's own child), whatever is open, so
+   a save or a delete that opens or closes the panel never moves it. It lies over the list and the panel, under the scrim, search
+   and menus (so it never covers a result or takes their clicks), and is never so wide that it reaches the side menu. */
+.tstack {
+  position: absolute;
+  left: 50%;
+  bottom: 52px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: min(540px, calc(100% - 44px));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.live:empty {
+  display: none;
+}
+
+.toast {
+  position: relative;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  /* The same room on both sides, so words alone ("Saved") sit in the middle; a button at the end takes 6px of it back. */
+  padding: 9px 16px;
+  overflow: hidden;
+  background-color: var(--toast);
+  color: var(--toast-ink);
+  border-radius: 14px;
+  font-size: 13.5px;
+  font-weight: 500;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 16px 36px -12px var(--lift);
+  animation: rise 0.24s var(--ease) both;
+}
+
+/* A sentence to read, not a few words (a file opened as a read-only copy): it wraps, and its button stays at the first line. */
+.toast.long {
+  align-items: flex-start;
+}
+
+.toast.long > span {
+  max-width: 54ch;
+  line-height: 1.45;
+}
+
+.tc {
+  color: rgba(255, 255, 255, 0.86);
+  white-space: nowrap;
+}
+
+.tn {
+  font-weight: 600;
+  color: var(--toast-ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.tb2 {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  min-width: 26px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.14);
+  border: 0;
+  border-radius: 13px;
+  color: var(--toast-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toast > .tb2:last-child {
+  margin-right: -6px;
+}
+
+.tb2:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.tb2 .i {
+  width: 12px;
+  height: 12px;
+}
+
+.app .toast :focus-visible {
+  outline: 2px solid var(--toast-ink);
+  outline-offset: 1px;
+}
+
+/* ---- The app's questions: banners over the list and on the lock screen ---- */
+
+/* The banners of one screen, in a column; none, no space. */
+.asks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 62ch;
+  margin: 0 0 16px;
+}
+
+.asks:empty {
+  display: none;
+}
+
+/* A banner is words, with its buttons below: the card's colour and an edge, the text colour for the words. */
+.ask {
+  padding: 12px 14px;
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+}
+
+.ask p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.ask .err {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.ask-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* A refusal of the question's answer, above the buttons and left-aligned like the words. */
+.dbtns .err {
+  flex: 1 1 100%;
+  order: -1;
+  margin: 0;
+  text-align: left;
+}
+
+/* ---- Search: its button in the side menu, and the box that opens over the window ---- */
+
+/* The key cap that names a shortcut: quiet words on the ground, with a thin edge. */
+.kc {
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--ground);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink2);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.srch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  margin: 0 8px 4px;
+  padding: 0 6px 0 10px;
+  /* A box of its own, as drawn (1d, 3h): the card's colour with a thin edge, like the buttons at the foot. */
+  background: var(--card);
+  border: 0;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--ink2);
+  text-align: left;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.srch:hover {
+  background: var(--hov);
+}
+
+.srch:active {
+  background: var(--prs);
+  transform: scale(0.97);
+}
+
+.rail.closed .srch {
+  justify-content: center;
+  width: 44px;
+  margin: 0 8px 4px;
+  padding: 0;
+}
+
+.rail.closed .kc {
+  display: none;
+}
+
+/* The box: it is as tall as its answers, up to what the window leaves, and scrolls inside. */
+.pal.find {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100% - 144px);
+}
+
+.stop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 18px;
+  box-shadow: 0 1px 0 var(--line);
+  transition: box-shadow 0.2s var(--ease);
+}
+
+.stop:focus-within {
+  box-shadow: 0 2px 0 var(--v);
+}
+
+.stop .i {
+  width: 19px;
+  height: 19px;
+  color: var(--ink2);
+}
+
+.pin {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 56px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.pin::placeholder {
+  color: var(--ink2);
+  opacity: 1;
+}
+
+/* The line under the box is the focus mark here, so the ring is not drawn as well. */
+.pal .pin:focus-visible {
+  outline: none;
+}
+
+.hlist {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px;
+  overflow-y: auto;
+}
+
+.hlist ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.res {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 0;
+  border-radius: 12px;
+  transition: background-color 0.2s var(--ease);
+}
+
+.res:hover,
+.res:focus-within {
+  background: var(--hov);
+}
+
+.hgo {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 6px 8px 10px;
+  background: none;
+  border: 0;
+  border-radius: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hgo:active {
+  transform: scale(0.99);
+}
+
+.hmeta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+}
+
+.ht {
+  display: block;
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A key's result: its name in mono at the drawn size (4b). */
+.ht.m {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.hd {
+  display: block;
+  margin-top: 1px;
+  font-size: 12.5px;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A result's buttons show on the first one, the one the pointer is on, and the one with focus in it. */
+.ra {
+  flex: none;
+  display: flex;
+  gap: 5px;
+  opacity: 0;
+  transition: opacity 0.2s var(--ease);
+}
+
+.res:hover .ra,
+.res:focus-within .ra,
+.res.first .ra {
+  opacity: 1;
+}
+
+.ra .pill {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+.hempty {
+  padding: 22px 18px 24px;
+  text-align: center;
+}
+
+.hempty b {
+  display: block;
+  font-size: 14.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.hempty span {
+  display: block;
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--ink2);
+}
+
+/* What is missing from the answers: a busy vault, said above the results. */
+.snote {
+  margin: 0;
+  padding: 8px 18px 0;
+  font-size: 13px;
+  color: var(--ink2);
+}
+
+.serr {
+  margin: 0;
+  padding: 8px 18px 0;
+}
+
+.sfoot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px;
+  background: var(--ground);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---- Add, the new-login form and the generator (6a to 6d, 16a) ---- */
+
+/* Add at the right end of the toolbar. The pairs are the main button's, measured with the others. */
+.addslot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.addb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 84px;
+  height: 32px;
+  padding: 0 14px 0 10px;
+  background: var(--add);
+  border: 0;
+  border-radius: 10px;
+  color: var(--addi);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+.addb .i {
+  width: 15px;
+  height: 15px;
+  stroke-width: 2;
+}
+
+.addb:hover,
+.addb[aria-expanded="true"] {
+  background: var(--addh);
+}
+
+.addb:active {
+  transform: scale(0.97);
+  background: var(--addp);
+}
+
+/* The panel's footer: the form's buttons, in view while the fields scroll. */
+.pbar {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 0 0 18px 18px;
+  box-shadow: 0 -1px 0 var(--line);
+}
+
+.fbox {
+  min-width: 0;
+}
+
+/* A label with a button beside it (Password and Generate): both centred on one row, 5px above the box, as 6b and 11a draw it. */
+.flrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0 5px;
+}
+
+.flrow .flab {
+  margin: 0 0 0 2px;
+}
+
+.fhint {
+  margin: 8px 2px 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ink2);
+}
+
+.finp.m {
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+}
+
+/* A note's text: a taller box that grows downward only, its lines kept as typed. */
+.farea {
+  height: auto;
+  min-height: 132px;
+  padding: 10px 12px;
+  line-height: 1.5;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.finp[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.fbox .err {
+  margin-top: 8px;
+}
+
+/* ---- The Trash and the folders (Task 14) ---- */
+
+/* A question's dangerous answer (Delete for good, Delete, Open anyway): filled red, as drawn (13d, 10b, 14d). Cancel, the quiet
+   pill beside it, still has the focus when the question opens. */
+.pill.dfill,
+.pill.dfill:hover,
+.pill.dfill:active {
+  background: var(--danger-fill);
+  color: var(--danger-fill-ink);
+  font-weight: 600;
+}
+
+/* A short line of words in a panel, under what it explains. */
+.tnote {
+  margin: 8px 0 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink2);
+}
+
+/* A card set apart at the foot of a panel (2b, 13b): Move to trash, or the Trash's Restore and Delete for good, each a row
+   that fills the card, with a line between two rows; the sentence under it centred. */
+.gapart {
+  margin-top: 34px;
+}
+
+.dgr {
+  display: block;
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  background: none;
+  border: 0;
+  border-radius: 14px;
+  color: var(--danger);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease);
+}
+
+/* The focus ring sits inside the row, so on two stacked rows it does not cross the line between them. */
+.dgr:focus-visible {
+  outline-offset: -2px;
+}
+
+.dgr:hover {
+  background: var(--hov);
+}
+
+.dgr:active {
+  background: var(--prs);
+  transform: scale(0.985);
+}
+
+.dgr.calm {
+  color: var(--v);
+  font-weight: 600;
+}
+
+.dgr + .dgr {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: inset 0 1px 0 var(--line);
+}
+
+.dgr:has(+ .dgr) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.dcap {
+  margin: 7px 0 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--ink2);
+}
+
+/* "New folder" in the side menu becomes a name box: its edge in the quiet text colour (the ordinary edge is a hair under 3 to 1
+   on the side menu's tint), and in the error colour once the name was refused. */
+.nfold {
+  padding: 4px 0 2px;
+}
+
+.nfin {
+  height: 34px;
+  box-shadow: inset 0 0 0 1px var(--ink2);
+}
+
+.nfin[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+
+.nfold .err {
+  margin: 6px 4px 0;
+}
+
+/* The generator: the value, what changes it, and its two buttons. Inside the form it sits under the password; on its own
+   page it is the page. */
+.gen {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(var(--sh), 0.05);
+}
+
+.gout {
+  display: block;
+  min-height: 40px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: var(--card);
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  /* Not selectable: a native copy would skip the marks that keep a password out of Windows' clipboard history. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.grow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 32px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.grow input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--v);
+}
+
+.grow input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--v);
+}
+
+.gnum {
+  flex: none;
+  width: 24px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.gact {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.gkind {
+  display: flex;
+}
+
+/* Choices side by side (Characters or Passphrase, Replace or Keep both, the theme): the chosen one a filled card with a thin
+   edge, so the choice is not told by a tint alone. */
+.segs {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin-left: auto;
+  border-radius: 10px;
+  background: rgba(var(--sh), 0.08);
+}
+
+.gkind .segs {
+  margin-left: 0;
+}
+
+.seg {
+  height: 26px;
+  padding: 0 11px;
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 0.2s var(--ease),
+    transform 0.2s var(--ease),
+    box-shadow 0.2s var(--ease);
+}
+
+/* The picked choice: a filled pill, as drawn (15b, 16a, 31a), not an accent ring that reads as keyboard focus. Its thin edge in
+   the quiet text colour keeps the 3 to 1 a state needs against the bar. */
+.seg[aria-pressed="true"] {
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--ink2);
+  font-weight: 600;
+}
+
+.seg:active {
+  transform: scale(0.97);
+}
+
+/* ---- Paste a .env (Task 17) ---- */
+
+/* The main pill of a panel while there is nothing to do with it (Save before any key is read, or once every one is left out): the
+   same grey as the main button's off state, still reachable by keyboard and said as off to a screen reader (`aria-disabled`). */
+.pill.t[aria-disabled="true"],
+.pill.t[aria-disabled="true"]:hover,
+.pill.t[aria-disabled="true"]:active {
+  background: var(--line);
+  color: var(--ink2);
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* A quiet pill that must not be pressed while a save runs (Cancel under a file being written): the quiet words, no press. */
+.pill[aria-disabled="true"] {
+  color: var(--ink2);
+  cursor: not-allowed;
+}
+
+.pill[aria-disabled="true"]:active {
+  transform: none;
+}
+
+/* The keys read from a paste: one card, a row for each. A row is the name, the dots that stand for its hidden value (no way to show
+   it) and the button that leaves it out; a name already in the folder adds a line under them with its choice. */
+.erows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.erow {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 8px 8px 8px 14px;
+}
+
+.erow + .erow::before {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: var(--line);
+}
+
+.en {
+  min-width: 0;
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.ed {
+  color: var(--ink2);
+  font-size: 13px;
+  letter-spacing: 1px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.ex {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  color: var(--ink2);
+  cursor: pointer;
+  transition: background-color 0.2s var(--ease);
+}
+
+.ex:hover {
+  background: var(--hov);
+}
+
+.ex:active {
+  background: var(--prs);
+}
+
+.ex .i {
+  width: 14px;
+  height: 14px;
+}
+
+.econf {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding-bottom: 4px;
+}
+
+.econf > span:first-child {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink2);
+}
+
+.eas {
+  flex-basis: 100%;
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 12.5px;
+  color: var(--ink2);
+  overflow-wrap: anywhere;
+}
+
+/* ---- The save box: a key copied with the shortcut (Task 18) ---- */
+
+/* The copied value: a field that shows its dots, or the value itself once Show is pressed; it wraps, since a key can be long. */
+.cval {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 12px;
+  background: var(--card);
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px var(--edge);
+  color: var(--ink);
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.cval .cdots {
+  color: var(--ink2);
+  letter-spacing: 1px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* The copied value once shown: not selectable, since a native copy would skip the marks that keep it out of Windows' clipboard
+   history (as `.kval`). */
+.cval .cshown {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* A tick box with its words beside it, in a panel's form. */
+.fchk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.fchk input {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--v);
+}
+
+.fbox .fchk + .fhint {
+  margin-top: 4px;
+}
+
+/* What the page says of the copy at the top of the box: a quiet line, and a line for a screen reader that is empty until it has something to say. */
+.cnote {
+  margin: 12px 2px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink2);
+}
+
+/* ---- Settings (Task 20, 31a and 31b) ---- */
+
+/* A row of a group: its words (and a hint under them) on the left, its control on the right. A refusal takes the line under both. */
+.srow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  min-height: 50px;
+  padding: 8px 14px;
+}
+
+.srow + .srow {
+  border-top: 1px solid var(--line);
+}
+
+.swords {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.slab {
+  display: block;
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.swords .fhint {
+  display: block;
+  margin: 2px 0 0;
+}
+
+.srow .fval {
+  margin: 0;
+}
+
+.srow .segs {
+  margin-left: 0;
+}
+
+.srow .snote {
+  flex: 1 1 100%;
+  margin: 2px 0 0;
+}
+
+.srow .ferr {
+  flex: 1 1 100%;
+  margin: 2px 0 0;
+}
+
+/* The words of a refusal on a row. */
+.ferr {
+  margin: 8px 2px 0;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* A list in a row: it keeps its own width (the list inside is as wide as its words) and never shrinks. */
+.ssel {
+  flex: none;
+}
+
+/* The save shortcut: the key cap and the pill that changes it. Its words keep at least 112px (the drawn 1280 window gives
+   them about 130), so in a narrower panel (1093 by 534) the key and pill drop to the line under the words, at the right,
+   instead of squeezing the words into a thin column. */
+.swords:has(+ .skeys) {
+  flex: 1 1 112px;
+}
+
+.skeys {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.skeys .kc {
+  font-size: 12.5px;
+  line-height: 24px;
+}
+
+/* The key cap while the page waits for the new keys: the vault's colour round it, so the state is not told by colour alone (it says "Press the new keys"). */
+.keycap {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 9px;
+  box-shadow: inset 0 0 0 1.5px var(--v);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* An on and off switch: a track that is the vault's colour when on, and a knob that slides across. It is a tick box underneath, so it is
+   set and read with the keyboard and a screen reader as one (it says "switch" and on or off). */
+.swt {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  margin: 0;
+  background: var(--switch-off);
+  border-radius: 12px;
+  cursor: pointer;
+  appearance: none;
+  transition: background-color 0.2s var(--ease);
+}
+
+.swt::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 16px;
+  height: 16px;
+  background: var(--switch-knob);
+  border-radius: 50%;
+  transition: transform 0.2s var(--ease);
+}
+
+.swt:checked {
+  background: var(--add);
+}
+
+.swt:checked::after {
+  transform: translateX(16px);
+}
+
+.swt[aria-disabled="true"] {
+  cursor: default;
+}

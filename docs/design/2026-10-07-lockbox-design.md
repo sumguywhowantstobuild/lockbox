@@ -1,6 +1,6 @@
 # Lockbox — Design Spec
 
-**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 6 (2026-10-27, Plan 3 decisions; §7.3 clipboard ownership updated 2026-11-01)
+**Date:** 2026-10-07 · **Author:** Ariel Maningas · **Status:** revision 7 (2026-11-05, the [user interface design](2026-11-05-user-interface-design.md); revision 6 was Plan 3's decisions, 2026-10-27). What revision 7 adds is designed, and comes with Plan 4's build; 7.2 and 7.3 carry the results of Plan 4's first checks (2026-11-06). 5.2 shows the recovery secret as 24 words (2026-11-06, Ariel; the derivation and the vault format are unchanged).
 
 ## 1. Purpose
 
@@ -12,7 +12,7 @@ Moved to [docs/PRD.md](../PRD.md#purpose).
 | R1 | **Confidentiality at rest.** Without the vault password or recovery key, a copy of the vault folder reveals only: the vault name, key-derivation parameters, the number of items and stored files, item sizes rounded up to 512-byte buckets, exact stored-file sizes, and file timestamps. (An old header plus an old password is covered in 5.3.) |
 | R2 | **Integrity.** Any modification of a key slot, the header fields, an item, or a file chunk is detected and refused or warned about. (Limits: R7.) |
 | R3 | **Guessing cost.** Each password guess costs one Argon2id derivation of at least 64 MiB, 3 iterations, parallelism 4 (calibrated to ~1 s, capped per 5.2); vaults outside the accepted bounds are refused. |
-| R4 | **No plaintext written by Lockbox** except where the user asks for it: "Save a copy", "Open", and printing or saving the recovery key as a PDF. OS paging, hibernation, crash dumps and the print spooler are outside Lockbox's control (5.6). |
+| R4 | **No plaintext written by Lockbox** except where the user asks for it: "Save a copy" (one file, or all of a folder's files), "Open", printing or saving the recovery key as a PDF, an export, and saving a folder's keys as a `.env` file. OS paging, hibernation, crash dumps and the print spooler are outside Lockbox's control (5.6). |
 | R5 | **No secrets in logs or error messages**: no passwords, keys, recovery keys or item content. |
 | R6 | **Locking stops access.** After a vault locks, no command returns its data and its running operations stop (7.4). |
 | R7 | **Documented limits.** v1 does not detect an attacker restoring an older valid copy of an item, or deleting a whole item file (6.6). |
@@ -67,18 +67,21 @@ Moved to [docs/PRD.md](../PRD.md#scope).
 |---|---|---|
 | Vault keys, file keys, password/recovery-derived keys | **Never** | — |
 | File contents | **Never** | Rust streams between disk and the vault directly |
-| File system paths | **Never from the UI** | Dialogs are opened by Rust inside commands (4.2) |
+| File system paths | **Never from the UI** | Dialogs are opened by Rust inside commands (4.2). Rust may send a path for the person to read (a saved export's folder); it is never accepted back |
 | Vault password, new password | UI → Rust | Typed into the UI on unlock, create, change |
 | Recovery key | Rust → UI once; UI → Rust | Displayed at creation/regeneration; typed in when recovering or restoring |
 | Item titles, usernames, URLs, notes, collection names | Rust → UI | While a list, item or search result is displayed |
-| Item passwords | Rust → UI | Only on "Reveal" or while editing. **Never for copying**: copy runs entirely in Rust. |
+| Item passwords, key values, earlier passwords | Rust → UI | Only on "Reveal" or while editing. **Never for copying**: copy runs entirely in Rust. |
+| A value captured by the save shortcut | Rust → UI | Only on "Reveal" (7.3) |
+| A pasted `.env` | UI → Rust | Once, on paste; the box empties at once and shows rows with names only |
+| A generated password | Rust → UI; UI → Rust | Sent for display; sent back only to copy it, like a typed password |
 
 **The search index lives in Rust.** The UI sends a query and receives only the matching results to display.
 
 **Places copies of secrets may exist:** the webview's memory (typed and displayed values), the IPC message buffers
 (typed passwords arrive and revealed values leave as JSON text that is not wiped), the OS clipboard (after a copy, until
-cleared), the Windows pagefile and hibernation file, crash dumps, the print spooler, and the user's chosen "Save a
-copy"/"Open" locations. The UI clears its state on lock (7.4), but webview memory can't be wiped as reliably as Rust's.
+cleared), the Windows pagefile and hibernation file, crash dumps, the print spooler, and the user's chosen locations for
+"Save a copy", "Open", an export and a saved `.env`. The UI clears its state on lock (7.4), but webview memory can't be wiped as reliably as Rust's.
 WebView2 autofill is off and the webview runs without a persistent profile, so typed values are not stored by it.
 
 ### 4.2 Tauri command security
@@ -138,9 +141,31 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
   - **Accepted when reading** (vault.json is attacker-controlled before unlock): memory 64 MiB–1 GiB, iterations 3–10,
     parallelism 4–16, salt exactly 16 bytes. Out-of-bounds values are refused **before** any derivation.
   - Calibration output always lies inside the read bounds (tested).
-- **Recovery secret:** 256 random bits plus a 4-bit checksum (the first 4 bits of SHA-256 of the secret), shown as 52
-  Crockford base32 characters in 13 groups of 4. Input ignores spaces, dashes and case, and maps O→0 and I/L→1. A typo
-  is reported as "That recovery key has a typo" (caught 15 times in 16) before any unwrap attempt.
+- **Recovery secret:** 256 random bits, shown as 24 numbered words from the BIP39 English word list (2,048 words, the
+  list crypto wallets use): the secret plus an 8-bit checksum (the first 8 bits of SHA-256 of the secret), cut into 24
+  pieces of 11 bits, one word each. This is BIP39's encoding of the secret only; BIP39's seed step (PBKDF2) isn't used,
+  so the key below is derived exactly as before. (Ariel, 2026-11-06: the earlier 52 characters in 13 groups were
+  confusing to write down.)
+  - **Reading it back:** the text is lowercased with ASCII rules only (no Unicode folding). Separators are any run of
+    spaces, tabs, line breaks, commas or periods. A token of only digits, or digits followed by `.` or `)`, is a word
+    number and is dropped. Every other token must match one word exactly on its first four letters, or the whole word
+    when the word is shorter than four (`act` matches only "act", never "action"); the first four letters are unique in
+    the list. Exactly 24 words are needed. A token that matches no word is reported with its position ("Word 7 isn't a
+    recovery key word"), a wrong count says how many were found, and a checksum mismatch is "That recovery key has a
+    typo" (a wrong but listed word is caught 255 times in 256), all before any unwrap attempt.
+  - **Only this form:** the earlier 52-character form isn't accepted. No release has shipped, so no one holds such a key,
+    and accepting both would make reading riskier (a group like `0000` looks like numbering) (my call, 2026-11-06; if a
+    vault made with a development build holds real data, keep its password, or make a new key from the open vault).
+  - **The list:** the file stored is Trezor's `python-mnemonic` copy of the BIP39 English list
+    (`src/mnemonic/wordlist/english.txt`, MIT, whose notice is the one kept), the same list `bitcoin/bips` publishes;
+    the test pins its SHA-256, and the build checks that the two copies match when the file is added. It is kept in the core with a third-party notice, pinned by its SHA-256 in a test that
+    also checks its shape (2,048 sorted, lowercase, unique words; unique first four letters). The encoding is the core's
+    own few lines over `sha2`, checked against BIP39's published test vectors, rather than a new crate (my call:
+    rust-bitcoin's `bip39`, CC0, would work, but its decoding returns an unwiped buffer, it has no first-four-letters
+    reading, and a password manager's core takes on as few dependencies as it can).
+  - **Not a wallet phrase:** 24 such words look like a crypto wallet's recovery phrase, which malware and scams hunt for.
+    Every screen and the PDF that show it are headed "Lockbox recovery key, not a crypto wallet phrase", and
+    `SECURITY.md` says so.
   **Recovery key** = HKDF-SHA256(ikm = secret, salt = recovery-slot salt (16 random bytes),
   info = `"lockbox recovery key v1"`) → 32 bytes.
 - **Key slots** in `vault.json`: `{type: "password"|"recovery", slot_version, salt, [kdf params], nonce: 24 random
@@ -171,6 +196,10 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
 - Each item file records its own readable **item_version** beside the ciphertext.
 - AD = `"lockbox/item"` ‖ item_version ‖ vault_id ‖ item_id. An item file can't be moved into another slot or vault
   undetected.
+- **Encrypted fields added by Plan 4:** a **Key** item holds a value, and its title is its name, which must be a valid
+  variable name; the value is never indexed. A **login** holds up to 5 earlier passwords, oldest dropped, each with the date
+  it was replaced; the engine moves the old one on a real change, never the UI. An item trashed with its collection records
+  that collection in `trashed_with`. An existing item with none of these fields still opens.
 
 ### 5.5 Files (blobs)
 - Each stored file has a random **file_id** and its own random 256-bit **file key**, kept inside its (encrypted) item.
@@ -209,13 +238,14 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
 ├── vault.json.bak      copy of the current vault.json
 ├── .lock               held with an OS exclusive lock while a Lockbox instance has the vault open
 ├── items/
-│   └── <hex id>.item        one encrypted item (login, note, file metadata, or collection)
+│   └── <hex id>.item        one encrypted item (login, key, note, file metadata, or collection)
 └── files/
     ├── <hex file_id>.blob   one encrypted file (chunks back to back)
     └── orphaned/            quarantine for unreferenced blobs (6.4)
 ```
 - **Collections are items** of type `collection`; other items reference their collection's ID. Deleting a collection
-  asks for confirmation and moves its items to the trash with it.
+  asks for confirmation and moves its items to the trash with it. Restoring the collection brings back the items whose
+  `trashed_with` names it (5.4), and restoring any item clears its own field.
 - **On-disk names are random IDs.** Titles, usernames, collection names and file names exist only inside encrypted
   items. The **vault name is readable** in `vault.json` so the lock screen can list vaults (it is covered by the header
   MAC); the UI warns at creation not to put secrets in it.
@@ -497,6 +527,17 @@ authenticated.
   temp sibling `.<random>.lockbox-partial` (created with the hidden attribute), verifies the entire stream, then renames
   it over the destination (6.2). On failure or cancellation only the temp file is deleted; **an existing destination is
   never touched unless the copy completed and verified.** Free space and file-size limits are checked first.
+- **Save all of a folder's files:** Rust opens the folder picker, then saves each stored file in the collection, attached
+  ones included, by the rules above up to the rename, as one job with one Cancel. The picker's title says the copies are
+  unencrypted. Free space for the whole batch is checked first. **An existing file is never replaced:** unlike a single
+  copy, the last step is a rename that refuses a taken name, under the same generation check, and a taken name gets " (2)",
+  then " (3)", also for a file that appears at the last moment. On a cancel or a lock, finished files stay and the file in progress leaves nothing. A damaged file is named in the result, and
+  the rest continue.
+- **An export, a saved `.env` and a recovery key PDF** follow Save a copy's rules: Rust picks the destination, a vault
+  folder or Lockbox's state folder is refused, a cloud-synced folder warns first, the file goes to a journaled hidden temp
+  file beside it, and it's renamed into place only if the session's generation is still current. An existing file is
+  untouched until then. A lock while WebView2 writes the PDF means the result is discarded. For the PDF, the temp is a new
+  file inside a new hidden folder there, since WebView2 refuses an existing hidden file (tested on 2026-11-06).
 - **Open:**
   - Decrypts into `%LOCALAPPDATA%\Lockbox\open\<random>\`, a folder whose permissions are restricted to the current
     Windows user, and launches the file with its default app **only after the full stream has verified.**
@@ -526,13 +567,34 @@ formats when the clipboard closes, which changes it after Lockbox's write.) If a
 cannot be set, the clipboard is emptied and the copy fails. Each copy has its own timer; a clear that finds the
 clipboard busy keeps trying until it succeeds or the copy is gone. Locking a vault clears a copy made from that vault; locking all vaults clears any.
 
+**Copy from the generator** takes the value from the UI and copies it in Rust with the same marks and timer, owned by the
+unlocked vault on screen.
+
+**The save shortcut:** apart from the clear below, this is the only time Lockbox reads the clipboard. A press reads it once, in Rust, into a single wiped slot
+with a new random capture ID, and tells the UI only that a value is waiting. A save or Reveal must name the current capture ID.
+A second press replaces the value and the ID. The slot empties on saving, cancelling, Lock all, closing the window, Quit, Windows
+locking or sleeping, locking the vault chosen in the box, and once the auto-lock idle time passes even with no vault open.
+Unlocking a vault doesn't empty it.
+
+**Clearing a value Lockbox didn't copy:** the save box offers it. Only if the person asks, in one clipboard opening, Lockbox
+reads the text to compare it, and clears it only if it's still the same. A different value it reads there is dropped at once. A value copied from another app usually carries no exclusion formats, so Windows clipboard
+history may keep it, and the wording doesn't promise otherwise. Tested on 2026-11-05: after the clear, the value copied
+from Notepad was still in Win+V. The save box compares the text exactly as it was read (the value saved is that text without the
+spaces and line breaks round it). The `.env` paste panel offers the same clear for the text it was given, after its keys are written,
+counting CRLF and LF as one line break, since the page may not keep Windows' CRLF; a save that writes no key never clears.
+
+The shortcut is registered Windows-wide on the hidden window, so it works with Lockbox minimised, hidden or behind another
+app (tested on 2026-11-05). The default is Ctrl+Shift+L (Ariel's pick). While Lockbox runs, other apps lose that key
+combination, among them Bitwarden's browser extension, which fills a login with it; Settings can change it.
+
 ### 7.4 Locking (concurrency contract)
 - **Idle** means no keyboard or mouse input anywhere in Windows for the configured minutes. **While a long operation the
   user started is running** (import, Save a copy, Open, backup, restore), the idle timer is paused, the UI shows why, and
   Lockbox asks Windows to stay awake (`SetThreadExecutionState`). Paused means time spent in a long operation does not
   count: after it ends, idle time counts from its end. **Windows lock, sleep and hibernate always lock all vaults
   immediately**, cancelling such operations. Signing out, switching user and a remote-desktop disconnect count as
-  Windows lock. Closing the app locks all vaults.
+  Windows lock. Closing the window locks all vaults and hides Lockbox to the tray, and Quit in the tray menu locks them and
+  stops it. During a long operation both ask first.
 - **Two guarantees, kept separate:**
   - **Access is denied immediately.** From the moment of locking, no new command runs and no response carrying vault
     data is accepted by the UI.
@@ -553,7 +615,9 @@ clipboard busy keeps trying until it succeeds or the copy is gone. Locking a vau
 - **Long operations** check for cancellation between chunks, delete their partial output (via 6.4 / 7.2 rules) and
   report "Cancelled: vault locked." A restore holds its own key from unlocking the backup, independent of any session
   of the destination vault; locking or closing the destination vault cancels a restore only before its swap starts (6.8).
-  A credential change or a new vault that a lock interrupts after it was written says so ("changed, but locked before it
+  A finished restore waiting for its answer stays through an idle lock; Windows locking or sleeping still cancels it.
+  **Each long operation has its own stop,** linked to the session's, and an operation ID says which: Cancel stops that
+  operation and leaves others in the vault running, and a lock stops them all. A credential change or a new vault that a lock interrupts after it was written says so ("changed, but locked before it
   could be shown") instead of plain "locked".
 - **Unlocking** is not cancellable inside the engine: a lock during it discards the result when the unlock returns. The
   password derivation runs until it returns, so the chunk bound above does not apply to it; the vault it returns is
@@ -566,6 +630,8 @@ clipboard busy keeps trying until it succeeds or the copy is gone. Locking a vau
 |---|---|
 | Wrong password | "Wrong password." (after also trying `.bak`, 6.3). No lockout (5.6). |
 | Recovery key typo | "That recovery key has a typo" (checksum, 5.2). |
+| Recovery key word not in the list | "Word 7 isn't a recovery key word" (5.2). The core's refusal carries the word's position, a number only. |
+| Recovery key with the wrong count | "That's 23 words; a recovery key has 24" (5.2). The core's refusal carries the count, a number only. |
 | Out-of-bounds Argon2 parameters or oversized header | Refused before derivation: "This vault file is damaged or not a Lockbox vault." |
 | Header MAC mismatch | Warning after unlock; header rewritten only with the user's OK (5.2). |
 | Damaged/tampered item | That item shows as damaged and is refused; the rest of the vault works; offer restore or open a backup read-only. |
@@ -589,6 +655,9 @@ clipboard busy keeps trying until it succeeds or the copy is gone. Locking a vau
 | Crash while unlocked | Session memory is gone with the process (5.6 limits); temp outputs, `.tmp`/`.partial` files and "Open" files cleaned at next launch/unlock. |
 
 **Rule:** no password, key, recovery key or item content ever appears in an error message or log (R5).
+
+**On screen:** the words and buttons for every moment the app has to ask are in the
+[user interface design](2026-11-05-user-interface-design.md#the-apps-questions), and screens never show raw error text.
 
 ## 9. Testing (acceptance criteria)
 

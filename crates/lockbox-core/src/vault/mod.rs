@@ -22,7 +22,7 @@ use crate::item::Item;
 use crate::kdf::{Argon2Params, check_new_password, derive_password_key};
 use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
-use crate::search::SearchIndex;
+use crate::search::{SearchHit, SearchIndex};
 use crate::secret::{Key32, random_bytes};
 use crate::slots::{KeySlot, SlotType, wrap_slot};
 use crate::{CoreError, Result};
@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use backup::BackupReport;
+pub use files::refuse_vault_folder;
 pub use journal::{JournalStep, JournalView, inspect_restore_journal};
 pub use naming::folder_name;
 pub use naming::is_reserved_device_name;
@@ -163,7 +164,11 @@ impl Vault {
         Self::create_with_id(parent, name, password, VaultId::random())
     }
 
-    fn create_with_id(
+    /// Like [`create`](Self::create), with the vault's ID chosen by the caller. The ID decides the folder's name
+    /// ([`folder_name`]), so a caller can write down where the vault will be (the shell's "recovery key not
+    /// confirmed" mark) before it exists. Use a fresh [`VaultId::random`]: the ID is bound into the vault's key slots,
+    /// and two different vaults should not share one.
+    pub fn create_with_id(
         parent: &Path,
         name: &str,
         password: &str,
@@ -408,7 +413,7 @@ impl Vault {
     }
 
     /// Items matching `q`, best first, at most `limit` (see [`SearchIndex::query`]).
-    pub fn search(&self, q: &str, limit: usize) -> Vec<ItemId> {
+    pub fn search(&self, q: &str, limit: usize) -> Vec<SearchHit> {
         self.index.query(q, limit)
     }
 

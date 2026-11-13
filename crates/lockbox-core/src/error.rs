@@ -11,6 +11,12 @@ pub enum CoreError {
     RecoveryKeyTypo,
     #[error("invalid recovery key")]
     InvalidRecoveryKey,
+    /// A word of the typed recovery key that is not in the list; `position` counts the words from 1 (numbers dropped).
+    #[error("recovery key has a word that is not in the list")]
+    RecoveryKeyWord { position: usize },
+    /// The typed recovery key has `found` words, not 24.
+    #[error("recovery key has the wrong number of words")]
+    RecoveryKeyCount { found: usize },
     #[error("damaged data: {what}")]
     Damaged { what: &'static str },
     #[error("password is too short (minimum {min} characters)")]
