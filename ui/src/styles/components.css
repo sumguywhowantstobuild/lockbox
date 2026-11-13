@@ -531,7 +531,9 @@
   display: flex;
   height: 100%;
   min-height: 0;
-  overflow: hidden;
+  /* clip, not hidden: a hidden box can still be scrolled, and focus moving into the panel as it slides in scrolled it
+     sideways (styles/panels.test.ts). */
+  overflow: clip;
   background: var(--ground);
   color: var(--ink);
 }
@@ -920,7 +922,8 @@
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  /* clip, as .win: nothing can scroll the list sideways while the panel slides in. */
+  overflow: clip;
   timeline-scope: --l;
 }
 
@@ -1164,7 +1167,7 @@
   overflow-x: hidden;
   scroll-timeline: --l block;
   padding: 56px var(--gut) 28px;
-  transition: right 0.28s var(--ease);
+  transition: right var(--slide) var(--ease);
 }
 
 .stage.open .lscroll {
@@ -1489,7 +1492,7 @@
   box-shadow:
     0 0 0 1px var(--line),
     0 24px 48px -28px var(--lift);
-  animation: slide 0.28s var(--ease) both;
+  animation: slide var(--slide) var(--ease) both;
 }
 
 @keyframes slide {
