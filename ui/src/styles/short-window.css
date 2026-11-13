@@ -2,6 +2,17 @@
    a laptop at 125%. Under 700 high the full-screen steps are tighter and the right side scrolls if it must; in narrow
    windows the panel and the side menu give room back. */
 
+/* The recovery key's 24 words are the tallest thing on the setup screens: under 880px high their rows sit closer, so the
+   key, its warnings and Continue fit at 1280 by 800 (21c, 21d's wrong pick, 21f). The rules under 700px tighten further,
+   so this block stays above theirs: placed after, it would undo them on the smallest windows. */
+@media (max-height: 880px) {
+  .fu-key {
+    padding: 10px 16px;
+    font-size: 15px;
+    line-height: 1.4;
+  }
+}
+
 @media (max-height: 700px) {
   .lock {
     height: 100%;

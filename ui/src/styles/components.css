@@ -67,7 +67,10 @@
   flex-direction: column;
   gap: 20px;
   justify-content: center;
-  padding: 56px 48px;
+  /* The full 56px from about 915px high; on a shorter window the space above and below gives way first (about 24px at
+     1280 by 800, a 763px page), down to the 20px the smallest windows use (from about 743px), so the recovery key's
+     Continue shows without scrolling. */
+  padding: clamp(20px, 21vh - 136px, 56px) 48px;
   background: var(--ground);
   color: var(--ink);
 }
@@ -242,7 +245,8 @@
 .fu {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  /* 14px from 900px high, 10px from about 767px down (the same as under 700px). */
+  gap: clamp(10px, 3vh - 13px, 14px);
   min-width: 0;
 }
 
@@ -308,7 +312,7 @@
 .fu-print {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: clamp(10px, 3vh - 13px, 14px);
   min-width: 0;
 }
 
