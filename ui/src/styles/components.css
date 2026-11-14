@@ -81,6 +81,8 @@
   font-weight: 500;
   letter-spacing: -0.025em;
   line-height: 1.2;
+  /* A heading that wraps keeps its lines even, never one word alone on the last ("…synced to the / cloud", 18c). */
+  text-wrap: balance;
 }
 
 .plate form label {
@@ -305,6 +307,12 @@
   flex-wrap: wrap;
   gap: 8px 16px;
   align-items: center;
+}
+
+/* A quiet button on its own line under the sentence that offers it (18c's Choose another): its words line up with the
+   sentence's, the hover tint reaching into the margin. */
+.fu-other {
+  margin: 0 0 0 -8px;
 }
 
 /* What prints is one element (`data-print-only`: the key's heading, its words and its warning); on screen it lays out as

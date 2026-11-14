@@ -75,6 +75,7 @@ export function CreateVault({ onBack }: { onBack: () => void }) {
     return (
       <CloudQuestion
         busy={busy}
+        step="Step 1 of 2"
         onContinue={() => void go(() => confirmCreateVault(token))}
         onChooseAnother={() => void go(() => createVault(name.trim(), password, true))}
         onCancel={() => {
