@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useLayoutEffect, type RefObject } from "react";
 
 /**
  * Keeps a value that is shown on the page (a generated password, a revealed key) from being copied natively. A native copy
@@ -7,9 +7,12 @@ import { useEffect, type RefObject } from "react";
  * focus on its box with nothing else selected. `onCopyKey` then does what the Copy button does (through the shell), for a
  * copy; with none, nothing is copied. Anything else is left alone, ordinary text selected beside a focused control
  * included: the value never stands in for text the person meant to copy.
+ *
+ * A layout effect, so the guard is on in the same commit that puts the value on the page: a passive effect runs a moment
+ * later, and a copy in that moment went through.
  */
 export function useValueGuard(valueBox: RefObject<HTMLElement | null>, onCopyKey?: () => void): void {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const guard = (event: Event) => {
       const value = valueBox.current;
       if (value === null) return;
