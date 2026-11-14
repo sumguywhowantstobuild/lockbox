@@ -293,6 +293,10 @@ export interface FakeShell {
   windowHidden(): boolean;
   /** How many times `close_explained_ok` reached the shell. */
   closeExplainedCalls(): number;
+  /** How many `clear_copied` (2c's Clear now) reached the shell. */
+  clearCopiedCalls(): number;
+  /** What the next `clear_copied` answers (`"cleared"` until set): `"gone"` or `"busy"` for the shell's other answers. */
+  answerClearCopied(answer: "cleared" | "gone" | "busy"): void;
   /** The shell has already shown 5b in an earlier run: the next close hides at once. */
   markCloseExplained(): void;
   /** A notice sent as `lockbox://notice` only, never kept for `launch_notices` (`first_close` is only ever an event). */
@@ -712,6 +716,8 @@ export function installFakeShell(
   let explaining = false;
   let hidden = false;
   let closeExplainedCalls = 0;
+  let clearCopiedCalls = 0;
+  let clearCopiedAnswer: "cleared" | "gone" | "busy" = "cleared";
   const live = new Map<number, Live>();
   const sessionVault = new Map<number, FakeVault>();
   // A fresh range of session numbers for each fake, because the bridge remembers every session's generation for the
@@ -1862,6 +1868,13 @@ export function installFakeShell(
         generated.push({ session: sent.session, generation: sent.generation, value: sent.value });
         return tagged(sent.session, sent.generation, null);
       }
+      case "clear_copied": {
+        exactly(args ?? {}, []);
+        clearCopiedCalls += 1;
+        const answer = clearCopiedAnswer;
+        clearCopiedAnswer = "cleared";
+        return answer;
+      }
       case "close_explained_ok":
         exactly(args ?? {}, []);
         closeExplainedCalls += 1;
@@ -2179,6 +2192,10 @@ export function installFakeShell(
     },
     windowHidden: () => hidden,
     closeExplainedCalls: () => closeExplainedCalls,
+    clearCopiedCalls: () => clearCopiedCalls,
+    answerClearCopied: (answer) => {
+      clearCopiedAnswer = answer;
+    },
     markCloseExplained: () => {
       closeExplained = true;
     },

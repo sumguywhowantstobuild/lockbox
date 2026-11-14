@@ -658,6 +658,17 @@ export function openUrl(vault: SessionRef, id: string, index: number): Promise<T
   return call<null>("open_url", { session: vault.session, generation: vault.generation, id, index });
 }
 
+/** What 2c's Clear now found: Lockbox's copy taken off, nothing of Lockbox's left to clear, or the clipboard held by another app. */
+export type ClearNow = "cleared" | "gone" | "busy";
+
+/**
+ * 2c's Clear now: takes Lockbox's last copy off the clipboard while it is still there. Whatever was copied since is left alone,
+ * as the timer leaves it. With the clipboard busy, the shell keeps trying on its own.
+ */
+export function clearCopied(): Promise<ClearNow> {
+  return callPlain<ClearNow>("clear_copied", {});
+}
+
 /** Locks every vault, then clears the clipboard of what Lockbox put there. */
 export async function lockAll(): Promise<void> {
   await callPlain<null>("lock_all", {});

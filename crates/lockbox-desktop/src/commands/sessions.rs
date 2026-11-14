@@ -7,6 +7,7 @@ use tauri::State;
 use tauri::ipc::Request;
 
 use super::{NoArgs, args, blocking};
+use crate::clipboard::ClearNow;
 use crate::error::ShellResult;
 use crate::session::{LockReason, SessionId, SessionInfo};
 use crate::shell::Shell;
@@ -58,6 +59,19 @@ pub(super) async fn close_explained_ok(
     .await
 }
 
+/// 2c's Clear now, on any copy message: takes Lockbox's last copy off the clipboard if it is still there (see
+/// [`Clipboard::clear_now`](crate::clipboard::Clipboard::clear_now)). It takes no session: it reads no vault and can only
+/// remove what Lockbox itself put on the clipboard.
+#[tauri::command]
+pub(super) async fn clear_copied(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<ClearNow> {
+    let NoArgs {} = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || Ok(shell.clipboard.clear_now())).await
+}
+
 #[tauri::command]
 pub(super) async fn lock_all(
     shell: State<'_, Arc<Shell>>,
@@ -107,6 +121,38 @@ mod tests {
             invoke_key: INVOKE_KEY.into(),
         };
         get_ipc_response(window, request).map(|body| body.deserialize().expect("a JSON answer"))
+    }
+
+    /// 2c's Clear now through the real command: "cleared" while Lockbox's copy is on the clipboard, "gone" once it
+    /// isn't, and a body with anything in it refused.
+    #[test]
+    fn clear_copied_answers_what_it_found() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let app = app_with(&ts);
+        let main = main_window(app.handle()).expect("the main window builds");
+        ts.shell
+            .clipboard
+            .copy(
+                &ts.shell.sessions,
+                session,
+                generation,
+                zeroize::Zeroizing::new("Pw-made-up-1".to_owned()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            invoke(&main, "clear_copied", json!({})),
+            Ok(json!("cleared"))
+        );
+        assert_eq!(ts.clipboard.text(), None);
+        assert_eq!(invoke(&main, "clear_copied", json!({})), Ok(json!("gone")));
+        assert_eq!(
+            invoke(&main, "clear_copied", json!({ "session": session })),
+            Err(json!({ "code": "invalid_input", "what": "request" }))
+        );
+        // The vault's folder is removed with the test's: it must be closed first.
+        ts.shell.lock_all();
     }
 
     /// 5b's button through the real command: it answers `null`, the note is saved, the page is told the explanation is

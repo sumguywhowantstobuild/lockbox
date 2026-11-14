@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FocusEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FocusEvent } from "react";
 import { focusList } from "../focus";
 import { messageFor } from "../messages";
-import { clearToast, undoTrash, useToast, type Toast } from "../store";
+import { clearCopiedNow, clearToast, undoTrash, useToast, type Toast } from "../store";
 import { CloseIcon } from "./Icon";
 
 /** How long a short message ("Saved", "Moved to Lineproof", "Restored") stays. */
@@ -84,30 +84,40 @@ export function ToastStack() {
     void undoTrash(trashed.session, trashed.id);
   }, [trashed]);
 
-  // When the time is up the message goes. The shell clears the clipboard at the same moment.
-  useEffect(() => {
-    if (copied !== null && left === 0) clearToast();
-  }, [copied, left]);
+  // A message whose time runs out while one of its buttons has focus gives focus back to the list first, so the next Tab goes on
+  // from there instead of starting again at the top of the page. It is asked while the message is still on the page, so only focus
+  // that is really inside it counts.
+  const stack = useRef<HTMLDivElement>(null);
+  const expire = useCallback(() => {
+    if (stack.current?.contains(document.activeElement) === true) focusList();
+    clearToast();
+  }, []);
+
+  // When the time is up the message goes. The shell clears the clipboard at the same moment. The copy message stays on the page at 0
+  // until this has run (before the screen is drawn, so "0 s" never shows), so its Clear now can still be found holding focus.
+  useLayoutEffect(() => {
+    if (copied !== null && left === 0) expire();
+  }, [copied, left, expire]);
 
   // A short message says it once and goes after a few seconds, or when another message takes its place.
   const short = saved ?? said;
   useEffect(() => {
     if (short === null) return;
-    const timer = setTimeout(clearToast, SAVED_SECONDS * 1000);
+    const timer = setTimeout(expire, SAVED_SECONDS * 1000);
     return () => {
       clearTimeout(timer);
     };
-  }, [short]);
+  }, [short, expire]);
 
   // "Moved to Trash" stays about ten seconds, and its time does not run out while the pointer rests on it or Undo has focus:
   // when the pointer leaves, or focus does, the ten seconds begin again.
   useEffect(() => {
     if (trashed === null || holding) return;
-    const timer = setTimeout(clearToast, TRASHED_SECONDS * 1000);
+    const timer = setTimeout(expire, TRASHED_SECONDS * 1000);
     return () => {
       clearTimeout(timer);
     };
-  }, [trashed, holding]);
+  }, [trashed, holding, expire]);
 
   // While "Moved to Trash" shows, Ctrl+Z does what its Undo does, from anywhere: in a long list the keyboard could not reach Undo, which
   // comes after the list, before its time ran out. Not inside a text box, where Ctrl+Z undoes typing, and not while a question is up.
@@ -130,15 +140,26 @@ export function ToastStack() {
   const failure = toast?.kind === "failed" ? messageFor(toast.error) : null;
   const told = toast?.kind === "told" ? toast.text : null;
   return (
-    <div className="tstack">
+    <div className="tstack" ref={stack}>
       <div role="status" className="live">
-        {copied !== null && left > 0 ? (
+        {copied !== null ? (
           <div className="toast">
             <span>{copied.text}</span>
             <span className="tc" aria-hidden="true">
               clears in <span className="tn">{left}</span> s
             </span>
             <span className="sr">It clears from the clipboard in {copied.seconds} seconds.</span>
+            <button
+              type="button"
+              className="tb2"
+              onClick={(event) => {
+                // The message is replaced by what the clear found: focus goes back to the list if the button had it.
+                if (document.activeElement === event.currentTarget) focusList();
+                void clearCopiedNow();
+              }}
+            >
+              Clear now
+            </button>
           </div>
         ) : null}
         {saved !== null ? (

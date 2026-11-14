@@ -811,6 +811,12 @@ test("cloud_folder_asks_before_creating", async () => {
   // The question, and nothing made: no key, no vault, no mark.
   expect(await screen.findByRole("heading", { level: 1, name: "This folder is synced to the cloud" })).toBeTruthy();
   expect(screen.getByText(/Lockbox doesn't support vaults in cloud folders/)).toBeTruthy();
+  // Stage 7 (group 3, 2026-11-14): still step 1 of the two, and the answers sit as drawn, Continue anyway beside Cancel, with
+  // Choose another on its own line under the sentence that offers it.
+  expect(screen.getByText("Step 1 of 2")).toBeTruthy();
+  const answers = screen.getByRole("button", { name: "Continue anyway" }).parentElement;
+  expect(answers?.contains(screen.getByRole("button", { name: "Cancel" }))).toBe(true);
+  expect(answers?.contains(screen.getByRole("button", { name: "Choose another" }))).toBe(false);
   expect(commandsSent()).not.toContain("create_vault_confirm");
   expect(shell.keyOf(1)).toBeUndefined();
   expect(shell.unconfirmed(1)).toBe(false);
@@ -856,6 +862,8 @@ test("an_existing_vault_in_a_cloud_folder_asks_too", async () => {
   await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
   click("I already have a vault");
   expect(await screen.findByRole("heading", { level: 1, name: "This folder is synced to the cloud" })).toBeTruthy();
+  // Adding a vault you already have isn't a numbered step.
+  expect(screen.queryByText(/^Step \d of \d$/)).toBeNull();
   await expectNoAxe(container);
   click("Continue anyway");
   expect(await screen.findByRole("heading", { level: 1, name: "Unlock Old vault" })).toBeTruthy();
@@ -1229,6 +1237,13 @@ test("cloud_warning_shows_21e_words", async () => {
   expect(within(dialog).getByText(CLOUD_TEXT)).toBeTruthy();
   expect(within(dialog).getByRole("button", { name: "Continue" })).toBeTruthy();
   expect(within(dialog).getByRole("button", { name: "Pick another folder" })).toBeTruthy();
+  // Stage 7 (group 3, 2026-11-14): over the setup screens the main answer takes their dark main button, as drawn, not the
+  // vault's colour. jsdom draws nothing, so the rule is read from the style sheet.
+  expect(within(dialog).getByRole("button", { name: "Pick another folder" }).classList.contains("fu-ink")).toBe(true);
+  const css = readBeside(import.meta.url, "../../styles/components.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = /(?:^|\})\s*\.pill\.t\.fu-ink\s*\{([^}]*)\}/.exec(css)?.[1]?.replace(/\s+/g, " ") ?? "";
+  expect(rule).toMatch(/background: var\(--ink\)/);
+  expect(rule).toMatch(/color: var\(--ground\)/);
   // Nothing is written until the person says yes, and the token is in no attribute.
   expect(shell.pdfs).toEqual([]);
   expect(document.body.innerHTML).not.toContain("pdf-token");

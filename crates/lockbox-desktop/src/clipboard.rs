@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use zeroize::Zeroizing;
 
 use crate::autolock::SHUTDOWN_WAIT;
@@ -106,6 +107,18 @@ impl Shared {
             self.retry(copy_id);
         }
     }
+}
+
+/// What 2c's Clear now found ([`Clipboard::clear_now`]), as the page reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClearNow {
+    /// Lockbox's copy was on the clipboard and is gone now.
+    Cleared,
+    /// There was nothing of Lockbox's to clear: already cleared, or something else copied since.
+    Gone,
+    /// Another program holds the clipboard; Lockbox keeps trying on its own.
+    Busy,
 }
 
 /// When the app's close stops waiting for its lock hooks ([`AutoLock::close_deadline`](crate::autolock::AutoLock)),
@@ -228,6 +241,31 @@ impl Clipboard {
             return Err(CLIPBOARD_FAILED);
         }
         Ok(())
+    }
+
+    /// 2c's Clear now: clears Lockbox's last copy here and now, while the clipboard still holds it, under the same rule
+    /// as its timer (whatever the user copied since is left alone). `Gone` when there is no copy to clear (the timer
+    /// or a lock got there first, or something else was copied since); `Busy` when another program holds the
+    /// clipboard: the copy stays recorded and the timer keeps trying, as for a busy timer clear.
+    pub fn clear_now(&self) -> ClearNow {
+        let busy = {
+            let mut owned = lock(&self.shared.owned);
+            let Some(copy) = *owned else {
+                return ClearNow::Gone;
+            };
+            match self.shared.backend.clear_if(&copy.tag, None) {
+                Ok(cleared) => {
+                    *owned = None;
+                    return match cleared {
+                        true => ClearNow::Cleared,
+                        false => ClearNow::Gone,
+                    };
+                }
+                Err(_) => copy.copy_id,
+            }
+        };
+        self.shared.retry(busy);
+        ClearNow::Busy
     }
 
     /// Tests only: runs `hook` once, right after the next write's publish ends, before its timer is set.
@@ -389,6 +427,61 @@ mod tests {
             Some("mine a third time"),
             "lock_all or a timer cleared it"
         );
+        assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// Stage 7 (2026-11-13, the group 2 walk): 2c's Clear now takes Lockbox's copy off at once, and the copy's timer
+    /// then has nothing left to do.
+    #[test]
+    fn clear_now_takes_our_copy_off_at_once() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        let start = ts.clock.now();
+        copy(&ts, s, g, SECRET).unwrap();
+        at(&ts, start, secs(5));
+        assert_eq!(ts.shell.clipboard.clear_now(), ClearNow::Cleared);
+        assert_eq!(ts.clipboard.text(), None, "Clear now left the copy");
+        assert_eq!(ts.shell.clipboard.owner(), None);
+        // A second press finds nothing, and the old timer touches nothing copied later.
+        assert_eq!(ts.shell.clipboard.clear_now(), ClearNow::Gone);
+        assert!(ts.clipboard.user_copy("mine"));
+        at(&ts, start, secs(30));
+        assert_eq!(ts.clipboard.text().as_deref(), Some("mine"));
+    }
+
+    /// Clear now follows the timer's rule: whatever the user copied after Lockbox's copy is left alone.
+    #[test]
+    fn clear_now_leaves_a_later_copy_alone() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        copy(&ts, s, g, SECRET).unwrap();
+        assert!(ts.clipboard.user_copy("mine"));
+        assert_eq!(ts.shell.clipboard.clear_now(), ClearNow::Gone);
+        assert_eq!(
+            ts.clipboard.text().as_deref(),
+            Some("mine"),
+            "Clear now cleared the user's own copy"
+        );
+        assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// With the clipboard held by another program, Clear now says so and keeps trying, as a busy timer clear does.
+    #[test]
+    fn clear_now_on_a_busy_clipboard_keeps_trying() {
+        let ts = TestShell::new();
+        let family = new_vault(&ts.vaults(), "Family");
+        let (s, g) = unlock(&ts, &family);
+        copy(&ts, s, g, SECRET).unwrap();
+        ts.clipboard.hold_open_elsewhere(true);
+        assert_eq!(ts.shell.clipboard.clear_now(), ClearNow::Busy);
+        assert_eq!(ts.clipboard.text().as_deref(), Some(SECRET));
+        assert_eq!(ts.shell.clipboard.owner(), Some(s), "given up while busy");
+        ts.clipboard.hold_open_elsewhere(false);
+        let now = ts.clock.now();
+        at(&ts, now, CLEAR_RETRY);
+        assert_eq!(ts.clipboard.text(), None, "never tried again");
         assert_eq!(ts.shell.clipboard.owner(), None);
     }
 

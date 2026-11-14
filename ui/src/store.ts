@@ -2733,6 +2733,29 @@ export async function openFromSearch(session: number, id: string): Promise<void>
   if (typeof done === "object") sayInSearch(done.failed);
 }
 
+/**
+ * 2c's Clear now, on a copy message: asks the shell to take Lockbox's copy off the clipboard, and says what it found in place of the
+ * countdown. A message that changed meanwhile (a newer copy, anything else) is left as it is.
+ */
+export async function clearCopiedNow(): Promise<void> {
+  const shown = state.toast;
+  if (shown?.kind !== "copied") return;
+  try {
+    const found = await api.clearCopied();
+    if (state.toast !== shown) return;
+    say(
+      shown.session,
+      found === "cleared"
+        ? "Clipboard cleared"
+        : found === "gone"
+          ? "It's no longer on the clipboard"
+          : "Another app is using the clipboard. Lockbox clears it as soon as it can.",
+    );
+  } catch (error) {
+    if (state.toast === shown) sayFailure(shown.session, error);
+  }
+}
+
 /** Takes the message away. */
 export function clearToast(): void {
   if (state.toast !== null) set({ ...state, toast: null });

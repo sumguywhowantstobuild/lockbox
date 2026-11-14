@@ -170,6 +170,101 @@ test("copy_calls_copy_field_and_shows_clear_time", async () => {
   expect(screen.queryByRole("status")?.textContent ?? "").not.toContain("Password copied");
 });
 
+// Stage 7 (2026-11-13, the group 2 walk): the approved 2c has Clear now on the copy message. It asks the shell, which clears only
+// Lockbox's own copy, and the message says what it found in place of the countdown.
+test("clear_now_on_the_copy_message_says_what_the_shell_found", async () => {
+  await unlocked();
+  const panel = await select("Bot admin console");
+  await within(panel).findByText("admin@example.com");
+  const answers = [
+    ["cleared", "Clipboard cleared"],
+    ["gone", "It's no longer on the clipboard"],
+    ["busy", "Another app is using the clipboard. Lockbox clears it as soon as it can."],
+  ] as const;
+  for (const [answer, words] of answers) {
+    fireEvent.click(within(panel).getByRole("button", { name: "Copy password" }));
+    const clear = await within(screen.getByRole("status")).findByRole("button", { name: "Clear now" });
+    shell.answerClearCopied(answer);
+    fireEvent.click(clear);
+    await within(screen.getByRole("status")).findByText(words);
+    expect(screen.getByRole("status").textContent).not.toContain("clears in");
+  }
+  expect(shell.clearCopiedCalls()).toBe(3);
+});
+
+test("clear_now_pressed_from_the_keyboard_gives_focus_back_to_the_list", async () => {
+  await unlocked();
+  const panel = await select("Bot admin console");
+  await within(panel).findByText("admin@example.com");
+  fireEvent.click(within(panel).getByRole("button", { name: "Copy password" }));
+  const clear = await within(screen.getByRole("status")).findByRole("button", { name: "Clear now" });
+  clear.focus();
+  fireEvent.click(clear);
+  await within(screen.getByRole("status")).findByText("Clipboard cleared");
+  expect(document.activeElement).not.toBe(document.body);
+  expect(screen.getByRole("main").contains(document.activeElement)).toBe(true);
+});
+
+// PR 6 review: a message whose time runs out while one of its buttons has focus gives focus back to the list, so the next Tab goes
+// on from there instead of starting over at the top of the page.
+test("a_copy_message_that_times_out_with_focus_on_clear_now_gives_focus_back_to_the_list", async () => {
+  await unlocked();
+  const panel = await select("Bot admin console");
+  await within(panel).findByText("admin@example.com");
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-11-06T12:00:00Z"));
+  fireEvent.click(within(panel).getByRole("button", { name: "Copy password" }));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10);
+  });
+  within(screen.getByRole("status")).getByRole("button", { name: "Clear now" }).focus();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(31_000);
+  });
+  expect(screen.queryByRole("button", { name: "Clear now" })).toBeNull();
+  expect(document.activeElement).not.toBe(document.body);
+  expect(screen.getByRole("main").contains(document.activeElement)).toBe(true);
+});
+
+// Only focus that is inside the message when it goes is moved: focus the person took elsewhere stays there, and a message whose
+// button was pressed and went away never pulls focus later.
+test("a_message_that_goes_leaves_focus_alone_when_it_was_not_inside", async () => {
+  await unlocked();
+  const panel = await select("Bot admin console");
+  await within(panel).findByText("admin@example.com");
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-11-06T12:00:00Z"));
+  const filter = screen.getByRole("searchbox", { name: "Filter this list" });
+  // Focus on Clear now, then taken to the filter box before the countdown ends.
+  fireEvent.click(within(panel).getByRole("button", { name: "Copy password" }));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10);
+  });
+  within(screen.getByRole("status")).getByRole("button", { name: "Clear now" }).focus();
+  filter.focus();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(31_000);
+  });
+  expect(document.activeElement).toBe(filter);
+  // Clear now pressed with the mouse, then the filter box: "Clipboard cleared" going a few seconds later leaves focus there.
+  fireEvent.click(within(panel).getByRole("button", { name: "Copy password" }));
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10);
+  });
+  const clear = within(screen.getByRole("status")).getByRole("button", { name: "Clear now" });
+  clear.focus();
+  fireEvent.click(clear);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10);
+  });
+  filter.focus();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5_000);
+  });
+  expect(screen.queryByText("Clipboard cleared")).toBeNull();
+  expect(document.activeElement).toBe(filter);
+});
+
 test("the_copy_message_has_no_accessibility_problems", async () => {
   const { container } = await unlocked();
   const panel = await select("Bot admin console");
