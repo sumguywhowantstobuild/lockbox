@@ -142,6 +142,9 @@ export function SearchPanel() {
       : busy.length === 1
         ? `${listOf(busy)} is busy, so its results are missing for now.`
         : `${listOf(busy)} are busy, so their results are missing for now.`;
+  // Every open vault busy: nothing was searched, so "Nothing for …" would say the item doesn't exist when it is only out of reach
+  // for now (stage 7, 4c). The busy line says it alone.
+  const searchedNone = busy.length > 0 && sessions.every((entry) => (search?.busy ?? []).includes(entry.session));
   const problem = search === null || search.error === null ? null : messageFor(search.error);
 
   // The arrow keys go between the box and the results, one result at a time; Tab goes through each result's buttons.
@@ -271,7 +274,7 @@ export function SearchPanel() {
                 })}
               </ul>
             </div>
-          ) : search.answered === null ? null : tooMany ? (
+          ) : search.answered === null || searchedNone ? null : tooMany ? (
             <div className="hempty">
               <b>{TOO_MANY}</b>
             </div>

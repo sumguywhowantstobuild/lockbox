@@ -170,6 +170,41 @@ test("copy_calls_copy_field_and_shows_clear_time", async () => {
   expect(screen.queryByRole("status")?.textContent ?? "").not.toContain("Password copied");
 });
 
+// Stage 7 (2026-11-13, the group 2 walk): the approved 2c has Clear now on the copy message. It asks the shell, which clears only
+// Lockbox's own copy, and the message says what it found in place of the countdown.
+test("clear_now_on_the_copy_message_says_what_the_shell_found", async () => {
+  await unlocked();
+  const panel = await select("Bot admin console");
+  await within(panel).findByText("admin@example.com");
+  const answers = [
+    ["cleared", "Clipboard cleared"],
+    ["gone", "It's no longer on the clipboard"],
+    ["busy", "Another app is using the clipboard. Lockbox clears it as soon as it can."],
+  ] as const;
+  for (const [answer, words] of answers) {
+    fireEvent.click(within(panel).getByRole("button", { name: "Copy password" }));
+    const clear = await within(screen.getByRole("status")).findByRole("button", { name: "Clear now" });
+    shell.answerClearCopied(answer);
+    fireEvent.click(clear);
+    await within(screen.getByRole("status")).findByText(words);
+    expect(screen.getByRole("status").textContent).not.toContain("clears in");
+  }
+  expect(shell.clearCopiedCalls()).toBe(3);
+});
+
+test("clear_now_pressed_from_the_keyboard_gives_focus_back_to_the_list", async () => {
+  await unlocked();
+  const panel = await select("Bot admin console");
+  await within(panel).findByText("admin@example.com");
+  fireEvent.click(within(panel).getByRole("button", { name: "Copy password" }));
+  const clear = await within(screen.getByRole("status")).findByRole("button", { name: "Clear now" });
+  clear.focus();
+  fireEvent.click(clear);
+  await within(screen.getByRole("status")).findByText("Clipboard cleared");
+  expect(document.activeElement).not.toBe(document.body);
+  expect(screen.getByRole("main").contains(document.activeElement)).toBe(true);
+});
+
 test("the_copy_message_has_no_accessibility_problems", async () => {
   const { container } = await unlocked();
   const panel = await select("Bot admin console");

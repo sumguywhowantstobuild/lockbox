@@ -367,6 +367,24 @@ test("busy_vault_says_results_are_missing", async () => {
   shell.setBusy(8, true);
   fireEvent.change(within(dialog).getByRole("textbox", { name: SEARCH }), { target: { value: "console" } });
   expect(await within(dialog).findByText("My vault and Home are busy, so their results are missing for now.")).toBeTruthy();
+  // Every open vault busy: nothing was searched, so the busy line is said alone (stage 7, 4c).
+  expect(within(dialog).queryByText(/^Nothing for/)).toBeNull();
+  expect(within(dialog).queryByText(/Try another word/)).toBeNull();
+});
+
+// Stage 7 (2026-11-13, the group 2 walk): with the only vault busy, "Nothing for …" read as if the item didn't exist.
+test("the_only_vault_busy_says_so_without_nothing_for", async () => {
+  await unlocked();
+  shell.setBusy(7, true);
+  const { dialog } = await searchFor("console");
+  expect(await within(dialog).findByText("My vault is busy, so its results are missing for now.")).toBeTruthy();
+  expect(within(dialog).queryByText(/^Nothing for/)).toBeNull();
+  expect(within(dialog).queryByText(/Try another word/)).toBeNull();
+  // Once the job is over, the next search says "Nothing for" as usual.
+  shell.setBusy(7, false);
+  fireEvent.change(within(dialog).getByRole("textbox", { name: SEARCH }), { target: { value: "acme" } });
+  expect(await within(dialog).findByText('Nothing for "acme"')).toBeTruthy();
+  expect(within(dialog).queryByText(/is busy/)).toBeNull();
 });
 
 test("two_logins_show_usernames", async () => {
@@ -522,8 +540,7 @@ test("clear_time_shows_after_copy", async () => {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(300);
   });
-  // The settings' own delay, counting down; the copy never shows the value, and "Clear now" is not offered, since no
-  // command clears the clipboard on its own.
+  // The settings' own delay, counting down; the copy never shows the value. "Clear now" is offered on every copy message (stage 7).
   const status = screen.getByRole("status");
   expect(status.textContent).toContain("Username copied");
   expect(status.textContent).toContain("clears in 45 s");
@@ -531,8 +548,7 @@ test("clear_time_shows_after_copy", async () => {
     await vi.advanceTimersByTimeAsync(5000);
   });
   expect(screen.getByRole("status").textContent).toContain("clears in 40 s");
-  expect(screen.queryByRole("button", { name: /clear now/i })).toBeNull();
-  expect(screen.queryByText(/clear now/i)).toBeNull();
+  expect(within(screen.getByRole("status")).getByRole("button", { name: "Clear now" })).toBeTruthy();
   await act(async () => {
     await vi.advanceTimersByTimeAsync(41_000);
   });

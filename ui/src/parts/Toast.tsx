@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FocusEvent } from "react";
 import { focusList } from "../focus";
 import { messageFor } from "../messages";
-import { clearToast, undoTrash, useToast, type Toast } from "../store";
+import { clearCopiedNow, clearToast, undoTrash, useToast, type Toast } from "../store";
 import { CloseIcon } from "./Icon";
 
 /** How long a short message ("Saved", "Moved to Lineproof", "Restored") stays. */
@@ -139,6 +139,17 @@ export function ToastStack() {
               clears in <span className="tn">{left}</span> s
             </span>
             <span className="sr">It clears from the clipboard in {copied.seconds} seconds.</span>
+            <button
+              type="button"
+              className="tb2"
+              onClick={(event) => {
+                // The message is replaced by what the clear found: focus goes back to the list if the button had it.
+                if (document.activeElement === event.currentTarget) focusList();
+                void clearCopiedNow();
+              }}
+            >
+              Clear now
+            </button>
           </div>
         ) : null}
         {saved !== null ? (

@@ -11,6 +11,7 @@
     "allow-lock-vault",
     "allow-lock-all",
     "allow-close-explained-ok",
+    "allow-clear-copied",
     "allow-list-vaults",
     "allow-start-new-vault-list",
     "allow-add-existing-vault",
