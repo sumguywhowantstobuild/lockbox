@@ -259,6 +259,7 @@ export function KeyActions({
         <Button
           ref={safeAnswer}
           look="pill-main"
+          className="fu-ink"
           aria-disabled={off}
           onClick={() => {
             if (working.current) return;

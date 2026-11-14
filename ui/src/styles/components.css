@@ -1757,6 +1757,21 @@
   min-width: 112px;
 }
 
+/* A question over the setup screens (21e): its main answer takes their dark main button, as drawn, not the vault's colour, so
+   it matches the screen's own Continue behind it. High contrast fills it as every main button. */
+.pill.t.fu-ink {
+  background: var(--ink);
+  color: var(--ground);
+}
+
+.pill.t.fu-ink:hover {
+  background: var(--ink2);
+}
+
+.pill.t.fu-ink:active {
+  background: var(--ink);
+}
+
 .frow {
   position: relative;
   display: flex;
