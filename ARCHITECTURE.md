@@ -23,7 +23,7 @@ The public surface is what the shell uses, and nothing more:
 - `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef, MAX_ITEM_JSON, PreviousPassword,
   MAX_PREVIOUS_PASSWORDS, check_key_name}`; `recovery::RecoverySecret`; `env_file` (reading and writing `.env` files);
   `generator::{PasswordOptions, PassphraseOptions, generate_password, generate_passphrase}`;
-  `blob::{CancelToken, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::{MIN_PASSWORD_CHARS, check_new_password}`;
+  `blob::{CancelToken, Progress, NoProgress, OutputJournal, NoJournal, MAX_FILE_BYTES}`; `kdf::{MIN_PASSWORD_CHARS, check_new_password}`;
   `fsio::{atomic_write, is_destination_taken, remove_dir_all_retry, remove_file_retry, rename_file_no_replace}` (the
   shell's state files and sweeps), and `fsio::{hidden_temp_path, create_hidden_file, clear_hidden, publish_readable,
   refuse_vault_folder}` (the one way the shell writes a readable file: a hidden temp, then a gated, flushed move).
@@ -57,7 +57,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `slots.rs` | Key slots: wrap and unwrap the vault key under the password key or the recovery key |
 | `header.rs` | `vault.json` and its `.bak`: strict parse, header MAC (a tamper-evident stamp), writing both copies in order |
 | `item.rs` | The item model (login, key, note, file, collection; a login's earlier passwords) and its sealed file format, padded to 512 bytes; its JSON through crate-private wire types |
-| `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); `authenticate_copy` (copies a blob unchanged while checking every chunk); cancel token; output-journal hook |
+| `blob.rs` | Encrypting and decrypting file contents in 1 MiB chunks (STREAM, a standard chunked method); `authenticate_copy` (copies a blob unchanged while checking every chunk); cancel token (a job's token is a child of its session's, so a lock stops every job and a stop leaves the others running); progress hook (bytes done and the total, at most once per MiB); output-journal hook |
 | `manifest.rs` | `backup-manifest.json`: the list of everything in a backup (path, size, SHA-256) with a MAC, and its strict parser |
 | `archive.rs` | The backup file (one stored ZIP64 archive): our own strict reader for the few shapes we write, and the writer |
 | `lockfile.rs` | The `.lock` file with an OS exclusive lock: one process per vault |

@@ -563,6 +563,7 @@ mod tests {
     use std::sync::mpsc;
 
     use lockbox_core::Vault;
+    use lockbox_core::blob::NoProgress;
     use lockbox_core::internals::fsio::failpoint;
     use lockbox_core::internals::lockfile::VaultLock;
     use zeroize::Zeroizing;
@@ -980,7 +981,7 @@ mod tests {
                     .shell
                     .autolock
                     .begin(Some(family), "import", cancel.clone());
-                Ok(vault.new_file_item(None, &src, cancel)?)
+                Ok(vault.new_file_item(None, &src, cancel, &NoProgress)?)
             });
         failpoint::disarm_all();
 

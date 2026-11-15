@@ -1361,7 +1361,7 @@ mod tests {
     use std::time::Instant;
 
     use lockbox_core::Credential;
-    use lockbox_core::blob::NoJournal;
+    use lockbox_core::blob::{NoJournal, NoProgress};
     use lockbox_core::internals::fsio::testutil::TempDir;
     use lockbox_core::internals::lockfile::VaultLock;
     use serde_json::json;
@@ -1438,8 +1438,15 @@ mod tests {
     }
 
     fn open_read_only_vault(dir: &Path) -> ReadOnlyVault {
-        heavy(|| ReadOnlyVault::open_folder(dir, Credential::Password(PW), &CancelToken::new()))
-            .unwrap()
+        heavy(|| {
+            ReadOnlyVault::open_folder(
+                dir,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &NoProgress,
+            )
+        })
+        .unwrap()
     }
 
     /// Opens `opened` as the session at `location`: its id and generation.
@@ -1849,7 +1856,7 @@ mod tests {
         let dir = vault.dir().to_path_buf();
         let backup = parent.path().join("Family.lockbox-backup");
         vault
-            .backup(&backup, &NoJournal, &CancelToken::new())
+            .backup(&backup, &NoJournal, &CancelToken::new(), &NoProgress)
             .unwrap();
         let mut before_restore = dir.clone().into_os_string();
         before_restore.push(".before-restore");
@@ -1862,7 +1869,12 @@ mod tests {
             Opened::Writable(vault),
         );
         let from_backup = heavy(|| {
-            ReadOnlyVault::open_backup(&backup, Credential::Password(PW), &CancelToken::new())
+            ReadOnlyVault::open_backup(
+                &backup,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &NoProgress,
+            )
         })
         .unwrap();
         let backup_session = open_as(

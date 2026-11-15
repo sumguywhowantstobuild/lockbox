@@ -368,7 +368,7 @@ pub(super) async fn capture_env(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use lockbox_core::blob::CancelToken;
+    use lockbox_core::blob::{CancelToken, NoProgress};
     use lockbox_core::ids::ItemId;
     use lockbox_core::item::{ItemKind, MAX_ITEM_JSON, check_key_name};
     use lockbox_core::{Credential, ReadOnlyVault};
@@ -520,6 +520,7 @@ mod tests {
                 &dir,
                 Credential::Password(TEST_PASSWORD),
                 &CancelToken::new(),
+                &NoProgress,
             )
         })
         .unwrap();

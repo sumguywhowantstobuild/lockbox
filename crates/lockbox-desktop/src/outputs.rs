@@ -823,7 +823,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use lockbox_core::CoreError;
-    use lockbox_core::blob::OutputJournal;
+    use lockbox_core::blob::{NoProgress, OutputJournal};
     use lockbox_core::internals::fsio::testutil::{make_dir_link, names};
     use lockbox_core::internals::fsio::{failpoint, set_hidden};
     use serde_json::json;
@@ -914,7 +914,12 @@ mod tests {
                     panic!("a writable vault");
                 };
                 let journal = shell.outputs.for_call(&shell.sessions, s, g);
-                let backup = vault.backup(&out.join("family.lockbox-backup"), &journal, cancel);
+                let backup = vault.backup(
+                    &out.join("family.lockbox-backup"),
+                    &journal,
+                    cancel,
+                    &NoProgress,
+                );
                 journal.finish(backup.map(drop))
             })
             .unwrap();

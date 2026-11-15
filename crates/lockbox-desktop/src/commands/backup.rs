@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use lockbox_core::blob::CancelToken;
+use lockbox_core::blob::{CancelToken, NoProgress};
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::recovery::RecoverySecret;
 use lockbox_core::{BackupReport, Credential, ReadOnlyVault, verify_backup};
@@ -180,7 +180,7 @@ impl Shell {
                 };
                 let _operation = self.autolock.begin(Some(session), BACKUP, cancel.clone());
                 let journal = self.outputs.for_call(&self.sessions, session, generation);
-                let report = journal.finish(vault.backup(&dest, &journal, cancel))?;
+                let report = journal.finish(vault.backup(&dest, &journal, cancel, &NoProgress))?;
                 let size_on_disk = fs::metadata(&dest)?.len();
                 Ok(Outcome::Done(BackupView::of(report, size_on_disk)))
             })
@@ -207,7 +207,7 @@ impl Shell {
         if self.locked_since(epoch) {
             return Err(ShellError::Locked);
         }
-        let verified = verify_backup(&backup, credential.credential(), &cancel);
+        let verified = verify_backup(&backup, credential.credential(), &cancel, &NoProgress);
         drop(credential);
         let checked = verified.map_err(ShellError::from).and_then(|found| {
             let size_on_disk = fs::metadata(&backup)?.len();
@@ -249,8 +249,12 @@ impl Shell {
         let answer = self
             .sessions
             .open_since(epoch, Some(location.clone()), None, |cancel| {
-                let vault =
-                    ReadOnlyVault::open_backup(location.path(), credential.credential(), cancel)?;
+                let vault = ReadOnlyVault::open_backup(
+                    location.path(),
+                    credential.credential(),
+                    cancel,
+                    &NoProgress,
+                )?;
                 Ok(OpenStep::Session(location, Opened::ReadOnly(vault), ()))
             })?;
         match answer {
@@ -631,7 +635,9 @@ mod tests {
             .shell
             .sessions
             .write(s, g, |vault, cancel| {
-                Ok(vault.attach_file(&id, &source, cancel)?.to_hex())
+                Ok(vault
+                    .attach_file(&id, &source, cancel, &NoProgress)?
+                    .to_hex())
             })
             .unwrap()
             .data;
@@ -689,6 +695,7 @@ mod tests {
                 &dest,
                 Credential::Password(TEST_PASSWORD),
                 &CancelToken::new(),
+                &NoProgress,
             )
         })
         .unwrap();
@@ -1043,6 +1050,7 @@ mod tests {
                 &dest,
                 Credential::Password(TEST_PASSWORD),
                 &CancelToken::new(),
+                &NoProgress,
             )
         })
         .unwrap()

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use std::{fs, io};
 
-use lockbox_core::blob::CancelToken;
+use lockbox_core::blob::{CancelToken, NoProgress};
 use lockbox_core::internals::fsio::testutil::TempDir;
 use zeroize::Zeroizing;
 
@@ -1564,7 +1564,7 @@ impl TestShell {
             .shell
             .sessions
             .write(session, generation, |vault, cancel| {
-                let id = vault.new_file_item(None, &source, cancel)?;
+                let id = vault.new_file_item(None, &source, cancel, &NoProgress)?;
                 let file = vault.get_item(&id)?.attachments[0].file_id;
                 Ok((id.to_hex(), file.to_hex()))
             });

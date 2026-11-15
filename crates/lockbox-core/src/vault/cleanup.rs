@@ -316,7 +316,7 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blob::{CancelToken, NoJournal};
+    use crate::blob::{CancelToken, NoJournal, NoProgress};
     use crate::fsio::failpoint;
     use crate::fsio::testutil::{TempDir, make_dir_link};
     use crate::ids::ItemId;
@@ -420,7 +420,7 @@ mod tests {
     fn file_item(parent: &TempDir, vault: &mut Vault, bytes: &[u8]) -> (ItemId, FileId) {
         let src = source(parent, "doc.bin", bytes);
         let id = vault
-            .new_file_item(None, &src, &CancelToken::new())
+            .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
             .unwrap();
         let file = vault.get_item(&id).unwrap().attachments[0].file_id;
         (id, file)
@@ -443,7 +443,14 @@ mod tests {
     fn exported(parent: &TempDir, vault: &Vault, item: &ItemId, file: &FileId) -> Vec<u8> {
         let dest = parent.path().join("out.bin");
         vault
-            .export_file(item, file, &dest, &NoJournal, &CancelToken::new())
+            .export_file(
+                item,
+                file,
+                &dest,
+                &NoJournal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
             .unwrap();
         fs::read(dest).unwrap()
     }
@@ -453,7 +460,7 @@ mod tests {
         let (id, old) = file_item(parent, vault, b"first");
         let second = source(parent, "second.bin", b"second");
         let new = vault
-            .replace_attachment(&id, &old, &second, &CancelToken::new())
+            .replace_attachment(&id, &old, &second, &CancelToken::new(), &NoProgress)
             .unwrap();
         (id, old, new)
     }

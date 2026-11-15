@@ -23,7 +23,7 @@ use super::source::{
 };
 use super::unlock::{Credential, load};
 use crate::archive::{BackupArchive, EntryKind, copy_hashed};
-use crate::blob::CancelToken;
+use crate::blob::{CancelToken, CountWrite, Meter, Progress};
 use crate::fsio::{
     DESTINATION_EXISTS, atomic_write, check_space, clear_hidden, open_shared_read, parent_dir,
     read_retry, remove_file_retry, rename_dir_no_replace, set_hidden, sync_dir, volume_info,
@@ -179,6 +179,10 @@ impl PreparedRestore {
     /// once it exists, and then the journal; from then on, while the parent folder is missing
     /// (its drive is not plugged in), both stay, for startup recovery or the user's dismissal to
     /// settle. A failed `create_dir` made no staging folder, so only the journal goes.
+    ///
+    /// `progress` hears the bytes written into the staging folder, out of the sum of the entries
+    /// (the manifest apart); nothing is reported until the copying starts. The read-back of each
+    /// entry is not counted.
     pub fn prepare(
         archive: &Path,
         parent: &Path,
@@ -186,6 +190,7 @@ impl PreparedRestore {
         destination: RestoreDestination,
         journal: &Path,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<PreparedRestore> {
         // A bad name is refused before the archive is even opened (unlocking takes a second).
         if let RestoreDestination::NewFolder(chosen) = &destination {
@@ -209,7 +214,7 @@ impl PreparedRestore {
             refuse_vault_folder(&target)?;
         }
         let src = VaultSource::Archive(BackupArchive::open(archive, cancel)?);
-        let opened = unlock_source(&src, &credential, cancel)?;
+        let opened = unlock_source(&src, &credential, cancel, None)?;
         check_opened(&opened)?;
         let refs = attached_refs(&opened);
         attached_blobs(&src, &refs)?;
@@ -287,7 +292,9 @@ impl PreparedRestore {
             finished: false,
             swap_started: false,
         };
-        prepared.extract(&refs, cancel)?;
+        let meter = Meter::new(progress, cancel, archive_of(&prepared.archive).total_size());
+        prepared.extract(&refs, cancel, &meter)?;
+        meter.finish();
         Ok(prepared)
     }
 
@@ -295,7 +302,12 @@ impl PreparedRestore {
     /// `vault.json.bak`.
     /// Each entry gets a new file that is synced and closed before the next, then read back
     /// from disk: the bytes on disk, not the ones just written, must hash to the manifest.
-    fn extract(&self, refs: &BTreeMap<FileId, &FileRef>, cancel: &CancelToken) -> Result<()> {
+    fn extract(
+        &self,
+        refs: &BTreeMap<FileId, &FileRef>,
+        cancel: &CancelToken,
+        meter: &Meter,
+    ) -> Result<()> {
         let staging = &self.staging;
         let (items, files) = (staging.join(ITEMS_DIR), staging.join(FILES_DIR));
         set_hidden(staging)?;
@@ -307,6 +319,10 @@ impl PreparedRestore {
             cancel.check()?;
             let path = staging.join(&e.name);
             let mut file = File::create_new(&path)?;
+            let mut counted = CountWrite {
+                inner: &mut file,
+                meter,
+            };
             match e.kind {
                 EntryKind::Blob(id) => {
                     let (vault_id, fref) = (&self.vault_id, refs[&id]);
@@ -316,13 +332,13 @@ impl PreparedRestore {
                         fref,
                         vault_id,
                         &listed,
-                        &mut file,
+                        &mut counted,
                         cancel,
                     )?;
                 }
                 _ => {
                     let src = &mut archive_of(&self.archive).reader(e);
-                    let hash = copy_hashed(src, e.size, &mut file, cancel)?;
+                    let hash = copy_hashed(src, e.size, &mut counted, cancel)?;
                     check_listed(&listed, &e.name, hash)?;
                 }
             }
@@ -708,6 +724,7 @@ pub(super) mod tests {
     use crate::archive::testkit::{
         ManifestMode, central_offset, patch, resize_entry, rewrite_backup,
     };
+    use crate::blob::NoProgress;
     use crate::fsio::testutil::{TempDir, make_dir_link, names};
     use crate::fsio::{VolumeInfo, failpoint, set_volume_override};
     use crate::item::ItemKind;
@@ -764,7 +781,7 @@ pub(super) mod tests {
         }
 
         fn prepare(&self, archive: &Path, credential: Credential) -> Result<PreparedRestore> {
-            self.prepare_with(archive, credential, &CancelToken::new())
+            self.prepare_with(archive, credential, &CancelToken::new(), &NoProgress)
         }
 
         fn prepare_with(
@@ -772,6 +789,7 @@ pub(super) mod tests {
             archive: &Path,
             credential: Credential,
             cancel: &CancelToken,
+            progress: &dyn Progress,
         ) -> Result<PreparedRestore> {
             PreparedRestore::prepare(
                 archive,
@@ -780,6 +798,7 @@ pub(super) mod tests {
                 RestoreDestination::SameVault,
                 &self.journal(),
                 cancel,
+                progress,
             )
         }
 
@@ -872,6 +891,52 @@ pub(super) mod tests {
                 fs::read(b.join(&name)).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn restore_progress_counts_what_it_copies() {
+        use crate::blob::testkit::{CancelAtFirst, Recorder};
+
+        let (_f, backup) = backed_up();
+        let copied = BackupArchive::open(&backup, &CancelToken::new())
+            .unwrap()
+            .total_size();
+
+        // Every entry the restore writes: vault.json, the items and the blobs.
+        let d = Dest::new();
+        let recorder = Recorder::default();
+        let p = d
+            .prepare_with(
+                &backup,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &recorder,
+            )
+            .unwrap();
+        assert_eq!(recorder.assert_a_clean_run(), copied);
+        assert!(recorder.calls().len() as u64 <= copied / MIB as u64 + 1);
+        drop(p);
+
+        // A stop is the last the listener hears, and the staging folder goes.
+        let d = Dest::new();
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Recorder::default());
+        let result = d.prepare_with(&backup, Credential::Password(PW), &cancel, &listener);
+        assert!(matches!(error(result), CoreError::Cancelled));
+        assert_eq!(listener.1.calls().len(), 1);
+        d.assert_untouched();
+
+        // A refusal before anything is copied reports nothing.
+        let d = Dest::new();
+        let recorder = Recorder::default();
+        let result = d.prepare_with(
+            &backup,
+            Credential::Password("not the password"),
+            &CancelToken::new(),
+            &recorder,
+        );
+        assert!(matches!(error(result), CoreError::WrongPassword));
+        assert!(recorder.calls().is_empty());
     }
 
     #[test]
@@ -1151,7 +1216,13 @@ pub(super) mod tests {
                 let credential = Credential::Password(PW);
                 let same = RestoreDestination::SameVault;
                 let p = PreparedRestore::prepare(
-                    &archive, &parent, credential, same, &journal, &cancel,
+                    &archive,
+                    &parent,
+                    credential,
+                    same,
+                    &journal,
+                    &cancel,
+                    &NoProgress,
                 );
                 *slot.borrow_mut() = Some(p.unwrap());
             }),
@@ -1271,6 +1342,7 @@ pub(super) mod tests {
             RestoreDestination::SameVault,
             &d.journal(),
             &CancelToken::new(),
+            &NoProgress,
         );
         match result {
             Err(e) => {
@@ -1437,7 +1509,7 @@ pub(super) mod tests {
         let d = Dest::new();
         let token = CancelToken::new();
         failpoint::arm_cancel("restore.after_entry", token.clone());
-        let result = d.prepare_with(&backup, Credential::Password(PW), &token);
+        let result = d.prepare_with(&backup, Credential::Password(PW), &token, &NoProgress);
         assert!(matches!(error(result), CoreError::Cancelled));
         d.assert_untouched();
     }
@@ -1490,7 +1562,14 @@ pub(super) mod tests {
             for file in &item.attachments {
                 let cancel = CancelToken::new();
                 vault
-                    .export_file(&item.id, &file.file_id, &dest, &NoJournal, &cancel)
+                    .export_file(
+                        &item.id,
+                        &file.file_id,
+                        &dest,
+                        &NoJournal,
+                        &cancel,
+                        &NoProgress,
+                    )
                     .unwrap();
                 all.push(fs::read(&dest).unwrap());
             }
@@ -1616,6 +1695,7 @@ pub(super) mod tests {
                 RestoreDestination::SameVault,
                 &self.journal(),
                 &cancel,
+                &NoProgress,
             )
             .unwrap()
         }
@@ -2961,6 +3041,7 @@ pub(super) mod tests {
                 destination,
                 &journal,
                 &CancelToken::new(),
+                &NoProgress,
             )
         }
     }

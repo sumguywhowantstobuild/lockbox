@@ -14,8 +14,8 @@ use super::cleanup::check_folder;
 use super::items::{BEING_DELETED, ITEMS_DIR, blank_item, edited};
 use super::source::FILE_MISSING;
 use crate::blob::{
-    CancelToken, OutputJournal, blob_len, check_length, decrypt_stream, encrypt_stream,
-    new_file_ref,
+    CancelToken, CountRead, CountWrite, Meter, OutputJournal, Progress, blob_len, check_length,
+    decrypt_stream, encrypt_stream, new_file_ref,
 };
 use crate::fsio::{
     check_space, clear_hidden, create_hidden_file, hidden_temp_path, parent_dir, remove_file_retry,
@@ -221,7 +221,9 @@ impl Drop for OutputTemp<'_> {
 /// decrypted copy is built in a hidden temp file beside `dest`, and an existing `dest` is
 /// replaced only once every chunk has authenticated. The caller has refused a `dest` that must
 /// not be written and has checked the space. The temp is recorded in `journal` before it exists,
-/// and each attempt of the rename passes the journal's gate.
+/// and each attempt of the rename passes the journal's gate. `progress` hears the plaintext bytes
+/// written, out of the file's length.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn export_blob(
     blob: &mut impl Read,
     blob_size: u64,
@@ -230,6 +232,7 @@ pub(super) fn export_blob(
     dest: &Path,
     journal: &dyn OutputJournal,
     cancel: &CancelToken,
+    progress: &dyn Progress,
 ) -> Result<()> {
     // Every early return below, and a panic, leaves the clean-up to `temp`.
     let mut temp = OutputTemp::create(
@@ -238,7 +241,12 @@ pub(super) fn export_blob(
         journal,
         "export.after_record",
     )?;
-    decrypt_stream(blob, blob_size, temp.file(), vault_id, fref, cancel)?;
+    let meter = Meter::new(progress, cancel, fref.length);
+    let mut counted = CountWrite {
+        inner: temp.file(),
+        meter: &meter,
+    };
+    decrypt_stream(blob, blob_size, &mut counted, vault_id, fref, cancel)?;
     temp.file().sync_all()?;
     temp.close();
     // Windows keeps a file's attributes when it replaces another: unhide first.
@@ -247,7 +255,9 @@ pub(super) fn export_blob(
     crate::fsio::failpoint::check("export.before_publish")?;
     // Last chance to cancel: from here only the journal's gate can still stop it.
     cancel.check()?;
-    temp.publish(dest)
+    temp.publish(dest)?;
+    meter.finish();
+    Ok(())
 }
 
 /// Opens the file to import and returns it with its size. On Windows other programs may
@@ -289,14 +299,19 @@ impl Vault {
 
     /// Encrypts the file at `src` into a published blob and returns its record. The blob is
     /// not referenced by any item yet.
-    fn import_file(&self, src: &Path, cancel: &CancelToken) -> Result<FileRef> {
+    fn import_file(
+        &self,
+        src: &Path,
+        cancel: &CancelToken,
+        progress: &dyn Progress,
+    ) -> Result<FileRef> {
         let name = src
             .file_name()
             .ok_or(CoreError::InvalidInput { what: "file name" })?
             .to_string_lossy()
             .into_owned();
         let (mut file, len) = open_source(src)?;
-        let fref = self.import_stream(&mut file, len, name, cancel)?;
+        let fref = self.import_stream(&mut file, len, name, cancel, progress)?;
         #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("import.before_item_write")?;
         // A cancel here leaves the published blob as an orphan (cleanup sets it aside), no item.
@@ -306,14 +321,16 @@ impl Vault {
 
     /// The blob side of an import (spec 6.4): `files/<id>.blob.partial`, flushed, then renamed
     /// to `files/<id>.blob`. Space and size limits are checked before anything is written.
+    /// `progress` hears the bytes read, out of `declared_len`.
     fn import_stream(
         &self,
         src: &mut impl Read,
         declared_len: u64,
         name: String,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<FileRef> {
-        self.import_stream_tracked(src, declared_len, name, cancel, &mut Vec::new())
+        self.import_stream_tracked(src, declared_len, name, cancel, progress, &mut Vec::new())
     }
 
     /// [`import_stream`](Self::import_stream) for a caller that must know which blob it may have
@@ -327,6 +344,7 @@ impl Vault {
         declared_len: u64,
         name: String,
         cancel: &CancelToken,
+        progress: &dyn Progress,
         published: &mut Vec<FileId>,
     ) -> Result<FileRef> {
         check_length(declared_len)?;
@@ -344,9 +362,21 @@ impl Vault {
         let partial = dir.join(format!("{}.blob.partial", fref.file_id.to_hex()));
         // Owned only once this succeeds; if the name is taken, nothing is removed.
         let mut out = File::create_new(&partial)?;
+        let meter = Meter::new(progress, cancel, declared_len);
         let written = (|| {
             let vault_id = &self.header.vault_id;
-            encrypt_stream(src, declared_len, &mut out, vault_id, &fref, cancel)?;
+            let mut counted = CountRead {
+                inner: src,
+                meter: &meter,
+            };
+            encrypt_stream(
+                &mut counted,
+                declared_len,
+                &mut out,
+                vault_id,
+                &fref,
+                cancel,
+            )?;
             out.sync_all()?;
             drop(out); // Windows cannot move a file that is still open.
             #[cfg(any(test, feature = "test-internals"))]
@@ -363,18 +393,21 @@ impl Vault {
             let _ = remove_file_retry(&partial);
             return Err(error);
         }
+        meter.finish();
         Ok(fref)
     }
 
     /// Encrypts the file at `src` and attaches it to the item. Returns the new file's ID.
+    /// `progress` hears the bytes read, out of the file's size.
     pub fn attach_file(
         &mut self,
         item: &ItemId,
         src: &Path,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<FileId> {
         let mut next = edited(self.file_holder(item)?)?;
-        let fref = self.import_file(src, cancel)?;
+        let fref = self.import_file(src, cancel, progress)?;
         let id = fref.file_id;
         next.attachments.push(fref);
         self.commit_item(next)?;
@@ -387,10 +420,11 @@ impl Vault {
         collection: Option<ItemId>,
         src: &Path,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<ItemId> {
         let id = self.fresh_item_id()?;
         self.check_collection(&id, &ItemKind::File, collection, None)?;
-        let fref = self.import_file(src, cancel)?;
+        let fref = self.import_file(src, cancel, progress)?;
         let mut item = blank_item(id, ItemKind::File, &fref.name, collection);
         item.attachments.push(fref);
         self.commit_item(item)?;
@@ -405,6 +439,7 @@ impl Vault {
         old: &FileId,
         src: &Path,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<FileId> {
         let mut next = edited(self.file_holder(item)?)?;
         let slot = next
@@ -412,7 +447,7 @@ impl Vault {
             .iter()
             .position(|f| f.file_id == *old)
             .ok_or(CoreError::NotFound)?;
-        let fref = self.import_file(src, cancel)?;
+        let fref = self.import_file(src, cancel, progress)?;
         let id = fref.file_id;
         next.attachments[slot] = fref;
         next.retired_blobs.push(*old);
@@ -425,6 +460,7 @@ impl Vault {
     /// once every chunk has authenticated. The temp is recorded in `journal` before it exists.
     /// A `dest` inside this vault, or in any vault folder (one whose folder, or a folder above
     /// it, holds `vault.json` or `vault.json.bak`), is refused before anything is created.
+    /// `progress` hears the bytes written, out of the file's size.
     pub fn export_file(
         &self,
         item: &ItemId,
@@ -432,6 +468,7 @@ impl Vault {
         dest: &Path,
         journal: &dyn OutputJournal,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<()> {
         let fref = self
             .get_item(item)?
@@ -455,6 +492,7 @@ impl Vault {
             dest,
             journal,
             cancel,
+            progress,
         )
     }
 
@@ -558,7 +596,7 @@ pub(super) mod tests {
         let (parent, mut vault) = new_vault();
         let src = source(&parent, "a.txt", b"hello");
         failpoint::arm("import.before_item_write");
-        let result = vault.new_file_item(None, &src, &CancelToken::new());
+        let result = vault.new_file_item(None, &src, &CancelToken::new(), &NoProgress);
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))));
         assert_eq!(vault.items().count(), 0, "no item");
@@ -580,7 +618,7 @@ pub(super) mod tests {
         let id = vault.new_item(ItemKind::Note, "n", None).unwrap();
         let src = source(&parent, "a.txt", b"hello");
         failpoint::arm("import.before_item_write");
-        let result = vault.attach_file(&id, &src, &CancelToken::new());
+        let result = vault.attach_file(&id, &src, &CancelToken::new(), &NoProgress);
         failpoint::disarm_all();
         assert!(result.is_err());
         let item = vault.get_item(&id).unwrap();
@@ -595,11 +633,11 @@ pub(super) mod tests {
         let first = source(&parent, "a.bin", b"first");
         let second = source(&parent, "b.bin", b"second");
         let id = vault
-            .new_file_item(None, &first, &CancelToken::new())
+            .new_file_item(None, &first, &CancelToken::new(), &NoProgress)
             .unwrap();
         let old = vault.get_item(&id).unwrap().attachments[0].file_id;
         let new = vault
-            .replace_attachment(&id, &old, &second, &CancelToken::new())
+            .replace_attachment(&id, &old, &second, &CancelToken::new(), &NoProgress)
             .unwrap();
         assert!(blob_path(&vault, &old).exists() && blob_path(&vault, &new).exists());
 
@@ -636,7 +674,7 @@ pub(super) mod tests {
         let (parent, mut vault) = new_vault();
         let src = source(&parent, "a.bin", b"x");
         let id = vault
-            .new_file_item(None, &src, &CancelToken::new())
+            .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
             .unwrap();
         let file = vault.get_item(&id).unwrap().attachments[0].file_id;
         fs::remove_file(blob_path(&vault, &file)).unwrap();
@@ -668,21 +706,27 @@ pub(super) mod tests {
 
         // Too little free space.
         set_volume_override(volume(Some(MIB), None));
-        let result = vault.new_file_item(None, &src, &CancelToken::new());
+        let result = vault.new_file_item(None, &src, &CancelToken::new(), &NoProgress);
         assert!(matches!(result, Err(CoreError::NotEnoughSpace { .. })));
         assert!(blob_files(&vault).is_empty(), "no .partial or .blob");
         assert_eq!(vault.items().count(), 0);
 
         // 5 GiB into a FAT32-style volume: refused without reading a byte.
         set_volume_override(volume(Some(100 * GIB), Some(4 * GIB - 1)));
-        let result = vault.import_stream(&mut NoRead, 5 * GIB, "big".into(), &CancelToken::new());
+        let result = vault.import_stream(
+            &mut NoRead,
+            5 * GIB,
+            "big".into(),
+            &CancelToken::new(),
+            &NoProgress,
+        );
         assert!(matches!(result, Err(CoreError::FileSystemLimit { .. })));
         assert!(blob_files(&vault).is_empty());
 
         // Export of a 5 GiB file to a FAT32-style destination.
         set_volume_override(None);
         let id = vault
-            .new_file_item(None, &src, &CancelToken::new())
+            .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
             .unwrap();
         let item = vault.items.get_mut(&id).unwrap();
         item.attachments[0].length = 5 * GIB;
@@ -697,6 +741,7 @@ pub(super) mod tests {
             &dest,
             &crate::blob::NoJournal,
             &CancelToken::new(),
+            &NoProgress,
         );
         assert!(matches!(result, Err(CoreError::FileSystemLimit { .. })));
         assert_eq!(fs::read(&dest).unwrap(), b"OLD", "destination untouched");
@@ -715,6 +760,7 @@ pub(super) mod tests {
             &dest,
             &crate::blob::NoJournal,
             &CancelToken::new(),
+            &NoProgress,
         );
         assert!(matches!(result, Err(CoreError::NotEnoughSpace { .. })));
     }
@@ -729,6 +775,7 @@ pub(super) mod tests {
             MAX_FILE_BYTES + 1,
             "huge".into(),
             &CancelToken::new(),
+            &NoProgress,
         );
         assert!(matches!(result, Err(CoreError::TooLarge { .. })));
         assert!(blob_files(&vault).is_empty());
@@ -748,7 +795,7 @@ pub(super) mod tests {
         let cancel = CancelToken::new();
         // Declared 2 MiB, source yields only 1 MiB.
         let mut short = Growing(Cursor::new(vec![7u8; MIB as usize]));
-        let result = vault.import_stream(&mut short, 2 * MIB, "a".into(), &cancel);
+        let result = vault.import_stream(&mut short, 2 * MIB, "a".into(), &cancel, &NoProgress);
         assert!(matches!(
             result,
             Err(CoreError::InvalidInput {
@@ -757,7 +804,7 @@ pub(super) mod tests {
         ));
         // Declared 1 MiB, source delivers one byte more.
         let mut long = Growing(Cursor::new(vec![7u8; MIB as usize + 1]));
-        let result = vault.import_stream(&mut long, MIB, "a".into(), &cancel);
+        let result = vault.import_stream(&mut long, MIB, "a".into(), &cancel, &NoProgress);
         assert!(matches!(
             result,
             Err(CoreError::InvalidInput {
@@ -778,7 +825,13 @@ pub(super) mod tests {
         for name in names {
             let mut data = Cursor::new(b"x".to_vec());
             let fref = vault
-                .import_stream(&mut data, 1, name.to_owned(), &CancelToken::new())
+                .import_stream(
+                    &mut data,
+                    1,
+                    name.to_owned(),
+                    &CancelToken::new(),
+                    &NoProgress,
+                )
                 .unwrap();
             let id = vault.fresh_item_id().unwrap();
             let mut item = blank_item(id, ItemKind::File, name, None);
@@ -796,7 +849,7 @@ pub(super) mod tests {
             let file = item.attachments[0].file_id;
             let journal = crate::blob::NoJournal;
             vault
-                .export_file(id, &file, &dest, &journal, &CancelToken::new())
+                .export_file(id, &file, &dest, &journal, &CancelToken::new(), &NoProgress)
                 .unwrap();
             assert_eq!(fs::read(&dest).unwrap(), b"x");
         }
@@ -808,7 +861,7 @@ pub(super) mod tests {
         let src = source(&parent, "a.txt", b"hello");
         let cancel = CancelToken::new();
         cancel.cancel();
-        let result = vault.new_file_item(None, &src, &cancel);
+        let result = vault.new_file_item(None, &src, &cancel, &NoProgress);
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert!(blob_files(&vault).is_empty());
         assert_eq!(vault.items().count(), 0);
@@ -858,7 +911,7 @@ pub(super) mod tests {
         let (parent, mut vault) = new_vault();
         let src = source(&parent, "a.txt", b"hello");
         let id = vault
-            .new_file_item(None, &src, &CancelToken::new())
+            .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
             .unwrap();
         let file = vault.get_item(&id).unwrap().attachments[0].file_id;
         (parent, vault, id, file)
@@ -873,7 +926,7 @@ pub(super) mod tests {
         let src = source(&parent, "a.txt", b"hello");
         let cancel = CancelToken::new();
         failpoint::arm_cancel("import.before_publish", cancel.clone());
-        let result = vault.new_file_item(None, &src, &cancel);
+        let result = vault.new_file_item(None, &src, &cancel, &NoProgress);
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert!(blob_files(&vault).is_empty(), "no .partial, no .blob");
         assert_eq!(vault.items().count(), 0);
@@ -887,12 +940,12 @@ pub(super) mod tests {
         let note = vault.new_item(ItemKind::Note, "n", None).unwrap();
         let cancel = CancelToken::new();
         failpoint::arm_cancel("import.before_item_write", cancel.clone());
-        let result = vault.attach_file(&note, &src, &cancel);
+        let result = vault.attach_file(&note, &src, &cancel, &NoProgress);
         assert!(matches!(result, Err(CoreError::Cancelled)));
         let item = vault.get_item(&note).unwrap();
         assert!(item.attachments.is_empty() && item.revision == 0);
 
-        let result = vault.new_file_item(None, &src, &cancel);
+        let result = vault.new_file_item(None, &src, &cancel, &NoProgress);
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert_eq!(vault.items().count(), 1, "no new item");
         // The blob had been published already: it stays as an orphan for cleanup. No .partial.
@@ -911,7 +964,7 @@ pub(super) mod tests {
         let cancel = CancelToken::new();
         failpoint::arm_cancel("export.before_publish", cancel.clone());
         let journal = Recorder::default();
-        let result = vault.export_file(&id, &file, &dest, &journal, &cancel);
+        let result = vault.export_file(&id, &file, &dest, &journal, &cancel, &NoProgress);
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert_eq!(fs::read(&dest).unwrap(), b"OLD");
         assert_eq!(file_names(&out), ["a.txt"], "no temp left");
@@ -936,7 +989,7 @@ pub(super) mod tests {
             .join(format!("{}.blob.partial", id.to_hex()));
         fs::write(&stale, b"someone else's").unwrap();
         force_next_file_id(id);
-        let result = vault.new_file_item(None, &src, &CancelToken::new());
+        let result = vault.new_file_item(None, &src, &CancelToken::new(), &NoProgress);
         assert!(matches!(result, Err(CoreError::Io(_))));
         assert_eq!(fs::read(&stale).unwrap(), b"someone else's");
         assert_eq!(vault.items().count(), 0);
@@ -953,7 +1006,14 @@ pub(super) mod tests {
         force_next_temp_name(name);
         let journal = Recorder::default();
         let dest = out.join("a.txt");
-        let result = vault.export_file(&id, &file, &dest, &journal, &CancelToken::new());
+        let result = vault.export_file(
+            &id,
+            &file,
+            &dest,
+            &journal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
         assert!(matches!(result, Err(CoreError::Io(_))));
         assert_eq!(fs::read(out.join(name)).unwrap(), b"someone else's");
         assert!(!dest.exists());
@@ -995,10 +1055,19 @@ pub(super) mod tests {
             vault.update_item(vault.get_item(&id).unwrap().clone())
         ));
         let cancel = CancelToken::new();
-        assert!(being_deleted(vault.attach_file(&id, &src, &cancel)));
-        assert!(being_deleted(
-            vault.replace_attachment(&id, &file, &src, &cancel)
-        ));
+        assert!(being_deleted(vault.attach_file(
+            &id,
+            &src,
+            &cancel,
+            &NoProgress
+        )));
+        assert!(being_deleted(vault.replace_attachment(
+            &id,
+            &file,
+            &src,
+            &cancel,
+            &NoProgress
+        )));
         let item = vault.get_item(&id).unwrap();
         assert!(item.trashed_at.is_some() && item.purging && item.revision == before);
 
@@ -1033,7 +1102,7 @@ pub(super) mod tests {
         fs::remove_file(blob_path(&vault, &file)).unwrap();
         let dest = parent.path().join("out.txt");
         let cancel = CancelToken::new();
-        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel);
+        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel, &NoProgress);
         assert!(matches!(
             result,
             Err(CoreError::Damaged {
@@ -1041,7 +1110,7 @@ pub(super) mod tests {
             })
         ));
         set_volume_override(volume(Some(MIB), None));
-        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel);
+        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel, &NoProgress);
         assert!(matches!(result, Err(CoreError::NotEnoughSpace { .. })));
     }
 
@@ -1056,7 +1125,8 @@ pub(super) mod tests {
         let journal = Recorder::default();
         let aliased = vault.dir().join("files").join("..").join("vault.json");
         for dest in [&blob, &header, &aliased] {
-            let result = vault.export_file(&id, &file, dest, &journal, &CancelToken::new());
+            let result =
+                vault.export_file(&id, &file, dest, &journal, &CancelToken::new(), &NoProgress);
             assert!(matches!(
                 result,
                 Err(CoreError::InvalidInput {
@@ -1078,7 +1148,14 @@ pub(super) mod tests {
         // Beside the vault folder is fine.
         let outside = vault.dir().parent().unwrap().join("copy.txt");
         vault
-            .export_file(&id, &file, &outside, &NoJournal, &CancelToken::new())
+            .export_file(
+                &id,
+                &file,
+                &outside,
+                &NoJournal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
             .unwrap();
         assert_eq!(fs::read(&outside).unwrap(), b"hello");
     }
@@ -1255,7 +1332,14 @@ pub(super) mod tests {
             other.dir().join("a.txt"),
             other.dir().join("items").join("a.txt"),
         ] {
-            let result = vault.export_file(&id, &file, &dest, &journal, &CancelToken::new());
+            let result = vault.export_file(
+                &id,
+                &file,
+                &dest,
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            );
             assert!(
                 matches!(
                     result,
@@ -1303,10 +1387,22 @@ pub(super) mod tests {
                 "{r:?}"
             );
         };
-        full(vault.export_file(&id, &file, &out.join("a.txt"), &journal, &cancel));
+        full(vault.export_file(
+            &id,
+            &file,
+            &out.join("a.txt"),
+            &journal,
+            &cancel,
+            &NoProgress,
+        ));
         full(
             vault
-                .backup(&out.join("b.lockbox-backup"), &journal, &cancel)
+                .backup(
+                    &out.join("b.lockbox-backup"),
+                    &journal,
+                    &cancel,
+                    &NoProgress,
+                )
                 .map(|_| ()),
         );
         assert!(
@@ -1335,10 +1431,22 @@ pub(super) mod tests {
             );
         }
         vault
-            .export_file(&id, &file, &out.join("a.txt"), &*journal, &cancel)
+            .export_file(
+                &id,
+                &file,
+                &out.join("a.txt"),
+                &*journal,
+                &cancel,
+                &NoProgress,
+            )
             .unwrap();
         vault
-            .backup(&out.join("b.lockbox-backup"), &*journal, &cancel)
+            .backup(
+                &out.join("b.lockbox-backup"),
+                &*journal,
+                &cancel,
+                &NoProgress,
+            )
             .unwrap();
         // Before the backup's temp, the folder holds only the export just published.
         let copied = vec!["a.txt".to_owned()];
@@ -1368,11 +1476,11 @@ pub(super) mod tests {
             ..GateJournal::default()
         };
         let export = catch_unwind(AssertUnwindSafe(|| {
-            vault.export_file(&id, &file, &copy, &journal, &cancel)
+            vault.export_file(&id, &file, &copy, &journal, &cancel, &NoProgress)
         }));
         assert!(export.is_err(), "the panic reaches the caller");
         let made = catch_unwind(AssertUnwindSafe(|| {
-            vault.backup(&backup, &journal, &cancel)
+            vault.backup(&backup, &journal, &cancel, &NoProgress)
         }));
         assert!(made.is_err(), "the panic reaches the caller");
         assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
@@ -1411,11 +1519,11 @@ pub(super) mod tests {
             ..GateJournal::default()
         };
         let export = catch_unwind(AssertUnwindSafe(|| {
-            vault.export_file(&id, &file, &copy, &journal, &cancel)
+            vault.export_file(&id, &file, &copy, &journal, &cancel, &NoProgress)
         }));
         assert_eq!(panic_text(&*export.unwrap_err()), "publish panicked");
         let made = catch_unwind(AssertUnwindSafe(|| {
-            vault.backup(&backup, &journal, &cancel)
+            vault.backup(&backup, &journal, &cancel, &NoProgress)
         }));
         assert_eq!(panic_text(&*made.unwrap_err()), "publish panicked");
         assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
@@ -1470,11 +1578,11 @@ pub(super) mod tests {
             ..GateJournal::default()
         };
         let export = catch_unwind(AssertUnwindSafe(|| {
-            vault.export_file(&id, &file, &copy, &journal, &cancel)
+            vault.export_file(&id, &file, &copy, &journal, &cancel, &NoProgress)
         }));
         assert_eq!(panic_text(&*export.unwrap_err()), "publish panicked");
         let made = catch_unwind(AssertUnwindSafe(|| {
-            vault.backup(&backup, &journal, &cancel)
+            vault.backup(&backup, &journal, &cancel, &NoProgress)
         }));
         assert_eq!(panic_text(&*made.unwrap_err()), "publish panicked");
         assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
@@ -1502,14 +1610,14 @@ pub(super) mod tests {
             ..GateJournal::default()
         };
         let export = catch_unwind(AssertUnwindSafe(|| {
-            vault.export_file(&id, &file, &copy, &journal, &cancel)
+            vault.export_file(&id, &file, &copy, &journal, &cancel, &NoProgress)
         }));
         assert_eq!(
             panic_text(&*export.unwrap_err()),
             "publish panicked after the rename"
         );
         let made = catch_unwind(AssertUnwindSafe(|| {
-            vault.backup(&backup, &journal, &cancel)
+            vault.backup(&backup, &journal, &cancel, &NoProgress)
         }));
         assert!(made.is_err());
         assert_eq!(fs::read(&copy).unwrap(), b"hello", "the copy is published");
@@ -1560,8 +1668,8 @@ pub(super) mod tests {
             }),
         );
         failpoint::arm("publish.after_rename");
-        let exported = vault.export_file(&id, &file, &copy, &*journal, &cancel);
-        let made = vault.backup(&backup, &*journal, &cancel);
+        let exported = vault.export_file(&id, &file, &copy, &*journal, &cancel, &NoProgress);
+        let made = vault.backup(&backup, &*journal, &cancel, &NoProgress);
         failpoint::disarm_all();
         assert_eq!(syncs.get(), 2, "the durability step ran once per output");
         assert!(matches!(exported, Err(CoreError::Io(_))), "{exported:?}");
@@ -1592,9 +1700,9 @@ pub(super) mod tests {
             refuse_publish: true,
             ..GateJournal::default()
         };
-        let result = vault.export_file(&id, &file, &copy, &journal, &cancel);
+        let result = vault.export_file(&id, &file, &copy, &journal, &cancel, &NoProgress);
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
-        let result = vault.backup(&backup, &journal, &cancel);
+        let result = vault.backup(&backup, &journal, &cancel, &NoProgress);
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
         assert_eq!(fs::read(&copy).unwrap(), b"OLD COPY");
         assert_eq!(fs::read(&backup).unwrap(), b"OLD BACKUP");
@@ -1644,10 +1752,104 @@ pub(super) mod tests {
             calls: Cell::new(0),
         };
         vault
-            .export_file(&id, &file, &dest, &journal, &CancelToken::new())
+            .export_file(
+                &id,
+                &file,
+                &dest,
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
             .unwrap();
         assert_eq!(journal.calls.get(), 3);
         assert_eq!(fs::read(&dest).unwrap(), b"hello");
         assert_eq!(file_names(&out), ["a.txt"]);
+    }
+
+    // ---- progress and a stop for one job ----
+
+    use crate::blob::NoProgress;
+    use crate::blob::testkit::{CancelAtFirst, Recorder as Listener};
+
+    fn big_bytes() -> Vec<u8> {
+        (0..3 * MIB as usize + 5).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn import_reports_bytes_done_and_the_file_size() {
+        let (parent, mut vault) = new_vault();
+        let data = big_bytes();
+        let src = source(&parent, "big.bin", &data);
+        let recorder = Listener::default();
+        vault
+            .new_file_item(None, &src, &CancelToken::new(), &recorder)
+            .unwrap();
+        assert_eq!(recorder.assert_a_clean_run(), data.len() as u64);
+        assert!(recorder.calls().len() <= 4, "{:?}", recorder.calls());
+
+        // Attaching and replacing report the same way.
+        let id = vault.new_item(ItemKind::Note, "n", None).unwrap();
+        let attached = Listener::default();
+        vault
+            .attach_file(&id, &src, &CancelToken::new(), &attached)
+            .unwrap();
+        assert_eq!(attached.assert_a_clean_run(), data.len() as u64);
+        let old = vault.get_item(&id).unwrap().attachments[0].file_id;
+        let replaced = Listener::default();
+        vault
+            .replace_attachment(&id, &old, &src, &CancelToken::new(), &replaced)
+            .unwrap();
+        assert_eq!(replaced.assert_a_clean_run(), data.len() as u64);
+    }
+
+    #[test]
+    fn save_a_copy_reports_bytes_done_and_the_file_size() {
+        let (parent, mut vault) = new_vault();
+        let data = big_bytes();
+        let src = source(&parent, "big.bin", &data);
+        let id = vault
+            .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
+            .unwrap();
+        let file = vault.get_item(&id).unwrap().attachments[0].file_id;
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let dest = out.join("copy.bin");
+        let recorder = Listener::default();
+        vault
+            .export_file(
+                &id,
+                &file,
+                &dest,
+                &NoJournal,
+                &CancelToken::new(),
+                &recorder,
+            )
+            .unwrap();
+        assert_eq!(recorder.assert_a_clean_run(), data.len() as u64);
+        assert_eq!(fs::read(&dest).unwrap(), data);
+    }
+
+    #[test]
+    fn a_stopped_import_or_copy_reports_nothing_after_the_stop() {
+        let (parent, mut vault) = new_vault();
+        let src = source(&parent, "big.bin", &big_bytes());
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Listener::default());
+        let result = vault.new_file_item(None, &src, &cancel, &listener);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(listener.1.calls().len(), 1);
+        assert!(blob_files(&vault).is_empty(), "no partial blob");
+
+        let id = vault
+            .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
+            .unwrap();
+        let file = vault.get_item(&id).unwrap().attachments[0].file_id;
+        let dest = parent.path().join("copy.bin");
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Listener::default());
+        let result = vault.export_file(&id, &file, &dest, &NoJournal, &cancel, &listener);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(listener.1.calls().len(), 1);
+        assert!(!dest.exists(), "no copy published");
     }
 }

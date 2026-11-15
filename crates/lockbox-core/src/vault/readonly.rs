@@ -9,7 +9,7 @@ use super::naming::created_at_now;
 use super::source::{FILE_MISSING, HEADER_MAC, VaultSource, unlock_source};
 use super::{Credential, Vault};
 use crate::archive::BackupArchive;
-use crate::blob::{CancelToken, OutputJournal, decrypt_stream};
+use crate::blob::{CancelToken, Meter, NoProgress, OutputJournal, Progress, decrypt_stream};
 use crate::fsio::parent_dir;
 use crate::header::{VaultHeader, verify_header_mac};
 use crate::ids::{FileId, ItemId, VaultId};
@@ -39,14 +39,15 @@ pub struct ReadOnlyVault {
 impl ReadOnlyVault {
     /// Opens a backup archive. The manifest MAC and the header and item hashes are checked
     /// (see `unlock_source`), and the header MAC must hold. Blobs are authenticated when
-    /// they are exported.
+    /// they are exported. `progress` hears the bytes of the item files read, out of their size.
     pub fn open_backup(
         archive: &Path,
         credential: Credential,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<ReadOnlyVault> {
         let source = VaultSource::Archive(BackupArchive::open(archive, cancel)?);
-        let vault = Self::open(source, &credential, cancel)?;
+        let vault = Self::open(source, &credential, cancel, progress)?;
         if !vault.header_mac_ok {
             return Err(HEADER_MAC);
         }
@@ -54,22 +55,30 @@ impl ReadOnlyVault {
     }
 
     /// Opens a vault folder, such as a `.before-restore` folder. A header whose MAC does not
-    /// match still opens; [`header_mac_ok`](Self::header_mac_ok) says so.
+    /// match still opens; [`header_mac_ok`](Self::header_mac_ok) says so. `progress` is heard as for
+    /// [`open_backup`](Self::open_backup).
     pub fn open_folder(
         dir: &Path,
         credential: Credential,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<ReadOnlyVault> {
-        Self::open(VaultSource::Folder(dir.to_path_buf()), &credential, cancel)
+        let source = VaultSource::Folder(dir.to_path_buf());
+        Self::open(source, &credential, cancel, progress)
     }
 
     fn open(
         source: VaultSource,
         credential: &Credential,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<ReadOnlyVault> {
+        // A list that cannot be made counts as nothing here: `unlock_source` meets the same error.
+        let items = source.item_ids().unwrap_or_default();
+        let meter = Meter::new(progress, cancel, source.items_len(&items));
         // The vault key is not kept: exporting needs only each file's own key.
-        let opened = unlock_source(&source, credential, cancel)?;
+        let opened = unlock_source(&source, credential, cancel, Some(&meter))?;
+        meter.finish();
         Ok(ReadOnlyVault {
             index: SearchIndex::build(opened.items.values()),
             header_mac_ok: verify_header_mac(&opened.header, &opened.key),
@@ -125,6 +134,7 @@ impl ReadOnlyVault {
         dest: &Path,
         journal: &dyn OutputJournal,
         cancel: &CancelToken,
+        progress: &dyn Progress,
     ) -> Result<()> {
         let fref = self
             .get_item(item)?
@@ -141,7 +151,9 @@ impl ReadOnlyVault {
         check_export_space(fref, dest)?;
         let (mut blob, blob_size) = self.source.blob(file)?;
         let vault_id = &self.header.vault_id;
-        export_blob(&mut blob, blob_size, vault_id, fref, dest, journal, cancel)
+        export_blob(
+            &mut blob, blob_size, vault_id, fref, dest, journal, cancel, progress,
+        )
     }
 
     /// The attachments of `id` whose file this source does not hold (a backup made while the
@@ -307,7 +319,8 @@ impl Vault {
                 #[cfg(not(any(test, feature = "test-internals")))]
                 let mut reader = reader;
                 let (len, name) = (old.length, old.name.clone());
-                self.import_stream_tracked(&mut reader, len, name, cancel, published)
+                // Copying an item shows a busy state only, so what the import reads is not reported.
+                self.import_stream_tracked(&mut reader, len, name, cancel, &NoProgress, published)
             };
             // A panic is reported as it is, ahead of the import's error: the import only saw the
             // stream end early because of it.
@@ -389,11 +402,21 @@ mod tests {
     const NEW_PW: &str = "another long passphrase";
 
     fn open_backup(path: &Path) -> Result<ReadOnlyVault> {
-        ReadOnlyVault::open_backup(path, Credential::Password(PW), &CancelToken::new())
+        ReadOnlyVault::open_backup(
+            path,
+            Credential::Password(PW),
+            &CancelToken::new(),
+            &NoProgress,
+        )
     }
 
     fn open_folder(dir: &Path) -> Result<ReadOnlyVault> {
-        ReadOnlyVault::open_folder(dir, Credential::Password(PW), &CancelToken::new())
+        ReadOnlyVault::open_folder(
+            dir,
+            Credential::Password(PW),
+            &CancelToken::new(),
+            &NoProgress,
+        )
     }
 
     /// What identifies an item and its files, for comparing two views of the same vault.
@@ -486,10 +509,10 @@ mod tests {
 
         let (from_backup, from_vault) = (f.out().join("ro.bin"), f.out().join("live.bin"));
         let cancel = CancelToken::new();
-        ro.export_file(&item, &file, &from_backup, &NoJournal, &cancel)
+        ro.export_file(&item, &file, &from_backup, &NoJournal, &cancel, &NoProgress)
             .unwrap();
         f.vault
-            .export_file(&item, &file, &from_vault, &NoJournal, &cancel)
+            .export_file(&item, &file, &from_vault, &NoJournal, &cancel, &NoProgress)
             .unwrap();
         assert_eq!(fs::read(&from_backup).unwrap(), b"hello world");
         assert_eq!(
@@ -497,8 +520,108 @@ mod tests {
             fs::read(&from_vault).unwrap()
         );
         let no_such_file = FileId::random();
-        let result = ro.export_file(&item, &no_such_file, &from_backup, &NoJournal, &cancel);
+        let result = ro.export_file(
+            &item,
+            &no_such_file,
+            &from_backup,
+            &NoJournal,
+            &cancel,
+            &NoProgress,
+        );
         assert!(matches!(result, Err(CoreError::NotFound)));
+    }
+
+    #[test]
+    fn opening_and_saving_a_copy_report_progress() {
+        use crate::blob::testkit::{CancelAtFirst, Recorder as Listener};
+
+        let mut f = Fixture::new();
+        f.vault.new_item(ItemKind::Note, "note", None).unwrap();
+        let (item, file) = f.file_item(&vec![5u8; 3 * MIB + 9]);
+        let backup = f.backup("a.lockbox-backup");
+        let items_dir = f.vault.dir().join("items");
+        let items_bytes: u64 = fs::read_dir(&items_dir)
+            .unwrap()
+            .map(|e| e.unwrap().metadata().unwrap().len())
+            .sum();
+
+        // Opening reads the items: that is the work, and its total.
+        let opening = Listener::default();
+        let ro = ReadOnlyVault::open_backup(
+            &backup,
+            Credential::Password(PW),
+            &CancelToken::new(),
+            &opening,
+        )
+        .unwrap();
+        assert_eq!(opening.assert_a_clean_run(), items_bytes);
+        let folder_listener = Listener::default();
+        let dir = f.vault.dir().to_path_buf();
+        let copy = f.out().join("folder-copy");
+        copy_folder(&dir, &copy);
+        ReadOnlyVault::open_folder(
+            &copy,
+            Credential::Password(PW),
+            &CancelToken::new(),
+            &folder_listener,
+        )
+        .unwrap();
+        assert_eq!(folder_listener.assert_a_clean_run(), items_bytes);
+
+        // Saving a copy reads the file: its size is the total.
+        let dest = f.out().join("ro.bin");
+        let saving = Listener::default();
+        ro.export_file(
+            &item,
+            &file,
+            &dest,
+            &NoJournal,
+            &CancelToken::new(),
+            &saving,
+        )
+        .unwrap();
+        assert_eq!(saving.assert_a_clean_run(), 3 * MIB as u64 + 9);
+
+        // A stop is the last the listener hears.
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Listener::default());
+        let again = f.out().join("again.bin");
+        let result = ro.export_file(&item, &file, &again, &NoJournal, &cancel, &listener);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(listener.1.calls().len(), 1);
+        assert!(!again.exists());
+    }
+
+    /// A stop that comes from the last report of an open still stops it.
+    #[test]
+    fn a_stop_from_the_last_report_still_stops_an_open() {
+        use crate::blob::testkit::{CancelAtFirst, Recorder as Listener};
+
+        let mut f = Fixture::new();
+        for n in 0..2 {
+            let notes = Zeroizing::new("a".repeat(600_000));
+            let title = format!("note {n}");
+            f.vault
+                .new_item_with_notes(ItemKind::Note, &title, None, notes)
+                .unwrap();
+        }
+        let backup = f.backup("a.lockbox-backup");
+        let copy = f.parent.path().join("copy");
+        copy_folder(f.vault.dir(), &copy);
+
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Listener::default());
+        let result =
+            ReadOnlyVault::open_backup(&backup, Credential::Password(PW), &cancel, &listener);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(listener.1.calls().len(), 1, "nothing after the stop");
+
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Listener::default());
+        let result =
+            ReadOnlyVault::open_folder(&copy, Credential::Password(PW), &cancel, &listener);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(listener.1.calls().len(), 1, "nothing after the stop");
     }
 
     #[test]
@@ -530,12 +653,13 @@ mod tests {
 
         let before = tree(&dir);
         let credential = Credential::Password(NEW_PW);
-        let ro = ReadOnlyVault::open_folder(&dir, credential, &CancelToken::new()).unwrap();
+        let ro =
+            ReadOnlyVault::open_folder(&dir, credential, &CancelToken::new(), &NoProgress).unwrap();
         assert!(ro.header_mac_ok());
         assert_eq!(ro.items().count(), 2);
         let dest = out.join("copy.bin");
         let cancel = CancelToken::new();
-        ro.export_file(&item, &file, &dest, &NoJournal, &cancel)
+        ro.export_file(&item, &file, &dest, &NoJournal, &cancel, &NoProgress)
             .unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"inside the folder");
         assert!(
@@ -569,8 +693,15 @@ mod tests {
         assert!(matches!(live, Err(CoreError::VaultInUse)));
         for (n, ro) in [&from_backup, &from_copy].into_iter().enumerate() {
             let dest = f.out().join(format!("{n}.bin"));
-            ro.export_file(&item, &file, &dest, &NoJournal, &CancelToken::new())
-                .unwrap();
+            ro.export_file(
+                &item,
+                &file,
+                &dest,
+                &NoJournal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .unwrap();
             assert_eq!(fs::read(&dest).unwrap(), b"shared contents");
         }
         // The folder view holds no lock: the copy can be unlocked while it is open.
@@ -594,7 +725,14 @@ mod tests {
             .collect();
         let journal = Recorder::default();
         for dest in &aliases {
-            let result = ro.export_file(&item, &file, dest, &journal, &CancelToken::new());
+            let result = ro.export_file(
+                &item,
+                &file,
+                dest,
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            );
             assert!(
                 matches!(
                     result,
@@ -613,8 +751,15 @@ mod tests {
         );
         // Beside it is fine.
         let beside = f.out().join("copy.bin");
-        ro.export_file(&item, &file, &beside, &journal, &CancelToken::new())
-            .unwrap();
+        ro.export_file(
+            &item,
+            &file,
+            &beside,
+            &journal,
+            &CancelToken::new(),
+            &NoProgress,
+        )
+        .unwrap();
         assert_eq!(fs::read(&beside).unwrap(), b"data");
     }
 
@@ -629,7 +774,14 @@ mod tests {
         let ro = open_backup(&backup).unwrap();
         let before = fs::read(&backup).unwrap();
         let journal = Recorder::default();
-        let result = ro.export_file(&item, &file, &link, &journal, &CancelToken::new());
+        let result = ro.export_file(
+            &item,
+            &file,
+            &link,
+            &journal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
         assert!(matches!(
             result,
             Err(CoreError::InvalidInput {
@@ -658,7 +810,7 @@ mod tests {
         let ro = open_folder(&copy).unwrap();
         let dest = f.out().join("copy.bin");
         let cancel = CancelToken::new();
-        let result = ro.export_file(&item, &file, &dest, &NoJournal, &cancel);
+        let result = ro.export_file(&item, &file, &dest, &NoJournal, &cancel, &NoProgress);
         assert!(matches!(
             result,
             Err(CoreError::Damaged {
@@ -669,7 +821,7 @@ mod tests {
             free_bytes: Some(MIB as u64),
             max_file_bytes: None,
         }));
-        let result = ro.export_file(&item, &file, &dest, &NoJournal, &cancel);
+        let result = ro.export_file(&item, &file, &dest, &NoJournal, &cancel, &NoProgress);
         assert!(
             matches!(result, Err(CoreError::NotEnoughSpace { .. })),
             "{result:?}"
@@ -692,7 +844,14 @@ mod tests {
         ];
         let journal = Recorder::default();
         for dest in &inside {
-            let result = ro.export_file(&item, &file, dest, &journal, &CancelToken::new());
+            let result = ro.export_file(
+                &item,
+                &file,
+                dest,
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            );
             assert!(
                 matches!(
                     result,
@@ -746,7 +905,14 @@ mod tests {
         for (n, ro) in views.iter().enumerate() {
             let journal = Recorder::default();
             for dest in &in_live {
-                let result = ro.export_file(&item, &file, dest, &journal, &CancelToken::new());
+                let result = ro.export_file(
+                    &item,
+                    &file,
+                    dest,
+                    &journal,
+                    &CancelToken::new(),
+                    &NoProgress,
+                );
                 assert_in_vault_folder(result, &format!("view {n}, {dest:?}"));
             }
             let recorded = journal.recorded.borrow();
@@ -766,7 +932,14 @@ mod tests {
         drop(gone);
         for dest in [bak_only.join("deeper").join("a.bin"), linked.join("a.bin")] {
             for (n, ro) in views.iter().enumerate() {
-                let result = ro.export_file(&item, &file, &dest, &NoJournal, &CancelToken::new());
+                let result = ro.export_file(
+                    &item,
+                    &file,
+                    &dest,
+                    &NoJournal,
+                    &CancelToken::new(),
+                    &NoProgress,
+                );
                 assert_in_vault_folder(result, &format!("view {n}, {dest:?}"));
             }
             assert!(!dest.exists());
@@ -778,8 +951,15 @@ mod tests {
         let beside = f.parent.path().join("beside.bin");
         for ro in &views {
             fs::write(&beside, b"OLD").unwrap();
-            ro.export_file(&item, &file, &beside, &NoJournal, &CancelToken::new())
-                .unwrap();
+            ro.export_file(
+                &item,
+                &file,
+                &beside,
+                &NoJournal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .unwrap();
             assert_eq!(fs::read(&beside).unwrap(), b"plaintext");
         }
     }
@@ -802,7 +982,14 @@ mod tests {
         for ro in &views {
             fs::write(&dest, b"OLD").unwrap();
             let journal = Recorder::default();
-            let result = ro.export_file(&item, &file, &dest, &journal, &CancelToken::new());
+            let result = ro.export_file(
+                &item,
+                &file,
+                &dest,
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            );
             assert!(
                 matches!(result, Err(CoreError::Damaged { .. })),
                 "{result:?}"
@@ -834,11 +1021,11 @@ mod tests {
             ]
         };
         for credential in wrong() {
-            let result = ReadOnlyVault::open_backup(&backup, credential, &cancel);
+            let result = ReadOnlyVault::open_backup(&backup, credential, &cancel, &NoProgress);
             assert!(matches!(result, Err(CoreError::WrongPassword)));
         }
         for credential in wrong() {
-            let result = ReadOnlyVault::open_folder(&copy, credential, &cancel);
+            let result = ReadOnlyVault::open_folder(&copy, credential, &cancel, &NoProgress);
             assert!(matches!(result, Err(CoreError::WrongPassword)));
         }
     }
@@ -852,10 +1039,10 @@ mod tests {
         copy_folder(f.vault.dir(), &copy);
         let cancel = CancelToken::new();
         let credential = Credential::Recovery(&f.recovery);
-        let ro = ReadOnlyVault::open_backup(&backup, credential, &cancel).unwrap();
+        let ro = ReadOnlyVault::open_backup(&backup, credential, &cancel, &NoProgress).unwrap();
         assert_eq!(ro.items().count(), 1);
         let credential = Credential::Recovery(&f.recovery);
-        let ro = ReadOnlyVault::open_folder(&copy, credential, &cancel).unwrap();
+        let ro = ReadOnlyVault::open_folder(&copy, credential, &cancel, &NoProgress).unwrap();
         assert_eq!(ro.items().count(), 1);
     }
 
@@ -868,10 +1055,10 @@ mod tests {
         let copy = f.parent.path().join("copy");
         copy_folder(f.vault.dir(), &copy);
         let backup_open = |token: &CancelToken| {
-            ReadOnlyVault::open_backup(&backup, Credential::Password(PW), token)
+            ReadOnlyVault::open_backup(&backup, Credential::Password(PW), token, &NoProgress)
         };
         let folder_open = |token: &CancelToken| {
-            ReadOnlyVault::open_folder(&copy, Credential::Password(PW), token)
+            ReadOnlyVault::open_folder(&copy, Credential::Password(PW), token, &NoProgress)
         };
 
         let cancelled = CancelToken::new();
@@ -1043,7 +1230,7 @@ mod tests {
         let dest = out.join(format!("{}.saved", file.to_hex()));
         let cancel = CancelToken::new();
         vault
-            .export_file(item, file, &dest, &NoJournal, &cancel)
+            .export_file(item, file, &dest, &NoJournal, &cancel, &NoProgress)
             .unwrap();
         fs::read(dest).unwrap()
     }
@@ -1079,9 +1266,9 @@ mod tests {
         let replacement = f.parent.path().join("new.bin");
         fs::write(&replacement, b"replacement").unwrap();
         let cancel = CancelToken::new();
-        let replaced = f
-            .vault
-            .replace_attachment(&item, &small, &replacement, &cancel);
+        let replaced =
+            f.vault
+                .replace_attachment(&item, &small, &replacement, &cancel, &NoProgress);
         replaced.unwrap();
         f.vault.trash_item(&item).unwrap();
         let backup = f.backup("a.lockbox-backup");
@@ -1238,7 +1425,8 @@ mod tests {
         let existing = f.out().join("existing.bin");
         fs::write(&existing, b"already in the live vault").unwrap();
         let cancel = CancelToken::new();
-        live.new_file_item(None, &existing, &cancel).unwrap();
+        live.new_file_item(None, &existing, &cancel, &NoProgress)
+            .unwrap();
         let before = files_listing(&live);
         assert_eq!(blob_count(&live), 1);
 
@@ -1312,7 +1500,9 @@ mod tests {
         let old_file = f.out().join("old.bin");
         fs::write(&old_file, b"older file, quarantined").unwrap();
         let cancel = CancelToken::new();
-        let old = live.new_file_item(None, &old_file, &cancel).unwrap();
+        let old = live
+            .new_file_item(None, &old_file, &cancel, &NoProgress)
+            .unwrap();
         let quarantined_id = live.get_item(&old).unwrap().attachments[0].file_id;
         // Its item file goes missing, so the next unlock quarantines the blob.
         let dir = live.dir().to_path_buf();
@@ -1859,8 +2049,15 @@ mod tests {
                 let original = f
                     .out()
                     .join(format!("{n}-{}.orig", old_ref.file_id.to_hex()));
-                ro.export_file(&item, &old_ref.file_id, &original, &NoJournal, &cancel)
-                    .unwrap();
+                ro.export_file(
+                    &item,
+                    &old_ref.file_id,
+                    &original,
+                    &NoJournal,
+                    &cancel,
+                    &NoProgress,
+                )
+                .unwrap();
                 let original = fs::read(original).unwrap();
                 assert_eq!(
                     saved(&live, &f.out(), &copied.id, &new_ref.file_id),
@@ -2004,18 +2201,34 @@ mod tests {
         let journal = GateJournal::default();
         let out = f.out();
         f.vault
-            .export_file(&item, &file, &out.join("live.bin"), &journal, &cancel)
+            .export_file(
+                &item,
+                &file,
+                &out.join("live.bin"),
+                &journal,
+                &cancel,
+                &NoProgress,
+            )
             .unwrap();
         let backup = out.join("a.lockbox-backup");
-        f.vault.backup(&backup, &journal, &cancel).unwrap();
+        f.vault
+            .backup(&backup, &journal, &cancel, &NoProgress)
+            .unwrap();
         let folder = f.parent.path().join("Family.before-restore");
         copy_folder(f.vault.dir(), &folder);
         for (ro, name) in [
             (open_backup(&backup).unwrap(), "from-backup.bin"),
             (open_folder(&folder).unwrap(), "from-folder.bin"),
         ] {
-            ro.export_file(&item, &file, &out.join(name), &journal, &cancel)
-                .unwrap();
+            ro.export_file(
+                &item,
+                &file,
+                &out.join(name),
+                &journal,
+                &cancel,
+                &NoProgress,
+            )
+            .unwrap();
             assert_eq!(fs::read(out.join(name)).unwrap(), b"hello");
         }
         let once = ["record", "publish", "clear"];
@@ -2039,12 +2252,12 @@ mod tests {
         let journal = GateJournal::default();
         let dest = f.out().join("a.bin");
         let cancel = CancelToken::new();
-        not_plain(ro.export_file(&item, &file, &dest, &journal, &cancel));
+        not_plain(ro.export_file(&item, &file, &dest, &journal, &cancel, &NoProgress));
         assert!(names(&f.out()).is_empty(), "{:?}", names(&f.out()));
         assert!(journal.calls.borrow().is_empty());
 
         remove_dir_link(&folder.join("files"));
-        let missing = ro.export_file(&item, &file, &dest, &journal, &cancel);
+        let missing = ro.export_file(&item, &file, &dest, &journal, &cancel, &NoProgress);
         assert!(
             matches!(
                 missing,

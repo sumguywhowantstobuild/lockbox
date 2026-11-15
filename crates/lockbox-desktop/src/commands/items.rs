@@ -1062,7 +1062,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use lockbox_core::blob::CancelToken;
+    use lockbox_core::blob::{CancelToken, NoProgress};
     use lockbox_core::ids::{FileId, ItemId, VaultId};
     use lockbox_core::internals::fsio::failpoint;
     use lockbox_core::internals::header::parse_header;
@@ -1197,7 +1197,7 @@ mod tests {
             .shell
             .sessions
             .write(s, g, |vault, cancel| {
-                let file_id = vault.attach_file(&item_id, &src, cancel)?;
+                let file_id = vault.attach_file(&item_id, &src, cancel, &NoProgress)?;
                 let item = vault.get_item(&item_id)?;
                 Ok((file_id, *file_key(&item.attachments[0]).as_bytes()))
             })
@@ -1758,7 +1758,7 @@ mod tests {
         ts.shell
             .sessions
             .write(session, generation, |vault, cancel| {
-                Ok(vault.attach_file(&item_id, &src, cancel)?)
+                Ok(vault.attach_file(&item_id, &src, cancel, &NoProgress)?)
             })
             .unwrap()
             .data
@@ -1934,7 +1934,12 @@ mod tests {
         let dir = vault_dir(&ts, 0);
         ts.shell.sessions.lock_all(LockReason::Manual);
         let vault = heavy(|| {
-            ReadOnlyVault::open_folder(&dir, Credential::Password(PW), &CancelToken::new())
+            ReadOnlyVault::open_folder(
+                &dir,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &NoProgress,
+            )
         })
         .unwrap();
         let location = Location::folder(&dir).unwrap();
@@ -2088,7 +2093,7 @@ mod tests {
             .shell
             .sessions
             .write(s, g, |vault, cancel| {
-                Ok(vault.attach_file(&item_id, &src, cancel)?)
+                Ok(vault.attach_file(&item_id, &src, cancel, &NoProgress)?)
             })
             .unwrap()
             .data;
@@ -2440,7 +2445,12 @@ mod tests {
         // Read-only: refused where it writes.
         ts.shell.sessions.lock_all(LockReason::Manual);
         let vault = heavy(|| {
-            ReadOnlyVault::open_folder(&dir, Credential::Password(PW), &CancelToken::new())
+            ReadOnlyVault::open_folder(
+                &dir,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &NoProgress,
+            )
         })
         .unwrap();
         let location = Location::folder(&dir).unwrap();
@@ -2808,7 +2818,12 @@ mod tests {
         let dir = vault_dir(ts, 0);
         ts.shell.sessions.lock_all(LockReason::Manual);
         let vault = heavy(|| {
-            ReadOnlyVault::open_folder(&dir, Credential::Password(PW), &CancelToken::new())
+            ReadOnlyVault::open_folder(
+                &dir,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &NoProgress,
+            )
         })
         .unwrap();
         let location = Location::folder(&dir).unwrap();

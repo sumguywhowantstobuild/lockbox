@@ -20,7 +20,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lockbox_core::blob::CancelToken;
+use lockbox_core::blob::{CancelToken, NoProgress};
 use lockbox_core::fsio::{is_destination_taken, remove_dir_all_retry};
 use lockbox_core::{
     CoreError, JournalStep, JournalView, PreparedRestore, ReadOnlyVault, Recovery,
@@ -1037,6 +1037,7 @@ impl Shell {
             choice.destination.clone(),
             &self.paths.journal,
             &cancel,
+            &NoProgress,
         );
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -1059,6 +1060,7 @@ impl Shell {
                     &choice.backup,
                     choice.credential.credential(),
                     &cancel,
+                    &NoProgress,
                 )?;
                 let suggested = format!("{} (restored)", folder_name(backup.name(), &backup.id()));
                 drop(backup);
@@ -1407,8 +1409,12 @@ impl Shell {
         let location = self.check_pre_restore(vault, &folder)?;
         let credential = credential.typed()?;
         let answer = self.sessions.open(Some(location.clone()), None, |cancel| {
-            let opened =
-                ReadOnlyVault::open_folder(location.path(), credential.credential(), cancel)?;
+            let opened = ReadOnlyVault::open_folder(
+                location.path(),
+                credential.credential(),
+                cancel,
+                &NoProgress,
+            )?;
             let header_changed = !opened.header_mac_ok();
             Ok(OpenStep::Session(
                 location.clone(),

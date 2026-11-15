@@ -4,7 +4,7 @@
 //! 8 GiB at its peak and takes minutes, so it only runs when asked for:
 //! `cargo test --release --locked -p lockbox-core --features test-internals --test backup_large -- --ignored --nocapture`
 
-use lockbox_core::blob::{CancelToken, NoJournal};
+use lockbox_core::blob::{CancelToken, NoJournal, NoProgress};
 use lockbox_core::ids::VaultId;
 use lockbox_core::internals::fsio::peak_memory_bytes;
 use lockbox_core::internals::header::{CONTAINER_VERSION, VaultHeader, header_mac, write_headers};
@@ -147,13 +147,17 @@ fn backup_restore_over_4_gib() {
     let source_hash = write_source(&source);
     stage("source written and hashed", started, &mut previous);
     let mut vault = open_light_vault(&vaults.join("vault"));
-    let item = vault.new_file_item(None, &source, &cancel).unwrap();
+    let item = vault
+        .new_file_item(None, &source, &cancel, &NoProgress)
+        .unwrap();
     let file = vault.get_item(&item).unwrap().attachments[0].file_id;
     fs::remove_file(&source).unwrap();
     stage("imported", started, &mut previous);
 
     let backup = out.join("big.lockbox-backup");
-    let report = vault.backup(&backup, &NoJournal, &cancel).unwrap();
+    let report = vault
+        .backup(&backup, &NoJournal, &cancel, &NoProgress)
+        .unwrap();
     assert_eq!((report.items, report.files), (1, 1));
     assert_eq!(
         (report.skipped_damaged_items, report.skipped_damaged_files),
@@ -161,7 +165,13 @@ fn backup_restore_over_4_gib() {
     );
     stage("backed up", started, &mut previous);
 
-    let summary = verify_backup(&backup, Credential::Password(PASSWORD), &cancel).unwrap();
+    let summary = verify_backup(
+        &backup,
+        Credential::Password(PASSWORD),
+        &cancel,
+        &NoProgress,
+    )
+    .unwrap();
     assert_eq!(
         (summary.items, summary.files, summary.missing_files),
         (1, 1, 0)
@@ -179,6 +189,7 @@ fn backup_restore_over_4_gib() {
         RestoreDestination::SameVault,
         &journal,
         &cancel,
+        &NoProgress,
     )
     .unwrap();
     assert!(
@@ -201,7 +212,7 @@ fn backup_restore_over_4_gib() {
         .0;
     let export = temp.path().join("export.bin");
     vault
-        .export_file(&item, &file, &export, &NoJournal, &cancel)
+        .export_file(&item, &file, &export, &NoJournal, &cancel, &NoProgress)
         .unwrap();
     stage("exported from the restored vault", started, &mut previous);
     let (export_hash, export_len) = hash_file(&export);

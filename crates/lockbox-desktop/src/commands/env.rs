@@ -871,6 +871,7 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
+    use lockbox_core::blob::NoProgress;
     use lockbox_core::internals::fsio::testutil::names;
     use lockbox_core::{CoreError, Credential, ReadOnlyVault};
     use serde_json::{Value, json};
@@ -1040,6 +1041,7 @@ mod tests {
                 &dir,
                 Credential::Password(TEST_PASSWORD),
                 &CancelToken::new(),
+                &NoProgress,
             )
         })
         .unwrap();
@@ -1557,6 +1559,7 @@ mod tests {
                 &dir,
                 Credential::Password(TEST_PASSWORD),
                 &CancelToken::new(),
+                &NoProgress,
             )
         })
         .unwrap();

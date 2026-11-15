@@ -45,11 +45,13 @@ mod kdf_impl;
 #[path = "recovery.rs"]
 mod recovery_impl;
 
-/// Encrypted file blobs: cancelling a long operation, recording the outputs it creates, the size
-/// limit.
+/// Encrypted file blobs: cancelling a long operation, hearing how far it has got, recording the
+/// outputs it creates, the size limit.
 pub mod blob {
     pub(crate) use crate::blob_impl::*;
-    pub use crate::blob_impl::{CancelToken, MAX_FILE_BYTES, NoJournal, OutputJournal};
+    pub use crate::blob_impl::{
+        CancelToken, MAX_FILE_BYTES, NoJournal, NoProgress, OutputJournal, Progress,
+    };
 }
 
 /// Crash-safe file helpers, for the shell's own state files and sweeps.

@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use lockbox_core::blob::{CancelToken, OutputJournal};
+use lockbox_core::blob::{CancelToken, NoProgress, OutputJournal};
 use lockbox_core::fsio::refuse_vault_folder;
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::{CoreError, Result as CoreResult, Vault};
@@ -210,7 +210,11 @@ impl Shell {
             session,
             generation,
             "Add a file",
-            |vault, source, cancel| Ok(vault.new_file_item(collection, source, cancel)?.to_hex()),
+            |vault, source, cancel| {
+                Ok(vault
+                    .new_file_item(collection, source, cancel, &NoProgress)?
+                    .to_hex())
+            },
         )
     }
 
@@ -226,7 +230,11 @@ impl Shell {
             session,
             generation,
             "Attach a file",
-            |vault, source, cancel| Ok(vault.attach_file(&id, source, cancel)?.to_hex()),
+            |vault, source, cancel| {
+                Ok(vault
+                    .attach_file(&id, source, cancel, &NoProgress)?
+                    .to_hex())
+            },
         )
     }
 
@@ -246,7 +254,7 @@ impl Shell {
             "Replace the file",
             |vault, source, cancel| {
                 Ok(vault
-                    .replace_attachment(&id, &file_id, source, cancel)?
+                    .replace_attachment(&id, &file_id, source, cancel, &NoProgress)?
                     .to_hex())
             },
         )
@@ -313,8 +321,12 @@ fn export(
     cancel: &CancelToken,
 ) -> CoreResult<()> {
     match vault {
-        VaultRef::Writable(vault) => vault.export_file(id, file_id, dest, journal, cancel),
-        VaultRef::ReadOnly(vault) => vault.export_file(id, file_id, dest, journal, cancel),
+        VaultRef::Writable(vault) => {
+            vault.export_file(id, file_id, dest, journal, cancel, &NoProgress)
+        }
+        VaultRef::ReadOnly(vault) => {
+            vault.export_file(id, file_id, dest, journal, cancel, &NoProgress)
+        }
     }
 }
 
@@ -884,6 +896,7 @@ mod tests {
                 &dir,
                 Credential::Password(TEST_PASSWORD),
                 &CancelToken::new(),
+                &NoProgress,
             )
         })
         .unwrap();
