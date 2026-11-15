@@ -1,10 +1,12 @@
 import { useRef, useState } from "react";
 import type { FileView, ItemSummary } from "../api";
 import { formatBytes } from "../format";
+import { useJob } from "../jobs";
 import { messageText, messageFor } from "../messages";
 import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
 import { KindIcon, PlusIcon } from "../parts/Icon";
+import { JobProgress } from "../parts/JobProgress";
 import { attachStoredFile, confirmStoredCopy, openStoredFile, replaceStoredFile, saveStoredFile, type SessionData } from "../store";
 
 // Stored files in an item's panel (10a to 10f, 9d): Open, Save a copy and Replace file on each, and Attach a file on a login, key or note.
@@ -309,20 +311,55 @@ const WORK: Record<string, string> = {
   open: "Opening the file.",
 };
 
+/** What 9b says for a job with progress, in the words the session chose (the design is silent beyond the sentence about the laptop). */
+const CARD = {
+  import: {
+    label: "Adding a file",
+    sentence: WORK.import,
+    warning: "Keep the laptop open. Windows locking or sleeping cancels this, and a file not finished isn't added.",
+  },
+  save_copy: {
+    label: "Saving a copy",
+    sentence: WORK.save_copy,
+    warning: "Keep the laptop open. Windows locking or sleeping cancels this, and a copy not finished isn't saved.",
+  },
+} as const;
+
+/**
+ * 9b for one file: the bar, the bytes in words and Cancel, while the add, attach or Save a copy this vault is working on has told the page
+ * which operation it is (`lockbox://job-started`, matched by the request the page sent). Nothing before that, and nothing for Open or Replace
+ * file, which have no progress of their own: 4A's "working" words are all they show.
+ */
+export function FileJobProgress({ data }: { data: SessionData }) {
+  const job = useJob(data.fileJob?.request ?? null);
+  if (job === null || (job.kind !== "import" && job.kind !== "save_copy")) return null;
+  return <JobProgress operation={job.operation} {...CARD[job.kind]} />;
+}
+
 /**
  * What 5d draws for a long job: while the shell says the vault is working (`lockbox://busy`), the window says what, and why it does not
  * lock for being idle. Windows locking or sleeping still locks, and the words say so. Nothing while no job runs, and a lock takes it with
- * the vault's record.
+ * the vault's record. A job that has its own progress card says what it is doing, and the Windows part, there, so only "Auto-lock is waiting
+ * until this finishes." is left here.
  */
 export function BusyNote({ data }: { data: SessionData }) {
+  const card = useJob(data.fileJob?.request ?? null);
   if (data.operations.length === 0) return null;
-  const doing = data.operations.map((name) => (Object.hasOwn(WORK, name) ? WORK[name] : "Working.")).filter((words, at, all) => all.indexOf(words) === at);
+  const doing =
+    card !== null
+      ? []
+      : data.operations.map((name) => (Object.hasOwn(WORK, name) ? WORK[name] : "Working.")).filter((words, at, all) => all.indexOf(words) === at);
   return (
     <div className="ask" role="status">
       {doing.map((words) => (
         <p key={words}>{words}</p>
       ))}
-      <p>Auto-lock is waiting until this finishes. Windows locking or sleeping still locks your vaults and stops it.</p>
+      {/* A progress card already says the Windows part ("Windows locking or sleeping cancels this"), so it is not said twice. */}
+      <p>
+        {card !== null
+          ? "Auto-lock is waiting until this finishes."
+          : "Auto-lock is waiting until this finishes. Windows locking or sleeping still locks your vaults and stops it."}
+      </p>
     </div>
   );
 }

@@ -284,8 +284,9 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 |---|---|
 | `lib.rs` | Builds the app: the launch order, the signal and tick threads, locking on every way out |
 | `shell.rs` | `Shell`: owns everything below, runs the launch work, sends the page's events |
-| `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard; locking in two phases; the ordered lock-hook thread |
-| `autolock.rs` | The idle timer, long operations that pause it, Windows signals, and the shutdown with its 2 s bound |
+| `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard; the lock epoch and the launch token (cancelled and replaced with each lock of all vaults); locking in two phases; the ordered lock-hook thread |
+| `autolock.rs` | The idle timer, the table of long operations (jobs) that pauses it, Windows signals, and the shutdown with its 2 s bound |
+| `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `lockbox://job-started`, `lockbox://progress` and `lockbox://lock-epoch` events |
 | `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
 | `outputs.rs` | The output journal (`pending-outputs.json`), the gate every decrypted file is published through, and the launch sweep |
 | `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries |
@@ -351,6 +352,18 @@ empties it again in the same opening, and if that fails too the copy stays owned
 it after the delay, and so does a lock, in one opening and only if that tag is still there, so a later copy of the user's
 own stays. A clear that finds the clipboard busy retries while the app runs. The answer re-checks the generation too.
 
+**Long jobs** (`autolock.rs` `begin_job`, `jobs.rs`). A job is one entry in the table of long operations that pauses the
+idle timer, so "a job" is exactly what the timer counts. Its token is a child of its scope's: the session's for a job of
+an unlocked session (`JobScope::Session`, with the generation it started in), the launch's for one with no session
+(`JobScope::Launch`, with the lock epoch it started in). A lock of that session, or of all vaults for the launch's,
+stops every job in the scope; the page's Stop (`cancel_operation`, given the operation and its scope) stops one job and
+no other. A scope that has gone answers `Locked` and a job not running in it `NotFound`, and a launch job's answer after
+the epoch changed is refused as `Locked`. A command that takes the page's `request` number sends `lockbox://job-started`
+(request, operation, scope, kind) once its work starts, then `lockbox://progress` at most about ten times a second and
+always one last event with `finished: true`; the page learns the operation from that event only, since an answer arrives
+after the job has ended. Every lock of all vaults also sends `lockbox://lock-epoch`, with or without a vault open. All three
+go to the main window only. Open, Replace file and copying an item are jobs in the table and send neither.
+
 **Open** (`open_file`). The stored name goes through the allowlist. An executable type asks first, before anything is
 decrypted. Then in a long operation (the idle timer pauses): a new folder only this user can reach, recorded in the
 journal first; the engine's export, which checks the whole stream before the copy gets its name; the internet mark and
@@ -397,7 +410,10 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
 10. **A long operation pauses the idle timer; Windows lock and sleep cancel it.** `long_operation_pauses_idle`,
     `idle_counts_from_end_of_long_operation`, `windows_lock_cancels_long_operations`, `sleep_locks_all`, `keep_awake_off_when_last_op_ends`.
     A question waiting for an answer does not pause it: `prepared_restore_does_not_stop_idle_lock`. The page's "Lock all"
-    also cancels operations that have no session: `the_pages_lock_all_cancels_operations_without_a_session`.
+    also cancels operations that have no session: `the_pages_lock_all_cancels_operations_without_a_session`. A Stop stops one
+    job and a lock stops every job of its scope: `cancel_operation_stops_only_that_job`, `a_lock_cancels_every_job_of_its_session_and_sends_finished`,
+    `lock_all_cancels_launch_jobs_and_refuses_their_answers`; the job events go to the main window only:
+    `progress_events_go_to_the_main_window_only`.
 11. **Every way out locks every vault; shutdown waits for that at most 2 s, then the app goes on closing** (one exception:
     the helper thread refused, in the Lock flow above, can wait longer). A vault not yet revoked by then ends with the
     process. `shutdown_locks_and_runs_hooks`, `closing_refuses_new_work`, `shutdown_bound_holds_under_operation_contention`,

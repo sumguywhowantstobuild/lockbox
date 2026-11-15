@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capture::CaptureEvent;
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
+use crate::jobs::{JobStarted, LockEpochEvent, ProgressEvent};
 use crate::pending::{Pending, PendingChoice, Token};
 use crate::{lock, os};
 
@@ -152,7 +153,7 @@ pub enum Notice {
 }
 
 /// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`,
-/// `lockbox://capture`).
+/// `lockbox://capture`, `lockbox://job-started`, `lockbox://progress`, `lockbox://lock-epoch`).
 pub trait Notifier: Send + Sync {
     fn locked(&self, session: SessionId, generation: u64, reason: LockReason);
     /// The long operations running for `session`, or for none (`None`: testing or restoring a backup).
@@ -161,6 +162,12 @@ pub trait Notifier: Send + Sync {
     /// The copied value waiting in the capture slot changed, or the slot emptied: what the page may know of it, never
     /// the value.
     fn capture(&self, event: &CaptureEvent);
+    /// A job began for the command that sent `request`: its operation, scope and kind.
+    fn job_started(&self, event: &JobStarted);
+    /// A job's bytes done of its total, or its end (`finished`). Two numbers: never a name, a path or a value.
+    fn progress(&self, event: &ProgressEvent);
+    /// All vaults were locked (or the app is closing): the epoch they are now in, even when no vault was open.
+    fn lock_epoch(&self, event: &LockEpochEvent);
 }
 
 /// What an opening closure gives back: a new session, or a question to ask first, whose state waits in [`Pending`]
@@ -530,6 +537,9 @@ struct Inner {
     opening: Vec<Opening>,
     /// Bumped by every lock of all vaults: an open that started before one discards what it made.
     epoch: u64,
+    /// The token the jobs with no session are children of: cancelled and replaced by every lock of all vaults, in the
+    /// same step as the epoch's bump.
+    launch: CancelToken,
     last_session: u64,
     /// Numbers opens and two-session links.
     last_serial: u64,
@@ -754,6 +764,13 @@ impl Sessions {
     /// (testing a backup) reads it before its work and compares after: a lock of all vaults in between drops its answer.
     pub(crate) fn epoch(&self) -> u64 {
         self.inner().epoch
+    }
+
+    /// The epoch now and the token of the jobs with no session in it, read in one step: a lock of all vaults either comes
+    /// before (the new epoch and a fresh token) or after (it cancels this token and the epoch no longer matches).
+    pub fn launch_scope(&self) -> (u64, CancelToken) {
+        let inner = self.inner();
+        (inner.epoch, inner.launch.clone())
     }
 
     /// Tests only: how many times a thread has had to wait for the sessions mutex.
@@ -1175,10 +1192,10 @@ impl Sessions {
         // early. Hooks are not part of it: a hook that blocks never keeps another session unlocked.
         let turn = self.lock_turn();
         // (1) Under the sessions mutex: the state, the generation, and everything a lock takes away...
-        let (locked, opening, pending) = {
+        let (locked, opening, pending, epoch_change) = {
             let mut inner = self.inner();
-            let (opening, pending) = match which {
-                Which::Some(_) => (Vec::new(), Vec::new()),
+            let (opening, pending, epoch_change) = match which {
+                Which::Some(_) => (Vec::new(), Vec::new(), None),
                 Which::All { close } => {
                     inner.epoch += 1;
                     if close {
@@ -1186,7 +1203,9 @@ impl Sessions {
                     }
                     let opening: Vec<CancelToken> =
                         inner.opening.iter().map(|o| o.cancel.clone()).collect();
-                    (opening, self.pending.drain())
+                    // The jobs with no session stop with the epoch; the ones begun after this step get a fresh token.
+                    let launch = std::mem::take(&mut inner.launch);
+                    (opening, self.pending.drain(), Some((inner.epoch, launch)))
                 }
             };
             let state = match reason {
@@ -1215,7 +1234,7 @@ impl Sessions {
                     })
                 })
                 .collect();
-            (locked, opening, pending)
+            (locked, opening, pending, epoch_change)
         };
         if matches!(which, Which::Some(_)) && locked.is_empty() {
             return None;
@@ -1227,6 +1246,9 @@ impl Sessions {
         // (2) Cancel what runs.
         for cancel in &opening {
             cancel.cancel();
+        }
+        if let Some((_, launch)) = &epoch_change {
+            launch.cancel();
         }
         for session in &locked {
             session.live.cancel.cancel();
@@ -1244,6 +1266,10 @@ impl Sessions {
         // (4) Tell the UI.
         for &(id, generation) in &notices {
             self.notifier.locked(id, generation, reason);
+        }
+        // A lock of all vaults is an epoch change whether or not any vault was open: the page drops what has no session.
+        if let Some((epoch, _)) = epoch_change {
+            self.notifier.lock_epoch(&LockEpochEvent { epoch, reason });
         }
         let notified: Vec<SessionId> = notices.into_iter().map(|(id, _)| id).collect();
         // (5) The hooks, in the order they were added (the clipboard's first), on the hook thread: after the hooks of
@@ -1416,6 +1442,9 @@ mod tests {
         fn busy(&self, _session: Option<SessionId>, _operations: &[&'static str]) {}
         fn notice(&self, _notice: &Notice) {}
         fn capture(&self, _event: &CaptureEvent) {}
+        fn job_started(&self, _event: &JobStarted) {}
+        fn progress(&self, _event: &ProgressEvent) {}
+        fn lock_epoch(&self, _event: &LockEpochEvent) {}
     }
 
     fn sessions() -> (Arc<Recorder>, Sessions) {
@@ -2330,6 +2359,9 @@ mod tests {
         fn busy(&self, _session: Option<SessionId>, _operations: &[&'static str]) {}
         fn notice(&self, _notice: &Notice) {}
         fn capture(&self, _event: &CaptureEvent) {}
+        fn job_started(&self, _event: &JobStarted) {}
+        fn progress(&self, _event: &ProgressEvent) {}
+        fn lock_epoch(&self, _event: &LockEpochEvent) {}
     }
 
     #[test]

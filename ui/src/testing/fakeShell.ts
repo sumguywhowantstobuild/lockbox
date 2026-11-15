@@ -410,6 +410,14 @@ export interface FakeShell {
    * at release, as the shell decides it: a lock in between leaves a refusal (`locked`) and nothing done.
    */
   holdFiles(): () => void;
+  /**
+   * The long jobs of a held command that has a request (an add, an attach, a Save a copy and its cloud yes), as the shell's job table would
+   * list them: sent to the page by `lockbox://job-started` as the command arrives, ended by `lockbox://progress` with `finished` when it is let
+   * go, cancelled (`cancel_operation`) or its vault locks. The operation is the shell's number, which the page learns from that event only.
+   */
+  runningJobs(): { request: number; operation: number; scope: { type: "session"; session: number; generation: number }; kind: string }[];
+  /** Sends `lockbox://progress` for a running job with these figures. */
+  sendProgress(operation: number, done: number, total: number): void;
   /** How many opened copies another program holds, as the last `lockbox://notice` of `open_cleanup` told. `retry_open_cleanup` leaves this many. */
   retryLeaves(stillOpen: number): void;
   /** How many times `retry_open_cleanup` reached the shell. */
@@ -668,6 +676,33 @@ const OPERATION: Record<string, string> = {
   replace_file: "import",
 };
 
+/** What a stored-file command that takes a `request` is called in `lockbox://job-started` and `lockbox://progress` (the others start no job event). */
+const JOB_KIND: Record<string, string> = {
+  add_file: "import",
+  attach_file: "import",
+  save_file_copy: "save_copy",
+  save_file_copy_confirm: "save_copy",
+};
+
+/** A request is a whole number the page chose (a `u32`); anything else is the shell's malformed-request answer. */
+function requestOf(sent: Record<string, unknown>): number {
+  const { request } = sent;
+  if (typeof request !== "number" || !Number.isInteger(request) || request < 0 || request > 0xffff_ffff) return refuse(MALFORMED);
+  return request;
+}
+
+/** One long job in the fake shell's table. */
+interface RunningJob {
+  request: number;
+  operation: number;
+  scope: { type: "session"; session: number; generation: number };
+  kind: string;
+  done: number;
+  total: number;
+  /** Ends the held command as a Cancel does: it answers `cancelled`. */
+  cancel: () => void;
+}
+
 /** The first free `NAME_2`, `NAME_3`, ... among the live keys of one place. */
 function freeName(items: readonly FakeItem[], place: string | null, name: string): string {
   const taken = liveKeys(items, place).map((item) => item.title);
@@ -785,6 +820,9 @@ export function installFakeShell(
   let dismissFile = false;
   let pickedFile: { name: string; length: number } | undefined;
   let heldFiles: (() => void)[] | undefined;
+  // The shell's job table, for the commands that take a request: operations are numbered from 1 and never reused.
+  const running = new Map<number, RunningJob>();
+  let nextOperation = 0;
   let heldRetry: (() => void)[] | undefined;
   let heldGetItem: (() => void)[] | undefined;
   let stillOpenAfterRetry = 0;
@@ -823,6 +861,12 @@ export function installFakeShell(
     // A lock lets go of the values of every paste its vault held.
     for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
     emit("lockbox://locked", { session, generation: entry.generation, reason });
+    // A lock stops every job of its session, and each says it has ended.
+    for (const job of [...running.values()]) {
+      if (job.scope.session !== session) continue;
+      running.delete(job.operation);
+      emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+    }
     // The copy handed to this vault goes with its lock.
     if (slot?.chosen === session) emptySlot();
   };
@@ -1386,13 +1430,17 @@ export function installFakeShell(
       }
       case "open_file":
       case "save_file_copy": {
-        const sent = exactly(args, cmd === "open_file" ? ["session", "generation", "id", "file_id", "confirmed_executable"] : ["session", "generation", "id", "file_id"]) as {
+        const sent = exactly(
+          args,
+          cmd === "open_file" ? ["session", "generation", "id", "file_id", "confirmed_executable"] : ["session", "generation", "id", "file_id", "request"],
+        ) as {
           session: number;
           generation: number;
           id: string;
           file_id: string;
           confirmed_executable?: boolean;
         };
+        if (cmd === "save_file_copy") requestOf(sent);
         const vault = vaultFor(sent.session, sent.generation);
         const holder = vault.items?.find((item) => item.id === sent.id);
         const file = holder?.attachments?.find((stored) => stored.file_id === sent.file_id);
@@ -1418,7 +1466,9 @@ export function installFakeShell(
         return tagged(sent.session, sent.generation, { Done: null });
       }
       case "save_file_copy_confirm": {
-        const { token } = exactly(args, ["token"]) as { token: string };
+        const sent = exactly(args, ["token", "request"]);
+        requestOf(sent);
+        const { token } = sent as { token: string };
         const parked = pendingPdfs.get(token);
         if (parked?.copy === undefined) return refuse({ code: "not_found" });
         pendingPdfs.delete(token);
@@ -1429,8 +1479,13 @@ export function installFakeShell(
       case "add_file":
       case "attach_file":
       case "replace_file": {
-        const keys = { add_file: ["session", "generation", "collection"], attach_file: ["session", "generation", "id"], replace_file: ["session", "generation", "id", "file_id"] };
+        const keys = {
+          add_file: ["session", "generation", "collection", "request"],
+          attach_file: ["session", "generation", "id", "request"],
+          replace_file: ["session", "generation", "id", "file_id"],
+        };
         const sent = exactly(args, keys[cmd]) as { session: number; generation: number; collection?: string | null; id?: string; file_id?: string };
+        if (cmd !== "replace_file") requestOf(sent);
         const vault = vaultFor(sent.session, sent.generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         const holder = cmd === "add_file" ? undefined : vault.items?.find((item) => item.id === sent.id);
@@ -1459,6 +1514,18 @@ export function installFakeShell(
         bump(holder);
         fileOps.push({ cmd, id: sent.id, ...(cmd === "replace_file" ? { file_id: sent.file_id } : {}) });
         return tagged(sent.session, sent.generation, { Done: stored.file_id });
+      }
+      case "cancel_operation": {
+        const sent = exactly(args, ["operation", "scope"]) as { operation: number; scope: RunningJob["scope"] };
+        const job = running.get(sent.operation);
+        // A scope the page names wrongly, a vault that has locked since, and a job that is over or was never here are each refused, and nothing is stopped.
+        if (job === undefined) return refuse({ code: "not_found" });
+        if (sent.scope.session !== job.scope.session || sent.scope.generation !== job.scope.generation) {
+          return refuse({ code: "not_found" });
+        }
+        vaultFor(job.scope.session, job.scope.generation);
+        job.cancel();
+        return null;
       }
       case "retry_open_cleanup": {
         exactly(args ?? {}, []);
@@ -1943,10 +2010,27 @@ export function installFakeShell(
       // A command that carries a session names it; the cloud question's yes names it by the copy it parked.
       const parkedFor = typeof args === "object" && args !== null && "token" in args ? pendingPdfs.get(args.token as string) : undefined;
       const session = typeof args === "object" && args !== null && "session" in args ? (args.session as number) : (parkedFor?.session ?? null);
+      // A command that takes a request becomes a job in the table once its work starts, and the page is told before the first progress and the answer.
+      const request = typeof args === "object" && args !== null && "request" in args && typeof args.request === "number" ? args.request : undefined;
+      const generation = typeof args === "object" && args !== null && "generation" in args ? (args.generation as number) : parkedFor?.generation;
+      let job: RunningJob | undefined;
+      if (Object.hasOwn(JOB_KIND, cmd) && request !== undefined && session !== null && generation !== undefined) {
+        nextOperation += 1;
+        job = {
+          request,
+          operation: nextOperation,
+          scope: { type: "session", session, generation },
+          kind: JOB_KIND[cmd] ?? "import",
+          done: 0,
+          total: 0,
+          cancel: () => undefined,
+        };
+        running.set(job.operation, job);
+        emit("lockbox://job-started", { request, operation: job.operation, scope: job.scope, kind: job.kind });
+      }
       emit("lockbox://busy", { session, operations: [OPERATION[cmd]] });
       return new Promise((resolve, reject) => {
-        waiting.push(() => {
-          emit("lockbox://busy", { session, operations: [] });
+        const settle = (): void => {
           const late = refusals.get(cmd);
           if (late !== undefined) {
             refusals.delete(cmd);
@@ -1960,6 +2044,31 @@ export function installFakeShell(
             // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
             reject(error);
           }
+        };
+        let settled = false;
+        const end = (cancelled: boolean): void => {
+          if (settled) return;
+          settled = true;
+          // The job's last event says it ended, with the whole of it done on success; a lock has already sent its own.
+          if (job !== undefined && running.delete(job.operation)) {
+            if (!cancelled) job.done = job.total;
+            emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+          }
+          emit("lockbox://busy", { session, operations: [] });
+          if (cancelled) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject({ code: "cancelled" });
+            return;
+          }
+          settle();
+        };
+        if (job !== undefined) {
+          job.cancel = () => {
+            end(true);
+          };
+        }
+        waiting.push(() => {
+          end(false);
         });
       });
     }
@@ -2292,6 +2401,14 @@ export function installFakeShell(
         heldFiles = undefined;
         for (const release of waiting) release();
       };
+    },
+    runningJobs: () => [...running.values()].map(({ request, operation, scope, kind }) => ({ request, operation, scope, kind })),
+    sendProgress: (operation, done, total) => {
+      const job = running.get(operation);
+      if (job === undefined) return;
+      job.done = done;
+      job.total = total;
+      emit("lockbox://progress", { operation, scope: job.scope, kind: job.kind, done, total, finished: false });
     },
     retryLeaves: (stillOpen) => {
       stillOpenAfterRetry = stillOpen;

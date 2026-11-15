@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::capture::CaptureEvent;
 use crate::error::ShellResult;
+use crate::jobs::{JobStarted, LockEpochEvent, ProgressEvent};
 use crate::lock;
 use crate::os::{
     CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Clock, Dialogs,
@@ -26,7 +27,7 @@ use crate::os::{
     Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
-use crate::shell::Shell;
+use crate::shell::{JOB_STARTED_EVENT, LOCK_EPOCH_EVENT, PROGRESS_EVENT, Shell};
 use crate::startup::{StartupState, state_of};
 
 /// Each Argon2 run (creating, unlocking or opening a vault) keeps several cores busy for about a second. Every test
@@ -57,9 +58,62 @@ pub struct Events {
     captures: Mutex<Vec<serde_json::Value>>,
     /// Run once, inside the next `busy` event, before it is recorded.
     on_busy: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Each job event (`lockbox://job-started`, `lockbox://progress`, `lockbox://lock-epoch`), as the page would
+    /// receive it, in the order they were sent.
+    jobs: Mutex<Vec<(&'static str, serde_json::Value)>>,
+    /// Run for each job event, on the thread that sent it, after it is recorded.
+    watcher: Mutex<Option<JobWatcher>>,
 }
 
+/// What [`Events::watch`] runs.
+type JobWatcher = Arc<dyn Fn(&'static str, &serde_json::Value) + Send + Sync>;
+
 impl Events {
+    /// Runs `watcher` for each job event from now on (the name, then the payload), on the thread that sent it, replacing
+    /// any earlier one.
+    pub fn watch(
+        &self,
+        watcher: impl Fn(&'static str, &serde_json::Value) + Send + Sync + 'static,
+    ) {
+        *lock(&self.watcher) = Some(Arc::new(watcher));
+    }
+
+    fn record_job_event(&self, name: &'static str, payload: serde_json::Value) {
+        lock(&self.jobs).push((name, payload.clone()));
+        let watcher = lock(&self.watcher).clone();
+        if let Some(watcher) = watcher {
+            watcher(name, &payload);
+        }
+    }
+
+    /// Every job event the shell sent, in order: its name and payload.
+    pub fn job_events(&self) -> Vec<(&'static str, serde_json::Value)> {
+        lock(&self.jobs).clone()
+    }
+
+    fn payloads(&self, wanted: &str) -> Vec<serde_json::Value> {
+        lock(&self.jobs)
+            .iter()
+            .filter(|(name, _)| *name == wanted)
+            .map(|(_, payload)| payload.clone())
+            .collect()
+    }
+
+    /// The payload of each `lockbox://job-started` the shell sent.
+    pub fn started(&self) -> Vec<serde_json::Value> {
+        self.payloads(JOB_STARTED_EVENT)
+    }
+
+    /// The payload of each `lockbox://progress` the shell sent.
+    pub fn progress(&self) -> Vec<serde_json::Value> {
+        self.payloads(PROGRESS_EVENT)
+    }
+
+    /// The payload of each `lockbox://lock-epoch` the shell sent.
+    pub fn epochs(&self) -> Vec<serde_json::Value> {
+        self.payloads(LOCK_EPOCH_EVENT)
+    }
+
     /// Runs `hook` once, inside the next `busy` event: it may block or panic there.
     pub fn during_next_busy(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.on_busy) = Some(hook);
@@ -104,6 +158,21 @@ impl Notifier for Events {
     fn capture(&self, event: &CaptureEvent) {
         let event = serde_json::to_value(event).expect("a capture event serialises");
         lock(&self.captures).push(event);
+    }
+
+    fn job_started(&self, event: &JobStarted) {
+        let event = serde_json::to_value(event).expect("a job-started event serialises");
+        self.record_job_event(JOB_STARTED_EVENT, event);
+    }
+
+    fn progress(&self, event: &ProgressEvent) {
+        let event = serde_json::to_value(event).expect("a progress event serialises");
+        self.record_job_event(PROGRESS_EVENT, event);
+    }
+
+    fn lock_epoch(&self, event: &LockEpochEvent) {
+        let event = serde_json::to_value(event).expect("a lock-epoch event serialises");
+        self.record_job_event(LOCK_EPOCH_EVENT, event);
     }
 }
 

@@ -177,3 +177,29 @@ test("on_capture_hands_over_each_event_as_it_came", async () => {
   handler({ payload: made });
   expect(seen).toHaveBeenCalledExactlyOnceWith(made);
 });
+
+// Task 2's three events, as the frozen connection names them: each is handed over as it came, and holds counts and ids only.
+test.each([
+  ["onJobStarted", "lockbox://job-started", { request: 4, operation: 9, scope: { type: "session", session: 3, generation: 7 }, kind: "import" }],
+  ["onProgress", "lockbox://progress", { operation: 9, scope: { type: "launch", epoch: 2 }, kind: "test", done: 5, total: 10, finished: false }],
+  ["onLockEpoch", "lockbox://lock-epoch", { epoch: 3, reason: "windows_locked" }],
+] as const)("%s_hands_over_each_event_as_it_came", async (name, channel, payload) => {
+  const seen = vi.fn();
+  await (bridge[name] as (handler: (event: unknown) => void) => Promise<unknown>)(seen);
+  const [event, handler] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
+  expect(event).toBe(channel);
+  handler({ payload });
+  expect(seen).toHaveBeenCalledExactlyOnceWith(payload);
+});
+
+// A job's scope is current while the bridge still holds that session's generation (a lock moves it on), or, for a launch job, in `jobs.ts`.
+test("session_is_current_only_at_the_generation_the_bridge_holds", async () => {
+  expect(bridge.isSessionCurrent(1, 2)).toBe(false);
+  await opened(1, 2);
+  expect(bridge.isSessionCurrent(1, 2)).toBe(true);
+  expect(bridge.isSessionCurrent(1, 1)).toBe(false);
+  await bridge.onLocked();
+  const [, handler] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
+  handler({ payload: { session: 1, generation: 3, reason: "manual" } });
+  expect(bridge.isSessionCurrent(1, 2)).toBe(false);
+});

@@ -396,6 +396,15 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       }
       // "Saved" is the message bar's words, measured above.
 
+      // The progress bar (9b, `JobProgress`): its fill is the text colour and its track a tint of that colour at 10 per cent, laid on
+      // the banner's card. The fill is the state, so it is measured against its track and against the card (3 to 1; `progress.test.ts`
+      // holds the style sheet to these two colours and to the same alpha), and the bytes in words and the warning under it are text.
+      const progressTrack = over([...rgbOf("--sh"), 0.1] as Rgba, card);
+      check("progress bar fill against its track", c("--ink"), progressTrack, 3);
+      check("progress bar fill against the card", c("--ink"), card, 3);
+      check("progress bytes words on the card", c("--ink2"), card, 4.5);
+      check("progress warning words on the card", c("--ink"), card, 4.5);
+
       // Move, trash and folders (Task 14). Move to trash and the Trash's two answers are rows of a card: Delete for good and Move
       // to trash in the error colour, Restore in the vault's colour, at rest, hovered and pressed (the tints laid over the card).
       // A question's dangerous answer is the filled red button, measured above.

@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::backup::{CredentialArg, FILTER, Typed};
 use crate::error::{Confirm, Outcome, ShellError, ShellResult, VAULT_NOT_LISTED};
+use crate::jobs::JobKind;
 use crate::lock;
 use crate::os::{same_name, same_path};
 use crate::outputs::is_real_folder_in;
@@ -43,9 +44,6 @@ use crate::session::{
     Location, LockHook, LockReason, Notice, OpenStep, Opened, SessionInfo, Sessions, Tagged,
 };
 use crate::shell::Shell;
-
-/// The long operation's name in `lockbox://busy`, with no session.
-const RESTORE: &str = "restore";
 
 const BUSY_RESTORE: ShellError = ShellError::Busy { what: "restore" };
 
@@ -1016,7 +1014,7 @@ impl Shell {
         epoch: u64,
     ) -> ShellResult<Outcome<RestorePreparedView>> {
         let (id, cancel, mut claim) = self.restore.claim_preparing()?;
-        let operation = self.autolock.begin(None, RESTORE, cancel.clone());
+        let operation = self.autolock.begin(None, JobKind::Restore, cancel.clone());
         if self.locked_since(epoch) {
             return Err(ShellError::Locked);
         }
@@ -1183,7 +1181,7 @@ impl Shell {
             .as_ref()
             .and_then(|place| self.sessions.find(place));
 
-        let operation = self.autolock.begin(None, RESTORE, cancel.clone());
+        let operation = self.autolock.begin(None, JobKind::Restore, cancel.clone());
         // A lock of all vaults whose hook has not run yet; or the one session that was open at the destination locked by
         // the user, whose hook is still queued (the token is not cancelled, and one session's lock leaves the epoch).
         if cancel.is_cancelled() || self.locked_since(epoch) || (was_open && session.is_none()) {

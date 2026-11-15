@@ -209,6 +209,78 @@ export function onBusy(handler: (event: BusyEvent) => void): Promise<UnlistenFn>
   });
 }
 
+/** A long job's number, unique in one launch of the app: the shell's `OperationId`. It reaches the page by `lockbox://job-started` only. */
+export type OperationId = number;
+
+/**
+ * What a job belongs to, so the page can drop what has gone: a session at the generation the job began in (a lock moves it on), or the
+ * lock epoch of the launch for a job that has no session (testing or restoring a backup).
+ */
+export type JobScope = { type: "session"; session: number; generation: number } | { type: "launch"; epoch: number };
+
+/** What a job is, by the shell's fixed names. The last three have no progress of their own. */
+export type JobKind =
+  | "import"
+  | "save_copy"
+  | "save_all"
+  | "backup"
+  | "test"
+  | "restore"
+  | "open_backup"
+  | "open"
+  | "replace"
+  | "copy_item";
+
+/** `lockbox://job-started`: the operation the shell gave the command that took `request`, sent before its first progress and before its answer. */
+export interface JobStartedEvent {
+  request: number;
+  operation: OperationId;
+  scope: JobScope;
+  kind: JobKind;
+}
+
+/** `lockbox://progress`: bytes done of the total, at most about ten a second, and one last event with `finished` when the job ends for any reason. */
+export interface ProgressEvent {
+  operation: OperationId;
+  scope: JobScope;
+  kind: JobKind;
+  done: number;
+  total: number;
+  finished: boolean;
+}
+
+/** `lockbox://lock-epoch`: the lock epoch changed (Lock all, an idle lock, Windows locking or sleep, the app closing), even with no vault open. */
+export interface LockEpochEvent {
+  epoch: number;
+  reason: LockReason;
+}
+
+/** Listens for `lockbox://job-started`: each event is handed over as it came (ids only, so no generation of its own: its scope says what it belongs to). */
+export function onJobStarted(handler: (event: JobStartedEvent) => void): Promise<UnlistenFn> {
+  return listen<JobStartedEvent>("lockbox://job-started", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/** Listens for `lockbox://progress`: two numbers and ids, handed over as they came. */
+export function onProgress(handler: (event: ProgressEvent) => void): Promise<UnlistenFn> {
+  return listen<ProgressEvent>("lockbox://progress", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/** Listens for `lockbox://lock-epoch`: handed over as it came. */
+export function onLockEpoch(handler: (event: LockEpochEvent) => void): Promise<UnlistenFn> {
+  return listen<LockEpochEvent>("lockbox://lock-epoch", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/** Whether the bridge still holds `generation` as the session's current one: false once the vault has locked, or for a session it has not seen opened. */
+export function isSessionCurrent(session: number, generation: number): boolean {
+  return generations.get(session) === generation;
+}
+
 /** Listens for `lockbox://capture`: each event is handed over as it came (it holds no vault data, so it has no generation). */
 export function onCapture(handler: (event: CaptureEvent) => void): Promise<UnlistenFn> {
   return listen<CaptureEvent>("lockbox://capture", ({ payload }) => {

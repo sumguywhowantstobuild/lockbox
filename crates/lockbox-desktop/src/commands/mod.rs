@@ -8,6 +8,7 @@ pub mod env;
 pub mod files;
 mod generator;
 pub mod items;
+mod jobs;
 mod list;
 pub mod readable;
 mod sessions;
@@ -73,6 +74,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         files::open_file,
         files::retry_open_cleanup,
         files::reset_output_journal,
+        jobs::cancel_operation,
         readable::save_recovery_pdf,
         readable::save_readable_confirm,
         readable::list_printers,

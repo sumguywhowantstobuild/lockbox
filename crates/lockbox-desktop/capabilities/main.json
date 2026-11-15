@@ -49,6 +49,7 @@
     "allow-open-file",
     "allow-retry-open-cleanup",
     "allow-reset-output-journal",
+    "allow-cancel-operation",
     "allow-save-recovery-pdf",
     "allow-save-readable-confirm",
     "allow-list-printers",

@@ -27,7 +27,7 @@ import { DetailsChangedAsk, LostOutputsAsk, OpenFilesAsk, ShortcutAsk, VaultBann
 import { EmptyAdd } from "./EmptyAdd";
 import { EnvFileDialog } from "./EnvOut";
 import { EnvPaste } from "./EnvPaste";
-import { BusyNote } from "./FileActions";
+import { BusyNote, FileJobProgress } from "./FileActions";
 import { EditForm } from "./forms/EditForm";
 import { DeleteFolderDialog, RenameFolderDialog } from "./forms/FolderForm";
 import { KeyForm } from "./forms/KeyForm";
@@ -252,6 +252,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             </h1>
             {locked === null ? null : <p className="lnote">{locked}</p>}
             <div className="asks">
+              <FileJobProgress data={data} />
               <BusyNote data={data} />
               <OpenFilesAsk />
               <LostOutputsAsk />

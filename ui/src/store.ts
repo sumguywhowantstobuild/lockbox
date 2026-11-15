@@ -9,7 +9,8 @@
 // session it was for is gone.
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
-import { focusList } from "./focus";
+import { focusList, takeJobFocus } from "./focus";
+import { nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
 import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, SearchHit, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
 
@@ -236,7 +237,15 @@ export interface FileJob {
   kind: "open" | "save" | "replace" | "attach" | "add";
   id: string | null;
   fileId: string | null;
+  /**
+   * The number this job's command was sent with. The shell names the job's operation by `lockbox://job-started` with this number, so the
+   * screen reads its progress with `useJob(request)`. Open and Replace send none and never get a job, so theirs matches nothing.
+   */
+  request: number;
 }
+
+/** A stored-file action as its caller names it: `runFile` gives it its request. */
+type FileJobStart = Omit<FileJob, "request">;
 
 /** The message about the last copy (or the refusal of one), save, move or restore, and the vault that made it. */
 export type Toast =
@@ -1120,6 +1129,8 @@ export function startNotices(): Promise<void> {
     } catch {
       // Without it the window does not say why auto-lock waits; the wait itself is the shell's, and unchanged.
     }
+    // The jobs' progress; each of its listeners can fail alone, and the window then shows no bar.
+    await startJobs();
     try {
       for (const notice of await api.launchNotices()) takeNotice(notice);
     } catch {
@@ -1826,8 +1837,19 @@ function endFileJob(session: number, generation: number): void {
   if (stillOpen(session, generation)) update(session, (current) => ({ ...current, fileJob: null }));
 }
 
-/** Says a refusal where the action began: a damaged file beside that file in the panel, anything else in the search or as a message. */
-function refuseFile(session: number, origin: FileOrigin, job: FileJob, error: unknown): void {
+/** What a stopped add or Save a copy says. Cancel is the person's own press, so it is a result, said whenever the vault is still open. */
+const NOTHING_ADDED = "Nothing was added.";
+const NO_COPY_SAVED = "No copy was saved.";
+
+/**
+ * Says a refusal where the action began: a damaged file beside that file in the panel, anything else in the search or as a message. A
+ * stop is not a refusal: an add or a Save a copy that was cancelled says what was left undone, in the way a finished one says what it did.
+ */
+function refuseFile(session: number, origin: FileOrigin, job: FileJobStart, error: unknown): void {
+  if (refusedWith(error, "cancelled") && (job.kind === "add" || job.kind === "attach" || job.kind === "save")) {
+    noted(session, job.kind === "save" ? NO_COPY_SAVED : NOTHING_ADDED);
+    return;
+  }
   if (!stillWhere(session, origin)) return;
   if (origin === "anywhere") sayFailure(session, error);
   else if ("search" in origin) sayInSearch(error);
@@ -1848,24 +1870,26 @@ type FileRan<T> = { outcome: api.Outcome<T> } | "stale" | "busy" | "refused";
  */
 async function runFile<T>(
   session: number,
-  job: FileJob,
+  job: FileJobStart,
   origin: FileOrigin,
   reload: boolean,
-  run: (vault: api.SessionRef) => Promise<api.Tagged<api.Outcome<T>>>,
+  run: (vault: api.SessionRef, request: number) => Promise<api.Tagged<api.Outcome<T>>>,
 ): Promise<FileRan<T>> {
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
   if (entry.fileJob !== null) return "busy";
   const { generation } = entry;
+  // The number this command is sent with: the shell names the job it becomes by `lockbox://job-started`, and the progress card reads it by this number.
+  const request = nextRequest();
   // A new job takes away what the last one said about this item's files.
   update(session, (current) => ({
     ...current,
-    fileJob: job,
+    fileJob: { ...job, request },
     openItem: current.openItem !== null && current.openItem.id === job.id ? { ...current.openItem, fileError: null } : current.openItem,
   }));
   try {
     if (reload) {
-      const done = await change(session, async (vault) => (await run(vault)).data);
+      const done = await change(session, async (vault) => (await run(vault, request)).data);
       if (done === "stale") return "stale";
       if ("failed" in done) {
         refuseFile(session, origin, job, done.failed);
@@ -1874,7 +1898,7 @@ async function runFile<T>(
       return { outcome: done.done };
     }
     try {
-      const answer = await run({ session, generation });
+      const answer = await run({ session, generation }, request);
       return stillOpen(session, generation) ? { outcome: answer.data } : "stale";
     } catch (error) {
       if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
@@ -1883,7 +1907,12 @@ async function runFile<T>(
       return "refused";
     }
   } finally {
+    // The command has answered, whatever it came to: its job, if it had one, is over, and so is its progress card. Focus that was on the
+    // card's Cancel goes to the result's message, not to the top of the page.
+    const refocus = takeJobFocus();
+    releaseRequest(request);
     endFileJob(session, generation);
+    refocus();
   }
 }
 
@@ -1938,7 +1967,9 @@ function saveResult(session: number, ran: FileRan<null>): CopyResult {
  * A cloud-synced folder answers `{ confirm }` first, for the screen to ask (21e); `confirmStoredCopy` goes on with it.
  */
 export async function saveStoredFile(session: number, id: string, fileId: string): Promise<CopyResult> {
-  const ran = await runFile(session, { kind: "save", id, fileId }, { panel: id }, false, (vault) => api.saveFileCopy(vault, id, fileId));
+  const ran = await runFile(session, { kind: "save", id, fileId }, { panel: id }, false, (vault, request) =>
+    api.saveFileCopy(vault, id, fileId, request),
+  );
   return saveResult(session, ran);
 }
 
@@ -1947,10 +1978,11 @@ export async function saveStoredFile(session: number, id: string, fileId: string
  * a lock by itself: the shell is asked about the session (`whyNotFound`). Locked: the session leaves the page and nothing is said. Still live:
  * the page's own "that took too long" is the refusal, said where the save began.
  */
-function confirmCopy(session: number, token: string): (vault: api.SessionRef) => Promise<api.Tagged<api.Outcome<null>>> {
-  return async () => {
+function confirmCopy(session: number, token: string): (vault: api.SessionRef, request: number) => Promise<api.Tagged<api.Outcome<null>>> {
+  return async (_vault, request) => {
     try {
-      return await api.saveFileCopyConfirm(token);
+      // The yes is its own command with its own request: that one names the job, not the save that asked the question.
+      return await api.saveFileCopyConfirm(token, request);
     } catch (error) {
       if (refusedWith(error, "not_found")) await whyNotFound(session, "file_copy_expired");
       throw error;
@@ -1993,7 +2025,9 @@ export async function replaceStoredFile(session: number, id: string, fileId: str
 
 /** Attach a file on the login, key or note open in the panel: one file, picked in the Windows picker. It says the original is still on the PC. */
 export async function attachStoredFile(session: number, id: string): Promise<StoreResult> {
-  const ran = await runFile(session, { kind: "attach", id, fileId: null }, { panel: id }, true, (vault) => api.attachFile(vault, id));
+  const ran = await runFile(session, { kind: "attach", id, fileId: null }, { panel: id }, true, (vault, request) =>
+    api.attachFile(vault, id, request),
+  );
   return storeResult(ran, () => {
     noted(session, `File attached. ${ORIGINAL_STAYS}`);
     void reloadOpen(session, id);
@@ -2009,7 +2043,9 @@ export async function addStoredFile(session: number, collection: string | null):
   const start = sessionOf(session);
   const openId = start?.openItem?.id ?? null;
   const tool = start?.tool ?? null;
-  const ran = await runFile(session, { kind: "add", id: null, fileId: null }, "anywhere", true, (vault) => api.addFile(vault, collection));
+  const ran = await runFile(session, { kind: "add", id: null, fileId: null }, "anywhere", true, (vault, request) =>
+    api.addFile(vault, collection, request),
+  );
   return storeResult(ran, (made) => {
     noted(session, `File added. ${ORIGINAL_STAYS}`);
     const now = sessionOf(session);
@@ -2042,7 +2078,9 @@ function afterSearchSave(session: number, id: string, file: FileView, origin: Fi
 /** Save a copy on a file result of the search: as the panel's, and the search steps aside once it worked. */
 export async function saveFileFromSearch(session: number, id: string, file: FileView): Promise<void> {
   const origin = searchOrigin();
-  const ran = await runFile(session, { kind: "save", id, fileId: file.file_id }, origin, false, (vault) => api.saveFileCopy(vault, id, file.file_id));
+  const ran = await runFile(session, { kind: "save", id, fileId: file.file_id }, origin, false, (vault, request) =>
+    api.saveFileCopy(vault, id, file.file_id, request),
+  );
   afterSearchSave(session, id, file, origin, saveResult(session, ran));
 }
 
@@ -2861,6 +2899,7 @@ export function resetStoreForTests(): void {
   listRuns.clear();
   detailRuns.clear();
   cleanupNotices = 0;
+  resetJobsForTests();
   state = EMPTY;
   for (const notify of listeners) notify();
 }

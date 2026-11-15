@@ -163,10 +163,10 @@ mod tests {
             )
             .unwrap();
         let test_backup = lockbox_core::blob::CancelToken::new();
-        let _running = ts
-            .shell
-            .autolock
-            .begin(None, "test_backup", test_backup.clone());
+        let _running =
+            ts.shell
+                .autolock
+                .begin(None, crate::jobs::JobKind::Test, test_backup.clone());
 
         lock_all(&ts.shell);
 

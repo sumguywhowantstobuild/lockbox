@@ -45,6 +45,7 @@ pub const COMMANDS: &[&str] = &[
     "open_file",
     "retry_open_cleanup",
     "reset_output_journal",
+    "cancel_operation",
     "save_recovery_pdf",
     "save_readable_confirm",
     "list_printers",

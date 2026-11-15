@@ -903,7 +903,7 @@ mod tests {
         }
 
         ts.dialogs.answer(Some(out.join("report copy.pdf")));
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id).unwrap();
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Done(())));
         // A backup through the same journal (its command comes with restore, in a later task).
         let shell = &ts.shell;
@@ -1557,7 +1557,7 @@ mod tests {
 
         // Refused before the dialog, and the engine's record refuses too: no temp is made.
         assert_eq!(
-            ts.shell.save_file_copy(s, g, &id, &file_id).err(),
+            ts.shell.save_file_copy(s, g, &id, &file_id, 1).err(),
             Some(damaged())
         );
         assert_eq!(ts.dialogs.opened(), 0);
@@ -1574,7 +1574,7 @@ mod tests {
         let source = ts.temp.path().join("statement.pdf");
         fs::write(&source, b"statement").unwrap();
         ts.dialogs.answer(Some(source));
-        let added = ts.shell.add_file(s, g, None).unwrap();
+        let added = ts.shell.add_file(s, g, None, 1).unwrap();
         assert!(matches!(added.data, Outcome::Done(_)));
 
         // Set aside: decrypted output works again.
@@ -1584,7 +1584,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&aside).unwrap(), text);
         let copy = docs.join("report copy.pdf");
         ts.dialogs.answer(Some(copy.clone()));
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id).unwrap();
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Done(())));
         assert_eq!(fs::read(&copy).unwrap(), b"report");
         assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());

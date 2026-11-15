@@ -24,7 +24,7 @@ import {
   useVaults,
   type SessionData,
 } from "../store";
-import { CloudCopyQuestion, ProgramQuestion } from "./FileActions";
+import { CloudCopyQuestion, FileJobProgress, ProgramQuestion } from "./FileActions";
 
 const LABEL = "Search every unlocked vault";
 
@@ -194,6 +194,8 @@ export function SearchPanel() {
           <p className="sr" role="status">
             {results.length === 0 ? "" : results.length === 1 ? "1 result" : `${String(results.length)} results`}
           </p>
+          {/* A Save a copy begun here is working under this box, which covers the window: its bar and Cancel are in the box, where they can be reached. */}
+          {sessions.map((session) => (session.fileJob?.kind === "save" ? <FileJobProgress key={session.session} data={session} /> : null))}
           {busyWords === null ? null : <p className="snote">{busyWords}</p>}
           {tooMany && results.length > 0 ? <p className="snote">{TOO_MANY}</p> : null}
           {problem === null ? null : (

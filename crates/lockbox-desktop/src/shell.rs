@@ -19,6 +19,7 @@ use crate::capture::{Capture, CaptureEvent, Read};
 use crate::clipboard::Clipboard;
 use crate::commands::env;
 use crate::error::{ShellError, ShellResult};
+use crate::jobs::{JobStarted, LockEpochEvent, ProgressEvent};
 use crate::locations::{LocationCheck, check_location, is_within};
 use crate::lock;
 use crate::open::{OpenFolders, RemoveReport};
@@ -40,6 +41,12 @@ pub const BUSY_EVENT: &str = "lockbox://busy";
 pub const NOTICE_EVENT: &str = "lockbox://notice";
 /// The copied value waiting for the save box changed or went: `{ capture_id, state, changed, env_keys }`.
 pub const CAPTURE_EVENT: &str = "lockbox://capture";
+/// A job began for the command that sent `request`: `{ request, operation, scope, kind }`.
+pub const JOB_STARTED_EVENT: &str = "lockbox://job-started";
+/// A job's bytes done of its total: `{ operation, scope, kind, done, total, finished }`.
+pub const PROGRESS_EVENT: &str = "lockbox://progress";
+/// All vaults locked, or the app closing, with or without any open: `{ epoch, reason }`.
+pub const LOCK_EPOCH_EVENT: &str = "lockbox://lock-epoch";
 
 pub struct Shell {
     pub sessions: Arc<Sessions>,
@@ -483,6 +490,18 @@ impl<R: Runtime> Notifier for Events<R> {
 
     fn capture(&self, event: &CaptureEvent) {
         self.emit(CAPTURE_EVENT, event);
+    }
+
+    fn job_started(&self, event: &JobStarted) {
+        self.emit(JOB_STARTED_EVENT, *event);
+    }
+
+    fn progress(&self, event: &ProgressEvent) {
+        self.emit(PROGRESS_EVENT, *event);
+    }
+
+    fn lock_epoch(&self, event: &LockEpochEvent) {
+        self.emit(LOCK_EPOCH_EVENT, *event);
     }
 }
 

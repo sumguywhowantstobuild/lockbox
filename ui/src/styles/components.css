@@ -2184,6 +2184,47 @@
   margin-top: 10px;
 }
 
+/* A long job's progress (9b): what it does, a thin bar, the bytes in words and the line about the laptop, with Cancel under them. The bar
+   is the text colour on a ten per cent tint of it; `tokens.contrast.test.ts` measures the pair and `progress.test.ts` keeps this sheet to
+   it. The fill's width is set by script, so the page needs no inline style. */
+.job .jt {
+  font-weight: 600;
+}
+
+.job .js {
+  margin-top: 2px;
+  color: var(--ink2);
+}
+
+.prog {
+  height: 6px;
+  margin-top: 12px;
+  border-radius: 3px;
+  background: rgba(var(--sh), 0.1);
+  overflow: hidden;
+}
+
+.prog span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ink);
+}
+
+.job .pnum {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+
+.job .fwarn {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
 /* A refusal of the question's answer, above the buttons and left-aligned like the words. */
 .dbtns .err {
   flex: 1 1 100%;

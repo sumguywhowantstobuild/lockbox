@@ -8,16 +8,22 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use lockbox_desktop::commands::COMMANDS;
 use lockbox_desktop::handler;
+use lockbox_desktop::jobs::{
+    JobKind, JobScope, JobStarted, LockEpochEvent, OperationId, ProgressEvent,
+};
+use lockbox_desktop::session::{LockReason, Notifier, SessionId};
+use lockbox_desktop::shell::{Events, JOB_STARTED_EVENT, LOCK_EPOCH_EVENT, PROGRESS_EVENT};
 use lockbox_desktop::window::{allowed_navigation, main_window};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder};
 use tauri::utils::config::{Csp, FrontendDist, PatternKind};
 use tauri::webview::InvokeRequest;
-use tauri::{App, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{App, Listener, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
                    font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; \
@@ -385,6 +391,123 @@ fn start_new_vault_list_is_granted_to_the_main_window_only() {
     }
     assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
     assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
+/// `cancel_operation` (a job's Stop) is listed, granted to the main window and reaches its handler from it; another window
+/// and a remote origin are refused by the ACL, before the handler. It takes an operation and its scope, not a session's
+/// generation as a field of its own: a stale scope and a foreign or finished operation are refused by the shell
+/// (`jobs`' own tests), since this test app keeps no shell state.
+#[test]
+fn cancel_operation_is_granted_to_the_main_window_only() {
+    let cmd = "cancel_operation";
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(granted.contains(&"allow-cancel-operation"));
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || {
+        InvokeBody::Json(json!({
+            "operation": 1,
+            "scope": { "type": "launch", "epoch": 0 }
+        }))
+    };
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
+/// The three job events go to the main window and no other window: a listener on the main window hears each of them with
+/// exactly the frozen payload, and one on another window hears none. Widening the target to every window (`Any`) fails
+/// this.
+#[test]
+fn progress_events_go_to_the_main_window_only() {
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let (heard_main, heard_other) = (
+        Arc::new(Mutex::new(Vec::<(String, String)>::new())),
+        Arc::new(Mutex::new(Vec::<(String, String)>::new())),
+    );
+    for event in [JOB_STARTED_EVENT, PROGRESS_EVENT, LOCK_EPOCH_EVENT] {
+        for (window, heard) in [(&main, &heard_main), (&other, &heard_other)] {
+            let heard = Arc::clone(heard);
+            window.listen(event, move |heard_event| {
+                heard
+                    .lock()
+                    .unwrap()
+                    .push((event.to_owned(), heard_event.payload().to_owned()));
+            });
+        }
+    }
+
+    let events = Events(app.handle().clone());
+    let scope = JobScope::Session {
+        session: SessionId(3),
+        generation: 7,
+    };
+    events.job_started(&JobStarted {
+        request: 9,
+        operation: OperationId(4),
+        scope,
+        kind: JobKind::Import,
+    });
+    events.progress(&ProgressEvent {
+        operation: OperationId(4),
+        scope,
+        kind: JobKind::Import,
+        done: 1,
+        total: 2,
+        finished: false,
+    });
+    events.lock_epoch(&LockEpochEvent {
+        epoch: 5,
+        reason: LockReason::Manual,
+    });
+
+    let scope_json = json!({ "type": "session", "session": 3, "generation": 7 });
+    let expected = [
+        (
+            JOB_STARTED_EVENT,
+            json!({ "request": 9, "operation": 4, "scope": scope_json, "kind": "import" }),
+        ),
+        (
+            PROGRESS_EVENT,
+            json!({
+                "operation": 4, "scope": scope_json, "kind": "import",
+                "done": 1, "total": 2, "finished": false
+            }),
+        ),
+        (LOCK_EPOCH_EVENT, json!({ "epoch": 5, "reason": "manual" })),
+    ];
+    let heard: Vec<(String, Value)> = heard_main
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, payload)| (name.clone(), serde_json::from_str(payload).unwrap()))
+        .collect();
+    let expected: Vec<(String, Value)> = expected
+        .into_iter()
+        .map(|(name, payload)| (name.to_owned(), payload))
+        .collect();
+    assert_eq!(heard, expected);
+    assert!(
+        heard_other.lock().unwrap().is_empty(),
+        "another window heard a job event"
+    );
 }
 
 #[test]

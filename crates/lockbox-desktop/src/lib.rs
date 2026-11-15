@@ -15,6 +15,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod commands;
 pub mod error;
+pub mod jobs;
 pub mod locations;
 pub mod open;
 mod os;

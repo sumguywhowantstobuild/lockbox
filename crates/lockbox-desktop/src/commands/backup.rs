@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 
 use super::{NoArgs, args, blocking};
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
+use crate::jobs::JobKind;
 use crate::open::safe_name;
 use crate::pending::Token;
 use crate::restore::{
@@ -28,11 +29,6 @@ use crate::restore::{
 };
 use crate::session::{Location, OpenStep, Opened, SessionId, SessionInfo, Tagged, VaultRef};
 use crate::shell::Shell;
-
-/// The long operations' names in `lockbox://busy`. The page shows "Backup in progress" for [`BACKUP`].
-const BACKUP: &str = "backup";
-const TEST_BACKUP: &str = "test_backup";
-const COPY_ITEM: &str = "copy_item";
 
 /// A backup file's extension, and the dialogs' filter for it (the extensions it shows, without dots).
 pub(crate) const EXTENSION: &str = ".lockbox-backup";
@@ -178,7 +174,9 @@ impl Shell {
                 let VaultRef::Writable(vault) = vault else {
                     return Err(ShellError::ReadOnly);
                 };
-                let _operation = self.autolock.begin(Some(session), BACKUP, cancel.clone());
+                let _operation =
+                    self.autolock
+                        .begin(Some(session), JobKind::Backup, cancel.clone());
                 let journal = self.outputs.for_call(&self.sessions, session, generation);
                 let report = journal.finish(vault.backup(&dest, &journal, cancel, &NoProgress))?;
                 let size_on_disk = fs::metadata(&dest)?.len();
@@ -202,7 +200,7 @@ impl Shell {
         };
         let credential = credential.typed()?;
         let cancel = CancelToken::new();
-        let operation = self.autolock.begin(None, TEST_BACKUP, cancel.clone());
+        let operation = self.autolock.begin(None, JobKind::Test, cancel.clone());
         // A lock before this point left `cancel` fresh and uncancelled: nothing is read.
         if self.locked_since(epoch) {
             return Err(ShellError::Locked);
@@ -308,7 +306,9 @@ impl Shell {
                         return Ok(Outcome::Confirm(Confirm::MissingFiles { names }));
                     }
                 }
-                let _operation = self.autolock.begin(Some(to), COPY_ITEM, cancel.clone());
+                let _operation = self
+                    .autolock
+                    .begin(Some(to), JobKind::CopyItem, cancel.clone());
                 let copied = vault.copy_item_from(source, &id, skip_missing, cancel)?;
                 Ok(Outcome::Done(CopiedItemView {
                     id: copied.id.to_hex(),
@@ -682,7 +682,7 @@ mod tests {
                 };
                 let edited = shell.update_item(s, g, edit).err();
                 dialogs.answer(Some(source.clone()));
-                let imported = shell.add_file(s, g, None).err();
+                let imported = shell.add_file(s, g, None, 1).err();
                 seen.borrow_mut().extend([edited, imported]);
             }),
         );
@@ -702,7 +702,7 @@ mod tests {
         assert_eq!((held.items, held.files), (2, 1));
         assert_eq!(titles(&ts, s, g), ["Bank", "report.pdf"]);
         let busy = ts.events.busy();
-        assert!(busy.contains(&(Some(s), vec![BACKUP])), "{busy:?}");
+        assert!(busy.contains(&(Some(s), vec!["backup"])), "{busy:?}");
     }
 
     /// Only a name ending in `.lockbox-backup` (any case) is written, and never into the state folder; a read-only
@@ -801,7 +801,7 @@ mod tests {
         ts.dialogs.answer(Some(dest.clone()));
         assert_eq!(heavy(|| ts.shell.test_backup(password())).err(), LOCKED);
         let busy = ts.events.busy();
-        assert!(busy.contains(&(None, vec![TEST_BACKUP])), "{busy:?}");
+        assert!(busy.contains(&(None, vec!["test_backup"])), "{busy:?}");
 
         // The app closing: dropped too, even when the check itself would have passed.
         ts.shell.sessions.shut();
@@ -947,7 +947,7 @@ mod tests {
             "a new file ID"
         );
         let busy = ts.events.busy();
-        assert!(busy.contains(&(Some(s), vec![COPY_ITEM])), "{busy:?}");
+        assert!(busy.contains(&(Some(s), vec!["copy_item"])), "{busy:?}");
     }
 
     /// The backup's session locks while the copy runs: `Locked`, no blob of the copy left, no item added, and the

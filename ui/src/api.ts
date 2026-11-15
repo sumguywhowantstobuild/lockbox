@@ -7,6 +7,8 @@ import {
   callPlain,
   open,
   type CaptureEvent,
+  type JobScope,
+  type OperationId,
   type Opened,
   type Outcome,
   type PageNotice,
@@ -15,8 +17,24 @@ import {
   type Tagged,
 } from "./bridge";
 
-export { onBusy, onCapture, onLocked, onNotice, StaleAnswer } from "./bridge";
-export type { BusyEvent, CaptureEvent, Confirm, Opened, Outcome, PageNotice, SessionRef, Tagged } from "./bridge";
+export { isSessionCurrent, onBusy, onCapture, onJobStarted, onLocked, onLockEpoch, onNotice, onProgress, StaleAnswer } from "./bridge";
+export type {
+  BusyEvent,
+  CaptureEvent,
+  Confirm,
+  JobKind,
+  JobScope,
+  JobStartedEvent,
+  LockedEvent,
+  LockEpochEvent,
+  OperationId,
+  Opened,
+  Outcome,
+  PageNotice,
+  ProgressEvent,
+  SessionRef,
+  Tagged,
+} from "./bridge";
 
 /** One vault on the list: no path, ever. `name` is null when its details cannot be read. */
 export interface VaultEntry {
@@ -611,8 +629,8 @@ export function openFile(vault: SessionRef, id: string, fileId: string, confirme
  * closed). A cloud-synced folder answers `{ Confirm: { CloudFolder: { token } } }` first (`saveFileCopyConfirm` goes on with it). Allowed
  * in a vault opened from a backup. Refused as `damaged` for a file that does not decrypt.
  */
-export function saveFileCopy(vault: SessionRef, id: string, fileId: string): Promise<Tagged<Outcome<null>>> {
-  return call<Outcome<null>>("save_file_copy", { session: vault.session, generation: vault.generation, id, file_id: fileId });
+export function saveFileCopy(vault: SessionRef, id: string, fileId: string, request: number): Promise<Tagged<Outcome<null>>> {
+  return call<Outcome<null>>("save_file_copy", { session: vault.session, generation: vault.generation, id, file_id: fileId, request });
 }
 
 /**
@@ -620,23 +638,32 @@ export function saveFileCopy(vault: SessionRef, id: string, fileId: string): Pro
  * decrypting or writing anything, and the shell parked the copy under the token. It goes on only while the vault is unlocked as it was
  * when asked; a token that is used, old, or dropped by a lock is `not_found`.
  */
-export function saveFileCopyConfirm(token: string): Promise<Tagged<Outcome<null>>> {
-  return call<Outcome<null>>("save_file_copy_confirm", { token });
+export function saveFileCopyConfirm(token: string, request: number): Promise<Tagged<Outcome<null>>> {
+  return call<Outcome<null>>("save_file_copy_confirm", { token, request });
 }
 
 /** Adds a file item holding one file the person picks, in the folder `collection` (`null`: none): the new item's ID. Read-only refuses. */
-export function addFile(vault: SessionRef, collection: string | null): Promise<Tagged<Outcome<string>>> {
-  return call<Outcome<string>>("add_file", { session: vault.session, generation: vault.generation, collection });
+export function addFile(vault: SessionRef, collection: string | null, request: number): Promise<Tagged<Outcome<string>>> {
+  return call<Outcome<string>>("add_file", { session: vault.session, generation: vault.generation, collection, request });
 }
 
 /** Attaches one file the person picks to the login, key or note `id`: the new file's ID. Read-only refuses. */
-export function attachFile(vault: SessionRef, id: string): Promise<Tagged<Outcome<string>>> {
-  return call<Outcome<string>>("attach_file", { session: vault.session, generation: vault.generation, id });
+export function attachFile(vault: SessionRef, id: string, request: number): Promise<Tagged<Outcome<string>>> {
+  return call<Outcome<string>>("attach_file", { session: vault.session, generation: vault.generation, id, request });
 }
 
 /** Replaces the stored file `fileId` of the item `id` with one the person picks: the new file's ID. Read-only refuses. */
 export function replaceFile(vault: SessionRef, id: string, fileId: string): Promise<Tagged<Outcome<string>>> {
   return call<Outcome<string>>("replace_file", { session: vault.session, generation: vault.generation, id, file_id: fileId });
+}
+
+/**
+ * Stops one running job: `operation` as `lockbox://job-started` gave it, with the scope that event named. The job ends with its own
+ * answer (`cancelled`). Refused (`locked`: the scope has gone; `not_found`: the job is over or was never there) when there is nothing to
+ * stop: the screens show nothing for either.
+ */
+export function cancelOperation(operation: OperationId, scope: JobScope): Promise<null> {
+  return callPlain<null>("cancel_operation", { operation, scope });
 }
 
 /** What a cleanup of opened copies did, as counts: the shell's `RemoveReport`. `still_open` counts every copy another program still holds. */

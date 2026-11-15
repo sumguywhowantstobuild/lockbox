@@ -348,6 +348,22 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "A file being added, with its progress and Cancel (9b)",
+    shows: ["FileActions#FileJobProgress"],
+    reach: async () => {
+      await unlocked();
+      const panel = await select("Bot admin console");
+      shell.holdFiles();
+      click("Attach a file", panel);
+      const card = await screen.findByRole("region", { name: "Adding a file" });
+      const job = shell.runningJobs()[0];
+      act(() => {
+        shell.sendProgress(job?.operation ?? 0, 1_288_490_189, 3_221_225_472);
+      });
+      await within(card).findByText("1.2 GB of 3 GB");
+    },
+  },
+  {
     name: "Open a program? (10b)",
     shows: ["FileActions#ProgramQuestion"],
     reach: async () => {
