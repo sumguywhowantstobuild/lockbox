@@ -163,7 +163,8 @@ fn second_launch(args: &[String], bring_forward: impl FnOnce()) {
 }
 
 /// What the app does with each event of its run. The window's close button never ends the app (it locks every vault
-/// and hides the window to the tray: [`close_requested`]); the tray's Quit does ([`tray::quit`]). Every way out locks
+/// and hides the window to the tray, after asking the page when a job runs: [`close_requested`]); the tray's Quit does
+/// ([`tray::quit`], also after asking when a job runs). Every way out locks
 /// every vault before the process ends: Quit, the exit request that follows it, and the loop's end. Windows signing out
 /// or shutting down (`WM_ENDSESSION`) reaches the app only as `Exit`: tao 0.37.2 sends it, then calls `process::exit`
 /// as soon as this callback returns. Each [`shutdown`] call returns once every vault is revoked (later calls at once),
@@ -192,14 +193,14 @@ impl PreventClose for CloseRequestApi {
 }
 
 /// The main window's close button: the window is not closed (so the app keeps running, and the save shortcut with it),
-/// and [`Shell::close_window`] locks every vault and hides the window, off the event loop's thread. With no shell (a
-/// failed start) the close is left alone, so the app can still end.
+/// and [`Shell::close_or_ask`] either asks the page first (a job is running) or locks every vault and hides the window,
+/// off the event loop's thread. With no shell (a failed start) the close is left alone, so the app can still end.
 fn close_requested<R: Runtime>(app: &AppHandle<R>, api: &impl PreventClose) {
     let Some(shell) = app.try_state::<Arc<Shell>>() else {
         return;
     };
     api.prevent_close();
-    shell.run_in_background(Shell::close_window);
+    shell.run_in_background(Shell::close_or_ask);
 }
 
 /// [`Shell::shutdown`], when the shell was made (a failed setup ends the app before there is one).
@@ -394,6 +395,85 @@ mod tests {
             !api.prevented(),
             "a close was stopped with no shell to lock"
         );
+    }
+
+    /// The window's close button with a job running (Task 12): the close is still stopped from closing the window, and
+    /// instead of locking and hiding, the page is asked. Nothing is locked, hidden or cancelled until the answer; the
+    /// answer runs today's close path.
+    #[test]
+    fn close_request_with_a_job_running_asks_instead_of_locking() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (family, _) = ts.open_vault("Family");
+        let token = lockbox_core::blob::CancelToken::new();
+        let job =
+            ts.shell
+                .autolock
+                .begin(Some(family), crate::jobs::JobKind::Backup, token.clone());
+        let app = app_with(&ts);
+
+        let api = FakeClose::default();
+        close_requested(app.handle(), &api);
+        assert!(api.prevented(), "the window was left to close");
+        wait_until("the page was never asked", || {
+            !ts.events.close_asked().is_empty()
+        });
+        assert_eq!(
+            ts.events.close_asked(),
+            [serde_json::json!({ "reason": "close", "running": ["backup"], "past_swap": false })]
+        );
+        wait_until("the close's thread never ended", || {
+            Arc::strong_count(&ts.shell) == 2
+        });
+        assert_eq!(state_of(&ts, family), SessionState::Unlocked);
+        assert!(!token.is_cancelled());
+        assert_eq!(ts.window.hides(), 0);
+        assert!(ts.events.locked().is_empty());
+
+        // Close anyway: the old path, which cancels the job, locks and hides.
+        ts.shell.close_answer(true).unwrap();
+        assert!(token.is_cancelled());
+        assert_eq!(state_of(&ts, family), SessionState::Locked);
+        assert_eq!(ts.window.hides(), 1);
+        drop(job);
+    }
+
+    /// Windows ending the session never asks and never waits for an answer, with a job running and a question
+    /// pending: the signal router's `Ending` runs the shutdown at once (every vault locked as an app close, the job
+    /// cancelled), as before.
+    #[test]
+    fn windows_ending_the_session_does_not_wait_for_an_answer() {
+        let ts = TestShell::new();
+        let (session, _) = ts.open_vault("Family");
+        let token = lockbox_core::blob::CancelToken::new();
+        let _job =
+            ts.shell
+                .autolock
+                .begin(Some(session), crate::jobs::JobKind::Import, token.clone());
+        ts.shell.close_or_ask();
+        assert_eq!(
+            ts.events.close_asked().len(),
+            1,
+            "no question to start with"
+        );
+
+        let (sink, signals) = mpsc::channel();
+        route_signals(signals, Arc::clone(&ts.shell)).unwrap();
+        sink.send(OsSignal::Ending).unwrap();
+        wait_until("Windows ending never reached the shutdown", || {
+            ts.events.locked().iter().any(|l| l.0 == session)
+        });
+        assert!(token.is_cancelled());
+        assert_eq!(
+            ts.events.locked().iter().map(|l| l.2).collect::<Vec<_>>(),
+            [LockReason::AppClosing]
+        );
+        assert_eq!(
+            ts.events.close_asked().len(),
+            1,
+            "the ending asked a question"
+        );
+        assert_eq!(ts.window.exits(), 0, "Windows ends the process itself");
     }
 
     /// A press of the shortcut, as the signal window sends it, ends in the shell, which reads the clipboard once and tells

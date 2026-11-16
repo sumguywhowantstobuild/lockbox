@@ -391,6 +391,19 @@ impl AutoLock {
         RunningJob::new(scope, kind, token, operation, report_to)
     }
 
+    /// The kinds of the jobs running now, for the question on closing: every operation this list counts (scoped or not,
+    /// with a session or without), each kind once, in the order the first of its kind began.
+    pub fn running_kinds(&self) -> Vec<JobKind> {
+        let running = lock(&self.operations.running);
+        let mut kinds = Vec::new();
+        for operation in &running.operations {
+            if !kinds.contains(&operation.kind) {
+                kinds.push(operation.kind);
+            }
+        }
+        kinds
+    }
+
     /// Whether `scope` is still the one jobs may be stopped in and answer for: a session still unlocked in that
     /// generation, or no lock of all vaults since the epoch.
     pub fn scope_current(&self, scope: JobScope) -> bool {
@@ -975,6 +988,50 @@ mod tests {
         ts.shell.lock_all();
         assert!(test_backup.is_cancelled());
         assert_eq!(state(&ts, family), SessionState::Locked);
+    }
+
+    /// The kinds the close question names: every operation the auto-lock counts (scoped or not, with a session or
+    /// without), each kind once, in the order the first of its kind began, and none once they have ended.
+    #[test]
+    fn running_kinds_lists_each_kind_once_in_start_order() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let autolock = &ts.shell.autolock;
+        assert!(autolock.running_kinds().is_empty());
+
+        let generation = ts.shell.sessions.unlocked()[0].1;
+        let scope = JobScope::Session {
+            session: family,
+            generation,
+        };
+        let backup = autolock.begin(None, JobKind::Backup, CancelToken::new());
+        let import = autolock.begin_job(scope, JobKind::Import, &CancelToken::new(), Some(1));
+        let open = autolock.begin(Some(family), JobKind::Open, CancelToken::new());
+        let second_import = autolock.begin(Some(family), JobKind::Import, CancelToken::new());
+        let copy = autolock.begin(Some(family), JobKind::CopyItem, CancelToken::new());
+        let replace = autolock.begin(Some(family), JobKind::Replace, CancelToken::new());
+        assert_eq!(
+            autolock.running_kinds(),
+            [
+                JobKind::Backup,
+                JobKind::Import,
+                JobKind::Open,
+                JobKind::CopyItem,
+                JobKind::Replace
+            ]
+        );
+
+        // One import ends and the other still runs; the first kind to end leaves the list when its last job does.
+        drop(import);
+        assert!(autolock.running_kinds().contains(&JobKind::Import));
+        drop(second_import);
+        drop(backup);
+        assert_eq!(
+            autolock.running_kinds(),
+            [JobKind::Open, JobKind::CopyItem, JobKind::Replace]
+        );
+        drop((open, copy, replace));
+        assert!(autolock.running_kinds().is_empty());
     }
 
     #[test]

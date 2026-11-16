@@ -594,7 +594,13 @@ combination, among them Bitwarden's browser extension, which fills a login with 
   count: after it ends, idle time counts from its end. **Windows lock, sleep and hibernate always lock all vaults
   immediately**, cancelling such operations. Signing out, switching user and a remote-desktop disconnect count as
   Windows lock. Closing the window locks all vaults and hides Lockbox to the tray, and Quit in the tray menu locks them and
-  stops it. During a long operation both ask first.
+  stops it. **While any long operation runs (every operation the idle timer counts), both ask first**, and until the
+  person answers nothing is cancelled, locked or hidden: the operations go on and the vaults stay unlocked. Only **Close
+  anyway** runs the close or Quit as above, which cancels the operations and locks; **Keep it running** changes nothing.
+  The question is one at a time, is dropped by any lock of all vaults (Lock all, Windows lock or sleep, an idle lock), and
+  is never kept across a restart. A restore already past its swap cannot be cancelled: the question says it finishes, or
+  is undone by recovery at the next launch, and nothing is lost either way. **Windows ending the session** (signing out,
+  shutting down) never asks and never waits: it locks and exits as before.
 - **Two guarantees, kept separate:**
   - **Access is denied immediately.** From the moment of locking, no new command runs and no response carrying vault
     data is accepted by the UI.

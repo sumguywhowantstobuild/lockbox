@@ -286,7 +286,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `shell.rs` | `Shell`: owns everything below, runs the launch work, sends the page's events |
 | `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard; the lock epoch and the launch token (cancelled and replaced with each lock of all vaults); locking in two phases; the ordered lock-hook thread |
 | `autolock.rs` | The idle timer, the table of long operations (jobs) that pauses it, Windows signals, and the shutdown with its 2 s bound |
-| `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `lockbox://job-started`, `lockbox://progress` and `lockbox://lock-epoch` events |
+| `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `lockbox://job-started`, `lockbox://progress` and `lockbox://lock-epoch` events; also the shape of `lockbox://close-asked` |
 | `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
 | `outputs.rs` | The output journal (`pending-outputs.json`), the gate every decrypted file is published through, and the launch sweep |
 | `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries |
@@ -364,6 +364,20 @@ always one last event with `finished: true`; the page learns the operation from 
 after the job has ended. Every lock of all vaults also sends `lockbox://lock-epoch`, with or without a vault open. All three
 go to the main window only. Open, Replace file and copying an item are jobs in the table and send neither.
 
+**Close and Quit with a job running** (`Shell::ask_before_closing`, `close_answer`). The window's close button and the
+tray's Quit first ask `AutoLock::running_kinds`, which lists the kinds of every operation the idle timer counts (each
+once, in start order). With none running, both do what they always did. With one running, nothing is locked, hidden or
+cancelled: the page is sent `lockbox://close-asked` (`reason` close or quit, the kinds, and `past_swap`) and the shell keeps
+one pending question, with the lock epoch it was asked in. A Quit comes from the tray, so the window is shown first. A
+second close or Quit while it is pending changes nothing, and a lock of all vaults (a new epoch) clears it. The page
+answers with `close_answer(go)`: `false` changes nothing, `true` runs the old path for the question's reason (a close:
+`close_window`, whose lock cancels the jobs and which still shows 5b on a first close; a Quit: the shutdown within 2 s,
+then the exit through `MainWindow::exit_app`). Either answer uses the question up, and an answer with none pending is
+`NotFound`. `past_swap` is the engine's flag from `PreparedRestore::swap_flag`, which goes on when the restore's journal
+says `swapping` (the point from which a cancel no longer counts) and is kept in `RestoreState::Committing`: a restore
+there finishes, or is undone by recovery at the next launch, whatever is answered. Windows ending the session never
+asks (its path is the shutdown, as before).
+
 **Open** (`open_file`). The stored name goes through the allowlist. An executable type asks first, before anything is
 decrypted. Then in a long operation (the idle timer pauses): a new folder only this user can reach, recorded in the
 journal first; the engine's export, which checks the whole stream before the copy gets its name; the internet mark and
@@ -418,7 +432,11 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
     the helper thread refused, in the Lock flow above, can wait longer). A vault not yet revoked by then ends with the
     process. `shutdown_locks_and_runs_hooks`, `closing_refuses_new_work`, `shutdown_bound_holds_under_operation_contention`,
     `shutdown_without_helper_revokes_inline`, `shutdown_clears_our_copy`, `shutdown_removes_all_opened_files`. That Tauri's
-    exit events reach this code needs a real window, so the hands-on list covers it.
+    exit events reach this code needs a real window, so the hands-on list covers it. With a job running, a close or Quit
+    asks first and nothing is locked or cancelled until the answer; Windows ending the session never asks:
+    `close_with_a_job_running_asks_first`, `close_anyway_cancels_the_jobs_then_hides_and_locks`, `keep_it_running_changes_nothing`,
+    `quit_with_a_job_running_asks_first`, `close_past_the_swap_says_it_finishes_next_time`, `a_lock_epoch_change_clears_the_question`,
+    `windows_ending_the_session_does_not_wait_for_an_answer`.
 12. **A vanished drive locks its vault as unavailable, never deleted.** `drive_gone_lock_marks_unavailable`,
     `vanished_folder_locks_as_unavailable`, `drive_gone_revokes_every_vault_on_it_despite_a_blocked_hook`. Spec 6.10.
 13. **The clipboard is one opening, and fails closed.** `write_and_clear_are_each_one_opening`, `failed_exclusion_empties_clipboard`,

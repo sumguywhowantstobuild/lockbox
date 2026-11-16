@@ -276,6 +276,27 @@ export function onLockEpoch(handler: (event: LockEpochEvent) => void): Promise<U
   });
 }
 
+/** Which way the app is going away: the window's close button, or Quit from the tray. */
+export type CloseReason = "close" | "quit";
+
+/**
+ * `lockbox://close-asked`: a close or a Quit arrived while a job runs, and nothing is locked, hidden or cancelled until the question is
+ * answered (`close_answer`). `running` is the kinds of jobs, each once, in the order they began; `past_swap` is a restore that can no longer be
+ * cancelled. Fixed names and a flag only: no vault, path or item.
+ */
+export interface CloseAskedEvent {
+  reason: CloseReason;
+  running: JobKind[];
+  past_swap: boolean;
+}
+
+/** Listens for `lockbox://close-asked`: handed over as it came (it holds no vault data, so it has no generation). */
+export function onCloseAsked(handler: (event: CloseAskedEvent) => void): Promise<UnlistenFn> {
+  return listen<CloseAskedEvent>("lockbox://close-asked", ({ payload }) => {
+    handler(payload);
+  });
+}
+
 /** Whether the bridge still holds `generation` as the session's current one: false once the vault has locked, or for a session it has not seen opened. */
 export function isSessionCurrent(session: number, generation: number): boolean {
   return generations.get(session) === generation;

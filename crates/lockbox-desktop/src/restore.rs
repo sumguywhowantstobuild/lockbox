@@ -15,7 +15,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -283,11 +283,14 @@ pub enum RestoreState {
         was_open: bool,
         epoch: u64,
     },
-    /// The swap is being made: a long operation. Once the engine writes `swapping` nothing cancels it.
+    /// The swap is being made: a long operation. Once the engine writes `swapping` nothing cancels it. `swapping` is the
+    /// engine's flag for exactly that point ([`PreparedRestore::swap_flag`]), the one thing readable while the engine
+    /// holds the restore.
     Committing {
         id: u32,
         cancel: CancelToken,
         destination: Option<Location>,
+        swapping: Arc<AtomicBool>,
     },
 }
 
@@ -463,6 +466,16 @@ impl Restores {
         matches!(lock(&self.inner).state, RestoreState::Idle)
     }
 
+    /// Whether a restore is committing and past the point of cancelling: the engine has written `swapping`, so a close
+    /// or Quit now leaves a swap that finishes, or is undone by recovery at the next launch, whatever is asked. Never
+    /// true while a restore waits for its yes, prepares, or has ended.
+    pub fn past_swap(&self) -> bool {
+        match &lock(&self.inner).state {
+            RestoreState::Committing { swapping, .. } => swapping.load(Ordering::SeqCst),
+            _ => false,
+        }
+    }
+
     /// The prepared restore `id`, taken out of the state, which becomes `Committing`. `NotFound`, `Cancelled` or `Busy`
     /// as [`Inner::not_prepared`] says.
     fn begin_commit(&self, id: u32) -> ShellResult<Commit> {
@@ -486,6 +499,7 @@ impl Restores {
                     id,
                     cancel: cancel.clone(),
                     destination: destination.clone(),
+                    swapping: prepared.swap_flag(),
                 };
                 Ok(Commit {
                     prepared: *prepared,
@@ -1509,6 +1523,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
+    use crate::jobs::CloseReason;
     use crate::os::{Clock, DriveType, KnownFolder, OsSignal};
     use crate::session::SessionState;
     use crate::testing::{FakeVolume, TEST_PASSWORD, TestShell, heavy};
@@ -2461,6 +2476,67 @@ mod tests {
         assert!(restored.before_restore);
         assert!(dir.is_dir() && !ts.shell.paths.journal.exists());
         assert!(staging_in(&parent).is_empty());
+        let (s2, g2) = unlock(&ts, restored.vault);
+        assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
+    }
+
+    /// Ask 15: a close or Quit that comes once the engine has written `swapping` says the restore is past the point of
+    /// cancelling (`past_swap`), so the page can say it will finish or be undone the next time Lockbox opens; one that
+    /// comes while the restore is committing but before that point does not, and neither does a restore waiting for its
+    /// yes. Asked from inside the commit, at each of the two points, and once while it waits. Close anyway in the swap
+    /// runs the old close, which cancels and locks, and the swap finishes all the same: nothing is lost.
+    #[test]
+    fn close_past_the_swap_says_it_finishes_next_time() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+
+        // Waiting for the yes: no job runs, so a close does not ask at all.
+        let view = prepared(&ts, &backup, &parent);
+        assert!(!ts.shell.restore.past_swap());
+        assert!(!ts.shell.ask_before_closing(CloseReason::Close));
+        assert!(ts.events.close_asked().is_empty());
+
+        // Committing, before the journal says `swapping`, then after it.
+        let (shell, once) = (Arc::clone(&ts.shell), Cell::new(true));
+        failpoint::observe(
+            "restore.before_swapping",
+            Box::new(move || {
+                if once.replace(false) {
+                    assert!(!shell.restore.past_swap());
+                    assert!(shell.ask_before_closing(CloseReason::Close));
+                    assert_eq!(shell.close_answer(false), Ok(()));
+                }
+            }),
+        );
+        let shell = Arc::clone(&ts.shell);
+        failpoint::observe(
+            "restore.after_journal",
+            Box::new(move || {
+                assert!(shell.restore.past_swap());
+                assert!(shell.ask_before_closing(CloseReason::Quit));
+            }),
+        );
+        let restored = ts.shell.restore_commit(view.restore).unwrap();
+        failpoint::disarm_all();
+
+        assert_eq!(
+            ts.events.close_asked(),
+            [
+                json!({ "reason": "close", "running": ["restore"], "past_swap": false }),
+                json!({ "reason": "quit", "running": ["restore"], "past_swap": true }),
+            ]
+        );
+        // The swap went through whatever was asked; nothing was lost, and the question outlived the commit.
+        assert!(restored.before_restore);
+        assert!(dir.is_dir() && !ts.shell.paths.journal.exists());
+        assert!(staging_in(&parent).is_empty());
+        assert!(!ts.shell.restore.past_swap(), "the restore is over");
+        assert_eq!(ts.window.exits(), 0, "asking exited");
         let (s2, g2) = unlock(&ts, restored.vault);
         assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
     }

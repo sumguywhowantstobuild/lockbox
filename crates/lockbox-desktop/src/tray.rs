@@ -7,6 +7,7 @@ use tauri::menu::{IsMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime};
 
+use crate::jobs::CloseReason;
 use crate::shell::Shell;
 use crate::window;
 
@@ -81,7 +82,7 @@ fn chosen<R: Runtime>(app: &AppHandle<R>, id: &str) {
             }
         }
         QUIT => match app.try_state::<Arc<Shell>>() {
-            Some(shell) => quit(&shell, || app.exit(0)),
+            Some(shell) => quit_or_ask(&shell, || app.exit(0)),
             // No shell, nothing to lock: a failed start.
             None => app.exit(0),
         },
@@ -93,6 +94,16 @@ fn chosen<R: Runtime>(app: &AppHandle<R>, id: &str) {
 /// clipboard copy cleared, every long operation cancelled), off the event loop's thread.
 pub(crate) fn lock_all(shell: &Arc<Shell>) {
     shell.run_in_background(Shell::lock_all);
+}
+
+/// The tray's Quit: with a job running, the window is shown and the page is asked first
+/// ([`Shell::ask_before_closing`]), and the app does not exit until the page answers Close anyway
+/// ([`Shell::close_answer`], which runs [`quit`] and exits through the window's exit seam); with none running, it is
+/// [`quit`] at once. Never waits for the answer: the asking is a window request and an event.
+pub(crate) fn quit_or_ask(shell: &Shell, exit: impl FnOnce()) {
+    if !shell.ask_before_closing(CloseReason::Quit) {
+        quit(shell, exit);
+    }
 }
 
 /// Quit: [`Shell::shutdown`] (every vault locked as an app close, at most [`SHUTDOWN_WAIT`] of waiting for the hooks),
@@ -243,6 +254,104 @@ mod tests {
             "it waited too long ({took:?})"
         );
         release.send(()).unwrap();
+    }
+
+    /// Quit with nothing running is the Quit it always was: no question, every vault locked as an app close, then the
+    /// exit.
+    #[test]
+    fn quit_with_no_job_exits_as_before() {
+        let ts = TestShell::new();
+        ts.open_vault("Family");
+        let exits = AtomicUsize::new(0);
+        quit_or_ask(&ts.shell, || {
+            assert!(all_locked(&ts), "exit before every vault was locked");
+            exits.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(exits.load(Ordering::SeqCst), 1);
+        assert!(ts.events.close_asked().is_empty());
+        assert_eq!(ts.window.forwards(), 0);
+    }
+
+    /// Quit with a job running asks first: the window is shown before the page is told (a Quit comes from the tray, with
+    /// the window hidden), nothing is locked, cancelled or exited until the answer, and the app does not exit on its own.
+    #[test]
+    fn quit_with_a_job_running_asks_first() {
+        let ts = TestShell::new();
+        let (session, _) = ts.open_vault("Family");
+        let token = lockbox_core::blob::CancelToken::new();
+        let _backup =
+            ts.shell
+                .autolock
+                .begin(Some(session), crate::jobs::JobKind::Backup, token.clone());
+        // How many questions had been sent when the window was brought forward.
+        let sent_at_forward = Arc::new(AtomicUsize::new(usize::MAX));
+        let (events, seen) = (Arc::clone(&ts.events), Arc::clone(&sent_at_forward));
+        ts.window.during_next_forward(move || {
+            seen.store(events.close_asked().len(), Ordering::SeqCst);
+        });
+        let exits = AtomicUsize::new(0);
+
+        quit_or_ask(&ts.shell, || {
+            exits.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(exits.load(Ordering::SeqCst), 0, "it quit without an answer");
+        assert_eq!(ts.window.forwards(), 1);
+        assert_eq!(
+            sent_at_forward.load(Ordering::SeqCst),
+            0,
+            "the window was shown after the question"
+        );
+        assert_eq!(
+            ts.events.close_asked(),
+            [serde_json::json!({ "reason": "quit", "running": ["backup"], "past_swap": false })]
+        );
+        assert!(!all_locked(&ts));
+        assert!(ts.events.locked().is_empty());
+        assert!(!token.is_cancelled());
+        assert_eq!(ts.window.exits(), 0);
+    }
+
+    /// Close anyway on a Quit runs today's Quit (every vault locked as an app close, the jobs cancelled, within the
+    /// shutdown wait) and exits through the exit seam; Keep it running changes nothing and does not exit.
+    #[test]
+    fn quit_answers_close_anyway_and_keep_it_running() {
+        let ts = TestShell::new();
+        let (session, _) = ts.open_vault("Family");
+        let token = lockbox_core::blob::CancelToken::new();
+        let _backup =
+            ts.shell
+                .autolock
+                .begin(Some(session), crate::jobs::JobKind::Backup, token.clone());
+        quit_or_ask(&ts.shell, || {});
+
+        ts.shell.close_answer(false).unwrap();
+        assert_eq!(ts.window.exits(), 0);
+        assert!(!all_locked(&ts));
+        assert!(!token.is_cancelled());
+        assert_eq!(
+            ts.shell.close_answer(false),
+            Err(crate::error::ShellError::NotFound)
+        );
+
+        quit_or_ask(&ts.shell, || {});
+        let started = Instant::now();
+        ts.shell.close_answer(true).unwrap();
+        assert!(started.elapsed() < SHUTDOWN_WAIT);
+        assert_eq!(ts.window.exits(), 1);
+        assert!(all_locked(&ts));
+        assert!(token.is_cancelled());
+        assert!(
+            ts.events
+                .locked()
+                .iter()
+                .all(|(_, _, reason)| *reason == LockReason::AppClosing)
+        );
+        assert_eq!(
+            ts.shell.close_answer(true),
+            Err(crate::error::ShellError::NotFound)
+        );
+        assert_eq!(ts.window.exits(), 1);
     }
 
     /// A left click on the icon opens the window (Windows' convention), on the release of the button, through the same

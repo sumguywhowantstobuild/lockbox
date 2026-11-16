@@ -107,6 +107,24 @@ pub struct LockEpochEvent {
     pub reason: LockReason,
 }
 
+/// What was asked of the app when the question came: the window's close button, or the tray's Quit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseReason {
+    Close,
+    Quit,
+}
+
+/// `lockbox://close-asked`: a close or Quit arrived while at least one job runs. The kinds, each once, in the order the
+/// first of each began, and whether a restore is past its swap (a cancel no longer counts, so it finishes or is undone
+/// by recovery at the next launch). Nothing else: no path, no name, no count.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CloseAsked {
+    pub reason: CloseReason,
+    pub running: Vec<JobKind>,
+    pub past_swap: bool,
+}
+
 /// A job under way: it holds its place in the auto-lock's list (so idle time does not count and the PC stays awake),
 /// its token, and what it tells the page. Dropping it ends the job: the page is told it finished, then the list is
 /// let go.

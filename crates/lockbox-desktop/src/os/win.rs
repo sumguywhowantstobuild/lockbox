@@ -885,6 +885,11 @@ impl<R: Runtime> MainWindow for WinMainWindow<R> {
             let _ = window::set_capture_protection(&main, on);
         }
     }
+
+    /// Tauri's own call (it queues the request for the event loop and does not wait): no `unsafe` here.
+    fn exit_app(&self) {
+        self.app.exit(0);
+    }
 }
 
 /// The save shortcut, registered through the signal window's thread ([`SignalThread::set_hotkey`]), which `RegisterHotKey`

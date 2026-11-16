@@ -19,7 +19,7 @@ use crate::capture::{Capture, CaptureEvent, Read};
 use crate::clipboard::Clipboard;
 use crate::commands::env;
 use crate::error::{ShellError, ShellResult};
-use crate::jobs::{JobStarted, LockEpochEvent, ProgressEvent};
+use crate::jobs::{CloseAsked, CloseReason, JobStarted, LockEpochEvent, ProgressEvent};
 use crate::locations::{LocationCheck, check_location, is_within};
 use crate::lock;
 use crate::open::{OpenFolders, RemoveReport};
@@ -47,6 +47,17 @@ pub const JOB_STARTED_EVENT: &str = "lockbox://job-started";
 pub const PROGRESS_EVENT: &str = "lockbox://progress";
 /// All vaults locked, or the app closing, with or without any open: `{ epoch, reason }`.
 pub const LOCK_EPOCH_EVENT: &str = "lockbox://lock-epoch";
+/// A close or Quit arrived while a job runs: `{ reason, running, past_swap }`. Sent to the main window and never kept.
+pub const CLOSE_ASKED_EVENT: &str = "lockbox://close-asked";
+
+/// A question asked of the page: what it was about, and the lock epoch it was asked in. A lock of all vaults changes the
+/// epoch and so clears it (the page closes the question on `lockbox://lock-epoch`). Also what an answer claims
+/// ([`Shell::claim_close_answer`]).
+#[derive(Clone, Copy)]
+pub struct PendingClose {
+    reason: CloseReason,
+    epoch: u64,
+}
 
 pub struct Shell {
     pub sessions: Arc<Sessions>,
@@ -80,6 +91,9 @@ pub struct Shell {
     /// One close of the window at a time; true while 5b, the first-close explanation, shows
     /// ([`close_window`](Self::close_window)).
     explaining: Mutex<bool>,
+    /// The close or Quit the page was asked about and has not answered ([`ask_before_closing`](Self::ask_before_closing)).
+    /// Held only while the epoch and the running jobs are read, never across a lock, a hook or the notifier.
+    close_question: Mutex<Option<PendingClose>>,
     /// How many times the window was shown again ([`window_shown`](Self::window_shown)). Held while the window gate is
     /// sealed for a hide or lifted by a show, so a close knows whether a reopen came after its seal
     /// ([`lock_and_hide`](Self::lock_and_hide)). Never held across a lock or a call to the window.
@@ -154,6 +168,7 @@ impl Shell {
             forbidden,
             creating: Mutex::default(),
             explaining: Mutex::default(),
+            close_question: Mutex::default(),
             window_shows: Arc::default(),
             settings_change: Mutex::default(),
             shortcut_presses: AtomicU64::new(0),
@@ -272,6 +287,90 @@ impl Shell {
         if started.is_err() {
             work(self);
         }
+    }
+
+    /// The window's close button: with a job running, asks the page first ([`ask_before_closing`](Self::ask_before_closing));
+    /// with none, closes as it always has ([`close_window`](Self::close_window)). Waits for the lock hooks when it
+    /// closes, so the caller runs it off the event loop's thread ([`run_in_background`](Self::run_in_background)).
+    pub fn close_or_ask(&self) {
+        if !self.ask_before_closing(CloseReason::Close) {
+            self.close_window();
+        }
+    }
+
+    /// With at least one job running (every operation the auto-lock counts: [`AutoLock::running_kinds`]), asks the page
+    /// whether to go on with a close or Quit (`lockbox://close-asked`) and answers `true`; nothing is locked, hidden or
+    /// cancelled until [`close_answer`](Self::close_answer). With none running, answers `false` and does nothing: the
+    /// caller closes as always. A Quit shows the window first (it comes from the tray, with the window hidden), then
+    /// asks.
+    ///
+    /// While a question is pending in the same lock epoch, a second request changes nothing: no second event, no second
+    /// window show, the first one's reason stays. A change of the epoch (Lock all, Windows locking or sleeping, an idle
+    /// lock) clears the pending question, so a request after it is judged afresh. Jobs that end meanwhile change nothing:
+    /// the question stays until it is answered.
+    pub fn ask_before_closing(&self, reason: CloseReason) -> bool {
+        let asked = {
+            let mut pending = lock(&self.close_question);
+            let epoch = self.sessions.epoch();
+            if pending.is_some_and(|question| question.epoch == epoch) {
+                return true;
+            }
+            *pending = None;
+            let running = self.autolock.running_kinds();
+            if running.is_empty() {
+                return false;
+            }
+            *pending = Some(PendingClose { reason, epoch });
+            CloseAsked {
+                reason,
+                running,
+                past_swap: self.restore.past_swap(),
+            }
+        };
+        if reason == CloseReason::Quit {
+            self.os.window.bring_forward();
+        }
+        self.notifier.close_asked(&asked);
+        true
+    }
+
+    /// The page's answer to the question ([`ask_before_closing`](Self::ask_before_closing)). Either answer uses the
+    /// question up. `go`: runs the old path for the question's reason, a close (today's
+    /// [`close_window`](Self::close_window), whose lock cancels every job) or a Quit (the shutdown, within
+    /// [`SHUTDOWN_WAIT`](crate::autolock::SHUTDOWN_WAIT), then the exit). Not `go`: nothing changes. `NotFound` when no
+    /// question is pending: never asked, already answered, or cleared by a lock of all vaults since. Waits for the lock
+    /// hooks when it closes, so the caller runs it off the async runtime.
+    pub fn close_answer(&self, go: bool) -> ShellResult<()> {
+        let question = self.claim_close_answer()?;
+        self.answer_claimed(question, go)
+    }
+
+    /// The first half of an answer: takes the pending question, and its lock epoch, out of the shell at the moment the
+    /// answer arrives, so that work queued behind it (the command runs the rest on the blocking pool) belongs to that
+    /// question alone. A question asked later is another question, which this answer can neither consume nor run
+    /// for. `NotFound` when none is pending, or when a lock of all vaults has cleared it.
+    pub fn claim_close_answer(&self) -> ShellResult<PendingClose> {
+        let mut pending = lock(&self.close_question);
+        match pending.take() {
+            Some(question) if question.epoch == self.sessions.epoch() => Ok(question),
+            _ => Err(ShellError::NotFound),
+        }
+    }
+
+    /// The second half: `go` runs the old path for the claimed question's reason, unless a lock of all vaults came since
+    /// it was claimed (`NotFound`, nothing run: the question it answered is gone, and what is running now was started
+    /// after it); not `go` changes nothing.
+    pub fn answer_claimed(&self, question: PendingClose, go: bool) -> ShellResult<()> {
+        if go {
+            if question.epoch != self.sessions.epoch() {
+                return Err(ShellError::NotFound);
+            }
+            match question.reason {
+                CloseReason::Close => self.close_window(),
+                CloseReason::Quit => crate::tray::quit(self, || self.os.window.exit_app()),
+            }
+        }
+        Ok(())
     }
 
     /// The window's close button (design, "The window"): it never ends the app. Locks every vault, exactly as the page's
@@ -503,6 +602,10 @@ impl<R: Runtime> Notifier for Events<R> {
     fn lock_epoch(&self, event: &LockEpochEvent) {
         self.emit(LOCK_EPOCH_EVENT, *event);
     }
+
+    fn close_asked(&self, event: &CloseAsked) {
+        self.emit(CLOSE_ASKED_EVENT, event.clone());
+    }
 }
 
 #[cfg(test)]
@@ -512,10 +615,13 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use lockbox_core::blob::CancelToken;
     use serde_json::{Value, json};
     use zeroize::Zeroizing;
 
+    use super::{CLOSE_ASKED_EVENT, CloseAsked, CloseReason};
     use crate::error::ShellError;
+    use crate::jobs::JobKind;
     use crate::lock;
     use crate::session::{LockReason, SessionState};
     use crate::settings::SettingsStore;
@@ -1003,6 +1109,485 @@ mod tests {
                 .iter()
                 .any(|s| s.session == after && s.state == SessionState::Unlocked)
         );
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Close or Quit with a job running (Task 12): the question, and its answer.
+    // -----------------------------------------------------------------------------------------------------------
+
+    /// What the page is sent when a close arrives while jobs run.
+    fn asked(reason: &str, running: &[&str], past_swap: bool) -> Value {
+        json!({ "reason": reason, "running": running, "past_swap": past_swap })
+    }
+
+    /// `lockbox://close-asked` has exactly the frozen JSON shape: a snake_case reason, the kinds in start order, and
+    /// whether the swap is past. Nothing else (no path, no name, no count).
+    #[test]
+    fn close_asked_has_the_frozen_shape() {
+        let event = CloseAsked {
+            reason: CloseReason::Close,
+            running: vec![JobKind::Import, JobKind::Backup],
+            past_swap: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"reason":"close","running":["import","backup"],"past_swap":false}"#
+        );
+        let quit = CloseAsked {
+            reason: CloseReason::Quit,
+            running: vec![JobKind::SaveCopy, JobKind::OpenBackup, JobKind::CopyItem],
+            past_swap: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&quit).unwrap(),
+            asked("quit", &["save_copy", "open_backup", "copy_item"], true)
+        );
+        assert_eq!(CLOSE_ASKED_EVENT, "lockbox://close-asked");
+    }
+
+    /// With nothing running, a close is the close it always was: every vault locks, the window hides, and the page is
+    /// asked nothing.
+    #[test]
+    fn close_with_no_job_hides_and_locks_as_before() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let vaults = two_vaults_and_a_copy(&ts);
+
+        ts.shell.close_or_ask();
+
+        assert_all_locked_by_a_manual_lock(&ts, &vaults);
+        assert_eq!(ts.window.hides(), 1);
+        assert!(ts.events.close_asked().is_empty());
+        assert_eq!(
+            ts.shell.close_answer(true),
+            Err(ShellError::NotFound),
+            "a question was left pending"
+        );
+    }
+
+    /// A close with a job running asks first: nothing is locked, hidden, cancelled or brought forward, and the page is
+    /// sent the one question, naming the job.
+    #[test]
+    fn close_with_a_job_running_asks_first() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let vaults = two_vaults_and_a_copy(&ts);
+        let token = CancelToken::new();
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(vaults[0].0), JobKind::Import, token.clone());
+
+        ts.shell.close_or_ask();
+
+        assert_eq!(
+            ts.events.close_asked(),
+            [asked("close", &["import"], false)]
+        );
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
+        assert!(ts.events.locked().is_empty());
+        assert!(
+            !token.is_cancelled(),
+            "the job was cancelled before the answer"
+        );
+        assert_eq!(ts.window.hides(), 0);
+        assert_eq!(ts.window.forwards(), 0, "a close has the window up already");
+        assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+        assert!(ts.events.notices().is_empty());
+    }
+
+    /// Close anyway: the jobs are cancelled, then the old close runs (every vault locked, the window hidden), in that
+    /// order, and the question is used up.
+    #[test]
+    fn close_anyway_cancels_the_jobs_then_hides_and_locks() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let vaults = two_vaults_and_a_copy(&ts);
+        let token = CancelToken::new();
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(vaults[0].0), JobKind::Import, token.clone());
+        ts.shell.close_or_ask();
+
+        let at_hide = Arc::new(Mutex::new(None));
+        let (seen, shell, job) = (Arc::clone(&at_hide), Arc::clone(&ts.shell), token.clone());
+        ts.window.during_next_hide(move || {
+            *lock(&seen) = Some((
+                job.is_cancelled(),
+                shell
+                    .sessions
+                    .list()
+                    .iter()
+                    .map(|s| s.state)
+                    .collect::<Vec<_>>(),
+            ));
+        });
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+
+        assert!(token.is_cancelled());
+        assert_all_locked_by_a_manual_lock(&ts, &vaults);
+        assert_eq!(ts.window.hides(), 1);
+        assert_eq!(
+            *lock(&at_hide),
+            Some((true, vec![SessionState::Locked; 2])),
+            "the window hid before the jobs were cancelled and the vaults locked"
+        );
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.events.close_asked().len(), 1);
+    }
+
+    /// Keep it running: nothing changes, the question is used up (a second answer is refused), and the next close
+    /// asks again.
+    #[test]
+    fn keep_it_running_changes_nothing() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let vaults = two_vaults_and_a_copy(&ts);
+        let token = CancelToken::new();
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(vaults[0].0), JobKind::Import, token.clone());
+        ts.shell.close_or_ask();
+
+        assert_eq!(ts.shell.close_answer(false), Ok(()));
+
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
+        assert!(ts.events.locked().is_empty());
+        assert!(!token.is_cancelled());
+        assert_eq!(ts.window.hides(), 0);
+        assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+        assert_eq!(ts.shell.close_answer(false), Err(ShellError::NotFound));
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+
+        ts.shell.close_or_ask();
+        assert_eq!(
+            ts.events.close_asked(),
+            [
+                asked("close", &["import"], false),
+                asked("close", &["import"], false)
+            ]
+        );
+    }
+
+    /// While the question shows, a second close (or a Quit) changes nothing: the question stays, with its first
+    /// reason, and no second event is sent. The answer runs the old path of that first reason.
+    #[test]
+    fn a_second_close_while_the_question_shows_changes_nothing() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (session, _) = ts.open_vault("Family");
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Import, CancelToken::new());
+        ts.shell.close_or_ask();
+
+        ts.shell.close_or_ask();
+        assert!(ts.shell.ask_before_closing(CloseReason::Quit));
+
+        assert_eq!(
+            ts.events.close_asked(),
+            [asked("close", &["import"], false)]
+        );
+        assert_eq!(
+            ts.window.forwards(),
+            0,
+            "the second request moved the window"
+        );
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.window.exits(), 0, "the Quit that changed nothing exited");
+        assert_eq!(ts.window.hides(), 1, "the close's own answer did not run");
+    }
+
+    /// Jobs that end while the question shows change nothing: the question stays, and Close anyway then just closes.
+    #[test]
+    fn jobs_finishing_meanwhile_leave_the_question_and_close_anyway_just_closes() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (session, _) = ts.open_vault("Family");
+        let import = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Import, CancelToken::new());
+        ts.shell.close_or_ask();
+
+        drop(import);
+        assert_eq!(ts.events.close_asked().len(), 1);
+        assert_eq!(ts.window.hides(), 0);
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        assert_eq!(ts.window.hides(), 1);
+    }
+
+    /// A change of the lock epoch (Lock all, Windows locking or sleeping, an idle lock) clears the question: an answer
+    /// to it is refused as no question pending, and nothing it would have done is done. A close after that, with a job
+    /// running, asks afresh.
+    #[test]
+    fn a_lock_epoch_change_clears_the_question() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (session, _) = ts.open_vault("Family");
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Import, CancelToken::new());
+        let _copy = ts
+            .shell
+            .autolock
+            .begin(None, JobKind::CopyItem, CancelToken::new());
+        for lock_all in [
+            (|ts: &TestShell| ts.shell.lock_all()) as fn(&TestShell),
+            |ts| ts.shell.autolock.signal(crate::os::OsSignal::SessionLocked),
+            |ts| ts.shell.autolock.signal(crate::os::OsSignal::Suspending),
+        ] {
+            let asked_before = ts.events.close_asked().len();
+            ts.shell.close_or_ask();
+            assert_eq!(ts.events.close_asked().len(), asked_before + 1);
+
+            lock_all(&ts);
+
+            assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+            assert_eq!(ts.shell.close_answer(false), Err(ShellError::NotFound));
+            assert_eq!(
+                ts.window.hides(),
+                0,
+                "an answer to a cleared question closed"
+            );
+        }
+        // A close after the change, with jobs still running (they were told to stop and have not ended): asks afresh.
+        let asked_before = ts.events.close_asked().len();
+        ts.shell.close_or_ask();
+        assert_eq!(ts.events.close_asked().len(), asked_before + 1);
+        assert_eq!(ts.shell.close_answer(false), Ok(()));
+    }
+
+    /// A question nobody answered before a lock of all vaults is gone with it: the next close, with a job still running,
+    /// asks again (a second event) instead of leaving the page waiting on a question it has dropped, and that new
+    /// question is the one an answer reaches.
+    #[test]
+    fn a_close_after_a_lock_epoch_change_asks_afresh_without_an_answer_between() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (session, _) = ts.open_vault("Family");
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Import, CancelToken::new());
+        ts.shell.close_or_ask();
+        ts.shell.lock_all();
+
+        assert!(ts.shell.ask_before_closing(CloseReason::Quit));
+
+        assert_eq!(
+            ts.events.close_asked(),
+            [
+                asked("close", &["import"], false),
+                asked("quit", &["import"], false)
+            ]
+        );
+        assert_eq!(ts.shell.close_answer(false), Ok(()));
+        assert_eq!(ts.window.exits(), 0);
+        assert_eq!(ts.shell.close_answer(false), Err(ShellError::NotFound));
+    }
+
+    /// A delayed answer (Codex F1): the answer is claimed when it arrives, before its work is queued. A lock of all
+    /// vaults and a new question can come before that work runs; the old answer then closes or quits nothing (its own
+    /// question's epoch has gone), and the new question stays pending for its own answer. Both reasons, and `go: false`
+    /// (which only uses its own question up).
+    #[test]
+    fn a_delayed_answer_never_consumes_or_runs_for_a_newer_question() {
+        for first in [CloseReason::Close, CloseReason::Quit] {
+            let ts = TestShell::new();
+            ts.shell.settings.mark_close_explained().unwrap();
+            let (session, _) = ts.open_vault("Family");
+            let _import =
+                ts.shell
+                    .autolock
+                    .begin(Some(session), JobKind::Import, CancelToken::new());
+            assert!(ts.shell.ask_before_closing(first));
+            // The old answer arrives (claimed) but its work has not run.
+            let old = ts.shell.claim_close_answer().unwrap();
+            assert_eq!(
+                ts.shell.claim_close_answer().err(),
+                Some(ShellError::NotFound)
+            );
+
+            // Windows locks; a job is still running, and a new question is asked.
+            ts.shell.autolock.signal(crate::os::OsSignal::SessionLocked);
+            let token = CancelToken::new();
+            let _backup = ts
+                .shell
+                .autolock
+                .begin(None, JobKind::Backup, token.clone());
+            assert!(ts.shell.ask_before_closing(CloseReason::Close));
+            let hides = ts.window.hides();
+
+            // The old answer's work runs now: refused, and nothing happens.
+            assert_eq!(
+                ts.shell.answer_claimed(old, true),
+                Err(ShellError::NotFound),
+                "{first:?}"
+            );
+            assert_eq!(ts.window.exits(), 0, "an old Quit exited");
+            assert_eq!(ts.window.hides(), hides, "an old close hid the window");
+            assert!(!token.is_cancelled(), "an old answer cancelled new work");
+
+            // The new question is still there, and is answered by its own answer.
+            assert_eq!(ts.events.close_asked().len(), 2);
+            assert_eq!(ts.shell.close_answer(true), Ok(()));
+            assert!(token.is_cancelled());
+        }
+    }
+
+    /// A claimed answer whose epoch is unchanged runs as the answer to its own question, and `go: false` claims and
+    /// changes nothing.
+    #[test]
+    fn a_claimed_answer_in_the_same_epoch_runs() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (session, _) = ts.open_vault("Family");
+        let token = CancelToken::new();
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Import, token.clone());
+        ts.shell.close_or_ask();
+        let kept = ts.shell.claim_close_answer().unwrap();
+        assert_eq!(ts.shell.answer_claimed(kept, false), Ok(()));
+        assert!(!token.is_cancelled());
+
+        ts.shell.close_or_ask();
+        let go = ts.shell.claim_close_answer().unwrap();
+        assert_eq!(ts.shell.answer_claimed(go, true), Ok(()));
+        assert!(token.is_cancelled());
+        assert_eq!(ts.window.hides(), 1);
+    }
+
+    /// 5b first, after the question: a first close with a job running asks (no 5b yet, nothing locked); Close anyway
+    /// then runs today's first close, which locks and shows 5b with the window visible.
+    #[test]
+    fn first_close_asks_before_5b_and_close_anyway_shows_5b() {
+        let ts = TestShell::new();
+        let (session, _) = ts.open_vault("Family");
+        let token = CancelToken::new();
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Import, token.clone());
+
+        ts.shell.close_or_ask();
+        assert_eq!(
+            ts.events.close_asked(),
+            [asked("close", &["import"], false)]
+        );
+        assert!(
+            ts.events.notices().is_empty(),
+            "5b came before the question"
+        );
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
+
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.events.notices(), [first_close(true)]);
+        assert!(token.is_cancelled());
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        assert_eq!(ts.window.hides(), 0, "5b is shown with the window visible");
+    }
+
+    /// Every operation the auto-lock counts is a job for the question (Task 2's definition), including the ones with no
+    /// bar of their own: an open, a replace and a copy of an item, each named by its kind, in start order.
+    #[test]
+    fn close_during_an_open_replace_or_copy_item_asks_too() {
+        for (kind, name) in [
+            (JobKind::Open, "open"),
+            (JobKind::Replace, "replace"),
+            (JobKind::CopyItem, "copy_item"),
+        ] {
+            let ts = TestShell::new();
+            ts.shell.settings.mark_close_explained().unwrap();
+            let (session, _) = ts.open_vault("Family");
+            let job = ts
+                .shell
+                .autolock
+                .begin(Some(session), kind, CancelToken::new());
+
+            ts.shell.close_or_ask();
+
+            assert_eq!(ts.events.close_asked(), [asked("close", &[name], false)]);
+            assert_eq!(ts.window.hides(), 0, "{name}");
+            assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
+            drop(job);
+            ts.shell.lock_all();
+        }
+        // Several at once: each kind once, in start order.
+        let ts = TestShell::new();
+        let (session, _) = ts.open_vault("Family");
+        let _open = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Open, CancelToken::new());
+        let _backup = ts
+            .shell
+            .autolock
+            .begin(None, JobKind::Backup, CancelToken::new());
+        let _copy = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::CopyItem, CancelToken::new());
+        let _second_open =
+            ts.shell
+                .autolock
+                .begin(Some(session), JobKind::Open, CancelToken::new());
+        ts.shell.close_or_ask();
+        assert_eq!(
+            ts.events.close_asked(),
+            [asked("close", &["open", "backup", "copy_item"], false)]
+        );
+    }
+
+    /// An answer with no question pending is refused as not found, on a shell that was never asked, and after a
+    /// question that has been answered.
+    #[test]
+    fn close_answer_with_no_question_pending_is_refused() {
+        let ts = TestShell::new();
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.shell.close_answer(false), Err(ShellError::NotFound));
+        assert_eq!(ts.window.hides(), 0);
+        assert_eq!(ts.window.exits(), 0);
+    }
+
+    /// A question is the exact one asked: an answer after a newer question (the earlier one answered, a job started,
+    /// a new close) is for the newer one only, with the newer one's reason.
+    #[test]
+    fn an_answer_goes_to_the_question_that_is_pending_now() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (session, _) = ts.open_vault("Family");
+        let _import = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Import, CancelToken::new());
+        ts.shell.close_or_ask();
+        assert_eq!(ts.shell.close_answer(false), Ok(()));
+        let _backup = ts
+            .shell
+            .autolock
+            .begin(Some(session), JobKind::Backup, CancelToken::new());
+        assert!(ts.shell.ask_before_closing(CloseReason::Quit));
+
+        assert_eq!(
+            ts.events.close_asked(),
+            [
+                asked("close", &["import"], false),
+                asked("quit", &["import", "backup"], false)
+            ]
+        );
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.window.exits(), 1, "the newer question was a Quit");
+        assert_eq!(ts.window.hides(), 0, "the older close ran");
     }
 
     /// A queued hide with no reopen before it runs: it hides, and the gate stays sealed.

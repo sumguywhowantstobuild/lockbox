@@ -7,6 +7,7 @@ pub const COMMANDS: &[&str] = &[
     "lock_vault",
     "lock_all",
     "close_explained_ok",
+    "close_answer",
     "clear_copied",
     "list_vaults",
     "start_new_vault_list",
