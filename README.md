@@ -60,19 +60,25 @@ cargo test -p lockbox-core --locked --features test-internals   # every engine t
 To run the app, use `cargo tauri dev` from `crates/lockbox-desktop` (the Tauri command-line tool is
 in [docs/SETUP.md](docs/SETUP.md#desktop-app-tauri)).
 
-The same checks that CI runs on every push:
+The same checks that CI runs on every push, all in one command that runs them side by side where it can:
+
+```
+node scripts/check.mjs       # add --no-scan to leave out the security scan
+```
+
+Or one by one:
 
 ```
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
 cargo test --locked
-cargo test -p lockbox-core --locked --features test-internals
+cargo test -p lockbox-core --locked --features test-internals --test '*'   # the engine's internal-only tests
 npm --prefix ui run lint
 npm --prefix ui run build    # before the UI tests: some of them read the built page and style sheet
 npm --prefix ui test
 cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc   # after the UI build, which it embeds
-node --test "scripts/*.test.mjs"   # the scanner's own tests
+node --test "scripts/*.test.mjs"   # the scripts' own tests
 node scripts/scan.mjs        # security scan; needs gitleaks, semgrep and osv-scanner, see docs/SETUP.md
 ```
 
