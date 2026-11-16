@@ -1,9 +1,12 @@
 // Stand-in for a scanner in tests. Behaviour comes from FAKE_<NAME>_EXIT and FAKE_<NAME>_REPORT
-// (FAKE_<NAME>_STAGED_EXIT / _STAGED_REPORT when called with --staged).
+// (FAKE_<NAME>_STAGED_EXIT / _STAGED_REPORT when called with --staged). FAKE_<NAME>_ARGS_TO names a file that
+// receives the arguments it was called with, as JSON.
 import { writeFileSync } from "node:fs";
 
 export function fake(name) {
   const args = process.argv.slice(2);
+  const argsTo = process.env[`FAKE_${name}_ARGS_TO`];
+  if (argsTo) writeFileSync(argsTo, JSON.stringify(args));
   const flag = args.findIndex((a) => ["--report-path", "--output", "--output-file"].includes(a));
   const key = `FAKE_${name}${args.includes("--staged") ? "_STAGED" : ""}`;
   const report = process.env[`${key}_REPORT`];

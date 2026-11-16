@@ -60,6 +60,9 @@ const tools = [
     okExit: [0],
     args: (out) => [
       "scan", "--metrics=off", "--disable-version-check",
+      // Semgrep's 5 s per rule and file runs out on a busy machine (the full check runs this beside the UI tests),
+      // and a timed-out pair is a file not scanned: INCOMPLETE. 60 s still stops a rule that truly hangs.
+      "--timeout", "60",
       ...["rust", "typescript", "secrets", "security-audit"].flatMap((p) => ["--config", `p/${p}`]),
       "--json", "--output", out,
       ...repoFiles(),

@@ -129,10 +129,31 @@ test("semgrep scan errors -> exit 2, files it could not scan are not clean", () 
   const { code, out } = run({ FAKE_SEMGREP_REPORT: errors });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: semgrep reported 1 scan error/);
+  // A rule that ran out of time left a file unscanned: still INCOMPLETE, however long the limit.
+  const timedOut = JSON.stringify({ results: [], errors: [{ type: "Timeout", level: "warn" }] });
+  const late = run({ FAKE_SEMGREP_REPORT: timedOut });
+  assert.equal(late.code, 2);
+  assert.match(late.out, /INCOMPLETE: semgrep reported 1 scan error/);
   // A report with no errors list at all is not trusted either.
   const bare = run({ FAKE_SEMGREP_REPORT: '{"results":[]}' });
   assert.equal(bare.code, 2);
   assert.match(bare.out, /semgrep wrote no readable report/);
+});
+
+test("semgrep_gets_time_for_a_busy_machine: each rule may take 60 s per file, not semgrep's 5 s", () => {
+  // The full check runs the scan beside the UI tests; at 5 s a loaded machine timed out 17 rule-and-file pairs.
+  const dir = mkdtempSync(join(tmpdir(), "scan-args-"));
+  try {
+    const argsTo = join(dir, "args.json");
+    const { code } = run({ FAKE_SEMGREP_ARGS_TO: argsTo });
+    assert.equal(code, 0);
+    const args = JSON.parse(readFileSync(argsTo, "utf8"));
+    const at = args.indexOf("--timeout");
+    assert.ok(at >= 0, "semgrep is called without --timeout");
+    assert.equal(args[at + 1], "60");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("git failing to list files -> exit 2, semgrep would scan nothing", () => {
