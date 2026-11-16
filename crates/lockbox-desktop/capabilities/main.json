@@ -66,6 +66,7 @@
     "allow-capture-cancel",
     "allow-capture-env",
     "allow-backup-vault",
+    "allow-vault-backup-due",
     "allow-test-backup",
     "allow-open-backup-read-only",
     "allow-copy-item-to",

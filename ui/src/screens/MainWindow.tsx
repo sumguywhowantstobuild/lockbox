@@ -24,6 +24,8 @@ import {
 } from "../store";
 import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, OpenFilesAsk, ShortcutAsk, VaultBanners } from "./Asks";
+import { BackupPanel, BackupRefusedAsk } from "./BackupFlow";
+import { BackupReminder } from "./BackupReminder";
 import { EmptyAdd } from "./EmptyAdd";
 import { EnvFileDialog } from "./EnvOut";
 import { EnvPaste } from "./EnvPaste";
@@ -260,6 +262,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               <VaultBanners data={data} />
             </div>
             <DetailsChangedAsk data={data} />
+            <BackupRefusedAsk data={data} />
+            <BackupReminder data={data} />
             {/* How the list is narrowed, on screen at once. */}
             {narrowed ? (
               <p className="lnote">
@@ -417,6 +421,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         ) : null}
         {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "settings" ? <SettingsPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+        {data.tool?.kind === "backup" ? <BackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
       </div>
       {/* The window's own: messages sit at the foot of the whole window, whatever is open beside the side menu. */}
       <ToastStack />

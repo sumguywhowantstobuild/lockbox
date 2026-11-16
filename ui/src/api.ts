@@ -688,6 +688,42 @@ export function cancelOperation(operation: OperationId, scope: JobScope): Promis
   return callPlain<null>("cancel_operation", { operation, scope });
 }
 
+/**
+ * What a finished backup holds and left out, as counts (the shell's `BackupView`): never a name. `damaged_items` are items left out because their
+ * stored record is damaged; `damaged_files` and `missing_files` are attached files left out because they fail their check or are not in the vault.
+ * `size_on_disk` is the backup file's size in bytes.
+ */
+export interface BackupView {
+  items: number;
+  files: number;
+  damaged_items: number;
+  damaged_files: number;
+  missing_files: number;
+  size_on_disk: number;
+}
+
+/** A backup is due: the vault's last one (else its making) is `days` whole days ago, and that is 30 or more. */
+export interface BackupDue {
+  days: number;
+}
+
+/**
+ * Backs up the open vault to a file the person picks in the Windows save dialog Rust opens (the path never comes to the page; the dialog
+ * suggests the vault's name and the day). A long job: `request` is the number the page chose, and `lockbox://job-started` says which operation it
+ * became (not sent for `"Dismissed"`, a closed dialog, or a refusal before anything is written). Cancel (`cancelOperation`) answers `cancelled`
+ * with nothing half-made left. Refused before writing with `invalid_input` and `what` `details changed`, `password copies disagree`,
+ * `recovery key copies disagree` or `details unchecked` (a backup made now might not open), `core` `not_enough_space` with its two numbers, or
+ * `read_only`. On success the shell keeps the date, which `vaultBackupDue` reads.
+ */
+export function backupVault(vault: SessionRef, request: number): Promise<Tagged<Outcome<BackupView>>> {
+  return call<Outcome<BackupView>>("backup_vault", { session: vault.session, generation: vault.generation, request });
+}
+
+/** Whether the vault's last backup, or its making when it has none, is 30 or more days ago. `null` when it is not, and always for a read-only copy. */
+export function vaultBackupDue(vault: SessionRef): Promise<Tagged<BackupDue | null>> {
+  return call<BackupDue | null>("vault_backup_due", { session: vault.session, generation: vault.generation });
+}
+
 /** What a cleanup of opened copies did, as counts: the shell's `RemoveReport`. `still_open` counts every copy another program still holds. */
 export interface RemoveReport {
   removed: number;

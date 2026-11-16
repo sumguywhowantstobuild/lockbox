@@ -62,6 +62,7 @@ pub const COMMANDS: &[&str] = &[
     "capture_cancel",
     "capture_env",
     "backup_vault",
+    "vault_backup_due",
     "test_backup",
     "open_backup_read_only",
     "copy_item_to",

@@ -8,7 +8,7 @@ use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
 use lockbox_core::blob::{CancelToken, NoProgress};
@@ -472,24 +472,50 @@ impl Power for FakePower {
     }
 }
 
-/// A clock that stands still until the test moves it.
-pub struct FakeClock(Mutex<Instant>);
+/// A clock that stands still until the test moves it: the monotonic one, and the wall clock beside it (2026-11-16
+/// 12:00:00 UTC to begin with).
+pub struct FakeClock(Mutex<Instant>, Mutex<SystemTime>, Mutex<i64>);
 
 impl FakeClock {
     pub fn set(&self, now: Instant) {
         *lock(&self.0) = now;
     }
+
+    /// Moves the wall clock (the date a backup is noted under, and "how many days ago").
+    pub fn set_wall(&self, now: SystemTime) {
+        *lock(&self.1) = now;
+    }
+
+    /// Puts the PC's time zone `hours` east of UTC (negative: west), for the local date.
+    pub fn set_utc_offset_hours(&self, hours: i64) {
+        *lock(&self.2) = hours * 3600;
+    }
 }
 
 impl Default for FakeClock {
     fn default() -> Self {
-        FakeClock(Mutex::new(Instant::now()))
+        FakeClock(
+            Mutex::new(Instant::now()),
+            Mutex::new(UNIX_EPOCH + Duration::from_secs(1_794_830_400)),
+            Mutex::new(0),
+        )
     }
 }
 
 impl Clock for FakeClock {
     fn now(&self) -> Instant {
         *lock(&self.0)
+    }
+
+    fn wall(&self) -> SystemTime {
+        *lock(&self.1)
+    }
+
+    /// The wall clock moved by the zone, as its date.
+    fn local_date(&self) -> String {
+        let utc = crate::dates::unix_secs(*lock(&self.1)) as i64;
+        let local = UNIX_EPOCH + Duration::from_secs((utc + *lock(&self.2)).max(0) as u64);
+        crate::dates::rfc3339_utc(local)[..10].to_owned()
     }
 
     /// No real wait: the clock moves on by `time`.

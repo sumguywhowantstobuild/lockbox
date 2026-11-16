@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use backup::BackupReport;
+pub use backup::{BackupPlan, BackupReport};
 pub use files::refuse_vault_folder;
 pub use journal::{JournalStep, JournalView, inspect_restore_journal};
 pub use naming::folder_name;
@@ -109,6 +109,13 @@ struct HeaderGuard {
     unverified: Option<Unverified>,
     /// A header write failed and `vault.json` now holds a header Lockbox cannot vouch for.
     uncertain: bool,
+}
+
+/// Which credential's key slot the header copies disagree on ([`Vault::unverified_slot`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnverifiedSlot {
+    Password,
+    Recovery,
 }
 
 /// The slot an unlock could not check, as the other header file holds it.
@@ -410,6 +417,24 @@ impl Vault {
 
     pub fn id(&self) -> VaultId {
         self.header.vault_id
+    }
+
+    /// When the vault was made, as its header says (`YYYY-MM-DDTHH:MM:SSZ`, RFC 3339 UTC). Read-only.
+    pub fn created_at(&self) -> &str {
+        &self.header.created_at
+    }
+
+    /// The credential whose key slot the two header copies disagree on, which this unlock could not check (a password
+    /// unlock cannot check the recovery slot, and the other way round); `None` when the copies agree. While it is
+    /// set, a backup is refused and only a change that replaces that credential goes ahead. Read-only.
+    pub fn unverified_slot(&self) -> Option<UnverifiedSlot> {
+        self.guard
+            .unverified
+            .as_ref()
+            .map(|unverified| match unverified.slot_type {
+                SlotType::Password => UnverifiedSlot::Password,
+                SlotType::Recovery => UnverifiedSlot::Recovery,
+            })
     }
 
     /// Items matching `q`, best first, at most `limit` (see [`SearchIndex::query`]).
@@ -884,6 +909,50 @@ mod tests {
         let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
         assert!(what(vault.change_password(NEW)).contains("copies disagree"));
         vault.regenerate_recovery().unwrap();
+    }
+
+    /// The shell tells a person which credential to renew: the accessor names the slot the two header copies
+    /// disagree on, and nothing when they agree.
+    #[test]
+    fn unverified_slot_names_the_slot_the_copies_disagree_on() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        drop(created.vault);
+        let (vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert_eq!(vault.unverified_slot(), None);
+        drop(vault);
+
+        // The recovery slot differs: a password unlock cannot check it.
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        header.slots[1].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        let (vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Recovery));
+        drop(vault);
+
+        // A fresh vault whose password slot differs: a recovery unlock cannot check it.
+        let other = Vault::create(parent.path(), "Work", PW).unwrap();
+        let dir = other.vault.dir().to_path_buf();
+        let secret = other.recovery;
+        drop(other.vault);
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        header.slots[0].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        let (vault, _) = Vault::unlock_with_recovery(&dir, &secret).unwrap();
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Password));
+    }
+
+    /// The header's creation time, as written when the vault was made.
+    #[test]
+    fn created_at_is_the_headers() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let on_disk = parse_header(&fs::read(created.vault.dir().join(HEADER_FILE)).unwrap())
+            .unwrap()
+            .created_at;
+        assert_eq!(created.vault.created_at(), on_disk);
+        assert_eq!(created.vault.created_at().len(), 20);
     }
 
     /// Accepting when the open header came from `.bak`: `vault.json` is "the other file" and

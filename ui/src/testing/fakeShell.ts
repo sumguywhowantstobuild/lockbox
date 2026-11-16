@@ -66,6 +66,20 @@ export interface FakeVault {
   busy?: boolean;
   /** Stored files (by file id) that do not decrypt: opening or saving one is refused as `damaged`. */
   damagedFiles?: string[];
+  /**
+   * Whole days since the vault's last backup, or since it was made when it has none (`vault_backup_due`): 30 or more is "due" and is answered
+   * as `{ days }`, less (and unset) as `null`. A backup that works clears it, as the shell's written date does.
+   */
+  backupDays?: number;
+  /** What a finished backup says it holds and left out (`BackupView`); the default is the vault's own counts, nothing left out, 1.2 GB on disk. */
+  backupView?: Partial<{
+    items: number;
+    files: number;
+    damaged_items: number;
+    damaged_files: number;
+    missing_files: number;
+    size_on_disk: number;
+  }>;
 }
 
 interface Live {
@@ -689,6 +703,7 @@ const OPERATION: Record<string, string> = {
   add_file: "import",
   attach_file: "import",
   replace_file: "import",
+  backup_vault: "backup",
 };
 
 /** What a stored-file command that takes a `request` is called in `lockbox://job-started` and `lockbox://progress` (the others start no job event). */
@@ -697,6 +712,7 @@ const JOB_KIND: Record<string, string> = {
   attach_file: "import",
   save_file_copy: "save_copy",
   save_file_copy_confirm: "save_copy",
+  backup_vault: "backup",
 };
 
 /** A request is a whole number the page chose (a `u32`); anything else is the shell's malformed-request answer. */
@@ -1548,6 +1564,38 @@ export function installFakeShell(
         bump(holder);
         fileOps.push({ cmd, id: sent.id, ...(cmd === "replace_file" ? { file_id: sent.file_id } : {}) });
         return tagged(sent.session, sent.generation, { Done: stored.file_id });
+      }
+      case "backup_vault": {
+        const sent = exactly(args, ["session", "generation", "request"]) as { session: number; generation: number };
+        requestOf(sent);
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The save dialog, closed without a choice: nothing is written and no date is kept.
+        if (dismissFile) {
+          dismissFile = false;
+          return tagged(sent.session, sent.generation, "Dismissed");
+        }
+        const live = (vault.items ?? []).filter((item) => item.kind !== "collection" && !(item.trashed ?? false));
+        const view = {
+          items: live.length,
+          files: live.reduce((total, item) => total + (item.attachments?.length ?? 0), 0),
+          damaged_items: 0,
+          damaged_files: 0,
+          missing_files: 0,
+          size_on_disk: 1_288_490_188,
+          ...vault.backupView,
+        };
+        fileOps.push({ cmd });
+        // The shell writes the vault's last backup date on success only.
+        vault.backupDays = undefined;
+        return tagged(sent.session, sent.generation, { Done: view });
+      }
+      case "vault_backup_due": {
+        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const vault = vaultFor(session, generation);
+        const days = vault.backupDays;
+        // Never for a read-only copy; due from 30 whole days.
+        return tagged(session, generation, (vault.readOnly ?? false) || days === undefined || days < 30 ? null : { days });
       }
       case "cancel_operation": {
         const sent = exactly(args, ["operation", "scope"]) as { operation: number; scope: RunningJob["scope"] };

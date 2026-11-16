@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use std::{ptr, slice};
 
 use lockbox_core::blob::CancelToken;
@@ -36,8 +36,8 @@ use windows_core::{BOOL, Interface, PCWSTR};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HOTKEY_ALREADY_REGISTERED,
     ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError,
-    GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, LocalFree, MAX_PATH, TRUE,
-    WPARAM,
+    GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, LocalFree, MAX_PATH, SYSTEMTIME,
+    TRUE, WPARAM,
 };
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Graphics::Printing::{
@@ -81,7 +81,7 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
-use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetLastInputInfo, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
@@ -102,10 +102,10 @@ use windows_sys::core::PWSTR;
 
 use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
-    CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env,
-    Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher,
-    MainWindow, Os, OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed,
-    PrintSteps, Shortcut, StartupEntry, SystemClock, ThreadTimer, Volumes,
+    CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Clock, Dialogs,
+    DriveType, Env, Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters,
+    KnownFolder, Launcher, MainWindow, Os, OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls,
+    PrintDone, PrintFailed, PrintSteps, Shortcut, StartupEntry, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
 use crate::startup::{self, StartupState};
@@ -834,6 +834,40 @@ impl IdleSource for WinIdle {
         // SAFETY: takes no arguments.
         let now = unsafe { GetTickCount() };
         Duration::from_millis(u64::from(now.wrapping_sub(info.dwTime)))
+    }
+}
+
+/// The real clocks: [`Instant::now`], [`SystemTime::now`], Windows' own local date (`GetLocalTime`, in the zone the
+/// person set) and [`thread::sleep`].
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn wall(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn local_date(&self) -> String {
+        let mut now = SYSTEMTIME {
+            wYear: 0,
+            wMonth: 0,
+            wDayOfWeek: 0,
+            wDay: 0,
+            wHour: 0,
+            wMinute: 0,
+            wSecond: 0,
+            wMilliseconds: 0,
+        };
+        // SAFETY: `now` is a writable SYSTEMTIME, which the call fills in; it cannot fail.
+        unsafe { GetLocalTime(&mut now) };
+        format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
+    }
+
+    fn sleep(&self, time: Duration) {
+        thread::sleep(time);
     }
 }
 
@@ -3818,5 +3852,21 @@ mod tests {
         assert!(claim("Local\\bad\0name").is_err());
         // The real name is a `Local\` one: per sign-in.
         assert!(INSTANCE_NAME.starts_with("Local\\"));
+    }
+
+    /// The real clock's local date is a `YYYY-MM-DD` date, and today in some zone: no more than a day from the UTC
+    /// date of the wall clock (every zone is within 14 hours of it).
+    #[test]
+    fn the_real_clock_names_todays_local_date() {
+        let clock = SystemClock;
+        let local = clock.local_date();
+        let bytes = local.as_bytes();
+        assert_eq!(bytes.len(), 10, "{local}");
+        assert!(bytes[4] == b'-' && bytes[7] == b'-', "{local}");
+        let utc = crate::dates::rfc3339_utc(clock.wall());
+        let day =
+            |text: &str| crate::dates::parse_utc(&format!("{}T00:00:00Z", &text[..10])).unwrap();
+        let apart = day(&local).abs_diff(day(&utc));
+        assert!(apart <= 86_400, "{local} against {utc}");
     }
 }

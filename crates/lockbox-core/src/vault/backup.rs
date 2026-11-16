@@ -27,7 +27,7 @@ use crate::{CoreError, Result};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const NOT_WRITABLE: CoreError = CoreError::InvalidInput {
     what: "destination not writable",
@@ -141,6 +141,53 @@ fn corrupt_if_armed(temp: &Path) -> Result<()> {
     Ok(crate::fsio::testutil::flip_byte(temp, at)?)
 }
 
+/// A backup that [`Vault::backup_check`] passed and that nothing has begun to write. It borrows the vault, so no vault
+/// write can come between the check and [`write`](Self::write), and it holds the destination the check was made for.
+pub struct BackupPlan<'v> {
+    vault: &'v Vault,
+    dest: PathBuf,
+    /// The bytes of `vault.json`, the item files and the blobs when the check measured them.
+    data: u64,
+}
+
+impl BackupPlan<'_> {
+    /// Writes the backup: built in a hidden temp beside the destination, re-read and checked, then renamed over it, as
+    /// [`Vault::backup`] describes (its progress, its stop, its journal and its failures).
+    pub fn write(
+        self,
+        journal: &dyn OutputJournal,
+        cancel: &CancelToken,
+        progress: &dyn Progress,
+    ) -> Result<BackupReport> {
+        let Self { vault, dest, data } = self;
+        let folder = parent_dir(&dest);
+        // Every early return below, and a panic, leaves the clean-up to `temp`.
+        let mut temp = OutputTemp::create(
+            folder,
+            ".lockbox-backup-partial",
+            journal,
+            "backup.after_record",
+        )?;
+        // Returns only after the writer and the file are dropped.
+        let meter = Meter::new(progress, cancel, data.saturating_mul(2));
+        let (manifest, report) = vault.write_archive(temp.take_file(), cancel, &meter)?;
+        // The copy is over, whatever was left out of it; the read-back is the second half.
+        meter.reach(data);
+        #[cfg(any(test, feature = "test-internals"))]
+        corrupt_if_armed(temp.path())?;
+        verify(temp.path(), &manifest, cancel, &meter)?;
+        // Windows keeps a file's attributes when it replaces another: unhide first.
+        clear_hidden(temp.path())?;
+        #[cfg(any(test, feature = "test-internals"))]
+        crate::fsio::failpoint::check("backup.before_publish")?;
+        // Last chance to cancel: from here only the journal's gate can still stop it.
+        cancel.check()?;
+        temp.publish(&dest)?;
+        meter.finish();
+        Ok(report)
+    }
+}
+
 impl Vault {
     /// Writes a backup of the open vault to `dest` (spec 6.7): built in a hidden temp beside
     /// it (recorded in `journal` before it exists), re-read and checked, then renamed over
@@ -167,6 +214,17 @@ impl Vault {
         cancel: &CancelToken,
         progress: &dyn Progress,
     ) -> Result<BackupReport> {
+        self.backup_check(dest, cancel)?
+            .write(journal, cancel, progress)
+    }
+
+    /// Everything that refuses a backup before a byte is written, as one step apart from the write: the header
+    /// cases (see [`backup`](Self::backup)), `vault.json` no longer being the open header, a `dest` inside the vault or
+    /// one that could never be replaced, too many entries, and the free-space check (the one check, through
+    /// `check_space`, with the numbers its refusal carries). Writes nothing and names no temp. A caller that must tell
+    /// someone when the work starts does it between this and [`BackupPlan::write`]; `backup` is the two together.
+    /// `cancel` is checked while the files are measured.
+    pub fn backup_check<'v>(&'v self, dest: &Path, cancel: &CancelToken) -> Result<BackupPlan<'v>> {
         self.refuse_backup()?;
         let folder = parent_dir(dest);
         refuse_inside(folder, &self.dir)?;
@@ -179,31 +237,14 @@ impl Vault {
         }
         let (estimate, data) = self.estimate(&blobs, cancel)?;
         check_space(estimate, estimate, &volume_info(folder)?)?;
-
-        // Every early return below, and a panic, leaves the clean-up to `temp`.
-        let mut temp = OutputTemp::create(
-            folder,
-            ".lockbox-backup-partial",
-            journal,
-            "backup.after_record",
-        )?;
-        // Returns only after the writer and the file are dropped.
-        let meter = Meter::new(progress, cancel, data.saturating_mul(2));
-        let (manifest, report) = self.write_archive(temp.take_file(), cancel, &meter)?;
-        // The copy is over, whatever was left out of it; the read-back is the second half.
-        meter.reach(data);
-        #[cfg(any(test, feature = "test-internals"))]
-        corrupt_if_armed(temp.path())?;
-        verify(temp.path(), &manifest, cancel, &meter)?;
-        // Windows keeps a file's attributes when it replaces another: unhide first.
-        clear_hidden(temp.path())?;
-        #[cfg(any(test, feature = "test-internals"))]
-        crate::fsio::failpoint::check("backup.before_publish")?;
-        // Last chance to cancel: from here only the journal's gate can still stop it.
-        cancel.check()?;
-        temp.publish(dest)?;
-        meter.finish();
-        Ok(report)
+        // The same read the write makes of `vault.json`: a header that is not the open one is refused here, before a
+        // temp is named, not found out once the work has begun. The write still reads it for the archive.
+        self.header_file()?;
+        Ok(BackupPlan {
+            vault: self,
+            dest: dest.to_path_buf(),
+            data,
+        })
     }
 
     fn refuse_backup(&self) -> Result<()> {
@@ -848,7 +889,7 @@ mod tests {
         let result = vault.backup(&dest, &journal, &CancelToken::new(), &NoProgress);
         assert!(
             matches!(result, Err(CoreError::NotEnoughSpace { needed, available })
-                if needed == estimate && available == just_enough - 1),
+                if needed == just_enough && available == just_enough - 1),
             "{result:?}"
         );
 
@@ -1017,6 +1058,150 @@ mod tests {
                 journal.assert_recorded_then_cleared();
             }
         }
+    }
+
+    // ---- the check that comes before the write ----
+
+    /// Everything that refuses a backup before a byte is written is in `backup_check`, so a caller that must tell the
+    /// page when the work starts can do it after the check. Each refusal is the one `backup` gives (the space check
+    /// is the same single check), and the check itself writes nothing and names no temp.
+    #[test]
+    fn check_runs_every_refusal_that_comes_before_the_write() {
+        let _cleanup = Cleanup;
+        let (parent, mut vault) = new_vault();
+        file_item(&parent, &mut vault, &[5u8; 10_000]);
+        let out = out_dir(&parent);
+        let dest = out.join("v.lockbox-backup");
+        let cancel = CancelToken::new();
+
+        // No room: the same numbers `backup` refuses with.
+        set_volume_override(Some(VolumeInfo {
+            free_bytes: Some(0),
+            max_file_bytes: None,
+        }));
+        let planned = vault.backup_check(&dest, &cancel).map(|_| ());
+        let backed = vault
+            .backup(&dest, &NoJournal, &cancel, &NoProgress)
+            .map(|_| ());
+        let Err(CoreError::NotEnoughSpace { needed, available }) = planned else {
+            panic!("not refused for space: {planned:?}");
+        };
+        assert_eq!(available, 0);
+        assert!(needed > 64 * MIB as u64, "the margin is in it: {needed}");
+        assert!(
+            matches!(backed, Err(CoreError::NotEnoughSpace { needed: n, available: 0 }) if n == needed)
+        );
+        set_volume_override(Some(VolumeInfo {
+            free_bytes: Some(needed),
+            max_file_bytes: None,
+        }));
+        assert!(vault.backup_check(&dest, &cancel).is_ok(), "exactly enough");
+        set_volume_override(None);
+
+        // A destination inside the vault, and one that could never be replaced.
+        let inside = vault.dir().join("v.lockbox-backup");
+        let refusal = vault.backup_check(&inside, &cancel).map(|_| ());
+        assert!(matches!(
+            refusal,
+            Err(CoreError::InvalidInput {
+                what: "destination inside vault"
+            })
+        ));
+        let folder = out.join("folder.lockbox-backup");
+        fs::create_dir(&folder).unwrap();
+        let refusal = vault.backup_check(&folder, &cancel).map(|_| ());
+        assert!(matches!(
+            refusal,
+            Err(CoreError::InvalidInput {
+                what: "destination not writable"
+            })
+        ));
+
+        // Too many entries.
+        ENTRY_LIMIT.with(|l| l.set(Some(1)));
+        let refusal = vault.backup_check(&dest, &cancel).map(|_| ());
+        assert!(matches!(
+            refusal,
+            Err(CoreError::TooLarge {
+                what: "backup entries"
+            })
+        ));
+        ENTRY_LIMIT.with(|l| l.set(None));
+
+        // A stop while the files are measured.
+        let stopped = CancelToken::new();
+        stopped.cancel();
+        let refusal = vault.backup_check(&dest, &stopped).map(|_| ());
+        assert!(matches!(refusal, Err(CoreError::Cancelled)));
+
+        // `vault.json` is no longer the open header: found here, before a temp exists.
+        let header = vault.dir().join(HEADER_FILE);
+        let good = fs::read(&header).unwrap();
+        fs::write(&header, b"not a header").unwrap();
+        let refusal = vault.backup_check(&dest, &cancel).map(|_| ());
+        assert!(matches!(
+            refusal,
+            Err(CoreError::Damaged {
+                what: "header changed on disk"
+            })
+        ));
+        fs::write(&header, good).unwrap();
+
+        // Nothing was written by any of it.
+        assert_eq!(names(&out), ["folder.lockbox-backup"]);
+        assert!(!dest.exists());
+    }
+
+    /// The header refusals are the check's too: each one, as `backup` gives it, with no temp named.
+    #[test]
+    fn check_refuses_the_header_cases_before_a_temp() {
+        let (parent, vault) = new_vault();
+        let dir = vault.dir().to_path_buf();
+        drop(vault);
+        let path = dir.join(HEADER_FILE);
+        let mut header = parse_header(&fs::read(&path).unwrap()).unwrap();
+        header.name = "Renamed".to_owned();
+        fs::write(&path, serialize_header(&header)).unwrap();
+        let (vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        let out = out_dir(&parent);
+        let refusal = vault
+            .backup_check(&out.join("v.lockbox-backup"), &CancelToken::new())
+            .map(|_| ());
+        // Matched through a binding: a `what:` literal here would read, to the page's message check, as a new refusal
+        // the page must word, and the backup command never sends it raw (the shell gives it its own words).
+        assert!(matches!(
+            refusal,
+            Err(CoreError::InvalidInput { what }) if what == "accept the header change first"
+        ));
+        assert!(names(&out).is_empty());
+    }
+
+    /// A check that passed, written, is the backup `backup` makes: the same report and a backup that verifies, and the
+    /// journal hears one temp, recorded and cleared, only from the write.
+    #[test]
+    fn a_checked_backup_written_is_the_backup() {
+        let (parent, mut vault) = new_vault();
+        vault.new_item(ItemKind::Note, "a", None).unwrap();
+        file_item(&parent, &mut vault, &[5u8; 10_000]);
+        let out = out_dir(&parent);
+        let (dest, plain) = (out.join("a.lockbox-backup"), out.join("b.lockbox-backup"));
+        let journal = Recorder::default();
+        let cancel = CancelToken::new();
+
+        let plan = vault.backup_check(&dest, &cancel).unwrap();
+        assert!(journal.0.borrow().is_empty());
+        assert!(names(&out).is_empty(), "the check writes nothing");
+        let report = plan.write(&journal, &cancel, &NoProgress).unwrap();
+        journal.assert_recorded_then_cleared();
+
+        let same = vault
+            .backup(&plain, &NoJournal, &cancel, &NoProgress)
+            .unwrap();
+        assert_eq!(report, same);
+        assert_eq!((report.items, report.files), (2, 1));
+        assert_eq!(entry_names(&dest), entry_names(&plain));
+        let summary = verify_backup(&dest, Credential::Password(PW), &cancel, &NoProgress).unwrap();
+        assert_eq!((summary.items, summary.files), (2, 1));
     }
 
     // ---- progress and a stop for one job ----

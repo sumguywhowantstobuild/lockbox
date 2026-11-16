@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use lockbox_core::blob::CancelToken;
 use lockbox_core::item::MAX_ITEM_JSON;
@@ -746,24 +746,18 @@ pub trait Power: Send + Sync {
     fn keep_awake(&self, on: bool);
 }
 
-/// The time now, on the monotonic clock (when a long operation ended), and the waits between clipboard tries.
+/// The time now, on the monotonic clock (when a long operation ended), the wall clock beside it (the date a backup
+/// finished), and the waits between clipboard tries.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
+    /// The calendar time: what the person's PC says it is. It can jump (the user sets it, Windows corrects it), so it
+    /// only ever names a date, never times a wait.
+    fn wall(&self) -> SystemTime;
+    /// Today's date in the PC's own time zone, `YYYY-MM-DD`: what a person calls today (a backup file's suggested
+    /// name). Only Windows knows the zone, so the real one is in `os::win`.
+    fn local_date(&self) -> String;
     /// Waits `time`: a test's fake clock just moves on by it.
     fn sleep(&self, time: Duration);
-}
-
-/// [`Instant::now`] and [`thread::sleep`].
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
-    fn sleep(&self, time: Duration) {
-        thread::sleep(time);
-    }
 }
 
 /// A folder Windows keeps for each user (`SHGetKnownFolderPath`).

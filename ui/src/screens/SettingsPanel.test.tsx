@@ -578,7 +578,7 @@ test("a_read_only_vault_can_open_settings_and_change_them", async () => {
 
 test("says_which_vault", async () => {
   const { panel, container } = await opened();
-  // 4A's settings are all for the app, so the panel says so, and has no section for the open vault.
+  // Most settings are for the app, so the panel says so; the open vault has one section of its own, "This vault" (Back up, from 4B).
   expect(within(panel).getByText("For every vault on this PC.")).toBeTruthy();
   expect(within(panel).queryByRole("heading", { name: "My vault" })).toBeNull();
   // The sections as drawn, in order.
@@ -586,6 +586,7 @@ test("says_which_vault", async () => {
     "Appearance",
     "Locking and clipboard",
     "Saving what you copied",
+    "This vault",
     "This PC",
     "About",
   ]);
@@ -622,10 +623,10 @@ test("shows_the_version", async () => {
   expect(commands("app_info")).toEqual([{}]);
 });
 
-test("no_backup_or_password_links_until_their_plans", async () => {
+test("no_test_restore_or_password_links_until_their_plans", async () => {
   const { panel } = await opened();
+  // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`); the rest of the vault's rows wait for their own plans.
   for (const name of [
-    /back up/i,
     /test a backup/i,
     /restore/i,
     /older copies/i,
@@ -644,6 +645,7 @@ test("no_backup_or_password_links_until_their_plans", async () => {
     "Dark",
     "System",
     "Change",
+    "Back up",
   ]);
 });
 

@@ -13,15 +13,16 @@ use std::sync::atomic::Ordering;
 use lockbox_core::blob::{CancelToken, NoProgress};
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::recovery::RecoverySecret;
-use lockbox_core::{BackupReport, Credential, ReadOnlyVault, verify_backup};
+use lockbox_core::{BackupReport, Credential, ReadOnlyVault, UnverifiedSlot, Vault, verify_backup};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Request;
 use zeroize::Zeroizing;
 
 use super::{NoArgs, args, blocking};
+use crate::dates;
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
-use crate::jobs::JobKind;
+use crate::jobs::{JobKind, JobScope};
 use crate::open::safe_name;
 use crate::pending::Token;
 use crate::restore::{
@@ -67,6 +68,44 @@ impl BackupView {
             missing_files,
             size_on_disk,
         }
+    }
+}
+
+/// A backup is due after this many whole days.
+const BACKUP_DUE_DAYS: u32 = 30;
+
+/// How long ago the vault was last backed up (or made, when it never was), once that is 30 days or more.
+#[derive(Debug, Serialize)]
+pub struct BackupDue {
+    pub days: u32,
+}
+
+/// The engine's refusal words that a backup's refusal is told apart by.
+const ACCEPT_FIRST: &str = "accept the header change first";
+const STATE_UNKNOWN: &str = "header state unknown; reopen the vault";
+const COPIES_DISAGREE: &str = "header copies disagree; replace the unchecked credential first";
+const CHANGED_ON_DISK: &str = "header changed on disk";
+
+/// The engine's refusal of a backup as the person must hear it: the changed header not yet accepted; the header copies
+/// disagreeing on the password, or on the recovery key (which one is asked of the open vault); and "details couldn't be
+/// checked", which a header state left unknown by a failed write and a `vault.json` that is no longer the header that
+/// was opened both mean (lock and open the vault again). Every other refusal, and a stop, is passed on as it is.
+fn backup_refusal(vault: &Vault, refusal: ShellError) -> ShellError {
+    let ShellError::Core(view) = refusal else {
+        return refusal;
+    };
+    let what = |what| ShellError::InvalidInput { what };
+    match (view.kind, view.what) {
+        ("invalid_input", Some(ACCEPT_FIRST)) => what("details changed"),
+        ("invalid_input", Some(STATE_UNKNOWN)) | ("damaged", Some(CHANGED_ON_DISK)) => {
+            what("details unchecked")
+        }
+        ("invalid_input", Some(COPIES_DISAGREE)) => match vault.unverified_slot() {
+            Some(UnverifiedSlot::Password) => what("password copies disagree"),
+            Some(UnverifiedSlot::Recovery) => what("recovery key copies disagree"),
+            None => what("details unchecked"),
+        },
+        _ => refusal,
     }
 }
 
@@ -135,16 +174,24 @@ fn has_backup_extension(dest: &Path) -> bool {
 impl Shell {
     /// Writes a backup of the open vault where the user picks (spec §6.7). Refused first, in this order: while the
     /// output journal is damaged (the backup's temp must be recorded in it), and for a read-only session. Then the
-    /// save dialog, outside every lock, suggesting the vault's name (`Dismissed` when closed); a name that does not
-    /// end in `.lockbox-backup` (any case) is refused as `"backup extension"`, a place inside the state folder as
-    /// `"state folder"`, both before anything is written. Then, in a long operation (writes answer `Busy` meanwhile):
-    /// the engine's backup, its temp recorded in the output journal first and each rename attempt only while the
-    /// session is still unlocked in `generation`. An existing backup file is touched only by the rename of a backup
-    /// that has verified. A lock at any point answers `Locked`.
+    /// save dialog, outside every lock, suggesting the vault's name and today's date (`Dismissed` when closed); a name
+    /// that does not end in `.lockbox-backup` (any case) is refused as `"backup extension"`, a place inside the state
+    /// folder as `"state folder"`, both before anything is written. Then the engine's check, which refuses everything
+    /// that can be refused before a byte is written (below), with no job begun and nothing sent to the page. Then, in
+    /// a long job the page's `request` names
+    /// (progress, and a Stop through `cancel_operation`; writes answer `Busy` meanwhile): the engine's backup, its temp
+    /// recorded in the output journal first and each rename attempt only while the session is still unlocked in
+    /// `generation`. An existing backup file is touched only by the rename of a backup that has verified. A lock at any
+    /// point answers `Locked`; a Stop answers `Cancelled`, with nothing half-made left.
+    ///
+    /// The engine refuses a backup in four cases the person must act on differently ([`backup_refusal`]): each is
+    /// answered with its own fixed `what`. Only a backup that was published notes the date, as `vault_state`'s
+    /// `last_backup` (UTC, the shell's wall clock); a note that cannot be saved does not fail a backup that is on disk.
     pub fn backup_vault(
         &self,
         session: SessionId,
         generation: u64,
+        request: u32,
     ) -> ShellResult<Tagged<Outcome<BackupView>>> {
         self.outputs.usable()?;
         // Read as `import` reads it: a read-only session has no backup of its own to make, and is refused before the
@@ -155,7 +202,8 @@ impl Shell {
                 VaultRef::Writable(vault) => Ok(vault.name().to_owned()),
                 VaultRef::ReadOnly(_) => Err(ShellError::ReadOnly),
             })?;
-        let suggested = safe_name(&format!("{}{EXTENSION}", name.data));
+        let today = self.os.clock.local_date();
+        let suggested = safe_name(&format!("{} {today}{EXTENSION}", name.data));
         let Some(dest) = self
             .os
             .dialogs
@@ -174,14 +222,56 @@ impl Shell {
                 let VaultRef::Writable(vault) = vault else {
                     return Err(ShellError::ReadOnly);
                 };
-                let _operation =
-                    self.autolock
-                        .begin(Some(session), JobKind::Backup, cancel.clone());
+                // Everything the engine refuses before it writes (the header cases, a destination it cannot take, too
+                // many entries, too little space) is answered here, before the job begins: the page takes
+                // `job-started` for "the work began", and a refusal must reach it as the refusal it is. The session's
+                // own token is the stop meanwhile (a lock); the page has no operation to stop yet.
+                let plan = vault
+                    .backup_check(&dest, cancel)
+                    .map_err(|refusal| backup_refusal(vault, refusal.into()))?;
+                let scope = JobScope::Session {
+                    session,
+                    generation,
+                };
+                let job = self
+                    .autolock
+                    .begin_job(scope, JobKind::Backup, cancel, Some(request));
                 let journal = self.outputs.for_call(&self.sessions, session, generation);
-                let report = journal.finish(vault.backup(&dest, &journal, cancel, &NoProgress))?;
+                let made = plan.write(&journal, job.token(), job.progress());
+                let report = journal
+                    .finish(made)
+                    .map_err(|refusal| backup_refusal(vault, refusal))?;
+                // The backup is on disk: the date is noted before anything else can fail, and a note that cannot be
+                // saved does not make a finished backup a failed one (the reminder just shows again).
+                let finished = dates::rfc3339_utc(self.os.clock.wall());
+                let _ = self.vault_state.set_last_backup(vault.dir(), &finished);
                 let size_on_disk = fs::metadata(&dest)?.len();
                 Ok(Outcome::Done(BackupView::of(report, size_on_disk)))
             })
+    }
+
+    /// Whether a backup of the open vault is due: 30 or more whole days since the last backup, or since the vault was
+    /// made when there is none (spec §6.7's reminder). `None` otherwise, and always `None` for a read-only session
+    /// (a backup or an older copy has nothing of its own to back up). A note that cannot be read as a date counts as no
+    /// backup, so the reminder shows rather than hides; a date in the future (a clock set back) is not due.
+    pub fn vault_backup_due(
+        &self,
+        session: SessionId,
+        generation: u64,
+    ) -> ShellResult<Tagged<Option<BackupDue>>> {
+        self.sessions.read(session, generation, |vault, _| {
+            let VaultRef::Writable(vault) = vault else {
+                return Ok(None);
+            };
+            let since = self
+                .vault_state
+                .last_backup(vault.dir())
+                .and_then(|noted| dates::parse_utc(&noted))
+                .or_else(|| dates::parse_utc(vault.created_at()));
+            let now = dates::unix_secs(self.os.clock.wall());
+            let days = since.map_or(0, |since| dates::whole_days_since(since, now));
+            Ok((days >= BACKUP_DUE_DAYS).then_some(BackupDue { days }))
+        })
     }
 
     /// Checks a backup the user picks, without restoring it (spec §6.7): the credential opens it, every entry and
@@ -324,6 +414,16 @@ impl Shell {
 struct BackupVault {
     session: SessionId,
     generation: u64,
+    /// The page's number for this job: its operation reaches the page by `lockbox://job-started` under it.
+    request: u32,
+}
+
+/// `vault_backup_due`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupDueArgs {
+    session: SessionId,
+    generation: u64,
 }
 
 /// `test_backup` and `open_backup_read_only`.
@@ -353,9 +453,23 @@ pub(super) async fn backup_vault(
     let BackupVault {
         session,
         generation,
+        request,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.backup_vault(session, generation)).await
+    blocking(move || shell.backup_vault(session, generation, request)).await
+}
+
+#[tauri::command]
+pub(super) async fn vault_backup_due(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<Option<BackupDue>>> {
+    let BackupDueArgs {
+        session,
+        generation,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.vault_backup_due(session, generation)).await
 }
 
 #[tauri::command]
@@ -548,9 +662,14 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::sync::Mutex;
+    use std::time::{Duration, UNIX_EPOCH};
 
-    use lockbox_core::internals::fsio::failpoint;
     use lockbox_core::internals::fsio::testutil::{flip_byte, names};
+    use lockbox_core::internals::fsio::{VolumeInfo, failpoint, set_volume_override};
+    use lockbox_core::internals::header::{
+        HEADER_FILE, VaultHeader, parse_header, serialize_header,
+    };
     use serde_json::{Value, json};
     use tauri::ipc::InvokeBody;
     use zeroize::Zeroizing;
@@ -558,6 +677,8 @@ mod tests {
     use super::super::items::{ItemEdit, NewKind};
     use super::super::{MALFORMED, parse};
     use super::*;
+    use crate::dates;
+    use crate::jobs::{JobScope, OperationId};
     use crate::session::{LockReason, SessionState};
     use crate::testing::{TEST_PASSWORD, TestShell, heavy};
 
@@ -597,7 +718,7 @@ mod tests {
     /// A backup of the session's vault in `dest`.
     fn back_up(ts: &TestShell, s: SessionId, g: u64, dest: &Path) -> BackupView {
         ts.dialogs.answer(Some(dest.to_path_buf()));
-        done(ts.shell.backup_vault(s, g).unwrap().data)
+        done(ts.shell.backup_vault(s, g, 1).unwrap().data)
     }
 
     /// The backup in `dest` opened read-only: its session and generation.
@@ -715,7 +836,7 @@ mod tests {
         for name in ["x.zip", "x", "x.lockbox-backup.zip", "x.lockbox-backups"] {
             ts.dialogs.answer(Some(folder.join(name)));
             assert_eq!(
-                ts.shell.backup_vault(s, g).err(),
+                ts.shell.backup_vault(s, g, 1).err(),
                 Some(NOT_A_BACKUP),
                 "{name}"
             );
@@ -727,7 +848,7 @@ mod tests {
         let in_state = ts.shell.paths.root.join("x.lockbox-backup");
         ts.dialogs.answer(Some(in_state.clone()));
         assert_eq!(
-            ts.shell.backup_vault(s, g).err(),
+            ts.shell.backup_vault(s, g, 1).err(),
             Some(ShellError::InvalidInput {
                 what: "state folder"
             })
@@ -740,7 +861,7 @@ mod tests {
         assert_eq!(names(&folder), ["FAMILY.LOCKBOX-BACKUP"]);
 
         // A closed dialog: `Dismissed`, tagged.
-        let closed = ts.shell.backup_vault(s, g).unwrap();
+        let closed = ts.shell.backup_vault(s, g, 1).unwrap();
         assert_eq!((closed.session, closed.generation), (s, g));
         assert!(matches!(closed.data, Outcome::Dismissed));
 
@@ -749,7 +870,7 @@ mod tests {
         fs::create_dir_all(&ts.shell.paths.root).unwrap();
         fs::write(&ts.shell.paths.outputs, b"not a journal").unwrap();
         assert!(matches!(
-            ts.shell.backup_vault(s, g).err(),
+            ts.shell.backup_vault(s, g, 1).err(),
             Some(ShellError::Core(view)) if view.kind == "damaged"
         ));
         assert_eq!(ts.dialogs.opened(), opened);
@@ -895,7 +1016,7 @@ mod tests {
             Box::new(move || shell.sessions.lock_all(LockReason::Manual)),
         );
         ts.dialogs.answer(Some(dest.clone()));
-        assert_eq!(ts.shell.backup_vault(s, g).err(), LOCKED);
+        assert_eq!(ts.shell.backup_vault(s, g, 1).err(), LOCKED);
         assert_eq!(fs::read(&dest).unwrap(), b"old backup");
         assert_eq!(names(dest.parent().unwrap()), ["family.lockbox-backup"]);
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
@@ -1023,7 +1144,7 @@ mod tests {
         );
         let opened = ts.dialogs.opened();
         assert_eq!(
-            ts.shell.backup_vault(bs, bg).err(),
+            ts.shell.backup_vault(bs, bg, 1).err(),
             Some(ShellError::ReadOnly)
         );
         assert_eq!(ts.dialogs.opened(), opened);
@@ -1128,9 +1249,26 @@ mod tests {
             sneaked["path"] = json!("SENTINEL-7f3a");
             assert!(!parses(sneaked));
         };
+        refuses_a_path(
+            json!({ "session": 1, "generation": 1, "request": 7 }),
+            &|body| parse::<BackupVault>(&InvokeBody::Json(body)).is_ok(),
+        );
         refuses_a_path(json!({ "session": 1, "generation": 1 }), &|body| {
-            parse::<BackupVault>(&InvokeBody::Json(body)).is_ok()
+            parse::<BackupDueArgs>(&InvokeBody::Json(body)).is_ok()
         });
+        // The page's number is required for a backup (a job it can Stop), and no backup's due date takes one.
+        for bad in [
+            json!({ "session": 1, "generation": 1 }),
+            json!({ "session": 1, "generation": 1, "request": -1 }),
+            json!({ "session": 1, "generation": 1, "request": "7" }),
+        ] {
+            let refused = parse::<BackupVault>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        let refused = parse::<BackupDueArgs>(&InvokeBody::Json(
+            json!({ "session": 1, "generation": 1, "request": 7 }),
+        ));
+        assert_eq!(refused.err(), Some(MALFORMED));
         refuses_a_path(
             json!({
                 "from": 1, "from_generation": 1, "id": id, "to": 2, "to_generation": 1, "skip_missing": false
@@ -1210,5 +1348,764 @@ mod tests {
 
     fn wrong_password() -> ShellError {
         lockbox_core::CoreError::WrongPassword.into()
+    }
+
+    // ---- Task 3: the job, the date, the refusals, the reminder ----
+
+    /// 2026-11-16T12:00:00Z: the wall clock of these tests until one moves it.
+    const NOW: u64 = 1_794_830_400;
+    const DAY: u64 = 86_400;
+
+    fn wall(ts: &TestShell, secs: u64) {
+        ts.clock.set_wall(UNIX_EPOCH + Duration::from_secs(secs));
+    }
+
+    fn last_backup(ts: &TestShell) -> Option<String> {
+        ts.shell.vault_state.last_backup(&vault_dir(ts))
+    }
+
+    fn due(ts: &TestShell, s: SessionId, g: u64) -> Option<u32> {
+        ts.shell
+            .vault_backup_due(s, g)
+            .unwrap()
+            .data
+            .map(|d| d.days)
+    }
+
+    /// The vault folder's header, as written when the vault was made.
+    fn header_of(dir: &Path) -> VaultHeader {
+        parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap()
+    }
+
+    fn edit_header(dir: &Path, edit: impl FnOnce(&mut VaultHeader)) {
+        let mut header = header_of(dir);
+        edit(&mut header);
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+    }
+
+    /// A new vault "Family" in the test's vaults folder, closed again: its canonical folder and recovery secret.
+    fn closed_vault(ts: &TestShell) -> (PathBuf, RecoverySecret) {
+        let created =
+            heavy(|| lockbox_core::Vault::create(&ts.vaults(), "Family", TEST_PASSWORD)).unwrap();
+        let dir = fs::canonicalize(created.vault.dir()).unwrap();
+        let recovery = created.recovery;
+        drop(created.vault);
+        (dir, recovery)
+    }
+
+    /// `vault`, unlocked through the engine, as the shell's writable session at its folder.
+    fn session_over(ts: &TestShell, vault: lockbox_core::Vault) -> (SessionId, u64) {
+        let location = Location::folder(vault.dir()).unwrap();
+        let opened = ts.shell.sessions.open(Some(location.clone()), None, |_| {
+            Ok(OpenStep::Session(location, Opened::Writable(vault), ()))
+        });
+        let Ok(Outcome::Done(tagged)) = opened else {
+            panic!("the session did not open");
+        };
+        (tagged.session, tagged.generation)
+    }
+
+    /// Opens the closed vault in `dir` with its password, through the engine.
+    fn by_password(ts: &TestShell, dir: &Path) -> (SessionId, u64) {
+        let (vault, _) =
+            heavy(|| lockbox_core::Vault::unlock_with_password(dir, TEST_PASSWORD)).unwrap();
+        session_over(ts, vault)
+    }
+
+    /// The wire form of a refusal.
+    fn wire(error: ShellError) -> Value {
+        serde_json::to_value(error).unwrap()
+    }
+
+    /// How many job events and busy announcements the shell has sent so far: a job that registered would add to them.
+    fn job_marks(ts: &TestShell) -> (usize, usize, usize) {
+        (
+            ts.events.started().len(),
+            ts.events.progress().len(),
+            ts.events.busy().len(),
+        )
+    }
+
+    /// Asks for a backup into a fresh folder and returns what it was refused with, after checking that nothing was
+    /// written there, nothing was left in the output journal, no date was noted, and no job was started or registered
+    /// (the page is told of none, and nothing paused the idle lock).
+    fn refused_backup(ts: &TestShell, s: SessionId, g: u64, vault: &Path) -> ShellError {
+        let folder = ts.folder("Refused");
+        ts.dialogs
+            .answer(Some(folder.join("family.lockbox-backup")));
+        let before = job_marks(ts);
+        let refused = ts.shell.backup_vault(s, g, 1).err().expect("refused");
+        assert_eq!(
+            job_marks(ts),
+            before,
+            "a refusal before writing starts no job"
+        );
+        assert!(names(&folder).is_empty(), "{:?}", names(&folder));
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+        assert_eq!(ts.shell.vault_state.last_backup(vault), None);
+        refused
+    }
+
+    /// Spec 6.7 and the reminder: the date a backup finished is kept (RFC 3339, UTC, the shell's own clock) when the
+    /// backup is published, and only then: a refused name, a closed dialog and a failed backup leave it as it was.
+    #[test]
+    fn backup_writes_the_last_backup_date_on_success_only() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        let folder = ts.folder("Backups");
+        let dest = folder.join("family.lockbox-backup");
+        wall(&ts, NOW);
+        assert_eq!(last_backup(&ts), None);
+
+        ts.dialogs.answer(Some(folder.join("x.zip")));
+        assert_eq!(ts.shell.backup_vault(s, g, 1).err(), Some(NOT_A_BACKUP));
+        assert!(matches!(
+            ts.shell.backup_vault(s, g, 2).unwrap().data,
+            Outcome::Dismissed
+        ));
+        failpoint::arm("backup.before_publish");
+        ts.dialogs.answer(Some(dest.clone()));
+        assert!(ts.shell.backup_vault(s, g, 3).is_err());
+        failpoint::disarm_all();
+        assert_eq!(last_backup(&ts), None, "nothing finished");
+
+        back_up(&ts, s, g, &dest);
+        assert_eq!(last_backup(&ts).as_deref(), Some("2026-11-16T12:00:00Z"));
+        let state: Value =
+            serde_json::from_slice(&fs::read(&ts.shell.paths.vault_state).unwrap()).unwrap();
+        assert_eq!(
+            state["vaults"][0]["last_backup"],
+            json!("2026-11-16T12:00:00Z")
+        );
+
+        // Forty days on: a failed backup keeps the first date, the next good one moves it.
+        wall(&ts, NOW + 40 * DAY);
+        failpoint::arm("backup.before_publish");
+        ts.dialogs.answer(Some(dest.clone()));
+        assert!(ts.shell.backup_vault(s, g, 4).is_err());
+        failpoint::disarm_all();
+        assert_eq!(last_backup(&ts).as_deref(), Some("2026-11-16T12:00:00Z"));
+        back_up(&ts, s, g, &dest);
+        assert_eq!(last_backup(&ts).as_deref(), Some("2026-12-26T12:00:00Z"));
+    }
+
+    /// The save dialog suggests `<vault name> <YYYY-MM-DD>.lockbox-backup`, the date being the person's own local day
+    /// (not UTC's), and a name that is not safe as a file name is cleaned as it always was.
+    #[test]
+    fn backup_dialog_suggests_the_name_and_the_local_date() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        // 23:00 UTC on 2026-11-16 is already the 17th in a zone 14 hours east, and still the 16th 5 hours west.
+        wall(&ts, NOW + 11 * 3600);
+        ts.clock.set_utc_offset_hours(14);
+        assert!(matches!(
+            ts.shell.backup_vault(s, g, 1).unwrap().data,
+            Outcome::Dismissed
+        ));
+        ts.clock.set_utc_offset_hours(-5);
+        assert!(matches!(
+            ts.shell.backup_vault(s, g, 2).unwrap().data,
+            Outcome::Dismissed
+        ));
+        assert_eq!(
+            ts.dialogs.suggested(),
+            [
+                "Family 2026-11-17.lockbox-backup",
+                "Family 2026-11-16.lockbox-backup"
+            ]
+        );
+        assert_eq!(ts.dialogs.titles(), ["Back up this vault"; 2]);
+    }
+
+    /// A date that cannot be saved does not turn a backup that is on disk into a failure: the person is told it
+    /// finished, and the reminder simply shows again.
+    #[test]
+    fn a_note_that_cannot_be_saved_does_not_fail_a_finished_backup() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        // Where the notes file should be, a folder: it cannot be read or replaced.
+        let _ = fs::remove_file(&ts.shell.paths.vault_state);
+        fs::create_dir(&ts.shell.paths.vault_state).unwrap();
+        let view = back_up(&ts, s, g, &dest);
+        assert_eq!(view.items, 0);
+        assert!(dest.is_file());
+        assert_eq!(last_backup(&ts), None);
+    }
+
+    /// A Stop while the backup runs: `Cancelled`, the backup file that was there byte for byte as it was, nothing else
+    /// beside it (the hidden partial was there when it was stopped, and is gone), the output journal clear, no date
+    /// noted, and the same session backs up afterwards. The page was told of the job by its own request.
+    #[test]
+    fn cancelled_backup_leaves_no_file_and_keeps_the_old_one() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        let bytes: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        ts.stored_file(s, g, "report.pdf", &bytes);
+        let folder = ts.folder("Backups");
+        let dest = folder.join("family.lockbox-backup");
+        fs::write(&dest, b"old backup").unwrap();
+
+        let during = Arc::new(Mutex::new(None));
+        let (shell, seen, watched) = (Arc::clone(&ts.shell), Arc::clone(&during), folder.clone());
+        ts.events.watch(move |name, payload| {
+            let done = payload["done"].as_u64().unwrap_or(0);
+            if name != crate::shell::PROGRESS_EVENT
+                || payload["finished"] != json!(false)
+                || done == 0
+                || seen.lock().unwrap().is_some()
+            {
+                return;
+            }
+            *seen.lock().unwrap() = Some(names(&watched));
+            let operation = OperationId(payload["operation"].as_u64().unwrap());
+            let scope: JobScope = serde_json::from_value(payload["scope"].clone()).unwrap();
+            shell.autolock.cancel_operation(operation, scope).unwrap();
+        });
+        ts.dialogs.answer(Some(dest.clone()));
+        let stopped = ts.shell.backup_vault(s, g, 61);
+        assert_eq!(stopped.err(), Some(ShellError::Cancelled));
+
+        let during = during.lock().unwrap().take().expect("stopped part-way");
+        assert!(during.len() > 1, "no partial was being written: {during:?}");
+        assert_eq!(fs::read(&dest).unwrap(), b"old backup");
+        assert_eq!(names(&folder), ["family.lockbox-backup"]);
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+        assert_eq!(last_backup(&ts), None);
+        let started = ts.events.started();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0]["request"], json!(61));
+        assert_eq!(started[0]["kind"], json!("backup"));
+        let last = ts.events.progress().pop().unwrap();
+        assert_eq!(last["finished"], json!(true));
+
+        ts.events.watch(|_, _| {});
+        let view = back_up(&ts, s, g, &dest);
+        assert_eq!(view.files, 1);
+        assert_ne!(fs::read(&dest).unwrap(), b"old backup");
+    }
+
+    /// A backup that fails after the work started (the last step before publishing) leaves no file and no temp, an
+    /// output journal with nothing in it, no date, and the engine's own refusal as the answer.
+    #[test]
+    fn failed_backup_leaves_no_file() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let folder = ts.folder("Backups");
+        let dest = folder.join("family.lockbox-backup");
+        failpoint::arm("backup.before_publish");
+        ts.dialogs.answer(Some(dest.clone()));
+        let failed = ts.shell.backup_vault(s, g, 1);
+        failpoint::disarm_all();
+        assert!(matches!(
+            failed.err(),
+            Some(ShellError::Core(view)) if view.kind == "io"
+        ));
+        assert!(names(&folder).is_empty(), "{:?}", names(&folder));
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+        assert_eq!(last_backup(&ts), None);
+        let last = ts.events.progress().pop().unwrap();
+        assert_eq!(last["finished"], json!(true));
+
+        // And the same session backs up afterwards.
+        assert_eq!(back_up(&ts, s, g, &dest).files, 1);
+    }
+
+    /// The four refusals the design words differently, each from a real engine state, each before anything is
+    /// written: the changed header, the two key slots the copies disagree on, and "details couldn't be checked", which
+    /// both a failed header write and a `vault.json` changed since the unlock end in.
+    #[test]
+    fn backup_refusal_says_which_case() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+
+        // A header changed outside Lockbox, not yet accepted.
+        let (dir, _) = closed_vault(&ts);
+        edit_header(&dir, |h| h.name = "Renamed".to_owned());
+        let (s, g) = by_password(&ts, &dir);
+        let refused = refused_backup(&ts, s, g, &dir);
+        assert_eq!(
+            refused,
+            ShellError::InvalidInput {
+                what: "details changed"
+            }
+        );
+        assert_eq!(
+            wire(refused),
+            json!({ "code": "invalid_input", "what": "details changed" })
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // The copies disagree on the recovery key: a password unlock cannot check that slot.
+        let (dir, _) = closed_vault(&ts);
+        edit_header(&dir, |h| h.slots[1].ciphertext[0] ^= 1);
+        let (s, g) = by_password(&ts, &dir);
+        let refused = refused_backup(&ts, s, g, &dir);
+        assert_eq!(
+            refused,
+            ShellError::InvalidInput {
+                what: "recovery key copies disagree"
+            }
+        );
+        assert_eq!(
+            wire(refused),
+            json!({ "code": "invalid_input", "what": "recovery key copies disagree" })
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // The copies disagree on the password: a recovery unlock cannot check that slot.
+        let (dir, recovery) = closed_vault(&ts);
+        edit_header(&dir, |h| h.slots[0].ciphertext[0] ^= 1);
+        let (vault, _) =
+            heavy(|| lockbox_core::Vault::unlock_with_recovery(&dir, &recovery)).unwrap();
+        let (s, g) = session_over(&ts, vault);
+        let refused = refused_backup(&ts, s, g, &dir);
+        assert_eq!(
+            refused,
+            ShellError::InvalidInput {
+                what: "password copies disagree"
+            }
+        );
+        assert_eq!(
+            wire(refused),
+            json!({ "code": "invalid_input", "what": "password copies disagree" })
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // A failed header write left the state unknown: "details couldn't be checked".
+        let (dir, _) = closed_vault(&ts);
+        edit_header(&dir, |h| h.slots[0].ciphertext[0] ^= 1);
+        failpoint::arm("unlock.repair_write");
+        let (mut vault, _) =
+            heavy(|| lockbox_core::Vault::unlock_with_password(&dir, TEST_PASSWORD)).unwrap();
+        failpoint::disarm_all();
+        failpoint::arm("write_headers.before_first");
+        assert!(vault.change_password("a different long password").is_err());
+        failpoint::disarm_all();
+        let (s, g) = session_over(&ts, vault);
+        let refused = refused_backup(&ts, s, g, &dir);
+        assert_eq!(
+            refused,
+            ShellError::InvalidInput {
+                what: "details unchecked"
+            }
+        );
+        assert_eq!(
+            wire(refused),
+            json!({ "code": "invalid_input", "what": "details unchecked" })
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // `vault.json` is no longer the header that was opened: the engine's "header changed on disk" is the same
+        // case, with the same advice (lock and open again).
+        let (dir, _) = closed_vault(&ts);
+        let (s, g) = by_password(&ts, &dir);
+        fs::write(dir.join(HEADER_FILE), b"not a header").unwrap();
+        let refused = refused_backup(&ts, s, g, &dir);
+        assert_eq!(
+            refused,
+            ShellError::InvalidInput {
+                what: "details unchecked"
+            }
+        );
+    }
+
+    /// A refusal that is not one of the four is the engine's own, as today: a destination the engine cannot take is
+    /// not turned into header advice.
+    #[test]
+    fn other_refusals_keep_their_own_form() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dir = vault_dir(&ts);
+        ts.dialogs.answer(Some(dir.join("inside.lockbox-backup")));
+        let before = job_marks(&ts);
+        let refused = ts.shell.backup_vault(s, g, 1).err();
+        assert_eq!(
+            refused.map(wire),
+            Some(json!({
+                "code": "core", "kind": "invalid_input", "what": "destination inside vault"
+            }))
+        );
+        assert!(!dir.join("inside.lockbox-backup").exists());
+        assert_eq!(job_marks(&ts), before, "refused before writing: no job");
+
+        // A destination that is a folder, which could never be replaced, is refused the same way.
+        let folder = ts.folder("Backups");
+        fs::create_dir(folder.join("taken.lockbox-backup")).unwrap();
+        ts.dialogs.answer(Some(folder.join("taken.lockbox-backup")));
+        let refused = ts.shell.backup_vault(s, g, 2).err();
+        assert_eq!(
+            refused.map(wire),
+            Some(json!({
+                "code": "core", "kind": "invalid_input", "what": "destination not writable"
+            }))
+        );
+        assert_eq!(job_marks(&ts), before, "refused before writing: no job");
+    }
+
+    /// `job-started` is sent only once the work starts: not for a closed dialog, a read-only session, a refused name
+    /// or a stale session. A backup that runs sends it before its first progress event and before the answer, with its
+    /// session and generation as the scope, and progress that ends at the total.
+    #[test]
+    fn backup_sends_job_started_only_once_the_work_starts() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        ts.stored_file(s, g, "report.pdf", &bytes);
+        let folder = ts.folder("Backups");
+        let dest = folder.join("family.lockbox-backup");
+        // A backup that is open (read-only) stays open: the one that runs is written beside it.
+        let (bs, bg) = {
+            let opened = folder.join("opened.lockbox-backup");
+            back_up(&ts, s, g, &opened);
+            open_backup(&ts, &opened)
+        };
+        ts.events.watch(|_, _| {});
+        let before = ts.events.started().len();
+
+        assert!(matches!(
+            ts.shell.backup_vault(s, g, 2).unwrap().data,
+            Outcome::Dismissed
+        ));
+        assert_eq!(
+            ts.shell.backup_vault(bs, bg, 3).err(),
+            Some(ShellError::ReadOnly)
+        );
+        ts.dialogs.answer(Some(folder.join("x.zip")));
+        assert_eq!(ts.shell.backup_vault(s, g, 4).err(), Some(NOT_A_BACKUP));
+        assert_eq!(ts.shell.backup_vault(s, g + 1, 5).err(), LOCKED);
+        assert_eq!(ts.events.started().len(), before, "nothing started");
+
+        let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let early = Arc::new(Mutex::new(Vec::new()));
+        let (flag, seen) = (Arc::clone(&answered), Arc::clone(&early));
+        ts.events.watch(move |name, _| {
+            let after = flag.load(std::sync::atomic::Ordering::SeqCst);
+            seen.lock().unwrap().push((name, after));
+        });
+        ts.dialogs.answer(Some(dest.clone()));
+        let view = ts.shell.backup_vault(s, g, 6).unwrap();
+        answered.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(view.data, Outcome::Done(_)));
+        let seen = early.lock().unwrap().clone();
+        assert_eq!(seen[0].0, crate::shell::JOB_STARTED_EVENT);
+        assert!(
+            seen[1..]
+                .iter()
+                .all(|(name, _)| *name == crate::shell::PROGRESS_EVENT)
+        );
+        assert!(seen.len() >= 3, "{seen:?}");
+        assert!(seen.iter().all(|(_, after)| !after), "an event came late");
+
+        let started = ts.events.started();
+        let started = &started[before];
+        assert_eq!(started["request"], json!(6));
+        assert_eq!(started["kind"], json!("backup"));
+        assert_eq!(
+            started["scope"],
+            json!({ "type": "session", "session": s.0, "generation": g })
+        );
+        let operation = started["operation"].as_u64().unwrap();
+        let progress: Vec<Value> = ts
+            .events
+            .progress()
+            .into_iter()
+            .filter(|event| event["operation"] == json!(operation))
+            .collect();
+        let (last, earlier) = progress.split_last().unwrap();
+        assert!(earlier.iter().all(|e| e["finished"] == json!(false)));
+        assert_eq!(last["finished"], json!(true));
+        assert_eq!(last["done"], last["total"]);
+        assert!(progress.iter().all(|e| e["kind"] == json!("backup")));
+    }
+
+    /// Stale generation: `Locked`; a session that is not ours: `NotFound`; both before the dialog opens and before
+    /// anything is started or written.
+    #[test]
+    fn backup_vault_refused_stale_and_foreign() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dialogs = ts.dialogs.opened();
+        let foreign = SessionId(s.0 + 100);
+        assert_eq!(ts.shell.backup_vault(s, g + 1, 1).err(), LOCKED);
+        assert_eq!(
+            ts.shell.backup_vault(foreign, g, 1).err(),
+            Some(ShellError::NotFound)
+        );
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(ts.shell.backup_vault(s, g, 1).err(), LOCKED);
+        assert_eq!(ts.dialogs.opened(), dialogs, "no dialog before the check");
+        assert!(ts.events.started().is_empty());
+    }
+
+    /// A read-only session (a backup opened to look inside) has nothing of its own to back up: refused before the
+    /// dialog, with nothing started.
+    #[test]
+    fn backup_on_read_only_refused() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let (bs, bg) = open_backup(&ts, &dest);
+        let (opened, started) = (ts.dialogs.opened(), ts.events.started().len());
+        ts.dialogs
+            .answer(Some(backup_file(&ts, "again.lockbox-backup")));
+        assert_eq!(
+            ts.shell.backup_vault(bs, bg, 9).err(),
+            Some(ShellError::ReadOnly)
+        );
+        assert_eq!(ts.dialogs.opened(), opened);
+        assert_eq!(ts.events.started().len(), started);
+        assert!(!backup_file(&ts, "again.lockbox-backup").exists());
+    }
+
+    /// Spec 6.7's reminder: due when the last backup, else the vault's creation, is 30 or more whole days ago. The
+    /// stored date is the shell's own RFC 3339 text; one that cannot be read counts as no backup; one in the future
+    /// (a clock set back) is not due.
+    #[test]
+    fn backup_due_after_30_days_or_from_creation() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dir = vault_dir(&ts);
+        let created = dates::parse_utc(&header_of(&dir).created_at).expect("the engine's own date");
+
+        // From creation: never backed up.
+        for (now, expected) in [
+            (created, None),
+            (created + 30 * DAY - 1, None),
+            (created + 30 * DAY, Some(30)),
+            (created + 31 * DAY + 5 * 3600, Some(31)),
+            (created - 10, None),
+        ] {
+            wall(&ts, now);
+            assert_eq!(due(&ts, s, g), expected, "{}", now - created);
+        }
+        wall(&ts, created + 31 * DAY);
+        assert_eq!(
+            serde_json::to_value(ts.shell.vault_backup_due(s, g).unwrap()).unwrap(),
+            json!({ "session": s.0, "generation": g, "data": { "days": 31 } })
+        );
+        wall(&ts, created + 1);
+        assert_eq!(
+            serde_json::to_value(ts.shell.vault_backup_due(s, g).unwrap()).unwrap(),
+            json!({ "session": s.0, "generation": g, "data": null })
+        );
+
+        // From the last backup, once there is one.
+        let then = created + 100 * DAY;
+        ts.shell
+            .vault_state
+            .set_last_backup(
+                &dir,
+                &dates::rfc3339_utc(UNIX_EPOCH + Duration::from_secs(then)),
+            )
+            .unwrap();
+        for (now, expected) in [
+            (then, None),
+            (then + 29 * DAY + 86_399, None),
+            (then + 30 * DAY, Some(30)),
+            (then + 45 * DAY, Some(45)),
+            (then - 5, None),
+        ] {
+            wall(&ts, now);
+            assert_eq!(due(&ts, s, g), expected, "{}", now - then);
+        }
+
+        // A note that cannot be read counts as no backup: the reminder shows rather than hides.
+        for unreadable in ["yesterday", "2026-11-06", "", "2026-11-06T09:30:00+02:00"] {
+            ts.shell
+                .vault_state
+                .set_last_backup(&dir, unreadable)
+                .unwrap();
+            wall(&ts, created + 31 * DAY);
+            assert_eq!(due(&ts, s, g), Some(31), "{unreadable:?}");
+        }
+
+        // A real backup moves it, through the same clock.
+        wall(&ts, created + 50 * DAY);
+        back_up(&ts, s, g, &backup_file(&ts, "family.lockbox-backup"));
+        wall(&ts, created + 79 * DAY);
+        assert_eq!(due(&ts, s, g), None);
+        wall(&ts, created + 80 * DAY);
+        assert_eq!(due(&ts, s, g), Some(30));
+    }
+
+    /// The reminder is asked about this session's own vault: another vault's backup does not count for it, and the
+    /// newer of two vaults is not the one read.
+    #[test]
+    fn backup_due_reads_the_asked_vault() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let (other, go) = ts.open_vault("Work");
+        let created = dates::parse_utc(&header_of(&vault_dir(&ts)).created_at).unwrap();
+        wall(&ts, created + 40 * DAY);
+        back_up(&ts, other, go, &backup_file(&ts, "work.lockbox-backup"));
+        assert_eq!(due(&ts, other, go), None);
+        assert_eq!(due(&ts, s, g), Some(40));
+    }
+
+    /// Stale generation: `Locked`; a session that is not ours: `NotFound`.
+    #[test]
+    fn backup_due_refused_stale_foreign() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        wall(&ts, NOW + 400 * DAY);
+        assert!(due(&ts, s, g).is_some(), "due, so a refusal is the check");
+        assert_eq!(ts.shell.vault_backup_due(s, g + 1).err(), LOCKED);
+        assert_eq!(
+            ts.shell.vault_backup_due(SessionId(s.0 + 100), g).err(),
+            Some(ShellError::NotFound)
+        );
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(ts.shell.vault_backup_due(s, g).err(), LOCKED);
+    }
+
+    /// A read-only session (a backup, a pre-restore folder) is never asked to back up: `null`, even when the live
+    /// vault beside it is long overdue.
+    #[test]
+    fn backup_due_is_none_on_read_only() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let (bs, bg) = open_backup(&ts, &dest);
+        wall(&ts, NOW + 400 * DAY);
+        assert!(due(&ts, s, g).is_some(), "the live vault is overdue");
+        assert_eq!(due(&ts, bs, bg), None);
+    }
+
+    /// Where the free space is known to be too little, the backup is refused before anything is written, with the
+    /// numbers: what it needs (the margin the engine keeps free included, so it is always above what is there) and
+    /// what the drive has, in the form 22d reads.
+    #[test]
+    fn backup_no_space_refused_before_writing_with_numbers() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let _volume = Volume;
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", &vec![7u8; 300_000]);
+        let folder = ts.folder("Backups");
+        let dest = folder.join("family.lockbox-backup");
+
+        // With nothing free, the answer says what it needs.
+        pretend_free(Some(0));
+        ts.dialogs.answer(Some(dest.clone()));
+        let Some(ShellError::Core(view)) = ts.shell.backup_vault(s, g, 1).err() else {
+            panic!("not refused for space");
+        };
+        assert_eq!(view.kind, "not_enough_space");
+        let needed = view.needed.unwrap();
+        assert_eq!(view.available, Some(0));
+        assert!(needed > 64 * 1024 * 1024, "the margin is in it: {needed}");
+        assert_eq!(
+            wire(ShellError::Core(view)),
+            json!({ "code": "core", "kind": "not_enough_space", "needed": needed, "available": 0 })
+        );
+
+        // One byte short: refused, and "needs X, has Y" has X above Y. Nothing was written or kept.
+        pretend_free(Some(needed - 1));
+        ts.dialogs.answer(Some(dest.clone()));
+        let Some(ShellError::Core(view)) = ts.shell.backup_vault(s, g, 2).err() else {
+            panic!("not refused for space");
+        };
+        assert_eq!(
+            (view.needed, view.available),
+            (Some(needed), Some(needed - 1))
+        );
+        assert!(names(&folder).is_empty(), "{:?}", names(&folder));
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+        assert_eq!(last_backup(&ts), None);
+
+        // Exactly what it said it needs: goes ahead.
+        pretend_free(Some(needed));
+        assert_eq!(back_up(&ts, s, g, &dest).files, 1);
+        assert!(dest.is_file());
+    }
+
+    /// An insufficient-space refusal starts no job: the page is sent no `job-started` and no progress, no job is
+    /// registered (nothing paused the idle lock), the refusal carries the numbers 22d shows, and the same call made
+    /// again with room (another destination, as 22d's retry does) is a backup that starts its job under its own
+    /// request. The page treats `job-started` as "the work began", so one sent for this refusal would show the
+    /// "didn't finish" screen instead of 22d.
+    #[test]
+    fn backup_no_space_starts_no_job_and_a_retry_works() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let _volume = Volume;
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", &vec![7u8; 300_000]);
+        let folder = ts.folder("Backups");
+        let elsewhere = ts.folder("Other drive");
+        ts.events.watch(|_, _| {});
+        let before = job_marks(&ts);
+
+        pretend_free(Some(1024));
+        ts.dialogs
+            .answer(Some(folder.join("family.lockbox-backup")));
+        let Some(ShellError::Core(view)) = ts.shell.backup_vault(s, g, 7).err() else {
+            panic!("not refused for space");
+        };
+        assert_eq!(view.kind, "not_enough_space");
+        let needed = view.needed.unwrap();
+        assert_eq!(view.available, Some(1024));
+        assert!(needed > 64 * 1024 * 1024, "the margin is in it: {needed}");
+        assert_eq!(
+            job_marks(&ts),
+            before,
+            "no job-started, no progress, no job"
+        );
+        assert!(ts.events.job_events().is_empty());
+        assert!(names(&folder).is_empty(), "{:?}", names(&folder));
+        assert_eq!(ts.journal(), Vec::<PathBuf>::new());
+        assert_eq!(last_backup(&ts), None);
+
+        // The retry with room, the way 22d sends it: the same session, another destination.
+        pretend_free(Some(needed));
+        ts.dialogs
+            .answer(Some(elsewhere.join("family.lockbox-backup")));
+        let view = done(ts.shell.backup_vault(s, g, 8).unwrap().data);
+        assert_eq!((view.items, view.files), (1, 1));
+        assert!(elsewhere.join("family.lockbox-backup").is_file());
+        let started = ts.events.started();
+        assert_eq!(started.len(), 1, "only the backup that ran started a job");
+        assert_eq!(started[0]["request"], json!(8));
+        assert_eq!(started[0]["kind"], json!("backup"));
+        assert!(last_backup(&ts).is_some());
+    }
+
+    /// A drive whose free space cannot be read is "unknown", and unknown never blocks: the backup runs.
+    #[test]
+    fn backup_unknown_free_space_goes_ahead() {
+        let ts = TestShell::new();
+        let _volume = Volume;
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        pretend_free(None);
+        let view = back_up(&ts, s, g, &dest);
+        assert_eq!((view.items, view.files), (1, 1));
+        assert!(dest.is_file());
+        assert!(last_backup(&ts).is_some());
+    }
+
+    /// Makes the engine see `free` bytes free on every drive (`None`: the drive's free space is unknown), on this
+    /// thread only.
+    fn pretend_free(free: Option<u64>) {
+        set_volume_override(Some(VolumeInfo {
+            free_bytes: free,
+            max_file_bytes: None,
+        }));
+    }
+
+    /// Always ends the pretence, so a failing test cannot leak it into the next one on this thread.
+    struct Volume;
+    impl Drop for Volume {
+        fn drop(&mut self) {
+            set_volume_override(None);
+        }
     }
 }

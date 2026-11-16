@@ -16,8 +16,12 @@ the place where keys and file contents must not cross is the IPC boundary (the b
 The public surface is what the shell uses, and nothing more:
 
 - from the crate root: `Vault`, `ReadOnlyVault`, `CoreError`, `Result`, `BackupReport`, `BackupSummary`,
-  `CleanupReport`, `CreatedVault`, `Credential`, `JournalStep`, `JournalView`, `PreparedRestore`, `Recovery`,
-  `RestoreDestination`, `RestoreOutcome`, `UnlockReport`, `dismiss_restore_journal`, `inspect_restore_journal`,
+  `BackupPlan` (a backup that `Vault::backup_check` passed and nothing has begun to write; its `write` makes it, and
+  `Vault::backup` is the two together), `CleanupReport`, `CreatedVault`, `Credential`, `JournalStep`, `JournalView`,
+  `PreparedRestore`, `Recovery`,
+  `RestoreDestination`, `RestoreOutcome`, `UnlockReport`, `UnverifiedSlot` (which credential's key slot the two header
+  copies disagree on, from `Vault::unverified_slot`; `Vault::created_at` is the header's creation time, for the
+  backup reminder), `dismiss_restore_journal`, `inspect_restore_journal`,
   `CopiedItem`, `folder_name`, `is_reserved_device_name`, `read_vault_id`, `read_vault_name`, `recover_restore`,
   `verify_backup`, `version`, `SearchHit` (what a search found: the item, and the attached file a match was in);
 - `ids::{VaultId, ItemId, FileId}`; `item::{Item, ItemKind, FileRef, MAX_ITEM_JSON, PreviousPassword,
@@ -32,7 +36,9 @@ The public surface is what the shell uses, and nothing more:
 so no code outside the engine can serialise one to the screen. A `FileRef`'s key, nonce prefix, blob version and chunk
 size are crate-private. Raw keys, header writes and the other low-level modules are private. The `test-internals`
 feature (tests only, never in a shipped build) re-exports them under `lockbox_core::internals` and turns the
-failpoints on, for the integration tests and the shell's tests.
+failpoints on, for the integration tests and the shell's tests. It also lets the shell's tests pretend a drive's free
+space (`internals::fsio::set_volume_override`, per thread): the one `check_space` stays the only check, and its refusal's
+`needed` counts the 64 MiB it keeps free, so "needs X, has Y" always has X above Y.
 
 The core has Windows-specific file code (`fsio/windows.rs`) and a portable fallback (`fsio/portable.rs`), so the same
 code builds and is tested on Linux CI and can be reused for Android later.
@@ -295,15 +301,16 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
 | `settings.rs` | The app-wide settings with their bounds (`settings.json`): idle time, clipboard delay, theme, the save shortcut (two modifiers, a letter, digit or F1 to F12, never Ctrl with C, V or X) and capture protection |
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
-| `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and the last backup |
+| `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
+| `dates.rs` | The one date shape the shell writes and reads (RFC 3339, UTC, whole seconds), and "whole days since": the 30-day backup reminder counts from the last backup, else from the vault's creation |
 | `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values also when their own vault locks |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
 | `window.rs` | The one window: what it may load, open, download or receive, and how it starts (shown, or hidden for a `--hidden` start) |
 | `commands/` | The `#[tauri::command]` wrappers. `list.rs` names every command; `args.rs` parses a request strictly |
-| `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock`, `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
-| `os/win.rs` | The real Windows calls, the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
+| `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock` (monotonic time, the wall clock and the PC's local date), `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
+| `os/win.rs` | The real Windows calls (the real clocks included), the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
 | `os/signals.rs` | Turns a window message into an `OsSignal` |
 | `testing.rs` | The fakes (test builds only) |
 
@@ -377,6 +384,20 @@ then the exit through `MainWindow::exit_app`). Either answer uses the question u
 says `swapping` (the point from which a cancel no longer counts) and is kept in `RestoreState::Committing`: a restore
 there finishes, or is undone by recovery at the next launch, whatever is answered. Windows ending the session never
 asks (its path is the shutdown, as before).
+
+**Back up** (`backup_vault`, `vault_backup_due`). A backup is a session job (`JobKind::Backup`) with progress and a Stop;
+the save dialog suggests `<vault name> <local date>.lockbox-backup`, and the page never receives the path. The engine
+refuses a backup in four cases the person acts on differently, and the shell tells them apart with fixed words:
+`details changed` (a header change not yet accepted), `password copies disagree` and `recovery key copies disagree`
+(asked of the open vault, `Vault::unverified_slot`) and `details unchecked` (a failed header write left its state
+unknown, or `vault.json` is no longer the header that was opened). A drive known to have too little room refuses with the
+numbers before anything is written; an unreadable free-space figure never blocks. Every refusal that comes before the
+first byte (those four, a destination inside the vault or one that cannot be replaced, too many entries, too little
+room, a stop while the files are measured) is the engine's `Vault::backup_check`, which the shell runs before it begins
+the job: the page is sent `job-started` only for work that has begun, so these reach it as plain refusals (the "not
+enough space" screen needs the numbers, not a "didn't finish" screen). The job then runs `BackupPlan::write`. Only a published backup notes its date;
+a date that cannot be saved does not fail a backup that is on disk. `vault_backup_due` answers `{ days }` once the last
+backup, else the vault's creation, is 30 or more whole days back, and `null` otherwise and always for a read-only session.
 
 **Open** (`open_file`). The stored name goes through the allowlist. An executable type asks first, before anything is
 decrypted. Then in a long operation (the idle timer pauses): a new folder only this user can reach, recorded in the
