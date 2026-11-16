@@ -813,6 +813,9 @@ pub trait Dialogs: Send + Sync {
     fn pick_folder(&self, title: &str, start: Option<&Path>) -> Option<PathBuf>;
     /// `filter`: a name and the extensions it shows, without dots.
     fn pick_file(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf>;
+    /// Like [`pick_file`](Self::pick_file), for one or more files, in the order Windows gives them. `None` when the
+    /// dialog is closed.
+    fn pick_files(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<Vec<PathBuf>>;
     fn save_file(
         &self,
         title: &str,

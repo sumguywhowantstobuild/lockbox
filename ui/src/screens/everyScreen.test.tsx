@@ -50,6 +50,13 @@ function items(): FakeItem[] {
   ];
 }
 
+/** Three made-up files picked for Add files: 2.1 MB, 3.2 GB and 84 KB. */
+const THREE_FILES = [
+  { name: "signed-contract-demo.pdf", size: 2_202_010 },
+  { name: "design-files-demo.zip", size: 3_435_973_837 },
+  { name: "scope-notes-demo.docx", size: 86_016 },
+];
+
 function vault(extra: Partial<FakeVault> = {}): FakeVault {
   return { id: 7, name: "My vault", items: items(), ...extra };
 }
@@ -348,19 +355,112 @@ const CASES: Case[] = [
     },
   },
   {
-    name: "A file being added, with its progress and Cancel (9b)",
+    name: "A copy being saved, with its progress and Cancel (9b)",
     shows: ["FileActions#FileJobProgress"],
     reach: async () => {
       await unlocked();
-      const panel = await select("Bot admin console");
+      const panel = await select("Client contract");
       shell.holdFiles();
-      click("Attach a file", panel);
-      const card = await screen.findByRole("region", { name: "Adding a file" });
+      click("Save a copy of contract-demo.pdf", panel);
+      const card = await screen.findByRole("region", { name: "Saving a copy" });
       const job = shell.runningJobs()[0];
       act(() => {
         shell.sendProgress(job?.operation ?? 0, 1_288_490_189, 3_221_225_472);
       });
       await within(card).findByText("1.2 GB of 3 GB");
+    },
+  },
+  {
+    name: "Many files picked (9a)",
+    shows: ["AddFiles#AddFiles"],
+    reach: async () => {
+      await unlocked();
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      await screen.findByRole("complementary", { name: "Add files" });
+    },
+  },
+  {
+    name: "Many files, no room for them (9e)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      shell.setFreeSpace(1_181_116_006);
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      const panel = await screen.findByRole("complementary", { name: "Add files" });
+      click("Add 3 files", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Many files being added, with one bar and Cancel (9b)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      shell.holdFiles();
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      click("Add 3 files", await screen.findByRole("complementary", { name: "Add files" }));
+      const card = await screen.findByRole("region", { name: "Adding files" });
+      const job = shell.runningJobs()[0];
+      act(() => {
+        shell.sendProgress(job?.operation ?? 0, 1_395_864_371, 3_438_175_847);
+      });
+      await within(card).findByText("2 of 3");
+    },
+  },
+  {
+    name: "Many files added, and the originals still on the PC (9c)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      click("Add 3 files", await screen.findByRole("complementary", { name: "Add files" }));
+      await screen.findByRole("complementary", { name: "3 files added" });
+    },
+  },
+  {
+    name: "Many files, some not added, named (9c)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      shell.unreadableFiles(["scope-notes-demo.docx"]);
+      shell.batchEndsAfter(1, { code: "busy", what: "vault" });
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      click("Add 3 files", await screen.findByRole("complementary", { name: "Add files" }));
+      await screen.findByRole("complementary", { name: "1 of 3 files added" });
+    },
+  },
+  {
+    name: "Many files, the summary kept after moving on (9c)",
+    shows: ["AddFiles#AddFilesLeft"],
+    reach: async () => {
+      await unlocked();
+      shell.batchEndsAfter(1, { code: "busy", what: "vault" });
+      const release = shell.holdFiles();
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      click("Add 3 files", await screen.findByRole("complementary", { name: "Add files" }));
+      await screen.findByRole("region", { name: "Adding files" });
+      await select("Client contract");
+      act(() => {
+        release();
+      });
+      await screen.findByRole("region", { name: "1 of 3 files added" });
+    },
+  },
+  {
+    name: "Attach files on an item (9d)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      const panel = await select("Bot admin console");
+      shell.pickFilesNext(THREE_FILES);
+      click("Attach files", panel);
+      await screen.findByRole("complementary", { name: "Attach files" });
     },
   },
   {

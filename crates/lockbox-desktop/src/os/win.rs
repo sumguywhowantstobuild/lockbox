@@ -1661,6 +1661,22 @@ fn dialog_waits() -> usize {
     DIALOG_WAITS.load(Ordering::SeqCst)
 }
 
+/// Tests only: what the next many-files dialog on this thread shows instead of Windows' own dialog.
+#[cfg(test)]
+type ShowFiles = Box<dyn FnOnce() -> Option<Vec<PathBuf>>>;
+
+#[cfg(test)]
+thread_local! {
+    static SHOW_FILES: std::cell::RefCell<Option<ShowFiles>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Tests only: from now on, the next many-files dialog on this thread runs `show` in place of Windows' dialog, inside
+/// the wrapper that puts the working directory back.
+#[cfg(test)]
+fn show_files_with(show: ShowFiles) {
+    SHOW_FILES.with(|slot| *slot.borrow_mut() = Some(show));
+}
+
 /// Takes [`DIALOG`], waiting for a dialog shown on another thread.
 fn dialog_turn() -> std::sync::MutexGuard<'static, ()> {
     #[cfg(test)]
@@ -1709,6 +1725,19 @@ impl<R: Runtime> Dialogs for WinDialogs<R> {
 
     fn pick_file(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
         keeping_current_dir(|| self.filtered(title, filter).pick_file())
+    }
+
+    /// Through [`keeping_current_dir`] like every dialog, and this one needs it: rfd 0.17.2's multi-select open dialog
+    /// replaces the options (`FOS_ALLOWMULTISELECT` alone, `dialog_ffi.rs:348`), dropping `FOS_NOCHANGEDIR`, so Windows
+    /// may move the working directory into the folder the files were picked in.
+    fn pick_files(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<Vec<PathBuf>> {
+        keeping_current_dir(|| {
+            #[cfg(test)]
+            if let Some(show) = SHOW_FILES.with(|show| show.borrow_mut().take()) {
+                return show();
+            }
+            self.filtered(title, filter).pick_files()
+        })
     }
 
     /// Windows asks before replacing an existing file: rfd leaves the save dialog's default options, which include
@@ -2849,6 +2878,41 @@ mod tests {
         assert_eq!(answer, 7);
         assert_eq!(after_one, before);
         assert_eq!(after_two, before);
+    }
+
+    /// The many-files dialog goes through the wrapper that puts the working directory back: rfd 0.17.2's multi-select
+    /// replaces the dialog's options (`dialog_ffi.rs:348`), dropping `FOS_NOCHANGEDIR`, so Windows may move it. The
+    /// dialog itself is stood in for by a function that moves the directory and answers two paths; everything around
+    /// it is the real `pick_files`. Reads the directory only inside the wrapper's turn, since another test moves it too.
+    #[test]
+    fn pick_files_restores_the_working_directory() {
+        use lockbox_core::internals::fsio::testutil::TempDir;
+
+        let moved_to = TempDir::new();
+        let (started_in, hold) = (Arc::new(Mutex::new(None)), moved_to.path().to_path_buf());
+        let seen = Arc::clone(&started_in);
+        show_files_with(Box::new(move || {
+            *seen.lock().unwrap() = Some(std::env::current_dir().unwrap());
+            std::env::set_current_dir(&hold).unwrap();
+            Some(vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")])
+        }));
+        let app = tauri::test::mock_app();
+        let dialogs = WinDialogs {
+            app: app.handle().clone(),
+        };
+        let answer = dialogs.pick_files("Add files", None);
+        let after = keeping_current_dir(|| std::env::current_dir().unwrap());
+        let before = started_in.lock().unwrap().clone().expect("the dialog ran");
+        // Put back here as well, so a failure does not leave the test program in a folder about to be deleted.
+        std::env::set_current_dir(&before).unwrap();
+        assert_eq!(
+            answer,
+            Some(vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")])
+        );
+        assert_eq!(after, before, "the working directory was left moved");
+        // A closed dialog is no answer.
+        show_files_with(Box::new(|| None));
+        assert_eq!(dialogs.pick_files("Add files", None), None);
     }
 
     fn started() -> (SignalThread, Receiver<OsSignal>) {

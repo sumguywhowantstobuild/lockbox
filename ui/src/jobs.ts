@@ -35,6 +35,7 @@ const listeners = new Set<() => void>();
 let counter = 0;
 let lastEpoch = 0;
 let spoken = "";
+let spokenKey = 0;
 let started: Promise<void> | undefined;
 
 function notify(): void {
@@ -188,6 +189,7 @@ export function releaseRequest(request: number): void {
   // What the start said has done its work; the end is said by the result the screen shows ("File added.", "Nothing was added.").
   if (byOperation.size === 0 && spoken !== "") {
     spoken = "";
+    spokenKey = 0;
     notify();
   }
 }
@@ -197,14 +199,24 @@ export function releaseRequest(request: number): void {
  * brought its own live region would be a new region, which a screen reader does not speak the first text of; this one is already on the
  * page when the text changes. Only the start is said here, once: progress is never spoken, and the end is the result's own message.
  */
-export function announceJob(text: string): void {
+export function announceJob(text: string, operation: number): void {
   spoken = text;
+  spokenKey = operation;
   notify();
 }
 
 /** What the page's spoken place holds for the jobs: the last start, until the job's command has answered. */
 export function useJobAnnouncement(): string {
   return useSyncExternalStore(subscribe, () => spoken);
+}
+
+/**
+ * Whose start the spoken place holds: the operation. The place draws its text under this key, so two jobs whose start words are the same (two
+ * batches in two vaults, "Adding files started.") are two updates, and the second is heard: a live region says what is added to it, and text that
+ * is the same as before is not a change.
+ */
+export function useJobAnnouncementKey(): number {
+  return useSyncExternalStore(subscribe, () => spokenKey);
 }
 
 export function jobOfRequest(request: number): Job | null {
@@ -255,6 +267,7 @@ export function resetJobsForTests(): void {
   counter = 0;
   lastEpoch = 0;
   spoken = "";
+  spokenKey = 0;
   started = undefined;
   notify();
 }

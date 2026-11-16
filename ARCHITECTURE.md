@@ -140,6 +140,8 @@ must give an error with fixed wording, never a panic.
   into `files/<id>.blob.partial`, flush, check for cancel, `replace_file` to `files/<id>.blob`. Only then is the item
   saved with `atomic_write`. The item file is the commit point; a failure before it leaves an unreferenced blob that
   cleanup sets aside (spec 6.4). Replacing a file lists the old one in the item's `retired_blobs`; cleanup deletes it.
+  `check_import_space` asks the same refusals once for a whole batch of sizes (each over 256 GiB, the file system's limit
+  for the largest, free space for every blob together plus the slack kept free) before the first byte of the first file.
 - **Export** (`export_file`): refuses a destination inside the vault. Decrypts into a hidden temp file beside the
   destination (recorded first through the journal hook, a list that lets a crash cleanup find leftovers), checks the
   whole stream, flushes, unhides, checks for cancel, then publishes over the destination through the journal's gate
@@ -303,12 +305,13 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
 | `dates.rs` | The one date shape the shell writes and reads (RFC 3339, UTC, whole seconds), and "whole days since": the 30-day backup reminder counts from the last backup, else from the vault's creation |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values also when their own vault locks |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question and the files picked to be added also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again) |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
 | `window.rs` | The one window: what it may load, open, download or receive, and how it starts (shown, or hidden for a `--hidden` start) |
 | `commands/` | The `#[tauri::command]` wrappers. `list.rs` names every command; `args.rs` parses a request strictly |
+| `commands/add_files.rs` | Many files in: the picker and its held list (paths stay in Rust), and `add_files`, one job for the batch (one bar over every file's bytes) where each file is its own change of the vault, the vault is let go between two files, a file that cannot be read, or is no longer the size measured, is named and skipped, and a Stop or a refusal names what was not added |
 | `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock` (monotonic time, the wall clock and the PC's local date), `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
 | `os/win.rs` | The real Windows calls (the real clocks included), the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
 | `os/signals.rs` | Turns a window message into an `OsSignal` |

@@ -26,7 +26,9 @@ use crate::session::{Location, SessionId};
 const LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 /// A one-time confirmation token: 128 random bits from the OS, as 32 lowercase hex characters (a JSON string, so
-/// JavaScript keeps every bit). Parsed back only in that exact form.
+/// JavaScript keeps every bit). Parsed back only in that exact form. Cloned only to answer with the token a command was
+/// given (Pick more keeps its token).
+#[derive(Clone)]
 pub struct Token(String);
 
 impl Token {
@@ -131,6 +133,16 @@ pub enum PendingChoice {
         /// The name Keep both was shown for each clashing row in each place, so the save can tell that the place has
         /// changed since.
         shown: ShownNames,
+    },
+    /// The files picked to be added to a vault (`pick_files_to_add`), waiting for `add_files`: the session and generation
+    /// that picked them (a command from any other is refused), and their paths in the order picked. The paths never go to
+    /// the page. One entry for the whole pick session: Pick more and Remove change the list in place under the same token
+    /// and start its five minutes again ([`Pending::update_picked`]); the add takes it once. Dropped by the lock of that
+    /// one vault too ([`Pending::drop_picked_files`]), not only by Lock all. Holds no secret.
+    PickedFiles {
+        session: SessionId,
+        generation: u64,
+        paths: Vec<PathBuf>,
     },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
@@ -239,6 +251,128 @@ impl Pending {
         drop(dropped);
     }
 
+    /// Drops the files picked for `only` (those of every session when `None`), and nothing else here: the lock hook's work,
+    /// as for the pasted keys.
+    pub(crate) fn drop_picked_files(&self, only: Option<SessionId>) {
+        let dropped = {
+            let mut parked = lock(&self.parked);
+            let ours = |p: &Parked| match &p.choice {
+                PendingChoice::PickedFiles { session, .. } => {
+                    only.is_none_or(|locked| locked == *session)
+                }
+                _ => false,
+            };
+            let (gone, kept): (Vec<Parked>, Vec<Parked>) =
+                std::mem::take(&mut *parked).into_iter().partition(ours);
+            *parked = kept;
+            gone
+        };
+        drop(dropped);
+    }
+
+    /// Changes the list of picked files parked under `token` in place, for the session and generation that picked it: `f`
+    /// is given the paths, and its answer is returned. The token stays, and its five minutes start again. `ChoiceExpired`
+    /// for a token that is not there, is another kind of choice, or belongs to another session or generation, with
+    /// nothing changed. `f` runs under the table's lock: no slow work in it.
+    pub fn update_picked<R>(
+        &self,
+        token: &Token,
+        session: SessionId,
+        generation: u64,
+        f: impl FnOnce(&mut Vec<PathBuf>) -> ShellResult<R>,
+    ) -> ShellResult<R> {
+        self.update_picked_at(token, session, generation, Instant::now(), f)
+    }
+
+    pub(crate) fn update_picked_at<R>(
+        &self,
+        token: &Token,
+        session: SessionId,
+        generation: u64,
+        now: Instant,
+        f: impl FnOnce(&mut Vec<PathBuf>) -> ShellResult<R>,
+    ) -> ShellResult<R> {
+        let (answer, expired) = {
+            let mut parked = lock(&self.parked);
+            let expired = take_expired(&mut parked, now);
+            let answer = match find_picked(&mut parked, token, session, generation) {
+                Some((until, paths)) => {
+                    *until = now + LIFETIME;
+                    f(paths)
+                }
+                None => Err(ShellError::ChoiceExpired),
+            };
+            (answer, expired)
+        };
+        drop(expired);
+        answer
+    }
+
+    /// The paths of the picked files parked under `token`, as [`update_picked`](Self::update_picked) finds them, and
+    /// nothing changed (the lifetime included).
+    pub fn peek_picked(
+        &self,
+        token: &Token,
+        session: SessionId,
+        generation: u64,
+    ) -> ShellResult<Vec<PathBuf>> {
+        self.peek_picked_at(token, session, generation, Instant::now())
+    }
+
+    pub(crate) fn peek_picked_at(
+        &self,
+        token: &Token,
+        session: SessionId,
+        generation: u64,
+        now: Instant,
+    ) -> ShellResult<Vec<PathBuf>> {
+        let (answer, expired) = {
+            let mut parked = lock(&self.parked);
+            let expired = take_expired(&mut parked, now);
+            let answer = find_picked(&mut parked, token, session, generation)
+                .map(|(_, paths)| paths.clone())
+                .ok_or(ShellError::ChoiceExpired);
+            (answer, expired)
+        };
+        drop(expired);
+        answer
+    }
+
+    /// Takes the picked files parked under `token` for good, once, but only if they are still exactly `checked` (what the
+    /// caller measured and checked before the job): a list changed since, a used or expired choice, or another session's
+    /// or generation's is `ChoiceExpired`, and what is parked stays.
+    pub fn take_picked(
+        &self,
+        token: &Token,
+        session: SessionId,
+        generation: u64,
+        checked: &[PathBuf],
+    ) -> ShellResult<()> {
+        self.take_picked_at(token, session, generation, checked, Instant::now())
+    }
+
+    pub(crate) fn take_picked_at(
+        &self,
+        token: &Token,
+        session: SessionId,
+        generation: u64,
+        checked: &[PathBuf],
+        now: Instant,
+    ) -> ShellResult<()> {
+        let (taken, expired) = {
+            let mut parked = lock(&self.parked);
+            let expired = take_expired(&mut parked, now);
+            let found = parked.iter().position(|p| {
+                p.token.matches(token)
+                    && matches!(&p.choice, PendingChoice::PickedFiles { session: s, generation: g, paths }
+                        if *s == session && *g == generation && paths == checked)
+            });
+            (found.map(|at| parked.swap_remove(at)), expired)
+        };
+        drop(expired);
+        taken.map(drop).ok_or(ShellError::ChoiceExpired)
+    }
+
     fn park_at(&self, choice: PendingChoice, now: Instant) -> (Token, Vec<PendingChoice>) {
         let token = Token::random();
         let mut parked = lock(&self.parked);
@@ -308,6 +442,26 @@ impl Pending {
     pub(crate) fn len(&self) -> usize {
         lock(&self.parked).len()
     }
+}
+
+/// The picked files parked under `token` for `session` in `generation`: when they expire and their paths. Nothing for a
+/// token that is not there, another kind of choice, or another session or generation.
+fn find_picked<'a>(
+    parked: &'a mut [Parked],
+    token: &Token,
+    session: SessionId,
+    generation: u64,
+) -> Option<(&'a mut Instant, &'a mut Vec<PathBuf>)> {
+    parked.iter_mut().find_map(|p| match &mut p.choice {
+        PendingChoice::PickedFiles {
+            session: s,
+            generation: g,
+            paths,
+        } if *s == session && *g == generation && p.token.matches(token) => {
+            Some((&mut p.until, paths))
+        }
+        _ => None,
+    })
 }
 
 /// Takes the expired choices out of `parked`, for the caller to drop after releasing its lock.
@@ -396,6 +550,130 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(!dropped.load(Ordering::SeqCst));
         assert!(matches!(pending.take(&third), Err(ShellError::NotFound)));
+    }
+
+    fn picked(session: u64, generation: u64, names: &[&str]) -> PendingChoice {
+        PendingChoice::PickedFiles {
+            session: SessionId(session),
+            generation,
+            paths: names.iter().map(PathBuf::from).collect(),
+        }
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    /// Picked files are kept under one token: updating them in place keeps the token, answers `ChoiceExpired` for a token
+    /// that is not there or belongs to another session or generation, and changes nothing then.
+    #[test]
+    fn picked_files_update_in_place_for_their_own_session_only() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(picked(1, 1, &["a"]), now);
+        let added = pending.update_picked_at(&token, SessionId(1), 1, now, |list| {
+            list.push(PathBuf::from("b"));
+            Ok(list.len())
+        });
+        assert_eq!(added, Ok(2));
+        for (session, generation) in [(2, 1), (1, 2)] {
+            let refused =
+                pending.update_picked_at(&token, SessionId(session), generation, now, |list| {
+                    list.clear();
+                    Ok(())
+                });
+            assert_eq!(refused, Err(ShellError::ChoiceExpired));
+        }
+        let other = Token::random();
+        assert_eq!(
+            pending.update_picked_at(&other, SessionId(1), 1, now, |_| Ok(())),
+            Err(ShellError::ChoiceExpired)
+        );
+        assert_eq!(
+            pending.peek_picked_at(&token, SessionId(1), 1, now),
+            Ok(paths(&["a", "b"]))
+        );
+        assert_eq!(pending.len(), 1);
+        // A choice of another kind is no picked list.
+        let test = pending.put_at(PendingChoice::Test(None), now);
+        assert_eq!(
+            pending.peek_picked_at(&test, SessionId(1), 1, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// Updating the list starts its five minutes again; one not touched for five minutes is gone.
+    #[test]
+    fn picked_files_lifetime_restarts_with_each_update() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(picked(1, 1, &["a"]), now);
+        let at = now + LIFETIME - Duration::from_secs(1);
+        pending
+            .update_picked_at(&token, SessionId(1), 1, at, |_| Ok(()))
+            .unwrap();
+        // Past the first five minutes, inside the second's.
+        let later = now + LIFETIME + Duration::from_secs(10);
+        assert_eq!(
+            pending.peek_picked_at(&token, SessionId(1), 1, later),
+            Ok(paths(&["a"]))
+        );
+        let expired = at + LIFETIME;
+        assert_eq!(
+            pending.update_picked_at(&token, SessionId(1), 1, expired, |_| Ok(())),
+            Err(ShellError::ChoiceExpired)
+        );
+        assert_eq!(pending.len(), 0, "an expired list is dropped");
+    }
+
+    /// The list is taken once, and only as it was checked: a changed list, another session's or generation's token, or a
+    /// second take is refused, and a refusal leaves what is there.
+    #[test]
+    fn picked_files_are_taken_once_and_only_as_checked() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(picked(1, 1, &["a", "b"]), now);
+        let checked = paths(&["a", "b"]);
+        for (session, generation, list) in [
+            (2, 1, checked.clone()),
+            (1, 2, checked.clone()),
+            (1, 1, paths(&["a"])),
+        ] {
+            assert_eq!(
+                pending.take_picked_at(&token, SessionId(session), generation, &list, now),
+                Err(ShellError::ChoiceExpired)
+            );
+            assert_eq!(pending.len(), 1);
+        }
+        assert_eq!(
+            pending.take_picked_at(&token, SessionId(1), 1, &checked, now),
+            Ok(())
+        );
+        assert_eq!(pending.len(), 0);
+        assert_eq!(
+            pending.take_picked_at(&token, SessionId(1), 1, &checked, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// A lock of one vault drops that vault's picked files and nothing else; a lock of all drops every list.
+    #[test]
+    fn drop_picked_files_takes_one_sessions_and_only_picks() {
+        let pending = Pending::default();
+        let first = pending.put(picked(1, 1, &["a"]));
+        let second = pending.put(picked(2, 1, &["b"]));
+        let (dropped, marker) = marker();
+        pending.put(marker);
+
+        pending.drop_picked_files(Some(SessionId(1)));
+        assert_eq!(pending.len(), 2);
+        assert!(!dropped.load(Ordering::SeqCst), "another kind stays");
+        assert!(pending.peek_picked(&first, SessionId(1), 1).is_err());
+        assert!(pending.peek_picked(&second, SessionId(2), 1).is_ok());
+
+        pending.drop_picked_files(None);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.peek_picked(&second, SessionId(2), 1).is_err());
     }
 
     /// A paste waits five minutes like every other choice.

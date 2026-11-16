@@ -434,6 +434,21 @@ export interface FakeShell {
   /** The file the next picker chooses, by its name and size in bytes (a made-up name; a made-up one is chosen when none is set). */
   pickNext(name: string, length?: number): void;
   /**
+   * The files the next `pick_files_to_add` chooses (a first pick, or Pick more), by name and size in bytes. A pick with none set chooses
+   * the one file `pickNext` names, or a made-up one, so a test of one file needs nothing more.
+   */
+  pickFilesNext(files: { name: string; size: number }[]): void;
+  /** The choices the shell holds now (the page's picks), as the names and sizes in each, in order of the picks. */
+  heldChoices(): { name: string; size: number }[][];
+  /** Free space on the drive, in bytes, as `add_files` checks it; `null` (to begin with) is a drive whose free space can't be read, which never blocks. */
+  setFreeSpace(bytes: number | null): void;
+  /** The names a batch can't read (deleted or held open after the pick, or not a file): each goes in `failed`, and the batch goes on. */
+  unreadableFiles(names: string[]): void;
+  /** The next batch ends after `count` files went in, for the vault's `refusal` (a drive that filled, a vault that stayed busy). */
+  batchEndsAfter(count: number, refusal: object): void;
+  /** The names `add_files` stored, in order. */
+  addedFiles: string[];
+  /**
    * Holds every stored-file command's answer until `release` is called, as a big file would: `lockbox://busy` says the vault is
    * working (`import`, `save_copy` or `open`) as the command arrives, and says it is not when the answer is decided, which is
    * at release, as the shell decides it: a lock in between leaves a refusal (`locked`) and nothing done.
@@ -702,6 +717,7 @@ const OPERATION: Record<string, string> = {
   save_file_copy_confirm: "save_copy",
   add_file: "import",
   attach_file: "import",
+  add_files: "import",
   replace_file: "import",
   backup_vault: "backup",
 };
@@ -710,10 +726,33 @@ const OPERATION: Record<string, string> = {
 const JOB_KIND: Record<string, string> = {
   add_file: "import",
   attach_file: "import",
+  add_files: "import",
   save_file_copy: "save_copy",
   save_file_copy_confirm: "save_copy",
   backup_vault: "backup",
 };
+
+/** The most one file can be (`MAX_FILE_BYTES`, 256 GiB): a file over it is refused before the batch starts. */
+const MAX_FILE = 256 * 1024 ** 3;
+/** What the shell sends for a choice that was used, dropped, expired or is another session's. */
+export const CHOICE_EXPIRED = { code: "choice_expired" };
+/** What the shell sends for a file's number past the end of the picked list. */
+const NO_SUCH_PICK = { code: "invalid_input", what: "index" };
+
+/** One file the page picked, as the shell holds it (the page sees the name and size only). */
+interface PickedEntry {
+  name: string;
+  size: number;
+}
+
+/** A batch the shell has taken the choice for: where it goes, and the files in the order picked. */
+interface Batch {
+  session: number;
+  generation: number;
+  into: { type: "folder"; collection: string | null } | { type: "item"; id: string };
+  files: PickedEntry[];
+  total: number;
+}
 
 /** A request is a whole number the page chose (a `u32`); anything else is the shell's malformed-request answer. */
 function requestOf(sent: Record<string, unknown>): number {
@@ -856,6 +895,14 @@ export function installFakeShell(
   let dismissFile = false;
   let pickedFile: { name: string; length: number } | undefined;
   let heldFiles: (() => void)[] | undefined;
+  // Many files (Task 10): the choices the shell holds (one per pick session, kept by Pick more and Remove), the next picks, and how a batch ends.
+  const choices = new Map<string, { session: number; generation: number; files: PickedEntry[] }>();
+  const nextPicks: PickedEntry[][] = [];
+  const batches = new Map<number, Batch>();
+  const addedFiles: string[] = [];
+  let freeSpace: number | null = null;
+  let unreadable: string[] = [];
+  let batchEnd: { count: number; refusal: object } | undefined;
   // The shell's job table, for the commands that take a request: operations are numbered from 1 and never reused.
   const running = new Map<number, RunningJob>();
   let nextOperation = 0;
@@ -896,6 +943,8 @@ export function installFakeShell(
     entry.generation += 1;
     // A lock lets go of the values of every paste its vault held.
     for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
+    // And of the files picked and not yet added.
+    for (const [token, held] of choices) if (held.session === session) choices.delete(token);
     emit("lockbox://locked", { session, generation: entry.generation, reason });
     // A lock stops every job of its session, and each says it has ended.
     for (const job of [...running.values()]) {
@@ -1035,6 +1084,108 @@ export function installFakeShell(
     existing = undefined;
     vaults.push(vault);
     return { Done: { id: vault.id, name: vault.name, available: true } };
+  };
+
+  /** The held choice of a pick session, when it is this session's at this generation; otherwise the shell's `choice_expired`. */
+  const choiceOf = (token: unknown, session: number, generation: number) => {
+    const held = typeof token === "string" ? choices.get(token) : undefined;
+    if (held === undefined || held.session !== session || held.generation !== generation) return refuse(CHOICE_EXPIRED);
+    return held;
+  };
+
+  /**
+   * Everything `add_files` decides before the job starts, in the shell's order: the request, the vault, read-only, the choice, where it
+   * goes, a file over 256 GiB, and room for the whole batch (an unknown drive never blocks). Only then is the choice used up.
+   */
+  const startBatch = (args: unknown): Batch => {
+    const sent = exactly(args, ["session", "generation", "choice", "into", "request"]) as {
+      session: number;
+      generation: number;
+      choice: unknown;
+      into: Batch["into"];
+      request: unknown;
+    };
+    requestOf(sent);
+    const vault = vaultFor(sent.session, sent.generation);
+    if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+    const held = choiceOf(sent.choice, sent.session, sent.generation);
+    if (sent.into.type === "folder") {
+      const place = sent.into.collection;
+      if (place !== null && vault.items?.find((item) => item.id === place && item.kind === "collection") === undefined) return refuse({ code: "core", kind: "not_found" });
+    } else {
+      const holder = vault.items?.find((item) => item.id === (sent.into as { id: string }).id);
+      if (holder === undefined) return refuse({ code: "core", kind: "not_found" });
+      if (holder.kind === "collection" || holder.kind === "file") return refuse(CANNOT_HOLD_FILES);
+    }
+    if (held.files.some((file) => file.size > MAX_FILE)) return refuse({ code: "core", kind: "too_large", what: "file" });
+    const total = held.files.reduce((sum, file) => sum + file.size, 0);
+    if (freeSpace !== null && total > freeSpace) return refuse({ code: "core", kind: "not_enough_space", needed: total, available: freeSpace });
+    choices.delete(sent.choice as string);
+    return { session: sent.session, generation: sent.generation, into: sent.into, files: held.files, total };
+  };
+
+  /**
+   * The batch's end: each file in turn is stored, or named in `failed` when it can't be read, until a stop (`cutAt` bytes done when Cancel
+   * was pressed) or a refusal ends it, and every file after that is `not_added`, in the order picked. A file the stop caught part way is
+   * `not_added` too: the engine leaves nothing of it.
+   */
+  const finishBatch = (batch: Batch, cutAt?: number): unknown => {
+    const vault = sessionVault.get(batch.session);
+    const failed: string[] = [];
+    const notAdded: string[] = [];
+    let stopped: object | null = null;
+    let count = 0;
+    let sofar = 0;
+    for (const file of batch.files) {
+      if (stopped === null && cutAt !== undefined && sofar + file.size > cutAt) stopped = { code: "cancelled" };
+      if (stopped === null && batchEnd !== undefined && count >= batchEnd.count) {
+        stopped = batchEnd.refusal;
+        batchEnd = undefined;
+      }
+      if (stopped !== null) {
+        notAdded.push(file.name);
+        continue;
+      }
+      if (unreadable.includes(file.name)) {
+        failed.push(file.name);
+        continue;
+      }
+      sofar += file.size;
+      count += 1;
+      nextItem += 1;
+      const stored = { file_id: itemId(nextItem), name: file.name, length: file.size, media_type: "application/octet-stream" };
+      if (batch.into.type === "folder") {
+        const made: FakeItem = {
+          id: itemId(nextItem + 0x100),
+          kind: "file",
+          title: file.name,
+          collection: batch.into.collection,
+          attachments: [stored],
+          modified_at: nowText(),
+        };
+        if (vault !== undefined) vault.items = [...(vault.items ?? []), made];
+      } else {
+        const id = batch.into.id;
+        const holder = vault?.items?.find((item) => item.id === id);
+        if (holder !== undefined) {
+          holder.attachments = [...(holder.attachments ?? []), stored];
+          bump(holder);
+        }
+      }
+      addedFiles.push(file.name);
+    }
+    // A batch that stored anything is one operation of the vault's, so it counts once; one stopped before its first file counts for nothing.
+    if (count > 0) fileOps.push(batch.into.type === "folder" ? { cmd: "add_files", collection: batch.into.collection } : { cmd: "add_files", id: batch.into.id });
+    return { added: count, failed, not_added: notAdded, stopped };
+  };
+
+  /** The next pick: what `pickFilesNext` queued, else the one file `pickNext` names, else a made-up one. */
+  const nextPick = (): PickedEntry[] => {
+    const queued = nextPicks.shift();
+    if (queued !== undefined) return queued;
+    const one = pickedFile ?? { name: "picked-file.pdf", length: 2048 };
+    pickedFile = undefined;
+    return [{ name: one.name, size: one.length }];
   };
 
   const answer = (cmd: string, args: unknown): unknown => {
@@ -1597,6 +1748,48 @@ export function installFakeShell(
         // Never for a read-only copy; due from 30 whole days.
         return tagged(session, generation, (vault.readOnly ?? false) || days === undefined || days < 30 ? null : { days });
       }
+      case "pick_files_to_add": {
+        const sent = exactly(args, ["session", "generation", "choice"]) as { session: number; generation: number; choice: unknown };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
+        // A bad choice is refused before any dialog opens.
+        const held = sent.choice === null ? undefined : choiceOf(sent.choice, sent.session, sent.generation);
+        if (dismissFile) {
+          dismissFile = false;
+          // Nothing was picked: a new choice is not made, and Pick more keeps its list as it was.
+          return tagged(sent.session, sent.generation, held === undefined ? "Dismissed" : { Done: { choice: sent.choice, files: held.files.map((file) => ({ ...file })) } });
+        }
+        const picked = nextPick();
+        let token = sent.choice;
+        if (held === undefined) {
+          nextToken += 1;
+          token = nextToken.toString(16).padStart(32, "0");
+          choices.set(token, { session: sent.session, generation: sent.generation, files: picked });
+        } else {
+          held.files.push(...picked);
+        }
+        const now = choices.get(token as string)?.files ?? [];
+        return tagged(sent.session, sent.generation, { Done: { choice: token, files: now.map((file) => ({ ...file })) } });
+      }
+      case "remove_picked_file": {
+        const sent = exactly(args, ["session", "generation", "choice", "index"]) as { session: number; generation: number; choice: unknown; index: unknown };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const held = choiceOf(sent.choice, sent.session, sent.generation);
+        if (typeof sent.index !== "number" || !Number.isInteger(sent.index) || sent.index < 0 || sent.index >= held.files.length) return refuse(NO_SUCH_PICK);
+        held.files.splice(sent.index, 1);
+        return tagged(sent.session, sent.generation, { Done: { files: held.files.map((file) => ({ ...file })) } });
+      }
+      case "add_files": {
+        const request = (args as { request?: unknown } | null)?.request;
+        const taken = typeof request === "number" ? batches.get(request) : undefined;
+        const batch = taken ?? startBatch(args);
+        if (typeof request === "number") batches.delete(request);
+        // A lock between the job's start and its end leaves a refusal, and nothing is written.
+        vaultFor(batch.session, batch.generation);
+        return tagged(batch.session, batch.generation, { Done: finishBatch(batch) });
+      }
       case "cancel_operation": {
         const sent = exactly(args, ["operation", "scope"]) as { operation: number; scope: RunningJob["scope"] };
         const job = running.get(sent.operation);
@@ -2107,6 +2300,17 @@ export function installFakeShell(
       // A command that takes a request becomes a job in the table once its work starts, and the page is told before the first progress and the answer.
       const request = typeof args === "object" && args !== null && "request" in args && typeof args.request === "number" ? args.request : undefined;
       const generation = typeof args === "object" && args !== null && "generation" in args ? (args.generation as number) : parkedFor?.generation;
+      // A batch is checked, and its choice used up, before its job starts: a refusal then starts no job and sends no `job-started`.
+      let batch: Batch | undefined;
+      if (cmd === "add_files") {
+        try {
+          batch = startBatch(args);
+        } catch (error) {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+          return Promise.reject(error);
+        }
+        if (request !== undefined) batches.set(request, batch);
+      }
       let job: RunningJob | undefined;
       if (Object.hasOwn(JOB_KIND, cmd) && request !== undefined && session !== null && generation !== undefined) {
         nextOperation += 1;
@@ -2116,7 +2320,7 @@ export function installFakeShell(
           scope: { type: "session", session, generation },
           kind: JOB_KIND[cmd] ?? "import",
           done: 0,
-          total: 0,
+          total: batch?.total ?? 0,
           cancel: () => undefined,
         };
         running.set(job.operation, job);
@@ -2149,6 +2353,18 @@ export function installFakeShell(
             emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
           }
           emit("lockbox://busy", { session, operations: [] });
+          if (cancelled && batch !== undefined && request !== undefined) {
+            // A Stop on a batch is not a refusal: the files before it stay stored, and the answer says what went in and what did not.
+            batches.delete(request);
+            try {
+              vaultFor(batch.session, batch.generation);
+              resolve(tagged(batch.session, batch.generation, { Done: finishBatch(batch, job?.done ?? 0) }));
+            } catch (error) {
+              // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+              reject(error);
+            }
+            return;
+          }
           if (cancelled) {
             // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
             reject({ code: "cancelled" });
@@ -2285,6 +2501,7 @@ export function installFakeShell(
       entry.generation += 1;
       for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
       for (const [token, parked] of pendingPdfs) if (parked.session === session) pendingPdfs.delete(token);
+      for (const [token, held] of choices) if (held.session === session) choices.delete(token);
     },
     sessionOf: (vaultId) => {
       const vault = vaults.find((v) => v.id === vaultId);
@@ -2359,6 +2576,7 @@ export function installFakeShell(
     },
     dropParkedChoices: () => {
       pendingPdfs.clear();
+      choices.clear();
     },
     printed,
     setPrinters: (names, preferred = null) => {
@@ -2492,6 +2710,20 @@ export function installFakeShell(
     pickNext: (name, length = 2048) => {
       pickedFile = { name, length };
     },
+    pickFilesNext: (files) => {
+      nextPicks.push(files.map(({ name, size }) => ({ name, size })));
+    },
+    heldChoices: () => [...choices.values()].map((held) => held.files.map((file) => ({ ...file }))),
+    setFreeSpace: (bytes) => {
+      freeSpace = bytes;
+    },
+    unreadableFiles: (names) => {
+      unreadable = [...names];
+    },
+    batchEndsAfter: (count, refusal) => {
+      batchEnd = { count, refusal };
+    },
+    addedFiles,
     holdFiles: () => {
       const waiting: (() => void)[] = [];
       heldFiles = waiting;

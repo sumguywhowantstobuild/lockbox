@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import type { FileView, ItemSummary } from "../api";
+import { verbs } from "../addFilesWords";
 import { formatBytes } from "../format";
 import { useJob } from "../jobs";
 import { messageText, messageFor } from "../messages";
@@ -7,7 +8,7 @@ import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
 import { KindIcon, PlusIcon } from "../parts/Icon";
 import { JobProgress } from "../parts/JobProgress";
-import { attachStoredFile, confirmStoredCopy, openStoredFile, replaceStoredFile, saveStoredFile, type SessionData } from "../store";
+import { startAddFiles, confirmStoredCopy, openStoredFile, replaceStoredFile, saveStoredFile, type SessionData } from "../store";
 
 // Stored files in an item's panel (10a to 10f, 9d): Open, Save a copy and Replace file on each, and Attach a file on a login, key or note.
 // What the buttons do, and what is said when it is done, is the store's (`openStoredFile` and the rest): this file draws the rows, asks
@@ -262,9 +263,9 @@ export function FileRows({ data, summary }: { data: SessionData; summary: ItemSu
 }
 
 /**
- * "Attached files" on a login, key or note (9d): its files with their buttons, and Attach a file, which picks one file in the Windows picker
- * (many at once is 4B's, so the words say one). In a vault opened from a backup there is no Attach, and the section shows only when there is
- * a file to open.
+ * "Attached files" on a login, key or note (9d): its files with their buttons, and Attach files, which picks one file or many in the Windows
+ * picker and lists them in the Add files panel before they go on this item (`AddFiles`). In a vault opened from a backup there is no Attach,
+ * and the section shows only when there is a file to open.
  */
 export function AttachedFiles({ data, summary }: { data: SessionData; summary: ItemSummary }) {
   const job = data.fileJob;
@@ -279,7 +280,7 @@ export function AttachedFiles({ data, summary }: { data: SessionData; summary: I
             aria-disabled={job !== null ? true : undefined}
             aria-busy={mine ? true : undefined}
             onClick={() => {
-              if (data.fileJob === null) void attachStoredFile(data.session, summary.id);
+              if (data.fileJob === null) void startAddFiles(data.session, { type: "item", id: summary.id });
             }}
           >
             {mine ? (
@@ -287,7 +288,7 @@ export function AttachedFiles({ data, summary }: { data: SessionData; summary: I
             ) : (
               <>
                 <PlusIcon />
-                Attach a file
+                Attach files
               </>
             )}
           </Button>
@@ -304,6 +305,9 @@ export function AttachedFiles({ data, summary }: { data: SessionData; summary: I
   );
 }
 
+/** 9b's line about the laptop for a batch of files, as drawn. */
+const BATCH_WARNING = "Keep the laptop open. Windows locking or sleeping cancels this, and files not finished aren't added.";
+
 /** What each long operation the shell names is, in the window's words. */
 const WORK: Record<string, string> = {
   import: "Adding a file to your vault.",
@@ -312,29 +316,28 @@ const WORK: Record<string, string> = {
   backup: "Backing up this vault.",
 };
 
-/** What 9b says for a job with progress, in the words the session chose (the design is silent beyond the sentence about the laptop). */
-const CARD = {
-  import: {
-    label: "Adding a file",
-    sentence: WORK.import,
-    warning: "Keep the laptop open. Windows locking or sleeping cancels this, and a file not finished isn't added.",
-  },
-  save_copy: {
-    label: "Saving a copy",
-    sentence: WORK.save_copy,
-    warning: "Keep the laptop open. Windows locking or sleeping cancels this, and a copy not finished isn't saved.",
-  },
+/** What 9b says for a Save a copy with progress, in the words the session chose (the design is silent beyond the sentence about the laptop). */
+const SAVE_CARD = {
+  label: "Saving a copy",
+  sentence: WORK.save_copy,
+  warning: "Keep the laptop open. Windows locking or sleeping cancels this, and a copy not finished isn't saved.",
 } as const;
 
 /**
- * 9b for one file: the bar, the bytes in words and Cancel, while the add, attach or Save a copy this vault is working on has told the page
- * which operation it is (`lockbox://job-started`, matched by the request the page sent). Nothing before that, and nothing for Open or Replace
- * file, which have no progress of their own: 4A's "working" words are all they show.
+ * 9b outside the Add files panel: the bar, the bytes in words and Cancel, for the Save a copy this vault is working on, or for a batch of
+ * files once the person has gone from its panel, once the job has told the page which operation it is (`lockbox://job-started`, matched by the
+ * request the page sent). Nothing before that, and nothing for Open or Replace file, which have no progress of their own: 4A's "working" words
+ * are all they show. A batch has its bar in the panel while that is on screen (one bar, never two); here it is what can still stop it.
  */
 export function FileJobProgress({ data }: { data: SessionData }) {
   const job = useJob(data.fileJob?.request ?? null);
   if (job === null || (job.kind !== "import" && job.kind !== "save_copy")) return null;
-  return <JobProgress operation={job.operation} {...CARD[job.kind]} />;
+  if (data.fileJob?.kind === "add_files") {
+    if (data.tool?.kind === "add_files") return null;
+    const { doing } = verbs(data.addFiles?.into ?? { type: "folder", collection: null });
+    return <JobProgress operation={job.operation} label={`${doing} files`} sentence={`${doing} files to your vault.`} warning={BATCH_WARNING} />;
+  }
+  return job.kind === "save_copy" ? <JobProgress operation={job.operation} {...SAVE_CARD} /> : null;
 }
 
 /**

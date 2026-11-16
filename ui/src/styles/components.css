@@ -2225,6 +2225,79 @@
   font-weight: 500;
 }
 
+/* The file going in, and its place in the batch ("2 of 3"), above the bar (9b). */
+.job .jn {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.job .jn b {
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.job .jn span {
+  flex: none;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The card that keeps a batch's end when the person has gone from its panel: a heading as the bar's card has, then the summary. */
+.away .jt {
+  font-weight: 600;
+}
+
+/* Many files in (9a to 9c), in the side panel. A picked file is a row of a tile, its name, its size and the button that leaves it out. */
+.erow.pf {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
+.erow.pf .ftile {
+  width: 30px;
+  height: 30px;
+  font-size: 9px;
+}
+
+.erow.pf .en {
+  font-family: inherit;
+  font-size: 13.5px;
+}
+
+.erow.pf .ed {
+  letter-spacing: 0;
+}
+
+/* The end's lists of the files that did not go in: a label and the names under it, in the text colour. */
+.sumlist {
+  margin-top: 14px;
+}
+
+.sumlist .gh {
+  margin: 0 0 4px;
+}
+
+.names {
+  margin: 0;
+  padding: 0 0 0 18px;
+  color: var(--ink);
+  font-size: 13.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* A sentence in the panel that has to be read before something is deleted (the originals stay; keep the files that did not go in). */
+.fwarn {
+  margin: 12px 2px 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
 /* A refusal of the question's answer, above the buttons and left-aligned like the words. */
 .dbtns .err {
   flex: 1 1 100%;

@@ -405,6 +405,17 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("progress bytes words on the card", c("--ink2"), card, 4.5);
       check("progress warning words on the card", c("--ink"), card, 4.5);
 
+      // Many files in (Task 10), in the side panel: the picked list is a card of rows (a name, its size and the button that leaves it out;
+      // the button's icon is measured with the pasted keys' above), the refusal of 9e is the form's error line on the panel (measured
+      // above), and the end's lists and its sentence about the originals are words on the panel. The bar of 9b sits on its own card.
+      check("picked file name on its card", c("--ink"), card, 4.5);
+      check("picked file size on its card", c("--ink2"), card, 4.5);
+      check("add files sentence about the originals on the panel", c("--ink"), paper, 4.5);
+      check("add files summary lists on the panel", c("--ink"), paper, 4.5);
+      check("add files refusal on the panel", c("--danger"), paper, 4.5);
+      check("file now going in, on the bar's card", c("--ink"), card, 4.5);
+      check("file number going in, on the bar's card", c("--ink2"), card, 4.5);
+
       // Move, trash and folders (Task 14). Move to trash and the Trash's two answers are rows of a card: Delete for good and Move
       // to trash in the error colour, Restore in the vault's colour, at rest, hovered and pressed (the tints laid over the card).
       // A question's dangerous answer is the filled red button, measured above.

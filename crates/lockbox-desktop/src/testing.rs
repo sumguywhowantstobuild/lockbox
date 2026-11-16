@@ -1143,6 +1143,8 @@ impl Volumes for FakeVolumes {
 #[derive(Default)]
 pub struct FakeDialogs {
     answers: Mutex<VecDeque<Option<PathBuf>>>,
+    /// What the many-files dialog answers, in order (`None`, as if closed, once the queue is empty).
+    file_answers: Mutex<VecDeque<Option<Vec<PathBuf>>>>,
     opened: AtomicUsize,
     /// Run once, inside the next dialog, before it answers: while the user would be choosing.
     on_open: Mutex<Option<Hook>>,
@@ -1179,6 +1181,11 @@ impl FakeDialogs {
         lock(&self.answers).push_back(answer);
     }
 
+    /// What the next many-files dialog answers (`None`: closed).
+    pub fn answer_files(&self, answer: Option<Vec<PathBuf>>) {
+        lock(&self.file_answers).push_back(answer);
+    }
+
     pub fn opened(&self) -> usize {
         self.opened.load(Ordering::SeqCst)
     }
@@ -1192,12 +1199,16 @@ impl FakeDialogs {
         *lock(&self.on_open) = Some(hook);
     }
 
-    fn next(&self) -> Option<PathBuf> {
+    fn opening(&self) {
         self.opened.fetch_add(1, Ordering::SeqCst);
         let hook = lock(&self.on_open).take();
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    fn next(&self) -> Option<PathBuf> {
+        self.opening();
         lock(&self.answers).pop_front().flatten()
     }
 }
@@ -1210,6 +1221,11 @@ impl Dialogs for FakeDialogs {
 
     fn pick_file(&self, _title: &str, _filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
         self.next()
+    }
+
+    fn pick_files(&self, _title: &str, _filter: Option<(&str, &[&str])>) -> Option<Vec<PathBuf>> {
+        self.opening();
+        lock(&self.file_answers).pop_front().flatten()
     }
 
     fn save_file(

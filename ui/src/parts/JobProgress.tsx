@@ -9,15 +9,20 @@ import { Button } from "./Button";
  *
  * Cancel stops that one operation (`stopJob`) and says "Cancelling…" until the job's own answer comes; `onStop` is told once it is pressed. The
  * bar is a progress bar for a screen reader, with its value as words. It has no live region of its own: the start is said in the page's
- * always-present spoken place (`announceJob`), the end is the result's own message, and nothing is said between, so ten figures a second
- * don't become ten announcements. The fill's width is set from script, as a style property the
- * page's policy allows; the markup has no `style` of its own.
+ * always-present spoken place (`announceJob`, keyed by the operation so a second job with the same words is heard too), the end is the result's
+ * own message, and nothing is said between, so ten figures a second don't become ten announcements. The fill's width is set from script, as a
+ * style property the page's policy allows; the markup has no `style` of its own.
+ *
+ * A batch of files says which file is going in (`now`: its name and "2 of 3", both worked out by the screen from the sizes it holds). A card
+ * that sits under a heading of its own (the Add files panel's) leaves out its own (`heading={false}`); it is still named for a screen reader.
  */
 export function JobProgress({
   operation,
   label,
   sentence,
   warning,
+  now,
+  heading = true,
   onStop,
 }: {
   operation: number;
@@ -27,6 +32,9 @@ export function JobProgress({
   sentence?: string;
   /** The line about the laptop, from 9b. */
   warning?: string;
+  /** The file going in now and its place in the batch, from what the screen holds: `{ name, place: "2 of 3" }`. */
+  now?: { name: string; place: string } | null;
+  heading?: boolean;
   onStop?: () => void;
 }) {
   const job = useJobByOperation(operation);
@@ -40,14 +48,21 @@ export function JobProgress({
   // The start is said once, in the page's always-present spoken place, after this has mounted; see `announceJob`.
   const shown = job !== null;
   useEffect(() => {
-    if (shown) announceJob(`${label} started.`);
-  }, [shown, label]);
+    if (shown) announceJob(`${label} started.`, operation);
+  }, [shown, label, operation]);
   if (job === null) return null;
   const words = counted ? `${formatBytes(job.done)} of ${formatBytes(job.total)}` : "Starting…";
   return (
-    <section className="ask job" aria-label={label}>
-      <p className="jt">{label}</p>
+    // `data-operation` says whose card it is: when a job ends, focus moves only if it was in that job's own card (`takeJobFocus`).
+    <section className="ask job" aria-label={label} data-operation={operation}>
+      {heading ? <p className="jt">{label}</p> : null}
       {sentence === undefined ? null : <p className="js">{sentence}</p>}
+      {now === undefined || now === null ? null : (
+        <p className="jn">
+          <b>{now.name}</b>
+          <span>{now.place}</span>
+        </p>
+      )}
       <div
         className="prog"
         role="progressbar"

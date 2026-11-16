@@ -106,6 +106,8 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:recovery key copies disagree": { title: "Make a new recovery key for this vault, then back up.", body: "" },
   "code:invalid_input:details unchecked": { title: "Lock this vault and open it again, then back up.", body: "" },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
+  // A choice the shell was holding (the files picked, 9a) was used, dropped by a lock, or left too long: pick again.
+  "code:choice_expired": { title: "That choice has expired.", body: "Pick the files again." },
   "code:core": GENERIC,
 
   // The page's own refusal (code "page"): it never comes from the shell.
@@ -231,6 +233,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "header changed on disk",
   "id",
   "idle time",
+  "index",
   "item",
   "item cannot hold files",
   "journal full",
