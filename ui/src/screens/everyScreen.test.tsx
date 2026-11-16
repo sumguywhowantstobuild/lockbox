@@ -564,6 +564,17 @@ const CASES: Case[] = [
       await screen.findByRole("dialog", { name: "Lockbox stays by the clock" });
     },
   },
+  {
+    name: "Closing or quitting with a job running (33b, Ask 15)",
+    shows: ["CloseQuestion#CloseQuestion"],
+    reach: async () => {
+      await unlocked();
+      act(() => {
+        shell.askClose("close", { running: ["backup"], pastSwap: false });
+      });
+      await screen.findByRole("dialog", { name: "A backup is running" });
+    },
+  },
 ];
 
 /**

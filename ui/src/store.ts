@@ -10,6 +10,7 @@
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
 import { focusList, takeJobFocus } from "./focus";
+import { resetCloseAskForTests, startCloseAsk } from "./closeAsk";
 import { nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
 import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, SearchHit, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
@@ -1131,6 +1132,8 @@ export function startNotices(): Promise<void> {
     }
     // The jobs' progress; each of its listeners can fail alone, and the window then shows no bar.
     await startJobs();
+    // The question a close or a Quit asks while a job runs (33b); it is heard from here on, whichever screen is up.
+    await startCloseAsk();
     try {
       for (const notice of await api.launchNotices()) takeNotice(notice);
     } catch {
@@ -2900,6 +2903,7 @@ export function resetStoreForTests(): void {
   detailRuns.clear();
   cleanupNotices = 0;
   resetJobsForTests();
+  resetCloseAskForTests();
   state = EMPTY;
   for (const notify of listeners) notify();
 }

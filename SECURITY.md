@@ -121,6 +121,15 @@ trusted than Rust.
 - **Long operations pause the idle timer** (import, Save a copy, Open, backup, restore) and keep the PC awake, and time
   spent in them does not count. Windows lock and sleep still cancel them. A question waiting for your answer does not
   pause anything.
+- **Closing or quitting while a long operation runs asks first, and nothing locks until you answer.** The window's close
+  button and the tray's Quit ask whether to go on (any operation the idle timer counts, including Open, Replace and
+  copying an item). Until you answer, the operations keep running and the vaults stay unlocked; the question is dropped
+  by any lock of all vaults (Lock all, Windows lock or sleep, an idle lock), and it is never kept across a restart.
+  "Close anyway" is the only answer that cancels the operations and locks (a close locks and hides; a Quit locks and
+  exits, waiting at most 2 seconds for the lock to finish); "Keep it running" changes nothing. A restore past its swap
+  cannot be cancelled and finishes, or is undone at the next launch. Windows ending the session (signing out, shutdown)
+  never asks and never waits: it locks and exits as before. An unanswered question leaves the vaults unlocked while the operation runs,
+  as the paused idle timer already does.
 - **The app does not start** if it cannot listen for Windows lock and sleep.
 
 ## How Lockbox encrypts
@@ -540,8 +549,7 @@ Lockbox defends.
 
 These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plans 4B and 4C
 (backing up, testing and restoring a backup, opening one read-only, changing the password, "forgot password", a new
-recovery key from Settings, more than one vault, emptying the trash, export, Quit's questions, progress and a stop for long
-jobs, saving many files at once), the end-to-end tests on the running app, and the installer. Until backup and
+recovery key from Settings, more than one vault, emptying the trash, export, progress and a stop for long jobs, saving many files at once), the end-to-end tests on the running app, and the installer. Until backup and
 "forgot password" have screens, don't keep the only copy of anything important in Lockbox. Plan 4A's screens are built
 (first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
 folders and the trash, `.env` in and out, the save shortcut, stored files, settings), and the page clears what it shows at

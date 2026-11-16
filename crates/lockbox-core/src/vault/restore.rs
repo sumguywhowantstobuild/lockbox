@@ -37,6 +37,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const BAD_PATH: CoreError = CoreError::InvalidInput {
     what: "restore path",
@@ -80,6 +82,9 @@ pub struct PreparedRestore {
     /// The last swap attempt got as far as writing `swapping` into the journal, so only
     /// recovery can say what its error left behind.
     swap_started: bool,
+    /// On while the journal says `swapping` (the point from which a cancel no longer counts): shared with the caller
+    /// through [`swap_flag`](Self::swap_flag), since `commit` holds `&mut self` for the whole swap.
+    swapping: Arc<AtomicBool>,
 }
 
 /// What a finished (or recovered) swap left on disk.
@@ -291,6 +296,7 @@ impl PreparedRestore {
             armed: true,
             finished: false,
             swap_started: false,
+            swapping: Arc::default(),
         };
         let meter = Meter::new(progress, cancel, archive_of(&prepared.archive).total_size());
         prepared.extract(&refs, cancel, &meter)?;
@@ -383,6 +389,13 @@ impl PreparedRestore {
     /// state when the vault is open, a cancel came first, or the first rename was refused.
     pub fn can_retry(&self) -> bool {
         self.armed && !self.finished
+    }
+
+    /// A flag that is on from the moment the journal says `swapping` (a cancel no longer counts; a crash is settled by
+    /// recovery at the next launch) and off again if the first rename is refused and the restore goes back to its
+    /// pre-swap state. It is the one thing a caller can read while [`commit`](Self::commit) runs.
+    pub fn swap_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.swapping)
     }
 
     /// Spec 6.8 steps 5 and 6: swaps the staged vault into place. Cancelling is checked before
@@ -548,6 +561,7 @@ impl PreparedRestore {
         cancel: &CancelToken,
     ) -> Result<RestoreOutcome> {
         self.swap_started = false;
+        self.swapping.store(false, Ordering::SeqCst);
         let parent = parent_dir(&self.target).to_owned();
         let lock = lock_journal(&self.journal)?;
         // Step 2.
@@ -560,6 +574,7 @@ impl PreparedRestore {
         self.rewrite_journal(&lock, JournalStep::Swapping, before.clone())?;
         self.armed = false;
         self.swap_started = true;
+        self.swapping.store(true, Ordering::SeqCst);
         #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.after_journal")?;
 
@@ -592,6 +607,8 @@ impl PreparedRestore {
                     self.armed = self
                         .rewrite_journal(&lock, JournalStep::Extracting, None)
                         .is_ok();
+                    // Back before the swap: a cancel counts again.
+                    self.swapping.store(!self.armed, Ordering::SeqCst);
                 }
                 return Err(e);
             }
@@ -739,6 +756,7 @@ pub(super) mod tests {
     use std::fs;
     use std::path::Component;
     use std::rc::Rc;
+    use std::sync::atomic::Ordering;
 
     /// Always resets, so a failing test cannot leak a failpoint or volume on this thread.
     struct Cleanup;
@@ -1952,6 +1970,68 @@ pub(super) mod tests {
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::RestorePending)));
         assert!(!p.can_retry());
+    }
+
+    /// The flag the shell reads to tell "past the point of cancelling": off as prepared, off through every refusal and
+    /// every cancel before the journal says `swapping`, off again after a refused first rename, on from the moment the
+    /// journal says `swapping` (seen from inside the swap), and on after an error that recovery settled.
+    #[test]
+    fn swap_flag_is_on_only_from_the_journal_saying_swapping() {
+        let _reset = Cleanup;
+        let (s, vault) = Scene::replacing();
+        let mut p = s.prepare();
+        let flag = p.swap_flag();
+        assert!(!flag.load(Ordering::SeqCst), "as prepared");
+
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::VaultInUse)
+        ));
+        assert!(!flag.load(Ordering::SeqCst), "the vault is open");
+        drop(vault);
+
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        assert!(matches!(p.commit(&cancelled), Err(CoreError::Cancelled)));
+        assert!(!flag.load(Ordering::SeqCst), "cancelled before the swap");
+
+        failpoint::arm("restore.fail_move_existing");
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::Io(_))
+        ));
+        failpoint::disarm_all();
+        assert!(!flag.load(Ordering::SeqCst), "a refused first rename");
+
+        // Seen from inside the swap: off at the last cancel check, on once the journal says `swapping`.
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        for step in ["restore.before_swapping", "restore.after_journal"] {
+            let (flag, seen) = (flag.clone(), seen.clone());
+            failpoint::observe(
+                step,
+                Box::new(move || seen.borrow_mut().push((step, flag.load(Ordering::SeqCst)))),
+            );
+        }
+        p.commit(&CancelToken::new()).unwrap();
+        failpoint::disarm_all();
+        assert_eq!(
+            *seen.borrow(),
+            [
+                ("restore.before_swapping", false),
+                ("restore.after_journal", true)
+            ]
+        );
+        assert!(flag.load(Ordering::SeqCst), "the swap went through");
+
+        // An error after the swap began is settled by recovery: the flag stays on.
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        let flag = p.swap_flag();
+        failpoint::arm("restore.after_move_existing");
+        let result = p.commit(&CancelToken::new());
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert!(flag.load(Ordering::SeqCst), "rolled back after it began");
     }
 
     #[test]

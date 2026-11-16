@@ -17,10 +17,23 @@ import {
   type Tagged,
 } from "./bridge";
 
-export { isSessionCurrent, onBusy, onCapture, onJobStarted, onLocked, onLockEpoch, onNotice, onProgress, StaleAnswer } from "./bridge";
+export {
+  isSessionCurrent,
+  onBusy,
+  onCapture,
+  onCloseAsked,
+  onJobStarted,
+  onLocked,
+  onLockEpoch,
+  onNotice,
+  onProgress,
+  StaleAnswer,
+} from "./bridge";
 export type {
   BusyEvent,
   CaptureEvent,
+  CloseAskedEvent,
+  CloseReason,
   Confirm,
   JobKind,
   JobScope,
@@ -339,6 +352,15 @@ export async function resetOutputJournal(): Promise<void> {
  */
 export async function closeExplainedOk(): Promise<void> {
   await callPlain<null>("close_explained_ok", {});
+}
+
+/**
+ * The answer to the question a close or a Quit asked while a job runs (`lockbox://close-asked`). `true` is Close anyway: the shell runs the old
+ * path for the reason it asked about (close locks every vault, which cancels the jobs; Quit quits). `false` is Keep it running: nothing
+ * changes. Either answer clears the question. Refused with `not_found` when none is pending (it was cleared by a lock, or answered already).
+ */
+export async function closeAnswer(go: boolean): Promise<null> {
+  return callPlain<null>("close_answer", { go });
 }
 
 /**

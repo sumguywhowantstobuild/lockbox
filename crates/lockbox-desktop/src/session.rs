@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::capture::CaptureEvent;
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
-use crate::jobs::{JobStarted, LockEpochEvent, ProgressEvent};
+use crate::jobs::{CloseAsked, JobStarted, LockEpochEvent, ProgressEvent};
 use crate::pending::{Pending, PendingChoice, Token};
 use crate::{lock, os};
 
@@ -153,7 +153,8 @@ pub enum Notice {
 }
 
 /// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`,
-/// `lockbox://capture`, `lockbox://job-started`, `lockbox://progress`, `lockbox://lock-epoch`).
+/// `lockbox://capture`, `lockbox://job-started`, `lockbox://progress`, `lockbox://lock-epoch`,
+/// `lockbox://close-asked`).
 pub trait Notifier: Send + Sync {
     fn locked(&self, session: SessionId, generation: u64, reason: LockReason);
     /// The long operations running for `session`, or for none (`None`: testing or restoring a backup).
@@ -168,6 +169,8 @@ pub trait Notifier: Send + Sync {
     fn progress(&self, event: &ProgressEvent);
     /// All vaults were locked (or the app is closing): the epoch they are now in, even when no vault was open.
     fn lock_epoch(&self, event: &LockEpochEvent);
+    /// A close or Quit arrived while a job runs: the page is asked whether to go on (`lockbox://close-asked`).
+    fn close_asked(&self, event: &CloseAsked);
 }
 
 /// What an opening closure gives back: a new session, or a question to ask first, whose state waits in [`Pending`]
@@ -1445,6 +1448,7 @@ mod tests {
         fn job_started(&self, _event: &JobStarted) {}
         fn progress(&self, _event: &ProgressEvent) {}
         fn lock_epoch(&self, _event: &LockEpochEvent) {}
+        fn close_asked(&self, _event: &CloseAsked) {}
     }
 
     fn sessions() -> (Arc<Recorder>, Sessions) {
@@ -2362,6 +2366,7 @@ mod tests {
         fn job_started(&self, _event: &JobStarted) {}
         fn progress(&self, _event: &ProgressEvent) {}
         fn lock_epoch(&self, _event: &LockEpochEvent) {}
+        fn close_asked(&self, _event: &CloseAsked) {}
     }
 
     #[test]

@@ -13,10 +13,13 @@ use std::sync::{Arc, Mutex};
 use lockbox_desktop::commands::COMMANDS;
 use lockbox_desktop::handler;
 use lockbox_desktop::jobs::{
-    JobKind, JobScope, JobStarted, LockEpochEvent, OperationId, ProgressEvent,
+    CloseAsked, CloseReason, JobKind, JobScope, JobStarted, LockEpochEvent, OperationId,
+    ProgressEvent,
 };
 use lockbox_desktop::session::{LockReason, Notifier, SessionId};
-use lockbox_desktop::shell::{Events, JOB_STARTED_EVENT, LOCK_EPOCH_EVENT, PROGRESS_EVENT};
+use lockbox_desktop::shell::{
+    CLOSE_ASKED_EVENT, Events, JOB_STARTED_EVENT, LOCK_EPOCH_EVENT, PROGRESS_EVENT,
+};
 use lockbox_desktop::window::{allowed_navigation, main_window};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, InvokeBody};
@@ -426,6 +429,78 @@ fn cancel_operation_is_granted_to_the_main_window_only() {
     }
     assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
     assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
+/// `close_answer` (the answer to the close or Quit question) is listed, granted to the main window and reaches its handler
+/// from it; another window and a remote origin are refused by the ACL, before the handler. It takes no session and no
+/// generation (it reads and writes no vault), so the stale-generation, foreign-ID and read-only refusals do not apply to
+/// it; a question that is not pending is refused by the shell (its own tests are in `commands::sessions`).
+#[test]
+fn close_answer_is_granted_to_the_main_window_only() {
+    let cmd = "close_answer";
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(granted.contains(&"allow-close-answer"));
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({ "go": false }));
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
+/// The question goes to the main window and no other window: a listener on the main window hears it with exactly the
+/// frozen payload, and one on another window hears nothing. Widening the target to every window (`Any`) fails this.
+#[test]
+fn close_asked_goes_to_the_main_window_only() {
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let (heard_main, heard_other) = (
+        Arc::new(Mutex::new(Vec::<String>::new())),
+        Arc::new(Mutex::new(Vec::<String>::new())),
+    );
+    for (window, heard) in [(&main, &heard_main), (&other, &heard_other)] {
+        let heard = Arc::clone(heard);
+        window.listen(CLOSE_ASKED_EVENT, move |event| {
+            heard.lock().unwrap().push(event.payload().to_owned());
+        });
+    }
+
+    Events(app.handle().clone()).close_asked(&CloseAsked {
+        reason: CloseReason::Quit,
+        running: vec![JobKind::Import, JobKind::Restore],
+        past_swap: true,
+    });
+
+    let heard: Vec<Value> = heard_main
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|payload| serde_json::from_str(payload).unwrap())
+        .collect();
+    assert_eq!(
+        heard,
+        [json!({ "reason": "quit", "running": ["import", "restore"], "past_swap": true })]
+    );
+    assert!(
+        heard_other.lock().unwrap().is_empty(),
+        "another window heard the question"
+    );
 }
 
 /// The three job events go to the main window and no other window: a listener on the main window hears each of them with

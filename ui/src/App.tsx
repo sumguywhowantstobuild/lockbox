@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { LockboxParts } from "./parts/LockboxParts";
 import { PortalContainerProvider } from "./parts/Portal";
 import { vaultLook } from "./parts/Pattern";
+import { CloseQuestion } from "./screens/CloseQuestion";
 import { FirstClose } from "./screens/FirstClose";
 import { LockScreen } from "./screens/LockScreen";
 import { MainWindow } from "./screens/MainWindow";
@@ -70,6 +71,7 @@ export default function App() {
         <div ref={setRoot} className={`app mode-${mode} v-${look.accent}`}>
           {screen}
           <FirstClose />
+          <CloseQuestion />
         </div>
       </PortalContainerProvider>
     </LockboxParts>

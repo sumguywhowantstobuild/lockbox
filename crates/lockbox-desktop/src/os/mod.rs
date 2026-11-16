@@ -61,6 +61,10 @@ pub trait MainWindow: Send + Sync {
     /// ([`window::set_capture_protection`](crate::window::set_capture_protection)): the request is made, and Windows
     /// does not say whether it holds. A window that is not there has nothing to protect.
     fn protect_from_capture(&self, on: bool);
+    /// Ends the app (the exit that follows a Quit's shutdown), the one way out the shell takes itself. Tauri's own call
+    /// ([`AppHandle::exit`](tauri::AppHandle::exit)): it queues the request for the event loop and does not wait, so it
+    /// is safe from any thread. The exit request that follows runs the shutdown again, which returns at once.
+    fn exit_app(&self);
 }
 
 /// The save shortcut as Windows holds it, behind a trait so `set_settings` is tested without a window.

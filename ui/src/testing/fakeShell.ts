@@ -297,6 +297,21 @@ export interface FakeShell {
   clearCopiedCalls(): number;
   /** What the next `clear_copied` answers (`"cleared"` until set): `"gone"` or `"busy"` for the shell's other answers. */
   answerClearCopied(answer: "cleared" | "gone" | "busy"): void;
+  /**
+   * A close or a Quit while a job runs, as the shell asks it (Plan 4B Task 12): `lockbox://close-asked` goes out and the question is pending,
+   * with nothing locked, hidden or cancelled, until `close_answer`. `running` is the kinds as the shell names them (distinct, in start order).
+   */
+  askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean }): void;
+  /** The shell's lock epoch changes (Lock all, Windows locking or sleeping, an idle lock): `lockbox://lock-epoch` goes out and a pending question is dropped. */
+  changeLockEpoch(reason?: string): void;
+  /** Whether a question is waiting for `close_answer`. */
+  pendingClose(): boolean;
+  /** Every `close_answer` the shell accepted, as `go` was sent (an answer with no question pending is refused and not here). */
+  closeAnswers(): boolean[];
+  /** How many times the app was quit (a Quit with nothing running, or a yes to a Quit's question). */
+  quits(): number;
+  /** Sends `payload` on `channel` exactly as given, for an event the page must not trust. */
+  sendRaw(channel: string, payload: unknown): void;
   /** The shell has already shown 5b in an earlier run: the next close hides at once. */
   markCloseExplained(): void;
   /** A notice sent as `lockbox://notice` only, never kept for `launch_notices` (`first_close` is only ever an event). */
@@ -751,6 +766,11 @@ export function installFakeShell(
   let explaining = false;
   let hidden = false;
   let closeExplainedCalls = 0;
+  // The question a close or a Quit asked and the shell is holding, what was answered, how often the app quit, and the lock epoch's number.
+  let pendingClose: "close" | "quit" | undefined;
+  const closeAnswers: boolean[] = [];
+  let quits = 0;
+  let lockEpoch = 0;
   let clearCopiedCalls = 0;
   let clearCopiedAnswer: "cleared" | "gone" | "busy" = "cleared";
   const live = new Map<number, Live>();
@@ -877,6 +897,20 @@ export function installFakeShell(
     explaining = false;
     hidden = true;
     emit("lockbox://notice", { kind: "first_close", explain: false });
+  };
+
+  /** The window's close, as the shell does it with nothing running (and after a yes): every vault locks, then 5b or the hide. */
+  const closeAsBefore = (): void => {
+    for (const session of [...live.keys()]) lock(session);
+    emptySlot();
+    if (explaining) {
+      explained();
+    } else if (closeExplained) {
+      hidden = true;
+    } else {
+      explaining = true;
+      emit("lockbox://notice", { kind: "first_close", explain: true });
+    }
   };
 
   const vaultFor = (session: number, generation: number): FakeVault => {
@@ -1947,6 +1981,18 @@ export function installFakeShell(
         closeExplainedCalls += 1;
         explained();
         return null;
+      case "close_answer": {
+        const { go } = exactly(args, ["go"]);
+        if (typeof go !== "boolean") return refuse(MALFORMED);
+        // No question pending, or a second answer: refused, with nothing done.
+        if (pendingClose === undefined) return refuse({ code: "not_found" });
+        const reason = pendingClose;
+        pendingClose = undefined;
+        closeAnswers.push(go);
+        if (go && reason === "close") closeAsBefore();
+        if (go && reason === "quit") quits += 1;
+        return null;
+      }
       case "lock_vault": {
         const { session } = exactly(args, ["session"]) as { session: number };
         lock(session);
@@ -2287,17 +2333,21 @@ export function installFakeShell(
       emit("lockbox://notice", notice);
     },
     outputJournalResets: () => outputResets,
-    closeWindow: () => {
-      for (const session of [...live.keys()]) lock(session);
-      emptySlot();
-      if (explaining) {
-        explained();
-      } else if (closeExplained) {
-        hidden = true;
-      } else {
-        explaining = true;
-        emit("lockbox://notice", { kind: "first_close", explain: true });
-      }
+    closeWindow: closeAsBefore,
+    askClose: (reason, { running: kinds, pastSwap = false }) => {
+      pendingClose = reason;
+      emit("lockbox://close-asked", { reason, running: kinds, past_swap: pastSwap });
+    },
+    changeLockEpoch: (reason = "manual") => {
+      lockEpoch += 1;
+      pendingClose = undefined;
+      emit("lockbox://lock-epoch", { epoch: lockEpoch, reason });
+    },
+    pendingClose: () => pendingClose !== undefined,
+    closeAnswers: () => [...closeAnswers],
+    quits: () => quits,
+    sendRaw: (channel, payload) => {
+      emit(channel, payload);
     },
     windowHidden: () => hidden,
     closeExplainedCalls: () => closeExplainedCalls,

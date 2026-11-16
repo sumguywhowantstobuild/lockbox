@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::capture::CaptureEvent;
 use crate::error::ShellResult;
-use crate::jobs::{JobStarted, LockEpochEvent, ProgressEvent};
+use crate::jobs::{CloseAsked, JobStarted, LockEpochEvent, ProgressEvent};
 use crate::lock;
 use crate::os::{
     CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Clock, Dialogs,
@@ -63,6 +63,8 @@ pub struct Events {
     jobs: Mutex<Vec<(&'static str, serde_json::Value)>>,
     /// Run for each job event, on the thread that sent it, after it is recorded.
     watcher: Mutex<Option<JobWatcher>>,
+    /// Each `lockbox://close-asked`, as the page would receive it.
+    close_asked: Mutex<Vec<serde_json::Value>>,
 }
 
 /// What [`Events::watch`] runs.
@@ -112,6 +114,11 @@ impl Events {
     /// The payload of each `lockbox://lock-epoch` the shell sent.
     pub fn epochs(&self) -> Vec<serde_json::Value> {
         self.payloads(LOCK_EPOCH_EVENT)
+    }
+
+    /// The payload of each `lockbox://close-asked` the shell sent, in order.
+    pub fn close_asked(&self) -> Vec<serde_json::Value> {
+        lock(&self.close_asked).clone()
     }
 
     /// Runs `hook` once, inside the next `busy` event: it may block or panic there.
@@ -174,6 +181,11 @@ impl Notifier for Events {
         let event = serde_json::to_value(event).expect("a lock-epoch event serialises");
         self.record_job_event(LOCK_EPOCH_EVENT, event);
     }
+
+    fn close_asked(&self, event: &CloseAsked) {
+        let event = serde_json::to_value(event).expect("a close-asked event serialises");
+        lock(&self.close_asked).push(event);
+    }
 }
 
 /// Idle time the test sets: none until it does.
@@ -205,9 +217,16 @@ pub struct FakeWindow {
     queued_hides: Mutex<Vec<Box<dyn FnOnce() -> bool + Send>>>,
     /// Each time the shell asked for capture protection to change while the window was up, in order.
     protections: Mutex<Vec<bool>>,
+    /// How many times the shell ended the app.
+    exits: AtomicUsize,
 }
 
 impl FakeWindow {
+    /// How many times the shell ended the app (a Quit's exit).
+    pub fn exits(&self) -> usize {
+        self.exits.load(Ordering::SeqCst)
+    }
+
     /// Each capture protection the shell asked the window for (`true`: kept out of captures), in order.
     pub fn protections(&self) -> Vec<bool> {
         lock(&self.protections).clone()
@@ -285,6 +304,10 @@ impl MainWindow for FakeWindow {
 
     fn protect_from_capture(&self, on: bool) {
         lock(&self.protections).push(on);
+    }
+
+    fn exit_app(&self) {
+        self.exits.fetch_add(1, Ordering::SeqCst);
     }
 }
 
