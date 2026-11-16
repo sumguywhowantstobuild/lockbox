@@ -90,6 +90,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         capture::capture_cancel,
         capture::capture_env,
         backup::backup_vault,
+        backup::vault_backup_due,
         backup::test_backup,
         backup::open_backup_read_only,
         backup::copy_item_to,

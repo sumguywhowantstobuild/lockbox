@@ -15,6 +15,28 @@ export function formatBytes(bytes: number): string {
   return `${text} ${units[unit] ?? "B"}`;
 }
 
+/** "1 damaged file", "2 damaged files". */
+function counted(n: number, one: string, many: string): string {
+  return `${String(n)} ${n === 1 ? one : many}`;
+}
+
+/**
+ * What a backup left out, in words and counts alone (22c): "Left out: 2 damaged items, 1 damaged file and 3 missing files." and, when an attached
+ * file was among them, that the items that use it are saved without it. `null` when nothing was left out. No name of any item or file.
+ */
+export function leftOutWords(view: { damaged_items: number; damaged_files: number; missing_files: number }): string | null {
+  const parts = [
+    view.damaged_items > 0 ? counted(view.damaged_items, "damaged item", "damaged items") : null,
+    view.damaged_files > 0 ? counted(view.damaged_files, "damaged file", "damaged files") : null,
+    view.missing_files > 0 ? counted(view.missing_files, "missing file", "missing files") : null,
+  ].filter((part): part is string => part !== null);
+  const last = parts.pop();
+  if (last === undefined) return null;
+  const list = parts.length === 0 ? last : `${parts.join(", ")} and ${last}`;
+  const files = view.damaged_files > 0 || view.missing_files > 0;
+  return `Left out: ${list}.${files ? " Items that use a left-out file are saved without it." : ""}`;
+}
+
 const MONTHS = [
   "January",
   "February",

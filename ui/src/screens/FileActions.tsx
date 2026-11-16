@@ -309,6 +309,7 @@ const WORK: Record<string, string> = {
   import: "Adding a file to your vault.",
   save_copy: "Saving a copy of the file.",
   open: "Opening the file.",
+  backup: "Backing up this vault.",
 };
 
 /** What 9b says for a job with progress, in the words the session chose (the design is silent beyond the sentence about the laptop). */
@@ -343,7 +344,9 @@ export function FileJobProgress({ data }: { data: SessionData }) {
  * until this finishes." is left here.
  */
 export function BusyNote({ data }: { data: SessionData }) {
-  const card = useJob(data.fileJob?.request ?? null);
+  // A backup's progress card sits in its panel; with that panel open it says the Windows part itself, as a file job's card does.
+  const backup = useJob(data.backup?.phase === "running" && data.tool?.kind === "backup" ? data.backup.request : null);
+  const card = useJob(data.fileJob?.request ?? null) ?? backup;
   if (data.operations.length === 0) return null;
   const doing =
     card !== null

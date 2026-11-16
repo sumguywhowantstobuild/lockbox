@@ -428,6 +428,35 @@ fn cancel_operation_is_granted_to_the_main_window_only() {
     assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
 }
 
+/// `vault_backup_due` (the 30-day reminder) is listed, granted to the main window and reaches its handler from it;
+/// another window and a remote origin are refused by the ACL, before the handler. Its arguments are a session and its
+/// generation (`backup_due_refused_stale_foreign` and the argument tests in `commands/backup.rs` cover the rest).
+#[test]
+fn vault_backup_due_is_granted_to_the_main_window_only() {
+    let cmd = "vault_backup_due";
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(granted.contains(&"allow-vault-backup-due"));
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({ "session": 1, "generation": 1 }));
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
 /// The three job events go to the main window and no other window: a listener on the main window hears each of them with
 /// exactly the frozen payload, and one on another window hears none. Widening the target to every window (`Any`) fails
 /// this.

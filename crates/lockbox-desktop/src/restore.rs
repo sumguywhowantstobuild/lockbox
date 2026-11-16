@@ -1555,7 +1555,7 @@ mod tests {
     fn backup_of(ts: &TestShell, s: SessionId, g: u64, file: &str) -> PathBuf {
         let dest = ts.folder("Backups").join(file);
         ts.dialogs.answer(Some(dest.clone()));
-        done(ts.shell.backup_vault(s, g).unwrap().data);
+        done(ts.shell.backup_vault(s, g, 1).unwrap().data);
         dest
     }
 

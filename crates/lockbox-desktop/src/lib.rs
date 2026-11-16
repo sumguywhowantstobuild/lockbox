@@ -14,6 +14,7 @@ pub mod autolock;
 pub mod capture;
 pub mod clipboard;
 pub mod commands;
+pub mod dates;
 pub mod error;
 pub mod jobs;
 pub mod locations;

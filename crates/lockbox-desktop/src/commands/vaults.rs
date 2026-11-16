@@ -2455,7 +2455,7 @@ mod tests {
         let backup = ts.folder("Backups").join("Family.lockbox-backup");
         ts.dialogs.answer(Some(backup.clone()));
         done(
-            heavy(|| ts.shell.backup_vault(session, generation))
+            heavy(|| ts.shell.backup_vault(session, generation, 1))
                 .unwrap()
                 .data,
         );
@@ -2586,7 +2586,7 @@ mod tests {
         let backup = backups.join("Family.lockbox-backup");
         ts.dialogs.answer(Some(backup.clone()));
         done(
-            heavy(|| ts.shell.backup_vault(session, generation))
+            heavy(|| ts.shell.backup_vault(session, generation, 1))
                 .unwrap()
                 .data,
         );
@@ -2671,7 +2671,7 @@ mod tests {
         let backup = ts.folder("Backups").join("Work.lockbox-backup");
         ts.dialogs.answer(Some(backup.clone()));
         done(
-            heavy(|| ts.shell.backup_vault(session, generation))
+            heavy(|| ts.shell.backup_vault(session, generation, 1))
                 .unwrap()
                 .data,
         );

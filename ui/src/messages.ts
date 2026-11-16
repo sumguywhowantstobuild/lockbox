@@ -96,6 +96,15 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:shortcut taken": { title: "Another app already uses {shortcut}.", body: "Press a different combination." },
   "code:invalid_input:shortcut not set": { title: "Windows didn't take that shortcut.", body: "Try again." },
   "core:io:startup": { title: "Lockbox couldn't change Start with Windows.", body: "Try again." },
+  // A backup refused before anything is written (Asks 2 and the three beside it): the design's words, without the vault's name, which the
+  // screen puts in its own heading ("Can't back up My vault yet").
+  "code:invalid_input:details changed": {
+    title: "Its details were changed outside Lockbox, so a backup made now might not open.",
+    body: "Look at that change and accept it first, then back up.",
+  },
+  "code:invalid_input:password copies disagree": { title: "Change this vault's password once more, then back up.", body: "" },
+  "code:invalid_input:recovery key copies disagree": { title: "Make a new recovery key for this vault, then back up.", body: "" },
+  "code:invalid_input:details unchecked": { title: "Lock this vault and open it again, then back up.", body: "" },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   "code:core": GENERIC,
 
@@ -205,6 +214,8 @@ export const KNOWN_WHATS: readonly string[] = [
   "destination inside vault",
   "destination is the backup",
   "destination not writable",
+  "details changed",
+  "details unchecked",
   "earlier password",
   "env keys",
   "env rows",
@@ -248,12 +259,14 @@ export const KNOWN_WHATS: readonly string[] = [
   "operation in progress",
   "output journal",
   "password",
+  "password copies disagree",
   "password is empty",
   "pdf",
   "print",
   "printer",
   "printer name",
   "recovery key",
+  "recovery key copies disagree",
   "removable drive",
   "request",
   "restore",
@@ -290,6 +303,20 @@ export const KNOWN_WHATS: readonly string[] = [
   "vault still finishing an operation",
   "website",
 ];
+
+/** What a backup that began and did not finish says first (the design's words, and what a stop says as well). */
+export const BACKUP_NOT_FINISHED = "The backup didn't finish. Nothing half-made was left.";
+
+/**
+ * What follows that sentence for a backup that began and did not finish: the table's own words for the refusal when it has some (a drive that
+ * went away), else `null`. A stop is the person's own press and says nothing more; a refusal the table does not know says nothing more either,
+ * never the generic words.
+ */
+export function backupNotFinishedMore(error: unknown): string | null {
+  const said = messageFor(error);
+  const stopped = isRecord(error) && error.code === "cancelled";
+  return stopped || said.title === GENERIC.title ? null : messageText(said);
+}
 
 /** A message as one line of text, for a screen that shows it in one place. */
 export function messageText(message: Pick<Message, "title" | "body">): string {

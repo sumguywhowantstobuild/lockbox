@@ -79,12 +79,13 @@ impl VaultStateStore {
         }
     }
 
-    /// The date `folder` was last backed up, as it was set.
+    /// When `folder` was last backed up, as it was set (RFC 3339, UTC: see [`crate::dates`]).
     pub fn last_backup(&self, folder: &Path) -> Option<String> {
         self.find(folder).ok()??.last_backup
     }
 
-    /// Notes the date `folder` was last backed up (RFC 3339, as the engine writes dates).
+    /// Notes when `folder` was last backed up: `YYYY-MM-DDTHH:MM:SSZ`, RFC 3339 in UTC, as the engine writes its own
+    /// dates ([`crate::dates::rfc3339_utc`]).
     pub fn set_last_backup(&self, folder: &Path, date: &str) -> ShellResult<()> {
         self.change(folder, |stored| stored.last_backup = Some(date.to_owned()))
     }
@@ -294,18 +295,28 @@ mod tests {
         let store = store(&temp);
         let folder = temp.path().join("Family-1234abcd");
         assert_eq!(store.last_backup(&folder), None);
-        store.set_last_backup(&folder, "2026-11-06").unwrap();
-        assert_eq!(store.last_backup(&folder).as_deref(), Some("2026-11-06"));
+        store
+            .set_last_backup(&folder, "2026-11-06T09:30:00Z")
+            .unwrap();
+        assert_eq!(
+            store.last_backup(&folder).as_deref(),
+            Some("2026-11-06T09:30:00Z")
+        );
         assert!(!store.is_unconfirmed(&folder), "a backup date is no mark");
         store.mark_unconfirmed(&folder).unwrap();
         store.clear_unconfirmed(&folder).unwrap();
         assert_eq!(
             store.last_backup(&folder).as_deref(),
-            Some("2026-11-06"),
+            Some("2026-11-06T09:30:00Z"),
             "clearing the mark keeps the date"
         );
-        store.set_last_backup(&folder, "2026-11-07").unwrap();
-        assert_eq!(store.last_backup(&folder).as_deref(), Some("2026-11-07"));
+        store
+            .set_last_backup(&folder, "2026-11-07T18:05:41Z")
+            .unwrap();
+        assert_eq!(
+            store.last_backup(&folder).as_deref(),
+            Some("2026-11-07T18:05:41Z")
+        );
         assert_eq!(written(&store)["vaults"].as_array().unwrap().len(), 1);
         let other = temp.path().join("Work-5678abcd");
         assert_eq!(store.last_backup(&other), None);

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { GENERIC, KNOWN_WHATS, MESSAGES, messageFor } from "./messages";
+import { GENERIC, KNOWN_WHATS, MESSAGES, messageFor, messageText } from "./messages";
 import { listBelow, readBeside } from "./testing/files";
 
 const CRATES = "../../crates/";
@@ -284,4 +284,19 @@ test("no_message_contains_raw_error_text", () => {
     available: 3,
   });
   expect(messageFor({ code: "core", kind: "wrong_password" }).numbers).toBeUndefined();
+});
+
+// Plan 4B Task 3: the four reasons a backup is refused before anything is written, each with the design's words (the vault's name is
+// the screen's own, in its heading). Nothing here is the shell's text: only which one it was.
+test("the_four_backup_refusals_have_the_designs_words", () => {
+  const said = (what: string) => messageText(messageFor({ code: "invalid_input", what }));
+  expect(said("details changed")).toBe(
+    "Its details were changed outside Lockbox, so a backup made now might not open. Look at that change and accept it first, then back up.",
+  );
+  expect(said("password copies disagree")).toBe("Change this vault's password once more, then back up.");
+  expect(said("recovery key copies disagree")).toBe("Make a new recovery key for this vault, then back up.");
+  expect(said("details unchecked")).toBe("Lock this vault and open it again, then back up.");
+  for (const what of ["details changed", "password copies disagree", "recovery key copies disagree", "details unchecked"]) {
+    expect(KNOWN_WHATS).toContain(what);
+  }
 });

@@ -10,7 +10,9 @@
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
 import { focusList, takeJobFocus } from "./focus";
-import { nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
+import { jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
+import { leftOutWords } from "./format";
+import { backupNotFinishedMore, BACKUP_NOT_FINISHED } from "./messages";
 import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, SearchHit, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
 
@@ -62,7 +64,25 @@ export type Tool =
   /** The Generator page (16a). */
   | { kind: "generator" }
   /** Settings (31a, 31b): the app's, for every vault, so a read-only vault opens it too. What it shows is `StoreState.settings`. */
-  | { kind: "settings" };
+  | { kind: "settings" }
+  /** Back up this vault (22a to 22d). Where it is, is `SessionData.backup`, which outlives the panel while the backup runs. */
+  | { kind: "backup" };
+
+/**
+ * Where a backup of this vault is (22a to 22d, and Ask 2), or `null` when none is begun. It lives in the session's record, so a lock takes it with
+ * the rest; it stays when the panel is closed while the backup runs, so Back up opens on the running one and starts no second.
+ */
+export type BackupStep =
+  /** 22a. Where it goes is picked in Windows' own dialog, after Back up. `error` is what the last try was refused with, before anything was written (22d's numbers among them). */
+  | { phase: "ask"; error: unknown }
+  /** Back up was pressed: the dialog is open, then the work runs. `request` names its job by `lockbox://job-started`, which is when the bar appears. */
+  | { phase: "running"; request: number }
+  /** 22c. */
+  | { phase: "saved"; view: api.BackupView }
+  /** The work began and did not finish: stopped, or failed. Nothing half-made was left. */
+  | { phase: "failed"; error: unknown }
+  /** Refused before anything was written, for a reason a backup made now might not open (Ask 2 and the three beside it): the question is on screen. */
+  | { phase: "refused"; error: unknown };
 
 /** What the new-login form sends: the person's own text, as typed. The shell completes the website and checks the limits. */
 export interface LoginDraft {
@@ -110,7 +130,7 @@ export type RecoveryStep =
   | { phase: "pick"; key: string; unfinished: boolean; asks: readonly Ask[]; at: number };
 
 /** The banners an unlock can raise, each closed with its own button (Asks 4, 5, 9 and 10). */
-export type Banner = "unreadable" | "leftover" | "spare" | "cloud";
+export type Banner = "unreadable" | "leftover" | "spare" | "cloud" | "backup";
 
 /**
  * What an unlock found that the person has not answered yet. It lives in the session's record, so a lock drops it with
@@ -133,7 +153,9 @@ export interface SessionAsks {
   spareDetails: boolean;
   /** The cloud service syncing the vault's folder (Ask 10), or `null`. */
   cloud: api.CloudProvider | null;
-  /** The banners the person has closed since this unlock. */
+  /** The whole days since the vault's last backup, when that is 30 or more (Ask 1), else `null`. Never for a read-only copy. */
+  backupDue: number | null;
+  /** The banners and questions the person has closed since this unlock (`"backup"` is the reminder's Later). */
   closed: Banner[];
 }
 
@@ -146,6 +168,7 @@ const NO_ASKS: SessionAsks = {
   leftover: 0,
   spareDetails: false,
   cloud: null,
+  backupDue: null,
   closed: [],
 };
 
@@ -228,6 +251,8 @@ export interface SessionData {
    * they are working and the others to wait: one at a time. A lock takes it with the record.
    */
   fileJob: FileJob | null;
+  /** The backup of this vault that is begun and not put away: see {@link BackupStep}. */
+  backup: BackupStep | null;
   /** The long operations the shell says are running for this vault (`lockbox://busy`): while there are any, auto-lock waits and the window says so. */
   operations: string[];
 }
@@ -508,6 +533,8 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
     lockNote: null,
   });
   if (unfinished && !details) void makeNewKey(record.session);
+  // The 30-day reminder (Ask 1) is read beside the list, never ahead of it. A read-only copy has none to make.
+  if (!info.read_only) void readBackupDue(record.session, record.generation);
   // A copy that waited on the lock screen (8b) opens its box in this vault, and is handed to it.
   seatCapture();
   return loadItems(record);
@@ -538,6 +565,7 @@ function newRecord(
     recovery,
     asks,
     fileJob: null,
+    backup: null,
     operations: [],
   };
 }
@@ -1369,6 +1397,143 @@ export function loadSettings(): void {
 /** Closes the form or tool in the panel; what was typed in it is gone. */
 export function closeTool(session: number): void {
   update(session, (current) => ({ ...current, tool: null }));
+}
+
+// ---- Back up a vault (Plan 4B Task 3: 22a to 22d, Ask 1 and Ask 2) ----
+//
+// Back up is pressed in the panel; Rust opens Windows' save dialog and writes the file, so the page never holds a path. The command is a long job
+// with a `request` the page chose, which the shell turns into an operation by `lockbox://job-started` once the work starts (not for a closed
+// dialog, nor for a refusal before anything is written). What an answer does depends on where the person is when it comes: the panel, when it is
+// still open, shows the result; a panel closed meanwhile gets the result as a message instead. A lock, or a stale answer, says nothing at all.
+
+/** The four reasons a backup is refused before anything is written, because one made now might not open: the shell's fixed `what` for each. */
+const BACKUP_REFUSED = ["details changed", "password copies disagree", "recovery key copies disagree", "details unchecked"];
+
+function isBackupRefused(error: unknown): boolean {
+  return refusedWith(error, "invalid_input") && BACKUP_REFUSED.includes(String((error as { what?: unknown }).what));
+}
+
+/**
+ * Reads whether a backup is due (Ask 1) for a session just unlocked, and keeps the days when it is. A failure, or a vault locked meanwhile, says
+ * nothing: the reminder is only a reminder, and the next unlock asks again.
+ */
+async function readBackupDue(session: number, generation: number): Promise<void> {
+  try {
+    const answer = await api.vaultBackupDue({ session, generation });
+    const due = answer.data;
+    if (due !== null && stillOpen(session, generation)) updateAsks(session, (asks) => ({ ...asks, backupDue: due.days }));
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+  }
+}
+
+/**
+ * Opens Back up (22a) in the vault's panel, from Settings or from the reminder's "Back up now". One that is running is shown as it is, and no
+ * second starts. Not in a read-only copy, which has nothing of its own to back up.
+ */
+export function openBackup(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const running = entry.backup?.phase === "running";
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "backup" },
+    backup: running ? current.backup : { phase: "ask", error: null },
+  }));
+}
+
+/** Closes the Back up panel. A backup that runs goes on, and its result is said when it comes. */
+export function closeBackup(session: number): void {
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "backup" ? null : current.tool,
+    backup: current.backup?.phase === "running" ? current.backup : null,
+  }));
+}
+
+/** Ask 2's "Not now", and the other refusals' only answer: the question goes. */
+export function putBackupAside(session: number): void {
+  update(session, (current) => (current.backup?.phase === "refused" ? { ...current, backup: null } : current));
+}
+
+/**
+ * Ask 2's "See the change": the details were changed outside Lockbox and not accepted, which is Ask 3's question. It opens for this vault, and
+ * its Accept or Lock this vault answer it as they do after an unlock.
+ */
+export function seeTheChange(session: number): void {
+  update(session, (current) =>
+    current.backup?.phase === "refused" ? { ...current, backup: null, asks: { ...current.asks, detailsChanged: true, detailsError: null } } : current,
+  );
+}
+
+/** Says how a backup ended, where the person is: in the panel when it is still open, else as a message. Nothing for a vault that locked. */
+function endBackup(session: number, generation: number, step: BackupStep & { phase: "saved" | "failed" }): void {
+  const entry = sessionOf(session);
+  if (entry?.generation !== generation) return;
+  if (entry.tool?.kind === "backup") {
+    update(session, (current) => ({ ...current, backup: step }));
+    return;
+  }
+  update(session, (current) => ({ ...current, backup: null }));
+  if (step.phase === "saved") {
+    const left = leftOutWords(step.view);
+    noted(session, left === null ? "Backup saved." : `Backup saved. ${left}`);
+  } else {
+    const more = backupNotFinishedMore(step.error);
+    told(session, more === null ? BACKUP_NOT_FINISHED : `${BACKUP_NOT_FINISHED} ${more}`);
+  }
+}
+
+/**
+ * Back up, pressed on 22a: sends the command with a new request and waits. `"Dismissed"` (the save dialog closed) goes back to 22a with nothing
+ * said. A refusal before anything was written (no job ever started) is said on 22a: 22d's numbers for a drive too small, the table's words for the
+ * rest, and the four that mean a backup made now might not open leave 22a for their own question. A refusal after the work began, and a stop, are
+ * "didn't finish". A second press while one is out sends nothing.
+ */
+export async function startBackup(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly || entry.backup?.phase !== "ask") return;
+  const { generation } = entry;
+  const request = nextRequest();
+  update(session, (current) => ({ ...current, backup: { phase: "running", request } }));
+  try {
+    const answer = await api.backupVault({ session, generation }, request);
+    if (!stillOpen(session, generation)) return;
+    const outcome = answer.data;
+    if (outcome === "Dismissed") {
+      update(session, (current) => ({ ...current, backup: { phase: "ask", error: null } }));
+    } else if ("Done" in outcome) {
+      endBackup(session, generation, { phase: "saved", view: outcome.Done });
+    } else {
+      // This command never asks a question.
+      endBackup(session, generation, { phase: "failed", error: UNEXPECTED });
+    }
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+    // Whether the work began is what the shell said by `job-started`, read before the job is let go below.
+    const began = jobOfRequest(request) !== null;
+    if (isBackupRefused(error)) {
+      update(session, (current) => ({
+        ...current,
+        tool: current.tool?.kind === "backup" ? null : current.tool,
+        backup: { phase: "refused", error },
+      }));
+    } else if (refusedWith(error, "cancelled") || began) {
+      endBackup(session, generation, { phase: "failed", error });
+    } else {
+      // Refused before anything was written. With the panel closed meanwhile, the sentence is said as a message.
+      if (sessionOf(session)?.tool?.kind === "backup") update(session, (current) => ({ ...current, backup: { phase: "ask", error } }));
+      else {
+        update(session, (current) => ({ ...current, backup: null }));
+        sayFailure(session, error);
+      }
+    }
+  } finally {
+    releaseRequest(request);
+  }
 }
 
 /** How a save came out: made (the form is gone and the login is open), the vault locked meanwhile, or the shell's refusal. */

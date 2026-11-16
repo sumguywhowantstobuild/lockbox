@@ -467,6 +467,44 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Back up: where it goes, progress, saved and not enough space (22a to 22d)",
+    shows: ["BackupFlow#BackupPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Back up", settings);
+      const panel = await screen.findByRole("complementary", { name: "Back up" });
+      // The last of its views, the one with the most on it: a refusal said under the advice.
+      shell.refuseNext("backup_vault", { code: "core", kind: "not_enough_space", needed: 1_288_490_189, available: 419_430_400 });
+      click("Back up", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Backup refused, and the questions beside it (Ask 2)",
+    shows: ["BackupFlow#BackupRefusedAsk"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Back up", settings);
+      const panel = await screen.findByRole("complementary", { name: "Back up" });
+      shell.refuseNext("backup_vault", { code: "invalid_input", what: "details changed" });
+      click("Back up", panel);
+      return screen.findByRole("dialog", { name: "Can't back up My vault yet" });
+    },
+  },
+  {
+    name: "Backup overdue (Ask 1)",
+    shows: ["BackupReminder#BackupReminder"],
+    reach: async () => {
+      start([vault({ backupDays: 40 })]);
+      await unlockIt(null);
+      return screen.findByRole("dialog", { name: "My vault hasn't been backed up in 30 days" });
+    },
+  },
+  {
     name: "Save what you copied, in the vault (8a)",
     shows: ["SaveBox#SaveBox"],
     reach: async () => {
