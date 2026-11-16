@@ -97,6 +97,8 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:shortcut not set": { title: "Windows didn't take that shortcut.", body: "Try again." },
   "core:io:startup": { title: "Lockbox couldn't change Start with Windows.", body: "Try again." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
+  // A choice the shell was holding (the files picked, 9a) was used, dropped by a lock, or left too long: pick again.
+  "code:choice_expired": { title: "That choice has expired.", body: "Pick the files again." },
   "code:core": GENERIC,
 
   // The page's own refusal (code "page"): it never comes from the shell.
@@ -220,6 +222,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "header changed on disk",
   "id",
   "idle time",
+  "index",
   "item",
   "item cannot hold files",
   "journal full",

@@ -22,6 +22,7 @@ import {
   useVaults,
   type SessionData,
 } from "../store";
+import { AddFiles, AddFilesLeft } from "./AddFiles";
 import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, OpenFilesAsk, ShortcutAsk, VaultBanners } from "./Asks";
 import { EmptyAdd } from "./EmptyAdd";
@@ -253,6 +254,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             {locked === null ? null : <p className="lnote">{locked}</p>}
             <div className="asks">
               <FileJobProgress data={data} />
+              <AddFilesLeft data={data} />
               <BusyNote data={data} />
               <OpenFilesAsk />
               <LostOutputsAsk />
@@ -415,6 +417,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             detail={data.tool.detail}
           />
         ) : null}
+        {data.tool?.kind === "add_files" ? <AddFiles key={`${String(data.session)}:${String(data.generation)}:${String(data.addFiles?.opening)}`} data={data} folders={folders} /> : null}
         {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "settings" ? <SettingsPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
       </div>

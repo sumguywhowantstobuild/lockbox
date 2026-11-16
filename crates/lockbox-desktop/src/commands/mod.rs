@@ -1,6 +1,7 @@
 //! The commands the page may call. Each is `async` (Tauri runs sync commands on the main thread), takes the raw
 //! request and parses it with [`args`] into a struct that refuses unknown fields.
 
+pub mod add_files;
 mod args;
 pub mod backup;
 pub mod capture;
@@ -70,6 +71,9 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         files::save_file_copy_confirm,
         files::add_file,
         files::attach_file,
+        add_files::pick_files_to_add,
+        add_files::remove_picked_file,
+        add_files::add_files,
         files::replace_file,
         files::open_file,
         files::retry_open_cleanup,

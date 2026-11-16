@@ -69,6 +69,12 @@ test("a_new_recovery_key_a_lock_kept_from_the_screen_has_words_of_its_own", () =
   expect(message.body).toContain("make another one");
 });
 
+test("a_choice_that_expired_asks_to_pick_again", () => {
+  const message = messageFor({ code: "choice_expired" });
+  expect(message.title).toBe("That choice has expired.");
+  expect(message.body).toBe("Pick the files again.");
+});
+
 test("unknown_error_gets_the_generic_message", () => {
   const unknown: unknown[] = [
     new Error("boom"),

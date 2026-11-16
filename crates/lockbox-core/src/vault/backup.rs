@@ -848,7 +848,7 @@ mod tests {
         let result = vault.backup(&dest, &journal, &CancelToken::new(), &NoProgress);
         assert!(
             matches!(result, Err(CoreError::NotEnoughSpace { needed, available })
-                if needed == estimate && available == just_enough - 1),
+                if needed == just_enough && available == just_enough - 1),
             "{result:?}"
         );
 

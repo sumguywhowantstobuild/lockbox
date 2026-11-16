@@ -397,6 +397,24 @@ impl Vault {
         Ok(fref)
     }
 
+    /// The refusals an import of files of these `sizes` would meet, asked once for the whole batch before the first
+    /// byte is written: a file over [`MAX_FILE_BYTES`](crate::blob::MAX_FILE_BYTES) (`TooLarge`), the file system's
+    /// limit for the largest stored file (`FileSystemLimit`), and free space for every stored blob together, with the
+    /// slack kept free (`NotEnoughSpace`, whose `needed` includes that slack). Unknown free space never refuses. Each
+    /// file is still checked on its own as it goes in.
+    pub fn check_import_space(&self, sizes: &[u64]) -> Result<()> {
+        let (mut total, mut largest) = (0u64, 0u64);
+        for &size in sizes {
+            check_length(size)?;
+            let stored = blob_len(size);
+            total = total.saturating_add(stored);
+            largest = largest.max(stored);
+        }
+        let dir = self.dir.join(FILES_DIR);
+        fs::create_dir_all(&dir)?;
+        check_space(total, largest, &volume_info(&dir)?)
+    }
+
     /// Encrypts the file at `src` and attaches it to the item. Returns the new file's ID.
     /// `progress` hears the bytes read, out of the file's size.
     pub fn attach_file(
@@ -779,6 +797,65 @@ pub(super) mod tests {
         );
         assert!(matches!(result, Err(CoreError::TooLarge { .. })));
         assert!(blob_files(&vault).is_empty());
+    }
+
+    /// A batch's space is the sum of each stored blob (with its tags) plus the slack kept free, and the refusal says so:
+    /// three files that each fit alone are refused together, with numbers the page can show; one byte more room fits.
+    #[test]
+    fn import_space_check_counts_the_whole_batch() {
+        let _cleanup = Cleanup;
+        let (_parent, vault) = new_vault();
+        let sizes = [30 * MIB, 30 * MIB + 5, 30 * MIB + 9];
+        let blobs: u64 = sizes.iter().map(|&s| blob_len(s)).sum();
+        let margin = 64 * MIB;
+        for size in sizes {
+            set_volume_override(volume(Some(blob_len(size) + margin), None));
+            vault.check_import_space(&[size]).unwrap();
+        }
+        set_volume_override(volume(Some(blobs + margin - 1), None));
+        let result = vault.check_import_space(&sizes);
+        assert!(
+            matches!(result, Err(CoreError::NotEnoughSpace { needed, available })
+                if needed == blobs + margin && available == blobs + margin - 1),
+            "{result:?}"
+        );
+        set_volume_override(volume(Some(blobs + margin), None));
+        vault.check_import_space(&sizes).unwrap();
+        vault.check_import_space(&[]).unwrap();
+    }
+
+    /// A volume whose free space cannot be read never blocks, whatever the batch.
+    #[test]
+    fn import_space_check_unknown_space_goes_ahead() {
+        let _cleanup = Cleanup;
+        let (_parent, vault) = new_vault();
+        set_volume_override(volume(None, None));
+        vault
+            .check_import_space(&[GIB, 50 * GIB, 100 * GIB])
+            .unwrap();
+    }
+
+    /// One file over 256 GiB refuses the batch even when space is unknown, and a file system's per-file limit counts for
+    /// the largest file alone, not the sum.
+    #[test]
+    fn import_space_check_refuses_a_file_over_256_gib_and_the_file_system_limit() {
+        let _cleanup = Cleanup;
+        let (_parent, vault) = new_vault();
+        set_volume_override(volume(None, None));
+        let result = vault.check_import_space(&[MIB, MAX_FILE_BYTES + 1]);
+        assert!(
+            matches!(result, Err(CoreError::TooLarge { what: "file" })),
+            "{result:?}"
+        );
+        vault.check_import_space(&[MIB, MAX_FILE_BYTES]).unwrap();
+
+        set_volume_override(volume(Some(100 * GIB), Some(4 * GIB - 1)));
+        vault.check_import_space(&[3 * GIB, 3 * GIB]).unwrap();
+        let result = vault.check_import_space(&[MIB, 5 * GIB]);
+        assert!(
+            matches!(result, Err(CoreError::FileSystemLimit { max_file }) if max_file == 4 * GIB - 1),
+            "{result:?}"
+        );
     }
 
     /// Claims fewer bytes than it then delivers: a file that grows during import.

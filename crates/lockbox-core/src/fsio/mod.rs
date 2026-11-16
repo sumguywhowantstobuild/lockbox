@@ -37,35 +37,41 @@ pub struct VolumeInfo {
 
 /// Free space and per-file size limit of the volume holding `dir`.
 pub fn volume_info(dir: &Path) -> Result<VolumeInfo> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     if let Some(fake) = VOLUME_OVERRIDE.with(|v| v.get()) {
         return Ok(fake);
     }
     Ok(sys::volume_info(dir)?)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 thread_local! {
     static VOLUME_OVERRIDE: std::cell::Cell<Option<VolumeInfo>> = const { std::cell::Cell::new(None) };
 }
 
-/// Lets a test pretend the disk is full or FAT32 (this thread only).
-#[cfg(test)]
-pub(crate) fn set_volume_override(v: Option<VolumeInfo>) {
+/// Lets a test pretend the disk is full, FAT32 or of unknown size (this thread only: set it on the thread that runs
+/// the engine call). The engine's own tests, and the shell's through `internals::fsio`; no shipped build has it.
+#[cfg(any(test, feature = "test-internals"))]
+pub fn set_volume_override(v: Option<VolumeInfo>) {
     VOLUME_OVERRIDE.with(|cell| cell.set(v));
 }
 
-/// Pure check: can `needed` more bytes be written, and can a single file of `file_bytes` exist here?
+/// Pure check: can `needed` more bytes be written, and can a single file of `file_bytes` exist here? A refusal's
+/// `needed` includes the slack kept free, so "needs X, has Y" always has X above Y.
 pub fn check_space(needed: u64, file_bytes: u64, v: &VolumeInfo) -> Result<()> {
     if let Some(max_file) = v.max_file_bytes
         && file_bytes > max_file
     {
         return Err(CoreError::FileSystemLimit { max_file });
     }
+    let with_margin = needed.saturating_add(SPACE_MARGIN);
     if let Some(available) = v.free_bytes
-        && needed.saturating_add(SPACE_MARGIN) > available
+        && with_margin > available
     {
-        return Err(CoreError::NotEnoughSpace { needed, available });
+        return Err(CoreError::NotEnoughSpace {
+            needed: with_margin,
+            available,
+        });
     }
     Ok(())
 }
@@ -1075,7 +1081,7 @@ mod tests {
         assert!(matches!(
             check_space(50 * MIB, 0, &small),
             Err(CoreError::NotEnoughSpace { needed, available })
-                if needed == 50 * MIB && available == 100 * MIB
+                if needed == 50 * MIB + SPACE_MARGIN && available == 100 * MIB
         ));
         check_space(36 * MIB, 0, &small).unwrap(); // needed + margin == free exactly
 

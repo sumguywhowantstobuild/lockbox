@@ -110,6 +110,42 @@ test("progress_bar_is_announced_without_flooding", () => {
   expect(new Set(said)).toEqual(new Set(["Adding a file started."]));
 });
 
+// Task 2's carried item R1: two jobs whose start words are the same each get their own spoken update, because the update is keyed by the
+// operation (a live region says what is added to it, and text that is the same as before is not a change a screen reader notices).
+test("two_starts_with_the_same_words_are_both_spoken", () => {
+  const place = renderHook(() => ({ said: jobs.useJobAnnouncement(), key: jobs.useJobAnnouncementKey() }));
+  start(1);
+  render(<JobProgress operation={1} label="Adding files" />);
+  expect(place.result.current.said).toBe("Adding files started.");
+  const first = place.result.current.key;
+  expect(first).toBe(1);
+  // A second job, with the same label, starts later: the words are the same, and the update is not.
+  start(2);
+  render(<JobProgress operation={2} label="Adding files" />);
+  expect(place.result.current.said).toBe("Adding files started.");
+  expect(place.result.current.key).toBe(2);
+  expect(place.result.current.key).not.toBe(first);
+});
+
+test("the_spoken_place_is_a_new_element_for_each_start", async () => {
+  // The always-present place of the message stack draws the update under a key: a new job's start is a new element, and so is heard.
+  const { ToastStack } = await import("./Toast");
+  start(1);
+  const { container } = render(
+    <>
+      <ToastStack />
+      <JobProgress operation={1} label="Adding files" />
+    </>,
+  );
+  const before = container.querySelector(".tstack [role='status'] .sr");
+  expect(before?.textContent).toBe("Adding files started.");
+  start(2);
+  render(<JobProgress operation={2} label="Adding files" />);
+  const after = container.querySelector(".tstack [role='status'] .sr");
+  expect(after?.textContent).toBe("Adding files started.");
+  expect(after).not.toBe(before);
+});
+
 test("stop_calls_cancel_for_that_operation", async () => {
   start(1);
   const stopped = vi.fn();

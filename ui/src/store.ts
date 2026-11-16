@@ -9,8 +9,9 @@
 // session it was for is gone.
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
-import { focusList, takeJobFocus } from "./focus";
-import { nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
+import { batchHasFocus, focusList, takeJobFocus } from "./focus";
+import { awayMessage, partialWords, wasClean } from "./addFilesWords";
+import { announceJob, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
 import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, SearchHit, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
 
@@ -59,6 +60,11 @@ export type Tool =
    * when Edit was pressed. What the form asks of Rust (the password, a key's value) and what is typed live in the form.
    */
   | { kind: "edit"; summary: ItemSummary; detail: ItemDetail }
+  /**
+   * Add files (9a to 9e) and Attach files: the panel for one batch. What it shows is the session's `addFiles` (the picked list, the bar, the
+   * end), and the panel is only where it is on screen: leaving it while the batch works leaves the batch and its bar going.
+   */
+  | { kind: "add_files" }
   /** The Generator page (16a). */
   | { kind: "generator" }
   /** Settings (31a, 31b): the app's, for every vault, so a read-only vault opens it too. What it shows is `StoreState.settings`. */
@@ -228,13 +234,42 @@ export interface SessionData {
    * they are working and the others to wait: one at a time. A lock takes it with the record.
    */
   fileJob: FileJob | null;
+  /**
+   * The batch of files being picked, added or just ended (Task 10), or `null`: the Add files panel shows it. An end that left something out
+   * (a file not read, a stop) is kept here after the person has gone from the panel, for a card in the list's column to name what was never
+   * stored. A lock takes it with the record.
+   */
+  addFiles: AddFilesFlow | null;
   /** The long operations the shell says are running for this vault (`lockbox://busy`): while there are any, auto-lock waits and the window says so. */
   operations: string[];
 }
 
+/** One batch of files, from the pick to its end. The paths stay in Rust: the page holds names and sizes for display, and the choice (a token). */
+export interface AddFilesFlow {
+  /** Counts the times the panel was opened: a new pick is a new panel. */
+  opening: number;
+  /** Where the batch goes: a folder (the one chosen in the panel when it is added) or the item the files are attached to. */
+  into: api.AddInto;
+  /** The choice the shell holds the picked paths under, or `null` once the shell let it go (the person picks again). */
+  choice: string | null;
+  /** The files picked so far, in the order they will go in. */
+  files: api.PickedFile[];
+  /** `pick`: 9a (and 9e); `adding`: 9b; `done`: 9c. */
+  phase: "pick" | "adding" | "done";
+  /** A Pick more or a removal is waiting for the shell. */
+  busy: boolean;
+  /** The shell's refusal to say in the panel (no room, a file too big, an expired choice), or `null`. */
+  problem: unknown;
+  /** How the batch ended, once it has. */
+  result: api.AddFilesView | null;
+  /** The panel's result takes focus: focus was in this batch's own panel or bar when it ended. Otherwise focus stays where the person put it. */
+  focusResult: boolean;
+}
+
 /** What a stored-file action is doing: its kind, and the item and file it is about (`null` where there is none: Add has neither, Attach has no file). */
 export interface FileJob {
-  kind: "open" | "save" | "replace" | "attach" | "add";
+  /** `add` and `attach` are the picker being open for a new batch; `add_files` is the batch itself. */
+  kind: "open" | "save" | "replace" | "attach" | "add" | "add_files";
   id: string | null;
   fileId: string | null;
   /**
@@ -538,6 +573,7 @@ function newRecord(
     recovery,
     asks,
     fileJob: null,
+    addFiles: null,
     operations: [],
   };
 }
@@ -1799,8 +1835,6 @@ export async function undoTrash(session: number, id: string): Promise<void> {
 
 const OPENED_COPY = "Opened a temporary read-only copy. Edits there aren't saved back. To change the stored file, use Replace file.";
 const SAVED_COPY = "Saved a copy. It isn't encrypted. Delete it when you're finished.";
-const ORIGINAL_STAYS =
-  "The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
 
 /** Says something the person reads and puts away with "Got it", and that holds no file name. */
 function noted(session: number, text: string): void {
@@ -1909,7 +1943,8 @@ async function runFile<T>(
   } finally {
     // The command has answered, whatever it came to: its job, if it had one, is over, and so is its progress card. Focus that was on the
     // card's Cancel goes to the result's message, not to the top of the page.
-    const refocus = takeJobFocus();
+    // Only if focus was in this job's own card: another job's card (in another vault's window, or the search) is left alone.
+    const refocus = takeJobFocus(jobOfRequest(request)?.operation ?? null);
     releaseRequest(request);
     endFileJob(session, generation);
     refocus();
@@ -2023,34 +2058,229 @@ export async function replaceStoredFile(session: number, id: string, fileId: str
   });
 }
 
-/** Attach a file on the login, key or note open in the panel: one file, picked in the Windows picker. It says the original is still on the PC. */
-export async function attachStoredFile(session: number, id: string): Promise<StoreResult> {
-  const ran = await runFile(session, { kind: "attach", id, fileId: null }, { panel: id }, true, (vault, request) =>
-    api.attachFile(vault, id, request),
-  );
-  return storeResult(ran, () => {
-    noted(session, `File attached. ${ORIGINAL_STAYS}`);
-    void reloadOpen(session, id);
-  });
+// ---- Many files in (Plan 4B Task 10): Add, then File, and Attach files ----
+//
+// One picker, for one file or many. The shell holds the picked paths under a choice and the page holds names and sizes (`AddFilesFlow`), shown
+// in the Add files panel: 9a the list (Pick more, leave one out, the folder), 9b one bar for the whole batch, 9c the end. The batch is one
+// long job (`add_files`), so it is the vault's one file job while it runs, and a second Add or Attach sends nothing. The panel is where it is on
+// screen, no more: leaving it leaves the batch and its bar (in the list's column) going, and an end that left something out keeps its names in
+// a card, since a file that was never stored is one nobody should delete the original of.
+
+/** The number of the last time the Add files panel was opened. */
+let addOpenings = 0;
+
+/** Changes one session's batch while it is still the opening and generation the caller began in. */
+function changeFlow(session: number, generation: number, opening: number, change: (flow: AddFilesFlow) => AddFilesFlow): void {
+  if (!stillOpen(session, generation)) return;
+  update(session, (current) => (current.addFiles?.opening === opening ? { ...current, addFiles: change(current.addFiles) } : current));
 }
 
 /**
- * Add, then File: one file picked in the Windows picker becomes an item in the folder on screen (`collection`, `null` for none). The new item
- * opens in the panel only if the panel is as it was when Add was pressed; one the person has moved to is left as it is. It says the original is
- * still on the PC.
+ * A refusal of something done in the panel (a pick, a removal, the batch before it starts): the vault locked (nothing is said, the vault is
+ * gone), or the shell's refusal is kept for the panel to say in words. A choice the shell let go takes the list with it, since the paths it
+ * stood for are gone and the person picks again.
  */
-export async function addStoredFile(session: number, collection: string | null): Promise<StoreResult> {
-  const start = sessionOf(session);
-  const openId = start?.openItem?.id ?? null;
-  const tool = start?.tool ?? null;
-  const ran = await runFile(session, { kind: "add", id: null, fileId: null }, "anywhere", true, (vault, request) =>
-    api.addFile(vault, collection, request),
+function flowRefused(session: number, generation: number, opening: number, error: unknown): void {
+  if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+  if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+  const gone = refusedWith(error, "choice_expired");
+  changeFlow(session, generation, opening, (flow) => ({
+    ...flow,
+    busy: false,
+    phase: "pick",
+    problem: error,
+    choice: gone ? null : flow.choice,
+    files: gone ? [] : flow.files,
+  }));
+}
+
+/**
+ * Add, then File, or Attach files on a login, key or note (`into`): opens the Windows picker for one file or many. A closed picker says and
+ * changes nothing; files picked open the Add files panel on the list, with nothing sent to be written yet.
+ */
+export async function startAddFiles(session: number, into: api.AddInto): Promise<StoreResult> {
+  const item = into.type === "item" ? into.id : null;
+  const ran = await runFile(
+    session,
+    { kind: item === null ? "add" : "attach", id: item, fileId: null },
+    item === null ? "anywhere" : { panel: item },
+    false,
+    (vault) => api.pickFilesToAdd(vault, null),
   );
-  return storeResult(ran, (made) => {
-    noted(session, `File added. ${ORIGINAL_STAYS}`);
-    const now = sessionOf(session);
-    if (now !== undefined && (now.openItem?.id ?? null) === openId && now.tool === tool) void selectItem(session, made);
-  });
+  if (typeof ran === "string") return ran;
+  const { outcome } = ran;
+  if (outcome === "Dismissed") return "dismissed";
+  if (typeof outcome === "object" && "Done" in outcome) {
+    const picked = outcome.Done;
+    addOpenings += 1;
+    const opening = addOpenings;
+    update(session, (current) => ({
+      ...endReveals(current),
+      openItem: null,
+      trash: false,
+      tool: { kind: "add_files" },
+      addFiles: { opening, into, choice: picked.choice, files: picked.files, phase: "pick", busy: false, problem: null, result: null, focusResult: false },
+    }));
+    return "done";
+  }
+  sayFailure(session, UNEXPECTED);
+  return "refused";
+}
+
+/** Pick more (9a): the picker adds its files to the same choice, and the list is the whole of it. With no choice left (it expired) it starts a new pick. A closed picker changes nothing. */
+export async function pickMoreFiles(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.addFiles ?? null;
+  if (entry === undefined || flow === null || flow.phase !== "pick" || flow.busy) return;
+  const { generation } = entry;
+  const { opening } = flow;
+  changeFlow(session, generation, opening, (now) => ({ ...now, busy: true, problem: null }));
+  try {
+    const answer = await api.pickFilesToAdd({ session, generation }, flow.choice);
+    if (!stillOpen(session, generation)) return;
+    const outcome = answer.data;
+    if (typeof outcome === "object" && "Done" in outcome) {
+      const { choice, files } = outcome.Done;
+      changeFlow(session, generation, opening, (now) => ({ ...now, busy: false, choice, files }));
+    } else if (outcome === "Dismissed") {
+      changeFlow(session, generation, opening, (now) => ({ ...now, busy: false }));
+    } else {
+      flowRefused(session, generation, opening, UNEXPECTED);
+    }
+  } catch (error) {
+    flowRefused(session, generation, opening, error);
+  }
+}
+
+/** Leaves file number `index` out of the pick (9a's button on each row): the list that is left, from the shell. */
+export async function leaveOutPickedFile(session: number, index: number): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.addFiles ?? null;
+  if (entry === undefined || flow === null || flow.phase !== "pick" || flow.busy || flow.choice === null) return;
+  const { generation } = entry;
+  const { opening, choice } = flow;
+  changeFlow(session, generation, opening, (now) => ({ ...now, busy: true, problem: null }));
+  try {
+    const answer = await api.removePickedFile({ session, generation }, choice, index);
+    if (!stillOpen(session, generation)) return;
+    const outcome = answer.data;
+    if (typeof outcome === "object" && "Done" in outcome) {
+      const { files } = outcome.Done;
+      changeFlow(session, generation, opening, (now) => ({ ...now, busy: false, files }));
+    } else {
+      flowRefused(session, generation, opening, UNEXPECTED);
+    }
+  } catch (error) {
+    flowRefused(session, generation, opening, error);
+  }
+}
+
+/**
+ * What the batch's command comes to for the page: how it ended (with its operation, and whether focus was in its own panel or bar as it did, both
+ * read while the bar is still there), or the shell's refusal before it began (the page's refusals are data, so the panel says them).
+ */
+type BatchRun = { view: api.AddFilesView; operation: number | null; focused: boolean } | { refused: unknown };
+
+/**
+ * Add N files (9a): sends the choice and where it goes (`into`, the folder the panel chose, or the item), and the batch is one job with one bar.
+ * A refusal before it starts (no room for the whole batch, a file over 256 GB, a choice that expired) is said in the panel and the choice stays
+ * (the shell uses it up only when the job starts); how it ended is the batch's own answer, kept for 9c, or for a card when the person has gone.
+ */
+export async function runAddFiles(session: number, into: api.AddInto): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.addFiles ?? null;
+  if (entry === undefined || flow === null || flow.phase !== "pick" || flow.busy || flow.choice === null || flow.files.length === 0) return;
+  if (entry.readOnly || entry.fileJob !== null) return;
+  const { generation } = entry;
+  const { opening, choice } = flow;
+  changeFlow(session, generation, opening, (now) => ({ ...now, into, phase: "adding", problem: null }));
+  const ran = await runFile<BatchRun>(
+    session,
+    { kind: "add_files", id: into.type === "item" ? into.id : null, fileId: null },
+    "anywhere",
+    true,
+    async (vault, request) => {
+      try {
+        const answer = await api.addFiles(vault, choice, into, request);
+        const { data } = answer;
+        if (typeof data === "object" && "Done" in data) {
+          // The command has answered but its bar is still on the page: whose place focus is in is read now, before the result replaces the bar.
+          const operation = jobOfRequest(request)?.operation ?? null;
+          const focused = batchHasFocus(operation, sessionOf(session)?.tool?.kind === "add_files");
+          return { ...answer, data: { Done: { view: data.Done, operation, focused } } };
+        }
+        return { ...answer, data: { Done: { refused: UNEXPECTED } } };
+      } catch (error) {
+        // A lock is the vault going (the caller's business); anything else came before the job started, and is the panel's to say.
+        if (error instanceof api.StaleAnswer || refusedAsLocked(error)) throw error;
+        return { session: vault.session, generation: vault.generation, data: { Done: { refused: error } } };
+      }
+    },
+  );
+  if (ran === "stale") return;
+  if (typeof ran === "string") {
+    // Another job was working (it was checked above, so this is a race), or the read after the batch was refused: back to the list.
+    changeFlow(session, generation, opening, (now) => ({ ...now, phase: "pick" }));
+    return;
+  }
+  const { outcome } = ran;
+  const done = typeof outcome === "object" && "Done" in outcome ? outcome.Done : { refused: UNEXPECTED };
+  if ("refused" in done) {
+    flowRefused(session, generation, opening, done.refused);
+    return;
+  }
+  // The item the files were attached to, when it is open now (the person went to another item and came back while the batch worked), still holds
+  // the details it was read with, and its revision: read it again (only the open one is, as after every other change to an item).
+  if (into.type === "item") void reloadOpen(session, into.id);
+  endBatch(session, generation, opening, into, done);
+}
+
+/**
+ * Where a batch's end goes: the panel when it is still on screen; else, when everything went in, one message that says so (and the originals
+ * stay); else the flow stays at its end, and the card in the list's column names what was left out until it is put away. The result takes
+ * focus only for a person who was in the batch's own panel or bar; for anyone else (in the filter, on another item) the end is said in the
+ * page's spoken place instead, by the operation, which the card or the panel drawn after it could not do (a screen reader does not speak a
+ * region that is new).
+ */
+function endBatch(
+  session: number,
+  generation: number,
+  opening: number,
+  into: api.AddInto,
+  run: { view: api.AddFilesView; operation: number | null; focused: boolean },
+): void {
+  if (!stillOpen(session, generation)) return;
+  const entry = sessionOf(session);
+  if (entry?.addFiles?.opening !== opening) return;
+  const { view: result, operation, focused } = run;
+  const showing = entry.tool?.kind === "add_files";
+  if (!showing && wasClean(result)) {
+    update(session, (current) => ({ ...current, addFiles: null }));
+    noted(session, awayMessage(result, into));
+    return;
+  }
+  const total = entry.addFiles.files.length;
+  const takesFocus = showing && focused;
+  changeFlow(session, generation, opening, (now) => ({ ...now, phase: "done", result, busy: false, focusResult: takesFocus }));
+  if (!takesFocus) announceJob(wasClean(result) ? awayMessage(result, into) : partialWords(result, total, into), operation ?? 0);
+}
+
+/**
+ * Closes the Add files panel. Before the batch starts it is Cancel: nothing was written, and the choice is let to expire. While it works the
+ * panel goes and the batch carries on (its bar moves to the list's column). At its end it is Done, and it is also what puts away the card that
+ * kept an end the person had left. An item the files were attached to comes back in the panel, with the files it has now.
+ */
+export function closeAddFiles(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined) return;
+  const flow = entry.addFiles;
+  const showing = entry.tool?.kind === "add_files";
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "add_files" ? null : current.tool,
+    addFiles: flow?.phase === "adding" ? current.addFiles : null,
+  }));
+  if (showing && flow?.into.type === "item" && flow.phase !== "adding") void selectItem(session, flow.into.id);
 }
 
 /** Open on a file result of the search: as the panel's, and the search steps aside once it worked. A program file is asked over the search. */

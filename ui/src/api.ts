@@ -652,6 +652,64 @@ export function attachFile(vault: SessionRef, id: string, request: number): Prom
   return call<Outcome<string>>("attach_file", { session: vault.session, generation: vault.generation, id, request });
 }
 
+// ---- Many files in (Task 10): one picker, the picked list held in Rust, then one job for the batch ----
+//
+// The page holds names and sizes for display, and a choice (a token). The paths stay in Rust; the page can send back the choice and an
+// index, never a path.
+
+/** One picked file, for display: its name (not its path) and its size in bytes. */
+export interface PickedFile {
+  name: string;
+  size: number;
+}
+
+/** What a pick answers: the choice the shell holds the paths under, and every file picked so far, in order. */
+export interface PickedFiles {
+  choice: string;
+  files: PickedFile[];
+}
+
+/** Where a batch goes: the folder on screen (`null`: no folder), or an item the files are attached to (a login, key or note; its hex id). */
+export type AddInto = { type: "folder"; collection: string | null } | { type: "item"; id: string };
+
+/** A refusal as the shell sends it: a plain object with a `code`, and the fields of that refusal. `messageFor` gives its words. */
+export type ShellRefusal = { code: string } & Record<string, unknown>;
+
+/**
+ * How a batch ended: how many files went in, the names of those that could not be read (the batch went on), the names never tried because
+ * the batch stopped (in the order picked), and what stopped it (`cancelled` for a Stop, `locked`, `busy`, or a full drive), or `null` when
+ * it ran to the end. A file that was being written when it stopped is in `not_added`.
+ */
+export interface AddFilesView {
+  added: number;
+  failed: string[];
+  not_added: string[];
+  stopped: ShellRefusal | null;
+}
+
+/**
+ * Opens the Windows picker for many files. With no `choice` it starts a pick (`"Dismissed"` when the picker is closed with nothing
+ * chosen). With the choice a pick answered, Pick more adds the new files to the same choice, and a closed picker leaves the list as it
+ * was. A choice that was used, dropped or has expired is refused as `choice_expired`.
+ */
+export function pickFilesToAdd(vault: SessionRef, choice: string | null): Promise<Tagged<Outcome<PickedFiles>>> {
+  return call<Outcome<PickedFiles>>("pick_files_to_add", { session: vault.session, generation: vault.generation, choice });
+}
+
+/** Leaves file number `index` (from 0) out of a pick: the list that is left. An index past the end is refused (`invalid_input`, `index`). */
+export function removePickedFile(vault: SessionRef, choice: string, index: number): Promise<Tagged<Outcome<{ files: PickedFile[] }>>> {
+  return call<Outcome<{ files: PickedFile[] }>>("remove_picked_file", { session: vault.session, generation: vault.generation, choice, index });
+}
+
+/**
+ * Stores every file of the pick, one after another, as one job with one progress over the batch's bytes (`request` names it for
+ * `lockbox://job-started`). The choice is used up when the job starts; one refused before that (no room for the whole batch, a file over
+ * 256 GiB) leaves it. Read-only refuses.
+ */
+export function addFiles(vault: SessionRef, choice: string, into: AddInto, request: number): Promise<Tagged<Outcome<AddFilesView>>> {
+  return call<Outcome<AddFilesView>>("add_files", { session: vault.session, generation: vault.generation, choice, into, request });
+}
+
 /** Replaces the stored file `fileId` of the item `id` with one the person picks: the new file's ID. Read-only refuses. */
 export function replaceFile(vault: SessionRef, id: string, fileId: string): Promise<Tagged<Outcome<string>>> {
   return call<Outcome<string>>("replace_file", { session: vault.session, generation: vault.generation, id, file_id: fileId });

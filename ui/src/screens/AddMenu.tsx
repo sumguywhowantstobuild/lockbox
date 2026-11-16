@@ -1,12 +1,12 @@
 import { rememberOpener } from "../focus";
 import { KindIcon, PlusIcon } from "../parts/Icon";
 import { Menu } from "../parts/Menu";
-import { addStoredFile, openNewKey, openNewLogin, openNewNote, openPasteEnv } from "../store";
+import { openNewKey, openNewLogin, openNewNote, openPasteEnv, startAddFiles } from "../store";
 
 /**
  * Add (6a), at the right end of the toolbar: a menu of what can be added. A login, a key, a note and a file are equal in it, as
- * drawn, and a pasted .env is set apart after them. File picks one file in the Windows picker and stores it as an item in the folder on
- * screen (`folder`, `null` on All items); several at once is 4B's, so it is not "Files". Not shown in a vault opened from a backup, where
+ * drawn, and a pasted .env is set apart after them. File opens the Windows picker for one file or many and lists them in the Add files
+ * panel, to store each as an item in the folder on screen (`folder`, `null` on All items). Not shown in a vault opened from a backup, where
  * nothing can be added.
  */
 export function AddMenu({ session, folder }: { session: number; folder: string | null }) {
@@ -50,7 +50,7 @@ export function AddMenu({ session, folder }: { session: number; folder: string |
             label: "File",
             icon: <KindIcon kind="file" className="i" />,
             onSelect: () => {
-              void addStoredFile(session, folder);
+              void startAddFiles(session, { type: "folder", collection: folder });
             },
           },
           {
