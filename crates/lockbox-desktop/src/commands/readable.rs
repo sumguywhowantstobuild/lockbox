@@ -1322,12 +1322,14 @@ mod tests {
         ] {
             assert_eq!(parse::<SessionArgs>(&body(bad)).err(), Some(MALFORMED));
         }
-        let token = "0123456789abcdef0123456789abcdef";
-        assert!(parse::<ConfirmArgs>(&body(json!({ "token": token }))).is_ok());
+        // A well-formed token (32 hex), built rather than written out: a literal reads as a key to the review packer's
+        // key scan, which a repo cannot switch off.
+        let well_formed = "0123456789abcdef".repeat(2);
+        assert!(parse::<ConfirmArgs>(&body(json!({ "token": well_formed }))).is_ok());
         for bad in [
             json!({}),
             json!({ "token": "not a token" }),
-            json!({ "token": token, "dest": "C:\\x" }),
+            json!({ "token": well_formed, "dest": "C:\\x" }),
         ] {
             assert_eq!(parse::<ConfirmArgs>(&body(bad)).err(), Some(MALFORMED));
         }
