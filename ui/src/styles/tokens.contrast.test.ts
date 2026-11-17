@@ -267,7 +267,8 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         check(`link-button words, ${state}`, c("--ink"), tint, 4.5);
       }
       check("link-button words, disabled", c("--ink2"), ground, 4.5);
-      // The key screen's Print and Save as PDF: card-coloured buttons with an edge on the plate. Words at rest, hovered and
+      // The key screen's Print and Save as PDF, and 26a's "A vault folder" (the same card-coloured button, also waiting while a picker is open):
+      // card-coloured buttons with an edge on the plate. Words at rest, hovered and
       // pressed (the tint laid over the card), greyed while another print runs, and the edge against the plate at rest.
       for (const [state, fill] of [["rest", card], ["hover", over(c("--hov"), card)], ["pressed", over(c("--prs"), card)]] as const) {
         check(`Print and Save as PDF words, ${state}`, c("--ink"), fill, 4.5);

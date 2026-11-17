@@ -11,9 +11,10 @@ import { MainWindow } from "./screens/MainWindow";
 import { RestoreFlow } from "./screens/RestoreFlow";
 import { FirstRun } from "./screens/setup/FirstRun";
 import { LostList } from "./screens/setup/LostList";
+import { MoveIn } from "./screens/setup/MoveIn";
 import { PickWords } from "./screens/setup/PickWords";
 import { RecoveryKey } from "./screens/setup/RecoveryKey";
-import { startCapture, startNotices, startStore, useRestore, useSessions, useStartError, useVaultListDamaged, useVaults } from "./store";
+import { startCapture, startNotices, startStore, useMoveIn, useRestore, useSessions, useStartError, useVaultListDamaged, useVaults } from "./store";
 import { useMode } from "./theme";
 import "./styles/tokens.css";
 import "./styles/base.css";
@@ -25,7 +26,8 @@ import "./styles/print.css";
 /**
  * The whole app: first-time setup while there is no vault, the lost-list screen while the list of vaults is damaged, the lock screen while none is open, the main window of the
  * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. A restore
- * (24a to 24e) takes the whole window above any of these while it is open, and gives it back when it ends. The
+ * (24a to 24e) takes the whole window above any of these while it is open, and gives it back when it ends; moving to a new computer (26a to 26c) takes the
+ * place of the first screen and the lock screen in the same way. The
  * store starts listening for locks before anything asks the shell for anything. The first close of the window is explained
  * over whichever of these is up (5b). Light or dark follows the theme chosen in Settings, and Windows' own setting for System.
  */
@@ -70,12 +72,16 @@ export default function App() {
   // a lock of the open vault does not take its steps away.
   const restore = useRestore();
   const restoring = restore !== null && restore.phase !== "picking";
+  // Moving to a new computer (26a to 26c) is the app's too: it takes the place of the first screen and the lock screen while it is open, and a restore
+  // begun from it comes above it, except that 26c takes the place of the restore's last step (24e) until its Unlock goes there.
+  const moveIn = useMoveIn();
+  const movingIn = moveIn !== null && active === undefined;
 
   return (
     <LockboxParts>
       <PortalContainerProvider value={root ?? undefined}>
         <div ref={setRoot} className={`app mode-${mode} v-${look.accent}`}>
-          {restoring ? <RestoreFlow /> : screen}
+          {restoring && moveIn?.step !== "here" ? <RestoreFlow /> : movingIn ? <MoveIn /> : screen}
           <FirstClose />
           <CloseQuestion />
         </div>

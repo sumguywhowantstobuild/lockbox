@@ -116,7 +116,8 @@ function Steps({ flow }: { flow: Flow }) {
   const name = flow.prepared?.name ?? flow.checked?.name ?? "";
   const cancel = () => {
     closeRestore();
-    focusBack("settings");
+    // Begun from the first screen's 26a: Cancel goes back there, which takes focus to its own heading. Otherwise it goes back to Settings.
+    if (flow.origin !== "first_screen") focusBack("settings");
   };
 
   let steps;

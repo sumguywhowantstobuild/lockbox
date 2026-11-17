@@ -364,7 +364,7 @@ for the vault's name. Moments with their own screen in a task (10d, 10e, 1c, 2c,
 | Restore refused, wrong drive | A vault can't live on a removable, FAT32 or network drive. Choose a folder on this PC. | OK |
 | All old-copy names used | There are too many older copies of this vault. Delete some, then restore again. | Older copies, Cancel |
 | Nowhere to copy to | Unlock a vault first, so there's somewhere to copy this to. | OK |
-| Vault made but not listed | Your new vault is on disk but couldn't be added to the list. Use "I already have a vault" on the first screen to add it. (Its new recovery key is made at its first unlock, 21f.) | OK |
+| Vault made but not listed | Your new vault is on disk but couldn't be added to the list. Use "I already have a vault or a backup" on the first screen to add it. (Its new recovery key is made at its first unlock, 21f.) | OK |
 | Password count while typing (21b) | At least 12 characters · 5 so far. At 12 or more, a check mark and "12 characters or more", said once to a screen reader. | none |
 | Recovery key saved as a PDF (21c, 21f) | Saved in C:\Users\you\Documents. | none |
 | Saving a readable file to a cloud folder (21e) | This folder is synced to the cloud. This file would be uploaded unprotected. | Continue, Pick another folder |

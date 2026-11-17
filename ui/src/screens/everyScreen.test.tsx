@@ -169,6 +169,33 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "What do you have? (26a, 26b)",
+    shows: ["setup/MoveIn#MoveIn"],
+    reach: async () => {
+      start([]);
+      await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+      click("I already have a vault or a backup");
+      await screen.findByRole("heading", { level: 1, name: "What do you have?" });
+      // 26b: the folder on a USB stick, refused, with its words as the alert.
+      shell.refuseNext("add_existing_vault", { code: "invalid_input", what: "removable drive" });
+      click("A vault folder");
+      await screen.findByRole("alert");
+    },
+  },
+  {
+    name: "A vault is here, bring in the next (26c)",
+    shows: ["setup/MoveIn#MoveIn"],
+    reach: async () => {
+      start([]);
+      await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+      click("I already have a vault or a backup");
+      await screen.findByRole("heading", { level: 1, name: "What do you have?" });
+      shell.offerExisting({ id: 40, name: "Old vault", items: [] });
+      click("A vault folder");
+      await screen.findByRole("heading", { level: 1, name: "Old vault is here" });
+    },
+  },
+  {
     name: "Lost list of vaults (Ask 12)",
     shows: ["setup/LostList#LostList", "setup/Frame#Frame"],
     reach: async () => {

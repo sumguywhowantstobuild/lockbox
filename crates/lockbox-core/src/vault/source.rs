@@ -91,6 +91,8 @@ impl VaultSource {
     pub(super) fn item_ids(&self) -> Result<Vec<ItemId>> {
         match self {
             Self::Folder(dir) => {
+                #[cfg(any(test, feature = "test-internals"))]
+                crate::fsio::failpoint::check("source.list")?;
                 let items = dir.join(ITEMS_DIR);
                 check_folder(&items)?;
                 let entries = match fs::read_dir(&items) {
@@ -144,6 +146,31 @@ impl VaultSource {
         ids.iter()
             .map(|id| self.item_len(id).unwrap_or(0))
             .fold(0, u64::saturating_add)
+    }
+
+    /// [`items_len`](Self::items_len), stopping at the first item it would size once `cancel` is set (`Cancelled`).
+    pub(super) fn items_len_cancellable(
+        &self,
+        ids: &[ItemId],
+        cancel: &CancelToken,
+    ) -> Result<u64> {
+        let mut total = 0_u64;
+        for id in ids {
+            #[cfg(any(test, feature = "test-internals"))]
+            crate::fsio::failpoint::check("source.size")?;
+            cancel.check()?;
+            total = total.saturating_add(self.item_len(id).unwrap_or(0));
+        }
+        Ok(total)
+    }
+
+    /// Fails unless a folder source's root is a plain folder, as [`header`](Self::header) requires before it reads
+    /// the root's header: a link or junction could lead anywhere. An archive has no root folder.
+    pub(super) fn check_root(&self) -> Result<()> {
+        match self {
+            Self::Folder(dir) => check_folder(dir),
+            Self::Archive(_) => Ok(()),
+        }
     }
 
     /// The size of the stored blob `id`, as [`blob`](Self::blob) would report it.

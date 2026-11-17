@@ -76,9 +76,17 @@ impl ReadOnlyVault {
         cancel: &CancelToken,
         progress: &dyn Progress,
     ) -> Result<ReadOnlyVault> {
+        // Before anything is listed or sized: a cancel already made, and a root that is a link (whose target would
+        // otherwise have its items listed first).
+        cancel.check()?;
+        source.check_root()?;
         // A list that cannot be made counts as nothing here: `unlock_source` meets the same error.
         let items = source.item_ids().unwrap_or_default();
-        let meter = Meter::new(progress, cancel, source.items_len(&items));
+        let meter = Meter::new(
+            progress,
+            cancel,
+            source.items_len_cancellable(&items, cancel)?,
+        );
         // The vault key is not kept: exporting needs only each file's own key.
         let opened = unlock_source(&source, credential, cancel, Some(&meter))?;
         meter.finish();
@@ -1166,6 +1174,108 @@ mod tests {
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert_eq!(reached.get(), 1, "never reached the per-item checkpoint");
+    }
+
+    /// How many times the step `name` is reached from now until the failpoints are disarmed.
+    fn count_reached(name: &'static str) -> Rc<Cell<u32>> {
+        let reached = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&reached);
+        failpoint::observe(name, Box::new(move || seen.set(seen.get() + 1)));
+        reached
+    }
+
+    /// Task 9, carried from Task 1: a vault folder that is a link is refused before the folder it leads to has
+    /// any item listed or sized.
+    #[test]
+    fn linked_root_refused_before_its_target_is_listed() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        for n in 0..3u8 {
+            f.file_item(&[n; 8]);
+        }
+        let link = f.parent.path().join("link");
+        make_dir_link(&link, f.vault.dir());
+        let listed = count_reached("source.list");
+        let sized = count_reached("source.size");
+        let opened = count_reached("source.item");
+        let result = ReadOnlyVault::open_folder(
+            &link,
+            Credential::Password(PW),
+            &CancelToken::new(),
+            &NoProgress,
+        );
+        failpoint::disarm_all();
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::InvalidInput {
+                    what: "not a plain folder"
+                })
+            ),
+            "refused some other way"
+        );
+        assert_eq!(listed.get(), 0, "the linked folder's items were listed");
+        assert_eq!(sized.get(), 0, "the linked folder's items were sized");
+        assert_eq!(opened.get(), 0, "the linked folder's items were opened");
+    }
+
+    /// Task 9, carried from Task 1: a cancel that is already there stops the open before any item is sized.
+    #[test]
+    fn cancelled_open_returns_before_sizing() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        for n in 0..3u8 {
+            f.file_item(&[n; 8]);
+        }
+        let backup = f.backup("a.lockbox-backup");
+        let copy = f.parent.path().join("copy");
+        copy_folder(f.vault.dir(), &copy);
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+
+        let sized = count_reached("source.size");
+        let from_backup =
+            ReadOnlyVault::open_backup(&backup, Credential::Password(PW), &cancelled, &NoProgress);
+        let from_folder =
+            ReadOnlyVault::open_folder(&copy, Credential::Password(PW), &cancelled, &NoProgress);
+        failpoint::disarm_all();
+        assert!(matches!(from_backup, Err(CoreError::Cancelled)));
+        assert!(matches!(from_folder, Err(CoreError::Cancelled)));
+        assert_eq!(sized.get(), 0, "an item was sized after the cancel");
+    }
+
+    /// Task 9, carried from Task 1: a cancel that comes while the items are being sized stops the sizing at that item
+    /// and the open there, before any item is read.
+    #[test]
+    fn cancel_during_sizing_stops_the_open() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        for n in 0..3u8 {
+            f.file_item(&[n; 8]);
+        }
+        let backup = f.backup("a.lockbox-backup");
+        let copy = f.parent.path().join("copy");
+        copy_folder(f.vault.dir(), &copy);
+        let backup_open = |token: &CancelToken| {
+            ReadOnlyVault::open_backup(&backup, Credential::Password(PW), token, &NoProgress)
+        };
+        let folder_open = |token: &CancelToken| {
+            ReadOnlyVault::open_folder(&copy, Credential::Password(PW), token, &NoProgress)
+        };
+        for open in [
+            &backup_open as &dyn Fn(&CancelToken) -> Result<ReadOnlyVault>,
+            &folder_open,
+        ] {
+            let token = CancelToken::new();
+            let sized = count_reached("source.size");
+            let read = count_reached("source.item");
+            failpoint::arm_cancel("source.size", token.clone());
+            let result = open(&token);
+            failpoint::disarm_all();
+            assert!(matches!(result, Err(CoreError::Cancelled)));
+            assert_eq!(sized.get(), 1, "the sizing went on after the cancel");
+            assert_eq!(read.get(), 0, "an item was read after the cancel");
+        }
     }
 
     #[test]

@@ -50,9 +50,32 @@ export const MESSAGES: Record<string, Words> = {
     title: "A vault can't live on a removable, FAT32 or network drive.",
     body: "Choose a folder on this PC.",
   },
+  // The other drives the location check refuses (a network drive, a CD or RAM disk, and a file system that isn't NTFS) are the same sentence to the person.
+  "code:invalid_input:network drive": {
+    title: "A vault can't live on a removable, FAT32 or network drive.",
+    body: "Choose a folder on this PC.",
+  },
+  "code:invalid_input:drive type not supported": {
+    title: "A vault can't live on a removable, FAT32 or network drive.",
+    body: "Choose a folder on this PC.",
+  },
+  "code:invalid_input:file system not supported": {
+    title: "A vault can't live on a removable, FAT32 or network drive.",
+    body: "Choose a folder on this PC.",
+  },
+  // Lockbox's own settings folder, picked as the place for a vault: the words of `state folder`.
+  "code:invalid_input:app data folder": {
+    title: "Lockbox won't save that in its own settings folder.",
+    body: "Choose another folder.",
+  },
+  // A folder picked to add as a vault that has no vault in it (26a).
+  "code:invalid_input:not a vault folder": {
+    title: "That folder isn't a Lockbox vault.",
+    body: "Choose the vault's own folder.",
+  },
   "code:invalid_input:vault not listed": {
     title: "Your new vault is on disk but couldn't be added to the list.",
-    body: "Use “I already have a vault” on the first screen to add it.",
+    body: "Use “I already have a vault or a backup” on the first screen to add it.",
   },
   "code:invalid_input:password is empty": { title: "Type the password first.", body: "" },
   // The shell writes a "not confirmed" note before it makes a recovery key, and makes none when it can't.
@@ -127,6 +150,8 @@ export const MESSAGES: Record<string, Words> = {
   // The backup picked for Test a backup was let go by the shell (left too long, or a lock): this screen's own words, since "Pick the files again."
   // (`code:choice_expired`, Add files) is not what it asks.
   "page:test_choice_expired": { title: "That choice has expired.", body: "Pick the backup again." },
+  // 26b: a vault folder on a removable drive, picked on the first screen's "What do you have?" (the page's own, since the create form says the drive rule instead).
+  "page:copy_it_first": { title: "That folder is on a removable drive.", body: "Copy it to this PC first, then choose the copy." },
   // A restore whose copy was stopped (Cancel, Windows locking or sleeping, Lock all, closing): nothing was changed. Said on the first step of the restore.
   "page:restore_cancelled": { title: "The restore was cancelled.", body: "Your vault is as it was." },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
@@ -208,6 +233,7 @@ export const MESSAGES: Record<string, Words> = {
  */
 export const KNOWN_WHATS: readonly string[] = [
   "already restored",
+  "app data folder",
   "backup",
   "backup changed",
   "backup entries",
@@ -246,6 +272,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "destination not writable",
   "details changed",
   "details unchecked",
+  "drive type not supported",
   "earlier password",
   "env keys",
   "env rows",
@@ -255,6 +282,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "file missing",
   "file name",
   "file record",
+  "file system not supported",
   "folder",
   "folder changed",
   "folder is open",
@@ -276,6 +304,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "key slots",
   "link",
   "link type",
+  "network drive",
   "no character class selected",
   "no files",
   "no keys",

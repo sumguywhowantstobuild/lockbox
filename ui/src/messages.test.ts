@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import { GENERIC, KNOWN_WHATS, MESSAGES, messageFor, messageText } from "./messages";
+import { folderWords } from "./moveInWords";
 import { listBelow, readBeside } from "./testing/files";
 
 const CRATES = "../../crates/";
@@ -38,7 +39,12 @@ test("every_shell_error_has_a_message", () => {
   for (const { text } of sources) for (const match of text.matchAll(/\bwhat: (?:Some\()?"([^"]*)"/g)) whats.add(match[1] ?? "");
   // And the label a change passes as an argument (`write_change(session, generation, "…", …)`): it is a refusal's `what` too.
   for (const { text } of sources) for (const match of text.matchAll(/\bwrite_change\(\s*\w+,\s*\w+,\s*"([^"]*)"/g)) whats.add(match[1] ?? "");
+  // And the location check's own, which it makes through its local `refuse("…")` (it has no `what:` of its own to read).
+  for (const { path, text } of sources) {
+    if (path.endsWith("lockbox-desktop/src/locations.rs")) for (const match of text.matchAll(/\brefuse\("([^"]*)"\)/g)) whats.add(match[1] ?? "");
+  }
   expect(whats, "a change's label was read").toContain("password");
+  expect(whats, "the location check's labels were read").toContain("network drive");
   expect(whats.size, "the whats were read").toBeGreaterThan(50);
   for (const what of whats) if (!KNOWN_WHATS.includes(what)) missing.push(`what: ${what}`);
   expect(missing, "no message for these").toEqual([]);
@@ -170,9 +176,37 @@ test("word_and_count_refusals_have_words", () => {
 test("a_vault_made_but_not_listed_points_at_the_first_screens_words", () => {
   const words = messageFor({ code: "invalid_input", what: "vault not listed" });
   expect(words.title).toBe("Your new vault is on disk but couldn't be added to the list.");
-  expect(words.body).toContain("I already have a vault");
+  expect(words.body).toContain("I already have a vault or a backup");
   // The new key is made automatically at the next unlock.
   expect(words.body).not.toMatch(/recovery key/i);
+});
+
+test("a_vault_folder_on_a_removable_drive_has_26bs_words_in_the_table", () => {
+  // The words come through `messageFor`, from the table, as the design gives them; the page's own kind is what the first screen asks for.
+  expect(messageText(messageFor({ code: "page", kind: "copy_it_first" }))).toBe(
+    "That folder is on a removable drive. Copy it to this PC first, then choose the copy.",
+  );
+  expect(MESSAGES["page:copy_it_first"]).toBeDefined();
+  expect(folderWords({ code: "invalid_input", what: "removable drive" })).toBe(messageText(messageFor({ code: "page", kind: "copy_it_first" })));
+  // Any other refusal is the table's words for it, never the removable drive's.
+  expect(folderWords({ code: "invalid_input", what: "network drive" })).toBe(messageText(messageFor({ code: "invalid_input", what: "network drive" })));
+});
+
+test("a_folder_that_cannot_be_added_has_words_of_its_own", () => {
+  // Every drive a vault can't live on is the design's wrong-drive sentence; a folder with no vault in it is told to pick the vault's own.
+  for (const what of ["removable drive", "network drive", "drive type not supported", "file system not supported"]) {
+    expect(messageText(messageFor({ code: "invalid_input", what })), what).toBe(
+      "A vault can't live on a removable, FAT32 or network drive. Choose a folder on this PC.",
+    );
+  }
+  expect(messageText(messageFor({ code: "invalid_input", what: "not a vault folder" }))).toBe(
+    "That folder isn't a Lockbox vault. Choose the vault's own folder.",
+  );
+  // Lockbox's own settings folder has the words `state folder` has.
+  expect(messageFor({ code: "invalid_input", what: "app data folder" })).toEqual(messageFor({ code: "invalid_input", what: "state folder" }));
+  for (const what of ["network drive", "drive type not supported", "file system not supported", "not a vault folder", "app data folder"]) {
+    expect(KNOWN_WHATS).toContain(what);
+  }
 });
 
 test("a_bad_key_name_has_words_of_its_own", () => {
