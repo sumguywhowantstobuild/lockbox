@@ -521,6 +521,29 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("settings switch, on track on the card", c("--add"), card, 3);
       check("settings switch, knob on the off track", c("--switch-knob"), c("--switch-off"), 3);
       check("settings switch, knob on the on track", c("--switch-knob"), c("--add"), 3);
+
+      // Test a backup (Plan 4B Task 4, 23a to 23d), in the side panel. The box a password or recovery key is typed into (`CredentialField`): what is
+      // typed, hidden or shown, is words on the box's own card; its edge, at rest, with the pointer on it and in error, is what marks it on the panel
+      // (3 to 1; its focus ring is the ordinary one); Show and Hide beside it is the quiet pill (measured on the panel above), and its refusal line
+      // ("Wrong password...") is the form's error line on the panel (4.5 to 1, measured above) and says it in words as well as in the edge.
+      check("credential box words on its card", c("--ink"), card, 4.5);
+      check("credential box edge on the panel", c("--edge"), paper, 3);
+      check("credential box edge, pointer on it, on the panel", c("--ink2"), paper, 3);
+      check("credential box edge, in error, on the panel", c("--danger"), paper, 3);
+      check("credential box label on the panel", c("--ink2"), paper, 4.5);
+      // The picked backup's row: its name, its size and the tile's letters on the card (the tile's tint laid over it, in each tile colour).
+      check("picked backup name on its card", c("--ink"), card, 4.5);
+      check("picked backup size on its card", c("--ink2"), card, 4.5);
+      check("picked backup tile letters on the card", c("--ink"), card, 4.5);
+      for (const tile of ["--t0", "--t1", "--t2", "--t3", "--t4"]) {
+        check(`picked backup tile letters on tile ${tile}`, c("--ink"), over([...rgbOf(tile), 0.15] as Rgba, card), 4.5);
+      }
+      // The result: its figures' labels (quiet words) and values on the group's card, the line that says nothing was changed on the panel, and
+      // the damaged backup's sentence (the error colour on the panel, which is also said by its heading).
+      check("test result labels on the card", c("--ink2"), card, 4.5);
+      check("test result values on the card", c("--ink"), card, 4.5);
+      check("test result sentence on the panel", c("--ink2"), paper, 4.5);
+      check("damaged backup sentence on the panel", c("--danger"), paper, 4.5);
     }
   }
 

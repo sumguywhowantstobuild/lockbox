@@ -122,6 +122,9 @@ export const MESSAGES: Record<string, Words> = {
   },
   // A cloud question left open past the shell's five minutes: the shell let go of the save it had parked, so the yes finds nothing.
   "page:key_pdf_expired": { title: "That took too long, so nothing was saved. Press Save as PDF again.", body: "" },
+  // The backup picked for Test a backup was let go by the shell (left too long, or a lock): this screen's own words, since "Pick the files again."
+  // (`code:choice_expired`, Add files) is not what it asks.
+  "page:test_choice_expired": { title: "That choice has expired.", body: "Pick the backup again." },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
@@ -216,6 +219,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "collection",
   "collection has items",
   "collection inside a collection",
+  "credential",
   "damaged output journals",
   "damaged vault lists",
   "destination changed",

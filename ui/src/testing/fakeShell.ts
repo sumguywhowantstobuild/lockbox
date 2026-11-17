@@ -224,6 +224,9 @@ function summary(item: FakeItem) {
   };
 }
 
+/** What a job belongs to, as `lockbox://job-started` says: a session at a generation, or the launch at a lock epoch (a test of a backup). */
+type JobScopeOf = { type: "session"; session: number; generation: number } | { type: "launch"; epoch: number };
+
 export interface FakeShell {
   /** Every command sent, in order, with its arguments. */
   calls: { cmd: string; args: unknown }[];
@@ -476,8 +479,40 @@ export interface FakeShell {
    * go, cancelled (`cancel_operation`) or its vault locks. The operation is the shell's number, which the page learns from that event only.
    */
   runningJobs(): { request: number; operation: number; scope: { type: "session"; session: number; generation: number }; kind: string }[];
+  /** The launch-scoped jobs running (a test of a backup), as `runningJobs` lists a vault's: the scope names the lock epoch the job began in. */
+  runningLaunchJobs(): { request: number; operation: number; scope: { type: "launch"; epoch: number }; kind: string }[];
   /** Sends `lockbox://progress` for a running job with these figures. */
   sendProgress(operation: number, done: number, total: number): void;
+  /**
+   * Test a backup (Plan 4B Task 4). The shell holds the picked backups under choices of 32 hex characters, launch-scoped: a pick forgets the choice it was
+   * sent, and the shell's lock epoch (`lock_all`, `changeLockEpoch`) drops every one. These are the names and sizes held now, in order of the picks.
+   */
+  testChoices(): { name: string; size: number }[];
+  /** The tokens of the choices held now, in order of the picks (the page only learns one from an answer). */
+  testChoiceTokens(): string[];
+  /** The file the next `test_backup_pick` chooses, by name and size in bytes (`BACKUP_NAME` and 1.2 GB when none is set). */
+  pickBackupNext(name: string, size?: number): void;
+  /** Lets the shell forget every held backup at once, as five minutes do: a `test_backup` for one is then `choice_expired`. */
+  expireTestChoices(): void;
+  /** What the next tests find when they open (changes what `test_backup` answers with): the summary's fields over a made-up one. Stays until changed. */
+  backupSummary(summary: Partial<{ created_at: string; items: number; files: number; missing_files: number; size_on_disk: number }>): void;
+  /** The next test that opens the backup finds it damaged, with this first failing `what` (`undefined`: a refusal with none). Once. */
+  damageBackup(what: string | undefined): void;
+  /** Holds every `test_backup_pick` answer until `release` is called, as the picker stays open: the choice is made at release. */
+  holdPicker(): () => void;
+  /**
+   * Holds every `test_backup` until `release` is called, as a big backup would: its job (kind `test`, scope `launch` with the epoch it began in) is
+   * running from the moment the command arrives, and it is decided at release (a lock epoch in between leaves `locked`, a Cancel leaves `cancelled`).
+   */
+  holdTest(): () => void;
+  /**
+   * Holds the `lockbox://job-started` of a test of a backup until `release` is called, as an event that reaches the page late (the command has begun
+   * and the job is running in the shell; the page has not heard which operation it is).
+   */
+  holdJobStarted(): () => void;
+  /** The name and the choice of the backup the last `backup_vault` wrote and parked for 22c's Test this backup. */
+  lastBackupName(): string;
+  lastBackupChoice(): string;
   /** How many opened copies another program holds, as the last `lockbox://notice` of `open_cleanup` told. `retry_open_cleanup` leaves this many. */
   retryLeaves(stillOpen: number): void;
   /** How many times `retry_open_cleanup` reached the shell. */
@@ -754,6 +789,12 @@ const JOB_KIND: Record<string, string> = {
 const MAX_FILE = 256 * 1024 ** 3;
 /** What the shell sends for a choice that was used, dropped, expired or is another session's. */
 export const CHOICE_EXPIRED = { code: "choice_expired" };
+/** The backup the picker chooses when a test names none, how big it is, and the password it was made with (the day it was made, not today's). */
+export const BACKUP_NAME = "My vault 2026-10-02.lockbox-backup";
+const BACKUP_SIZE = 1_288_490_188;
+export const BACKUP_PASSWORD = "from-the-day-it-was-made";
+/** The backup the fake's backups write, as named and kept for 22c. */
+const BACKUP_DAY = "2026-11-04";
 /** What the shell sends for a file's number past the end of the picked list. */
 const NO_SUCH_PICK = { code: "invalid_input", what: "index" };
 
@@ -817,7 +858,7 @@ function requestOf(sent: Record<string, unknown>): number {
 interface RunningJob {
   request: number;
   operation: number;
-  scope: { type: "session"; session: number; generation: number };
+  scope: JobScopeOf;
   kind: string;
   done: number;
   total: number;
@@ -967,6 +1008,16 @@ export function installFakeShell(
   let goneNames: string[] = [];
   let changeAfterPlan = false;
   let explorerFails = false;
+  // Test a backup (Task 4): the backups the shell holds paths of, by choice (the password each was made with is the shell's own), the next pick, what a test
+  // finds, a damage to find once, the holds a test can put on the picker and on the test, and the backup the last `backup_vault` wrote.
+  const testHeld = new Map<string, { name: string; size: number; password: string }>();
+  let nextBackupPick: { name: string; size: number } | undefined;
+  let summaryMade: Partial<{ created_at: string; items: number; files: number; missing_files: number; size_on_disk: number }> = {};
+  let damage: { what: string | undefined } | undefined;
+  let heldPicker: (() => void)[] | undefined;
+  let heldTests: (() => void)[] | undefined;
+  let heldStarts: (() => void)[] | undefined;
+  let lastBackup: { name: string; choice: string } | undefined;
   // The shell's job table, for the commands that take a request: operations are numbered from 1 and never reused.
   const running = new Map<number, RunningJob>();
   let nextOperation = 0;
@@ -1016,12 +1067,28 @@ export function installFakeShell(
     emit("lockbox://locked", { session, generation: entry.generation, reason });
     // A lock stops every job of its session, and each says it has ended.
     for (const job of [...running.values()]) {
-      if (job.scope.session !== session) continue;
+      if (job.scope.type !== "session" || job.scope.session !== session) continue;
       running.delete(job.operation);
       emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
     }
     // The copy handed to this vault goes with its lock.
     if (slot?.chosen === session) emptySlot();
+  };
+
+  /**
+   * The shell's lock epoch moves on (Lock all, an idle lock, Windows locking or sleeping, the app closing): `lockbox://lock-epoch` goes out, the backups
+   * it held for Test a backup are let go, and every launch-scoped job ends (its command, still out, is refused as `locked` when it answers).
+   */
+  const bumpEpoch = (reason = "manual"): void => {
+    lockEpoch += 1;
+    pendingClose = undefined;
+    testHeld.clear();
+    for (const job of [...running.values()]) {
+      if (job.scope.type !== "launch") continue;
+      running.delete(job.operation);
+      emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+    }
+    emit("lockbox://lock-epoch", { epoch: lockEpoch, reason });
   };
 
   /** 5b's button, or a second close while it shows: the flag is kept, `explain: false` is sent, the window hides. */
@@ -1036,6 +1103,7 @@ export function installFakeShell(
   const closeAsBefore = (): void => {
     for (const session of [...live.keys()]) lock(session);
     emptySlot();
+    bumpEpoch();
     if (explaining) {
       explained();
     } else if (closeExplained) {
@@ -1900,6 +1968,30 @@ export function installFakeShell(
         fileOps.push({ cmd, id: sent.id, ...(cmd === "replace_file" ? { file_id: sent.file_id } : {}) });
         return tagged(sent.session, sent.generation, { Done: stored.file_id });
       }
+      case "test_backup_pick": {
+        const sent = exactly(args, ["choice"]);
+        if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
+        // A closed picker: nothing is picked, and the choice that was sent is left as it was.
+        if (dismissFile) {
+          dismissFile = false;
+          return "Dismissed";
+        }
+        const file = nextBackupPick ?? { name: BACKUP_NAME, size: BACKUP_SIZE };
+        nextBackupPick = undefined;
+        // A new pick forgets the old one.
+        if (typeof sent.choice === "string") testHeld.delete(sent.choice);
+        nextToken += 1;
+        const token = nextToken.toString(16).padStart(32, "0");
+        testHeld.set(token, { ...file, password: BACKUP_PASSWORD });
+        return { Done: { choice: token, file_name: file.name, size: file.size } };
+      }
+      case "forget_test_backup": {
+        const sent = exactly(args, ["choice"]);
+        if (typeof sent.choice !== "string") return refuse(MALFORMED);
+        // Forgetting is idempotent: a token that is unknown or already gone is no error.
+        testHeld.delete(sent.choice);
+        return null;
+      }
       case "backup_vault": {
         const sent = exactly(args, ["session", "generation", "request"]) as { session: number; generation: number };
         requestOf(sent);
@@ -1923,7 +2015,13 @@ export function installFakeShell(
         fileOps.push({ cmd });
         // The shell writes the vault's last backup date on success only.
         vault.backupDays = undefined;
-        return tagged(sent.session, sent.generation, { Done: view });
+        // And parks the backup it wrote for 22c's Test this backup, which opens it with this vault's password (the one it was made with).
+        nextToken += 1;
+        const token = nextToken.toString(16).padStart(32, "0");
+        const name = `${vault.name ?? "Vault"} ${BACKUP_DAY}.lockbox-backup`;
+        testHeld.set(token, { name, size: view.size_on_disk, password: vault.password ?? PASSWORD });
+        lastBackup = { name, choice: token };
+        return tagged(sent.session, sent.generation, { Done: { ...view, test: { choice: token, file_name: name, size: view.size_on_disk } } });
       }
       case "vault_backup_due": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
@@ -2036,7 +2134,13 @@ export function installFakeShell(
         const job = running.get(sent.operation);
         // A scope the page names wrongly, a vault that has locked since, and a job that is over or was never here are each refused, and nothing is stopped.
         if (job === undefined) return refuse({ code: "not_found" });
-        if (sent.scope.session !== job.scope.session || sent.scope.generation !== job.scope.generation) {
+        if (job.scope.type === "launch") {
+          // A launch's job (a test of a backup) is named by the lock epoch it began in.
+          if (sent.scope.type !== "launch" || sent.scope.epoch !== job.scope.epoch) return refuse({ code: "not_found" });
+          job.cancel();
+          return null;
+        }
+        if (sent.scope.type !== "session" || sent.scope.session !== job.scope.session || sent.scope.generation !== job.scope.generation) {
           return refuse({ code: "not_found" });
         }
         vaultFor(job.scope.session, job.scope.generation);
@@ -2483,12 +2587,82 @@ export function installFakeShell(
       case "lock_all":
         exactly(args ?? {}, []);
         for (const session of [...live.keys()]) lock(session);
-        // Every all-vault lock empties the slot, even with no vault open.
+        // Every all-vault lock empties the slot, even with no vault open, and moves the lock epoch (which drops what the launch holds).
         emptySlot();
+        bumpEpoch();
         return null;
       default:
         throw new Error(`the fake shell has no command ${cmd}`);
     }
+  };
+
+  /**
+   * Test a backup, as the shell does it: the arguments are checked and the credential read as one box's (`password_or_key`); a choice that is not held
+   * is `choice_expired`; only then does the job begin (launch-scoped, kind `test`, `lockbox://job-started` before the answer). It ends when the answer is
+   * decided (held until released with `holdTest`): a Cancel answers `cancelled`; a lock epoch that moved meanwhile refuses `locked`; a wrong password is
+   * `wrong_password`; a damaged backup is `damaged` with the first failing `what`; else the summary. The choice is kept by every one of these.
+   */
+  const testBackupCommand = (args: unknown): Promise<unknown> => {
+    const sent = exactly(args, ["choice", "credential", "request"]);
+    const request = requestOf(sent);
+    const credential = sent.credential;
+    if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
+    const text = (credential as { password_or_key?: unknown }).password_or_key;
+    if (typeof text !== "string" || typeof sent.choice !== "string") return refuse(MALFORMED);
+    const held = testHeld.get(sent.choice);
+    if (held === undefined) return refuse(CHOICE_EXPIRED);
+    const epoch = lockEpoch;
+    nextOperation += 1;
+    const job: RunningJob = {
+      request,
+      operation: nextOperation,
+      scope: { type: "launch", epoch },
+      kind: "test",
+      done: 0,
+      total: held.size,
+      cancel: () => undefined,
+    };
+    running.set(job.operation, job);
+    const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
+    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    else heldStarts.push(() => {
+      emit("lockbox://job-started", startedEvent);
+    });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const end = (cancelled: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (running.delete(job.operation)) {
+          if (!cancelled) job.done = job.total;
+          emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+        }
+        const found = ((): { refused: object } | { done: object } => {
+          if (cancelled) return { refused: { code: "cancelled" } };
+          if (lockEpoch !== epoch) return { refused: LOCKED };
+          if (text !== held.password) return { refused: WRONG_PASSWORD };
+          if (damage !== undefined) {
+            const { what } = damage;
+            damage = undefined;
+            return { refused: { code: "core", kind: "damaged", ...(what === undefined ? {} : { what }) } };
+          }
+          return { done: { created_at: "2026-10-02T12:00:00Z", items: 24, files: 6, missing_files: 0, size_on_disk: held.size, ...summaryMade } };
+        })();
+        if ("refused" in found) {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+          reject(found.refused);
+        } else {
+          resolve({ Done: found.done });
+        }
+      };
+      job.cancel = () => {
+        end(true);
+      };
+      if (heldTests === undefined) end(false);
+      else heldTests.push(() => {
+        end(false);
+      });
+    });
   };
 
   invoke.mockImplementation((cmd: string, args?: unknown) => {
@@ -2500,6 +2674,28 @@ export function installFakeShell(
       refusals.delete(cmd);
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
       return Promise.reject(refusal);
+    }
+    if (cmd === "test_backup") {
+      try {
+        return testBackupCommand(args);
+      } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+        return Promise.reject(error);
+      }
+    }
+    if (cmd === "test_backup_pick" && heldPicker !== undefined) {
+      // The picker stays open: the pick is made when it closes.
+      const waiting = heldPicker;
+      return new Promise((resolve, reject) => {
+        waiting.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          }
+        });
+      });
     }
     if (
       heldPrint !== undefined &&
@@ -2874,11 +3070,7 @@ export function installFakeShell(
       pendingClose = reason;
       emit("lockbox://close-asked", { reason, running: kinds, past_swap: pastSwap });
     },
-    changeLockEpoch: (reason = "manual") => {
-      lockEpoch += 1;
-      pendingClose = undefined;
-      emit("lockbox://lock-epoch", { epoch: lockEpoch, reason });
-    },
+    changeLockEpoch: bumpEpoch,
     pendingClose: () => pendingClose !== undefined,
     closeAnswers: () => [...closeAnswers],
     quits: () => quits,
@@ -3017,7 +3209,50 @@ export function installFakeShell(
         for (const release of waiting) release();
       };
     },
-    runningJobs: () => [...running.values()].map(({ request, operation, scope, kind }) => ({ request, operation, scope, kind })),
+    runningJobs: () =>
+      [...running.values()].flatMap(({ request, operation, scope, kind }) => (scope.type === "session" ? [{ request, operation, scope, kind }] : [])),
+    runningLaunchJobs: () =>
+      [...running.values()].flatMap(({ request, operation, scope, kind }) => (scope.type === "launch" ? [{ request, operation, scope, kind }] : [])),
+    testChoices: () => [...testHeld.values()].map(({ name, size }) => ({ name, size })),
+    testChoiceTokens: () => [...testHeld.keys()],
+    pickBackupNext: (name, size = BACKUP_SIZE) => {
+      nextBackupPick = { name, size };
+    },
+    expireTestChoices: () => {
+      testHeld.clear();
+    },
+    backupSummary: (summary) => {
+      summaryMade = { ...summaryMade, ...summary };
+    },
+    damageBackup: (what) => {
+      damage = { what };
+    },
+    holdPicker: () => {
+      const waiting: (() => void)[] = [];
+      heldPicker = waiting;
+      return () => {
+        heldPicker = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdTest: () => {
+      const waiting: (() => void)[] = [];
+      heldTests = waiting;
+      return () => {
+        heldTests = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdJobStarted: () => {
+      const waiting: (() => void)[] = [];
+      heldStarts = waiting;
+      return () => {
+        heldStarts = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    lastBackupName: () => lastBackup?.name ?? "",
+    lastBackupChoice: () => lastBackup?.choice ?? "",
     sendProgress: (operation, done, total) => {
       const job = running.get(operation);
       if (job === undefined) return;

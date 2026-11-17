@@ -98,6 +98,15 @@ trusted than Rust.
   dismissing it) shows your own folders so you can act on them, and a readable file Lockbox saved where you chose (the
   recovery key's PDF, a saved `.env`) names the folder it went to. Stored links are opened from Rust, and only for `http`
   and `https`.
+- **A backup picked to be tested.** "Test a backup" asks for the file first and holds its path in Rust under a one-time
+  token; the page gets the token, the file's name and its size, never the path, and the path is in no error or event.
+  The held pick belongs to no vault: locking one vault leaves it, and a lock of all vaults, an idle lock, Windows
+  locking or sleeping, and closing drop it, as do five minutes without an attempt (an attempt that is running is never timed out, and its end starts them again), a
+  new pick, and the page forgetting it when the panel closes. A token that is unknown, used, expired or of another kind
+  answers "choice expired", and a lock that comes while the picker is open or the test runs answers "locked" and holds
+  nothing. The held pick holds no password and no key: the credential is typed again with each try, so a wrong password
+  keeps the file picked and nothing else. A backup Lockbox has just written is held the same way, so "Test this backup"
+  needs no picker. Testing reads the backup and writes nothing.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
@@ -180,7 +189,10 @@ in the code with a `shortcut:` comment.
   buffers, which Lockbox does not own. The fields Rust parses them into are wiped when they are dropped; a password kept
   for a question waiting for your answer lives until the answer, the five-minute limit or a lock of all vaults, and one
   typed before a file or folder picker lives until that picker closes, even past a lock (nothing is done with it then).
-  *Accepted:* wiping the buffers would mean replacing Tauri's transport.
+  The one box of "Test a backup" holds a password or a recovery key: Rust reads the text as a recovery key first and,
+  if it is a well-formed key that turns out wrong, tries it as a password too (text that is not a well-formed key is
+  tried as a password only, with no typo words); it is wiped when the try ends, and the page empties the box after
+  every send, a wrong password included (unlike the unlock form). *Accepted:* wiping the buffers would mean replacing Tauri's transport.
 - **Webview memory is not wiped.** Values typed or shown in the window live in WebView2's memory until the browser engine
   frees them. The screens clear their state at a lock, but that releases the text; it does not erase it. *Accepted:*
   no browser engine offers more. Keep the time a password is revealed short.

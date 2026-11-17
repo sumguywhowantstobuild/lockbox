@@ -27,6 +27,7 @@ import { AddFiles, AddFilesLeft } from "./AddFiles";
 import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, OpenFilesAsk, ShortcutAsk, VaultBanners } from "./Asks";
 import { BackupPanel, BackupRefusedAsk } from "./BackupFlow";
+import { TestBackupPanel } from "./TestBackup";
 import { BackupReminder } from "./BackupReminder";
 import { EmptyAdd } from "./EmptyAdd";
 import { EnvFileDialog } from "./EnvOut";
@@ -454,6 +455,9 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "settings" ? <SettingsPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "backup" ? <BackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+        {data.tool?.kind === "test_backup" ? (
+          <TestBackupPanel key={`${String(data.session)}:${String(data.generation)}:${String(data.test?.opening)}`} data={data} />
+        ) : null}
       </div>
       {/* The window's own: messages sit at the foot of the whole window, whatever is open beside the side menu. */}
       <ToastStack />

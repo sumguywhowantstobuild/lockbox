@@ -75,6 +75,14 @@ test("a_choice_that_expired_asks_to_pick_again", () => {
   expect(message.body).toBe("Pick the files again.");
 });
 
+test("a_backup_choice_that_expired_has_the_test_screens_own_words", () => {
+  // The page's own refusal, for Test a backup: the shared "Pick the files again." stays for Add files.
+  const message = messageFor({ code: "page", kind: "test_choice_expired" });
+  expect(message.title).toBe("That choice has expired.");
+  expect(message.body).toBe("Pick the backup again.");
+  expect(messageFor({ code: "choice_expired" }).body).toBe("Pick the files again.");
+});
+
 test("unknown_error_gets_the_generic_message", () => {
   const unknown: unknown[] = [
     new Error("boom"),

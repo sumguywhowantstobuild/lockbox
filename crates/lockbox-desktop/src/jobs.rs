@@ -280,8 +280,8 @@ impl Progress for Reporter {
 impl Shell {
     /// Begins a job with no session, in the lock epoch it starts in: its token is a child of the launch's, which a lock
     /// of all vaults cancels. Its answer goes through [`AutoLock::answer_job`](crate::autolock::AutoLock::answer_job),
-    /// so one that outlived the epoch is refused as `Locked`. The commands that use it (testing a backup, a restore's
-    /// copy, opening a backup read-only) come in later tasks; the tests drive it now.
+    /// so one that outlived the epoch is refused as `Locked`. Testing a backup uses it; the others that will (a restore's
+    /// copy, opening a backup read-only) come in later tasks, and the tests drive them now.
     pub fn begin_launch_job(&self, kind: JobKind, request: Option<u32>) -> RunningJob {
         let (epoch, launch) = self.sessions.launch_scope();
         self.autolock

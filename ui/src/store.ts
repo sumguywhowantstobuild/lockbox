@@ -13,7 +13,7 @@ import { batchHasFocus, focusList, takeJobFocus } from "./focus";
 import { resetCloseAskForTests, startCloseAsk } from "./closeAsk";
 import { awayMessage, partialWords, refusalWords, wasClean } from "./addFilesWords";
 import { spokenEnd } from "./saveAllWords";
-import { announceJob, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
+import { announceJob, cancelRequest, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
 import { leftOutWords } from "./format";
 import { backupNotFinishedMore, BACKUP_NOT_FINISHED } from "./messages";
 import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, SearchHit, VaultEntry } from "./api";
@@ -79,7 +79,9 @@ export type Tool =
   /** Settings (31a, 31b): the app's, for every vault, so a read-only vault opens it too. What it shows is `StoreState.settings`. */
   | { kind: "settings" }
   /** Back up this vault (22a to 22d). Where it is, is `SessionData.backup`, which outlives the panel while the backup runs. */
-  | { kind: "backup" };
+  | { kind: "backup" }
+  /** Test a backup (23a to 23d), on the vault whose Settings or 22c opened it. Where it is, is `SessionData.test`, which goes with the panel. */
+  | { kind: "test_backup" };
 
 /**
  * Where a backup of this vault is (22a to 22d, and Ask 2), or `null` when none is begun. It lives in the session's record, so a lock takes it with
@@ -96,6 +98,36 @@ export type BackupStep =
   | { phase: "failed"; error: unknown }
   /** Refused before anything was written, for a reason a backup made now might not open (Ask 2 and the three beside it): the question is on screen. */
   | { phase: "refused"; error: unknown };
+
+/**
+ * Where Test a backup is (23a to 23d), or `null` when it is not begun. The backup's path never comes here: the shell holds it under `choice`, and
+ * the page holds the name and size it was told, to show. It is the panel's own, on the session that opened it: the panel closing, another panel
+ * taking its place, or the vault locking ends it, and its end lets the choice go and stops a test that runs (`letGoOfTest`). The typed text is not
+ * kept here: it is the box's own state, wiped after every send.
+ */
+export interface TestFlow {
+  /** Counts the times Test a backup was begun: an answer meant for an earlier one is dropped. */
+  opening: number;
+  /**
+   * `picking`: Windows' picker is open (Settings is still on screen); `ask`: 23a (and 23c, with `problem`); `testing`: the bar, from the moment
+   * Test was pressed; `good`: 23b; `damaged`: 23d.
+   */
+  phase: "picking" | "ask" | "testing" | "good" | "damaged";
+  /** The choice the shell holds the backup's path under, or `null` while none is picked (before the first pick, or once the shell let it go). */
+  choice: string | null;
+  fileName: string | null;
+  size: number;
+  /** Pick another is waiting for the shell. */
+  busy: boolean;
+  /** What the last try was refused with, to say under the box (a wrong password among them), or `null`. */
+  problem: unknown;
+  /** The number the test's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
+  request: number | null;
+  /** What the test found, for 23b. */
+  view: api.BackupSummaryView | null;
+  /** The engine's refusal for a damaged backup, for 23d. */
+  damage: unknown;
+}
 
 /** What the new-login form sends: the person's own text, as typed. The shell completes the website and checks the limits. */
 export interface LoginDraft {
@@ -266,6 +298,8 @@ export interface SessionData {
   fileJob: FileJob | null;
   /** The backup of this vault that is begun and not put away: see {@link BackupStep}. */
   backup: BackupStep | null;
+  /** Test a backup, begun from this vault's Settings or 22c and not put away: see {@link TestFlow}. */
+  test: TestFlow | null;
   /**
    * The batch of files being picked, added or just ended (Task 10), or `null`: the Add files panel shows it. An end that left something out
    * (a file not read, a stop) is kept here after the person has gone from the panel, for a card in the list's column to name what was never
@@ -481,10 +515,17 @@ function sessionOf(session: number): SessionData | undefined {
   return state.sessions.find((entry) => entry.session === session);
 }
 
-/** Changes one session's record, when it is still there. */
+/**
+ * Changes one session's record, when it is still there. Test a backup is the panel's own, so it ends wherever its panel does: whatever takes the
+ * panel (another tool, an item, the Trash, a folder) leaves no test behind, and a test that ends this way lets its backup go (`letGoOfTest`).
+ */
 function update(session: number, change: (entry: SessionData) => SessionData): void {
-  if (sessionOf(session) === undefined) return;
-  set({ ...state, sessions: state.sessions.map((entry) => (entry.session === session ? change(entry) : entry)) });
+  const before = sessionOf(session);
+  if (before === undefined) return;
+  let next = change(before);
+  if (next.test !== null && next.test.phase !== "picking" && next.tool?.kind !== "test_backup") next = { ...next, test: null };
+  set({ ...state, sessions: state.sessions.map((entry) => (entry.session === session ? next : entry)) });
+  if (before.test !== null && next.test?.opening !== before.test.opening) letGoOfTest(before.test);
 }
 
 /** Whether the session is still open in the generation the caller read it in. */
@@ -535,6 +576,9 @@ export function startStore(): Promise<void> {
 
 /** Forgets everything the page holds of the vault: the list, the open item, revealed values and typed text. */
 export function dropSession(session: number): void {
+  // A test running for this vault is stopped and its backup let go: the vault's lock ends the panel the test lived in.
+  const leaving = sessionOf(session)?.test ?? null;
+  if (leaving !== null) letGoOfTest(leaving);
   const toast = state.toast;
   const keepToast = toast === null || toast.session !== session;
   const sessions = state.sessions.filter((entry) => entry.session !== session);
@@ -632,6 +676,7 @@ function newRecord(
     asks,
     fileJob: null,
     backup: null,
+    test: null,
     addFiles: null,
     saveAll: null,
     operations: [],
@@ -1604,6 +1649,228 @@ export async function startBackup(session: number): Promise<void> {
   } finally {
     releaseRequest(request);
   }
+}
+
+// ---- Test a backup (Plan 4B Task 4: 23a to 23d) ----
+//
+// The backup is picked first, in Windows' own dialog that Rust opens, and Rust holds its path under a choice; the page holds the name and size it was told
+// and the choice, in the session whose panel it is (`SessionData.test`). Then the password or recovery key is typed in one box and sent with the choice: the
+// shell tests the backup as a launch-scoped job (a progress bar and a Cancel) and writes nothing. Every answer keeps the choice, so a wrong password is tried
+// again without picking the file again; the choice is let go when the panel closes, when another panel takes its place, when the vault locks, and after
+// five minutes unused (the shell's side). The typed text is the box's own state and is wiped after every send, so nothing typed is kept here.
+
+/** The number of the last time Test a backup was begun. */
+let testOpenings = 0;
+
+/** What the page says when the shell has let the picked backup go (an answer of `choice_expired`, or of `locked` while it ran): `messages.ts` has its words. */
+const TEST_CHOICE_EXPIRED = { code: "page", kind: "test_choice_expired" };
+
+/** A test's flow at its start: waiting for the picker (`pick` is `null`), or with a backup picked, at 23a. */
+function newTest(opening: number, pick: api.TestPick | null): TestFlow {
+  return {
+    opening,
+    phase: pick === null ? "picking" : "ask",
+    choice: pick?.choice ?? null,
+    fileName: pick?.file_name ?? null,
+    size: pick?.size ?? 0,
+    busy: false,
+    problem: null,
+    request: null,
+    view: null,
+    damage: null,
+  };
+}
+
+/**
+ * Test a backup has ended (its panel closed, was replaced, or its vault locked): the test that runs is stopped, and the shell lets the backup picked go.
+ * Both are best effort: a lock may have taken either already, and the answer of a test that was stopped comes to nothing here.
+ */
+function letGoOfTest(flow: TestFlow): void {
+  // A test whose `job-started` has not come yet is stopped when it does (the shell has already begun it; forgetting the choice cannot stop it).
+  if (flow.request !== null) cancelRequest(flow.request);
+  if (flow.choice !== null) void api.forgetTestBackup(flow.choice).catch(() => undefined);
+}
+
+/** Changes one session's test while it is still the opening and generation the caller began in. */
+function changeTest(session: number, generation: number, opening: number, change: (flow: TestFlow) => TestFlow): void {
+  if (!stillOpen(session, generation)) return;
+  update(session, (current) => (current.test?.opening === opening ? { ...current, test: change(current.test) } : current));
+}
+
+/** Whether the test the caller began is still this session's (the panel not closed or replaced, the vault not locked since). */
+function testIsStill(session: number, generation: number, opening: number): boolean {
+  const entry = sessionOf(session);
+  return entry?.generation === generation && entry.test?.opening === opening;
+}
+
+/** A pick the page no longer has a place for (the vault locked or the panel went while the picker was open): the shell is told to forget it. */
+function forgetStray(pick: api.TestPick): void {
+  void api.forgetTestBackup(pick.choice).catch(() => undefined);
+}
+
+/**
+ * Settings' "Test a backup": opens Windows' picker for the backup file first, and 23a opens on it, with nothing sent but the pick. A closed picker says
+ * and changes nothing. While the picker is open the button waits (`phase: "picking"`), so a second press sends nothing. Settings stays on screen
+ * until a file is picked; the panel takes its place then.
+ */
+export async function startTestBackup(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.test !== null) return;
+  const { generation } = entry;
+  testOpenings += 1;
+  const opening = testOpenings;
+  update(session, (current) => ({ ...current, test: newTest(opening, null) }));
+  let answer: Awaited<ReturnType<typeof api.testBackupPick>>;
+  try {
+    answer = await api.testBackupPick(null);
+  } catch (error) {
+    // Nothing was picked: no panel. A vault that locked meanwhile says nothing, as with every lock.
+    if (!testIsStill(session, generation, opening)) return;
+    update(session, (current) => ({ ...current, test: null }));
+    if (!refusedAsLocked(error)) sayFailure(session, error);
+    return;
+  }
+  const mine = testIsStill(session, generation, opening);
+  if (answer === "Dismissed") {
+    if (mine) update(session, (current) => ({ ...current, test: null }));
+    return;
+  }
+  if (!("Done" in answer)) {
+    // This command never asks a question.
+    if (mine) {
+      update(session, (current) => ({ ...current, test: null }));
+      sayFailure(session, UNEXPECTED);
+    }
+    return;
+  }
+  if (!mine) {
+    forgetStray(answer.Done);
+    return;
+  }
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "test_backup" },
+    test: newTest(opening, answer.Done),
+  }));
+}
+
+/**
+ * 22c's "Test this backup": straight to 23a with the backup just written already picked (the shell parked its choice and told the page its name and size).
+ * Nothing is picked and nothing is sent.
+ */
+export function testThisBackup(session: number): void {
+  const step = sessionOf(session)?.backup;
+  if (step?.phase !== "saved") return;
+  testOpenings += 1;
+  const opening = testOpenings;
+  const { test } = step.view;
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "test_backup" },
+    backup: null,
+    test: newTest(opening, test),
+  }));
+}
+
+/**
+ * Pick another (and Pick a backup, when the choice has gone): the picker adds nothing to the old file, it replaces it. The sent choice is the current one
+ * (`null` when none is left); a closed picker leaves the file as it was.
+ */
+export async function pickAnotherBackup(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.test ?? null;
+  if (entry === undefined || flow === null || flow.phase !== "ask" || flow.busy) return;
+  const { generation } = entry;
+  const { opening, choice } = flow;
+  changeTest(session, generation, opening, (now) => ({ ...now, busy: true, problem: null }));
+  try {
+    const answer = await api.testBackupPick(choice);
+    const mine = testIsStill(session, generation, opening);
+    if (answer === "Dismissed") {
+      changeTest(session, generation, opening, (now) => ({ ...now, busy: false }));
+    } else if ("Done" in answer) {
+      const pick = answer.Done;
+      if (!mine) forgetStray(pick);
+      changeTest(session, generation, opening, (now) => ({ ...now, busy: false, choice: pick.choice, fileName: pick.file_name, size: pick.size, problem: null }));
+    } else {
+      changeTest(session, generation, opening, (now) => ({ ...now, busy: false, problem: UNEXPECTED }));
+    }
+  } catch (error) {
+    // A choice the shell let go takes the file with it: the person picks again.
+    const gone = refusedWith(error, "choice_expired") || refusedAsLocked(error);
+    changeTest(session, generation, opening, (now) =>
+      gone ? { ...now, busy: false, choice: null, fileName: null, size: 0, problem: TEST_CHOICE_EXPIRED } : { ...now, busy: false, problem: error },
+    );
+  }
+}
+
+/**
+ * Test, pressed on 23a with the text typed: sends the choice, the text as one box's (`password_or_key`) and a new request, and the bar takes the panel. The
+ * text is the caller's and is not kept: the screen wipes its box as it calls this. Every answer keeps the choice. A wrong password (or any refusal) goes
+ * back to 23a with its words under the box and the file still picked (23c); a stop goes back quietly; a damaged backup is 23d; a choice the shell no longer
+ * holds takes the file away and asks to pick again. The result is said in the page's spoken place. An answer for a panel closed or replaced meanwhile,
+ * or a vault locked, comes to nothing.
+ */
+export async function runTestBackup(session: number, credential: string): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.test ?? null;
+  if (entry === undefined || flow === null || flow.phase !== "ask" || flow.busy || flow.choice === null || credential === "") return;
+  const { generation } = entry;
+  const { opening, choice } = flow;
+  const request = nextRequest();
+  changeTest(session, generation, opening, (now) => ({ ...now, phase: "testing", request, problem: null }));
+  let ran: { view: api.BackupSummaryView } | { refused: unknown };
+  try {
+    const answer = await api.testBackup(choice, { password_or_key: credential }, request);
+    ran = typeof answer === "object" && "Done" in answer ? { view: answer.Done } : { refused: UNEXPECTED };
+  } catch (error) {
+    ran = { refused: error };
+  } finally {
+    // Before anything is said below: the job's own start words are cleared by this, and the result's are said after.
+    releaseRequest(request);
+  }
+  if (!testIsStill(session, generation, opening)) return;
+  if ("view" in ran) {
+    const { view } = ran;
+    changeTest(session, generation, opening, (now) => ({ ...now, phase: "good", request: null, view }));
+    announceJob("This backup is good.", request);
+    return;
+  }
+  const error = ran.refused;
+  if (refusedWith(error, "core") && (error as { kind?: unknown }).kind === "damaged") {
+    changeTest(session, generation, opening, (now) => ({ ...now, phase: "damaged", request: null, damage: error }));
+    announceJob("This backup is damaged.", request);
+  } else if (refusedWith(error, "cancelled")) {
+    changeTest(session, generation, opening, (now) => ({ ...now, phase: "ask", request: null }));
+  } else if (refusedWith(error, "choice_expired") || refusedAsLocked(error)) {
+    changeTest(session, generation, opening, (now) => ({
+      ...now,
+      phase: "ask",
+      request: null,
+      choice: null,
+      fileName: null,
+      size: 0,
+      problem: TEST_CHOICE_EXPIRED,
+    }));
+  } else {
+    changeTest(session, generation, opening, (now) => ({ ...now, phase: "ask", request: null, problem: error }));
+  }
+}
+
+/** Takes the refusal under the box away, as typing again does (a wrong password's line stays only until the next try is begun). */
+export function clearTestProblem(session: number): void {
+  const flow = sessionOf(session)?.test ?? null;
+  if (flow === null || flow.problem === null) return;
+  changeTest(session, sessionOf(session)?.generation ?? 0, flow.opening, (now) => ({ ...now, problem: null }));
+}
+
+/** Closes the Test a backup panel (Cancel, Done, Close, Escape): a test that runs is stopped and the backup picked is let go. */
+export function closeTestBackup(session: number): void {
+  update(session, (current) => ({ ...current, tool: current.tool?.kind === "test_backup" ? null : current.tool, test: null }));
 }
 
 /** How a save came out: made (the form is gone and the login is open), the vault locked meanwhile, or the shell's refusal. */

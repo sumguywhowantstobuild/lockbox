@@ -26,6 +26,9 @@ const progress = (operation: number, done: number, total: number, finished = fal
   finished,
 });
 
+/** The stops sent to the shell so far. */
+const cancelsSent = () => invoke.mock.calls.filter(([name]) => name === "cancel_operation");
+
 /** The bridge learns that session 3 is open at generation 7, as an unlock's answer tells it. */
 async function opened(session = 3, generation = 7): Promise<void> {
   invoke.mockResolvedValueOnce({ session, generation, data: "info" });
@@ -161,6 +164,61 @@ test("stop_calls_cancel_for_that_operation", async () => {
   expect(jobs.jobOfOperation(61)?.stopping).toBe(true);
   await jobs.stopJob(61);
   expect(invoke.mock.calls.filter(([name]) => name === "cancel_operation")).toHaveLength(1);
+});
+
+test("a_cancel_asked_before_the_job_is_known_is_sent_the_moment_it_starts", async () => {
+  const request = jobs.nextRequest();
+  invoke.mockResolvedValue(null);
+  // Asked while the page does not yet know the operation: nothing can be named, so nothing is sent.
+  jobs.cancelRequest(request);
+  expect(cancelsSent()).toEqual([]);
+  // Its `job-started` arrives: the stop goes out at once, for that operation, in that scope.
+  const launch = { type: "launch", epoch: 0 };
+  emit("lockbox://job-started", started(request, 81, launch, "test"));
+  await vi.waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith("cancel_operation", { operation: 81, scope: launch });
+  });
+  expect(jobs.jobOfOperation(81)?.stopping).toBe(true);
+  // Only that one request was asked for: another job's start sends nothing.
+  const other = jobs.nextRequest();
+  emit("lockbox://job-started", started(other, 82, launch, "test"));
+  expect(invoke.mock.calls.filter(([name]) => name === "cancel_operation")).toHaveLength(1);
+});
+
+test("a_cancel_asked_after_the_job_is_known_is_sent_at_once", async () => {
+  const request = jobs.nextRequest();
+  emit("lockbox://job-started", started(request, 83));
+  invoke.mockResolvedValue(null);
+  jobs.cancelRequest(request);
+  await vi.waitFor(() => {
+    expect(invoke).toHaveBeenCalledWith("cancel_operation", { operation: 83, scope: SESSION });
+  });
+});
+
+test("a_cancel_for_a_request_that_was_answered_first_is_dropped", () => {
+  const request = jobs.nextRequest();
+  jobs.cancelRequest(request);
+  // The answer came before any `job-started` (no job ever began, or it had ended): the wish goes with the request.
+  jobs.releaseRequest(request);
+  emit("lockbox://job-started", started(request, 84));
+  jobs.expectRequest(request);
+  expect(cancelsSent()).toEqual([]);
+});
+
+test("a_cancel_for_a_request_nobody_is_waiting_for_sends_nothing", () => {
+  jobs.cancelRequest(4242);
+  emit("lockbox://job-started", started(4242, 85));
+  jobs.expectRequest(4242);
+  expect(cancelsSent()).toEqual([]);
+});
+
+test("the_lock_epoch_is_a_number_a_screen_can_follow", () => {
+  expect(jobs.currentLockEpoch()).toBe(0);
+  emit("lockbox://lock-epoch", { epoch: 3, reason: "manual" });
+  expect(jobs.currentLockEpoch()).toBe(3);
+  // An older one never moves it back.
+  emit("lockbox://lock-epoch", { epoch: 2, reason: "manual" });
+  expect(jobs.currentLockEpoch()).toBe(3);
 });
 
 test("a_refused_stop_says_nothing", async () => {

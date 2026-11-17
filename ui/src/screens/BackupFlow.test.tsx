@@ -190,9 +190,8 @@ test("finished_backup_shows_what_it_left_out", async () => {
   // Counts, in words, and no name of any item or file.
   expect(within(done).getByText("Left out: 2 damaged items, 1 damaged file and 3 missing files. Items that use a left-out file are saved without it.")).toBeTruthy();
   expect(done.textContent).not.toMatch(/contract-demo|Client contract|Bot admin/);
-  // "Test this backup" comes with Task 4.
-  expect(within(done).queryByRole("button", { name: /Test this backup/ })).toBeNull();
-  expect(buttonsIn(done)).toEqual(["Close panel", "Done"]);
+  // "Test this backup" (Task 4) is beside Done, and has its own tests in `TestBackup.test.tsx`.
+  expect(buttonsIn(done)).toEqual(["Close panel", "Test this backup", "Done"]);
   press(done, "Done");
   await waitFor(() => {
     expect(screen.queryByRole("complementary", { name: "Backup saved" })).toBeNull();
@@ -509,10 +508,12 @@ test("back_up_hidden_on_a_read_only_vault", async () => {
   await unlocked(mine({ readOnly: true }));
   fireEvent.click(within(side()).getByRole("button", { name: "Settings" }));
   const settings = await screen.findByRole("complementary", { name: "Settings" });
-  // Settings is the app's own, so it opens; its vault group and its Back up are not there.
+  // Settings is the app's own, so it opens; Back up is not there (a read-only copy has nothing of its own to back up). The vault's group
+  // is: Test a backup works from any vault (`TestBackup.test.tsx`).
   expect(within(settings).getByRole("heading", { name: "Appearance" })).toBeTruthy();
-  expect(within(settings).queryByRole("heading", { name: "This vault" })).toBeNull();
+  expect(within(settings).getByRole("heading", { name: "This vault" })).toBeTruthy();
   expect(within(settings).queryByRole("button", { name: "Back up" })).toBeNull();
+  expect(within(settings).getByRole("button", { name: "Test a backup" })).toBeTruthy();
 });
 
 test("backup_screens_have_no_axe_violations", async () => {
