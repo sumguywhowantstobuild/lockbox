@@ -106,6 +106,8 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         backup::test_backup_pick,
         backup::test_backup,
         backup::forget_test_backup,
+        backup::open_backup_pick,
+        backup::forget_open_backup,
         backup::open_backup_read_only,
         backup::copy_item_to,
         backup::restore_pick,

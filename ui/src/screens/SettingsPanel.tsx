@@ -7,6 +7,7 @@ import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
 import { SETTINGS_HINT } from "../olderCopiesWords";
+import { SETTINGS_OPEN_HINT } from "../openBackupWords";
 import {
   closeTool,
   loadOlderCopies,
@@ -15,9 +16,11 @@ import {
   openBackup,
   openOlderCopies,
   saveSettings,
+  startOpenBackup,
   startRestore,
   startTestBackup,
   useOlderCopies,
+  useOpenBackup,
   useRestore,
   useSettings,
   type SaveTicket,
@@ -141,6 +144,8 @@ export function SettingsPanel({ data }: { data: SessionData }) {
   const saved = useSettings();
   // The picker of Restore a backup is open (or its steps are): a second press sends nothing.
   const restoring = useRestore() !== null;
+  // The same for Open a backup: its picker is open (or its panel is, in this panel's place).
+  const opening = useOpenBackup() !== null;
   // The older copies the restores kept of this vault, from the store's one listing. A session that is itself an older copy has none of its own.
   const kept = useOlderCopies();
   const olderCount = data.vaultId === NOT_ON_THE_LIST ? 0 : (kept ?? []).filter((entry) => entry.vault === data.vaultId).length;
@@ -311,6 +316,8 @@ export function SettingsPanel({ data }: { data: SessionData }) {
       title="Settings"
       subtitle="For every vault on this PC."
       titleRef={title}
+      // A backup or an older copy says it is read-only on every screen of its session, Settings too.
+      tools={data.readOnly ? <span className="chip">Read-only</span> : undefined}
       onClose={() => {
         closeTool(data.session);
         focusBack("settings");
@@ -445,6 +452,19 @@ export function SettingsPanel({ data }: { data: SessionData }) {
               }}
             >
               Test a backup
+            </Button>
+          </SettingsRow>
+          {/* Any vault's, a read-only one too: a backup is browsed in a session of its own and nothing is written into the vault that is open. */}
+          <SettingsRow label="Open a backup" hint={SETTINGS_OPEN_HINT} hintId={`${id}-open-hint`}>
+            <Button
+              aria-describedby={`${id}-open-hint`}
+              // The Windows picker is open: a second press sends nothing.
+              aria-disabled={opening ? true : undefined}
+              onClick={() => {
+                if (!opening) void startOpenBackup();
+              }}
+            >
+              Open a backup
             </Button>
           </SettingsRow>
           {/* Any vault's, a read-only one too: a restore unpacks a backup beside the vaults and writes nothing into the one that is open. */}

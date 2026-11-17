@@ -11,7 +11,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use lockbox_core::blob::NoProgress;
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::recovery::RecoverySecret;
 use lockbox_core::{
@@ -27,7 +26,7 @@ use crate::dates;
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
 use crate::jobs::{JobKind, JobScope};
 use crate::open::safe_name;
-use crate::pending::{PendingChoice, Token};
+use crate::pending::{Pending, PendingChoice, Token};
 use crate::restore::{
     PreRestoreEntry, RestoreChecked, RestoreNotice, RestorePick, RestorePreparedView, RestoredView,
 };
@@ -65,8 +64,57 @@ pub struct TestPick {
     pub size: u64,
 }
 
-/// The title of the picker of "Test a backup".
+/// A backup held in Rust for `open_backup_read_only`: the token that stands for its path, which never crosses; its name,
+/// for the page to show as text; and its size on disk.
+#[derive(Debug, Serialize)]
+pub struct OpenPick {
+    pub choice: Token,
+    pub file_name: String,
+    pub size: u64,
+}
+
+/// What a picker of a backup holds, before it is told as a [`TestPick`] or an [`OpenPick`].
+struct Picked {
+    choice: Token,
+    file_name: String,
+    size: u64,
+}
+
+impl From<Picked> for TestPick {
+    fn from(
+        Picked {
+            choice,
+            file_name,
+            size,
+        }: Picked,
+    ) -> TestPick {
+        TestPick {
+            choice,
+            file_name,
+            size,
+        }
+    }
+}
+
+impl From<Picked> for OpenPick {
+    fn from(
+        Picked {
+            choice,
+            file_name,
+            size,
+        }: Picked,
+    ) -> OpenPick {
+        OpenPick {
+            choice,
+            file_name,
+            size,
+        }
+    }
+}
+
+/// The titles of the pickers of "Test a backup" and "Open a backup".
 const TEST_PICK_TITLE: &str = "Test a backup";
+const OPEN_PICK_TITLE: &str = "Open a backup";
 
 impl BackupView {
     fn of(report: BackupReport, size_on_disk: u64, test: TestPick) -> BackupView {
@@ -157,9 +205,9 @@ pub struct CopiedItemView {
 pub enum CredentialArg {
     Password(Zeroizing<String>),
     RecoveryKey(Zeroizing<String>),
-    /// Text that is either. Only [`CredentialArg::attempts`] reads it (`test_backup`, `restore_check` and
-    /// `open_pre_restore_read_only` are the commands that do): [`CredentialArg::typed`] refuses it, so a command that
-    /// has not been taught the two tries never takes it for one.
+    /// Text that is either. Only [`CredentialArg::attempts`] reads it (`test_backup`, `restore_check`,
+    /// `open_backup_read_only` and `open_pre_restore_read_only` are the commands that do): [`CredentialArg::typed`]
+    /// refuses it, so a command that has not been taught the two tries never takes it for one.
     PasswordOrKey(Zeroizing<String>),
 }
 
@@ -401,26 +449,48 @@ impl Shell {
     /// the new token, the file's name and its size: never the path. The lock epoch is read before the picker, so a lock of
     /// all vaults while it is open is not forgotten: `Locked`, with nothing held. Needs no session.
     pub fn test_backup_pick(&self, choice: Option<&Token>) -> ShellResult<Outcome<TestPick>> {
+        let picked = self.pick_held_backup(
+            TEST_PICK_TITLE,
+            |path, epoch| PendingChoice::TestBackup { path, epoch },
+            Pending::forget_test_backup,
+            choice,
+        )?;
+        Ok(match picked {
+            Outcome::Done(picked) => Outcome::Done(picked.into()),
+            Outcome::Confirm(question) => Outcome::Confirm(question),
+            Outcome::Dismissed => Outcome::Dismissed,
+        })
+    }
+
+    /// The picker of a backup (outside every lock) and the pick held in Rust as `hold` makes it: the answer is the new
+    /// token, the file's name and its size, never the path. `replaced` is the choice being replaced (Pick another): once
+    /// the new pick is held it is forgotten (by `forget`); a closed picker answers `Dismissed` and leaves it as it was. The
+    /// lock epoch is read before the picker, so a lock of all vaults while it is open (or the app closing) is `Locked`,
+    /// with nothing held and `replaced` dropped by the lock.
+    fn pick_held_backup(
+        &self,
+        title: &str,
+        hold: fn(std::path::PathBuf, u64) -> PendingChoice,
+        forget: fn(&Pending, &Token),
+        replaced: Option<&Token>,
+    ) -> ShellResult<Outcome<Picked>> {
         let epoch = self.sessions.epoch();
-        let Some(path) = self.os.dialogs.pick_file(TEST_PICK_TITLE, Some(FILTER)) else {
+        let Some(path) = self.os.dialogs.pick_file(title, Some(FILTER)) else {
             return Ok(Outcome::Dismissed);
         };
         let size = fs::metadata(&path)?.len();
         let file_name = display_name(&path);
         let pending = self.sessions.pending();
-        let held = pending.put_at(
-            PendingChoice::TestBackup { path, epoch },
-            self.os.clock.now(),
-        );
+        let held = pending.put_at(hold(path, epoch), self.os.clock.now());
         // A lock of all vaults came while the picker was open (or the app is closing): what was just held is no one's.
         if self.locked_since(epoch) {
-            pending.forget_test_backup(&held);
+            forget(pending, &held);
             return Err(ShellError::Locked);
         }
-        if let Some(old) = choice {
-            pending.forget_test_backup(old);
+        if let Some(old) = replaced {
+            forget(pending, old);
         }
-        Ok(Outcome::Done(TestPick {
+        Ok(Outcome::Done(Picked {
             choice: held,
             file_name,
             size,
@@ -490,51 +560,122 @@ impl Shell {
         epoch != self.sessions.epoch() || self.sessions.closing_gate().load(Ordering::SeqCst)
     }
 
-    /// Opens a backup the user picks as a read-only session keyed by the backup's location (spec §6.9).
-    /// `Dismissed` when the dialog is closed, before anything else. A backup already open is answered as it is. The
-    /// lock epoch is read before the dialog: a lock of all vaults while the picker is open, or while the backup
-    /// opens, answers `Locked` and opens nothing.
+    /// Opens the picker of "Open a backup" (outside every lock) and holds the backup picked in Rust, as `test_backup_pick`
+    /// does for a test and under the same rules: a choice that lives until it is forgotten
+    /// ([`forget_open_backup`](Self::forget_open_backup)), a lock of all vaults, closing, a new pick (`choice` is the one
+    /// being replaced) or five minutes without an attempt. The answer is the new token, the file's name and its size:
+    /// never the path. A closed picker answers `Dismissed`; a lock of all vaults while it is open, `Locked`, with nothing
+    /// held. Needs no session.
+    pub fn open_backup_pick(&self, choice: Option<&Token>) -> ShellResult<Outcome<OpenPick>> {
+        let picked = self.pick_held_backup(
+            OPEN_PICK_TITLE,
+            |path, epoch| PendingChoice::OpenBackup { path, epoch },
+            Pending::forget_open_backup,
+            choice,
+        )?;
+        Ok(match picked {
+            Outcome::Done(picked) => Outcome::Done(picked.into()),
+            Outcome::Confirm(question) => Outcome::Confirm(question),
+            Outcome::Dismissed => Outcome::Dismissed,
+        })
+    }
+
+    /// Drops the held open pick `choice` (the page's panel closed, or its vault locked). Idempotent, as
+    /// [`forget_test_backup`](Self::forget_test_backup): a token that is unknown, dropped already or another kind of
+    /// choice's (a held test backup included) is nothing to forget, and answers without error.
+    pub fn forget_open_backup(&self, choice: &Token) -> ShellResult<()> {
+        self.sessions.pending().forget_open_backup(choice);
+        Ok(())
+    }
+
+    /// Opens the backup held under `choice` as a read-only session keyed by the backup's location (spec §6.9).
+    /// `ChoiceExpired` (before anything else) for a choice that is not held: unknown, dropped, used, five minutes old or
+    /// another kind (a held test backup too). The credential is read before the job begins, so one that cannot be read (a
+    /// recovery key that is no key) starts nothing; the one box tries a well-formed key as a key, then as a password.
+    /// The job is launch-scoped (`open_backup`: progress, and a Stop through `cancel_operation`), begun with the page's
+    /// `request`.
+    ///
+    /// A lock of all vaults, or the app closing, is looked for as the job begins and again when the open ends, its
+    /// announcement included: `Locked`, nothing opened, and the choice forgotten. A session opened (a backup already open
+    /// is answered as it is) uses the choice up. Every other answer (a wrong password, damage, a Stop, an I/O refusal)
+    /// keeps it, each starting its five minutes again, so the person can try another password. Writes nothing. Needs no
+    /// session.
     pub fn open_backup_read_only(
         &self,
+        choice: &Token,
         credential: CredentialArg,
+        request: u32,
     ) -> ShellResult<Outcome<Tagged<SessionInfo>>> {
+        let pending = self.sessions.pending();
         let epoch = self.sessions.epoch();
-        let Some(backup) = self.os.dialogs.pick_file("Open a backup", Some(FILTER)) else {
-            return Ok(Outcome::Dismissed);
-        };
-        let credential = credential.typed()?;
-        let location = Location::backup(&backup)?;
-        let answer = self
+        // In use from here to the end: the timer's sweeps leave it alone however long the open takes, and its five
+        // minutes start again, by the shell's clock, when `attempt` is dropped (on every way out, a refusal included).
+        let now = || self.os.clock.now();
+        let attempt = pending.use_open_backup(choice, epoch, &now)?;
+        let attempts = credential.attempts()?;
+        let location = Location::backup(attempt.path())?;
+        let job = self.begin_launch_job(JobKind::OpenBackup, Some(request));
+        // A lock before the job began: nothing is read. (One after it cancels the job's token, and its answer is refused
+        // by `answer_job`.)
+        if self.locked_since(epoch) {
+            pending.forget_open_backup(choice);
+            return Err(ShellError::Locked);
+        }
+        let opened = self
             .sessions
-            .open_since(epoch, Some(location.clone()), None, |cancel| {
-                let vault = ReadOnlyVault::open_backup(
-                    location.path(),
-                    credential.credential(),
-                    cancel,
-                    &NoProgress,
-                )?;
-                Ok(OpenStep::Session(location, Opened::ReadOnly(vault), ()))
-            })?;
-        match answer {
-            Outcome::Done(Tagged {
+            .open_since(epoch, Some(location.clone()), None, |_| {
+                let vault = attempts.run(|credential| {
+                    ReadOnlyVault::open_backup(
+                        location.path(),
+                        credential,
+                        job.token(),
+                        job.progress(),
+                    )
+                })?;
+                Ok(OpenStep::Session(
+                    location.clone(),
+                    Opened::ReadOnly(vault),
+                    (),
+                ))
+            });
+        drop(attempts);
+        let answer = match opened {
+            Ok(Outcome::Done(Tagged {
                 session,
                 generation,
                 data: (info, _),
-            }) => Ok(Outcome::Done(Tagged {
+            })) => Ok(Outcome::Done(Tagged {
                 session,
                 generation,
                 data: info,
             })),
             // The opening closure never asks.
-            Outcome::Confirm(_) | Outcome::Dismissed => Err(ShellError::Cancelled),
+            Ok(Outcome::Confirm(_) | Outcome::Dismissed) => Err(ShellError::Cancelled),
+            Err(refusal) => Err(refusal),
+        };
+        // A session opened, or a lock, uses the choice up; every other answer keeps it, with its five minutes started
+        // again from here when `attempt` goes (nothing to do if a lock or a forget has taken it).
+        if matches!(answer, Ok(_) | Err(ShellError::Locked)) {
+            pending.forget_open_backup(choice);
         }
+        drop(attempt);
+        // Ending the job announces on `lockbox://busy`, where a lock can land: the answer is checked after it.
+        let answered = self.autolock.answer_job(job, answer);
+        if matches!(answered, Err(ShellError::Locked)) {
+            pending.forget_open_backup(choice);
+        }
+        answered
     }
 
-    /// Copies the item `id` of the read-only session `from` into the open vault of session `to` (spec §6.9). When
-    /// the backup does not hold some of the item's files and `skip_missing` is not set, nothing is copied and the
-    /// answer is [`Confirm::MissingFiles`] with their names; sending the command again with `skip_missing` copies
-    /// the item without them and lists their names. A lock of either session while it runs answers `Locked`, with
-    /// no blob of the copy left.
+    /// Copies the item `id` of the read-only session `from` into the open vault of session `to`, in the folder `folder`
+    /// of that vault (its ID in hex; `None`: in no folder), whatever folder the item sat in at the source (spec §6.9). A
+    /// folder `to` does not have, or has in the trash, is refused with the engine's own refusal before anything is
+    /// written. When the backup does not hold some of the item's files and `skip_missing` is not set, nothing is copied and
+    /// the answer is [`Confirm::MissingFiles`] with their names; sending the command again with `skip_missing` (and the
+    /// same folder) copies the item without them and lists their names. A lock of either session while it runs answers
+    /// `Locked`, with no blob of the copy left.
+    // One argument per field of the command's JSON: the two sessions with their generations, the item, the folder, the yes.
+    #[allow(clippy::too_many_arguments)]
     pub fn copy_item_to(
         &self,
         from: SessionId,
@@ -542,9 +683,11 @@ impl Shell {
         id: &str,
         to: SessionId,
         to_generation: u64,
+        folder: Option<&str>,
         skip_missing: bool,
     ) -> ShellResult<Tagged<Outcome<CopiedItemView>>> {
         let id = ItemId::from_hex(id)?;
+        let folder = folder.map(ItemId::from_hex).transpose()?;
         self.sessions.read_write(
             from,
             from_generation,
@@ -553,6 +696,8 @@ impl Shell {
             |source, vault, cancel| {
                 // The item's own record names its files; the question and the answer both list them in its order.
                 let attachments = &source.get_item(&id)?.attachments;
+                // A folder the target would refuse is refused before the person is asked anything about files.
+                vault.check_copy_collection(folder)?;
                 let names = |files: &[FileId]| -> Vec<String> {
                     let listed = attachments
                         .iter()
@@ -569,7 +714,7 @@ impl Shell {
                 let _operation = self
                     .autolock
                     .begin(Some(to), JobKind::CopyItem, cancel.clone());
-                let copied = vault.copy_item_from(source, &id, skip_missing, cancel)?;
+                let copied = vault.copy_item_from(source, &id, folder, skip_missing, cancel)?;
                 Ok(Outcome::Done(CopiedItemView {
                     id: copied.id.to_hex(),
                     left_out: names(&copied.left_out),
@@ -596,11 +741,28 @@ struct BackupDueArgs {
     generation: u64,
 }
 
-/// `open_backup_read_only`.
+/// `open_backup_pick`: the choice being replaced (Pick another), or `null` for the first pick.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CredentialOnly {
+struct OpenBackupPick {
+    choice: Option<Token>,
+}
+
+/// `open_backup_read_only`: the held backup, what was typed, and the page's number for this job.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenBackupArgs {
+    choice: Token,
     credential: CredentialArg,
+    /// The page's number for this job: its operation reaches the page by `lockbox://job-started` under it.
+    request: u32,
+}
+
+/// `forget_open_backup`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForgetOpenBackup {
+    choice: Token,
 }
 
 /// `test_backup_pick`: the choice being replaced (Pick another), or `null` for the first pick.
@@ -635,6 +797,10 @@ struct CopyItemTo {
     id: String,
     to: SessionId,
     to_generation: u64,
+    /// The target vault's folder, its ID in hex, or `null` for no folder. The key itself is required: a page that leaves
+    /// it out is malformed, not "no folder".
+    #[serde(deserialize_with = "Option::deserialize")]
+    folder: Option<String>,
     /// The user said yes to [`Confirm::MissingFiles`].
     skip_missing: bool,
 }
@@ -701,13 +867,37 @@ pub(super) async fn forget_test_backup(
 }
 
 #[tauri::command]
+pub(super) async fn open_backup_pick(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Outcome<OpenPick>> {
+    let OpenBackupPick { choice } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.open_backup_pick(choice.as_ref())).await
+}
+
+#[tauri::command]
+pub(super) async fn forget_open_backup(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let ForgetOpenBackup { choice } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.forget_open_backup(&choice)).await
+}
+
+#[tauri::command]
 pub(super) async fn open_backup_read_only(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Outcome<Tagged<SessionInfo>>> {
-    let CredentialOnly { credential } = args(&request)?;
+    let OpenBackupArgs {
+        choice,
+        credential,
+        request,
+    } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.open_backup_read_only(credential)).await
+    blocking(move || shell.open_backup_read_only(&choice, credential, request)).await
 }
 
 #[tauri::command]
@@ -721,11 +911,20 @@ pub(super) async fn copy_item_to(
         id,
         to,
         to_generation,
+        folder,
         skip_missing,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || {
-        shell.copy_item_to(from, from_generation, &id, to, to_generation, skip_missing)
+        shell.copy_item_to(
+            from,
+            from_generation,
+            &id,
+            to,
+            to_generation,
+            folder.as_deref(),
+            skip_missing,
+        )
     })
     .await
 }
@@ -966,7 +1165,10 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant, UNIX_EPOCH};
 
-    use lockbox_core::blob::CancelToken;
+    use lockbox_core::blob::{CancelToken, NoProgress};
+    use lockbox_core::internals::fixture::{
+        ITEM_TITLE, KEPT_FILE, LOST_FILE, backup_missing_a_file,
+    };
     use lockbox_core::internals::fsio::testutil::{flip_byte, names};
     use lockbox_core::internals::fsio::{VolumeInfo, failpoint, set_volume_override};
     use lockbox_core::internals::header::{
@@ -982,7 +1184,7 @@ mod tests {
     use crate::dates;
     use crate::jobs::{JobScope, OperationId};
     use crate::os::Clock;
-    use crate::session::{LockReason, SessionState};
+    use crate::session::{LockReason, SessionKind, SessionState};
     use crate::testing::{TEST_PASSWORD, TestShell, heavy};
 
     /// Always disarms, so a failing test cannot leak a failpoint into the next one on this thread.
@@ -1026,9 +1228,7 @@ mod tests {
 
     /// The backup in `dest` opened read-only: its session and generation.
     fn open_backup(ts: &TestShell, dest: &Path) -> (SessionId, u64) {
-        ts.dialogs.answer(Some(dest.to_path_buf()));
-        let opened = heavy(|| ts.shell.open_backup_read_only(password())).unwrap();
-        let tagged = done(opened);
+        let tagged = ts.open_backup_read_only(dest, password());
         assert!(tagged.data.read_only);
         (tagged.session, tagged.generation)
     }
@@ -2037,36 +2237,45 @@ mod tests {
         }
     }
 
-    /// The new box's shape is one more form of the credential, and the other callers refuse it: only `test_backup` tries
-    /// a key and then a password.
+    /// The one box's shape is one more form of the credential, and a caller that was not taught the two tries refuses it
+    /// (`typed`); the callers that were (the test, the restore's check and both read-only opens) read it by `attempts`.
     #[test]
-    fn password_or_key_is_refused_by_the_other_callers() {
-        let ts = TestShell::new();
-        let (s, g) = ts.open_vault("Family");
-        let dest = secret_backup(&ts, s, g);
-        ts.dialogs.answer(Some(dest));
-        assert_eq!(
-            ts.shell.open_backup_read_only(typed(TEST_PASSWORD)).err(),
-            Some(ShellError::InvalidInput { what: "credential" })
-        );
+    fn password_or_key_is_refused_by_the_callers_that_take_one_meaning() {
+        let one_box = || typed(TEST_PASSWORD);
+        assert!(matches!(
+            one_box().typed(),
+            Err(ShellError::InvalidInput { what: "credential" })
+        ));
+        assert!(one_box().attempts().is_ok());
+        assert!(password().typed().is_ok());
     }
 
-    /// A lock of all vaults while the picker of "Open a backup" is open: `Locked`, and no session is opened.
+    /// A lock of all vaults while the picker of "Open a backup" is open: `Locked`, nothing is held and no session is
+    /// opened; the choice sent with it (Pick another) goes with the lock. A closed picker answers `Dismissed` and
+    /// leaves the choice as it was.
     #[test]
     fn lock_during_open_backup_picker() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         let dest = backup_file(&ts, "family.lockbox-backup");
         back_up(&ts, s, g, &dest);
+        let base = ts.shell.sessions.pending().len();
+        let first = open_pick(&ts, &dest);
+        ts.dialogs.answer(None);
+        assert!(matches!(
+            ts.shell.open_backup_pick(Some(&first.choice)),
+            Ok(Outcome::Dismissed)
+        ));
+        assert_eq!(ts.shell.sessions.pending().len(), base + 1, "kept");
+
         let shell = Arc::clone(&ts.shell);
         ts.dialogs.during_next_dialog(Box::new(move || {
             shell.sessions.lock_all(LockReason::Manual)
         }));
         ts.dialogs.answer(Some(dest));
-        assert_eq!(
-            heavy(|| ts.shell.open_backup_read_only(password())).err(),
-            LOCKED
-        );
+        assert_eq!(ts.shell.open_backup_pick(Some(&first.choice)).err(), LOCKED);
+        assert_eq!(ts.shell.sessions.pending().len(), 0, "nothing held");
+        assert_eq!(open_with(&ts, &first, password()).err(), EXPIRED);
         let sessions = ts.shell.sessions.list();
         assert_eq!(sessions.len(), 1, "only the vault is listed");
         assert_eq!(sessions[0].session, s);
@@ -2114,7 +2323,10 @@ mod tests {
         let (bs, bg) = open_backup(&ts, &dest);
 
         let before = names(&files);
-        let asked = ts.shell.copy_item_to(bs, bg, &id, s, g, false).unwrap();
+        let asked = ts
+            .shell
+            .copy_item_to(bs, bg, &id, s, g, None, false)
+            .unwrap();
         assert_eq!((asked.session, asked.generation), (s, g));
         let Outcome::Confirm(Confirm::MissingFiles { names: missing }) = asked.data else {
             panic!("not asked about the missing files");
@@ -2123,7 +2335,10 @@ mod tests {
         assert_eq!(titles(&ts, s, g), ["a-first.bin"], "nothing copied");
         assert_eq!(names(&files), before);
 
-        let copied = ts.shell.copy_item_to(bs, bg, &id, s, g, true).unwrap();
+        let copied = ts
+            .shell
+            .copy_item_to(bs, bg, &id, s, g, None, true)
+            .unwrap();
         assert_eq!((copied.session, copied.generation), (s, g));
         let copied = done(copied.data);
         assert_eq!(copied.left_out, ["a-first.bin", "c-third.bin"]);
@@ -2168,7 +2383,7 @@ mod tests {
             Box::new(move || shell.sessions.lock(bs, LockReason::Manual)),
         );
         assert_eq!(
-            ts.shell.copy_item_to(bs, bg, &id, s, g, false).err(),
+            ts.shell.copy_item_to(bs, bg, &id, s, g, None, false).err(),
             LOCKED
         );
         assert_eq!(names(&files), before, "no blob of the copy left");
@@ -2183,6 +2398,962 @@ mod tests {
         assert_eq!(states, [SessionState::Unlocked, SessionState::Locked]);
     }
 
+    // ---- Task 7: opening a backup read-only, picked first and held in Rust; copying items out ----
+
+    /// The refusal of a folder (collection) the target does not have, as the engine words it: the page words it.
+    const COLLECTION: &str = "collection";
+    /// The engine's refusal of text that is no ID.
+    const BAD_ID: &str = "id";
+
+    /// The page's first open pick: the picker answers `path`, no choice sent.
+    fn open_pick(ts: &TestShell, path: &Path) -> OpenPick {
+        ts.dialogs.answer(Some(path.to_path_buf()));
+        done(ts.shell.open_backup_pick(None).unwrap())
+    }
+
+    /// One `open_backup_read_only` attempt on the choice `picked`, as request 1.
+    fn open_with(
+        ts: &TestShell,
+        picked: &OpenPick,
+        credential: CredentialArg,
+    ) -> ShellResult<Outcome<Tagged<SessionInfo>>> {
+        heavy(|| {
+            ts.shell
+                .open_backup_read_only(&picked.choice, credential, 1)
+        })
+    }
+
+    /// The folders of the session's vault (and its items), by ID: the item's folder.
+    fn folder_of(ts: &TestShell, s: SessionId, g: u64, id: &str) -> Option<String> {
+        let list = ts.shell.list_items(s, g).unwrap().data;
+        list.items
+            .into_iter()
+            .find(|item| item.id == id)
+            .unwrap()
+            .collection
+    }
+
+    /// A new folder of the session's vault: its ID.
+    fn new_folder(ts: &TestShell, s: SessionId, g: u64, name: &str) -> String {
+        ts.shell
+            .new_item(s, g, NewKind::Collection, name.into(), None, None)
+            .unwrap()
+            .data
+    }
+
+    /// The backup holds the pick through every answer but a lock: a wrong password (twice), a damaged backup, a file
+    /// gone, a Stop; the picker is not opened again; the right password then opens it, and the choice is used up (a
+    /// second open of it, or of a backup already open, is the answer for a choice not held).
+    #[test]
+    fn open_read_only_keeps_the_choice_through_a_wrong_password() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", &vec![3u8; 300_000]);
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        // The backup's own offer to be tested is held too.
+        let base = ts.shell.sessions.pending().len();
+        let picked = open_pick(&ts, &dest);
+        let opened = ts.dialogs.opened();
+
+        for _ in 0..2 {
+            assert_eq!(
+                open_with(&ts, &picked, typed("another long password")).err(),
+                Some(wrong_password())
+            );
+        }
+        assert_eq!(ts.shell.sessions.list().len(), 1, "nothing opened");
+        assert_eq!(ts.shell.sessions.pending().len(), base + 1, "still held");
+
+        // A Stop answers `Cancelled`, and keeps it. (An open reports progress only once it has read a MiB of items and
+        // when it ends, so the Stop is sent as the job is told to the page.)
+        let shell = Arc::clone(&ts.shell);
+        ts.events.watch(move |name, payload| {
+            if name == crate::shell::JOB_STARTED_EVENT {
+                let operation = OperationId(payload["operation"].as_u64().unwrap());
+                let scope: JobScope = serde_json::from_value(payload["scope"].clone()).unwrap();
+                shell.autolock.cancel_operation(operation, scope).unwrap();
+            }
+        });
+        let stopped = open_with(&ts, &picked, typed(TEST_PASSWORD));
+        ts.events.watch(|_, _| {});
+        assert_eq!(stopped.err(), Some(ShellError::Cancelled));
+        assert_eq!(ts.shell.sessions.list().len(), 1, "nothing opened");
+
+        // Damaged, and the file gone: each is answered as what it is, and the choice stays for a retry.
+        let len = fs::metadata(&dest).unwrap().len();
+        let copy = backup_file(&ts, "damaged.lockbox-backup");
+        fs::copy(&dest, &copy).unwrap();
+        for at in len - 900..len - 10 {
+            flip_byte(&copy, at).unwrap();
+        }
+        let damaged = open_pick(&ts, &copy);
+        assert!(matches!(
+            open_with(&ts, &damaged, typed(TEST_PASSWORD)).err(),
+            Some(ShellError::Core(view)) if view.kind == "damaged"
+        ));
+        fs::remove_file(&copy).unwrap();
+        assert!(matches!(
+            open_with(&ts, &damaged, typed(TEST_PASSWORD)).err(),
+            Some(ShellError::Core(view)) if view.kind == "io"
+        ));
+        assert_eq!(
+            ts.shell.sessions.pending().len(),
+            base + 2,
+            "both still held"
+        );
+        fs::copy(&dest, &copy).unwrap();
+        let again = done(open_with(&ts, &damaged, typed(TEST_PASSWORD)).unwrap());
+        assert!(again.data.read_only);
+
+        // The right password opens the first one, with no picker, and uses the choice up.
+        let backup = done(open_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap());
+        assert!(backup.data.read_only);
+        assert_eq!(backup.data.kind, SessionKind::Backup);
+        assert_eq!(ts.dialogs.opened(), opened + 1, "only the second pick");
+        assert_eq!(ts.shell.sessions.pending().len(), base, "used up");
+        assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
+
+        // A well-formed recovery key opens it too, from the one box; one that is no key is refused before a job begins.
+        let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
+        let by_key = backup_file(&ts, "by-key.lockbox-backup");
+        back_up(&ts, s, g, &by_key);
+        let picked = open_pick(&ts, &by_key);
+        let started = ts.events.started().len();
+        let junk = CredentialArg::RecoveryKey(Zeroizing::new("not a key".into()));
+        assert!(matches!(
+            open_with(&ts, &picked, junk).err(),
+            Some(ShellError::Core(_))
+        ));
+        assert_eq!(ts.events.started().len(), started, "no job for it");
+        assert!(open_with(&ts, &picked, typed(&key)).is_ok());
+    }
+
+    /// A held open pick lives like a held test pick: forgotten by `forget_open_backup` (idempotent), by a lock of all
+    /// vaults of any reason and by closing, never by a lock of one vault; replaced by a new pick (a closed picker leaves it);
+    /// five minutes from the last attempt, an attempt in use never swept. A test choice and an open choice are different
+    /// kinds: neither answers for the other, and neither's forget touches the other. The path never reaches the page.
+    #[test]
+    fn open_backup_pick_holds_the_choice_like_a_test_pick() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+        let pending = ts.shell.sessions.pending();
+        let base = pending.len();
+
+        // Forget: idempotent, and the open is then refused as expired, with no picker.
+        let picked = open_pick(&ts, &dest);
+        assert!(ts.shell.forget_open_backup(&picked.choice).is_ok());
+        assert!(ts.shell.forget_open_backup(&picked.choice).is_ok());
+        let made_up = pending.put(PendingChoice::Test(None));
+        let _ = pending.take(&made_up);
+        assert!(ts.shell.forget_open_backup(&made_up).is_ok());
+        let opened = ts.dialogs.opened();
+        assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
+        assert_eq!(ts.dialogs.opened(), opened);
+        assert_eq!(pending.len(), base);
+
+        // A lock of one vault leaves it; every lock of all vaults drops it, and so does closing.
+        let picked = open_pick(&ts, &dest);
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(pending.len(), base + 1);
+        for reason in [
+            LockReason::Manual,
+            LockReason::Idle,
+            LockReason::WindowsLocked,
+            LockReason::Sleep,
+        ] {
+            let picked = open_pick(&ts, &dest);
+            ts.shell.sessions.lock_all(reason);
+            assert_eq!(
+                open_with(&ts, &picked, typed(TEST_PASSWORD)).err(),
+                EXPIRED,
+                "{reason:?}"
+            );
+            assert_eq!(pending.len(), 0);
+        }
+        assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
+        let picked = open_pick(&ts, &dest);
+        if let Some(hooks) = ts.shell.sessions.close() {
+            hooks.wait();
+        }
+        assert_eq!(pending.len(), 0);
+        assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
+    }
+
+    /// The pick's other rules: a new pick forgets the choice sent with it, a closed picker leaves it; a lock while the
+    /// picker is open holds nothing; five minutes without an attempt drops it; a test choice and an open choice are not
+    /// each other's; no answer holds the path.
+    #[test]
+    fn an_open_pick_is_replaced_expires_and_is_not_a_test_pick() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let first = secret_backup(&ts, s, g);
+        let second = backup_file(&ts, "second.lockbox-backup");
+        back_up(&ts, s, g, &second);
+        let pending = ts.shell.sessions.pending();
+        let base = pending.len();
+
+        // A new pick: the old choice is forgotten, the new one answers with the file's name and size.
+        let old = open_pick(&ts, &first);
+        let mut seen = vec![serde_json::to_string(&old).unwrap()];
+        ts.dialogs.answer(Some(second.clone()));
+        let new = done(ts.shell.open_backup_pick(Some(&old.choice)).unwrap());
+        seen.push(serde_json::to_string(&new).unwrap());
+        assert_eq!(new.file_name, "second.lockbox-backup");
+        assert_eq!(new.size, fs::metadata(&second).unwrap().len());
+        assert_eq!(open_with(&ts, &old, typed(TEST_PASSWORD)).err(), EXPIRED);
+        assert_eq!(pending.len(), base + 1);
+
+        // Five minutes without an attempt.
+        pending.sweep_at(Instant::now() + Duration::from_secs(10 * 60));
+        assert_eq!(pending.len(), 0, "every held pick was five minutes old");
+        assert_eq!(open_with(&ts, &new, typed(TEST_PASSWORD)).err(), EXPIRED);
+
+        // The two kinds are not each other's, and a refusal leaves the choice where it was.
+        let open = open_pick(&ts, &first);
+        let test = pick(&ts, &first);
+        assert_eq!(
+            open_with(&ts, &test_as_open(&test), typed(TEST_PASSWORD)).err(),
+            EXPIRED
+        );
+        assert_eq!(
+            test_with(&ts, &open_as_test(&open), typed(TEST_PASSWORD)).err(),
+            EXPIRED
+        );
+        assert!(ts.shell.forget_open_backup(&test.choice).is_ok());
+        assert!(ts.shell.forget_test_backup(&open.choice).is_ok());
+        assert_eq!(pending.len(), 2, "neither forget touched the other kind");
+        assert!(open_with(&ts, &open, typed(TEST_PASSWORD)).is_ok());
+        assert_eq!(
+            done(test_with(&ts, &test, typed(TEST_PASSWORD)).unwrap()).items,
+            0
+        );
+
+        // No answer or event holds the folder or the path.
+        let picked = open_pick(&ts, &first);
+        for credential in [typed("another long password"), typed(TEST_PASSWORD)] {
+            seen.push(match open_with(&ts, &picked, credential) {
+                Ok(answer) => serde_json::to_string(&answer).unwrap(),
+                Err(refused) => serde_json::to_string(&refused).unwrap(),
+            });
+        }
+        let gone = open_with(&ts, &picked, typed("x")).err();
+        seen.push(serde_json::to_string(&gone).unwrap());
+        for (name, payload) in ts.events.job_events() {
+            seen.push(format!("{name} {payload}"));
+        }
+        seen.push(serde_json::to_string(&ts.shell.sessions.list()).unwrap());
+        let root = ts.temp.path().to_string_lossy().into_owned();
+        let escaped = serde_json::to_string(&root).unwrap();
+        for text in &seen {
+            assert!(!text.contains(SECRET_FOLDER), "{text}");
+            assert!(!text.contains(&root), "{text}");
+            assert!(!text.contains(escaped.trim_matches('"')), "{text}");
+        }
+    }
+
+    /// A test pick as the token an open would be sent: only its token matters to the shell.
+    fn test_as_open(pick: &TestPick) -> OpenPick {
+        OpenPick {
+            choice: pick.choice.clone(),
+            file_name: pick.file_name.clone(),
+            size: pick.size,
+        }
+    }
+
+    /// An open pick as the token a test would be sent.
+    fn open_as_test(pick: &OpenPick) -> TestPick {
+        TestPick {
+            choice: pick.choice.clone(),
+            file_name: pick.file_name.clone(),
+            size: pick.size,
+        }
+    }
+
+    /// An open that runs longer than the choice's five minutes does not lose it (the shell's clock is moved past them
+    /// while the open runs and the timer ticks), and its five minutes start again when the attempt ends.
+    #[test]
+    fn an_open_longer_than_five_minutes_keeps_its_choice() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+        let t0 = ts.clock.now();
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+        let picked = open_pick(&ts, &dest);
+        let (shell, clock) = (Arc::clone(&ts.shell), Arc::clone(&ts.clock));
+        ts.events.during_next_busy(Box::new(move || {
+            clock.set(t0 + minutes(6));
+            shell.autolock.tick(t0 + minutes(6));
+        }));
+        assert_eq!(
+            open_with(&ts, &picked, typed("another long password")).err(),
+            Some(wrong_password())
+        );
+        ts.shell.sessions.pending().sweep_at(t0 + minutes(6 + 4));
+        assert!(
+            open_with(&ts, &picked, typed(TEST_PASSWORD)).is_ok(),
+            "the retry needs no new pick"
+        );
+    }
+
+    /// The backup says what it is and what it is called: the session's kind is `backup`, its name the file's name without
+    /// the extension (in any case; an extension that is not there leaves the name whole), not the vault's name inside it;
+    /// the pick's answer is the file's name and size. The vault's own session says `vault`. `Debug` never shows the name.
+    #[test]
+    fn open_backup_answers_its_kind_and_file_name() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let named = backup_file(&ts, "Task 14 check 2026-11-17.lockbox-backup");
+        let shouting = backup_file(&ts, "FAMILY ARCHIVE.LOCKBOX-BACKUP");
+        let bare = backup_file(&ts, "no extension");
+        for dest in [&named, &shouting] {
+            back_up(&ts, s, g, dest);
+        }
+        // A file that was renamed to no ending at all (a backup is only ever written with one).
+        fs::copy(&named, &bare).unwrap();
+
+        let picked = open_pick(&ts, &named);
+        assert_eq!(picked.file_name, "Task 14 check 2026-11-17.lockbox-backup");
+        assert_eq!(picked.size, fs::metadata(&named).unwrap().len());
+        let opened = done(open_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap());
+        assert_eq!(opened.data.name, "Task 14 check 2026-11-17");
+        assert_eq!(opened.data.kind, SessionKind::Backup);
+        assert!(opened.data.read_only);
+        let json = serde_json::to_value(&opened.data).unwrap();
+        assert_eq!(json["kind"], json!("backup"));
+        assert_eq!(json["name"], json!("Task 14 check 2026-11-17"));
+        assert!(
+            !format!("{:?}", opened.data).contains("Task 14"),
+            "Debug never shows the name"
+        );
+
+        let shouted = ts.open_backup_read_only(&shouting, typed(TEST_PASSWORD));
+        assert_eq!(shouted.data.name, "FAMILY ARCHIVE");
+        let whole = ts.open_backup_read_only(&bare, typed(TEST_PASSWORD));
+        assert_eq!(whole.data.name, "no extension");
+
+        // Every list says it, the vault's own session too.
+        let listed = ts.shell.sessions.list();
+        let kinds: Vec<(SessionKind, &str)> = listed
+            .iter()
+            .map(|info| (info.kind, info.name.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (SessionKind::Vault, "Family"),
+                (SessionKind::Backup, "Task 14 check 2026-11-17"),
+                (SessionKind::Backup, "FAMILY ARCHIVE"),
+                (SessionKind::Backup, "no extension"),
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&listed[0]).unwrap()["kind"],
+            json!("vault")
+        );
+        // Locked, it keeps its kind and name (sessions stay listed).
+        ts.shell.sessions.lock(opened.session, LockReason::Manual);
+        let after = ts.shell.sessions.list();
+        assert_eq!(after[1].kind, SessionKind::Backup);
+        assert_eq!(after[1].name, "Task 14 check 2026-11-17");
+        assert_eq!(after[1].state, SessionState::Locked);
+    }
+
+    /// Nothing can be written into a read-only session: copying an item *into* a backup (or an older copy) is refused
+    /// `read_only`, before anything is read or written; a backup of a backup is too; the source of a copy must be a
+    /// read-only session, and a writable one is refused as the wrong source.
+    #[test]
+    fn read_only_session_refuses_every_write() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let (id, _) = ts.stored_file(s, g, "report.pdf", b"report");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let (bs, bg) = open_backup(&ts, &dest);
+        let read_only = Some(ShellError::ReadOnly);
+
+        // Into a backup, from itself or from the live vault.
+        assert_eq!(
+            ts.shell
+                .copy_item_to(bs, bg, &id, bs, bg, None, false)
+                .err(),
+            read_only
+        );
+        assert_eq!(
+            ts.shell.copy_item_to(s, g, &id, bs, bg, None, true).err(),
+            read_only
+        );
+        // From a writable session: the wrong source.
+        assert_eq!(
+            ts.shell.copy_item_to(s, g, &id, s, g, None, false).err(),
+            Some(ShellError::InvalidInput {
+                what: "source vault"
+            })
+        );
+        assert_eq!(ts.shell.backup_vault(bs, bg, 1).err(), read_only);
+        assert_eq!(titles(&ts, bs, bg), ["report.pdf"]);
+        assert_eq!(titles(&ts, s, g), ["report.pdf"]);
+
+        // Into an older copy: the same.
+        let dir = vault_dir(&ts);
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        let location = Location::folder(&dir).unwrap();
+        let older = heavy(|| {
+            ReadOnlyVault::open_folder(
+                &dir,
+                Credential::Password(TEST_PASSWORD),
+                &CancelToken::new(),
+                &NoProgress,
+            )
+        })
+        .unwrap();
+        let Ok(Outcome::Done(older)) = ts.shell.sessions.open(Some(location.clone()), None, |_| {
+            Ok(OpenStep::Session(location, Opened::ReadOnly(older), ()))
+        }) else {
+            panic!("the older copy did not open");
+        };
+        assert_eq!(
+            ts.shell
+                .copy_item_to(bs, bg, &id, older.session, older.generation, None, false)
+                .err(),
+            read_only
+        );
+    }
+
+    /// 25d: an item whose backup lacks one of its files (a real backup the engine wrote, whose item refers to a file
+    /// entry the backup does not hold, so only that file is missing): the copy asks first with the file's name, writes
+    /// nothing, and the question answered (sent again with `skip_missing`) copies the rest and lists the name left out.
+    #[test]
+    fn copy_asks_before_leaving_files_out() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let made = backup_missing_a_file(&ts.folder("Made"), TEST_PASSWORD);
+        let item = made.item.to_hex();
+        let opened = ts.open_backup_read_only(&made.backup, password());
+        let (bs, bg) = (opened.session, opened.generation);
+        let files = vault_dir(&ts).join("files");
+        let before = names(&files);
+
+        let asked = ts
+            .shell
+            .copy_item_to(bs, bg, &item, s, g, None, false)
+            .unwrap();
+        assert_eq!((asked.session, asked.generation), (s, g));
+        let Outcome::Confirm(Confirm::MissingFiles { names: missing }) = asked.data else {
+            panic!("not asked about the missing file");
+        };
+        assert_eq!(missing, [LOST_FILE]);
+        assert!(titles(&ts, s, g).is_empty(), "nothing copied");
+        assert_eq!(names(&files), before, "nothing written");
+        let busy = ts.events.busy();
+        assert!(
+            !busy.contains(&(Some(s), vec!["copy_item"])),
+            "no copy began: {busy:?}"
+        );
+
+        // The question is asked again as often as it is sent without the yes.
+        assert!(matches!(
+            ts.shell
+                .copy_item_to(bs, bg, &item, s, g, None, false)
+                .unwrap()
+                .data,
+            Outcome::Confirm(Confirm::MissingFiles { .. })
+        ));
+    }
+
+    /// The yes to 25d: the item copies without the lost file and lists its name; the file the backup holds is copied whole
+    /// (its bytes are the backup's), under a new ID, and the copy is the live vault's own item.
+    #[test]
+    fn copy_without_them_copies_the_rest() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let made = backup_missing_a_file(&ts.folder("Made"), TEST_PASSWORD);
+        let item = made.item.to_hex();
+        let opened = ts.open_backup_read_only(&made.backup, password());
+        let (bs, bg) = (opened.session, opened.generation);
+
+        let copied = ts
+            .shell
+            .copy_item_to(bs, bg, &item, s, g, None, true)
+            .unwrap();
+        assert_eq!((copied.session, copied.generation), (s, g));
+        let copied = done(copied.data);
+        assert_eq!(copied.left_out, [LOST_FILE]);
+        assert_ne!(copied.id, item);
+        let detail = ts.shell.get_item(s, g, &copied.id).unwrap().data;
+        let kept: Vec<&str> = detail
+            .summary
+            .attachments
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect();
+        assert_eq!(kept, [KEPT_FILE]);
+        assert_ne!(
+            detail.summary.attachments[0].file_id,
+            made.kept.to_hex(),
+            "a new file ID"
+        );
+        assert_eq!(detail.summary.title, ITEM_TITLE);
+        // The file's bytes came through: saved out of the live vault, they are the ones the backup held.
+        let out = ts.folder("Saved").join("kept.txt");
+        let file = FileId::from_hex(&detail.summary.attachments[0].file_id).unwrap();
+        let id = ItemId::from_hex(&copied.id).unwrap();
+        ts.shell
+            .sessions
+            .read(s, g, |vault, _| match vault {
+                VaultRef::Writable(vault) => Ok(vault
+                    .export_file(
+                        &id,
+                        &file,
+                        &out,
+                        &lockbox_core::blob::NoJournal,
+                        &CancelToken::new(),
+                        &NoProgress,
+                    )
+                    .map_err(ShellError::from)?),
+                VaultRef::ReadOnly(_) => Err(ShellError::ReadOnly),
+            })
+            .unwrap();
+        assert_eq!(fs::read(&out).unwrap(), b"the file the backup holds");
+        let busy = ts.events.busy();
+        assert!(busy.contains(&(Some(s), vec!["copy_item"])), "{busy:?}");
+    }
+
+    /// 25c's Folder: the copy goes in the live vault's folder the page chose, or in none, whatever folder the item sat in
+    /// at the backup (the same name or ID there changes nothing); the answer lists its folder.
+    #[test]
+    fn copy_puts_the_item_in_the_chosen_folder() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let work = new_folder(&ts, s, g, "Work");
+        let note = ts
+            .shell
+            .new_item(s, g, NewKind::Note, "PIN".into(), Some(work.clone()), None)
+            .unwrap()
+            .data;
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let (bs, bg) = open_backup(&ts, &dest);
+        let other = new_folder(&ts, s, g, "Other");
+        let copy = |folder: Option<&str>| {
+            let copied = ts
+                .shell
+                .copy_item_to(bs, bg, &note, s, g, folder, false)
+                .unwrap();
+            assert_eq!((copied.session, copied.generation), (s, g));
+            done(copied.data).id
+        };
+
+        // The folder with the same ID as the item's in the backup.
+        let id = copy(Some(&work));
+        assert_eq!(folder_of(&ts, s, g, &id).as_deref(), Some(work.as_str()));
+        // Another folder of the live vault.
+        let id = copy(Some(&other));
+        assert_eq!(folder_of(&ts, s, g, &id).as_deref(), Some(other.as_str()));
+        // No folder: not the item's own, though the live vault has it.
+        let id = copy(None);
+        assert_eq!(folder_of(&ts, s, g, &id), None);
+        // The original is untouched.
+        assert_eq!(folder_of(&ts, s, g, &note).as_deref(), Some(work.as_str()));
+        // Another unlocked vault is its own target: its folders, not this one's.
+        let (t, tg) = ts.open_vault("Work vault");
+        let theirs = new_folder(&ts, t, tg, "Theirs");
+        let copied = ts
+            .shell
+            .copy_item_to(bs, bg, &note, t, tg, Some(&theirs), false)
+            .unwrap();
+        assert_eq!((copied.session, copied.generation), (t, tg));
+        let id = done(copied.data).id;
+        assert_eq!(folder_of(&ts, t, tg, &id).as_deref(), Some(theirs.as_str()));
+    }
+
+    /// A folder the target does not have is refused with the engine's own refusal, before anything is written: another
+    /// vault's folder, an ID that is not a folder, one never made, and one in the trash; a malformed ID too. For an item
+    /// whose backup lacks a file the folder is refused first, with no question about the file: the question comes only
+    /// once the folder is right. Nothing is added.
+    #[test]
+    fn copy_refuses_a_folder_not_in_the_target() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let (id, _) = ts.stored_file(s, g, "report.pdf", b"report");
+        let (t, tg) = ts.open_vault("Other");
+        let theirs = new_folder(&ts, t, tg, "Theirs");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let (bs, bg) = open_backup(&ts, &dest);
+        let files = vault_dir(&ts).join("files");
+        let before = names(&files);
+
+        let refused = |folder: &str| {
+            let answer = ts
+                .shell
+                .copy_item_to(bs, bg, &id, s, g, Some(folder), false);
+            matches!(
+                answer.as_ref().err(),
+                Some(ShellError::Core(view))
+                    if view.kind == "invalid_input" && view.what == Some(COLLECTION)
+            )
+        };
+        assert!(refused(&theirs), "another vault's folder");
+        assert!(refused(&id), "an item that is no folder");
+        assert!(refused(&ItemId::random().to_hex()), "a folder never made");
+        // In the trash.
+        let mine = new_folder(&ts, s, g, "Mine");
+        ts.shell.delete_collection(s, g, &mine).unwrap();
+        assert!(refused(&mine), "a folder in the trash");
+        // Not an ID at all: refused as a bad ID (the engine's, as the item's own ID is), nothing quoted.
+        let malformed = ts
+            .shell
+            .copy_item_to(bs, bg, &id, s, g, Some("SENTINEL-7f3a"), false)
+            .err();
+        assert!(
+            matches!(
+                &malformed,
+                Some(ShellError::Core(view))
+                    if view.kind == "invalid_input" && view.what == Some(BAD_ID)
+            ),
+            "{malformed:?}"
+        );
+        assert!(!format!("{malformed:?}").contains("SENTINEL"));
+
+        assert_eq!(names(&files), before, "nothing written");
+        assert_eq!(titles(&ts, s, g), ["Mine", "report.pdf"], "no item added");
+        // The same copy with no folder goes.
+        assert!(
+            ts.shell
+                .copy_item_to(bs, bg, &id, s, g, None, false)
+                .is_ok()
+        );
+
+        // A backup that lacks a file of the item: a folder the target does not have is refused first, either way the
+        // yes is sent; a good folder is asked about, then copied.
+        let made = backup_missing_a_file(&ts.folder("Made"), TEST_PASSWORD);
+        let (item, lacking) = (
+            made.item.to_hex(),
+            ts.open_backup_read_only(&made.backup, password()),
+        );
+        let (ls, lg) = (lacking.session, lacking.generation);
+        let count = titles(&ts, s, g).len();
+        for skip_missing in [false, true] {
+            let answer = ts
+                .shell
+                .copy_item_to(ls, lg, &item, s, g, Some(&mine), skip_missing);
+            assert!(
+                matches!(
+                    answer.as_ref().err(),
+                    Some(ShellError::Core(view))
+                        if view.kind == "invalid_input" && view.what == Some(COLLECTION)
+                ),
+                "{skip_missing}"
+            );
+        }
+        assert_eq!(titles(&ts, s, g).len(), count, "nothing copied");
+        let live = new_folder(&ts, s, g, "Live");
+        let asked = ts
+            .shell
+            .copy_item_to(ls, lg, &item, s, g, Some(&live), false)
+            .unwrap();
+        assert!(matches!(
+            asked.data,
+            Outcome::Confirm(Confirm::MissingFiles { .. })
+        ));
+        let copied = done(
+            ts.shell
+                .copy_item_to(ls, lg, &item, s, g, Some(&live), true)
+                .unwrap()
+                .data,
+        );
+        assert_eq!(
+            folder_of(&ts, s, g, &copied.id).as_deref(),
+            Some(live.as_str())
+        );
+    }
+
+    /// A stale generation or an unknown session on either side is refused (`Locked`, `NotFound`), before anything is
+    /// read or written; a session that locked and was opened again (a newer generation) is refused for the old one; the
+    /// right pair still copies afterwards.
+    #[test]
+    fn copy_refused_stale_foreign_on_either_side() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let (id, _) = ts.stored_file(s, g, "report.pdf", b"report");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let (bs, bg) = open_backup(&ts, &dest);
+        let files = vault_dir(&ts).join("files");
+        let before = names(&files);
+        let copy = |from: (SessionId, u64), to: (SessionId, u64)| {
+            ts.shell
+                .copy_item_to(from.0, from.1, &id, to.0, to.1, None, false)
+                .err()
+        };
+        let foreign = |session: SessionId| SessionId(session.0 + 100);
+
+        assert_eq!(copy((bs, bg + 1), (s, g)), LOCKED, "stale source");
+        assert_eq!(copy((bs, bg), (s, g + 1)), LOCKED, "stale target");
+        assert_eq!(
+            copy((foreign(bs), bg), (s, g)),
+            Some(ShellError::NotFound),
+            "foreign source"
+        );
+        assert_eq!(
+            copy((bs, bg), (foreign(s), g)),
+            Some(ShellError::NotFound),
+            "foreign target"
+        );
+        // The ids swapped: a vault as the source, a backup as the target.
+        assert_eq!(copy((s, g), (bs, bg)), Some(ShellError::ReadOnly));
+        assert_eq!(names(&files), before);
+        assert_eq!(titles(&ts, s, g), ["report.pdf"]);
+
+        // The backup locked and opened again: its old generation is stale, the new one is current, and the newer
+        // session is not "the newest" that an old answer may use.
+        ts.shell.sessions.lock(bs, LockReason::Manual);
+        assert_eq!(copy((bs, bg), (s, g)), LOCKED, "the backup locked");
+        let reopened = ts.open_backup_read_only(&dest, password());
+        assert_eq!(reopened.session, bs, "the same session, a newer generation");
+        assert!(reopened.generation > bg);
+        assert_eq!(copy((bs, bg), (s, g)), LOCKED, "the old generation");
+        assert!(
+            ts.shell
+                .copy_item_to(bs, reopened.generation, &id, s, g, None, false)
+                .is_ok()
+        );
+        // The target locked: refused, and the backup is untouched.
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(copy((bs, reopened.generation), (s, g)), LOCKED);
+    }
+
+    /// A lock of all vaults while the open runs (as it begins, in the middle, and in the announcement that ends it):
+    /// `Locked`, whatever the open found, no session left open, and the choice gone with the lock. The app closing is the
+    /// same.
+    #[test]
+    fn lock_all_during_an_open_refuses_its_answer() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        ts.stored_file(s, g, "report.pdf", &bytes);
+        let dest = secret_backup(&ts, s, g);
+        // Nothing is left open; and where the open had finished when the lock came, its session is listed, locked.
+        let only_the_vault = |ts: &TestShell, listed: usize| {
+            let sessions = ts.shell.sessions.list();
+            assert_eq!(sessions.len(), listed);
+            assert!(
+                sessions
+                    .iter()
+                    .all(|info| info.state == SessionState::Locked)
+            );
+        };
+
+        // As the operation begins.
+        let picked = open_pick(&ts, &dest);
+        let shell = Arc::clone(&ts.shell);
+        ts.events.during_next_busy(Box::new(move || {
+            shell.sessions.lock_all(LockReason::Manual)
+        }));
+        assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), LOCKED);
+        let busy = ts.events.busy();
+        assert!(busy.contains(&(None, vec!["open_backup"])), "{busy:?}");
+        assert_eq!(
+            open_with(&ts, &picked, typed(TEST_PASSWORD)).err(),
+            EXPIRED,
+            "the choice went with the lock"
+        );
+        only_the_vault(&ts, 1);
+
+        // In the middle: the first progress event.
+        let picked = open_pick(&ts, &dest);
+        let (shell, flag) = (
+            Arc::clone(&ts.shell),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        ts.events.watch(move |name, _| {
+            if name == crate::shell::PROGRESS_EVENT && !flag.swap(true, Ordering::SeqCst) {
+                shell.sessions.lock_all(LockReason::Manual);
+            }
+        });
+        let answer = open_with(&ts, &picked, typed(TEST_PASSWORD));
+        ts.events.watch(|_, _| {});
+        assert_eq!(answer.err(), LOCKED);
+        only_the_vault(&ts, 1);
+
+        // In the announcement that ends it: the final check comes after the job is dropped.
+        let picked = open_pick(&ts, &dest);
+        let (events, shell) = (Arc::clone(&ts.events), Arc::clone(&ts.shell));
+        ts.events.during_next_busy(Box::new(move || {
+            events.during_next_busy(Box::new(move || {
+                shell.sessions.lock_all(LockReason::Manual)
+            }));
+        }));
+        assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), LOCKED);
+        let busy = ts.events.busy();
+        assert_eq!(busy.last(), Some(&(None, vec![])), "the end was announced");
+        only_the_vault(&ts, 2);
+
+        // The app closing, with the choice held.
+        let picked = open_pick(&ts, &dest);
+        ts.shell.sessions.shut();
+        assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), LOCKED);
+    }
+
+    /// `open_backup_read_only`'s job: a launch-scoped one in the epoch it began in, begun only once the work starts (not
+    /// for a forgotten choice or a credential that cannot be read), `open_backup`, with progress that ends at the total.
+    #[test]
+    fn open_backup_job_events_use_the_launch_scope() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        ts.stored_file(s, g, "report.pdf", &bytes);
+        let dest = secret_backup(&ts, s, g);
+        let before = ts.events.started().len();
+
+        let picked = open_pick(&ts, &dest);
+        let gone = open_pick(&ts, &dest);
+        ts.shell.forget_open_backup(&gone.choice).unwrap();
+        assert_eq!(open_with(&ts, &gone, typed(TEST_PASSWORD)).err(), EXPIRED);
+        assert_eq!(ts.events.started().len(), before, "nothing started");
+
+        let epoch = ts.shell.sessions.epoch();
+        let found = heavy(|| {
+            ts.shell
+                .open_backup_read_only(&picked.choice, typed(TEST_PASSWORD), 9)
+        });
+        assert!(found.is_ok());
+        let started = ts.events.started();
+        assert_eq!(started.len(), before + 1);
+        let started = &started[before];
+        assert_eq!(started["request"], json!(9));
+        assert_eq!(started["kind"], json!("open_backup"));
+        assert_eq!(
+            started["scope"],
+            json!({ "type": "launch", "epoch": epoch })
+        );
+        let operation = started["operation"].as_u64().unwrap();
+        let progress: Vec<Value> = ts
+            .events
+            .progress()
+            .into_iter()
+            .filter(|event| event["operation"] == json!(operation))
+            .collect();
+        let (last, earlier) = progress.split_last().unwrap();
+        assert!(earlier.iter().all(|e| e["finished"] == json!(false)));
+        assert_eq!(last["finished"], json!(true));
+        assert_eq!(last["done"], last["total"]);
+        assert!(progress.iter().all(|e| e["kind"] == json!("open_backup")));
+    }
+
+    /// The four commands' arguments are exactly what they name: tokens, a typed credential, the page's number, the
+    /// target's folder (the key is required, `null` is no folder), and never a path or anything else. A bad shape is the
+    /// fixed malformed-request answer.
+    #[test]
+    fn open_backup_requests_are_strict() {
+        let hex = "0123456789abcdef".repeat(2);
+        let session =
+            json!({ "from": 1, "from_generation": 1, "id": hex, "to": 2, "to_generation": 1 });
+        let copy = |extra: Value| {
+            let mut body = session.clone();
+            for (key, value) in extra.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            body
+        };
+        let parses_copy = |body: Value| parse::<CopyItemTo>(&InvokeBody::Json(body)).is_ok();
+        assert!(parses_copy(copy(
+            json!({ "folder": null, "skip_missing": false })
+        )));
+        assert!(parses_copy(copy(
+            json!({ "folder": hex, "skip_missing": true })
+        )));
+        for bad in [
+            copy(json!({ "skip_missing": false })),
+            copy(json!({ "folder": 7, "skip_missing": false })),
+            copy(json!({ "folder": null })),
+            copy(json!({ "folder": null, "skip_missing": "yes" })),
+            copy(json!({ "folder": null, "skip_missing": false, "path": "SENTINEL-7f3a" })),
+            copy(json!({ "folder": null, "skipMissing": false })),
+        ] {
+            let refused = parse::<CopyItemTo>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+
+        let ok = |body: Value, parses: &dyn Fn(Value) -> bool| {
+            assert!(parses(body.clone()), "{body}");
+            let mut sneaked = body;
+            sneaked["path"] = json!("SENTINEL-7f3a");
+            assert!(!parses(sneaked));
+        };
+        ok(json!({ "choice": null }), &|body| {
+            parse::<OpenBackupPick>(&InvokeBody::Json(body)).is_ok()
+        });
+        ok(json!({ "choice": hex }), &|body| {
+            parse::<OpenBackupPick>(&InvokeBody::Json(body)).is_ok()
+        });
+        ok(
+            json!({ "choice": hex, "credential": { "password_or_key": "x" }, "request": 4 }),
+            &|body| parse::<OpenBackupArgs>(&InvokeBody::Json(body)).is_ok(),
+        );
+        ok(json!({ "choice": hex }), &|body| {
+            parse::<ForgetOpenBackup>(&InvokeBody::Json(body)).is_ok()
+        });
+        for bad in [
+            json!({ "choice": "SENTINEL-7f3a", "credential": { "password": "x" }, "request": 4 }),
+            json!({ "choice": hex.to_uppercase(), "credential": { "password": "x" }, "request": 4 }),
+            json!({ "choice": null, "credential": { "password": "x" }, "request": 4 }),
+            json!({ "credential": { "password": "x" }, "request": 4 }),
+            json!({ "choice": hex, "request": 4 }),
+            json!({ "choice": hex, "credential": { "password": "x" } }),
+            json!({ "choice": hex, "credential": { "password": "x" }, "request": -1 }),
+            json!({ "choice": hex, "credential": { "password": "x" }, "request": "4" }),
+            json!({ "choice": hex, "credential": { "password_or_key": "x", "password": "y" }, "request": 4 }),
+            // Today's shape, which had no choice and no request.
+            json!({ "credential": { "password": "x" } }),
+        ] {
+            let refused = parse::<OpenBackupArgs>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        for bad in [json!({ "choice": 7 }), json!({ "choice": "x" })] {
+            let refused = parse::<OpenBackupPick>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        assert!(parse::<OpenBackupPick>(&InvokeBody::Json(json!({}))).is_ok());
+        for bad in [
+            json!({}),
+            json!({ "choice": null }),
+            json!({ "choice": 7 }),
+            json!({ "choice": "x" }),
+        ] {
+            let refused = parse::<ForgetOpenBackup>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+    }
+
+    /// A read-only session that is an older copy and a backup session each list their kind; the vault's own lists `vault`.
+    /// (The older copy's is checked with `restore`'s own opening.)
+    #[test]
+    fn a_read_only_session_of_a_folder_is_an_older_copy_and_a_backup_is_not() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let (bs, _) = open_backup(&ts, &dest);
+        let kinds: Vec<(SessionId, SessionKind, bool)> = ts
+            .shell
+            .sessions
+            .list()
+            .into_iter()
+            .map(|info| (info.session, info.kind, info.read_only))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (s, SessionKind::Vault, false),
+                (bs, SessionKind::Backup, true)
+            ]
+        );
+    }
+
     /// A read-only backup session and the live vault it came from, both usable at once; locking one leaves the other;
     /// the backup refuses writes and cannot itself be backed up; a closed dialog opens nothing.
     #[test]
@@ -2193,7 +3364,8 @@ mod tests {
         let dest = backup_file(&ts, "family.lockbox-backup");
         back_up(&ts, s, g, &dest);
 
-        let closed = ts.shell.open_backup_read_only(password());
+        ts.dialogs.answer(None);
+        let closed = ts.shell.open_backup_pick(None);
         assert!(matches!(closed, Ok(Outcome::Dismissed)));
         assert_eq!(ts.shell.sessions.list().len(), 1, "nothing opened");
 
@@ -2201,10 +3373,11 @@ mod tests {
         assert_ne!(bs, s);
         assert_eq!(titles(&ts, bs, bg), ["report.pdf"]);
         assert_eq!(titles(&ts, s, g), ["report.pdf"]);
-        // The same backup again is the same session.
-        ts.dialogs.answer(Some(dest.clone()));
-        let again = done(ts.shell.open_backup_read_only(password()).unwrap());
+        // The same backup again is the same session, and the choice that asked for it is used up.
+        let picked = open_pick(&ts, &dest);
+        let again = done(open_with(&ts, &picked, password()).unwrap());
         assert_eq!((again.session, again.generation), (bs, bg));
+        assert_eq!(open_with(&ts, &picked, password()).err(), EXPIRED);
 
         // The live vault takes a change; the backup refuses one, and a backup of itself, before any dialog.
         ts.shell
@@ -2296,7 +3469,16 @@ mod tests {
     /// quotes nothing.
     #[test]
     fn credential_argument_shapes() {
-        let ok = |body: Value| parse::<CredentialOnly>(&InvokeBody::Json(body)).is_ok();
+        // The credential as `open_backup_read_only` takes it, beside the choice and the page's number it also needs.
+        let hex = "0123456789abcdef".repeat(2);
+        let with = |mut body: Value| {
+            if body.get("credential").is_some() {
+                body["choice"] = json!(hex);
+                body["request"] = json!(1);
+            }
+            body
+        };
+        let ok = |body: Value| parse::<OpenBackupArgs>(&InvokeBody::Json(with(body))).is_ok();
         assert!(ok(json!({ "credential": { "password": "pw" } })));
         assert!(ok(json!({ "credential": { "recovery_key": "key" } })));
         assert!(ok(json!({ "credential": { "password_or_key": "text" } })));
@@ -2313,7 +3495,7 @@ mod tests {
             json!({ "password": "SENTINEL-7f3a" }),
             json!({ "credential": { "password": "pw" }, "path": "SENTINEL-7f3a" }),
         ] {
-            let refused = parse::<CredentialOnly>(&InvokeBody::Json(bad.clone()));
+            let refused = parse::<OpenBackupArgs>(&InvokeBody::Json(with(bad.clone())));
             assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
         }
     }
@@ -2349,7 +3531,8 @@ mod tests {
         assert_eq!(refused.err(), Some(MALFORMED));
         refuses_a_path(
             json!({
-                "from": 1, "from_generation": 1, "id": id, "to": 2, "to_generation": 1, "skip_missing": false
+                "from": 1, "from_generation": 1, "id": id, "to": 2, "to_generation": 1, "folder": null,
+                "skip_missing": false
             }),
             &|body| parse::<CopyItemTo>(&InvokeBody::Json(body)).is_ok(),
         );

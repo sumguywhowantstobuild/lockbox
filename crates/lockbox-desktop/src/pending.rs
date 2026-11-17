@@ -174,6 +174,12 @@ pub enum PendingChoice {
     /// with the rest ([`Pending::drain`]). Kept through every answer of `test_backup`, each one starting its five minutes
     /// again ([`Pending::use_test_backup`]); dropped by [`Pending::forget_test_backup`]. Holds no secret.
     TestBackup { path: PathBuf, epoch: u64 },
+    /// The backup picked to be opened read-only (`open_backup_pick`), waiting for `open_backup_read_only`: held exactly as
+    /// [`PendingChoice::TestBackup`] is (its path never goes to the page; launch-scoped; every answer but a session opened
+    /// keeps it, each use starting its five minutes again, [`Pending::use_open_backup`]; dropped by
+    /// [`Pending::forget_open_backup`]), and another kind of choice: a test choice never answers for an open and an open
+    /// choice never for a test. Holds no secret.
+    OpenBackup { path: PathBuf, epoch: u64 },
     /// The backup picked to be restored (`restore_pick`), waiting for the password check, the folder and the copy: its
     /// path, which never goes to the page, the lock epoch it was held in, and, once the password has worked
     /// (`restore_check`), what that found and the credential that worked, which waits here and not on the page (zeroized,
@@ -252,31 +258,52 @@ pub struct Pending {
 struct Parked {
     token: Token,
     until: Instant,
-    /// The attempts running on a held backup ([`Pending::use_test_backup`], [`Pending::use_restore_pick`]): while any
-    /// does, it is not swept for being old. Always 0 for every other choice.
+    /// The attempts running on a held backup ([`Pending::use_test_backup`], [`Pending::use_open_backup`],
+    /// [`Pending::use_restore_pick`]): while any does, it is not swept for being old. Always 0 for every other choice.
     in_use: u32,
     choice: PendingChoice,
 }
 
+/// The two held backups that are only a path and an epoch: one picked to be tested, one to be opened read-only. They
+/// are held, used, forgotten and expired alike; they are never each other's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeldBackup {
+    Test,
+    Open,
+}
+
+impl HeldBackup {
+    /// The path and the epoch of `choice`, when it is a held backup of this kind.
+    fn of(self, choice: &PendingChoice) -> Option<(&Path, u64)> {
+        match (self, choice) {
+            (HeldBackup::Test, PendingChoice::TestBackup { path, epoch })
+            | (HeldBackup::Open, PendingChoice::OpenBackup { path, epoch }) => Some((path, *epoch)),
+            _ => None,
+        }
+    }
+}
+
 /// A held backup an attempt is using: it is not swept for being old while this lives, and its five minutes start again
-/// when it is dropped ([`Pending::use_test_backup`]).
-pub struct TestBackupUse<'a> {
+/// when it is dropped ([`Pending::use_test_backup`], [`Pending::use_open_backup`]).
+pub struct HeldBackupUse<'a> {
     pending: &'a Pending,
+    kind: HeldBackup,
     token: Token,
     path: PathBuf,
     clock: &'a dyn Fn() -> Instant,
 }
 
-impl TestBackupUse<'_> {
+impl HeldBackupUse<'_> {
     /// The backup's path: never sent to the page.
     pub fn path(&self) -> &Path {
         &self.path
     }
 }
 
-impl Drop for TestBackupUse<'_> {
+impl Drop for HeldBackupUse<'_> {
     fn drop(&mut self) {
-        self.pending.end_test_backup(&self.token, (self.clock)());
+        self.pending
+            .end_held_backup(self.kind, &self.token, (self.clock)());
     }
 }
 
@@ -676,29 +703,48 @@ impl Pending {
     }
 
     /// Starts an attempt on the backup held under `token`, which must have been held in lock epoch `epoch` (the current
-    /// one): its path is the answer's [`path`](TestBackupUse::path). While the answer lives the backup is in use and no
+    /// one): its path is the answer's [`path`](HeldBackupUse::path). While the answer lives the backup is in use and no
     /// sweep (the timer's, or any put or take) drops it for being old, however long the attempt runs; when the answer is
     /// dropped its five minutes start again, by `clock`. A forget, a new pick or a lock of all vaults still drops it, in
     /// use or not. `ChoiceExpired` for a token that is not there, was used or dropped, is five minutes old and not in
-    /// use, holds another kind of choice or a backup of another epoch, with nothing changed. Never the generic
-    /// `NotFound`.
+    /// use, holds another kind of choice (a held open pick too) or a backup of another epoch, with nothing changed. Never
+    /// the generic `NotFound`.
     pub fn use_test_backup<'a>(
         &'a self,
         token: &Token,
         epoch: u64,
         clock: &'a dyn Fn() -> Instant,
-    ) -> ShellResult<TestBackupUse<'a>> {
+    ) -> ShellResult<HeldBackupUse<'a>> {
+        self.use_held_backup(HeldBackup::Test, token, epoch, clock)
+    }
+
+    /// [`use_test_backup`](Self::use_test_backup) for the backup picked to be opened read-only (`open_backup_read_only`):
+    /// the same rules, and a held test backup under the token is another kind of choice (`ChoiceExpired`).
+    pub fn use_open_backup<'a>(
+        &'a self,
+        token: &Token,
+        epoch: u64,
+        clock: &'a dyn Fn() -> Instant,
+    ) -> ShellResult<HeldBackupUse<'a>> {
+        self.use_held_backup(HeldBackup::Open, token, epoch, clock)
+    }
+
+    fn use_held_backup<'a>(
+        &'a self,
+        kind: HeldBackup,
+        token: &Token,
+        epoch: u64,
+        clock: &'a dyn Fn() -> Instant,
+    ) -> ShellResult<HeldBackupUse<'a>> {
         let now = clock();
         let (answer, expired) = {
             let mut parked = lock(&self.parked);
             let expired = take_expired(&mut parked, now);
             let answer = parked
                 .iter_mut()
-                .find_map(|p| match &p.choice {
-                    PendingChoice::TestBackup { path, epoch: held }
-                        if *held == epoch && p.token.matches(token) =>
-                    {
-                        let path = path.clone();
+                .find_map(|p| match kind.of(&p.choice) {
+                    Some((path, held)) if held == epoch && p.token.matches(token) => {
+                        let path = path.to_path_buf();
                         p.until = now + LIFETIME;
                         p.in_use += 1;
                         Some(path)
@@ -709,21 +755,23 @@ impl Pending {
             (answer, expired)
         };
         drop(expired);
-        answer.map(|path| TestBackupUse {
+        answer.map(|path| HeldBackupUse {
             pending: self,
+            kind,
             token: Token(token.0.clone()),
             path,
             clock,
         })
     }
 
-    /// The end of an attempt ([`TestBackupUse`] dropped): one less in use, and five minutes from `now`. Nothing for a
+    /// The end of an attempt ([`HeldBackupUse`] dropped): one less in use, and five minutes from `now`. Nothing for a
     /// choice a forget or a lock has dropped since.
-    fn end_test_backup(&self, token: &Token, now: Instant) {
+    fn end_held_backup(&self, kind: HeldBackup, token: &Token, now: Instant) {
         let mut parked = lock(&self.parked);
-        if let Some(p) = parked.iter_mut().find(|p| {
-            p.token.matches(token) && matches!(p.choice, PendingChoice::TestBackup { .. })
-        }) {
+        if let Some(p) = parked
+            .iter_mut()
+            .find(|p| p.token.matches(token) && kind.of(&p.choice).is_some())
+        {
             p.in_use = p.in_use.saturating_sub(1);
             p.until = now + LIFETIME;
         }
@@ -819,11 +867,21 @@ impl Pending {
     /// Drops the backup held under `token`, and nothing else: a token that is not there, was dropped already, or holds
     /// another kind of choice is left alone, with no error (forgetting is idempotent).
     pub fn forget_test_backup(&self, token: &Token) {
+        self.forget_held_backup(HeldBackup::Test, token);
+    }
+
+    /// [`forget_test_backup`](Self::forget_test_backup) for the backup picked to be opened read-only: a held test backup,
+    /// or any other kind of choice, under the token is left alone.
+    pub fn forget_open_backup(&self, token: &Token) {
+        self.forget_held_backup(HeldBackup::Open, token);
+    }
+
+    fn forget_held_backup(&self, kind: HeldBackup, token: &Token) {
         let gone = {
             let mut parked = lock(&self.parked);
-            let found = parked.iter().position(|p| {
-                p.token.matches(token) && matches!(p.choice, PendingChoice::TestBackup { .. })
-            });
+            let found = parked
+                .iter()
+                .position(|p| p.token.matches(token) && kind.of(&p.choice).is_some());
             found.map(|at| parked.swap_remove(at))
         };
         drop(gone);
@@ -1489,6 +1547,149 @@ mod tests {
         drop(pending.drain());
         assert_eq!(
             used(&pending, &token, 1, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    fn held_open(epoch: u64) -> PendingChoice {
+        PendingChoice::OpenBackup {
+            path: PathBuf::from("b.lockbox-backup"),
+            epoch,
+        }
+    }
+
+    /// One whole attempt on the held open pick at `now`: begun and ended at the same moment.
+    fn open_used(
+        pending: &Pending,
+        token: &Token,
+        epoch: u64,
+        now: Instant,
+    ) -> ShellResult<PathBuf> {
+        let clock = || now;
+        pending
+            .use_open_backup(token, epoch, &clock)
+            .map(|attempt| attempt.path().to_path_buf())
+    }
+
+    /// A held open pick is used by its own token in the epoch it was held in, and by nothing else: a held test backup
+    /// under the token (and the other way round), another kind, a token that is not there and another epoch's pick
+    /// answer `ChoiceExpired` (never `NotFound`), and what is parked stays.
+    #[test]
+    fn a_held_open_backup_is_used_by_its_token_and_epoch_only() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let open = pending.put_at(held_open(3), now);
+        let test = pending.put_at(held(3), now);
+        let other = pending.put_at(picked(1, 1, &["a"]), now);
+        assert_eq!(
+            open_used(&pending, &open, 3, now),
+            Ok(PathBuf::from("b.lockbox-backup"))
+        );
+        for (token, epoch) in [(&open, 4), (&test, 3), (&other, 3), (&Token::random(), 3)] {
+            assert_eq!(
+                open_used(&pending, token, epoch, now),
+                Err(ShellError::ChoiceExpired)
+            );
+        }
+        assert_eq!(
+            used(&pending, &open, 3, now),
+            Err(ShellError::ChoiceExpired),
+            "an open pick is no test pick"
+        );
+        assert_eq!(pending.len(), 3, "nothing was taken");
+        assert!(pending.take_at(&open, now).is_ok());
+        assert_eq!(
+            open_used(&pending, &open, 3, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// An attempt in use is not swept, however long it runs, and its five minutes start again when it ends; each use
+    /// restarts them; a forget or a lock of all vaults still drops it in use, and the end brings nothing back.
+    #[test]
+    fn a_held_open_backup_in_use_is_not_swept_and_restarts_when_the_attempt_ends() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(held_open(1), now);
+        let time = std::cell::Cell::new(now);
+        let clock = || time.get();
+
+        let attempt = pending.use_open_backup(&token, 1, &clock).unwrap();
+        time.set(now + LIFETIME + Duration::from_secs(60));
+        pending.sweep_at(time.get());
+        assert_eq!(pending.len(), 1, "swept while in use");
+        time.set(time.get() + Duration::from_secs(60));
+        let ended = time.get();
+        drop(attempt);
+        pending.sweep_at(ended + LIFETIME - Duration::from_secs(1));
+        assert_eq!(pending.len(), 1, "five minutes from the end");
+        let again = ended + LIFETIME - Duration::from_secs(1);
+        assert!(open_used(&pending, &token, 1, again).is_ok());
+        pending.sweep_at(again + LIFETIME);
+        assert_eq!(pending.len(), 0, "five minutes after the last use");
+        assert_eq!(
+            open_used(&pending, &token, 1, again + LIFETIME),
+            Err(ShellError::ChoiceExpired)
+        );
+
+        let token = pending.put_at(held_open(1), again);
+        let attempt = pending.use_open_backup(&token, 1, &clock).unwrap();
+        pending.forget_open_backup(&token);
+        assert_eq!(pending.len(), 0);
+        drop(attempt);
+        assert_eq!(pending.len(), 0, "the end of the attempt brought it back");
+
+        let token = pending.put_at(held_open(1), again);
+        let attempt = pending.use_open_backup(&token, 1, &clock).unwrap();
+        drop(pending.drain());
+        drop(attempt);
+        assert_eq!(
+            open_used(&pending, &token, 1, again),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// Forgetting drops a held open pick and only that: a held test backup, a restore pick or another kind of choice under
+    /// the token stays, and an unknown or dropped token is nothing to forget, with no error. And the other kinds' forgets
+    /// leave an open pick where it is.
+    #[test]
+    fn forget_open_backup_drops_only_a_held_open_backup() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let open = pending.put_at(held_open(1), now);
+        let test = pending.put_at(held(1), now);
+        let restore = pending.put_at(restore_pick(1), now);
+        let other = pending.put_at(picked(1, 1, &["a"]), now);
+        for token in [&test, &restore, &other] {
+            pending.forget_open_backup(token);
+        }
+        assert_eq!(pending.len(), 4);
+        pending.forget_test_backup(&open);
+        pending.forget_restore_pick(&open);
+        assert_eq!(pending.len(), 4, "the other kinds' forgets");
+        pending.forget_open_backup(&open);
+        assert_eq!(pending.len(), 3);
+        pending.forget_open_backup(&open);
+        pending.forget_open_backup(&Token::random());
+        assert_eq!(pending.len(), 3);
+        assert!(pending.peek_picked(&other, SessionId(1), 1).is_ok());
+    }
+
+    /// A lock of one vault leaves a held open pick alone (it has no vault); a lock of all vaults drains it with the rest.
+    #[test]
+    fn locking_one_vault_leaves_a_held_open_backup_and_draining_drops_it() {
+        let pending = Pending::default();
+        let token = pending.put(held_open(1));
+        pending.drop_env_pastes(Some(SessionId(1)));
+        pending.drop_stored_copies(Some(SessionId(1)));
+        pending.drop_picked_files(Some(SessionId(1)));
+        pending.drop_save_alls(Some(SessionId(1)));
+        pending.drop_saved_folders(Some(SessionId(1)));
+        let now = Instant::now();
+        assert!(open_used(&pending, &token, 1, now).is_ok());
+        drop(pending.drain());
+        assert_eq!(
+            open_used(&pending, &token, 1, now),
             Err(ShellError::ChoiceExpired)
         );
     }

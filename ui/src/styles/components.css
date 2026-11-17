@@ -194,8 +194,11 @@
   margin-top: 14px;
 }
 
-/* A second line under the lock screen's form (Restore a backup): a quiet button whose words line up with the form's. */
+/* A second line under the lock screen's form (Restore a backup, Open a backup): quiet buttons whose words line up with the form's. */
 .lalt {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
   margin: 0 0 0 -8px;
 }
 
@@ -1933,6 +1936,26 @@
 
 .mi.dng {
   color: var(--danger);
+}
+
+/* A row of the vault menu that brings an open vault, backup or older copy to the front: its name, and under it what it is when it is read-only. */
+.mi .mtwo {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mi .mtwo .mt {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mi .mtwo .ms {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--ink2);
 }
 
 /* A menu that opens with lines saying how things stand (the vault menu: each vault, and Unlocked or Locked). */

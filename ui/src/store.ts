@@ -82,6 +82,8 @@ export type Tool =
   | { kind: "backup" }
   /** Test a backup (23a to 23d), on the vault whose Settings or 22c opened it. Where it is, is `SessionData.test`, which goes with the panel. */
   | { kind: "test_backup" }
+  /** Open a backup (25a), begun from this window: where it is, is `StoreState.openBackup` (its `host` is this session), which goes with the panel. */
+  | { kind: "open_backup" }
   /** Older copies (24f), from Settings: the copies a restore kept of this vault, opened read-only or deleted. What it lists is `StoreState.olderCopies`. */
   | { kind: "older_copies" };
 
@@ -129,6 +131,32 @@ export interface TestFlow {
   view: api.BackupSummaryView | null;
   /** The engine's refusal for a damaged backup, for 23d. */
   damage: unknown;
+}
+
+/**
+ * Where Open a backup is (25a), or `null` when it is not begun. It is the app's, not a vault's: a backup needs no vault. It shows as a panel in the window of the
+ * session that was on screen when it began (`host`, whose tool is then `open_backup`), or full-screen in the setup frame when begun from the lock screen (`host`
+ * is `null`). The backup's path and what is typed are never here: the shell holds the path under `choice`, the page holds the name and size it was told, and the
+ * typed text is the box's own state, wiped as it is sent and on every lock epoch. Whatever ends the flow (Cancel, another panel taking its window, its host locking, a
+ * lock of every vault) lets the choice go and stops an open that runs (`letGoOfOpen`); a session opened ends it too.
+ */
+export interface OpenFlow {
+  /** Counts the times Open a backup was begun: an answer meant for an earlier one is dropped. */
+  opening: number;
+  /** The session whose window holds the panel, or `null` for the lock screen's full-screen steps. */
+  host: number | null;
+  /** `picking`: Windows' picker is open (nothing is on screen yet); `ask`: 25a, and its refusals; `opening`: the bar, from the moment Open read-only was pressed. */
+  phase: "picking" | "ask" | "opening";
+  /** The choice the shell holds the backup's path under, or `null` while none is picked (before the first pick, or once the shell let it go). */
+  choice: string | null;
+  fileName: string | null;
+  size: number;
+  /** Pick another is waiting for the shell. */
+  busy: boolean;
+  /** What the last try was refused with, to say under the box (a wrong password among them) or the row, or `null`. */
+  problem: unknown;
+  /** The number the open's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
+  request: number | null;
 }
 
 /** Where a restore was begun from, when that decides what Cancel goes back to: the first screen's "A backup file" (26a). Every other caller has none. */
@@ -341,10 +369,15 @@ export interface CaptureView {
 export interface SessionData {
   session: number;
   generation: number;
-  /** The vault's place on the registry's list. */
+  /** The vault's place on the registry's list. A session that is no listed vault's (an older copy, a backup) has `NOT_ON_THE_LIST`. */
   vaultId: number;
+  /** A backup's is the backup file's name without its ending; an older copy keeps its vault's name (the header says "older copy" beside it). */
   name: string;
   readOnly: boolean;
+  /** What the session is: a vault, an older copy a restore kept, or a backup, which are the two read-only kinds. */
+  kind: api.SessionKind;
+  /** The order the sessions were unlocked or opened in (a later one has a larger number): the window shows the last of `sessions`, which a switch moves, so this stays. */
+  opened: number;
   /** `null` until the list has come. */
   items: ItemSummary[] | null;
   /** The shell's refusal, when it would not give the list. */
@@ -523,6 +556,8 @@ export interface StoreState {
   capture: CaptureView | null;
   /** Restore a backup, or `null` while none is begun. It is the app's own: no vault's lock takes it away. */
   restore: RestoreFlow | null;
+  /** Open a backup, or `null` while none is begun. It is the app's own, shown in one window's panel or full-screen from the lock screen: see {@link OpenFlow}. */
+  openBackup: OpenFlow | null;
   /** Moving to a new computer (26a to 26c), or `null` while it is not open. */
   moveIn: MoveIn | null;
   /** The vault the lock screen chooses when it next opens (26c's Unlock after a folder came in), or `null`; the lock screen takes it once. */
@@ -570,6 +605,7 @@ const EMPTY: StoreState = {
   search: null,
   capture: null,
   restore: null,
+  openBackup: null,
   moveIn: null,
   unlockPick: null,
   olderCopies: null,
@@ -621,8 +657,12 @@ function update(session: number, change: (entry: SessionData) => SessionData): v
   if (before === undefined) return;
   let next = change(before);
   if (next.test !== null && next.test.phase !== "picking" && next.tool?.kind !== "test_backup") next = { ...next, test: null };
-  set({ ...state, sessions: state.sessions.map((entry) => (entry.session === session ? next : entry)) });
+  // Open a backup shown in this window's panel is the panel's own too: whatever takes the panel from it ends the flow.
+  const flow = state.openBackup;
+  const endsOpen = flow !== null && flow.host === session && flow.phase !== "picking" && next.tool?.kind !== "open_backup";
+  set({ ...state, sessions: state.sessions.map((entry) => (entry.session === session ? next : entry)), openBackup: endsOpen ? null : state.openBackup });
   if (before.test !== null && next.test?.opening !== before.test.opening) letGoOfTest(before.test);
+  if (endsOpen) letGoOfOpen(flow);
 }
 
 /** Whether the session is still open in the generation the caller read it in. */
@@ -676,6 +716,12 @@ export function dropSession(session: number): void {
   // A test running for this vault is stopped and its backup let go: the vault's lock ends the panel the test lived in.
   const leaving = sessionOf(session)?.test ?? null;
   if (leaving !== null) letGoOfTest(leaving);
+  // An Open a backup panel in this window goes with it: the choice is let go and an open that runs is stopped.
+  const leavingOpen = state.openBackup;
+  if (leavingOpen !== null && leavingOpen.host === session) {
+    set({ ...state, openBackup: null });
+    letGoOfOpen(leavingOpen);
+  }
   const toast = state.toast;
   const keepToast = toast === null || toast.session !== session;
   const sessions = state.sessions.filter((entry) => entry.session !== session);
@@ -747,19 +793,25 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
   return loadItems(record);
 }
 
+/** How many sessions the page has made a record for: each record's `opened`. */
+let sessionsOpened = 0;
+
 function newRecord(
   answer: { session: number; generation: number },
   vaultId: number,
-  info: { name: string; read_only: boolean },
+  info: { name: string; read_only: boolean; kind: api.SessionKind },
   recovery: RecoveryStep | null,
   asks: SessionAsks = NO_ASKS,
 ): SessionData {
+  sessionsOpened += 1;
   return {
     session: answer.session,
     generation: answer.generation,
     vaultId,
     name: info.name,
     readOnly: info.read_only,
+    kind: info.kind,
+    opened: sessionsOpened,
     items: null,
     loadError: null,
     openItem: null,
@@ -1450,9 +1502,12 @@ export function startNotices(): Promise<void> {
     await startJobs();
     // Where a lock epoch leaves the restore's steps (24a to 24e): the reason matters there, and nowhere else.
     try {
-      await api.onLockEpoch(takeRestoreEpoch);
+      await api.onLockEpoch((event) => {
+        takeRestoreEpoch(event);
+        takeOpenEpoch();
+      });
     } catch {
-      // Without it a restore's steps stay up after a lock, and the shell's answers to what they send say it has gone.
+      // Without it a restore's or an open's steps stay up after a lock, and the shell's answers to what they send say it has gone.
     }
     // The question a close or a Quit asks while a job runs (33b); it is heard from here on, whichever screen is up.
     await startCloseAsk();
@@ -2053,6 +2108,271 @@ export function clearTestProblem(session: number): void {
 /** Closes the Test a backup panel (Cancel, Done, Close, Escape): a test that runs is stopped and the backup picked is let go. */
 export function closeTestBackup(session: number): void {
   update(session, (current) => ({ ...current, tool: current.tool?.kind === "test_backup" ? null : current.tool, test: null }));
+}
+
+// ---- Open a backup read-only (Plan 4B Task 7: 25a to 25d) ----
+//
+// The backup is picked first, in Windows' own dialog that Rust opens, and Rust holds its path under a choice (of Open a backup's own kind). The password or recovery key
+// is typed once in one box and sent with the choice; the open is a launch-scoped job with a bar and a Stop. A wrong password, damage, a stop and a refusal keep the
+// choice, so the next try needs no new pick; a session opened uses it up. The new session is a read-only one, added and brought to the front. The flow is the app's
+// (a backup needs no vault): its panel is in the window that began it, or it is full-screen from the lock screen. The typed text is the box's own state.
+
+/** The number of the last time Open a backup was begun. */
+let openOpenings = 0;
+
+/** A flow's first step: waiting for the picker (`pick` is `null`), or with a backup picked. */
+function newOpen(opening: number, host: number | null, pick: api.OpenPick | null): OpenFlow {
+  return {
+    opening,
+    host,
+    phase: pick === null ? "picking" : "ask",
+    choice: pick?.choice ?? null,
+    fileName: pick?.file_name ?? null,
+    size: pick?.size ?? 0,
+    busy: false,
+    problem: null,
+    request: null,
+  };
+}
+
+/** Open a backup has ended (cancelled, its panel taken, its host locked): an open that runs is stopped, and the shell lets the backup picked go. Both are best effort. */
+function letGoOfOpen(flow: OpenFlow): void {
+  if (flow.request !== null) cancelRequest(flow.request);
+  if (flow.choice !== null) void api.forgetOpenBackup(flow.choice).catch(() => undefined);
+}
+
+/** Whether the flow the caller began is still on. */
+function openIsStill(opening: number): boolean {
+  return state.openBackup?.opening === opening;
+}
+
+/** Changes the flow while it is still the opening the caller began. */
+function changeOpen(opening: number, change: (flow: OpenFlow) => OpenFlow): void {
+  const flow = state.openBackup;
+  if (flow?.opening !== opening) return;
+  set({ ...state, openBackup: change(flow) });
+}
+
+/** A pick the page no longer has a place for (the flow was left while the picker was open): the shell is told to forget it. */
+function forgetOpenStray(choice: string): void {
+  void api.forgetOpenBackup(choice).catch(() => undefined);
+}
+
+/** Puts the panel away from its window: the host's tool goes when it is Open a backup's. */
+function closeOpenPanel(host: number | null): void {
+  if (host !== null) update(host, (current) => ({ ...current, tool: current.tool?.kind === "open_backup" ? null : current.tool }));
+}
+
+/**
+ * "Open a backup", from Ask 4, 10d, Save all's summary, Settings or the lock screen: opens Windows' picker for the backup file first, and 25a opens on it, with nothing sent but
+ * the pick. A closed picker says nothing and opens nothing; a lock while it was open too. Any other refusal opens 25a with no file and its words under the row. Only one runs
+ * at a time (and none while a restore's steps are up). From a window it is that window's panel (its tool is then Open a backup, which replaces what was there once a file
+ * is picked); with no vault open it is the lock screen's full-screen steps.
+ */
+export async function startOpenBackup(): Promise<void> {
+  if (state.openBackup !== null || state.restore !== null) return;
+  const host = state.sessions.at(-1)?.session ?? null;
+  openOpenings += 1;
+  const opening = openOpenings;
+  set({ ...state, openBackup: newOpen(opening, host, null) });
+  let answer: Awaited<ReturnType<typeof api.openBackupPick>>;
+  try {
+    answer = await api.openBackupPick(null);
+  } catch (error) {
+    if (!openIsStill(opening)) return;
+    if (refusedAsLocked(error)) {
+      set({ ...state, openBackup: null });
+      return;
+    }
+    changeOpen(opening, (now) => ({ ...now, phase: "ask", problem: error }));
+    if (host !== null) showOpenPanel(host);
+    return;
+  }
+  if (!openIsStill(opening)) {
+    if (typeof answer === "object" && "Done" in answer) forgetOpenStray(answer.Done.choice);
+    return;
+  }
+  if (answer === "Dismissed") {
+    set({ ...state, openBackup: null });
+    return;
+  }
+  if ("Done" in answer) {
+    const pick = answer.Done;
+    changeOpen(opening, () => newOpen(opening, host, pick));
+  } else {
+    // This command never asks a question.
+    changeOpen(opening, (now) => ({ ...now, phase: "ask", problem: UNEXPECTED }));
+  }
+  if (host !== null) showOpenPanel(host);
+}
+
+/** The panel takes its window's side: what was open there (an item, Settings, a form) goes, as another tool does. */
+function showOpenPanel(host: number): void {
+  update(host, (current) => ({ ...endReveals(current), openItem: null, trash: false, tool: { kind: "open_backup" } }));
+}
+
+/** Pick another (and Pick a backup, when the choice has gone): the new file replaces the old one in the shell; a closed picker leaves the file as it was. */
+export async function pickAnotherOpenBackup(): Promise<void> {
+  const flow = state.openBackup;
+  if (flow === null || flow.phase !== "ask" || flow.busy) return;
+  const { opening, choice } = flow;
+  changeOpen(opening, (now) => ({ ...now, busy: true, problem: null }));
+  try {
+    const answer = await api.openBackupPick(choice);
+    const mine = openIsStill(opening);
+    if (answer === "Dismissed") {
+      changeOpen(opening, (now) => ({ ...now, busy: false }));
+    } else if ("Done" in answer) {
+      const pick = answer.Done;
+      if (!mine) forgetOpenStray(pick.choice);
+      changeOpen(opening, (now) => ({ ...now, busy: false, choice: pick.choice, fileName: pick.file_name, size: pick.size, problem: null }));
+    } else {
+      changeOpen(opening, (now) => ({ ...now, busy: false, problem: UNEXPECTED }));
+    }
+  } catch (error) {
+    // A choice the shell let go takes the file with it: the person picks again.
+    const gone = refusedWith(error, "choice_expired") || refusedAsLocked(error);
+    changeOpen(opening, (now) =>
+      gone ? { ...now, busy: false, choice: null, fileName: null, size: 0, problem: TEST_CHOICE_EXPIRED } : { ...now, busy: false, problem: error },
+    );
+  }
+}
+
+/**
+ * Open read-only, pressed on 25a with the text typed: sends the choice, the text as one box's (`password_or_key`) and a new request, and the bar takes the panel. The text is the
+ * caller's and is not kept: the screen wipes its box as it calls this. A wrong password, damage or any other refusal goes back to 25a with its words and the file still picked; a
+ * stop goes back quietly; a choice the shell no longer holds takes the file away and asks to pick again. A backup opened is a new read-only session, added and brought to the
+ * front, and the panel closes. An answer for a flow left meanwhile comes to nothing (a session the shell made for it is locked again, unless the page holds it already).
+ */
+export async function runOpenBackup(credential: string): Promise<void> {
+  const flow = state.openBackup;
+  if (flow === null || flow.phase !== "ask" || flow.busy || flow.choice === null || credential === "") return;
+  const { opening, choice, host } = flow;
+  const request = nextRequest();
+  changeOpen(opening, (now) => ({ ...now, phase: "opening", request, problem: null }));
+  let ended: { opened: api.Tagged<api.SessionInfo> } | { refused: unknown };
+  try {
+    const answer = await api.openBackupReadOnly(choice, { password_or_key: credential }, request);
+    ended = typeof answer === "object" && typeof (answer as { session?: unknown }).session === "number" ? { opened: answer } : { refused: UNEXPECTED };
+  } catch (error) {
+    ended = { refused: error };
+  } finally {
+    releaseRequest(request);
+  }
+  if (!openIsStill(opening)) {
+    // The flow was left meanwhile: a session the shell made for it is not shown, and is locked again, unless the page holds that one already.
+    if ("opened" in ended && sessionOf(ended.opened.session) === undefined) void api.lockVault(ended.opened.session).catch(() => undefined);
+    return;
+  }
+  if ("opened" in ended) {
+    const { opened } = ended;
+    const held = sessionOf(opened.session);
+    set({ ...state, openBackup: null });
+    closeOpenPanel(host);
+    if (held?.generation === opened.generation) {
+      // A backup that was open already: its window comes to the front as it was.
+      showSession(opened.session);
+    } else {
+      const record = newRecord(opened, NOT_ON_THE_LIST, opened.data, null);
+      set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+      void loadItems(record);
+    }
+    focusList();
+    return;
+  }
+  const error = ended.refused;
+  if (refusedWith(error, "cancelled")) {
+    changeOpen(opening, (now) => ({ ...now, phase: "ask", request: null }));
+  } else if (refusedWith(error, "choice_expired") || refusedAsLocked(error)) {
+    changeOpen(opening, (now) => ({ ...now, phase: "ask", request: null, choice: null, fileName: null, size: 0, problem: TEST_CHOICE_EXPIRED }));
+  } else {
+    changeOpen(opening, (now) => ({ ...now, phase: "ask", request: null, problem: error }));
+  }
+}
+
+/** Takes the refusal under the box away, as typing again does. No step is taken. */
+export function clearOpenProblem(): void {
+  const flow = state.openBackup;
+  if (flow === null || flow.phase !== "ask" || flow.problem === null) return;
+  set({ ...state, openBackup: { ...flow, problem: null } });
+}
+
+/** Cancel (and Close, and Escape), on any step: the flow goes. An open that runs is stopped and the shell lets the pick go. */
+export function closeOpenBackup(): void {
+  const flow = state.openBackup;
+  if (flow === null) return;
+  set({ ...state, openBackup: null });
+  letGoOfOpen(flow);
+  closeOpenPanel(flow.host);
+}
+
+/** A lock epoch (Lock all, an idle lock, Windows locking or sleeping, the app closing): the shell dropped the pick and ended the open, so the flow goes, with what was typed. */
+function takeOpenEpoch(): void {
+  const flow = state.openBackup;
+  if (flow === null) return;
+  set({ ...state, openBackup: null });
+  closeOpenPanel(flow.host);
+}
+
+/** Open a backup as the screens read it: `null` while none is begun. */
+export function useOpenBackup(): OpenFlow | null {
+  return useSelect((current) => current.openBackup);
+}
+
+/**
+ * Brings an open session to the front: the window shows the last of the sessions, so it goes last. Nothing else about any session changes. An Open a backup panel that was
+ * waiting for a password in the window that is left goes with it (its choice is let go); one that is opening carries on, and its backup comes to the front when it is open.
+ */
+export function showSession(session: number): void {
+  const entry = sessionOf(session);
+  const current = state.sessions.at(-1);
+  if (entry === undefined || current === undefined || current.session === session) return;
+  const flow = state.openBackup;
+  const leaving = flow !== null && flow.host === current.session && flow.phase === "ask";
+  set({ ...state, sessions: [...state.sessions.filter((one) => one.session !== session), entry], openBackup: leaving ? null : state.openBackup });
+  if (leaving) {
+    letGoOfOpen(flow);
+    closeOpenPanel(flow.host);
+  }
+}
+
+/**
+ * What a copy out of an open backup (or older copy) into a vault came to, for the form to say: `done` (the vault's name, and the names of the files left out), `missing` (the
+ * backup lacks these files: nothing was copied, and 25d asks), `refused` (the shell's refusal, for `messageFor`) or `stale` (a session locked meanwhile: nothing to say).
+ */
+export type CopyOut = { done: { name: string; leftOut: string[] } } | { missing: string[] } | { refused: unknown } | "stale";
+
+/**
+ * Copy to a vault: the item `id` of the session `from` goes into the vault `to`, in its folder `folder` (`null` for none). With `skipMissing` false the shell asks first when the
+ * backup lacks files attached to the item; sent again with it, the item copies without them. The vault's list is read again, and the window stays on the session it was on. Says
+ * "Copied to <vault>." in the page's spoken place when it is done.
+ */
+export async function copyItemOut(from: api.SessionRef, id: string, to: number, folder: string | null, skipMissing: boolean): Promise<CopyOut> {
+  // The source is the session and generation the copy (or the question) was begun in, never whatever is on screen now: if it is not that one any more, nothing is sent.
+  if (!stillOpen(from.session, from.generation)) return "stale";
+  const target = sessionOf(to);
+  if (target === undefined || target.readOnly) return "stale";
+  let answer;
+  try {
+    answer = await api.copyItemTo(from, id, { session: to, generation: target.generation }, folder, skipMissing);
+  } catch (error) {
+    // The lock events clear the sessions that locked; a refusal as locked, or an answer made stale by one, has nothing to say.
+    if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
+    return { refused: error };
+  }
+  if (!stillOpen(from.session, from.generation) || !stillOpen(to, target.generation)) return "stale";
+  const outcome = answer.data;
+  if (typeof outcome === "object" && "Done" in outcome) {
+    const record = sessionOf(to);
+    if (record !== undefined) void loadItems(record, { quiet: true });
+    const leftOut = outcome.Done.left_out;
+    say(from.session, leftOut.length === 0 ? `Copied to ${target.name}.` : `Copied to ${target.name}, without the files the backup doesn't have.`);
+    return { done: { name: target.name, leftOut } };
+  }
+  if (typeof outcome === "object" && "Confirm" in outcome && typeof outcome.Confirm === "object" && "MissingFiles" in outcome.Confirm) {
+    return { missing: outcome.Confirm.MissingFiles.names };
+  }
+  return { refused: UNEXPECTED };
 }
 
 // ---- Restore a backup (24a to 24e) ----

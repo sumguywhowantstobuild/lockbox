@@ -19,6 +19,7 @@ use lockbox_core::{ReadOnlyVault, Vault};
 use serde::{Deserialize, Serialize};
 
 use crate::capture::CaptureEvent;
+use crate::commands::backup::EXTENSION;
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
 use crate::jobs::{CloseAsked, JobStarted, LockEpochEvent, ProgressEvent};
 use crate::pending::{Pending, PendingChoice, Token};
@@ -186,7 +187,8 @@ pub enum OpenStep<X> {
 /// opening closure ran, or its question.
 pub type OpenAnswer<X> = Outcome<Tagged<(SessionInfo, Option<X>)>>;
 
-/// One session as the UI lists it.
+/// One session as the UI lists it. For a backup, `name` is the backup file's name without `.lockbox-backup`; for the
+/// others, the vault's own.
 #[derive(Clone, Serialize)]
 pub struct SessionInfo {
     pub session: SessionId,
@@ -194,9 +196,10 @@ pub struct SessionInfo {
     pub name: String,
     pub read_only: bool,
     pub state: SessionState,
+    pub kind: SessionKind,
 }
 
-/// Never shows the vault's name (R5).
+/// Never shows the session's name (R5).
 impl fmt::Debug for SessionInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionInfo")
@@ -204,7 +207,42 @@ impl fmt::Debug for SessionInfo {
             .field("generation", &self.generation)
             .field("read_only", &self.read_only)
             .field("state", &self.state)
+            .field("kind", &self.kind)
             .finish_non_exhaustive()
+    }
+}
+
+/// What a session is, from where it is and whether it can be written (never stored apart from them): a vault on the
+/// list, an older copy of one (a read-only vault folder) or a backup opened read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    Vault,
+    OlderCopy,
+    Backup,
+}
+
+impl SessionKind {
+    fn of(location: &Location, read_only: bool) -> SessionKind {
+        match (location, read_only) {
+            (Location::Backup(_), _) => SessionKind::Backup,
+            (Location::Folder(_), true) => SessionKind::OlderCopy,
+            (Location::Folder(_), false) => SessionKind::Vault,
+        }
+    }
+}
+
+/// A backup session's name: its file's name without the `.lockbox-backup` ending (any case). A name without that
+/// ending, or with nothing before it, stays whole.
+fn backup_name(file: &Path) -> String {
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let ending = EXTENSION.len();
+    match name.len().checked_sub(ending) {
+        // The last bytes equal an ASCII ending, so the cut is on a character boundary.
+        Some(at) if at > 0 && name.as_bytes()[at..].eq_ignore_ascii_case(EXTENSION.as_bytes()) => {
+            name[..at].to_owned()
+        }
+        _ => name.into_owned(),
     }
 }
 
@@ -439,6 +477,7 @@ impl Entry {
             name: self.name.clone(),
             read_only: self.read_only,
             state: self.state,
+            kind: SessionKind::of(&self.location, self.read_only),
         }
     }
 }
@@ -620,7 +659,7 @@ impl Inner {
         };
         let entry = &mut self.sessions[at];
         let counted = Counted::new(&entry.vaults);
-        let (name, read_only, handle) = match opened {
+        let (vault_name, read_only, handle) = match opened {
             Opened::Writable(vault) => (
                 vault.name().to_owned(),
                 false,
@@ -639,7 +678,12 @@ impl Inner {
             ),
         };
         entry.gate.generation.fetch_add(1, Ordering::SeqCst);
-        entry.name = name;
+        // A backup is called what its file is called; the vault inside it is the vault's own name, which an older copy
+        // keeps.
+        entry.name = match &entry.location {
+            Location::Backup(file) => backup_name(file),
+            Location::Folder(_) => vault_name,
+        };
         entry.read_only = read_only;
         entry.state = SessionState::Unlocked;
         entry.live = Some(Live {
@@ -1893,6 +1937,81 @@ mod tests {
             Ok(matches!(vault, VaultRef::ReadOnly(_)))
         });
         assert!(read.unwrap().data);
+    }
+
+    /// A session's kind comes from where it is and whether it can be written: a writable folder is a `vault`, a read-only
+    /// folder an `older_copy`, a read-only backup a `backup`, whatever vault is inside it; the same in every answer
+    /// (the open's, `list`) and after a lock. A backup's name is its file's, an older copy's its vault's.
+    #[test]
+    fn a_sessions_kind_comes_from_its_location_and_read_only_flag() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let (live, _, dir) = open_writable(&sessions, parent.path());
+        let older = parent.path().join("Family.before-restore");
+        copy_folder(&dir, &older);
+        let (copy, _) = open_read_only(&sessions, &older);
+        let file = parent.path().join("Task 14 check.lockbox-backup");
+        fs::write(&file, b"stands in for a backup").unwrap();
+        let location = Location::backup(&file).unwrap();
+        let opened = Opened::ReadOnly(open_read_only_vault(&dir));
+        let (backup, _) = open_as(&sessions, location, opened);
+
+        let listed = sessions.list();
+        let seen = |id: SessionId| {
+            let info = listed.iter().find(|info| info.session == id).unwrap();
+            (info.kind, info.name.clone(), info.read_only)
+        };
+        assert_eq!(seen(live), (SessionKind::Vault, "Family".to_owned(), false));
+        assert_eq!(
+            seen(copy),
+            (SessionKind::OlderCopy, "Family".to_owned(), true)
+        );
+        assert_eq!(
+            seen(backup),
+            (SessionKind::Backup, "Task 14 check".to_owned(), true)
+        );
+        let json = serde_json::to_value(&listed).unwrap();
+        let kinds: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|info| info["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["vault", "older_copy", "backup"]);
+
+        sessions.lock_all(LockReason::Manual);
+        let locked = sessions.list();
+        let kinds: Vec<SessionKind> = locked.iter().map(|info| info.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                SessionKind::Vault,
+                SessionKind::OlderCopy,
+                SessionKind::Backup
+            ]
+        );
+    }
+
+    /// A backup session's name is the file's name without `.lockbox-backup`, in any case; a name without that ending, or
+    /// with nothing before it, stays whole; only the one ending goes.
+    #[test]
+    fn a_backups_name_is_its_file_name_without_the_extension() {
+        for (file, name) in [
+            (
+                "Task 14 check 2026-11-17.lockbox-backup",
+                "Task 14 check 2026-11-17",
+            ),
+            ("FAMILY.LOCKBOX-BACKUP", "FAMILY"),
+            ("a.Lockbox-Backup", "a"),
+            ("héllo wörld.lockbox-backup", "héllo wörld"),
+            ("a.lockbox-backup.lockbox-backup", "a.lockbox-backup"),
+            ("no extension", "no extension"),
+            ("x.zip", "x.zip"),
+            ("x.lockbox-backups", "x.lockbox-backups"),
+            (".lockbox-backup", ".lockbox-backup"),
+        ] {
+            assert_eq!(backup_name(Path::new(file)), name, "{file}");
+        }
     }
 
     #[test]

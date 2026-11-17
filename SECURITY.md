@@ -107,6 +107,14 @@ trusted than Rust.
   nothing. The held pick holds no password and no key: the credential is typed again with each try, so a wrong password
   keeps the file picked and nothing else. A backup Lockbox has just written is held the same way, so "Test this backup"
   needs no picker. Testing reads the backup and writes nothing.
+- **A backup picked to be opened read-only.** "Open a backup" is held exactly as a backup picked to be tested is (a token,
+  the file's name and size, never the path; the same lifetime and the same refusals), as a kind of choice of its own: a
+  test's token is "choice expired" when sent to the open, and an open's when sent to the test. The credential is typed
+  again with each try, in the one box the test uses (and wiped when the try ends); a wrong password, a damaged backup, a
+  Stop or a read error keep the file picked, and a backup that opened, or a lock, uses the pick up. The backup is opened
+  as a session that can never be written to: copying an item *into* it is refused, and it is only ever the source of a
+  copy into a vault you have unlocked, into a folder of that vault that you choose (a folder the vault does not have is
+  refused before anything is written). The session is named for the backup's file, not for the vault inside it.
 - **A backup picked to be restored, and the password typed for it.** "Restore a backup" asks for the file first and holds
   its path in Rust the same way (the page gets a token, the file's name and size, never the path). Unlike "Test a
   backup", the credential is not typed again with each step: the box of the first screen is sent once, Rust opens the
@@ -216,7 +224,7 @@ in the code with a `shortcut:` comment.
   buffers, which Lockbox does not own. The fields Rust parses them into are wiped when they are dropped; a password kept
   for a question waiting for your answer lives until the answer, the five-minute limit or a lock of all vaults, and one
   typed before a file or folder picker lives until that picker closes, even past a lock (nothing is done with it then).
-  The one box of "Test a backup" holds a password or a recovery key: Rust reads the text as a recovery key first and,
+  The one box of "Test a backup" (and of "Open a backup") holds a password or a recovery key: Rust reads the text as a recovery key first and,
   if it is a well-formed key that turns out wrong, tries it as a password too (text that is not a well-formed key is
   tried as a password only, with no typo words); it is wiped when the try ends, and the page empties the box after
   every send, a wrong password included (unlike the unlock form). The same box of "Restore a backup" is sent once, to

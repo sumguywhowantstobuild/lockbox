@@ -42,6 +42,7 @@ import { GeneratorPage } from "./GeneratorPanel";
 import { ItemList } from "./ItemList";
 import { FILTER, itemCount, kindCount, kindPlural, ListTools, showAll, useKind, useSort } from "./ListTools";
 import { OlderCopiesPanel } from "./OlderCopies";
+import { OpenBackupPanel } from "./OpenBackup";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
 import { SaveAllCloudQuestion, SaveAllFiles, SaveAllLeft } from "./SaveAllFiles";
@@ -410,7 +411,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         </main>
         {panel === "item" && data.openItem !== null ? (
           <ItemPanel
-            key={data.openItem.id}
+            // One panel is one session's, at one generation, for one item: another session's item with the same ID is a new panel, with a new form.
+            key={`${String(data.session)}:${String(data.generation)}:${data.openItem.id}`}
             data={data}
             folders={folders}
             folderNames={folderNames}
@@ -460,6 +462,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         {data.tool?.kind === "test_backup" ? (
           <TestBackupPanel key={`${String(data.session)}:${String(data.generation)}:${String(data.test?.opening)}`} data={data} />
         ) : null}
+        {data.tool?.kind === "open_backup" ? <OpenBackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
       </div>
       {/* The window's own: messages sit at the foot of the whole window, whatever is open beside the side menu. */}
       <ToastStack />

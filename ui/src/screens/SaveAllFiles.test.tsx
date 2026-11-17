@@ -614,11 +614,44 @@ test("damaged_file_is_named_and_points_to_a_backup", async () => {
   const ended = await screen.findByRole("complementary", { name: "3 of 4 files saved" });
   const alert = within(ended).getByRole("alert");
   expect(alert.textContent).toBe(`${RECORDING.name} is damaged, so it wasn't saved. A backup may have a good copy.`);
-  // The button that opens a backup waits for Task 7: no dead link until then. Show in Explorer and Done stay.
-  expect(within(ended).queryByRole("button", { name: /Open a backup/ })).toBeNull();
+  // The way to the backup is the button beside the sentence (Task 7); Show in Explorer and Done stay.
+  expect(within(ended).getByRole("button", { name: "Open a backup" })).toBeTruthy();
   expect(within(ended).getByRole("button", { name: "Show in Explorer" })).toBeTruthy();
   expect(within(ended).getByRole("button", { name: "Done" })).toBeTruthy();
   expect(within(ended).getByText(WARNING)).toBeTruthy();
+});
+
+test("save_all_summary_offers_open_a_backup", async () => {
+  await unlocked(mine({ damagedFiles: [RECORDING.file_id] }));
+  await openFolder("Agency support agent");
+  await pressSaveAll();
+  const ended = await screen.findByRole("complementary", { name: "3 of 4 files saved" });
+  // One button, after the damaged file's sentence and before the rest of the summary.
+  const buttons = within(ended).getAllByRole("button", { name: "Open a backup" });
+  expect(buttons).toHaveLength(1);
+  const sentence = within(ended).getByRole("alert");
+  expect(sentence.compareDocumentPosition(buttons[0] as HTMLElement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(sent("open_backup_pick")).toEqual([]);
+  fireEvent.click(buttons[0] as HTMLElement);
+  // The picker comes first; the backup's panel takes the summary's place, and nothing is saved or changed.
+  const opening = await screen.findByRole("complementary", { name: "Open a backup" });
+  expect(sent("open_backup_pick")).toEqual([{ choice: null }]);
+  expect(screen.queryByRole("complementary", { name: "3 of 4 files saved" })).toBeNull();
+  fireEvent.click(within(opening).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Open a backup" })).toBeNull();
+  });
+  // The summary's card in the list's column is still there for the copies, with the way to the backup in it too.
+  const card = await screen.findByRole("region", { name: "3 of 4 files saved" });
+  expect(within(card).getByRole("button", { name: "Open a backup" })).toBeTruthy();
+});
+
+test("a_summary_with_no_damaged_file_has_no_open_a_backup_button", async () => {
+  await unlocked();
+  await openFolder("Agency support agent");
+  await pressSaveAll();
+  const ended = await screen.findByRole("complementary", { name: /files saved$/ });
+  expect(within(ended).queryByRole("button", { name: "Open a backup" })).toBeNull();
 });
 
 test("stopped_names_unfinished_and_not_started", async () => {

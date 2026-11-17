@@ -144,6 +144,87 @@ test("a_menu_opens_from_its_button_and_chooses_one_item", async () => {
   expect(document.querySelectorAll("style")).toHaveLength(0);
 });
 
+test("a_menu_with_rows_keeps_its_rows_as_menu_items_that_say_which_is_current", async () => {
+  const chosen = vi.fn<(which: string) => void>();
+  render(
+    <LockboxParts>
+      <Menu
+        label="Vaults"
+        notes={[{ name: "My vault", state: "Unlocked" }]}
+        rows={[
+          {
+            id: "a",
+            label: "My vault",
+            checked: false,
+            onSelect: () => {
+              chosen("a");
+            },
+          },
+          {
+            id: "b",
+            label: "Old laptop backup",
+            detail: "Backup",
+            checked: true,
+            onSelect: () => {
+              chosen("b");
+            },
+          },
+        ]}
+        items={[
+          {
+            label: "Lock Old laptop backup",
+            onSelect: () => {
+              chosen("lock");
+            },
+          },
+        ]}
+      />
+    </LockboxParts>,
+  );
+  const trigger = screen.getByRole("button", { name: "Vaults" });
+  trigger.focus();
+  // The keyboard opens it, and focus is in the menu at once.
+  fireEvent.keyDown(trigger, { key: "ArrowDown" });
+  const menu = await screen.findByRole("menu");
+  // A row is a menu item (a radio item of the menu), the current one says "checked" in words and by a mark, never by colour alone; the rows' group has a name.
+  const rows = within(menu).getAllByRole("menuitemradio");
+  expect(rows.map((row) => row.textContent)).toEqual(["My vault", "Old laptop backupBackup"]);
+  expect(rows.map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
+  expect(rows[1]?.querySelector("svg")).not.toBeNull();
+  expect(rows[0]?.querySelector("svg")).toBeNull();
+  expect(within(menu).getByRole("group", { name: "Open now" })).toBeTruthy();
+  // The action stays a plain menu item, after the rows.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Lock Old laptop backup"]);
+  await expectNoAxe(menu);
+  // The arrow keys reach every row and the action in order, and Enter chooses the one focused: the menu shuts.
+  const focused = () => document.activeElement?.textContent;
+  await vi.waitFor(() => {
+    expect(menu.contains(document.activeElement)).toBe(true);
+  });
+  const order = [focused()];
+  for (let step = 0; step < 2; step += 1) {
+    fireEvent.keyDown(document.activeElement ?? menu, { key: "ArrowDown" });
+    await vi.waitFor(() => {
+      expect(focused()).not.toBe(order.at(-1));
+    });
+    order.push(focused());
+  }
+  expect(order).toEqual(["My vault", "Old laptop backupBackup", "Lock Old laptop backup"]);
+  fireEvent.keyDown(document.activeElement ?? menu, { key: "ArrowUp" });
+  await vi.waitFor(() => {
+    expect(focused()).toBe("Old laptop backupBackup");
+  });
+  fireEvent.click(document.activeElement as Element);
+  expect(chosen).toHaveBeenCalledWith("b");
+  await vi.waitFor(() => {
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+  await vi.waitFor(() => {
+    expect(document.activeElement).toBe(trigger);
+  });
+  expect(document.querySelectorAll("style")).toHaveLength(0);
+});
+
 test("a_combobox_narrows_as_you_type_and_picks_one", async () => {
   function Pick() {
     const [value, setValue] = useState<string | null>(null);

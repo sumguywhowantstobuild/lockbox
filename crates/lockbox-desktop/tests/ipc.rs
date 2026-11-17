@@ -620,6 +620,57 @@ fn test_backup_commands_are_granted_to_the_main_window_only() {
     }
 }
 
+/// The commands of "Open a backup" (the pick, the open, the forget) and the copy out of it are listed, granted to the main
+/// window and reach their handler from it with their new shapes; another window and a remote origin are refused by the ACL,
+/// before the handler. They take tokens, a typed credential, the page's number and a folder's ID, and no path (their bodies
+/// are checked in `commands::backup`'s own tests).
+#[test]
+fn open_backup_commands_are_granted_to_the_main_window_only() {
+    // Built, not written out: the review packer's key scan reads a long hex literal beside "choice" as a secret.
+    let hex = "0123456789abcdef".repeat(2);
+    let copy = json!({
+        "from": 1, "from_generation": 1, "id": hex, "to": 2, "to_generation": 1,
+        "folder": null, "skip_missing": false,
+    });
+    let commands = [
+        ("open_backup_pick", json!({ "choice": null })),
+        (
+            "open_backup_read_only",
+            json!({ "choice": hex, "credential": { "password_or_key": "x" }, "request": 1 }),
+        ),
+        ("forget_open_backup", json!({ "choice": hex })),
+        ("copy_item_to", copy),
+    ];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for (cmd, request) in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(request.clone());
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
 /// The commands of "Restore a backup" (the pick, the password check, the folder, the copy, its yes, the swap, the discard
 /// and the forget) are listed, granted to the main window and reach their handler from it; another window and a remote
 /// origin are refused by the ACL, before the handler. They take tokens, a typed credential and the page's numbers, and no

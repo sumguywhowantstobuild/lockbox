@@ -101,6 +101,9 @@ pub mod internals {
             BLOB_VERSION, CHUNK_SIZE, blob_len, chunk_count, decrypt_stream, encrypt_stream,
         };
     }
+    pub mod fixture {
+        pub use crate::vault::fixture::*;
+    }
     pub mod fsio {
         pub use crate::fsio_impl::*;
     }

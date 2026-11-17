@@ -78,6 +78,8 @@
     "allow-test-backup-pick",
     "allow-test-backup",
     "allow-forget-test-backup",
+    "allow-open-backup-pick",
+    "allow-forget-open-backup",
     "allow-open-backup-read-only",
     "allow-copy-item-to",
     "allow-restore-pick",

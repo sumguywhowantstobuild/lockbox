@@ -216,14 +216,20 @@ test("program_file_asks_first", async () => {
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-test("damaged_file_shows_10d_without_backup_button", async () => {
+test("damaged_file_10d_offers_open_a_backup", async () => {
   await unlocked(mine({ damagedFiles: [CONTRACT.file_id] }));
   const panel = await select("Client contract");
+  // Nothing offers a backup until a file has failed.
+  expect(within(panel).queryByRole("button", { name: /backup/i })).toBeNull();
   fireEvent.click(within(panel).getByRole("button", { name: "Open contract-demo.pdf" }));
   const refusal = await within(panel).findByRole("alert");
   expect(refusal.textContent).toBe(DAMAGED);
-  // No button for a backup (opening a backup is 4B's), and the words come from the table, never the shell's own text.
-  expect(screen.queryByRole("button", { name: /backup/i })).toBeNull();
+  // As drawn (10d): the words, then Open a backup, in the file's row; the words come from the table, never the shell's own text.
+  const row = refusal.closest(".frow") as HTMLElement;
+  expect(within(row).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual([
+    "Open a backup",
+    "Replace file contract-demo.pdf",
+  ]);
   expect(panel.textContent).not.toMatch(/"kind"|code|what/);
   // The file can't be opened or saved now: those two are replaced by the words; Replace file is still the way to a good copy.
   expect(within(panel).queryByRole("button", { name: /^Open contract-demo\.pdf/ })).toBeNull();
@@ -235,9 +241,20 @@ test("damaged_file_shows_10d_without_backup_button", async () => {
   await select("Rotation steps");
   const back = await select("Client contract");
   expect(within(back).queryByRole("alert")).toBeNull();
-  // Save a copy is refused the same way, in the same words.
+  // Save a copy is refused the same way, in the same words, with the same way to a backup.
   fireEvent.click(within(back).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
   expect((await within(back).findByRole("alert")).textContent).toBe(DAMAGED);
+  // Open a backup: the picker, then the backup's panel takes the item's place; nothing in the vault was changed.
+  expect(sent("open_backup_pick")).toEqual([]);
+  fireEvent.click(within(back).getByRole("button", { name: "Open a backup" }));
+  const opening = await screen.findByRole("complementary", { name: "Open a backup" });
+  expect(sent("open_backup_pick")).toEqual([{ choice: null }]);
+  expect(screen.queryByRole("complementary", { name: "Client contract" })).toBeNull();
+  expect(shell.fileOps).toEqual([]);
+  fireEvent.click(within(opening).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Open a backup" })).toBeNull();
+  });
 });
 
 test("still_open_at_lock_offers_retry", async () => {

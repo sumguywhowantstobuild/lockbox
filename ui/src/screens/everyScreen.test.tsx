@@ -688,6 +688,57 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Open a backup: the file and the box, progress and a wrong password (25a)",
+    shows: ["OpenBackup#OpenBackupPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Open a backup", settings);
+      const panel = await screen.findByRole("complementary", { name: "Open a backup" });
+      // The last of its views with a field on it: a wrong password said under the box.
+      fireEvent.change(within(panel).getByLabelText("Password or recovery key from when it was made"), { target: { value: "not the one" } });
+      click("Open read-only", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Open a backup from the lock screen: the same steps full-screen (25a)",
+    shows: ["OpenBackup#OpenBackupSteps"],
+    reach: async () => {
+      start([vault()]);
+      fireEvent.click(await screen.findByRole("button", { name: "Open a backup" }));
+      await screen.findByRole("heading", { level: 1, name: "Open a backup" });
+      fireEvent.change(screen.getByLabelText("Password or recovery key from when it was made"), { target: { value: "not the one" } });
+      click("Open read-only");
+      await screen.findByRole("alert");
+    },
+  },
+  {
+    name: "A backup open: Copy to a vault and the question about the files it lacks (25b to 25d)",
+    shows: ["OpenBackup#CopyToVault"],
+    reach: async () => {
+      await unlocked();
+      shell.backupHolds(
+        items().map((item) =>
+          item.id === itemId(1) ? { ...item, missingFiles: ["console-access-demo.pdf"] } : item,
+        ),
+      );
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Open a backup", settings);
+      const panel = await screen.findByRole("complementary", { name: "Open a backup" });
+      fireEvent.change(within(panel).getByLabelText("Password or recovery key from when it was made"), { target: { value: BACKUP_PASSWORD } });
+      click("Open read-only", panel);
+      await screen.findByRole("button", { name: /read-only, vault menu$/ });
+      const item = await select("Bot admin console");
+      click("Copy to a vault", item);
+      await within(item).findByRole("combobox", { name: "Vault" });
+      click("Copy", item);
+      return screen.findByRole("dialog", { name: "Copy without these files?" });
+    },
+  },
+  {
     name: "Restore a backup: the file and the box, where it goes, progress, the replace question and the finish (24a to 24e)",
     shows: ["RestoreFlow#RestoreFlow"],
     reach: async () => {

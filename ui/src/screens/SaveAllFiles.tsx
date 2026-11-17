@@ -8,7 +8,7 @@ import { KindIcon } from "../parts/Icon";
 import { JobProgress } from "../parts/JobProgress";
 import { Panel } from "../parts/Panel";
 import type { SaveAllView } from "../api";
-import { closeSaveAll, confirmSaveAll, leaveSaveAllQuestion, showSavedFolder, type SaveAllFlow, type SessionData } from "../store";
+import { closeSaveAll, confirmSaveAll, leaveSaveAllQuestion, showSavedFolder, startOpenBackup, type SaveAllFlow, type SessionData } from "../store";
 import { nowGoing } from "./AddFiles";
 import { CloudCopyQuestion, typeWord } from "./FileActions";
 
@@ -39,6 +39,18 @@ function SaveAllSummary({ view, rows, alert }: { view: SaveAllView; rows: boolea
           {`${name} is damaged, so it wasn't saved. A backup may have a good copy.`}
         </p>
       ))}
+      {/* One way to the backup for the damaged files (Task 7): a backup may hold a good copy of each. */}
+      {view.damaged.length === 0 ? null : (
+        <div className="fact">
+          <Button
+            onClick={() => {
+              void startOpenBackup();
+            }}
+          >
+            Open a backup
+          </Button>
+        </div>
+      )}
       {view.gone.map((name, at) => (
         <p key={`g${String(at)}:${name}`} className="psub">
           {`${name} was removed from the vault before it was saved.`}

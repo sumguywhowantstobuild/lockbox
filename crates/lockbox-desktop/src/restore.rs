@@ -2149,7 +2149,7 @@ mod tests {
     use super::*;
     use crate::jobs::{CloseReason, JobScope, OperationId};
     use crate::os::{Clock, DriveType, KnownFolder, OsSignal};
-    use crate::session::{SessionState, VaultRef};
+    use crate::session::{SessionKind, SessionState, VaultRef};
     use crate::testing::{FakeVolume, TEST_PASSWORD, TestShell, heavy};
 
     /// Always disarms, so a failing test cannot leak a failpoint into the next one on this thread.
@@ -4881,6 +4881,54 @@ mod tests {
             Some(ShellError::NotFound),
             "an ID of an earlier listing"
         );
+    }
+
+    /// An older copy opened read-only says what it is: its kind is `older_copy` in every answer and list (a read-only
+    /// session of a folder), and it keeps its vault's own name, not its folder's (`Family.before-restore`); the live
+    /// vault beside it says `vault`.
+    #[test]
+    fn older_copy_session_says_older_copy() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        restore_once(&ts, &backup, &parent);
+        let listed = ts.shell.list_pre_restore();
+        assert_eq!(listed.len(), 1);
+
+        let opened = heavy(|| {
+            ts.shell
+                .open_pre_restore_read_only(listed[0].id, password())
+        })
+        .unwrap();
+        let info = &opened.data.info;
+        assert_eq!(info.kind, SessionKind::OlderCopy);
+        assert!(info.read_only);
+        assert_eq!(info.name, "Family");
+        let json = serde_json::to_value(info).unwrap();
+        assert_eq!(json["kind"], json!("older_copy"));
+        assert_eq!(json["name"], json!("Family"));
+
+        let sessions = ts.shell.sessions.list();
+        let kind_of = |session: SessionId| {
+            sessions
+                .iter()
+                .find(|info| info.session == session)
+                .map(|info| (info.kind, info.read_only))
+        };
+        assert_eq!(
+            kind_of(opened.session),
+            Some((SessionKind::OlderCopy, true))
+        );
+        assert_eq!(kind_of(s), Some((SessionKind::Vault, false)));
+        // Opened again (the same session, answered as it is) it still says so.
+        let again = heavy(|| {
+            ts.shell
+                .open_pre_restore_read_only(listed[0].id, password())
+        })
+        .unwrap();
+        assert_eq!(again.session, opened.session);
+        assert_eq!(again.data.info.kind, SessionKind::OlderCopy);
     }
 
     /// Opening and deleting a pre-restore folder: refused for a link, another vault's ID, a folder a session has

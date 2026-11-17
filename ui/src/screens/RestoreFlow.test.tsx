@@ -182,7 +182,7 @@ test("the_restore_is_offered_in_settings_after_test_a_backup_and_works_from_ther
   fireEvent.click(within(screen.getByRole("navigation", { name: "Vault and folders" })).getByRole("button", { name: "Settings" }));
   const settings = await screen.findByRole("complementary", { name: "Settings" });
   const group = within(settings).getByRole("heading", { name: "This vault" }).closest("section") as HTMLElement;
-  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Restore a backup"]);
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup"]);
   press("Restore a backup", settings);
   await heading("Restore a backup");
   // The open vault's window is not on screen while the restore is.
