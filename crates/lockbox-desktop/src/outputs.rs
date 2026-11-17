@@ -802,7 +802,20 @@ impl OutputJournal for CallJournal<'_> {
             Ok(())
         });
         match gate {
-            Ok(()) => tried.unwrap_or(Err(REFUSED)),
+            Ok(()) => {
+                // Tests: a gate that fails after the move succeeded, as the engine's contract allows. The shell's own
+                // gate never does (it answers what the attempt answered), so only this step makes it.
+                #[cfg(test)]
+                if matches!(tried, Some(Ok(())))
+                    && lockbox_core::internals::fsio::failpoint::check("outputs.after_attempt")
+                        .is_err()
+                {
+                    // Named, not a `what:` literal: the page's message check would read it as a refusal to word.
+                    const TEST_GATE: &str = "gate";
+                    return Err(self.refuse(ShellError::InvalidInput { what: TEST_GATE }));
+                }
+                tried.unwrap_or(Err(REFUSED))
+            }
             Err(error) => {
                 #[cfg(test)]
                 self.outputs.attempted(Attempt::Refused);

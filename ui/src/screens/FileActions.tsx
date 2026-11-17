@@ -8,6 +8,7 @@ import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
 import { KindIcon, PlusIcon } from "../parts/Icon";
 import { JobProgress } from "../parts/JobProgress";
+import { KEEP_OPEN } from "../saveAllWords";
 import { startAddFiles, confirmStoredCopy, openStoredFile, replaceStoredFile, saveStoredFile, type SessionData } from "../store";
 
 // Stored files in an item's panel (10a to 10f, 9d): Open, Save a copy and Replace file on each, and Attach a file on a login, key or note.
@@ -57,11 +58,14 @@ export function CloudCopyQuestion({
   onAnother,
   onContinue,
   onNo,
+  many = false,
 }: {
   open: boolean;
   onAnother: () => void;
   onContinue: () => void;
   onNo: () => void;
+  /** Many files are going there (Save all files): the words are the plural of the singular's, and the yes is "Save here anyway". */
+  many?: boolean;
 }) {
   const another = useRef<HTMLButtonElement>(null);
   return (
@@ -71,10 +75,10 @@ export function CloudCopyQuestion({
         if (!next) onNo();
       }}
       title="This folder is synced to the cloud"
-      description="This file would be uploaded unprotected."
+      description={many ? "These files would be uploaded unprotected." : "This file would be uploaded unprotected."}
       initialFocus={another}
     >
-      <Button onClick={onContinue}>Continue</Button>
+      <Button onClick={onContinue}>{many ? "Save here anyway" : "Continue"}</Button>
       <Button ref={another} look="pill-main" onClick={onAnother}>
         Pick another folder
       </Button>
@@ -314,6 +318,7 @@ const WORK: Record<string, string> = {
   save_copy: "Saving a copy of the file.",
   open: "Opening the file.",
   backup: "Backing up this vault.",
+  save_all: "Saving files.",
 };
 
 /** What 9b says for a Save a copy with progress, in the words the session chose (the design is silent beyond the sentence about the laptop). */
@@ -331,7 +336,14 @@ const SAVE_CARD = {
  */
 export function FileJobProgress({ data }: { data: SessionData }) {
   const job = useJob(data.fileJob?.request ?? null);
-  if (job === null || (job.kind !== "import" && job.kind !== "save_copy")) return null;
+  if (job === null || (job.kind !== "import" && job.kind !== "save_copy" && job.kind !== "save_all")) return null;
+  if (data.fileJob?.kind === "save_all") {
+    // A folder's files being saved, once the person has gone from its panel (which has the one bar while it is on screen).
+    if (data.tool?.kind === "save_all") return null;
+    const plan = data.saveAll?.plan ?? null;
+    const sentence = plan === null || data.saveAll === null ? undefined : `From ${data.saveAll.folder.name}, to ${plan.folder_shown}.`;
+    return <JobProgress operation={job.operation} label="Saving files" sentence={sentence} warning={KEEP_OPEN} stopWord="Stop" />;
+  }
   if (data.fileJob?.kind === "add_files") {
     if (data.tool?.kind === "add_files") return null;
     const { doing } = verbs(data.addFiles?.into ?? { type: "folder", collection: null });

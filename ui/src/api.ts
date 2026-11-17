@@ -732,6 +732,90 @@ export function addFiles(vault: SessionRef, choice: string, into: AddInto, reque
   return call<Outcome<AddFilesView>>("add_files", { session: vault.session, generation: vault.generation, choice, into, request });
 }
 
+// ---- Save all of a folder's files (Task 11): two steps, then a summary whose handle is held in Rust ----
+//
+// `saveAllFiles` opens the Windows folder picker (titled with the number of files), runs the checks and answers a plan; `saveAllStart` runs the job
+// and answers how it ended. The destination is held in Rust under the plan's choice: the page sends the folder's id and a token, never a path, and
+// the names it is given back are for display only.
+
+/** One file of the plan: its name as it will be written (after the shell's name rule), its size, and the item it is attached to (`null` for a file item's own file). */
+export interface PlannedFile {
+  name: string;
+  size: number;
+  attached_to: string | null;
+}
+
+/** What `saveAllFiles` plans: the choice the start takes, where it goes (display text), every file in the order it will be saved, and their total bytes. */
+export interface SavePlan {
+  choice: string;
+  folder_shown: string;
+  files: PlannedFile[];
+  total: number;
+}
+
+/** A file that was saved: its name on disk, its size, and the item it is attached to (`null` for a file item's own file). */
+export interface SavedFile {
+  name: string;
+  size: number;
+  attached_to: string | null;
+}
+
+/** A name that changed on the way out: `from` as stored, `to` as on disk (a name Windows refuses, or a number added because the name was taken). */
+export interface Renamed {
+  from: string;
+  to: string;
+}
+
+/**
+ * How a save ended. `damaged` and `gone` name files left out (the batch went on); `unfinished` is the file being written when it ended (nothing of it
+ * is left) and `not_started` the names after it, in order; `stopped` is the refusal that ended it early (`cancelled` for a Stop, or a full drive), else
+ * `null`. `output` is the handle the shell holds for Show in Explorer, put away with `closeOutput`.
+ */
+export interface SaveAllView {
+  saved: SavedFile[];
+  renamed: Renamed[];
+  damaged: string[];
+  gone: string[];
+  unfinished: string | null;
+  not_started: string[];
+  stopped: ShellRefusal | null;
+  folder_shown: string;
+  output: string;
+}
+
+/**
+ * Picks where to save every stored file of the folder `folder` (its id) and checks it: `"Dismissed"` for a closed picker, `{ Confirm: { CloudFolder:
+ * { token } } }` for a cloud-synced folder (go on with `saveAllFilesConfirm`), or `{ Done: plan }`. Allowed in a vault opened from a backup. Refused
+ * as `invalid_input` (`no files`, `state folder`), `core` `not_enough_space` with its numbers, or for a damaged output journal.
+ */
+export function saveAllFiles(vault: SessionRef, folder: string): Promise<Tagged<Outcome<SavePlan>>> {
+  return call<Outcome<SavePlan>>("save_all_files", { session: vault.session, generation: vault.generation, folder });
+}
+
+/** The person's yes to the cloud question: the checks run again and the plan comes back, or a refusal. A token that is used, old or dropped is `choice_expired`. */
+export function saveAllFilesConfirm(token: string): Promise<Tagged<Outcome<SavePlan>>> {
+  return call<Outcome<SavePlan>>("save_all_files_confirm", { token });
+}
+
+/**
+ * Saves the files of a plan as one job with one progress over every file's bytes (`request` names it for `lockbox://job-started`, kind `save_all`).
+ * Every check runs again; the choice is used up when the job starts. Refused as `invalid_input` `folder changed` when the folder's files are no longer
+ * the planned ones. A Stop answers `Done` with `stopped` set; a lock answers `locked`.
+ */
+export function saveAllStart(choice: string, request: number): Promise<Tagged<Outcome<SaveAllView>>> {
+  return call<Outcome<SaveAllView>>("save_all_start", { choice, request });
+}
+
+/** Opens the saved folder in Windows' Explorer, by the summary's handle. A handle that was put away or let go is `choice_expired`; a failed open is `io`. */
+export function showOutputInExplorer(output: string): Promise<null> {
+  return callPlain<null>("show_output_in_explorer", { output });
+}
+
+/** Puts the summary's handle away when the summary closes. Safe to repeat. */
+export function closeOutput(output: string): Promise<null> {
+  return callPlain<null>("close_output", { output });
+}
+
 /** Replaces the stored file `fileId` of the item `id` with one the person picks: the new file's ID. Read-only refuses. */
 export function replaceFile(vault: SessionRef, id: string, fileId: string): Promise<Tagged<Outcome<string>>> {
   return call<Outcome<string>>("replace_file", { session: vault.session, generation: vault.generation, id, file_id: fileId });

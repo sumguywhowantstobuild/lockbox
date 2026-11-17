@@ -832,6 +832,9 @@ pub trait Launcher: Send + Sync {
     fn open_url(&self, url: &tauri::Url) -> io::Result<()>;
     /// Opens the decrypted copy `file` with its default app, the file's own folder as the working directory.
     fn open_file(&self, file: &Path) -> io::Result<()>;
+    /// Opens the folder `folder` in Explorer (Show in Explorer, after a folder's files were saved). The path is
+    /// the shell's own, never the page's.
+    fn open_folder(&self, folder: &Path) -> io::Result<()>;
 }
 
 /// Whether `a` and `b` name the same path as the file system compares names: component by component (so a trailing

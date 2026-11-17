@@ -1150,6 +1150,8 @@ pub struct FakeDialogs {
     on_open: Mutex<Option<Hook>>,
     /// The start folder each folder dialog was given, in order.
     starts: Mutex<Vec<Option<PathBuf>>>,
+    /// The title each folder dialog was given, in order.
+    folder_titles: Mutex<Vec<String>>,
     /// The name each save dialog suggested, in order.
     suggested: Mutex<Vec<String>>,
     /// The title each save dialog was given, in order.
@@ -1175,6 +1177,11 @@ impl FakeDialogs {
     /// The start folder each folder dialog was opened with (`None`: none given), in order.
     pub fn folder_starts(&self) -> Vec<Option<PathBuf>> {
         lock(&self.starts).clone()
+    }
+
+    /// The title each folder dialog was opened with, in order.
+    pub fn folder_titles(&self) -> Vec<String> {
+        lock(&self.folder_titles).clone()
     }
 
     pub fn answer(&self, answer: Option<PathBuf>) {
@@ -1214,8 +1221,9 @@ impl FakeDialogs {
 }
 
 impl Dialogs for FakeDialogs {
-    fn pick_folder(&self, _title: &str, start: Option<&Path>) -> Option<PathBuf> {
+    fn pick_folder(&self, title: &str, start: Option<&Path>) -> Option<PathBuf> {
         lock(&self.starts).push(start.map(Path::to_path_buf));
+        lock(&self.folder_titles).push(title.to_owned());
         self.next()
     }
 
@@ -1251,10 +1259,13 @@ impl Dialogs for FakeDialogs {
 pub struct FakeLauncher {
     opened: Mutex<Vec<String>>,
     opened_files: Mutex<Vec<PathBuf>>,
+    opened_folders: Mutex<Vec<PathBuf>>,
     /// Run once, inside the next launch, before it returns.
     on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The next file launch fails.
     fail_next_file: AtomicBool,
+    /// The next folder launch fails.
+    fail_next_folder: AtomicBool,
 }
 
 impl FakeLauncher {
@@ -1264,6 +1275,16 @@ impl FakeLauncher {
 
     pub fn opened_files(&self) -> Vec<PathBuf> {
         lock(&self.opened_files).clone()
+    }
+
+    /// The folders it was asked to open, in order.
+    pub fn opened_folders(&self) -> Vec<PathBuf> {
+        lock(&self.opened_folders).clone()
+    }
+
+    /// The next folder launch fails, as when Explorer cannot be started.
+    pub fn fail_next_folder(&self) {
+        self.fail_next_folder.store(true, Ordering::SeqCst);
     }
 
     /// Runs `hook` once, inside the next launch: while the link or file is being opened.
@@ -1296,6 +1317,15 @@ impl Launcher for FakeLauncher {
         self.run_hook();
         match self.fail_next_file.swap(false, Ordering::SeqCst) {
             true => Err(io::Error::other("no app")),
+            false => Ok(()),
+        }
+    }
+
+    fn open_folder(&self, folder: &Path) -> io::Result<()> {
+        lock(&self.opened_folders).push(folder.to_path_buf());
+        self.run_hook();
+        match self.fail_next_folder.swap(false, Ordering::SeqCst) {
+            true => Err(io::Error::other("no explorer")),
             false => Ok(()),
         }
     }

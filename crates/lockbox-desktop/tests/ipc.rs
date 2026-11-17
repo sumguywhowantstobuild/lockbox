@@ -249,6 +249,49 @@ fn readable_file_commands_are_granted_to_the_main_window_only() {
     }
 }
 
+/// The five Save all commands (Plan 4B, Task 11) are listed, granted to the main window and reach their handler from it;
+/// another window and a remote origin are refused by the ACL, before the handler. None takes a path: a folder is picked
+/// by Rust, and the summary's folder is opened through a handle (their bodies are checked in `commands::save_all`'s own
+/// tests, with the stale-generation, foreign-ID and read-only refusals).
+#[test]
+fn save_all_commands_are_granted_to_the_main_window_only() {
+    let commands = [
+        "save_all_files",
+        "save_all_files_confirm",
+        "save_all_start",
+        "show_output_in_explorer",
+        "close_output",
+    ];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for cmd in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(json!({}));
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
 /// The settings and Start with Windows commands (Task 20) are listed, granted to the main window and reach their handler
 /// from it; another window and a remote origin are refused by the ACL, before the handler. None takes a session, a
 /// generation or a path: the settings, or `{ on }`, are all they are sent (their bodies are checked in

@@ -182,7 +182,7 @@ impl BackupPlan<'_> {
         crate::fsio::failpoint::check("backup.before_publish")?;
         // Last chance to cancel: from here only the journal's gate can still stop it.
         cancel.check()?;
-        temp.publish(&dest)?;
+        temp.publish(&dest, cancel)?;
         meter.finish();
         Ok(report)
     }

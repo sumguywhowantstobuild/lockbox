@@ -105,6 +105,11 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:password copies disagree": { title: "Change this vault's password once more, then back up.", body: "" },
   "code:invalid_input:recovery key copies disagree": { title: "Make a new recovery key for this vault, then back up.", body: "" },
   "code:invalid_input:details unchecked": { title: "Lock this vault and open it again, then back up.", body: "" },
+  // Save all of a folder's files (Task 11): the folder had none by the time the shell counted, or its files are no longer the ones planned.
+  "code:invalid_input:no files": { title: "This folder has no files to save.", body: "" },
+  "code:invalid_input:folder changed": { title: "The files in this folder changed.", body: "Save them again." },
+  // Show in Explorer could not open the folder (the shell's own `io`, with no path): the same words as the engine's.
+  "code:io": { title: "Lockbox couldn't reach that folder or file.", body: "Check that the drive is connected, then try again." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
   // A choice the shell was holding (the files picked, 9a) was used, dropped by a lock, or left too long: pick again.
   "code:choice_expired": { title: "That choice has expired.", body: "Pick the files again." },
@@ -119,6 +124,9 @@ export const MESSAGES: Record<string, Words> = {
   "page:key_pdf_expired": { title: "That took too long, so nothing was saved. Press Save as PDF again.", body: "" },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
+  // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
+  "page:save_all_expired": { title: "That took too long, so nothing was saved. Choose Save all files again.", body: "" },
+  "page:output_expired": { title: "Lockbox can't open that folder now.", body: "Open it from Windows." },
 
   "core:wrong_password": { title: "Wrong password.", body: "" },
   "core:recovery_key_typo": { title: "That recovery key has a typing mistake.", body: "Check it against the one you saved." },
@@ -228,6 +236,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "file name",
   "file record",
   "folder",
+  "folder changed",
   "folder is open",
   "folder name",
   "header changed on disk",
@@ -248,6 +257,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "link",
   "link type",
   "no character class selected",
+  "no files",
   "no keys",
   "not a collection",
   "not a file",

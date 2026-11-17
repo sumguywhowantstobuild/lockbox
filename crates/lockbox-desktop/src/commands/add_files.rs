@@ -7,9 +7,7 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
 
 use lockbox_core::blob::{CancelToken, Progress};
 use lockbox_core::ids::ItemId;
@@ -18,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Request;
 
+use super::batch::{BatchProgress, RELEASE_GAP};
 use super::{args, blocking};
 use crate::error::{Outcome, ShellError, ShellResult};
 use crate::jobs::{JobKind, JobScope, RunningJob};
@@ -27,15 +26,6 @@ use crate::shell::Shell;
 
 /// The title of the picker, for the first pick and Pick more alike.
 const PICK_TITLE: &str = "Add files";
-
-/// How long the vault is let go between two files: three times a read's 10 ms wait between tries (a sleep can run over,
-/// and a busy PC delays the thread), so a read that was waiting for it gets in. About 30 ms a file, which a batch of
-/// large files never notices and a batch of thousands of tiny ones does.
-const RELEASE_GAP: Duration = Duration::from_millis(30);
-
-/// How long a file waits for a vault another command is using, trying again every [`BUSY_RETRY`], by the shell's clock.
-const BUSY_WAIT: Duration = Duration::from_secs(30);
-const BUSY_RETRY: Duration = Duration::from_millis(50);
 
 /// A picked file as the page lists it: its name (no folder) and its size now.
 #[derive(Serialize)]
@@ -173,70 +163,6 @@ fn listed(paths: &[PathBuf]) -> Vec<PickedFile> {
             size: shown_size(path),
         })
         .collect()
-}
-
-/// The batch's bar: each file's engine progress (bytes of that file) laid after the bytes of the files before it, out of
-/// the batch's total. Every file counts as the size it was measured at (the one the space check and the total used), not
-/// the length the engine sees when it opens it: its progress is held at that size, and the file's whole size is counted
-/// when it is finished or passed over, so a batch that ends well ends at its total. Never reports past the total, and
-/// never reports less than it has.
-struct BatchProgress<'a> {
-    inner: &'a dyn Progress,
-    /// The measured bytes of the files finished or passed over.
-    before: AtomicU64,
-    /// The measured size of the file the engine is working on.
-    current: AtomicU64,
-    /// The most reported so far.
-    high: AtomicU64,
-    total: u64,
-}
-
-impl Progress for BatchProgress<'_> {
-    fn advance(&self, done: u64, file_total: u64) {
-        let in_file = done
-            .min(file_total)
-            .min(self.current.load(Ordering::SeqCst));
-        self.report(self.before.load(Ordering::SeqCst).saturating_add(in_file));
-    }
-}
-
-impl<'a> BatchProgress<'a> {
-    fn new(inner: &'a dyn Progress, total: u64) -> Self {
-        Self {
-            inner,
-            before: AtomicU64::new(0),
-            current: AtomicU64::new(0),
-            high: AtomicU64::new(0),
-            total,
-        }
-    }
-
-    /// Sends `done` bytes of the total, or the most sent so far if that is more.
-    fn report(&self, done: u64) {
-        let done = done.min(self.total);
-        let done = self.high.fetch_max(done, Ordering::SeqCst).max(done);
-        self.inner.advance(done, self.total);
-    }
-
-    /// The engine is about to work on a file measured at `size`.
-    fn begin_file(&self, size: u64) {
-        self.current.store(size, Ordering::SeqCst);
-    }
-
-    /// A file went in whole: all of its measured size is done, whatever the engine last reported.
-    fn finished_file(&self, size: u64) {
-        self.passed_over(size);
-    }
-
-    /// A file that could not be read is passed over: its bytes count as done, so a batch that ends well ends at its total.
-    fn passed_over(&self, size: u64) {
-        let before = self
-            .before
-            .fetch_add(size, Ordering::SeqCst)
-            .saturating_add(size);
-        self.current.store(0, Ordering::SeqCst);
-        self.report(before);
-    }
 }
 
 impl Shell {
@@ -437,50 +363,40 @@ impl Shell {
             progress.passed_over(entry.size.unwrap_or(0));
             return Ok(Step::Failed);
         }
-        let clock = &self.os.clock;
-        let mut waited_from = None;
-        #[cfg(test)]
-        let mut retries = 0;
-        let result = loop {
-            let result = self.sessions.write_long(session, generation, |vault, _| {
-                // The vault is ours now: the file is checked against its measured size once more, and the engine opens
-                // it right after.
-                let Some(size) = entry.unchanged() else {
-                    return Ok(Tried::SourceGone);
-                };
-                progress.begin_file(size);
+        // `Busy` (another command has the vault) is waited out by the batches' shared wait.
+        let result = self.when_free(
+            job,
+            |retries| {
                 #[cfg(test)]
-                reached("import_open", entry.index);
-                match store(vault, target, &entry.path, job.token(), progress) {
-                    Ok(()) => Ok(Tried::Imported(size)),
-                    // The engine opens the source itself, so a failure to open or read it comes back as one of these;
-                    // told from the vault's own by looking at the file again.
-                    Err(CoreError::Io(_) | CoreError::InvalidInput { .. })
-                        if entry.unchanged().is_none() =>
-                    {
-                        Ok(Tried::SourceGone)
-                    }
-                    Err(error) => Err(error.into()),
-                }
-            });
-            let result = result.map(|tagged| tagged.data);
-            if !matches!(result, Err(ShellError::Busy { .. })) {
-                break result;
-            }
-            let began = *waited_from.get_or_insert_with(|| clock.now());
-            if clock.now().saturating_duration_since(began) >= BUSY_WAIT {
-                break result;
-            }
-            if job.token().is_cancelled() {
-                break Err(ShellError::Cancelled);
-            }
-            #[cfg(test)]
-            {
-                retries += 1;
                 reached("busy_retry", retries);
-            }
-            clock.sleep(BUSY_RETRY);
-        };
+                #[cfg(not(test))]
+                let _ = retries;
+            },
+            || {
+                let tried = self.sessions.write_long(session, generation, |vault, _| {
+                    // The vault is ours now: the file is checked against its measured size once more, and the engine
+                    // opens it right after.
+                    let Some(size) = entry.unchanged() else {
+                        return Ok(Tried::SourceGone);
+                    };
+                    progress.begin_file(size);
+                    #[cfg(test)]
+                    reached("import_open", entry.index);
+                    match store(vault, target, &entry.path, job.token(), progress) {
+                        Ok(()) => Ok(Tried::Imported(size)),
+                        // The engine opens the source itself, so a failure to open or read it comes back as one of
+                        // these; told from the vault's own by looking at the file again.
+                        Err(CoreError::Io(_) | CoreError::InvalidInput { .. })
+                            if entry.unchanged().is_none() =>
+                        {
+                            Ok(Tried::SourceGone)
+                        }
+                        Err(error) => Err(error.into()),
+                    }
+                });
+                tried.map(|tagged| tagged.data)
+            },
+        );
         match result {
             Ok(Tried::Imported(size)) => {
                 progress.finished_file(size);
@@ -498,13 +414,6 @@ impl Shell {
             )),
             Err(error) => Ok(Step::Stopped(error)),
         }
-    }
-
-    /// What a cancelled job's token means: `Cancelled` for a Stop, but `Locked` (the error) when the session was locked
-    /// meanwhile, which cancels every job of it too.
-    fn cancelled_or_locked(&self, session: SessionId, generation: u64) -> ShellResult<ShellError> {
-        self.still_current(session, generation, ())
-            .map(|_| ShellError::Cancelled)
     }
 
     /// Refuses a session that is stale, not ours or read-only, before anything else.

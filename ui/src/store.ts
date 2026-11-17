@@ -11,7 +11,8 @@ import { useSyncExternalStore } from "react";
 import * as api from "./api";
 import { batchHasFocus, focusList, takeJobFocus } from "./focus";
 import { resetCloseAskForTests, startCloseAsk } from "./closeAsk";
-import { awayMessage, partialWords, wasClean } from "./addFilesWords";
+import { awayMessage, partialWords, refusalWords, wasClean } from "./addFilesWords";
+import { spokenEnd } from "./saveAllWords";
 import { announceJob, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
 import { leftOutWords } from "./format";
 import { backupNotFinishedMore, BACKUP_NOT_FINISHED } from "./messages";
@@ -68,6 +69,11 @@ export type Tool =
    * end), and the panel is only where it is on screen: leaving it while the batch works leaves the batch and its bar going.
    */
   | { kind: "add_files" }
+  /**
+   * Save all of a folder's files (the bar, then the end): the panel for one save. What it shows is the session's `saveAll` (the plan, the bar, the
+   * summary), and the panel is only where it is on screen: leaving it while the save works leaves the save and its bar going.
+   */
+  | { kind: "save_all" }
   /** The Generator page (16a). */
   | { kind: "generator" }
   /** Settings (31a, 31b): the app's, for every vault, so a read-only vault opens it too. What it shows is `StoreState.settings`. */
@@ -266,6 +272,12 @@ export interface SessionData {
    * stored. A lock takes it with the record.
    */
   addFiles: AddFilesFlow | null;
+  /**
+   * The save of a folder's files being asked (the cloud question), run or just ended (Task 11), or `null`: the Save all panel shows it. The end is
+   * kept here after the person has gone from the panel, for a card in the list's column, since the copies are not encrypted and the summary holds
+   * the handle that Show in Explorer uses. A lock takes it with the record.
+   */
+  saveAll: SaveAllFlow | null;
   /** The long operations the shell says are running for this vault (`lockbox://busy`): while there are any, auto-lock waits and the window says so. */
   operations: string[];
 }
@@ -292,10 +304,28 @@ export interface AddFilesFlow {
   focusResult: boolean;
 }
 
+/** One save of a folder's files, from the cloud question to its end. The paths stay in Rust: the page holds names, sizes and tokens. */
+export interface SaveAllFlow {
+  /** Counts the times a save was begun: a new one is a new panel. */
+  opening: number;
+  /** The folder being saved: its id, and its name as the menu showed it. */
+  folder: { id: string; name: string };
+  /** `cloud`: the question waits for yes or no; `saving`: the bar; `done`: the summary. */
+  phase: "cloud" | "saving" | "done";
+  /** The token the cloud question's yes goes on with (`cloud`), else `null`. */
+  token: string | null;
+  /** What the shell planned once the picker answered (`saving`, `done`): where it goes and each file in order, for "3 of 4". */
+  plan: api.SavePlan | null;
+  /** How it ended, once it has. */
+  result: api.SaveAllView | null;
+  /** The panel's result takes focus: focus was in this save's own panel or bar when it ended. Otherwise focus stays where the person put it. */
+  focusResult: boolean;
+}
+
 /** What a stored-file action is doing: its kind, and the item and file it is about (`null` where there is none: Add has neither, Attach has no file). */
 export interface FileJob {
-  /** `add` and `attach` are the picker being open for a new batch; `add_files` is the batch itself. */
-  kind: "open" | "save" | "replace" | "attach" | "add" | "add_files";
+  /** `add` and `attach` are the picker being open for a new batch; `add_files` is the batch itself; `save_all` is a folder's files being saved (the picker, then the job). */
+  kind: "open" | "save" | "replace" | "attach" | "add" | "add_files" | "save_all";
   id: string | null;
   fileId: string | null;
   /**
@@ -603,6 +633,7 @@ function newRecord(
     fileJob: null,
     backup: null,
     addFiles: null,
+    saveAll: null,
     operations: [],
   };
 }
@@ -2449,6 +2480,201 @@ export function closeAddFiles(session: number): void {
     addFiles: flow?.phase === "adding" ? current.addFiles : null,
   }));
   if (showing && flow?.into.type === "item" && flow.phase !== "adding") void selectItem(session, flow.into.id);
+}
+
+// ---- Save all of a folder's files (Plan 4B Task 11): the folder's menu, the bar, the summary ----
+//
+// Two commands: `save_all_files` opens the Windows folder picker, checks and answers a plan (or the cloud question), and `save_all_start` runs the
+// job. The page chains them in one file job, so no other file action slips between, and the panel opens once the plan is known: it needs the folder
+// the files go to and their sizes for "3 of 4". The destination stays in Rust under the plan's choice; the page holds names, sizes and tokens.
+// The end is kept (the panel, or a card in the list's column when the person has gone) until Done, since the copies are not encrypted and the
+// summary's handle is what Show in Explorer uses; Done puts the handle away.
+
+/** The number of the last time a save was begun. */
+let saveAllOpenings = 0;
+
+/** Changes one session's save while it is still the opening and generation the caller began in. */
+function changeSaveAll(session: number, generation: number, opening: number, change: (flow: SaveAllFlow) => SaveAllFlow): void {
+  if (!stillOpen(session, generation)) return;
+  update(session, (current) => (current.saveAll?.opening === opening ? { ...current, saveAll: change(current.saveAll) } : current));
+}
+
+/** Puts a summary's handle away. A handle that is gone already, or a failure, is nothing to say: the shell lets go of it at a lock anyway. */
+function putAwayOutput(output: string): void {
+  void api.closeOutput(output).catch(() => undefined);
+}
+
+/** The page's own refusal for a plan or a choice the shell let go of (it is held a few minutes), said in Save all's own words. */
+function expiredSave(): Error {
+  return Object.assign(new Error("save_all_expired"), { code: "page", kind: "save_all_expired" });
+}
+
+/** What a save's first step or its start came to: the cloud question to ask (its token), or how the job ended (with its operation, and whether focus was in its own place). */
+type SaveAllRun = { cloud: string } | { view: api.SaveAllView; operation: number | null; focused: boolean };
+
+/** Whether the shell refused for want of room, with the numbers the page says (the plan's check, or the start's). */
+function noRoom(error: unknown): boolean {
+  return refusedWith(error, "core") && isRecord(error) && error.kind === "not_enough_space" && typeof error.needed === "number" && typeof error.available === "number";
+}
+
+/**
+ * One save: `plan` is the first step (the picker and the checks, or a cloud question's yes). A closed picker changes nothing and says nothing; a
+ * cloud folder parks the question; a plan opens the panel on the bar and starts the job. A refusal at either step is said in the page's words
+ * (the numbers, for want of room) and nothing is left of the panel; one that says the folder changed reads the list again, since it is out of date.
+ */
+async function runSaveAll(
+  session: number,
+  folder: { id: string; name: string },
+  opening: number,
+  plan: (vault: api.SessionRef) => Promise<api.Tagged<api.Outcome<api.SavePlan>>>,
+): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.fileJob !== null) return;
+  const { generation } = entry;
+  let refusal: unknown = null;
+  const ran = await runFile<SaveAllRun>(session, { kind: "save_all", id: folder.id, fileId: null }, "anywhere", false, async (vault, request) => {
+    try {
+      const planned = await plan(vault);
+      const first = planned.data;
+      if (first === "Dismissed") return { ...planned, data: "Dismissed" };
+      if ("Confirm" in first) {
+        if (typeof first.Confirm === "object" && "CloudFolder" in first.Confirm) {
+          return { ...planned, data: { Done: { cloud: first.Confirm.CloudFolder.token } } };
+        }
+        throw Object.assign(new Error("unexpected"), UNEXPECTED);
+      }
+      // The picker answered: the panel opens on the bar. A summary still held from an earlier save is put away now, since this one replaces it.
+      const earlier = sessionOf(session)?.saveAll?.result?.output;
+      update(session, (current) => ({
+        ...endReveals(current),
+        openItem: null,
+        tool: { kind: "save_all" },
+        saveAll: { opening, folder, phase: "saving", token: null, plan: first.Done, result: null, focusResult: false },
+      }));
+      if (earlier !== undefined) putAwayOutput(earlier);
+      const started = await api.saveAllStart(first.Done.choice, request);
+      const end = started.data;
+      if (typeof end !== "object" || !("Done" in end)) throw Object.assign(new Error("unexpected"), UNEXPECTED);
+      // The command has answered but its bar is still on the page: whose place focus is in is read now, before the result replaces the bar.
+      const operation = jobOfRequest(request)?.operation ?? null;
+      const focused = batchHasFocus(operation, sessionOf(session)?.tool?.kind === "save_all");
+      return { ...started, data: { Done: { view: end.Done, operation, focused } } };
+    } catch (error) {
+      refusal = error;
+      // A plan or choice the shell let go of: Save all's own words, not "pick the files again".
+      throw refusedWith(error, "choice_expired") ? expiredSave() : error;
+    }
+  });
+  if (ran === "stale" || ran === "busy") return;
+  const leave = () => {
+    update(session, (current) => ({
+      ...current,
+      tool: current.tool?.kind === "save_all" ? null : current.tool,
+      saveAll: current.saveAll?.opening === opening ? null : current.saveAll,
+    }));
+  };
+  if (ran === "refused") {
+    // The refusal was said by `runFile`; want of room is said again with its numbers, and a changed folder means the list is out of date.
+    if (noRoom(refusal) && stillOpen(session, generation)) told(session, refusalWords(refusal, []).text);
+    leave();
+    const record = sessionOf(session);
+    if (refusedWith(refusal, "invalid_input") && isRecord(refusal) && refusal.what === "folder changed" && record !== undefined) {
+      void loadItems(record, { quiet: true });
+    }
+    return;
+  }
+  const { outcome } = ran;
+  if (outcome === "Dismissed" || !("Done" in outcome)) return;
+  const done = outcome.Done;
+  if ("cloud" in done) {
+    // The question replaces a summary still held from an earlier save: its handle is put away first, as when a plan replaces it.
+    const earlier = sessionOf(session)?.saveAll?.result?.output;
+    if (earlier !== undefined) putAwayOutput(earlier);
+    update(session, (current) => ({
+      ...current,
+      saveAll: { opening, folder, phase: "cloud", token: done.cloud, plan: null, result: null, focusResult: false },
+    }));
+    return;
+  }
+  endSaveAll(session, generation, opening, done);
+}
+
+/**
+ * Where a save's end goes: the panel when it is on screen, else the flow stays at its end and the card in the list's column holds the summary. The
+ * result takes focus only for a person who was in the save's own panel or bar; for anyone else (in the filter, on another item) the end is said in
+ * the page's spoken place instead, by the operation, which a card drawn after it could not do.
+ */
+function endSaveAll(session: number, generation: number, opening: number, run: { view: api.SaveAllView; operation: number | null; focused: boolean }): void {
+  if (!stillOpen(session, generation)) return;
+  const entry = sessionOf(session);
+  if (entry?.saveAll?.opening !== opening) return;
+  const { view, operation, focused } = run;
+  const total = entry.saveAll.plan?.files.length ?? 0;
+  const takesFocus = entry.tool?.kind === "save_all" && focused;
+  changeSaveAll(session, generation, opening, (now) => ({ ...now, phase: "done", result: view, focusResult: takesFocus }));
+  if (!takesFocus) announceJob(spokenEnd(view, total), operation ?? 0);
+}
+
+/**
+ * Save all files (N) in the folder's menu: Windows' folder picker opens (the shell's, titled with the count), then the save runs. Nothing is sent
+ * while another file action works in the vault. Allowed in a vault opened from a backup.
+ */
+export async function startSaveAll(session: number, folder: { id: string; name: string }): Promise<void> {
+  if (sessionOf(session) === undefined) return;
+  saveAllOpenings += 1;
+  await runSaveAll(session, folder, saveAllOpenings, (vault) => api.saveAllFiles(vault, folder.id));
+}
+
+/** The cloud question's yes ("Save here anyway"): the shell checks again and the save goes on with the folder it parked. */
+export async function confirmSaveAll(session: number): Promise<void> {
+  const flow = sessionOf(session)?.saveAll ?? null;
+  if (flow === null || flow.phase !== "cloud" || flow.token === null) return;
+  const { token, folder } = flow;
+  update(session, (current) => ({ ...current, saveAll: null }));
+  saveAllOpenings += 1;
+  await runSaveAll(session, folder, saveAllOpenings, () => api.saveAllFilesConfirm(token));
+}
+
+/** The cloud question's other answers: "No" (Escape) writes nothing and leaves the question; "Pick another folder" asks Windows for a folder again. */
+export function leaveSaveAllQuestion(session: number, pickAnother: boolean): void {
+  const flow = sessionOf(session)?.saveAll ?? null;
+  if (flow === null || flow.phase !== "cloud") return;
+  update(session, (current) => ({ ...current, saveAll: null }));
+  if (pickAnother) void startSaveAll(session, flow.folder);
+}
+
+/**
+ * Closes the Save all panel. While the save works the panel goes and the save carries on (its bar moves to the list's column). At its end it is
+ * Done, which puts the summary's handle away, and it is also what puts away the card that kept an end the person had left.
+ */
+export function closeSaveAll(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined) return;
+  const flow = entry.saveAll;
+  if (flow?.phase === "done" && flow.result !== null) putAwayOutput(flow.result.output);
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "save_all" ? null : current.tool,
+    saveAll: flow?.phase === "saving" ? current.saveAll : null,
+  }));
+}
+
+/**
+ * Show in Explorer on the summary: the shell opens the saved folder by the handle (no path comes to the page). A handle the shell has let go of says
+ * to open the folder from Windows; a failed open is said in words, with no path.
+ */
+export async function showSavedFolder(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  const output = entry?.saveAll?.result?.output;
+  if (entry === undefined || output === undefined) return;
+  const { generation } = entry;
+  try {
+    await api.showOutputInExplorer(output);
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+    if (!stillOpen(session, generation)) return;
+    sayFailure(session, refusedWith(error, "choice_expired") ? { code: "page", kind: "output_expired" } : error);
+  }
 }
 
 /** Open on a file result of the search: as the panel's, and the search steps aside once it worked. A program file is asked over the search. */

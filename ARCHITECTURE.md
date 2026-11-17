@@ -67,13 +67,13 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `manifest.rs` | `backup-manifest.json`: the list of everything in a backup (path, size, SHA-256) with a MAC, and its strict parser |
 | `archive.rs` | The backup file (one stored ZIP64 archive): our own strict reader for the few shapes we write, and the writer |
 | `lockfile.rs` | The `.lock` file with an OS exclusive lock: one process per vault |
-| `fsio/mod.rs` | Safe file operations: `atomic_write` (all or nothing), `replace_file`, `rename_dir_no_replace`, retries, hidden temps, space checks |
+| `fsio/mod.rs` | Safe file operations: `atomic_write` (all or nothing), `replace_file`, `rename_dir_no_replace`, the gated renames that publish an output (`rename_replace_gated`; `rename_no_replace_gated`, which never replaces), retries, hidden temps, space checks |
 | `fsio/windows.rs` | The Win32 calls. The only place `unsafe` is allowed |
 | `fsio/portable.rs` | The same small surface for non-Windows systems |
 | `vault/mod.rs` | `Vault`: create (`create_with_id` when the caller must know the folder first), change password, regenerate recovery key, accept a changed header, search |
 | `vault/unlock.rs` | Opening a vault: header fallback and repair |
 | `vault/items.rs` | Items in an open vault: add, edit, trash, restore, collections |
-| `vault/files.rs` | Files in an open vault: import, replace, save a decrypted copy, purge |
+| `vault/files.rs` | Files in an open vault: import, replace, save a decrypted copy (replacing, or never replacing with numbered names), purge |
 | `vault/cleanup.rs` | The cleanup that runs at unlock; listing and deleting quarantined files |
 | `vault/naming.rs` | Vault names, folder names and timestamps |
 | `vault/backup.rs` | Making a backup of an open vault: built hidden, re-read and checked, then published |
@@ -147,7 +147,25 @@ must give an error with fixed wording, never a panic.
   whole stream, flushes, unhides, checks for cancel, then publishes over the destination through the journal's gate
   (`rename_replace_gated`, then `sync_after_replace`; rule 1) (spec 7.2). An export that fails, is cancelled or is
   refused before the rename leaves an existing destination alone. Once the rename has happened the destination holds
-  the new copy; if making that durable then fails, the error is returned as published, durability not confirmed.
+  the new copy; if making that durable then fails, the error is returned as published, durability not confirmed. The
+  job's cancel token is looked at inside every gated rename attempt, before the move (also for a backup's publication),
+  so a Stop that comes while another program holds the temp, during the wait between attempts, stops the publication.
+  A write or flush that fails because the drive is full (Windows `ERROR_DISK_FULL` 112 and `ERROR_HANDLE_DISK_FULL` 39,
+  or the portable `StorageFull`) is answered as the `NotEnoughSpace` refusal, with `needed` (the file and the slack kept
+  free) and `available` (the free space read at that moment, kept below `needed`, 0 where it cannot be read), the temp
+  removed; every other I/O error stays one.
+- **Export that never replaces** (`export_file_new`, on `Vault` and `ReadOnlyVault`; saving all of a folder's files):
+  the same verified temp, but its last step is `rename_no_replace_gated`, one `MoveFileExW` without
+  `MOVEFILE_REPLACE_EXISTING` through the same journal gate and waits, whose `renamed` hook disarms the temp's guard in the
+  attempt. A taken name (a file, a folder or a link, even a dangling one) answers `DESTINATION_EXISTS` at once, with the
+  temp untouched, and the caller's `candidates(n)` gives the next name (`a (2).txt` ... up to 999, then the refusal): the
+  copy is decrypted and verified once and moved to the first free name, and each name is refused like `export_file`'s
+  (inside the vault, in a vault's folder, the backup itself). Once the move has happened nothing after it
+  (the durability step, the failpoint `export.after_publish`) is an error of the save: the answer is the path it has.
+  The one failure that comes with a path is the journal's gate failing after the move (its contract allows it): the move
+  is not made again and nothing is removed, and the error is a `NewExportError { error, published: Some(path) }` (the
+  caller counts the file as saved and ends its batch with `error`); every other error has `published: None`.
+  `check_output_space(dir, sizes)` asks the space refusals once for a whole batch of copies, as `check_import_space` does.
 - **Purge** (`purge_item`, trashed items only): rewrite the item with `purging: true`, delete its blobs from `files/`
   and the quarantine (never one another item still attaches; refused while `files/` or `files/orphaned/` is a link),
   then delete the item file. A crash in between is finished at the next unlock. Refused while `items/` is a link,
@@ -297,7 +315,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `lockbox://job-started`, `lockbox://progress` and `lockbox://lock-epoch` events; also the shape of `lockbox://close-asked` |
 | `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
 | `outputs.rs` | The output journal (`pending-outputs.json`), the gate every decrypted file is published through, and the launch sweep |
-| `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries |
+| `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries; also `save_name`, the lighter name rule for a folder's saved files (only what Windows refuses or what could leave the folder is changed) |
 | `restore.rs` | One restore at a time: its state machine, launch recovery, pre-restore copies and their checks |
 | `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
 | `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
@@ -305,14 +323,16 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
 | `dates.rs` | The one date shape the shell writes and reads (RFC 3339, UTC, whole seconds), and "whole days since": the 30-day backup reminder counts from the last backup, else from the vault's creation |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question and the files picked to be added also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again) |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`) |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
 | `window.rs` | The one window: what it may load, open, download or receive, and how it starts (shown, or hidden for a `--hidden` start) |
 | `commands/` | The `#[tauri::command]` wrappers. `list.rs` names every command; `args.rs` parses a request strictly |
 | `commands/add_files.rs` | Many files in: the picker and its held list (paths stay in Rust), and `add_files`, one job for the batch (one bar over every file's bytes) where each file is its own change of the vault, the vault is let go between two files, a file that cannot be read, or is no longer the size measured, is named and skipped, and a Stop or a refusal names what was not added |
-| `os/mod.rs` | The traits (`Dialogs`, `Launcher`, `IdleSource`, `Power`, `Clock` (monotonic time, the wall clock and the PC's local date), `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
+| `commands/batch.rs` | What the two batch jobs share: the bar over every file's bytes together, the 30 ms the vault is let go between two files, the wait while another command has the vault (tried every 50 ms for 30 s by the shell's clock), and what a cancelled job's token means |
+| `commands/save_all.rs` | Saving all of a folder's files: `save_all_files` (the picker, the shared destination checks, the batch's space, the plan), `save_all_files_confirm` (the cloud question's yes), `save_all_start` (the checks again, then one job over every file, each its own read of the vault, never replacing; a damaged file, one that went, a full drive and a Stop each named in the summary) and the summary's handle (`show_output_in_explorer`, `close_output`) |
+| `os/mod.rs` | The traits (`Dialogs`, `Launcher` (a link, an opened copy, a folder in Explorer), `IdleSource`, `Power`, `Clock` (monotonic time, the wall clock and the PC's local date), `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
 | `os/win.rs` | The real Windows calls (the real clocks included), the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
 | `os/signals.rs` | Turns a window message into an `OsSignal` |
 | `testing.rs` | The fakes (test builds only) |
