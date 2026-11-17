@@ -6,6 +6,7 @@ import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
 import { cancelCapture, clearUnlockPick, startRestore, unlock, useCapture, useRestore, useStartError, useUnlockPick, useVaults } from "../store";
 import { useMode } from "../theme";
 import { LockScreenAsks } from "./Asks";
+import { DamagedVaultAsk } from "./RestoreNotices";
 
 /** A refusal as one line of text. */
 function said(message: Message): string {
@@ -35,6 +36,10 @@ export function LockScreen() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The finished restore's Unlock draws the password box anew, so it takes the focus (a box that stayed would not: it is only focused as it is drawn).
+  const [focusBox, setFocusBox] = useState(0);
+  // A vault that can't be opened and is the only one there is: Back from Ask 8 leaves the lock screen as it was, with its box.
+  const [backFrom, setBackFrom] = useState<number | null>(null);
   // A second press before the first has an answer must not send a second unlock, and state changes too late for that.
   const unlocking = useRef(false);
   const mode = useMode();
@@ -57,8 +62,9 @@ export function LockScreen() {
   }, []);
 
   const list = vaults ?? [];
-  // The chosen vault, or the first that can be reached.
-  const chosen = list.find((vault) => vault.id === chosenId && vault.available) ?? list.find((vault) => vault.available);
+  // The chosen vault, or the first that can be opened (one whose details are damaged has Ask 8 instead of a box), or the first that can be reached.
+  const chosen =
+    list.find((vault) => vault.id === chosenId && vault.available) ?? list.find((vault) => vault.available && !vault.details_damaged) ?? list.find((vault) => vault.available);
   const position = chosen === undefined ? 0 : list.indexOf(chosen);
   const name = (vault: VaultEntry) => vault.name ?? "A vault that can't be read";
 
@@ -85,6 +91,24 @@ export function LockScreen() {
   else if (list.length === 1 && chosen !== undefined) heading = `Unlock ${name(chosen)}`;
   if (capture !== null) heading = "Save what you copied";
 
+  // Ask 8: both copies of the vault's details are damaged (the list says so), so no password can open it. Its own screen takes the place of the box; Back is
+  // another vault that can be opened when there is one, and the lock screen as it was when there is not. A vault with no name for another reason keeps the box.
+  if (capture === null && chosen !== undefined && chosen.details_damaged && backFrom !== chosen.id) {
+    const other = list.find((vault) => vault.available && !vault.details_damaged);
+    return (
+      <DamagedVaultAsk
+        vault={chosen.id}
+        name={chosen.name}
+        onBack={() => {
+          setPassword("");
+          setError(null);
+          if (other === undefined) setBackFrom(chosen.id);
+          else setChosenId(other.id);
+        }}
+      />
+    );
+  }
+
   return (
     <div
       className="lock"
@@ -107,7 +131,14 @@ export function LockScreen() {
       </header>
       <main className="plate">
         <h1>{heading}</h1>
-        <LockScreenAsks />
+        <LockScreenAsks
+          onUnlock={(vault) => {
+            if (vault !== null) setChosenId(vault);
+            setPassword("");
+            setError(null);
+            setFocusBox((count) => count + 1);
+          }}
+        />
         {startError !== null ? (
           <p className="err" role="alert">
             {said(messageFor(startError))}
@@ -157,6 +188,7 @@ export function LockScreen() {
         {chosen === undefined ? null : (
           <form onSubmit={(event) => void submit(event)}>
             <PasswordField
+              key={focusBox}
               label={`Password for ${name(chosen)}`}
               value={password}
               onChange={(next) => {

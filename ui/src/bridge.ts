@@ -25,8 +25,10 @@ export interface JournalPaths {
  */
 export type RestoreNotice =
   | { state: "none" }
-  | { state: "recovered"; how: "staging_removed" | "rolled_back" | "finished" }
-  | { state: "drive_missing"; paths: JournalPaths }
+  /** `vault` is the listed vault at the journal's folder, once recovery is done: `null` when none is listed there or its name can't be read. */
+  | { state: "recovered"; how: "staging_removed" | "rolled_back" | "finished"; vault: { id: number; name: string } | null }
+  /** `folder` is the target's parent folder as text, what Ask 7 names. */
+  | { state: "drive_missing"; paths: JournalPaths; folder: string }
   | { state: "pending"; paths: JournalPaths }
   | { state: "unclear"; journal: string; paths: JournalPaths | null };
 

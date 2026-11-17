@@ -194,7 +194,7 @@ function Steps({ flow }: { flow: Flow }) {
         <h1 ref={heading} tabIndex={-1}>
           Where it goes
         </h1>
-        <p className="fu-sub">{whereWords(name, checked?.usual ?? true, checked?.replaces_existing ?? false)}</p>
+        <p className="fu-sub">{whereWords(name, checked?.usual ?? true, checked?.replaces_existing ?? false, flow.beside)}</p>
         <div className="fu-row">
           <span className="fu-hint fu-where">{checked?.folder_shown ?? ""}</span>
           <button

@@ -60,6 +60,12 @@ const BACKUP_CHANGED: ShellError = ShellError::InvalidInput {
     what: "backup changed",
 };
 
+/// A healthy copy of the vault is in the folder already, so a restore beside a damaged vault makes no second one (the
+/// engine's own refusal of a new folder beside a readable copy; nothing is written, nothing replaced).
+const ALREADY_HERE: ShellError = ShellError::InvalidInput {
+    what: "vault already here",
+};
+
 /// How long a commit waits for the destination's last command to let go of the vault it was closed with.
 const RELEASE_WAIT: Duration = if cfg!(test) {
     Duration::from_millis(300)
@@ -125,6 +131,22 @@ impl fmt::Debug for JournalPaths {
     }
 }
 
+/// The vault a settled restore is about, as the vault list has it. The name is the one the lock screen shows.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct NoticeVault {
+    pub id: u32,
+    pub name: String,
+}
+
+/// Never shows the name (R5).
+impl fmt::Debug for NoticeVault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NoticeVault")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A path as the user knows it: Lockbox spells a drive path `\\?\C:\..`, which Explorer does not.
 pub(crate) fn shown(path: &Path) -> String {
     let text = path.to_string_lossy();
@@ -141,7 +163,12 @@ pub(crate) fn shown(path: &Path) -> String {
 pub enum RestoreNotice {
     /// No journal, or nothing to tell.
     None,
-    Recovered(Recovered),
+    /// The restore was settled. `vault`: the vault on the list at the restore's folder once it was, to say which one
+    /// (`None` when none is listed there or its name cannot be read).
+    Recovered {
+        how: Recovered,
+        vault: Option<NoticeVault>,
+    },
     /// The folder that holds the journal's folders is not there (its drive is not plugged in): nothing was decided.
     /// Reconnect it and try again, or dismiss.
     DriveMissing(JournalPaths),
@@ -155,11 +182,18 @@ pub enum RestoreNotice {
     },
 }
 
+impl RestoreNotice {
+    /// A settled restore, its vault not named yet.
+    fn recovered(how: Recovered) -> RestoreNotice {
+        RestoreNotice::Recovered { how, vault: None }
+    }
+}
+
 impl fmt::Debug for RestoreNotice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             RestoreNotice::None => "RestoreNotice::None",
-            RestoreNotice::Recovered(_) => "RestoreNotice::Recovered(..)",
+            RestoreNotice::Recovered { .. } => "RestoreNotice::Recovered(..)",
             RestoreNotice::DriveMissing(_) => "RestoreNotice::DriveMissing(..)",
             RestoreNotice::Pending(_) => "RestoreNotice::Pending(..)",
             RestoreNotice::Unclear { .. } => "RestoreNotice::Unclear { .. }",
@@ -174,9 +208,12 @@ enum NoticeView<'a> {
     None,
     Recovered {
         how: Recovered,
+        vault: &'a Option<NoticeVault>,
     },
     DriveMissing {
         paths: &'a JournalPaths,
+        /// The folder that holds the restore's folders, as text: what the notice names.
+        folder: String,
     },
     Pending {
         paths: &'a JournalPaths,
@@ -191,13 +228,23 @@ impl Serialize for RestoreNotice {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             RestoreNotice::None => NoticeView::None,
-            RestoreNotice::Recovered(how) => NoticeView::Recovered { how: *how },
-            RestoreNotice::DriveMissing(paths) => NoticeView::DriveMissing { paths },
+            RestoreNotice::Recovered { how, vault } => NoticeView::Recovered { how: *how, vault },
+            RestoreNotice::DriveMissing(paths) => NoticeView::DriveMissing {
+                paths,
+                folder: parent_shown(&paths.target),
+            },
             RestoreNotice::Pending(paths) => NoticeView::Pending { paths },
             RestoreNotice::Unclear { journal, paths } => NoticeView::Unclear { journal, paths },
         }
         .serialize(serializer)
     }
+}
+
+/// The folder that holds `target` (a folder as [`shown`] spells it), as text; `target` itself when it has no parent.
+fn parent_shown(target: &str) -> String {
+    Path::new(target)
+        .parent()
+        .map_or_else(|| target.to_owned(), shown)
 }
 
 /// What dismissing a journal leaves behind (`Confirm::Dismissal`), for the user to act on.
@@ -231,6 +278,18 @@ impl Leaves {
     }
 }
 
+/// The folder the restore journal names as the restored vault's, or `None` when there is no journal or it cannot be read.
+/// Like [`recovery_notice`] it creates nothing when there is no journal (not the state folder, not a lock file).
+fn journal_target(journal: &Path) -> Option<PathBuf> {
+    if matches!(fs::symlink_metadata(journal), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+        return None;
+    }
+    inspect_restore_journal(journal)
+        .ok()
+        .flatten()
+        .map(|view| view.target)
+}
+
 /// Runs the engine's recovery on `journal` and says what it found. Never creates the state folder or a lock file when
 /// there is no journal.
 fn recovery_notice(journal: &Path) -> RestoreNotice {
@@ -246,9 +305,10 @@ fn recovery_notice(journal: &Path) -> RestoreNotice {
     };
     match recover_restore(journal) {
         Ok(Recovery::NothingToDo) => RestoreNotice::None,
-        Ok(Recovery::StagingRemoved) => RestoreNotice::Recovered(Recovered::StagingRemoved),
-        Ok(Recovery::RolledBack) => RestoreNotice::Recovered(Recovered::RolledBack),
-        Ok(Recovery::Finished) => RestoreNotice::Recovered(Recovered::Finished),
+        // The vault is named by the shell, which has the vault list ([`Shell::recover`]).
+        Ok(Recovery::StagingRemoved) => RestoreNotice::recovered(Recovered::StagingRemoved),
+        Ok(Recovery::RolledBack) => RestoreNotice::recovered(Recovered::RolledBack),
+        Ok(Recovery::Finished) => RestoreNotice::recovered(Recovered::Finished),
         // A rename or the staging removal failed, or the disk would not answer yet (the journal could not be locked or
         // read): the journal stays and trying again may work.
         Err(CoreError::RestorePending | CoreError::Io(_)) => match paths() {
@@ -955,9 +1015,39 @@ impl Shell {
     /// folder, so it never runs under a live restore of ours.
     pub fn recover(&self) -> RestoreNotice {
         self.restore.recoveries.fetch_add(1, Ordering::SeqCst);
-        let notice = recovery_notice(&self.paths.journal);
+        // The journal goes with the recovery, so the folder it names is read first, to say which vault was settled.
+        let target = journal_target(&self.paths.journal);
+        let mut notice = recovery_notice(&self.paths.journal);
+        if let RestoreNotice::Recovered { how, vault } = &mut notice {
+            *vault = target.and_then(|target| self.settled_vault(*how, &target));
+        }
         *lock(&self.restore.notice) = notice.clone();
         notice
+    }
+
+    /// The vault of the list at `target`, the folder a settled restore was about. A swap that had finished
+    /// ([`Recovered::Finished`]) may have ended before [`restore_commit`](Self::restore_commit) listed the vault: it is
+    /// listed here, as that does, so the lock screen shows it. `None` when none is listed there (the list is full or
+    /// damaged, the restore went to a new folder that was never made, ..) or its name cannot be read.
+    fn settled_vault(&self, how: Recovered, target: &Path) -> Option<NoticeVault> {
+        let listed = |target: &Path| {
+            self.registry
+                .entries()
+                .into_iter()
+                .find(|(_, dir)| same_path(dir, target))
+        };
+        let (id, dir) = match (listed(target), how) {
+            (Some(found), _) => found,
+            (None, Recovered::Finished) => {
+                let dir = fs::canonicalize(target).ok()?;
+                (self.registry.add(&dir).ok()?, dir)
+            }
+            (None, _) => return None,
+        };
+        Some(NoticeVault {
+            id,
+            name: read_vault_name(&dir).ok()?,
+        })
     }
 
     /// Tells the page what a restore found, when it is not `None`.
@@ -1011,9 +1101,23 @@ impl Shell {
     /// the old pick as it was, and `choice` (the pick being replaced, Pick another) is forgotten once the new one is held.
     /// The lock epoch is read before the picker, so a lock of all vaults while it is open is `Locked`, with nothing held.
     /// `Busy { restore }` while a restore of ours is preparing, finished or committing (one at a time).
-    pub fn restore_pick(&self, choice: Option<&Token>) -> ShellResult<Outcome<RestorePick>> {
+    ///
+    /// `vault`: the vault of the list the backup is for (Ask 4 and Ask 8). The check then makes the folder that holds that
+    /// vault the restore's folder (not the usual one), so the restore finds the vault there and replaces it, or, when its
+    /// headers cannot be read, unpacks into a new folder beside it and leaves it alone. A vault that is not on the list is
+    /// `NotFound`, before a picker opens and with nothing held.
+    pub fn restore_pick(
+        &self,
+        choice: Option<&Token>,
+        vault: Option<u32>,
+    ) -> ShellResult<Outcome<RestorePick>> {
         if !self.restore.is_idle() {
             return Err(BUSY_RESTORE);
+        }
+        // A vault that is not on the list is refused before a picker opens (the check looks again: it may be forgotten
+        // by then).
+        if let Some(vault) = vault {
+            self.registry.path(vault).ok_or(ShellError::NotFound)?;
         }
         let epoch = self.sessions.epoch();
         let Some(path) = self.os.dialogs.pick_file(RESTORE_PICK_TITLE, Some(FILTER)) else {
@@ -1026,6 +1130,7 @@ impl Shell {
             PendingChoice::RestorePick {
                 path,
                 epoch,
+                vault,
                 checked: None,
             },
             self.os.clock.now(),
@@ -1048,7 +1153,8 @@ impl Shell {
     /// 24a's Continue: opens the held backup with what was typed, in the one box (a recovery key that reads as a
     /// well-formed one is tried as the key, then as a password; anything else as a password), without unpacking it, and
     /// keeps the credential that worked in Rust, in the pick, with the vault's name, its ID, the day it was made and the
-    /// usual folder as where it goes. A second check replaces the first. A wrong password or key, a damaged backup and
+    /// usual folder as where it goes (the folder that holds the vault the pick was made for, when it was made for one:
+    /// `usual` is then false; `NotFound` if that vault has left the list). A second check replaces the first. A wrong password or key, a damaged backup and
     /// every other refusal leave the pick held, so the person tries again without picking the file again.
     ///
     /// `ChoiceExpired` (before anything else) for a pick that is not held. Not a job: about a second, like unlocking, so
@@ -1064,6 +1170,17 @@ impl Shell {
             .sessions
             .pending()
             .use_restore_pick(choice, epoch, &now)?;
+        // A pick made for a vault of the list goes beside that vault, where the engine finds it (or, if its headers are
+        // damaged, finds a folder it cannot read and unpacks into a new one beside it). It is looked up again here: the
+        // vault may have left the list since the pick.
+        let (parent, usual) = match held.vault() {
+            Some(vault) => {
+                let dir = self.registry.path(vault).ok_or(ShellError::NotFound)?;
+                let beside = dir.parent().ok_or(ShellError::NotFound)?;
+                (beside.to_path_buf(), false)
+            }
+            None => (default_vault_parent(self.os.env.as_ref())?, true),
+        };
         let attempts = credential.attempts()?;
         let (launch_epoch, launch) = self.sessions.launch_scope();
         if launch_epoch != epoch {
@@ -1085,21 +1202,22 @@ impl Shell {
             .backup_created_at()
             .and_then(dates::parse_utc)
             .map(|secs| dates::local_date_of(secs, offset));
-        let usual = default_vault_parent(self.os.env.as_ref())?;
         let checked = Checked::new(
             credential,
             vault.name().to_owned(),
             vault.id(),
             made,
+            parent,
             usual,
-            true,
         );
         drop(vault);
         // A lock that came while the backup was opened has dropped the pick: nothing is kept.
         if self.locked_since(epoch) {
             return Err(ShellError::Locked);
         }
-        let view = self.checked_view(&checked);
+        // Beside a vault whose details are damaged the restore makes a new folder, so it replaces nothing there.
+        let beside = self.beside_damaged_vault(held.vault(), &checked, &checked.parent)?;
+        let view = self.checked_view(&checked, beside.is_some());
         match held.set_checked(checked) {
             true => Ok(view),
             false => Err(ShellError::ChoiceExpired),
@@ -1145,7 +1263,7 @@ impl Shell {
         if !held_again.set_parent(picked, usual) {
             return Err(ShellError::ChoiceExpired);
         }
-        Ok(Outcome::Done(self.checked_view(&checked)))
+        Ok(Outcome::Done(self.checked_view(&checked, false)))
     }
 
     /// Drops the held pick `choice` (the flow was cancelled, or went back to the first screen). Idempotent: a token that
@@ -1157,8 +1275,12 @@ impl Shell {
 
     /// What the page is told of a checked pick: the vault's name, the day it was made, and where it goes, which is the
     /// folder of the vault already in the parent with this vault's ID (then it is replaced), else `<parent>\<name>`.
-    fn checked_view(&self, checked: &Checked) -> RestoreChecked {
-        let existing = existing_vault_in(&checked.parent, &checked.id);
+    /// `new_folder`: the restore goes to a new folder whatever is in the parent (Ask 8, beside a damaged vault).
+    fn checked_view(&self, checked: &Checked, new_folder: bool) -> RestoreChecked {
+        let existing = match new_folder {
+            true => None,
+            false => existing_vault_in(&checked.parent, &checked.id),
+        };
         let folder = match &existing {
             Some(dir) => dir.clone(),
             None => checked.parent.join(folder_name(&checked.name, &checked.id)),
@@ -1282,6 +1404,32 @@ impl Shell {
             };
             return self.park(question, epoch, |token| Confirm::CloudFolder { token });
         }
+        // Ask 8's restore, still beside the damaged vault it was started from, makes a new folder and nothing else: the
+        // engine's same-vault rule would find a healthy vault of the backup's ID there (the sibling an earlier restore
+        // made) and replace it.
+        let beside = match destination {
+            RestoreDestination::SameVault => {
+                self.beside_damaged_vault(held.vault(), checked, &check.path)?
+            }
+            RestoreDestination::NewFolder(_) => None,
+        };
+        let destination = match beside {
+            Some(Beside::Sibling) => return Err(ALREADY_HERE),
+            Some(Beside::Into(name)) => RestoreDestination::NewFolder(name),
+            Some(Beside::Taken(suggested)) => {
+                let question = RestoreChoice {
+                    pick: pick.clone(),
+                    destination,
+                    cloud_confirmed,
+                    asked: Asked::NewFolder,
+                };
+                return self.park(question, epoch, |token| Confirm::NewFolder {
+                    suggested,
+                    token,
+                });
+            }
+            None => destination,
+        };
         self.restore_run(
             held,
             pick,
@@ -1291,6 +1439,37 @@ impl Shell {
             epoch,
             request,
         )
+    }
+
+    /// Whether the pick was made for a vault whose details are damaged (Ask 8) and its folder is still the one beside that
+    /// vault (Choose another has not moved it): then where the restore goes. `None` for every other pick, a readable vault
+    /// (Ask 4) included, which keeps the engine's same-vault rule. `NotFound` when the vault has left the list.
+    fn beside_damaged_vault(
+        &self,
+        vault: Option<u32>,
+        checked: &Checked,
+        parent: &Path,
+    ) -> ShellResult<Option<Beside>> {
+        let Some(vault) = vault else {
+            return Ok(None);
+        };
+        let dir = self.registry.path(vault).ok_or(ShellError::NotFound)?;
+        let beside = dir
+            .parent()
+            .is_some_and(|beside| same_folder(beside, parent));
+        if !beside || !self.registry.entry(vault, &dir).details_damaged {
+            return Ok(None);
+        }
+        // A readable copy of this vault is beside it already (a sibling an earlier restore made): the engine keeps one
+        // writable copy of a vault in a folder, so it would not make another.
+        if existing_vault_in(parent, &checked.id).is_some() {
+            return Ok(Some(Beside::Sibling));
+        }
+        let default = folder_name(&checked.name, &checked.id);
+        Ok(Some(match is_free(&parent.join(&default)) {
+            true => Beside::Into(default),
+            false => Beside::Taken(restored_name(&default)),
+        }))
     }
 
     /// Parks `question` for the user's yes. A lock of all vaults between the epoch read and the parking has already
@@ -1376,7 +1555,7 @@ impl Shell {
             Err(e) if is_destination_taken(&e) && destination == RestoreDestination::SameVault => {
                 // The engine says only that the name is taken. The check already knows the vault's name and ID, so the
                 // suggestion needs no second unlocking.
-                let suggested = format!("{} (restored)", folder_name(&checked.name, &checked.id));
+                let suggested = restored_name(&folder_name(&checked.name, &checked.id));
                 drop(operation);
                 let question = RestoreChoice {
                     pick: pick.clone(),
@@ -1855,6 +2034,25 @@ fn kept_as_name(existing: &Path) -> Option<String> {
         })
 }
 
+/// Where an Ask 8 restore goes: a new folder of the default name, or, when something is at that name (the damaged vault's
+/// own folder), the new-folder question with a name that is free.
+enum Beside {
+    Into(String),
+    Taken(String),
+    /// A readable copy of the vault is in the folder already: refused, as the engine refuses a new folder there.
+    Sibling,
+}
+
+/// Nothing at all is at `path` (a dangling link counts, and so does a letter case that differs: `symlink_metadata`).
+fn is_free(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound)
+}
+
+/// The name suggested for a new folder when the default one is taken.
+fn restored_name(default: &str) -> String {
+    format!("{default} (restored)")
+}
+
 /// The one folder directly inside `parent` that holds the vault `id` (either header copy, no key needed), as the engine
 /// looks for the vault a restore replaces: hidden folders (a staging folder among them) and older copies are not it, nor
 /// a link. For what the page is told before the copy; the engine's own look decides what is replaced.
@@ -1971,7 +2169,7 @@ mod tests {
     /// Picks `backup` in the picker (answered for it).
     fn pick(ts: &TestShell, backup: &Path) -> RestorePick {
         ts.dialogs.answer(Some(backup.to_path_buf()));
-        done(ts.shell.restore_pick(None).unwrap())
+        done(ts.shell.restore_pick(None, None).unwrap())
     }
 
     /// The pick's password check, with the right password.
@@ -2133,6 +2331,14 @@ mod tests {
         ts.restarted()
     }
 
+    /// How recovery settled a restore, when the notice says it did.
+    fn how_of(notice: &RestoreNotice) -> Option<Recovered> {
+        match notice {
+            RestoreNotice::Recovered { how, .. } => Some(*how),
+            _ => None,
+        }
+    }
+
     /// The `kind` and `state` of each notice the page was sent, in order.
     fn sent(ts: &TestShell) -> Vec<(String, String)> {
         ts.events
@@ -2178,8 +2384,8 @@ mod tests {
         restarted.launch_work();
 
         assert_eq!(
-            restarted.restore_notice(),
-            RestoreNotice::Recovered(Recovered::RolledBack)
+            how_of(&restarted.restore_notice()),
+            Some(Recovered::RolledBack)
         );
         assert_eq!(restarted.restore.recoveries(), 1);
         let kept: Vec<Value> = restarted
@@ -2257,8 +2463,8 @@ mod tests {
 
         fs::rename(&unplugged, &parent).unwrap();
         assert_eq!(
-            ts.shell.retry_restore_recovery().unwrap(),
-            RestoreNotice::Recovered(Recovered::RolledBack)
+            how_of(&ts.shell.retry_restore_recovery().unwrap()),
+            Some(Recovered::RolledBack)
         );
         assert!(dir.exists());
         assert!(!ts.shell.paths.journal.exists());
@@ -2376,8 +2582,8 @@ mod tests {
         assert!(!dir.exists(), "the journal waits for the retry");
 
         assert_eq!(
-            ts.shell.retry_restore_recovery().unwrap(),
-            RestoreNotice::Recovered(Recovered::RolledBack)
+            how_of(&ts.shell.retry_restore_recovery().unwrap()),
+            Some(Recovered::RolledBack)
         );
         assert!(dir.exists());
     }
@@ -2398,7 +2604,7 @@ mod tests {
         let Outcome::Confirm(Confirm::Recovery { notice }) = answer else {
             panic!("not answered with the notice");
         };
-        assert_eq!(notice, RestoreNotice::Recovered(Recovered::RolledBack));
+        assert_eq!(how_of(&notice), Some(Recovered::RolledBack));
         assert_eq!(ts.shell.restore.recoveries(), recoveries + 1);
         assert!(dir.exists(), "the old vault is back");
         assert!(!ts.shell.paths.journal.exists());
@@ -2427,7 +2633,7 @@ mod tests {
                 ts.shell.dismiss_restore(false).err(),
                 ts.shell.dismiss_restore(true).err(),
                 ts.shell.restore_prepare(&unheld(), REQUEST).err(),
-                ts.shell.restore_pick(None).err(),
+                ts.shell.restore_pick(None, None).err(),
             ]
         };
         let seen = Rc::new(RefCell::new(Vec::new()));
@@ -2444,7 +2650,7 @@ mod tests {
                         shell.dismiss_restore(false).err(),
                         shell.dismiss_restore(true).err(),
                         shell.restore_prepare(&unheld(), REQUEST).err(),
-                        shell.restore_pick(None).err(),
+                        shell.restore_pick(None, None).err(),
                     ];
                     // The journal and the staging folder are as the restore left them, and no picker opened.
                     let intact = journal.exists() && !staging_in(&staging).is_empty();
@@ -2716,7 +2922,7 @@ mod tests {
         // to test it is one more choice, which the lock dropped).
         lock_in_picker();
         ts.dialogs.answer(Some(backup.clone()));
-        assert_eq!(ts.shell.restore_pick(None).err(), LOCKED);
+        assert_eq!(ts.shell.restore_pick(None, None).err(), LOCKED);
         assert!(!ts.shell.paths.journal.exists() && staging_in(&parent).is_empty());
         assert!(ts.shell.restore.is_idle());
         assert_eq!(ts.shell.sessions.pending().len(), 0, "nothing was held");
@@ -2724,11 +2930,11 @@ mod tests {
         // A closed picker shows nothing: dismissed, locked or not.
         lock_in_picker();
         assert!(matches!(
-            ts.shell.restore_pick(None),
+            ts.shell.restore_pick(None, None),
             Ok(Outcome::Dismissed)
         ));
         assert!(matches!(
-            ts.shell.restore_pick(None),
+            ts.shell.restore_pick(None, None),
             Ok(Outcome::Dismissed)
         ));
         assert_eq!(ts.shell.sessions.pending().len(), 0);
@@ -2867,14 +3073,14 @@ mod tests {
 
         // A closed picker leaves the pick as it was.
         assert!(matches!(
-            ts.shell.restore_pick(Some(&held.choice)),
+            ts.shell.restore_pick(Some(&held.choice), None),
             Ok(Outcome::Dismissed)
         ));
         check(&ts, &held.choice);
 
         // Another pick: the first is forgotten only once the new one is held.
         ts.dialogs.answer(Some(backup.clone()));
-        let second = done(ts.shell.restore_pick(Some(&held.choice)).unwrap());
+        let second = done(ts.shell.restore_pick(Some(&held.choice), None).unwrap());
         assert_ne!(
             serde_json::to_value(&second.choice).unwrap(),
             serde_json::to_value(&held.choice).unwrap(),
@@ -2890,7 +3096,7 @@ mod tests {
         // One restore at a time: while one is alive no pick is made, and no picker opens.
         let view = prepared(&ts, &backup, &parent);
         let opened = ts.dialogs.opened();
-        assert_eq!(ts.shell.restore_pick(None).err(), BUSY);
+        assert_eq!(ts.shell.restore_pick(None, None).err(), BUSY);
         assert_eq!(ts.dialogs.opened(), opened);
         ts.shell.restore_discard(view.restore).unwrap();
         pick(&ts, &backup);
@@ -3881,7 +4087,7 @@ mod tests {
         // A pick replaced by another, one forgotten, and one a lock has ended.
         let first = pick(&ts, &backup);
         ts.dialogs.answer(Some(backup.clone()));
-        let second = done(ts.shell.restore_pick(Some(&first.choice)).unwrap());
+        let second = done(ts.shell.restore_pick(Some(&first.choice), None).unwrap());
         all_refused(&ts, &first.choice, "replaced");
         check(&ts, &second.choice);
         ts.shell.forget_restore_pick(&second.choice).unwrap();
@@ -5150,10 +5356,13 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(Confirm::Recovery {
-                notice: RestoreNotice::Recovered(Recovered::Finished)
+                notice: RestoreNotice::Recovered {
+                    how: Recovered::Finished,
+                    vault: None
+                }
             })
             .unwrap(),
-            json!({ "Recovery": { "notice": { "state": "recovered", "how": "finished" } } })
+            json!({ "Recovery": { "notice": { "state": "recovered", "how": "finished", "vault": null } } })
         );
         assert_eq!(
             serde_json::to_value(RestorePreparedView {
@@ -5243,6 +5452,537 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------------------------------------------------------
+    // Task 6: a restore that did not finish, and the questions that offer a backup.
+    // ------------------------------------------------------------------------------------------------------------
+
+    /// A vault the engine makes in the folder `Source`, open as a session and on the vault list: its session, generation,
+    /// list ID and folder. Its folder is not the usual one.
+    fn listed_in_source(ts: &TestShell, name: &str) -> (SessionId, u64, u32, PathBuf) {
+        let (s, g, _) = source_vault(ts, name);
+        let source = ts.folder("Source");
+        let folder = names(&source).remove(0);
+        let dir = fs::canonicalize(source.join(folder)).unwrap();
+        let id = ts.shell.registry.add(&dir).unwrap();
+        (s, g, id, dir)
+    }
+
+    /// Both header copies of the vault in `dir` damaged (its session locked first).
+    fn damage_both_headers(ts: &TestShell, s: SessionId, dir: &Path) {
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        for header in ["vault.json", "vault.json.bak"] {
+            fs::write(dir.join(header), b"damaged").unwrap();
+        }
+    }
+
+    /// Every file under `dir` with its bytes, by its path inside `dir`.
+    fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(root: &Path, at: &Path, found: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for entry in fs::read_dir(at).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, found);
+                } else {
+                    let inside = path.strip_prefix(root).unwrap().to_path_buf();
+                    found.push((inside, fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(dir, dir, &mut found);
+        found.sort();
+        found
+    }
+
+    /// Picks `backup` for the vault `vault` of the list.
+    fn pick_for(ts: &TestShell, backup: &Path, vault: u32) -> RestorePick {
+        ts.dialogs.answer(Some(backup.to_path_buf()));
+        done(ts.shell.restore_pick(None, Some(vault)).unwrap())
+    }
+
+    /// Ask 8's start: a vault whose two header copies are damaged, in a folder that is not the usual one, and a good
+    /// backup of it. The held pick is made for that vault and checked.
+    struct Damaged {
+        ts: TestShell,
+        dir: PathBuf,
+        parent: PathBuf,
+        choice: Token,
+        before: Vec<(PathBuf, Vec<u8>)>,
+    }
+
+    fn damaged_vault_picked() -> Damaged {
+        let ts = TestShell::new();
+        let (s, g, id, dir) = listed_in_source(&ts, "Clients");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        damage_both_headers(&ts, s, &dir);
+        let before = snapshot(&dir);
+        let held = pick_for(&ts, &backup, id);
+        let view = check(&ts, &held.choice);
+        assert!(!view.usual && !view.replaces_existing);
+        Damaged {
+            parent: dir.parent().unwrap().to_path_buf(),
+            ts,
+            dir,
+            choice: held.choice,
+            before,
+        }
+    }
+
+    /// Ask 4's case (the vault opens, some of its items cannot be read): the pick made for the vault goes to the folder that
+    /// holds it, not the usual one, finds the vault there and replaces it, keeping it as an older copy.
+    #[test]
+    fn restore_pick_starts_in_the_given_vaults_folder() {
+        let ts = TestShell::new();
+        let (s, g, id, dir) = listed_in_source(&ts, "Clients");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let usual = usual_folder(&ts);
+
+        let held = pick_for(&ts, &backup, id);
+        let view = check(&ts, &held.choice);
+        assert!(!view.usual, "not the usual folder");
+        assert!(view.replaces_existing);
+        assert_eq!(
+            fs::canonicalize(&view.folder_shown).unwrap(),
+            dir,
+            "it names the open vault's own folder"
+        );
+        assert!(!usual.exists(), "nothing was made in the usual folder");
+
+        // Choose another still replaces the folder.
+        let elsewhere = ts.folder("Elsewhere");
+        let moved = choose(&ts, &held.choice, &elsewhere);
+        assert!(!moved.usual && !moved.replaces_existing);
+        let back = choose(&ts, &held.choice, dir.parent().unwrap());
+        assert!(back.replaces_existing);
+
+        let prepared = done(copy(&ts, &held.choice).unwrap());
+        assert!(prepared.replaces_existing);
+        assert!(prepared.kept_as.is_some(), "the open vault is kept");
+        let restored = ts.shell.restore_commit(prepared.restore, REQUEST).unwrap();
+        assert_eq!(restored.vault, id, "the same vault on the list");
+        assert!(restored.before_restore);
+        assert!(!usual.exists());
+        let (s2, g2) = unlock(&ts, restored.vault);
+        assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
+    }
+
+    /// A vault that is not on the list is refused before a picker opens and nothing is held; one forgotten after the pick
+    /// is refused by the check.
+    #[test]
+    fn restore_pick_refuses_a_vault_not_listed() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dialogs, held) = (ts.dialogs.opened(), ts.shell.sessions.pending().len());
+
+        assert_eq!(
+            ts.shell.restore_pick(None, Some(99)).err(),
+            Some(ShellError::NotFound)
+        );
+        assert_eq!(ts.dialogs.opened(), dialogs, "no picker opened");
+        assert_eq!(ts.shell.sessions.pending().len(), held, "nothing held");
+
+        let first = pick_for(&ts, &backup, 1);
+        ts.shell.registry.forget(1).unwrap();
+        assert_eq!(
+            heavy(|| ts.shell.restore_check(&first.choice, working())).err(),
+            Some(ShellError::NotFound)
+        );
+        assert!(ts.shell.restore.is_idle());
+    }
+
+    /// A vault with both header copies damaged lists with no name, as available and with its details damaged: the page's
+    /// trigger for Ask 8.
+    #[test]
+    fn both_headers_unreadable_listed_without_a_name() {
+        let ts = TestShell::new();
+        let (s, _) = ts.open_vault("Clients");
+        let dir = vault_dir(&ts);
+        let first = || ts.shell.registry.list().unwrap().remove(0);
+        assert_eq!(first().name.as_deref(), Some("Clients"));
+        assert!(!first().details_damaged);
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        // One header copy is enough to name it: only the two together look like this.
+        fs::write(dir.join("vault.json"), b"damaged").unwrap();
+        assert_eq!(first().name.as_deref(), Some("Clients"));
+        assert!(!first().details_damaged);
+        damage_both_headers(&ts, s, &dir);
+        let listed = first();
+        assert_eq!(
+            (listed.id, listed.name.as_deref(), listed.available),
+            (1, None, true)
+        );
+        assert!(listed.details_damaged);
+        assert_eq!(
+            serde_json::to_value(&listed).unwrap(),
+            json!({ "id": 1, "name": null, "available": true, "details_damaged": true })
+        );
+        // Header files that are there but unreadable count whichever copy is left, and a lost copy does not clear it.
+        fs::remove_file(dir.join("vault.json")).unwrap();
+        assert!(first().details_damaged, "only the other copy is there");
+        // No header files at all is not "damaged": nothing says a vault was there.
+        fs::remove_file(dir.join("vault.json.bak")).unwrap();
+        assert!(!first().details_damaged);
+    }
+
+    /// A listed folder with no vault in it also lists with no name and as available, but its details are not damaged: it
+    /// holds no header files. Nor is a folder whose drive is gone.
+    #[test]
+    fn a_listed_folder_with_no_vault_in_it_lists_the_same_way() {
+        let ts = TestShell::new();
+        let empty = ts.folder("Nothing here");
+        fs::write(empty.join("notes.txt"), b"not a vault").unwrap();
+        let id = ts.shell.registry.add(&empty).unwrap();
+        let listed = ts.shell.registry.list().unwrap();
+        assert_eq!((listed[0].id, listed[0].name.as_deref()), (id, None));
+        assert!(listed[0].available);
+        assert!(!listed[0].details_damaged);
+        fs::remove_dir_all(&empty).unwrap();
+        let gone = ts.shell.registry.list().unwrap();
+        assert!(!gone[0].available && !gone[0].details_damaged);
+    }
+
+    /// Ask 8: from a vault whose headers are both damaged the backup unpacks into a new folder in the same parent
+    /// (not the usual one) and the damaged folder's files are byte for byte what they were.
+    #[test]
+    fn ask_8_restores_beside_the_damaged_folder() {
+        let Damaged {
+            ts,
+            dir,
+            parent,
+            choice,
+            before,
+            ..
+        } = damaged_vault_picked();
+        let usual = usual_folder(&ts);
+
+        // Its default name is the damaged folder's own: the existing new-folder question comes up.
+        let Outcome::Confirm(Confirm::NewFolder { suggested, token }) = copy(&ts, &choice).unwrap()
+        else {
+            panic!("not asked for a new folder");
+        };
+        assert_eq!(snapshot(&dir), before, "nothing written yet");
+        let view = done(
+            heavy(|| {
+                ts.shell
+                    .restore_prepare_confirm(&token, Some(suggested.clone()), REQUEST)
+            })
+            .unwrap(),
+        );
+        assert!(!view.replaces_existing);
+        let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        assert!(!restored.before_restore);
+        assert_ne!(restored.vault, 1, "a vault of its own on the list");
+
+        let fresh = parent.join(&suggested);
+        assert!(fresh.is_dir(), "a new folder in the damaged one's parent");
+        assert_eq!(snapshot(&dir), before, "the damaged folder is untouched");
+        assert!(!usual.exists(), "nothing went to the usual folder");
+        let mut folders = names(&parent);
+        folders.sort();
+        let mut expected = vec![
+            dir.file_name().unwrap().to_string_lossy().into_owned(),
+            suggested,
+        ];
+        expected.sort();
+        assert_eq!(folders, expected);
+        let (s2, g2) = unlock(&ts, restored.vault);
+        assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
+    }
+
+    /// A new folder beside the damaged one never takes a name that is in use: the damaged folder's own name (in any letter
+    /// case) and a sibling's are refused with nothing written, and the pick stays for a name that is free.
+    #[test]
+    fn destination_beside_refuses_an_existing_name() {
+        let Damaged {
+            ts,
+            dir,
+            parent,
+            choice,
+            before,
+            ..
+        } = damaged_vault_picked();
+        let sibling = parent.join("Taken");
+        fs::create_dir_all(&sibling).unwrap();
+        let own = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let listing = names(&parent);
+
+        for name in [own.clone(), own.to_uppercase(), "Taken".to_owned()] {
+            let Outcome::Confirm(Confirm::NewFolder { token, .. }) = copy(&ts, &choice).unwrap()
+            else {
+                panic!("not asked for a new folder");
+            };
+            let refused = heavy(|| {
+                ts.shell
+                    .restore_prepare_confirm(&token, Some(name.clone()), REQUEST)
+            })
+            .err();
+            assert!(
+                matches!(&refused, Some(ShellError::Core(view)) if view.kind == "invalid_input"),
+                "{name}: {refused:?}"
+            );
+            assert_eq!(names(&parent), listing, "{name}: nothing written");
+            assert_eq!(snapshot(&dir), before, "{name}: the damaged folder");
+            assert!(ts.shell.restore.is_idle() && !ts.shell.paths.journal.exists());
+        }
+
+        // The pick is still held: a free name goes through.
+        let Outcome::Confirm(Confirm::NewFolder { token, .. }) = copy(&ts, &choice).unwrap() else {
+            panic!("not asked once more");
+        };
+        let view = done(
+            heavy(|| {
+                ts.shell
+                    .restore_prepare_confirm(&token, Some("Clients again".into()), REQUEST)
+            })
+            .unwrap(),
+        );
+        ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        assert!(parent.join("Clients again").is_dir());
+        assert_eq!(snapshot(&dir), before);
+    }
+
+    /// Ask 8 again, after a restore from it already made a healthy vault of the same ID beside the damaged one: the
+    /// second restore is refused ("vault already here", as the engine refuses a second writable copy of a vault in one
+    /// folder), never a replacement of the first, which the engine's same-vault rule would have found and replaced. The
+    /// check still says the restore replaces nothing. The first sibling and the damaged folder are as they were.
+    #[test]
+    fn a_second_ask_8_restore_never_replaces_the_first_sibling() {
+        let Damaged {
+            ts,
+            dir,
+            parent,
+            choice,
+            before,
+        } = damaged_vault_picked();
+        let Outcome::Confirm(Confirm::NewFolder { suggested, token }) = copy(&ts, &choice).unwrap()
+        else {
+            panic!("not asked for a new folder");
+        };
+        let view = done(
+            heavy(|| {
+                ts.shell
+                    .restore_prepare_confirm(&token, Some(suggested.clone()), REQUEST)
+            })
+            .unwrap(),
+        );
+        let first = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        let sibling = parent.join(&suggested);
+        let sibling_before = snapshot(&sibling);
+        let listing = names(&parent);
+
+        // Again, from the same damaged vault.
+        let backup = ts.folder("Backups").join("clients.lockbox-backup");
+        let held = pick_for(&ts, &backup, 1);
+        let checked = check(&ts, &held.choice);
+        assert!(
+            !checked.usual && !checked.replaces_existing,
+            "not the sibling"
+        );
+        // Refused, as the engine refuses a second writable copy in a folder: not the sibling replaced (an older copy kept,
+        // the swap confirmed) as the same-vault rule would have it. Nothing is written.
+        assert_eq!(copy(&ts, &held.choice).err(), Some(ALREADY_HERE));
+        assert_eq!(snapshot(&sibling), sibling_before, "the first sibling");
+        assert_eq!(snapshot(&dir), before, "the damaged folder");
+        assert_eq!(names(&parent), listing, "nothing written, no older copy");
+        assert!(!ts.shell.paths.journal.exists() && ts.shell.restore.is_idle());
+        assert_eq!(ts.shell.registry.entries().len(), 2);
+        assert_eq!(first.vault, 2);
+        // The first sibling still opens.
+        let (s2, g2) = unlock(&ts, first.vault);
+        assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
+    }
+
+    /// A damaged vault whose folder has another name than the default one: the restore needs no question and goes to the
+    /// default-named new folder; a second one is refused with that sibling there, and the damaged folder is never written.
+    #[test]
+    fn ask_8_from_a_renamed_folder_goes_to_the_default_folder() {
+        let ts = TestShell::new();
+        let (s, g, _) = source_vault(&ts, "Clients");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let source = ts.folder("Source");
+        let own = source.join(names(&source).remove(0));
+        damage_both_headers(&ts, s, &own);
+        let old = source.join("Old stuff");
+        fs::rename(&own, &old).unwrap();
+        let id = ts
+            .shell
+            .registry
+            .add(&fs::canonicalize(&old).unwrap())
+            .unwrap();
+        let before = snapshot(&old);
+
+        let held = pick_for(&ts, &backup, id);
+        check(&ts, &held.choice);
+        let view = done(copy(&ts, &held.choice).unwrap());
+        assert!(!view.replaces_existing);
+        let first = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        assert!(!first.before_restore);
+        assert_ne!(first.vault, id);
+
+        let held = pick_for(&ts, &backup, id);
+        check(&ts, &held.choice);
+        // The first sibling is there: refused, never replaced.
+        assert_eq!(copy(&ts, &held.choice).err(), Some(ALREADY_HERE));
+        assert_eq!(snapshot(&old), before, "the damaged folder");
+        assert_eq!(ts.shell.registry.entries().len(), 2);
+        assert!(!ts.shell.paths.journal.exists());
+    }
+
+    /// A header another program holds (a sharing violation) is not damage: the lock screen must still ask for the
+    /// password. A real sharing violation, made by opening the file with no sharing; the engine retries it for a few seconds
+    /// before it gives up, so the test takes that long.
+    #[cfg(windows)]
+    #[test]
+    fn a_header_held_by_another_program_is_not_damage() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let ts = TestShell::new();
+        let (s, _) = ts.open_vault("Clients");
+        let dir = vault_dir(&ts);
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        // The other copy is corrupt: with the first held, no copy can be read, and one of them is only busy.
+        fs::write(dir.join("vault.json.bak"), b"damaged").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join("vault.json"))
+            .unwrap();
+        let listed = ts.shell.registry.list().unwrap().remove(0);
+        assert_eq!(listed.name, None);
+        assert!(listed.available);
+        assert!(!listed.details_damaged, "busy is not damaged");
+        drop(held);
+        let listed = ts.shell.registry.list().unwrap().remove(0);
+        assert_eq!(listed.name.as_deref(), Some("Clients"));
+        assert!(!listed.details_damaged);
+    }
+
+    /// A restore undone at launch names the vault it put back, as the vault list knows it.
+    #[test]
+    fn recovered_notice_names_the_vault() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        crash_mid_swap(&ts, &backup, &parent);
+
+        let restarted = restarted(&ts);
+        restarted.launch_work();
+
+        let RestoreNotice::Recovered { how, vault } = restarted.restore_notice() else {
+            panic!("not recovered");
+        };
+        assert_eq!(how, Recovered::RolledBack);
+        assert_eq!(
+            vault,
+            Some(NoticeVault {
+                id: 1,
+                name: "Family".into()
+            })
+        );
+        let kept = serde_json::to_value(&restarted.launch_notices()[0]).unwrap();
+        assert_eq!(
+            kept,
+            json!({
+                "kind": "restore", "state": "recovered", "how": "rolled_back",
+                "vault": { "id": 1, "name": "Family" }
+            })
+        );
+    }
+
+    /// A restore whose swap ended before the page listed the vault: recovery at launch finishes it, the vault is
+    /// listed (it was not), and the notice names it.
+    #[test]
+    fn finished_restore_at_launch_is_listed() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g, _) = source_vault(&ts, "Clients");
+        let backup = backup_of(&ts, s, g, "clients.lockbox-backup");
+        let elsewhere = ts.folder("Elsewhere");
+        let view = prepared(&ts, &backup, &elsewhere);
+        failpoint::arm("restore.before_journal_done");
+        failpoint::arm("recover.under_lock");
+        let error = ts.shell.restore_commit(view.restore, REQUEST).unwrap_err();
+        failpoint::disarm_all();
+        assert_eq!(error, restore_pending());
+        assert!(ts.shell.registry.entries().is_empty(), "not listed yet");
+        assert!(ts.shell.paths.journal.exists());
+
+        let restarted = restarted(&ts);
+        restarted.launch_work();
+
+        let RestoreNotice::Recovered { how, vault } = restarted.restore_notice() else {
+            panic!("not recovered");
+        };
+        assert_eq!(how, Recovered::Finished);
+        assert_eq!(
+            vault,
+            Some(NoticeVault {
+                id: 1,
+                name: "Clients".into()
+            })
+        );
+        let listed = restarted.registry.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            (listed[0].name.as_deref(), listed[0].available),
+            (Some("Clients"), true)
+        );
+        assert!(!restarted.paths.journal.exists());
+        let listed_dir = restarted.registry.path(1).unwrap();
+        assert!(same_folder(listed_dir.parent().unwrap(), &elsewhere));
+        // Once listed, a later recovery of the same kind does not list it twice.
+        assert_eq!(restarted.registry.entries().len(), 1);
+    }
+
+    /// The notice for a drive that is not connected names the folder that held the restore's folders, as text.
+    #[test]
+    fn drive_missing_names_the_parent_folder() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+        crash_mid_swap(&ts, &backup, &parent);
+
+        let unplugged = parent.with_file_name("Lockbox Vaults (unplugged)");
+        fs::rename(&parent, &unplugged).unwrap();
+        let notice = ts.shell.retry_restore_recovery().unwrap();
+        let told = serde_json::to_value(&notice).unwrap();
+        let sent_to_page = ts.events.notices().last().cloned().unwrap();
+        assert_eq!(told["state"], "drive_missing");
+        let folder = told["folder"].as_str().unwrap().to_owned();
+        assert_eq!(sent_to_page["folder"], told["folder"]);
+        assert!(!folder.starts_with(r"\\?\"), "shown as the user knows it");
+        let vault_folder = dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            !folder.ends_with(&vault_folder),
+            "the parent, not the vault"
+        );
+        assert!(told["paths"]["target"].as_str().unwrap().len() > folder.len());
+
+        fs::rename(&unplugged, &parent).unwrap();
+        assert!(same_folder(Path::new(&folder), &parent));
+        // The other states carry no folder.
+        let pending = RestoreNotice::Pending(JournalPaths {
+            step: JournalStep::Swapping,
+            staging: String::new(),
+            target: String::new(),
+            before_restore: None,
+        });
+        assert!(
+            serde_json::to_value(&pending)
+                .unwrap()
+                .get("folder")
+                .is_none()
+        );
+    }
+
     /// The notice reaches the page as one flat object, and never shows a path in `Debug`.
     #[test]
     fn notice_json_is_flat_and_debug_hides_paths() {
@@ -5263,15 +6003,31 @@ mod tests {
                     "staging": r"C:\Vaults\.restore-aa",
                     "target": r"C:\Vaults\Family",
                     "before_restore": r"C:\Vaults\Family.before-restore",
-                }
+                },
+                "folder": r"C:\Vaults",
             })
         );
         assert_eq!(
-            serde_json::to_value(Notice::Restore(RestoreNotice::Recovered(
-                Recovered::RolledBack
-            )))
+            serde_json::to_value(Notice::Restore(RestoreNotice::Recovered {
+                how: Recovered::RolledBack,
+                vault: None
+            }))
             .unwrap(),
-            json!({ "kind": "restore", "state": "recovered", "how": "rolled_back" })
+            json!({ "kind": "restore", "state": "recovered", "how": "rolled_back", "vault": null })
+        );
+        assert_eq!(
+            serde_json::to_value(RestoreNotice::Recovered {
+                how: Recovered::Finished,
+                vault: Some(NoticeVault {
+                    id: 3,
+                    name: "Family".into()
+                })
+            })
+            .unwrap(),
+            json!({
+                "state": "recovered", "how": "finished",
+                "vault": { "id": 3, "name": "Family" }
+            })
         );
         let unclear = RestoreNotice::Unclear {
             journal: r"C:\State\restore-journal.json".into(),

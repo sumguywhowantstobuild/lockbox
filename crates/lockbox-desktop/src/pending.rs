@@ -181,9 +181,12 @@ pub enum PendingChoice {
     /// (an idle one too), Windows locking or sleeping and closing drop it with the rest ([`Pending::drain`]). Kept
     /// through a wrong password and through a refusal of the copy, each use starting its five minutes again
     /// ([`Pending::use_restore_pick`]); dropped by [`Pending::forget_restore_pick`]. Holds a secret once checked.
+    /// `vault`: the listed vault the pick was made for (Ask 4 and Ask 8 offer a backup for one), whose folder's parent the
+    /// check makes the restore's folder instead of the usual one.
     RestorePick {
         path: PathBuf,
         epoch: u64,
+        vault: Option<u32>,
         checked: Option<crate::restore::Checked>,
     },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
@@ -285,6 +288,7 @@ pub struct RestorePickUse<'a> {
     pending: &'a Pending,
     token: Token,
     path: PathBuf,
+    vault: Option<u32>,
     checked: Option<Checked>,
     clock: &'a dyn Fn() -> Instant,
 }
@@ -293,6 +297,11 @@ impl RestorePickUse<'_> {
     /// The backup's path: never sent to the page.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The listed vault the pick was made for, if one.
+    pub fn vault(&self) -> Option<u32> {
+        self.vault
     }
 
     /// What the last successful check found, when one has.
@@ -742,9 +751,10 @@ impl Pending {
                     PendingChoice::RestorePick {
                         path,
                         epoch: held,
+                        vault,
                         checked,
                     } if *held == epoch && p.token.matches(token) => {
-                        let found = (path.clone(), checked.clone());
+                        let found = (path.clone(), *vault, checked.clone());
                         p.until = now + LIFETIME;
                         p.in_use += 1;
                         Some(found)
@@ -755,10 +765,11 @@ impl Pending {
             (answer, expired)
         };
         drop(expired);
-        answer.map(|(path, checked)| RestorePickUse {
+        answer.map(|(path, vault, checked)| RestorePickUse {
             pending: self,
             token: Token(token.0.clone()),
             path,
+            vault,
             checked,
             clock,
         })
@@ -1486,6 +1497,7 @@ mod tests {
         PendingChoice::RestorePick {
             path: PathBuf::from("a.lockbox-backup"),
             epoch,
+            vault: None,
             checked: None,
         }
     }

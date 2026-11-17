@@ -706,6 +706,31 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "A restore that didn't finish: Ask 6, Ask 7 and the two states with no drawn screen",
+    shows: ["RestoreNotices#RestoreNotices"],
+    reach: async () => {
+      const paths = { step: "swapping", staging: "C:\\Vaults\\demo", target: "C:\\Vaults\\demo", before_restore: null };
+      start([vault()], [{ kind: "restore", state: "drive_missing", paths, folder: "E:\\Vaults" }]);
+      await screen.findByRole("heading", { level: 1, name: "A restore is waiting for a drive" });
+      // Try again that comes to a second screen: the rename that failed, then the one that was undone.
+      shell.retryRestoreGives({ state: "pending", paths });
+      click("Try again");
+      await screen.findByRole("heading", { level: 1, name: "A restore is waiting" });
+      shell.retryRestoreGives({ state: "recovered", how: "rolled_back", vault: { id: 7, name: "My vault" } });
+      click("Try again");
+      await screen.findByRole("heading", { level: 1, name: "A restore didn't finish" });
+    },
+  },
+  {
+    name: "A vault whose details are both damaged: Ask 8",
+    shows: ["RestoreNotices#DamagedVaultAsk"],
+    reach: async () => {
+      start([vault(), { id: 9, name: null, available: true, detailsDamaged: true }]);
+      fireEvent.click(await screen.findByRole("radio", { name: /A vault that can't be read/ }));
+      await screen.findByRole("heading", { level: 1, name: "This vault can't be opened" });
+    },
+  },
+  {
     name: "Backup refused, and the questions beside it (Ask 2)",
     shows: ["BackupFlow#BackupRefusedAsk"],
     reach: async () => {

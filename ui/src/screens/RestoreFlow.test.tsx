@@ -145,7 +145,7 @@ test("backup_first_then_password_or_key", async () => {
   await onTheLockScreen();
   await restoreFromTheLockScreen();
   // The picker opened first, with nothing sent but the pick's own: no credential travels before a file is chosen.
-  expect(sent("restore_pick")).toEqual([{ choice: null }]);
+  expect(sent("restore_pick")).toEqual([{ choice: null, vault: null }]);
   expect(sent("restore_check")).toEqual([]);
   // 24a, as drawn: the dark side's line, the file as text with its size, Pick another, the one box, its hint, Continue and Cancel.
   expect(document.querySelector("header.field .say")?.textContent).toBe(SAY);
@@ -187,7 +187,7 @@ test("the_restore_is_offered_in_settings_after_test_a_backup_and_works_from_ther
   await heading("Restore a backup");
   // The open vault's window is not on screen while the restore is.
   expect(screen.queryByRole("heading", { level: 1, name: "All items" })).toBeNull();
-  expect(sent("restore_pick")).toEqual([{ choice: null }]);
+  expect(sent("restore_pick")).toEqual([{ choice: null, vault: null }]);
   // Cancel goes back to the vault, with Settings still open, and lets the file go.
   const choice = shell.restorePickTokens()[0];
   press("Cancel");
@@ -248,7 +248,7 @@ test("a_restore_already_going_is_said_on_the_first_step_with_no_file", async () 
   press("Pick a backup");
   await screen.findByText(FILE_ROW);
   expect(screen.queryByRole("alert")).toBeNull();
-  expect(sent("restore_pick")[1]).toEqual({ choice: null });
+  expect(sent("restore_pick")[1]).toEqual({ choice: null, vault: null });
 });
 
 test("pick_another_sends_the_choice_it_has_and_swaps_the_file", async () => {
@@ -258,7 +258,7 @@ test("pick_another_sends_the_choice_it_has_and_swaps_the_file", async () => {
   shell.pickBackupNext("Older vault 2026-08-01.lockbox-backup", 5 * MB);
   press("Pick another");
   await screen.findByText("Older vault 2026-08-01.lockbox-backup, 5 MB");
-  expect(sent("restore_pick")[1]).toEqual({ choice });
+  expect(sent("restore_pick")[1]).toEqual({ choice, vault: null });
   expect(shell.restorePicks()).toEqual([{ name: "Older vault 2026-08-01.lockbox-backup", size: 5 * MB, checked: false }]);
   // A closed picker leaves the file as it was.
   shell.dismissFileNext();
@@ -328,7 +328,7 @@ test("a_choice_the_shell_let_go_takes_the_file_away_and_asks_to_pick_again", asy
   expect(screen.getByRole("button", { name: "Continue" }).getAttribute("aria-disabled")).toBe("true");
   press("Pick a backup");
   await screen.findByText(FILE_ROW);
-  expect(sent("restore_pick")[1]).toEqual({ choice: null });
+  expect(sent("restore_pick")[1]).toEqual({ choice: null, vault: null });
 });
 
 test("folder_step_suggests_the_usual_folder", async () => {
@@ -822,7 +822,7 @@ test("a_backup_replaced_after_the_check_goes_back_to_the_first_step_with_nothing
   press("Pick a backup");
   await screen.findByText(FILE_ROW);
   expect(screen.queryByRole("alert")).toBeNull();
-  expect(sent("restore_pick")[1]).toEqual({ choice: null });
+  expect(sent("restore_pick")[1]).toEqual({ choice: null, vault: null });
 });
 
 test("a_backup_that_changed_is_refused_the_same_way_before_the_job_and_after_a_question", async () => {
@@ -1077,4 +1077,54 @@ test("a_refusal_screen_has_no_axe_violations", async () => {
   press("Restore");
   await heading("This restore can't go ahead");
   await expectNoAxe(container);
+});
+
+const PENDING_PATHS = { step: "swapping", staging: "C:\\Vaults\\SENTINEL-restore", target: "C:\\Vaults\\SENTINEL-restore", before_restore: null };
+
+test("a_restore_refused_by_an_unfinished_one_shows_its_notice", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  const choice = shell.restorePickTokens()[0];
+  await toTheFolder();
+  // An unfinished restore's journal is still there: the shell ran its recovery and says what it found, instead of copying.
+  shell.restoreRecoversNext({ state: "drive_missing", paths: PENDING_PATHS, folder: "E:\\Vaults" });
+  press("Restore");
+  await heading("A restore is waiting for a drive");
+  expect(screen.getByText(/^It was using E:\\Vaults, which isn't connected\./)).toBeTruthy();
+  // The restore flow is closed, with nothing of it on the screen, and the pick is let go.
+  expect(screen.queryByRole("heading", { level: 1, name: "Where it goes" })).toBeNull();
+  expect(screen.queryByRole("heading", { level: 1, name: "This restore can't go ahead" })).toBeNull();
+  expect(sent("forget_restore_pick")).toEqual([{ choice }]);
+  expect(document.body.textContent).not.toContain("SENTINEL");
+  expect(JSON.stringify(debugState())).not.toContain("SENTINEL");
+  // Dismiss is the way out, and it ends on the lock screen.
+  press("Dismiss");
+  await screen.findByLabelText(/^Password for /);
+  expect(sent("dismiss_restore")).toEqual([{ confirm: true }]);
+});
+
+test("a_restore_refused_by_an_unfinished_one_shows_its_notice: also from the question's answer, and a notice that was finished or undone", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  shell.restoreAsksNext("cloud");
+  await toTheFolder();
+  press("Restore");
+  await screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+  shell.restoreRecoversNext({ state: "recovered", how: "rolled_back", vault: { id: 7, name: "My vault" } });
+  press("Continue anyway");
+  await heading("A restore didn't finish");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByText(/has put My vault back the way it was/)).toBeTruthy();
+});
+
+test("a_restore_refused_by_an_unfinished_one_shows_its_notice: from an open vault, over its window", async () => {
+  await unlocked();
+  await restoreFromSettings();
+  await toTheFolder();
+  shell.restoreRecoversNext({ state: "pending", paths: PENDING_PATHS });
+  press("Restore");
+  await heading("A restore is waiting");
+  expect(screen.queryByRole("heading", { level: 1, name: "All items" })).toBeNull();
+  press("Dismiss");
+  await heading("All items");
 });

@@ -42,6 +42,8 @@ export interface FakeVault {
   id: number;
   name: string | null;
   available?: boolean;
+  /** Both copies of the vault's details are unreadable (Ask 8): the list says `details_damaged: true`. False unless a test makes it so. */
+  detailsDamaged?: boolean;
   password?: string;
   readOnly?: boolean;
   items?: FakeItem[];
@@ -546,6 +548,14 @@ export interface FakeShell {
   discardedRestores(): number[];
   /** The folder names `restore_prepare_confirm` was sent, in order (`null` for none). */
   confirmedNames(): (string | null)[];
+  /**
+   * Plan 4B Task 6, a restore that didn't finish. `restore_notice` answers what launch kept (the last `kind: "restore"` of `setLaunchNotices` or `tell`, without its
+   * kind), or `{ state: "none" }`. `retry_restore_recovery` answers the next of these (and that becomes what `restore_notice` answers), or the same notice again when
+   * none is given; `dismiss_restore` with `confirm: true` leaves nothing, and without it asks (`Confirm` `Dismissal`). A refusal is `refuseNext`.
+   */
+  retryRestoreGives(...answers: object[]): void;
+  /** The next `restore_prepare` (or its confirm) is not answered with a copy but with `Confirm` `Recovery` carrying this notice, as an unfinished restore's journal makes it. */
+  restoreRecoversNext(notice: object): void;
   /** The name and the choice of the backup the last `backup_vault` wrote and parked for 22c's Test this backup. */
   lastBackupName(): string;
   lastBackupChoice(): string;
@@ -1062,6 +1072,8 @@ export function installFakeShell(
     name: string;
     size: number;
     checked: { name: string; made: string | null; replaces: boolean; keptAs: string; usual: boolean } | undefined;
+    /** The listed vault the pick was made for (Ask 4, Ask 8): its parent folder is where the restore goes, not the usual one. */
+    vault: number | null;
   }
   const restoreHeld = new Map<string, RestoreHeld>();
   const restorePrepared = new Map<number, { name: string; replaces: boolean; keptAs: string; ended: boolean }>();
@@ -1072,6 +1084,11 @@ export function installFakeShell(
   let restoreQuestion: "cloud" | "name" | undefined;
   let restoreCopyRefusal: object | undefined;
   let restoreCommitRefusal: object | undefined;
+  /** What the next restore copy answers instead of copying: an unfinished restore's notice (`Confirm` `Recovery`). */
+  let restoreRecovery: object | undefined;
+  /** The answers the next `retry_restore_recovery` calls give, and the notice `restore_notice` answers since the last of them (`undefined`: what launch kept). */
+  const retryAnswers: object[] = [];
+  let restoreNoticeNow: object | undefined;
   let nextRestore = 0;
   let heldRestoreChecks: (() => void)[] | undefined;
   let heldRestoreCopies: (() => void)[] | undefined;
@@ -1079,6 +1096,14 @@ export function installFakeShell(
   let heldRestoreAnswers: (() => void)[] | undefined;
   /** The name the next finished copy's answer gives (the archive prepare actually opened), when it is not the checked one's. */
   let restoreCopyName: string | undefined;
+  /** What launch kept of a restore that didn't finish, as `restore_notice` answers it: the last of its notices without their `kind`, or none. */
+  const noticeOfLaunch = (): object => {
+    const last = [...launchNotices].reverse().find((notice) => (notice as { kind?: unknown }).kind === "restore");
+    if (last === undefined) return { state: "none" };
+    const plain: Record<string, unknown> = { ...(last as Record<string, unknown>) };
+    delete plain.kind;
+    return plain;
+  };
   /** What a checked pick says (the shell's `RestoreChecked`): where it goes is display text, never sent back. */
   const restoreViewOf = (held: RestoreHeld) => {
     const found = held.checked ?? { ...restoreFound, usual: true };
@@ -1521,7 +1546,7 @@ export function installFakeShell(
       case "list_vaults":
         exactly(args ?? {}, []);
         if (listDamaged) return refuse(VAULT_LIST_DAMAGED);
-        return vaults.map((v) => ({ id: v.id, name: v.name, available: v.available ?? true }));
+        return vaults.map((v) => ({ id: v.id, name: v.name, available: v.available ?? true, details_damaged: v.detailsDamaged ?? false }));
       case "start_new_vault_list":
         exactly(args ?? {}, []);
         // Only a damaged list is started over: a good one is refused and left as it is.
@@ -2069,8 +2094,11 @@ export function installFakeShell(
         return null;
       }
       case "restore_pick": {
-        const sent = exactly(args, ["choice"]);
+        const sent = exactly(args, ["choice", "vault"]);
         if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
+        if (sent.vault !== null && typeof sent.vault !== "number") return refuse(MALFORMED);
+        // A vault that is not listed is refused, and nothing is picked.
+        if (typeof sent.vault === "number" && !vaults.some((v) => v.id === sent.vault)) return refuse({ code: "not_found" });
         if (dismissFile) {
           dismissFile = false;
           return "Dismissed";
@@ -2081,7 +2109,7 @@ export function installFakeShell(
         if (typeof sent.choice === "string") restoreHeld.delete(sent.choice);
         nextToken += 1;
         const token = nextToken.toString(16).padStart(32, "0");
-        restoreHeld.set(token, { ...file, checked: undefined });
+        restoreHeld.set(token, { ...file, checked: undefined, vault: sent.vault });
         return { Done: { choice: token, file_name: file.name, size: file.size } };
       }
       case "restore_check": {
@@ -2099,8 +2127,27 @@ export function installFakeShell(
           damage = undefined;
           return refuse({ code: "core", kind: "damaged", ...(what === undefined ? {} : { what }) });
         }
-        held.checked = { ...restoreFound, usual: held.checked?.usual ?? true };
+        // A pick made for a vault goes in that vault's folder, which is not the usual one.
+        held.checked = { ...restoreFound, usual: held.vault === null ? (held.checked?.usual ?? true) : false };
         return restoreViewOf(held);
+      }
+      case "restore_notice": {
+        exactly(args ?? {}, []);
+        return restoreNoticeNow ?? noticeOfLaunch();
+      }
+      case "retry_restore_recovery": {
+        exactly(args ?? {}, []);
+        const found = retryAnswers.shift() ?? restoreNoticeNow ?? noticeOfLaunch();
+        restoreNoticeNow = found;
+        return found;
+      }
+      case "dismiss_restore": {
+        const sent = exactly(args, ["confirm"]);
+        if (typeof sent.confirm !== "boolean") return refuse(MALFORMED);
+        if (!sent.confirm) return { Confirm: { Dismissal: { leaves: { staging: "C:\\Vaults\\demo.restore", before_restore: null } } } };
+        restoreNoticeNow = { state: "none" };
+        launchNotices = launchNotices.filter((notice) => (notice as { kind?: unknown }).kind !== "restore");
+        return { Done: null };
       }
       case "restore_choose_folder": {
         const sent = exactly(args, ["choice"]);
@@ -2889,6 +2936,7 @@ export function installFakeShell(
       if (typeof sent.choice !== "string") return refuse(MALFORMED);
       const checked = restoreHeld.get(sent.choice)?.checked;
       if (checked === undefined) return refuse(CHOICE_EXPIRED);
+      if (restoreRecovery !== undefined) return recoveryAnswer();
       if (restoreQuestion !== undefined) {
         const kind = restoreQuestion;
         restoreQuestion = undefined;
@@ -2907,8 +2955,17 @@ export function installFakeShell(
     const choice = restoreAsked.get(sent.token);
     if (choice === undefined) return refuse(CHOICE_EXPIRED);
     restoreAsked.delete(sent.token);
+    if (restoreRecovery !== undefined) return recoveryAnswer();
     restoreNames.push(sent.name);
     return restoreCopy(choice, request);
+  };
+
+  /** An unfinished restore's journal is still there: the shell ran its recovery and answers what it found, instead of a copy. */
+  const recoveryAnswer = (): Promise<unknown> => {
+    const notice = restoreRecovery;
+    restoreRecovery = undefined;
+    restoreNoticeNow = notice;
+    return Promise.resolve({ Confirm: { Recovery: { notice } } });
   };
 
   /** The swap: a job with progress and no Stop. It ends the vault it replaces (that vault locks, reason `restore`) or adds the restored one to the list. */
@@ -3615,6 +3672,17 @@ export function installFakeShell(
     preparedRestores: () => [...restorePrepared.keys()],
     discardedRestores: () => [...restoreDiscarded],
     confirmedNames: () => [...restoreNames],
+    retryRestoreGives: (...answers) => {
+      // The command answers the notice's own fields; the `kind` tag belongs to the event.
+      for (const answer of answers) {
+        const plain: Record<string, unknown> = { ...(answer as Record<string, unknown>) };
+        delete plain.kind;
+        retryAnswers.push(plain);
+      }
+    },
+    restoreRecoversNext: (notice) => {
+      restoreRecovery = notice;
+    },
     lastBackupName: () => lastBackup?.name ?? "",
     lastBackupChoice: () => lastBackup?.choice ?? "",
     sendProgress: (operation, done, total) => {

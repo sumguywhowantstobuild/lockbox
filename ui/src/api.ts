@@ -12,6 +12,7 @@ import {
   type Opened,
   type Outcome,
   type PageNotice,
+  type RestoreNotice,
   type SearchResults,
   type SessionRef,
   type Tagged,
@@ -45,6 +46,7 @@ export type {
   Outcome,
   PageNotice,
   ProgressEvent,
+  RestoreNotice,
   SessionRef,
   Tagged,
 } from "./bridge";
@@ -54,6 +56,8 @@ export interface VaultEntry {
   id: number;
   name: string | null;
   available: boolean;
+  /** True exactly when the folder holds the vault's header files but neither copy of its details can be read (Ask 8). Another `name: null` vault is `false`. */
+  details_damaged: boolean;
 }
 
 export interface SessionInfo {
@@ -956,10 +960,30 @@ export interface RestoredView {
 /**
  * Opens the Windows picker (titled "Restore a backup") for a backup file and holds its path in the shell under a choice, launch-scoped. With `choice: null`
  * it starts a pick; with the choice a pick answered, the new file replaces that one. `"Dismissed"` is a closed picker. A lock while the picker is open is
- * refused as `locked` and holds nothing; `busy` (`what: "restore"`) while another restore is going. Plain: it needs no open vault.
+ * refused as `locked` and holds nothing; `busy` (`what: "restore"`) while another restore is going. Plain: it needs no open vault. `vault` is a listed
+ * vault's id, or `null`: with one, the restore goes in that vault's own parent folder instead of the usual one (a vault id that isn't listed is refused as
+ * `not_found`, and nothing is picked).
  */
-export function restorePick(choice: string | null): Promise<Outcome<RestorePick>> {
-  return callPlain<Outcome<RestorePick>>("restore_pick", { choice });
+export function restorePick(choice: string | null, vault: number | null): Promise<Outcome<RestorePick>> {
+  return callPlain<Outcome<RestorePick>>("restore_pick", { choice, vault });
+}
+
+/** What a restore that didn't finish left, as launch found it (also kept for `launch_notices`): `{ state: "none" }` when there is nothing. Plain. */
+export function restoreNotice(): Promise<RestoreNotice> {
+  return callPlain<RestoreNotice>("restore_notice", {});
+}
+
+/** Ask 7's and the pending notice's Try again: recovery runs again, and what it found is the answer. `busy` (`what: "restore"`) while a restore is running. */
+export function retryRestoreRecovery(): Promise<RestoreNotice> {
+  return callPlain<RestoreNotice>("retry_restore_recovery", {});
+}
+
+/**
+ * Dismisses an unfinished restore's journal, leaving the folders there as they are. Sent with `confirm: true` straight away: the notice's own words say what
+ * dismissing leaves. Without `confirm` the shell answers `Confirm` `Dismissal` with what it leaves. `busy` (`what: "restore"`) while a restore is running.
+ */
+export function dismissRestore(confirm: boolean): Promise<Outcome<null>> {
+  return callPlain<Outcome<null>>("dismiss_restore", { confirm });
 }
 
 /**

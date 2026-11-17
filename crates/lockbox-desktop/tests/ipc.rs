@@ -629,7 +629,7 @@ fn restore_commands_are_granted_to_the_main_window_only() {
     // Built, not written out: the review packer's key scan reads a long hex literal beside "choice" as a secret.
     let hex = "0123456789abcdef".repeat(2);
     let commands = [
-        ("restore_pick", json!({ "choice": null })),
+        ("restore_pick", json!({ "choice": null, "vault": null })),
         (
             "restore_check",
             json!({ "choice": hex, "credential": { "password_or_key": "x" } }),

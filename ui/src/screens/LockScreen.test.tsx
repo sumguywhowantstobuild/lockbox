@@ -285,7 +285,7 @@ test("restore_a_backup_is_a_second_line_under_the_form_and_opens_the_first_step"
   // It opens Windows' picker first, with nothing sent but the pick's own; the screens that follow belong to the app (`RestoreFlow.test.tsx`).
   fireEvent.click(link);
   await vi.waitFor(() => {
-    expect(invoke.mock.calls.filter(([name]) => name === "restore_pick")).toEqual([["restore_pick", { choice: null }]]);
+    expect(invoke.mock.calls.filter(([name]) => name === "restore_pick")).toEqual([["restore_pick", { choice: null, vault: null }]]);
   });
 });
 

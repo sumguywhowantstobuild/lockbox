@@ -631,7 +631,7 @@ test("restore_a_backup_follows_test_a_backup_in_this_vault_and_opens_the_first_s
   expect(button.getAttribute("aria-describedby")).not.toBeNull();
   fireEvent.click(button);
   await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
-  expect(commands("restore_pick")).toEqual([{ choice: null }]);
+  expect(commands("restore_pick")).toEqual([{ choice: null, vault: null }]);
 });
 
 test("a_read_only_vault_can_restore_a_backup_too", async () => {
