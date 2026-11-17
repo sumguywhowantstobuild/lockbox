@@ -9,11 +9,12 @@ import { FirstClose } from "./screens/FirstClose";
 import { LockScreen } from "./screens/LockScreen";
 import { MainWindow } from "./screens/MainWindow";
 import { RestoreFlow } from "./screens/RestoreFlow";
+import { RestoreNotices } from "./screens/RestoreNotices";
 import { FirstRun } from "./screens/setup/FirstRun";
 import { LostList } from "./screens/setup/LostList";
 import { PickWords } from "./screens/setup/PickWords";
 import { RecoveryKey } from "./screens/setup/RecoveryKey";
-import { startCapture, startNotices, startStore, useRestore, useSessions, useStartError, useVaultListDamaged, useVaults } from "./store";
+import { startCapture, startNotices, startStore, useNotices, useRestore, useSessions, useStartError, useVaultListDamaged, useVaults } from "./store";
 import { useMode } from "./theme";
 import "./styles/tokens.css";
 import "./styles/base.css";
@@ -25,7 +26,7 @@ import "./styles/print.css";
 /**
  * The whole app: first-time setup while there is no vault, the lost-list screen while the list of vaults is damaged, the lock screen while none is open, the main window of the
  * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. A restore
- * (24a to 24e) takes the whole window above any of these while it is open, and gives it back when it ends. The
+ * (24a to 24e) takes the whole window above any of these while it is open, and gives it back when it ends; so does the notice of a restore that didn't finish. The
  * store starts listening for locks before anything asks the shell for anything. The first close of the window is explained
  * over whichever of these is up (5b). Light or dark follows the theme chosen in Settings, and Windows' own setting for System.
  */
@@ -70,12 +71,16 @@ export default function App() {
   // a lock of the open vault does not take its steps away.
   const restore = useRestore();
   const restoring = restore !== null && restore.phase !== "picking";
+  // A restore that didn't finish (Asks 6 and 7, the two states beside them) takes the window the same way, below an open restore: the finished one is the lock
+  // screen's own and is not here.
+  const { restore: unfinished } = useNotices();
+  const notice = unfinished !== null && unfinished.ask !== "finished";
 
   return (
     <LockboxParts>
       <PortalContainerProvider value={root ?? undefined}>
         <div ref={setRoot} className={`app mode-${mode} v-${look.accent}`}>
-          {restoring ? <RestoreFlow /> : screen}
+          {restoring ? <RestoreFlow /> : notice ? <RestoreNotices /> : screen}
           <FirstClose />
           <CloseQuestion />
         </div>

@@ -146,6 +146,10 @@ export interface RestoreFlow {
    * `swapping`: 24c's last words, with no bar; `refused`: a refusal on a screen of its own; `done`: 24e.
    */
   phase: "picking" | "pick" | "checking" | "where" | "cloud" | "name" | "copying" | "replace" | "swapping" | "refused" | "done";
+  /** The listed vault this restore was started for (Ask 4's open vault, Ask 8's damaged one), or `null`: every pick goes with it, so the backup unpacks in that vault's folder. */
+  vault: number | null;
+  /** While the folder is the one that vault gave it (the person has not chosen another): whose, for 24b's words; `null` otherwise. */
+  beside: "damaged" | "open" | null;
   /** The choice the shell holds the backup's path under, or `null` while none is picked (before the first pick, or once the shell let it go). */
   choice: string | null;
   fileName: string | null;
@@ -259,12 +263,24 @@ const NO_ASKS: SessionAsks = {
   closed: [],
 };
 
+/**
+ * What a restore's notice says, as far as a screen needs it (Plan 4B Task 6): Ask 6 (`undone`, with the vault's name or `null`), the finished notice on the lock
+ * screen (`finished`, with the vault to unlock or `null`), Ask 7 (`drive_missing`, with the folder as text), and the two states with no drawn screen. The journal's
+ * own paths are never kept: the page shows a folder as text and takes no path back.
+ */
+export type RestoreAsk =
+  | { ask: "undone"; name: string | null }
+  | { ask: "finished"; vault: { id: number; name: string } | null }
+  | { ask: "drive_missing"; folder: string | null }
+  | { ask: "pending" }
+  | { ask: "unclear" };
+
 /** What launch, or a running app, told that is still to be answered; not tied to a vault. */
 export interface Notices {
   /** The record of opened files is damaged (Ask 11) until the person sets it aside. */
   lostOutputs: boolean;
-  /** A restore was finished at launch (the words say to unlock with the password from when the backup was made). */
-  restoreFinished: boolean;
+  /** What a restore that didn't finish left (launch's notice, or what a refused restore or a Try again found), or `null`: the screens for it are `RestoreNotices` and the lock screen's. */
+  restore: RestoreAsk | null;
   /**
    * The window was closed for the first time: every vault is locked, the window stayed, and 5b says why Lockbox is still
    * running. It is only ever heard as an event (never at launch), and it goes with the shell's `explain: false`.
@@ -516,7 +532,7 @@ const EMPTY: StoreState = {
   startError: null,
   sessions: [],
   toast: null,
-  notices: { lostOutputs: false, restoreFinished: false, firstClose: false, shortcut: null, openFiles: 0 },
+  notices: { lostOutputs: false, restore: null, firstClose: false, shortcut: null, openFiles: 0 },
   lockNote: null,
   search: null,
   capture: null,
@@ -684,7 +700,7 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
   set({
     ...state,
     sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record],
-    notices: { ...state.notices, restoreFinished: false },
+    notices: { ...state.notices, restore: state.notices.restore?.ask === "finished" ? null : state.notices.restore },
     lockNote: null,
   });
   if (unfinished && !details) void makeNewKey(record.session);
@@ -1210,20 +1226,44 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** The vault a restore's notice names, as `{ id, name }`; anything else (no vault listed there, a name that can't be read) is `null`. */
+function noticeVault(value: unknown): { id: number; name: string } | null {
+  if (!isRecord(value) || typeof value.id !== "number" || typeof value.name !== "string") return null;
+  return { id: value.id, name: value.name };
+}
+
 /**
- * Takes in what launch, or a running app, tells. Only the kinds that have a question in 4A change anything: the record of
- * opened files that could not be read (Ask 11), a restore finished at launch, and the first close (5b). The shell keeps its launch notices
- * and may send one again as an event, so the latest of each kind replaces the one before.
+ * A restore's notice, as a screen says it. Only what a screen shows is kept: the vault's name and id, and the folder as text; the journal's paths are dropped
+ * here, so the page never holds one. `null` for `none` and for a state a screen has no words for.
  */
-function takeNotice(notice: unknown): void {
+function askOfNotice(notice: unknown): RestoreAsk | null {
+  if (!isRecord(notice)) return null;
+  if (notice.state === "recovered") {
+    const vault = noticeVault(notice.vault);
+    if (notice.how === "finished") return { ask: "finished", vault };
+    if (notice.how === "staging_removed" || notice.how === "rolled_back") return { ask: "undone", name: vault?.name ?? null };
+    return null;
+  }
+  if (notice.state === "drive_missing") return { ask: "drive_missing", folder: typeof notice.folder === "string" ? notice.folder : null };
+  if (notice.state === "pending") return { ask: "pending" };
+  if (notice.state === "unclear") return { ask: "unclear" };
+  return null;
+}
+
+/**
+ * Takes in what launch, or a running app, tells. Only the kinds that have a question change anything: the record of
+ * opened files that could not be read (Ask 11), a restore that did not finish (Asks 6 and 7, the finished notice), and the first close (5b). The shell keeps its launch notices
+ * and may send one again as an event, so the latest of each kind replaces the one before. `live` is an event of a running app (not what launch kept): a restore's
+ * recovery that settles meanwhile may have added a vault to the list or brought one back, so the list is read again.
+ */
+function takeNotice(notice: unknown, live = false): void {
   if (!isRecord(notice)) return;
   if (notice.kind === "output_sweep") {
     set({ ...state, notices: { ...state.notices, lostOutputs: notice.unreadable === true } });
   } else if (notice.kind === "restore") {
-    set({
-      ...state,
-      notices: { ...state.notices, restoreFinished: notice.state === "recovered" && notice.how === "finished" },
-    });
+    // The latest replaces the one before; `none` (or anything that isn't a state a screen says) takes the notice away.
+    set({ ...state, notices: { ...state.notices, restore: askOfNotice(notice) } });
+    if (live) void refreshVaults();
   } else if (notice.kind === "first_close" && typeof notice.explain === "boolean") {
     set({ ...state, notices: { ...state.notices, firstClose: notice.explain } });
   } else if (notice.kind === "shortcut_taken") {
@@ -1274,6 +1314,54 @@ export function dismissShortcutNotice(): void {
   set({ ...state, notices: { ...state.notices, shortcut: null } });
 }
 
+/** Closes the notice of a restore that didn't finish (Ask 6's Not now, the finished notice's Unlock): nothing is sent, there is nothing to dismiss in the shell. */
+export function closeRestoreNotice(): void {
+  if (state.notices.restore === null) return;
+  set({ ...state, notices: { ...state.notices, restore: null } });
+}
+
+let retryingRestore = false;
+
+/**
+ * Ask 7's and the pending notice's Try again: the shell runs recovery again and answers what it found, which replaces the notice (Ask 6 or the finished notice
+ * when it worked, none when nothing is left). Answers `"still"` when the answer is the same notice as before, so the screen says so; `"changed"` otherwise. A
+ * refusal (`busy` while a restore is running) is thrown for the screen to say. A second press before the answer does nothing.
+ */
+export async function retryUnfinishedRestore(): Promise<"still" | "changed" | "ignored"> {
+  if (retryingRestore) return "ignored";
+  retryingRestore = true;
+  const before = state.notices.restore;
+  try {
+    const next = askOfNotice(await api.retryRestoreRecovery());
+    // Recovery may have brought a vault back (its drive is there again) or listed a restored one: the list is read again before the notice shows, so the
+    // finished notice's Unlock can choose that vault and the lock screen no longer marks it as not available.
+    await refreshVaults();
+    set({ ...state, notices: { ...state.notices, restore: next } });
+    return before !== null && next?.ask === before.ask ? "still" : "changed";
+  } finally {
+    retryingRestore = false;
+  }
+}
+
+let dismissingRestore = false;
+
+/**
+ * Dismiss, on Ask 7, the pending notice and the unreadable one: the shell lets the journal go and leaves the folders where they are (the notice's own words say
+ * so, so there is no second question), and the notice closes. A refusal (`busy` while a restore is running) is thrown for the screen to say, and the notice
+ * stays. A second press before the answer does nothing.
+ */
+export async function dismissUnfinishedRestore(): Promise<void> {
+  if (dismissingRestore) return;
+  dismissingRestore = true;
+  try {
+    const answer = await api.dismissRestore(true);
+    if (typeof answer !== "object" || !("Done" in answer)) throw Object.assign(new Error("unexpected"), UNEXPECTED);
+    closeRestoreNotice();
+  } finally {
+    dismissingRestore = false;
+  }
+}
+
 let confirmingClose = false;
 
 /**
@@ -1306,7 +1394,9 @@ export function startNotices(): Promise<void> {
   noticesStarted ??= (async () => {
     if (refusedWith(state.startError, "page")) return;
     try {
-      await api.onNotice(takeNotice);
+      await api.onNotice((notice) => {
+        takeNotice(notice, true);
+      });
     } catch {
       // Launch notices are still read below; only later ones are missed.
     }
@@ -1931,6 +2021,11 @@ export function closeTestBackup(session: number): void {
 // Then the folder, the copy (a job with a bar and a Cancel), the question when a vault is replaced, and the swap (a job with no Cancel). Every answer is
 // matched to the step it was asked in (`opening` and `run`): one that comes after the flow was left or moved on comes to nothing.
 
+/** What a restore is begun with: the listed vault it is for (Task 9 adds where it came from, beside this). */
+export interface RestoreStart {
+  vault?: number;
+}
+
 /** The number of the last time Restore a backup was begun, and of the last step taken in any of them. */
 let restoreOpenings = 0;
 let restoreRuns = 0;
@@ -1939,10 +2034,12 @@ let restoreRuns = 0;
 const RESTORE_CANCELLED = { code: "page", kind: "restore_cancelled" };
 
 /** The flow's first step, waiting for the picker (`pick` is `null`) or with a backup picked. */
-function newRestore(opening: number, run: number, pick: api.RestorePick | null): RestoreFlow {
+function newRestore(opening: number, run: number, pick: api.RestorePick | null, vault: number | null, beside: RestoreFlow["beside"]): RestoreFlow {
   return {
     opening,
     run,
+    vault,
+    beside,
     phase: pick === null ? "picking" : "pick",
     choice: pick?.choice ?? null,
     fileName: pick?.file_name ?? null,
@@ -1991,17 +2088,21 @@ function forgetRestoreStray(choice: string): void {
  * Settings' and the lock screen's "Restore a backup": opens Windows' picker for the backup file first, and the first step opens on it, with nothing sent
  * but the pick. A closed picker says nothing and opens nothing; a lock while it was open too. Any other refusal (another restore is going) opens the first
  * step with no file and its words under the row. While the picker is open the button waits, so a second press sends nothing.
+ * With a `vault` (Ask 4's open vault, Ask 8's damaged one) the pick is made for it: the backup unpacks in that vault's own folder, not the usual one.
  */
-export async function startRestore(): Promise<void> {
+export async function startRestore(options: RestoreStart = {}): Promise<void> {
   if (state.restore !== null) return;
   restoreOpenings += 1;
   restoreRuns += 1;
   const opening = restoreOpenings;
   const run = restoreRuns;
-  set({ ...state, restore: newRestore(opening, run, null) });
+  const vault = options.vault ?? null;
+  // A vault listed with `details_damaged` is Ask 8's: its folder can't be read, so the backup goes in a new folder beside it.
+  const beside = vault === null ? null : state.vaults?.find((entry) => entry.id === vault)?.details_damaged === true ? "damaged" : "open";
+  set({ ...state, restore: newRestore(opening, run, null, vault, beside) });
   let answer: Awaited<ReturnType<typeof api.restorePick>>;
   try {
-    answer = await api.restorePick(null);
+    answer = await api.restorePick(null, vault);
   } catch (error) {
     if (!restoreStill(opening, run)) return;
     if (refusedAsLocked(error)) set({ ...state, restore: null });
@@ -2030,7 +2131,8 @@ export async function pickAnotherRestore(): Promise<void> {
   const run = moveRestore(opening, flow.run, () => ({ busy: true, problem: null }));
   if (run === null) return;
   try {
-    const answer = await api.restorePick(choice);
+    // The vault the restore was started for goes again: a new pick starts from the usual folder otherwise.
+    const answer = await api.restorePick(choice, flow.vault);
     if (answer === "Dismissed") {
       moveRestore(opening, run, () => ({ busy: false }));
     } else if ("Done" in answer) {
@@ -2091,7 +2193,8 @@ export async function chooseRestoreFolder(): Promise<void> {
       moveRestore(opening, run, () => ({ busy: false }));
     } else if ("Done" in answer) {
       const found = answer.Done;
-      moveRestore(opening, run, () => ({ busy: false, checked: found }));
+      // The person chose the folder: it is no longer the one beside the vault the restore started from.
+      moveRestore(opening, run, () => ({ busy: false, checked: found, beside: null }));
     } else {
       moveRestore(opening, run, () => ({ busy: false, problem: UNEXPECTED }));
     }
@@ -2165,6 +2268,15 @@ async function copyRestore(flow: RestoreFlow, send: (request: number) => Promise
     } else if (typeof question === "object" && "NewFolder" in question) {
       const { token, suggested } = question.NewFolder;
       moveRestore(opening, run, () => ({ phase: "name", request: null, token, suggested }));
+    } else if (typeof question === "object" && "Recovery" in question && askOfNotice(question.Recovery.notice) !== null) {
+      // An unfinished restore's journal was still there, and the shell ran its recovery instead of copying: the flow is closed (the pick is let go) and its
+      // notice is shown, whichever screen the person was on.
+      const ask = askOfNotice(question.Recovery.notice);
+      const held = state.restore?.choice ?? null;
+      set({ ...state, restore: null, notices: { ...state.notices, restore: ask } });
+      if (held !== null) forgetRestoreStray(held);
+      // Recovery ran: it may have listed a restored vault or brought one back, so the list is read again.
+      void refreshVaults();
     } else {
       moveRestore(opening, run, () => ({ phase: "refused", refusedAs: "again", request: null, problem: UNEXPECTED }));
     }
@@ -4238,6 +4350,8 @@ export function resetStoreForTests(): void {
   searchShown = 0;
   searchOpening = 0;
   retryingOpen = false;
+  retryingRestore = false;
+  dismissingRestore = false;
   settingsLine = Promise.resolve();
   shortcutNoticeVoid = false;
   listRuns.clear();

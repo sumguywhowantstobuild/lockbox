@@ -730,11 +730,14 @@ pub(super) async fn copy_item_to(
     .await
 }
 
-/// `restore_pick`: the pick being replaced (Pick another), or `null` for the first pick.
+/// `restore_pick`: the pick being replaced (Pick another), or `null` for the first pick; and the vault of the list the
+/// backup is for (Ask 4 and Ask 8 offer one), or `null`: the restore then goes beside that vault, not in the usual
+/// folder.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestorePickArgs {
     choice: Option<Token>,
+    vault: Option<u32>,
 }
 
 /// `restore_check`: the held pick, and what was typed (a password or a recovery key, in the one box).
@@ -817,9 +820,9 @@ pub(super) async fn restore_pick(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Outcome<RestorePick>> {
-    let RestorePickArgs { choice } = args(&request)?;
+    let RestorePickArgs { choice, vault } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.restore_pick(choice.as_ref())).await
+    blocking(move || shell.restore_pick(choice.as_ref(), vault)).await
 }
 
 #[tauri::command]
@@ -2350,6 +2353,39 @@ mod tests {
             }),
             &|body| parse::<CopyItemTo>(&InvokeBody::Json(body)).is_ok(),
         );
+    }
+
+    /// `restore_pick`'s `vault` is a vault's number on the list or nothing (left out too), never a path, a name or a
+    /// destination. The shape of the first pick and of Pick another is as it was.
+    #[test]
+    fn restore_pick_vault_field_is_strict() {
+        let hex = "0123456789abcdef".repeat(2);
+        let parses = |body: Value| parse::<RestorePickArgs>(&InvokeBody::Json(body)).is_ok();
+        for good in [
+            json!({ "choice": null, "vault": null }),
+            json!({ "choice": null, "vault": 3 }),
+            json!({ "choice": hex, "vault": 0 }),
+            json!({ "choice": hex, "vault": 4_294_967_295_u32 }),
+            json!({ "choice": null }),
+            json!({}),
+        ] {
+            assert!(parses(good.clone()), "{good}");
+        }
+        for bad in [
+            json!({ "choice": null, "vault": -1 }),
+            json!({ "choice": null, "vault": 4_294_967_296_u64 }),
+            json!({ "choice": null, "vault": 1.5 }),
+            json!({ "choice": null, "vault": "3" }),
+            json!({ "choice": null, "vault": "SENTINEL-7f3a" }),
+            json!({ "choice": null, "vault": [3] }),
+            json!({ "choice": null, "vault": { "id": 3 } }),
+            json!({ "choice": null, "vault": 3, "path": "SENTINEL-7f3a" }),
+            json!({ "choice": null, "vault": 3, "destination": "beside" }),
+            json!({ "choice": null, "vault": 3, "vaults": [3] }),
+        ] {
+            let refused = parse::<RestorePickArgs>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
     }
 
     /// The restore commands take IDs, tokens, flags, a credential and a destination name: never a path, and nothing

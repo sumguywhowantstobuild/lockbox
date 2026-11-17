@@ -66,11 +66,63 @@ export function passwordFromWords(made: string | null): string {
   return day === "" ? "Password from when this backup was made" : `Password from ${day}`;
 }
 
-/** 24b's sentence for where it unpacks. */
-export function whereWords(name: string, usual: boolean, replaces: boolean): string {
+/**
+ * 24b's sentence for where it unpacks. `beside` is set while the folder is the one a restore started from a damaged vault's question (Ask 8) or from the
+ * open vault's (Ask 4) gave it, and the person has not chosen another.
+ */
+export function whereWords(name: string, usual: boolean, replaces: boolean, beside: "damaged" | "open" | null = null): string {
   if (replaces) return `${name} is already in this folder. Lockbox asks before replacing it, and keeps your current one beside it.`;
+  if (beside === "damaged") return `It unpacks as ${name}, in a new folder beside the damaged one.`;
+  if (beside === "open") return `It unpacks as ${name}, in the same folder as your vault.`;
   return usual ? `It unpacks as ${name}, in your usual vaults folder.` : `It unpacks as ${name}, in the folder you chose.`;
 }
+
+// A restore that didn't finish (Ask 6, Ask 7, the two states with no drawn screen) and a vault that can't be opened (Ask 8): the design's words and the
+// drawn ones, with the vault's name or the folder as text. A notice that can't name its vault says "your vault" (and "a vault" once finished).
+
+/** Ask 6's heading, which the screen for notes that can't be read shares. */
+export const UNDONE_HEADING = "A restore didn't finish";
+
+/** Ask 6: Lockbox was closed partway through and put the vault back. */
+export function undoneWords(name: string | null): string {
+  return `Lockbox was closed partway through, and has put ${name ?? "your vault"} back the way it was. Nothing is lost. You can start the restore again.`;
+}
+
+/** The finished notice on the lock screen. */
+export function finishedWords(name: string | null): string {
+  return `Lockbox finished restoring ${name ?? "a vault"}. Unlock with the password from when that backup was made.`;
+}
+
+/** Ask 7's heading. */
+export const MISSING_HEADING = "A restore is waiting for a drive";
+
+/** Ask 7: the folder is shown as text. */
+export function missingWords(folder: string): string {
+  return `It was using ${folder}, which isn't connected. Connect the drive, then try again. Dismissing leaves the folders there as they are, for you to sort out.`;
+}
+
+/** What Try again says when the drive is still not there. */
+export const DRIVE_STILL_MISSING = "That drive still isn't connected.";
+
+/** The state with no drawn screen: the drive is there but a rename failed. */
+export const PENDING_HEADING = "A restore is waiting";
+export const PENDING_WORDS =
+  "Lockbox couldn't finish putting things back yet. Close anything that may be using the vault's folder, then try again. Dismissing leaves the folders there as they are, for you to sort out.";
+/** What Try again says when it still cannot finish. */
+export const RESTORE_STILL_WAITING = "That restore still isn't finished.";
+
+/** The state with no drawn screen: the notes on what the restore had done can't be read. */
+export const UNCLEAR_WORDS =
+  "Lockbox can't read its notes on what the restore had done. Dismissing leaves the folders there as they are, for you to sort out.";
+
+/** Ask 8's heading: the vault by its name when the list gives one, else "This vault". */
+export function damagedHeading(name: string | null): string {
+  return `${name ?? "This vault"} can't be opened`;
+}
+
+/** Ask 8. */
+export const DAMAGED_WORDS =
+  "Both copies of its details are damaged, so no password can open it. A backup can bring it back, in a new folder beside this one, and the damaged folder is left alone.";
 
 /** 24d's sentence: the current vault is kept, under the name the shell will give it. */
 export function keptWords(name: string, keptAs: string | null): string {

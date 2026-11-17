@@ -450,7 +450,24 @@ one a viewer still holds is reported and retried.
 **Restore** (`restore_pick`, `restore_check`, `restore_choose_folder`, `restore_prepare`, `restore_prepare_confirm`,
 `restore_commit`, `restore_discard`, `forget_restore_pick`). Five steps on one held pick, none of which takes a path.
 `restore_pick` opens the picker ("Restore a backup", the backup filter) and holds the path as
-`PendingChoice::RestorePick { path, epoch, checked }`; `Busy` while a restore is alive. `restore_check` takes the typed
+`PendingChoice::RestorePick { path, epoch, vault, checked }`; `Busy` while a restore is alive. Its `vault` (a number on
+the vault list or `null`) is for the questions that offer a backup for a vault (Ask 4: some items cannot be read; Ask 8: both
+header copies are damaged): one not on the list is `NotFound` before a picker opens, and the check then makes the folder
+that holds that vault the restore's folder (`usual` false), not the usual one. The engine's own rules do the rest: a vault
+that opens is found there and replaced (kept as an older copy), and a folder whose headers cannot be read is never written,
+since the backup unpacks into a new folder beside it (the existing new-folder question, which refuses a name in use). The
+vault list tells the page which vaults Ask 8 is for: `VaultEntry.details_damaged` is true exactly when the folder holds a
+header file (`vault.json` or `vault.json.bak`) and every copy there is refused by the engine as damaged (corrupt or too
+large: `lockbox_core::header_is_damaged`); an empty folder, one with no header files, a header another program holds (a
+sharing violation) and a newer vault have no name either but are not damaged (`both_headers_unreadable_listed_without_a_name`,
+`a_listed_folder_with_no_vault_in_it_lists_the_same_way`, `a_header_held_by_another_program_is_not_damage`). While the
+pick's folder is still the damaged vault's own parent (Choose another has not moved it), `restore_prepare` never uses the
+engine's same-vault rule, which would find a healthy copy of the backup's vault there (the sibling an earlier Ask 8 restore
+made) and replace it: it restores into a new folder of the default name, asks the new-folder question when that name is the
+damaged folder's, and is refused ("vault already here", as the engine refuses a second writable copy of a vault in one
+folder) when such a sibling is there (`a_second_ask_8_restore_never_replaces_the_first_sibling`,
+`ask_8_from_a_renamed_folder_goes_to_the_default_folder`). Ask 4's vault opens, so it keeps the same-vault rule.
+`restore_check` takes the typed
 text (`{ "password_or_key": text }`: a well-formed key is tried as a key, then as a password), opens the backup read-only
 without unpacking it (`ReadOnlyVault::open_backup`), and keeps the credential that worked (`Attempts::run_keeping`), the
 vault's name and ID, the day it was made (`backup_created_at` read in the PC's zone, `Clock::utc_offset_secs`) and the
@@ -482,6 +499,14 @@ location, so it also catches a vault unlocked after `prepare`). Once the swap st
 journal, whatever locks. A commit the engine says cannot be retried goes straight to recovery. A stale journal at
 `restore_prepare` runs recovery and answers with its result.
 
+**What a restore that did not finish tells the page** (`restore_notice`, `retry_restore_recovery`, `dismiss_restore`, and
+`lockbox://notice` with `kind: "restore"`). Recovery runs at launch before the window (`Shell::launch_work`) and its
+result is kept (`RestoreNotice`), so a reloaded page asks again. `recovered` (`staging_removed`, `rolled_back` or `finished`)
+carries `vault: { id, name } | null`: the vault of the list at the journal's folder, read before recovery removes the
+journal and looked up once it is done, never a path. A `finished` restore whose swap ended before `restore_commit` listed the
+vault is listed by recovery, as that does, so the notice can name it. `drive_missing` carries `folder`, the target's parent
+as text (what the drive-missing screen names); the page never sends it back.
+
 ### Rules the shell must keep
 
 Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind this list are the fuller record.
@@ -491,7 +516,8 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
    `views_never_carry_keys_or_unrevealed_password`, `reveal_returns_password_tagged`. The recovery key crosses once, when
    it is made, for display, and the generator's output is a new value, not a stored one. Spec 4.1.
 2. **Paths never come from the page.** Commands take IDs and values; Rust opens every dialog: `request_with_a_path_field_refused`
-   (one each in `commands/vaults.rs`, `files.rs`, `backup.rs`), `restore_requests_are_strict`, `item_requests_refuse_unknown_fields`.
+   (one each in `commands/vaults.rs`, `files.rs`, `backup.rs`), `restore_requests_are_strict`, `restore_pick_vault_field_is_strict`,
+   `item_requests_refuse_unknown_fields`.
    Paths go the other way in one case: a restore that cannot finish (its notice, and the question before dismissing it)
    shows the user's own folders so they can act on them.
 3. **Every command needs a permission, and the window has exactly the expected set.** `capability_grants_exactly_the_expected_set`,

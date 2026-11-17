@@ -6,16 +6,19 @@ import { Dialog } from "../parts/Dialog";
 import {
   acceptDetails,
   closeBanner,
+  closeRestoreNotice,
   dismissShortcutNotice,
   lockThisVault,
   retryOpenFiles,
   setOutputRecordAside,
+  startRestore,
   useLockNote,
   useNotices,
   useSettings,
   type Banner,
   type SessionData,
 } from "../store";
+import { finishedWords } from "../restoreWords";
 import { shortcutText } from "../shortcut";
 
 // The app's questions that an unlock, or the launch before it, has to tell (the design's "The app's questions"). Each
@@ -135,7 +138,20 @@ export function VaultBanners({ data }: { data: SessionData }) {
       {asks.unreadable > 0 && open("unreadable") ? (
         <Notice
           text={`${String(asks.unreadable)} ${count(asks.unreadable, "item in this vault can't be read. Everything else works. It may be damaged", "items in this vault can't be read. Everything else works. They may be damaged")}, so Lockbox left all stored files where they are until this is sorted.`}
-          actions={[{ name: "Close", onPress: close("unreadable") }]}
+          actions={[
+            // A backup can bring the vault back, beside it. A copy opened from a backup is not a vault on the list, so it has none. Open a backup comes with Task 7.
+            ...(data.readOnly
+              ? []
+              : [
+                  {
+                    name: "Restore a backup",
+                    onPress: () => {
+                      void startRestore({ vault: data.vaultId });
+                    },
+                  },
+                ]),
+            { name: "Close", onPress: close("unreadable") },
+          ]}
         />
       ) : null}
       {asks.leftover > 0 && open("leftover") ? (
@@ -271,22 +287,32 @@ export function ShortcutAsk() {
 }
 
 /**
- * What the lock screen says beside the password: a restore that Lockbox finished at launch (words only; the lock
- * screen's own Unlock is its button, and unlocking is what clears it), and a refusal that the vault it was about has
- * locked before (Ask 16, "Locked before it could say"; words, no button).
+ * What the lock screen says beside the password: a restore that Lockbox finished at launch (the vault's name as the notice gave it, and an Unlock
+ * button that closes the notice and leaves that vault chosen with its password box focused; unlocking clears it too), and a refusal that the vault
+ * it was about has locked before (Ask 16, "Locked before it could say"; words, no button). `onUnlock` is the lock screen's: it gets the vault the notice names, or
+ * `null` when it names none.
  */
-export function LockScreenAsks() {
-  const { restoreFinished } = useNotices();
+export function LockScreenAsks({ onUnlock }: { onUnlock: (vault: number | null) => void }) {
+  const { restore } = useNotices();
   const note = useLockNote();
+  const finished = restore?.ask === "finished" ? restore : null;
   return (
     <div className="asks">
       {note === null ? null : <Notice text={messageText(messageFor(note))} actions={[]} />}
-      {restoreFinished ? (
+      {finished === null ? null : (
         <Notice
-          text="Lockbox finished restoring a vault. Unlock with the password from when that backup was made."
-          actions={[]}
+          text={finishedWords(finished.vault?.name ?? null)}
+          actions={[
+            {
+              name: "Unlock",
+              onPress: () => {
+                closeRestoreNotice();
+                onUnlock(finished.vault?.id ?? null);
+              },
+            },
+          ]}
         />
-      ) : null}
+      )}
       <OpenFilesAsk />
       <LostOutputsAsk />
       <ShortcutAsk />

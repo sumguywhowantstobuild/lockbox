@@ -186,8 +186,8 @@ pub use vault::{
     BackupPlan, BackupReport, BackupSummary, CleanupReport, CopiedItem, CreatedVault, Credential,
     JournalStep, JournalView, NewExportError, PreparedRestore, ReadOnlyVault, Recovery,
     RestoreDestination, RestoreOutcome, UnlockReport, UnverifiedSlot, Vault,
-    dismiss_restore_journal, folder_name, inspect_restore_journal, is_reserved_device_name,
-    read_vault_id, read_vault_name, recover_restore, verify_backup,
+    dismiss_restore_journal, folder_name, header_is_damaged, inspect_restore_journal,
+    is_reserved_device_name, read_vault_id, read_vault_name, recover_restore, verify_backup,
 };
 
 /// The version of this crate, as set in `Cargo.toml`.
