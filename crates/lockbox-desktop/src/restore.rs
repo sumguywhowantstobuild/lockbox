@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use lockbox_core::blob::{CancelToken, NoProgress};
 use lockbox_core::fsio::{is_destination_taken, remove_dir_all_retry};
@@ -948,6 +948,9 @@ pub struct RestorePreparedView {
     /// `-99` that is free. `Some` only when a vault is replaced, and `None` then when all ninety-nine are taken (the
     /// swap refuses, as it always did).
     pub kept_as: Option<String>,
+    /// The vault the swap replaces, as its ID on the vault list: `Some` exactly when `replaces_existing`, unless that
+    /// vault is not on the list. The page lists that vault's older copies from it.
+    pub replaces: Option<u32>,
 }
 
 /// A pre-restore copy, open read-only.
@@ -980,6 +983,11 @@ pub struct PreRestoreEntry {
     pub name: Option<String>,
     /// The folder's name only, never its path.
     pub folder: String,
+    /// The local day (`YYYY-MM-DD`) that vault was last written: the newest modified time of the copy's header files.
+    /// `None` when neither can be read.
+    pub last_written: Option<String>,
+    /// Bytes of every regular file under the folder, links not followed. `None` on any read error.
+    pub size: Option<u64>,
 }
 
 /// Never shows the name or the folder (R5).
@@ -1574,6 +1582,13 @@ impl Shell {
         let name = prepared.name().to_owned();
         let existing = prepared.existing().map(Path::to_path_buf);
         let kept_as = existing.as_deref().and_then(kept_as_name);
+        let replaces = existing.as_deref().and_then(|dir| {
+            self.registry
+                .entries()
+                .into_iter()
+                .find(|(_, listed)| same_path(listed, dir))
+                .map(|(id, _)| id)
+        });
         let location = existing
             .as_deref()
             .and_then(|dir| Location::folder(dir).ok());
@@ -1651,6 +1666,7 @@ impl Shell {
             name,
             replaces_existing: existing.is_some(),
             kept_as,
+            replaces,
         }))
     }
 
@@ -1815,10 +1831,19 @@ impl Shell {
                 }
             }
         }
+        // Read before the list is locked: a big folder takes a while to measure.
+        let offset = self.os.clock.utc_offset_secs();
+        let found: Vec<_> = found
+            .into_iter()
+            .map(|(vault, folder)| {
+                let (day, size) = (last_written_day(&folder, offset), folder_size(&folder));
+                (vault, folder, day, size)
+            })
+            .collect();
         let mut list = lock(&self.restore.pre_restore);
         list.listed.clear();
         let mut entries = Vec::new();
-        for (vault, folder) in found {
+        for (vault, folder, last_written, size) in found {
             list.last_id += 1;
             let id = list.last_id;
             entries.push(PreRestoreEntry {
@@ -1829,6 +1854,8 @@ impl Shell {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
+                last_written,
+                size,
             });
             list.listed.push(Listed { id, vault, folder });
         }
@@ -1918,14 +1945,12 @@ impl Shell {
     ) -> ShellResult<Tagged<PreRestoreOpened>> {
         let (vault, folder) = self.listed_pre_restore(id)?;
         let location = self.check_pre_restore(vault, &folder)?;
-        let credential = credential.typed()?;
+        // The one box of every backup field: a well-formed recovery key is tried as a key, then as a password.
+        let credential = credential.attempts()?;
         let answer = self.sessions.open(Some(location.clone()), None, |cancel| {
-            let opened = ReadOnlyVault::open_folder(
-                location.path(),
-                credential.credential(),
-                cancel,
-                &NoProgress,
-            )?;
+            let opened = credential.run(|credential| {
+                ReadOnlyVault::open_folder(location.path(), credential, cancel, &NoProgress)
+            })?;
             let header_changed = !opened.header_mac_ok();
             Ok(OpenStep::Session(
                 location.clone(),
@@ -1988,6 +2013,39 @@ fn pre_restore_folders(dir: &Path, registered: &[(u32, PathBuf)]) -> Vec<PathBuf
         .collect();
     found.sort();
     found
+}
+
+/// The two files that hold a vault's header, and so the last time the vault was written to.
+const HEADER_FILES: [&str; 2] = ["vault.json", "vault.json.bak"];
+
+/// The local day (`YYYY-MM-DD`, the zone `offset_secs` east of UTC) of the newest modified time among the header files
+/// in `folder`: the last day that vault was written. `None` when neither can be read, or the time is before 1970.
+fn last_written_day(folder: &Path, offset_secs: i64) -> Option<String> {
+    let newest = HEADER_FILES
+        .iter()
+        .filter_map(|file| fs::metadata(folder.join(file)).ok()?.modified().ok())
+        .max()?;
+    let secs = newest.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(dates::local_date_of(secs, offset_secs))
+}
+
+/// The bytes of every regular file under `folder`, folders walked and links not followed. `None` on any read error:
+/// a size is never a guess.
+fn folder_size(folder: &Path) -> Option<u64> {
+    let mut total = 0u64;
+    let mut pending = vec![folder.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).ok()? {
+            let entry = entry.ok()?;
+            let kind = entry.file_type().ok()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                total = total.saturating_add(entry.metadata().ok()?.len());
+            }
+        }
+    }
+    Some(total)
 }
 
 /// What comes before `.before-restore` or `.before-restore-<2..=99>` at the end of `candidate` (any letter case), the names
@@ -4809,7 +4867,10 @@ mod tests {
                 .keys()
                 .map(String::as_str)
                 .collect();
-            assert_eq!(keys, ["folder", "id", "name", "vault"]);
+            assert_eq!(
+                keys,
+                ["folder", "id", "last_written", "name", "size", "vault"]
+            );
             assert!(!entry["folder"].as_str().unwrap().contains('\\'), "{entry}");
         }
         // The next listing replaces the IDs.
@@ -5039,6 +5100,213 @@ mod tests {
                 .all(|info| info.session == s || info.read_only),
             "no other session came back"
         );
+    }
+
+    /// Every regular file under `dir` (links not followed), as a test counts them.
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                found.extend(files_under(&entry.path()));
+            } else if kind.is_file() {
+                found.push(entry.path());
+            }
+        }
+        found
+    }
+
+    fn bytes_under(dir: &Path) -> u64 {
+        files_under(dir)
+            .iter()
+            .map(|file| fs::metadata(file).unwrap().len())
+            .sum()
+    }
+
+    /// Sets the modified time of `path` to the UTC moment `when` (`YYYY-MM-DDTHH:MM:SSZ`).
+    fn touched(path: &Path, when: &str) {
+        let secs = dates::parse_utc(when).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    /// An older copy says the last day its vault was written (the newest modified time of its header files, as the PC's
+    /// zone calls that day) and its size (every regular file under it, links not followed). A file written later that
+    /// is not a header does not move the day; what cannot be read is `null`, never a guess.
+    #[test]
+    fn pre_restore_list_says_the_day_and_size() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", &vec![5u8; 5000]);
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        restore_once(&ts, &backup, &parent);
+        let listed = ts.shell.list_pre_restore();
+        assert_eq!(listed.len(), 1);
+        let aside = parent.join(&listed[0].folder);
+
+        touched(&aside.join("vault.json"), "2026-11-03T10:00:00Z");
+        touched(&aside.join("vault.json.bak"), "2026-11-04T12:00:00Z");
+        let other = files_under(&aside)
+            .into_iter()
+            .find(|file| !file.ends_with("vault.json") && !file.ends_with("vault.json.bak"))
+            .expect("the older copy holds more than its header");
+        touched(&other, "2026-12-25T12:00:00Z");
+
+        let day = |ts: &TestShell, hours: i64| {
+            ts.clock.set_utc_offset_hours(hours);
+            ts.shell.list_pre_restore().remove(0).last_written
+        };
+        assert_eq!(day(&ts, 0).as_deref(), Some("2026-11-04"));
+        assert_eq!(
+            day(&ts, 14).as_deref(),
+            Some("2026-11-05"),
+            "the PC's zone moves the day"
+        );
+        assert_eq!(day(&ts, -13).as_deref(), Some("2026-11-03"));
+
+        let expected = bytes_under(&aside);
+        assert!(expected > 5000, "the stored file counts");
+        let entry = ts.shell.list_pre_restore().remove(0);
+        assert_eq!(entry.size, Some(expected));
+
+        // A link inside the folder is not followed, and what it leads to is not counted.
+        let elsewhere = ts.folder("Elsewhere");
+        fs::write(elsewhere.join("big.bin"), vec![1u8; 100_000]).unwrap();
+        make_dir_link(&aside.join("linked"), &elsewhere);
+        assert_eq!(
+            ts.shell.list_pre_restore().remove(0).size,
+            Some(expected),
+            "a link is not followed"
+        );
+
+        // The two new keys are in what the page is sent, as a day and a number.
+        let json = serde_json::to_value(ts.shell.list_pre_restore()).unwrap();
+        assert!(json[0]["last_written"].is_string() && json[0]["size"].is_u64());
+
+        // Nothing readable is `null`.
+        let nothing = ts.folder("Nothing");
+        assert_eq!(last_written_day(&nothing, 0), None);
+        assert_eq!(folder_size(&nothing.join("gone")), None);
+        assert_eq!(folder_size(&nothing), Some(0));
+    }
+
+    /// 24f's Open read-only takes the one box every backup field uses: a well-formed recovery key is tried as a key, then
+    /// as a password; anything else as a password. The two old forms still work, and a wrong one is refused.
+    #[test]
+    fn pre_restore_opens_with_the_one_box_credential() {
+        let ts = TestShell::new();
+        let (s, g, recovery) = source_vault(&ts, "Family");
+        let key = recovery.to_display().to_string();
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        // The vault is put on the shell's list (it is in the folder `Source` holds), then restored over.
+        let source = ts.folder("Source");
+        let vault_folder = fs::read_dir(&source)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .unwrap();
+        ts.dialogs.answer(Some(vault_folder));
+        done(ts.shell.add_existing_vault().unwrap());
+        restore_once(&ts, &backup, &source);
+        let listed = ts.shell.list_pre_restore();
+        assert_eq!(listed.len(), 1);
+        let id = listed[0].id;
+
+        let open = |credential: CredentialArg| {
+            let answer = heavy(|| ts.shell.open_pre_restore_read_only(id, credential));
+            if let Ok(opened) = &answer {
+                ts.shell.sessions.lock(opened.session, LockReason::Manual);
+                assert!(ts.shell.sessions.release_wait(opened.session, RELEASE_WAIT));
+            }
+            answer
+        };
+        assert_eq!(
+            open(typed("another long password")).err(),
+            Some(CoreError::WrongPassword.into())
+        );
+        assert!(open(typed(&"abandon ".repeat(24))).is_err());
+        let by_password = open(typed(TEST_PASSWORD)).unwrap();
+        assert!(by_password.data.info.read_only);
+        let by_key = open(typed(&key)).unwrap();
+        assert!(by_key.data.info.read_only);
+        // The two forms that were there before.
+        assert!(open(password()).is_ok());
+        let as_key = CredentialArg::RecoveryKey(Zeroizing::new(key));
+        assert!(open(as_key).is_ok());
+    }
+
+    /// 24d's answer names the vault the swap would replace, as its ID on the vault list (24f lists that vault's older
+    /// copies from it); a restore into a folder with no such vault names none.
+    #[test]
+    fn restore_prepared_names_the_vault_it_replaces() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let (_other, _) = ts.open_vault("Other");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+
+        let view = prepared(&ts, &backup, &parent);
+        assert!(view.replaces_existing);
+        let listed = ts.shell.registry.entries();
+        let family = listed
+            .iter()
+            .find(|(_, dir)| same_folder(dir, &vault_dir(&ts)))
+            .map(|(id, _)| *id);
+        assert!(family.is_some());
+        assert_eq!(view.replaces, family);
+        assert_eq!(
+            serde_json::to_value(&view).unwrap()["replaces"],
+            json!(family)
+        );
+        ts.shell.restore_discard(view.restore).unwrap();
+
+        let fresh = ts.folder("Fresh");
+        let view = prepared(&ts, &backup, &fresh);
+        assert!(!view.replaces_existing);
+        assert_eq!(view.replaces, None);
+        assert!(serde_json::to_value(&view).unwrap()["replaces"].is_null());
+    }
+
+    /// All ninety-nine names taken: the swap refuses, and the finished restore stays (the same number), so that once one
+    /// older copy is deleted the same Replace goes through, with the copy made where the deleted one was.
+    #[test]
+    fn too_many_copies_keeps_the_finished_restore() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+        let folder = dir.file_name().unwrap().to_string_lossy().into_owned();
+        restore_once(&ts, &backup, &parent);
+        // The other ninety-eight names are taken by folders that are not older copies of this vault.
+        for n in 2..=99 {
+            fs::create_dir(parent.join(format!("{folder}.before-restore-{n}"))).unwrap();
+        }
+        let view = prepared(&ts, &backup, &parent);
+        assert_eq!(view.kept_as, None, "no name is free");
+
+        let refused = ts.shell.restore_commit(view.restore, REQUEST).err();
+        assert!(
+            matches!(&refused, Some(ShellError::Core(found))
+                if found.what == Some("too many before-restore copies")),
+            "{refused:?}"
+        );
+        assert!(!ts.shell.restore.is_idle(), "the finished restore is kept");
+        assert!(!staging_in(&parent).is_empty());
+
+        // The one older copy is listed and deleted; the same Replace is pressed again.
+        let listed = ts.shell.list_pre_restore();
+        assert_eq!(listed.len(), 1, "only a real older copy is listed");
+        done(ts.shell.delete_pre_restore(listed[0].id, true).unwrap());
+        let again = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        assert!(again.before_restore);
+        assert!(parent.join(format!("{folder}.before-restore")).is_dir());
+        assert!(ts.shell.restore.is_idle() && staging_in(&parent).is_empty());
     }
 
     /// The folder dialog of a restore ("Restore into this folder") opens in the folder the pick is in now: the usual
@@ -5370,11 +5638,12 @@ mod tests {
                 name: "Family".into(),
                 replaces_existing: true,
                 kept_as: Some("Family-1a2b3c4d.before-restore".into()),
+                replaces: Some(2),
             })
             .unwrap(),
             json!({
                 "restore": 3, "name": "Family", "replaces_existing": true,
-                "kept_as": "Family-1a2b3c4d.before-restore"
+                "kept_as": "Family-1a2b3c4d.before-restore", "replaces": 2
             })
         );
         assert_eq!(
@@ -5383,9 +5652,13 @@ mod tests {
                 name: "Family".into(),
                 replaces_existing: false,
                 kept_as: None,
+                replaces: None,
             })
             .unwrap(),
-            json!({ "restore": 4, "name": "Family", "replaces_existing": false, "kept_as": null })
+            json!({
+                "restore": 4, "name": "Family", "replaces_existing": false, "kept_as": null,
+                "replaces": null
+            })
         );
         assert_eq!(
             serde_json::to_value(RestorePick {

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
-import { BACKUP_NAME, BACKUP_PASSWORD, installFakeShell, PASSWORD, sampleItems, type FakeShell, type FakeVault } from "../testing/fakeShell";
+import { BACKUP_NAME, BACKUP_PASSWORD, installFakeShell, PASSWORD, sampleItems, type FakeOlderCopy, type FakeShell, type FakeVault } from "../testing/fakeShell";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -599,8 +599,94 @@ test("each_restore_refusal_shows_its_design_message", async () => {
   await within(screen.getByRole("main")).findByText(TOO_MANY);
   expect(screen.queryByRole("button", { name: "Replace" })).toBeNull();
   expect(screen.queryByRole("button", { name: "OK" })).toBeNull();
-  // The design's "Older copies" button waits for the task that builds it.
-  expect(screen.queryByRole("button", { name: /older copies/i })).toBeNull();
+  // The design's Older copies button is beside Cancel (Task 8): the copy is made and waits, so there is nothing to go back to but Cancel.
+  expect(screen.getByRole("button", { name: "Older copies" })).toBeTruthy();
+  press("Cancel");
+  await screen.findByLabelText(/^Password for /);
+  expect(sent("restore_discard")).toEqual([{ restore }]);
+});
+
+const TOO_MANY_REFUSAL = { code: "core", kind: "invalid_input", what: "too many before-restore copies" };
+
+/** The restore from the lock screen as far as the swap's refusal for too many older copies, with `list` kept beside the vault it would replace. */
+async function toTheTooManyRefusal(list: FakeOlderCopy[]) {
+  await onTheLockScreen();
+  shell.olderCopies(list);
+  await restoreFromTheLockScreen();
+  await toTheReplaceQuestion();
+  shell.restoreCommitRefuses(TOO_MANY_REFUSAL);
+  press("Replace");
+  await within(screen.getByRole("main")).findByText(TOO_MANY);
+}
+
+const KEPT: FakeOlderCopy[] = [
+  { vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 3 * MB },
+  { vault: 7, folder: "My vault.before-restore-2", last_written: "2026-11-05", size: 4 * MB },
+  { vault: 8, folder: "Other.before-restore", last_written: "2026-09-09", size: MB },
+];
+
+test("too_many_copies_offers_older_copies_and_replace_again", async () => {
+  // From the lock screen: no vault is open, so a copy can be deleted here and none opened.
+  await toTheTooManyRefusal(KEPT);
+  const [restore] = shell.preparedRestores();
+  press("Older copies");
+  await heading("Older copies");
+  const main = screen.getByRole("main");
+  expect(within(main).getByText("For My vault. Kept when you restored a backup over it.")).toBeTruthy();
+  expect(within(main).getByText("My vault.before-restore")).toBeTruthy();
+  expect(within(main).getByText("My vault.before-restore-2")).toBeTruthy();
+  expect(within(main).queryByText("Other.before-restore")).toBeNull();
+  expect(within(main).getByText("From 4 November 2026 · 3 MB")).toBeTruthy();
+  // Delete only: the flow can run with no vault open.
+  expect(within(main).queryByRole("button", { name: "Open read-only" })).toBeNull();
+  expect(within(main).getAllByRole("button", { name: "Delete" })).toHaveLength(2);
+  expect(within(main).getByText("Delete asks first, because it can't be undone.")).toBeTruthy();
+  await expectNoAxe(document.body);
+
+  // Back is the refusal again, and the copy still waits.
+  press("Back");
+  await within(screen.getByRole("main")).findByText(TOO_MANY);
+  expect(shell.preparedRestores()).toEqual([restore]);
+  press("Older copies");
+  await heading("Older copies");
+
+  // Delete asks first; the yes deletes it and the flow is at 24d again, with the same finished copy.
+  press("Delete", screen.getByText("My vault.before-restore").closest(".frow") as HTMLElement);
+  const dialog = await screen.findByRole("dialog", { name: "Delete My vault.before-restore?" });
+  expect(sent("delete_pre_restore").at(-1)?.confirm).toBe(false);
+  expect(shell.deletedOlderCopies()).toEqual([]);
+  press("Delete for good", dialog);
+  await heading("Replace your vault with this?");
+  expect(shell.deletedOlderCopies()).toEqual(["My vault.before-restore"]);
+  expect(shell.preparedRestores()).toEqual([restore]);
+
+  // Replace is pressed again, for the same finished copy, and goes through.
+  press("Replace");
+  await heading("My vault is restored");
+  expect(sent("restore_commit").map((args) => args.restore)).toEqual([restore, restore]);
+  expect(shell.discardedRestores()).toEqual([]);
+});
+
+test("the_older_copies_of_a_restore_follow_the_locks_as_the_question_does", async () => {
+  await toTheTooManyRefusal(KEPT);
+  press("Older copies");
+  await heading("Older copies");
+  // An idle lock leaves a finished restore, so the screen stays.
+  await theEpochMoves("idle");
+  expect(screen.getByRole("heading", { level: 1, name: "Older copies" })).toBeTruthy();
+  // Any other lock ended the finished restore: the flow goes without a word.
+  await theEpochMoves("manual");
+  await screen.findByLabelText(/^Password for /);
+  expect(screen.queryByRole("heading", { level: 1, name: "Older copies" })).toBeNull();
+});
+
+test("cancel_on_the_older_copies_screen_lets_the_finished_copy_go", async () => {
+  await toTheTooManyRefusal(KEPT);
+  const [restore] = shell.preparedRestores();
+  press("Older copies");
+  await heading("Older copies");
+  press("Back");
+  await within(screen.getByRole("main")).findByText(TOO_MANY);
   press("Cancel");
   await screen.findByLabelText(/^Password for /);
   expect(sent("restore_discard")).toEqual([{ restore }]);

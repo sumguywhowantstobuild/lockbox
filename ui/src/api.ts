@@ -943,12 +943,17 @@ export interface RestoreChecked {
   replaces_existing: boolean;
 }
 
-/** A finished copy, waiting for its swap (the shell's `RestorePreparedView`): `kept_as` is the folder name the older copy will have, when one is replaced. */
+/**
+ * A finished copy, waiting for its swap (the shell's `RestorePreparedView`): `kept_as` is the folder name the older copy will have, when one is replaced, and
+ * `replaces` is the vault the swap would replace, as its place on the vault list (the older copies of that vault are listed by `listPreRestore`); `null` when
+ * nothing is replaced, or the vault replaced is not on the list.
+ */
 export interface RestorePreparedView {
   restore: number;
   name: string;
   replaces_existing: boolean;
   kept_as: string | null;
+  replaces: number | null;
 }
 
 /** A finished swap (the shell's `RestoredView`): the vault to unlock, and whether the one it replaced was kept beside it. */
@@ -1032,6 +1037,50 @@ export async function restoreDiscard(restore: number): Promise<void> {
 /** Lets the picked backup go (the flow was cancelled). A pick that is unknown or already gone is no error. */
 export async function forgetRestorePick(choice: string): Promise<void> {
   await callPlain<null>("forget_restore_pick", { choice });
+}
+
+/**
+ * An older copy a restore kept beside a vault (the shell's `PreRestoreEntry`), as `listPreRestore` lists it. `id` is valid until the next listing, which replaces
+ * every ID; `vault` is the vault's place on the vault list; `folder` is the folder's name (never a path); `last_written` is the local day (`YYYY-MM-DD`) that vault
+ * was last written and `size` is its bytes on disk, each `null` when the shell could not read it.
+ */
+export interface PreRestoreEntry {
+  id: number;
+  vault: number;
+  name: string | null;
+  folder: string;
+  last_written: string | null;
+  size: number | null;
+}
+
+/** What opening an older copy answers: the read-only session's details beside the flag that its details were changed outside Lockbox (the shell's `PreRestoreOpened`). */
+export interface PreRestoreOpened extends SessionInfo {
+  header_changed: boolean;
+}
+
+/** Every older copy beside every vault on the list, with new IDs (the last listing's are gone). Never refuses. */
+export function listPreRestore(): Promise<PreRestoreEntry[]> {
+  return callPlain<PreRestoreEntry[]>("list_pre_restore", {});
+}
+
+/**
+ * Opens an older copy of the last listing as a read-only session beside the live vault, with what was typed as one box's (`password_or_key`: a well-formed
+ * recovery key is tried as a key, then as a password). A wrong one is `core` `wrong_password`; an ID the last listing does not have, or a folder that is not what it
+ * was listed as, is `not_found`. The new session is read-only, and a lock of it (`lockVault`) closes it.
+ */
+export async function openPreRestoreReadOnly(id: number, passwordOrKey: string): Promise<Tagged<PreRestoreOpened>> {
+  const answer = await open<PreRestoreOpened>("open_pre_restore_read_only", { id, credential: { password_or_key: passwordOrKey } });
+  // The command answers a tagged session and never asks a question or opens a dialog.
+  if (answer === "Dismissed" || "Confirm" in answer) throw new Error("unexpected answer to open_pre_restore_read_only");
+  return answer;
+}
+
+/**
+ * Deletes an older copy of the last listing, for good. Without `confirm` nothing is touched and the answer is the question (`Confirm` `DeletePreRestore`);
+ * with it the folder is deleted. `busy` (`what` `folder is open`) while a session is open on it; `not_found` for an ID the last listing does not have.
+ */
+export function deletePreRestore(id: number, confirm: boolean): Promise<Outcome<null>> {
+  return callPlain<Outcome<null>>("delete_pre_restore", { id, confirm });
 }
 
 /** Whether the vault's last backup, or its making when it has none, is 30 or more days ago. `null` when it is not, and always for a read-only copy. */

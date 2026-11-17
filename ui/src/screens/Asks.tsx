@@ -38,6 +38,9 @@ const PROVIDER: Record<CloudProvider, string> = {
 const DETAILS_CHANGED =
   "Its name, or other details kept beside your items, don't match what Lockbox last saved. Moving a vault or restoring a backup doesn't cause this. If you edited that file yourself, accept it. If you didn't, lock it and check your PC first; restoring a backup you trust is the safer way back. Backups stay off until you accept.";
 
+/** What Ask 3 says is wrong, in the design's words: also the first sentences of an older copy's warning. */
+const DETAILS_DIFFER = "Its name, or other details kept beside your items, don't match what Lockbox last saved.";
+
 /** The one word that fits one or many. */
 function count(n: number, one: string, many: string): string {
   return n === 1 ? one : many;
@@ -164,6 +167,14 @@ export function VaultBanners({ data }: { data: SessionData }) {
         <Notice
           text="Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password."
           actions={[{ name: "Later", onPress: close("spare") }]}
+        />
+      ) : null}
+      {asks.headerChanged && open("details") ? (
+        // An older copy opened read-only whose details were changed outside Lockbox. Ask 3's first sentences, for a copy that can't change: there is nothing to
+        // accept, and nothing is locked or turned off, so it is a banner. The last two sentences are this screen's own words.
+        <Notice
+          text={`${data.name}'s details were changed outside Lockbox. ${DETAILS_DIFFER} Nothing in this older copy can change. If you didn't edit its files yourself, check your PC first.`}
+          actions={[{ name: "Close", onPress: close("details") }]}
         />
       ) : null}
       {cloud !== null && open("cloud") ? (

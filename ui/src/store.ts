@@ -81,7 +81,9 @@ export type Tool =
   /** Back up this vault (22a to 22d). Where it is, is `SessionData.backup`, which outlives the panel while the backup runs. */
   | { kind: "backup" }
   /** Test a backup (23a to 23d), on the vault whose Settings or 22c opened it. Where it is, is `SessionData.test`, which goes with the panel. */
-  | { kind: "test_backup" };
+  | { kind: "test_backup" }
+  /** Older copies (24f), from Settings: the copies a restore kept of this vault, opened read-only or deleted. What it lists is `StoreState.olderCopies`. */
+  | { kind: "older_copies" };
 
 /**
  * Where a backup of this vault is (22a to 22d, and Ask 2), or `null` when none is begun. It lives in the session's record, so a lock takes it with
@@ -156,9 +158,10 @@ export interface RestoreFlow {
   /**
    * `picking`: Windows' picker is open (nothing is on screen yet); `pick`: 24a (and 24c's refusals' way back, with `problem`); `checking`: the backup is
    * being opened with what was typed; `where`: 24b; `cloud` and `name`: the questions the copy asked first, over 24b; `copying`: 24c's bar; `replace`: 24d;
-   * `swapping`: 24c's last words, with no bar; `refused`: a refusal on a screen of its own; `done`: 24e.
+   * `swapping`: 24c's last words, with no bar; `refused`: a refusal on a screen of its own; `older`: the refusal for too many older copies' way to delete
+   * some (24f, with Delete only), the finished copy still waiting; `done`: 24e.
    */
-  phase: "picking" | "pick" | "checking" | "where" | "cloud" | "name" | "copying" | "replace" | "swapping" | "refused" | "done";
+  phase: "picking" | "pick" | "checking" | "where" | "cloud" | "name" | "copying" | "replace" | "swapping" | "refused" | "older" | "done";
   /** The listed vault this restore was started for (Ask 4's open vault, Ask 8's damaged one), or `null`: every pick goes with it, so the backup unpacks in that vault's folder. */
   vault: number | null;
   /** While the folder is the one that vault gave it (the person has not chosen another): whose, for 24b's words; `null` otherwise. */
@@ -236,7 +239,7 @@ export type RecoveryStep =
   | { phase: "pick"; key: string; unfinished: boolean; asks: readonly Ask[]; at: number };
 
 /** The banners an unlock can raise, each closed with its own button (Asks 4, 5, 9 and 10). */
-export type Banner = "unreadable" | "leftover" | "spare" | "cloud" | "backup";
+export type Banner = "unreadable" | "leftover" | "spare" | "cloud" | "backup" | "details";
 
 /**
  * What an unlock found that the person has not answered yet. It lives in the session's record, so a lock drops it with
@@ -245,6 +248,11 @@ export type Banner = "unreadable" | "leftover" | "spare" | "cloud" | "backup";
 export interface SessionAsks {
   /** Ask 3 waits: the vault's details were changed outside Lockbox. */
   detailsChanged: boolean;
+  /**
+   * An older copy opened read-only whose details were changed outside Lockbox (the shell's `header_changed`). It is no question, since nothing in a read-only
+   * copy can be accepted: a banner says it, and closes (`"details"`).
+   */
+  headerChanged: boolean;
   /** The vault's recovery key was never confirmed, and its new key (21f) follows Ask 3's yes, not before. */
   keyWaits: boolean;
   /** Ask 3's answer is on its way, so a second press does nothing. */
@@ -267,6 +275,7 @@ export interface SessionAsks {
 
 const NO_ASKS: SessionAsks = {
   detailsChanged: false,
+  headerChanged: false,
   keyWaits: false,
   answering: false,
   detailsError: null,
@@ -519,6 +528,11 @@ export interface StoreState {
   /** The vault the lock screen chooses when it next opens (26c's Unlock after a folder came in), or `null`; the lock screen takes it once. */
   unlockPick: number | null;
   /**
+   * The older copies the shell last listed, or `null` until a listing has come. The shell replaces every ID at each listing, so this is the page's one
+   * listing: it is read again when Settings opens, when 24f opens and after each delete or open, and every button sends an ID from it as it is now.
+   */
+  olderCopies: api.PreRestoreEntry[] | null;
+  /**
    * The app's settings as the shell has them saved: read once at the start and made current by each save (`saveSettings`). `null` until
    * they come, and when they could not be read; the screens then use `DEFAULT_SETTINGS`. Nothing secret is in them, so a lock leaves them.
    */
@@ -558,6 +572,7 @@ const EMPTY: StoreState = {
   restore: null,
   moveIn: null,
   unlockPick: null,
+  olderCopies: null,
   settings: null,
 };
 
@@ -2456,6 +2471,7 @@ function takeRestoreEpoch(event: LockEpochEvent): void {
       else if (event.reason !== "idle") set({ ...state, restore: null });
       break;
     case "replace":
+    case "older":
       if (event.reason !== "idle") set({ ...state, restore: null });
       break;
     case "copying":
@@ -2518,6 +2534,205 @@ export function useUnlockPick(): number | null {
 /** The lock screen has taken the vault it was asked to choose. */
 export function clearUnlockPick(): void {
   if (state.unlockPick !== null) set({ ...state, unlockPick: null });
+}
+
+// ---- Older copies (Plan 4B Task 8: 24f and 24g) ----
+//
+// A restore keeps the vault it replaced beside the restored one. The shell lists those copies (`list_pre_restore`) and replaces every ID at each listing, so the page
+// holds one listing, here: it is read again when Settings opens, when 24f opens and after each delete or open, and a button names its copy by the vault and the folder's
+// name, which this store turns into the ID of the newest listing at the moment it sends. An answer of `not_found` means the listing changed under the page: it is read
+// again and the screen says so. Nothing typed is kept here: the box is the screen's own state, wiped as it is sent.
+
+/**
+ * The place on the vault list of a session that is not a vault's own: an older copy opened read-only. It is no listed vault's, so the places that mark a vault
+ * open (the side menu, the window's locked line, the search) never count the live vault as unlocked because its older copy is, and Settings, which counts the
+ * copies of the vault it is open on, finds none beside a copy.
+ */
+export const NOT_ON_THE_LIST = -1;
+
+/**
+ * The listings go one at a time: the shell replaces every ID when a listing ends, in the order they end, so two out at once could leave the page with IDs the
+ * shell has already replaced. This is the end of the last one asked; the next is sent only when it is over, and a press that needs an ID waits for it.
+ */
+let olderListingLine: Promise<void> = Promise.resolve();
+
+/** Reads the older copies again, after any listing already on its way. The shell never refuses a listing; if the bridge itself fails the page keeps what it had. */
+export function loadOlderCopies(): Promise<void> {
+  const run = olderListingLine.then(async () => {
+    try {
+      const list = await api.listPreRestore();
+      if (Array.isArray(list)) set({ ...state, olderCopies: list });
+    } catch {
+      // Nothing to say: the screens show the listing they had.
+    }
+  });
+  olderListingLine = run;
+  return run;
+}
+
+/** Opens asked for, and how many of them (the oldest first) were walked away from: the box's Cancel, or its panel closing, before the answer came. */
+let olderOpenTickets = 0;
+let olderOpenAbandoned = 0;
+/** The end of the last open asked: opens go one at a time too, so an abandoned one is over before the next is sent. */
+let olderOpenLine: Promise<void> = Promise.resolve();
+
+/**
+ * Walks away from every open that was asked and has not answered: its box was cancelled or its panel closed. One that has not been sent is never sent; one whose
+ * answer comes later is not shown, and the session the shell made for it is locked again.
+ */
+export function abandonOlderOpens(): void {
+  olderOpenAbandoned = olderOpenTickets;
+}
+
+/** The older copies as the screens read them: `null` until the first listing. */
+export function useOlderCopies(): api.PreRestoreEntry[] | null {
+  return useSelect((current) => current.olderCopies);
+}
+
+/** The ID the newest listing gives the copy in `folder` of `vault`, or `null` when it is not in it any more. */
+function olderCopyId(vault: number, folder: string): number | null {
+  return state.olderCopies?.find((entry) => entry.vault === vault && entry.folder === folder)?.id ?? null;
+}
+
+/** Opens 24f in the vault's panel, from Settings. It is the vault's copies, which a read-only session of it lists as well. */
+export function openOlderCopies(session: number): void {
+  update(session, (current) => ({ ...endReveals(current), openItem: null, tool: { kind: "older_copies" } }));
+}
+
+/** What opening an older copy came to: it is open (a read-only session, the window's now), the listing had changed (read again), or the vault locked meanwhile. */
+export type OlderOpen = "opened" | "changed" | "stale";
+
+/**
+ * Open read-only, with what was typed in one box (a password or a recovery key; the shell tries a well-formed key as a key, then as a password). A wrong one is
+ * thrown, for the step to say in the field. The copy opens as a read-only session of its own whose place on the list is `NOT_ON_THE_LIST`, so the live vault does
+ * not show as unlocked because of it. The listing is read again afterwards. A copy whose details were changed outside Lockbox (`header_changed`) opens all the
+ * same, with a banner that says so. An open that was walked away from (`abandonOlderOpens`) before its answer came shows nothing: the session the shell made is
+ * locked again, and `"stale"` is the answer.
+ */
+export async function openOlderCopy(vault: number, folder: string, passwordOrKey: string): Promise<OlderOpen> {
+  olderOpenTickets += 1;
+  const ticket = olderOpenTickets;
+  const abandoned = () => ticket <= olderOpenAbandoned;
+  const before = olderOpenLine;
+  let over = () => undefined;
+  olderOpenLine = new Promise<void>((resolve) => {
+    over = () => {
+      resolve();
+    };
+  });
+  try {
+    await before;
+    // The IDs of a listing on its way are the ones to send.
+    await olderListingLine;
+    if (abandoned()) return "stale";
+    const id = olderCopyId(vault, folder);
+    if (id === null) {
+      await loadOlderCopies();
+      return abandoned() ? "stale" : "changed";
+    }
+    let answer;
+    try {
+      answer = await api.openPreRestoreReadOnly(id, passwordOrKey);
+    } catch (error) {
+      // A press that was walked away from says nothing, whatever the shell answered: its words are not for the box that is on screen now.
+      if (abandoned() || error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
+      if (refusedWith(error, "not_found")) {
+        await loadOlderCopies();
+        return abandoned() ? "stale" : "changed";
+      }
+      throw error;
+    }
+    if (abandoned()) {
+      // Cancelled, or its panel closed, while the shell worked: the copy is not shown. What the shell opened is let go, unless the page holds that session already
+      // (the copy was open, and the shell answered with it): that one was not made by this open, and stays.
+      if (sessionOf(answer.session) === undefined) void api.lockVault(answer.session).catch(() => undefined);
+      return "stale";
+    }
+    const record = newRecord(answer, NOT_ON_THE_LIST, answer.data, null, { ...NO_ASKS, headerChanged: answer.data.header_changed });
+    set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+    void loadOlderCopies();
+    return await loadItems(record);
+  } finally {
+    over();
+  }
+}
+
+/**
+ * What a delete came to: the question is asked (24g), the copy is gone (the listing is read again), the listing had changed (read again), the shell's refusal, or
+ * `"cancelled"`: the question or its panel went (or a lock came) before the send, so nothing was sent.
+ */
+export type OlderDelete = "asked" | "deleted" | "changed" | "cancelled" | { failed: unknown };
+
+/** Deletes asked for, and how many of them (the oldest first) were walked away from: the question's Cancel, its panel closing, or a lock, before the send. */
+let olderDeleteTickets = 0;
+let olderDeleteAbandoned = 0;
+
+/**
+ * Walks away from every delete that was asked and has not been sent: a yes that waits for a listing on its way is dropped, so a copy is never deleted after the
+ * question was cancelled or the panel or the vault went. One the shell already has cannot be taken back.
+ */
+export function abandonOlderDeletes(): void {
+  olderDeleteAbandoned = olderDeleteTickets;
+}
+
+/**
+ * Delete, in two sends: without `confirm` the shell only asks (24g), touching nothing; with it the copy is deleted for good and the listing is read again. `busy`
+ * (the copy is open) and any other refusal come back as `failed`, for the screen to say through `messageFor`. Whether the call was walked away from
+ * (`abandonOlderDeletes`) is checked again right before the send, after the wait for a listing on its way; `onSend` runs at that moment, when the shell is handed a
+ * yes that nothing can stop any more.
+ */
+export async function deleteOlderCopy(vault: number, folder: string, confirm: boolean, onSend?: () => void): Promise<OlderDelete> {
+  olderDeleteTickets += 1;
+  const ticket = olderDeleteTickets;
+  const abandoned = () => ticket <= olderDeleteAbandoned;
+  // The IDs of a listing on its way are the ones to send.
+  await olderListingLine;
+  if (abandoned()) return "cancelled";
+  const id = olderCopyId(vault, folder);
+  if (id === null) {
+    await loadOlderCopies();
+    return "changed";
+  }
+  let answer;
+  try {
+    if (confirm) onSend?.();
+    answer = await api.deletePreRestore(id, confirm);
+  } catch (error) {
+    if (refusedWith(error, "not_found")) {
+      await loadOlderCopies();
+      return "changed";
+    }
+    return { failed: error };
+  }
+  if (typeof answer === "object" && "Done" in answer) {
+    await loadOlderCopies();
+    return "deleted";
+  }
+  return typeof answer === "object" && "Confirm" in answer && answer.Confirm === "DeletePreRestore" ? "asked" : { failed: UNEXPECTED };
+}
+
+/** The refusal for too many older copies: its Older copies button lists the copies of the vault the swap would replace, with Delete only. */
+export function showOlderCopiesInRestore(): void {
+  const flow = state.restore;
+  if (flow?.phase !== "refused" || flow.refusedAs !== "discard") return;
+  // The vault the swap would replace is on the list, or there is no list of its copies to show.
+  const replaces = flow.prepared?.replaces ?? null;
+  if (replaces === null) return;
+  moveRestore(flow.opening, flow.run, () => ({ phase: "older" }));
+}
+
+/** 24f's Back, inside the restore: the refusal again, with the finished copy still waiting. */
+export function backToTooManyRefusal(): void {
+  const flow = state.restore;
+  if (flow?.phase !== "older") return;
+  moveRestore(flow.opening, flow.run, () => ({ phase: "refused" }));
+}
+
+/** A copy was deleted inside the restore: back to 24d, so Replace can be pressed again for the same finished copy. */
+export function backToReplaceQuestion(): void {
+  const flow = state.restore;
+  if (flow?.phase !== "older") return;
+  moveRestore(flow.opening, flow.run, () => ({ phase: "replace", problem: null }));
 }
 
 /** How a save came out: made (the form is gone and the login is open), the vault locked meanwhile, or the shell's refusal. */
@@ -4438,6 +4653,12 @@ export function resetStoreForTests(): void {
   shortcutNoticeVoid = false;
   listRuns.clear();
   detailRuns.clear();
+  olderListingLine = Promise.resolve();
+  olderOpenLine = Promise.resolve();
+  olderOpenTickets = 0;
+  olderOpenAbandoned = 0;
+  olderDeleteTickets = 0;
+  olderDeleteAbandoned = 0;
   cleanupNotices = 0;
   resetJobsForTests();
   resetCloseAskForTests();

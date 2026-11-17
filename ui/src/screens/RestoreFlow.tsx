@@ -8,17 +8,22 @@ import { CredentialField } from "../parts/CredentialField";
 import { Dialog } from "../parts/Dialog";
 import { JobProgress } from "../parts/JobProgress";
 import { PasswordField } from "../parts/PasswordField";
+import { OLDER_COPIES, olderCopiesFor } from "../olderCopiesWords";
 import {
   answerRestoreQuestion,
+  backToReplaceQuestion,
   backToRestoreFile,
   backToRestoreFolder,
+  backToTooManyRefusal,
   checkRestore,
   chooseRestoreFolder,
   clearRestoreProblem,
   closeRestore,
+  NOT_ON_THE_LIST,
   pickAnotherRestore,
   replaceRestore,
   runRestore,
+  showOlderCopiesInRestore,
   unlockRestored,
   useRestore,
   type RestoreFlow as Flow,
@@ -36,6 +41,7 @@ import {
   WAITS,
   whereWords,
 } from "../restoreWords";
+import { OlderCopiesList } from "./OlderCopies";
 import { Frame } from "./setup/Frame";
 
 // Restore a backup (24a to 24e). Full-screen steps on the first-use screens' two-sided frame, shown by the app above whatever else it would show: the
@@ -68,7 +74,8 @@ function viewOf(flow: Flow): string {
  *   from another vault, ask first.
  * - **24c:** the bar and its Cancel, until the swap; then "Putting it in place", with no bar and no Cancel. **24d:** the question, when a vault is replaced.
  * - **24e:** the restored vault's own password, and Unlock.
- * - A refusal of the copy or the swap is a screen of its own with the design's words.
+ * - A refusal of the copy or the swap is a screen of its own with the design's words. The swap's refusal for too many older copies has an Older copies button beside
+ *   Cancel (24f, with Delete only): a delete goes back to 24d, and Replace is pressed again for the same finished copy.
  *
  * What is typed is this screen's own state: it is wiped as it is sent, and on every lock epoch. The screens have no message stack, so a polite place of
  * their own says the bar's start, the swap, the end and the refusals.
@@ -276,6 +283,8 @@ function Steps({ flow }: { flow: Flow }) {
   } else if (view === "refused") {
     // A refusal of the copy: OK goes back to 24b with the pick kept. A refusal of the swap leaves a finished copy that can only be let go.
     const again = flow.refusedAs === "again" && !isTooManyOlderCopies(flow.problem);
+    // Too many older copies: Delete some, then Replace again. The button lists the copies of the vault the swap would replace (when it is on the vault list).
+    const listable = !again && isTooManyOlderCopies(flow.problem) && flow.prepared?.replaces !== null && flow.prepared?.replaces !== undefined;
     steps = (
       <div className="fu">
         <h1 ref={heading} tabIndex={-1}>
@@ -287,11 +296,37 @@ function Steps({ flow }: { flow: Flow }) {
             <button type="button" className="prim" onClick={backToRestoreFolder}>
               OK
             </button>
+          ) : listable ? (
+            <>
+              <button type="button" className="prim" onClick={showOlderCopiesInRestore}>
+                {OLDER_COPIES}
+              </button>
+              <button type="button" className="lnk" onClick={cancel}>
+                Cancel
+              </button>
+            </>
           ) : (
             <button type="button" className="prim" onClick={cancel}>
               Cancel
             </button>
           )}
+        </div>
+      </div>
+    );
+  } else if (view === "older") {
+    // 24f inside the restore: Delete alone (the flow can run from the lock screen with no vault open, so nothing is opened here). A delete goes back to 24d, so Replace
+    // can be pressed again for the same finished copy; Back is the refusal again.
+    steps = (
+      <div className="fu">
+        <h1 ref={heading} tabIndex={-1}>
+          {OLDER_COPIES}
+        </h1>
+        <p className="fu-sub">{olderCopiesFor(name)}</p>
+        <OlderCopiesList vault={flow.prepared?.replaces ?? NOT_ON_THE_LIST} vaultName={name} canOpen={false} onDeleted={backToReplaceQuestion} />
+        <div className="fu-row">
+          <button type="button" className="lnk" onClick={backToTooManyRefusal}>
+            Back
+          </button>
         </div>
       </div>
     );
