@@ -2758,19 +2758,32 @@ mod tests {
         }
         let retries = Rc::new(RefCell::new(Vec::new()));
         {
-            let (retries, release_tx) = (Rc::clone(&retries), Rc::clone(&release_tx));
+            let (retries, release_tx, holder) = (
+                Rc::clone(&retries),
+                Rc::clone(&release_tx),
+                Rc::clone(&holder),
+            );
             at_retry(move |tries| {
                 retries.borrow_mut().push(tries);
                 if tries == 3
                     && let Some(release) = release_tx.borrow_mut().take()
                 {
                     release.send(()).unwrap();
+                    // Wait until the hold has really ended before the next try: the shell's test clock jumps on every
+                    // wait, so on a slow machine the whole 30-second limit could pass before the holder thread ran
+                    // (CI, 2026-11-17: the second file was refused as busy).
+                    if let Some(handle) = holder.borrow_mut().take() {
+                        handle.join().unwrap();
+                    }
                 }
             });
         }
         let before = ts.clock.now();
         let view = serde_json::to_value(done(ts.shell.save_all_start(&plan.choice, 1))).unwrap();
-        holder.borrow_mut().take().unwrap().join().unwrap();
+        assert!(
+            holder.borrow().is_none(),
+            "the hold was let go at the third try"
+        );
         assert_eq!(saved_names(&view), ["a.txt", "b.txt"]);
         assert_eq!(view["stopped"], Value::Null);
         assert!(

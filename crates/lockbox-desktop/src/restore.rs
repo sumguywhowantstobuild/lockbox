@@ -3009,7 +3009,12 @@ mod tests {
         let held = pick(&ts, &backup);
         let view = check(&ts, &held.choice);
         assert!(view.usual && view.replaces_existing);
-        assert_eq!(view.folder_shown, shown(&vault_dir(&ts)));
+        // The same folder, compared as a folder: GitHub's Windows runner spells its temp folder with a short name
+        // (RUNNER~1) in the test's profile and the long one in the vault list (CI, 2026-11-17).
+        assert_eq!(
+            fs::canonicalize(&view.folder_shown).unwrap(),
+            fs::canonicalize(vault_dir(&ts)).unwrap()
+        );
         assert_eq!(view.name, "Family");
         assert!(usual.is_dir(), "the vault made there made the folder");
         assert_eq!(
