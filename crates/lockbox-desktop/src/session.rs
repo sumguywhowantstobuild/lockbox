@@ -543,6 +543,9 @@ struct Inner {
     /// The token the jobs with no session are children of: cancelled and replaced by every lock of all vaults, in the
     /// same step as the epoch's bump.
     launch: CancelToken,
+    /// The epoch of the last lock of all vaults whose reason was not [`LockReason::Idle`]: set in the same step as the
+    /// epoch's bump, so it is right before any hook has run.
+    non_idle_epoch: u64,
     last_session: u64,
     /// Numbers opens and two-session links.
     last_serial: u64,
@@ -767,6 +770,14 @@ impl Sessions {
     /// (testing a backup) reads it before its work and compares after: a lock of all vaults in between drops its answer.
     pub(crate) fn epoch(&self) -> u64 {
         self.inner().epoch
+    }
+
+    /// Whether all vaults were locked since `epoch` was read for any reason but idle time (the person's Lock all, the
+    /// window's close, Windows locking, sleep, the app closing), or the app is closing. What a finished restore waiting
+    /// for its answer asks: an idle lock leaves it, any of these ends it. Read from the sessions' own count, so it is true
+    /// from the moment of the lock, before its hooks have run.
+    pub(crate) fn non_idle_lock_since(&self, epoch: u64) -> bool {
+        self.inner().non_idle_epoch > epoch || self.closing.load(Ordering::SeqCst)
     }
 
     /// The epoch now and the token of the jobs with no session in it, read in one step: a lock of all vaults either comes
@@ -1201,6 +1212,9 @@ impl Sessions {
                 Which::Some(_) => (Vec::new(), Vec::new(), None),
                 Which::All { close } => {
                     inner.epoch += 1;
+                    if reason != LockReason::Idle {
+                        inner.non_idle_epoch = inner.epoch;
+                    }
                     if close {
                         self.shut();
                     }
@@ -2552,6 +2566,46 @@ mod tests {
         assert!(held, "the first unlock's vault was still held");
         assert!(released, "every copy dropped");
         assert_eq!(answer.err(), Some(ShellError::Locked));
+    }
+
+    /// An idle lock of all vaults moves the epoch but is not a lock "by the person or by Windows" (the finished restore
+    /// survives it); every other lock of all vaults is, and so is the app closing. Read from the sessions' own
+    /// bookkeeping, so it is right even before a lock's hooks have run. One session's lock is none of them.
+    #[test]
+    fn an_idle_lock_is_told_apart_from_every_other_lock_of_all_vaults() {
+        let (_, sessions) = sessions();
+        let start = sessions.epoch();
+        assert!(!sessions.non_idle_lock_since(start));
+
+        sessions.lock_all(LockReason::Idle);
+        assert_ne!(sessions.epoch(), start);
+        assert!(!sessions.non_idle_lock_since(start), "idle is not one");
+
+        for reason in [
+            LockReason::Manual,
+            LockReason::WindowsLocked,
+            LockReason::Sleep,
+        ] {
+            let before = sessions.epoch();
+            sessions.lock_all(LockReason::Idle);
+            assert!(!sessions.non_idle_lock_since(before), "{reason:?}");
+            sessions.lock_all(reason);
+            assert!(sessions.non_idle_lock_since(before), "{reason:?}");
+            assert!(sessions.non_idle_lock_since(start), "{reason:?}");
+            assert!(
+                !sessions.non_idle_lock_since(sessions.epoch()),
+                "{reason:?}: only later locks count"
+            );
+        }
+
+        // A lock of one session moves nothing.
+        let now = sessions.epoch();
+        sessions.lock(SessionId(99), LockReason::Manual);
+        assert!(!sessions.non_idle_lock_since(now));
+
+        // The app closing counts, whatever the epoch.
+        sessions.shut();
+        assert!(sessions.non_idle_lock_since(sessions.epoch()));
     }
 
     /// Fix round 1: locations compare as Windows compares names (ordinal, ignoring case), not by Unicode lowercase.

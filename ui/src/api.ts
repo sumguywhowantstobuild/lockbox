@@ -915,6 +915,101 @@ export async function forgetTestBackup(choice: string): Promise<void> {
   await callPlain<null>("forget_test_backup", { choice });
 }
 
+/**
+ * A backup file the shell holds for Restore a backup under `choice` (32 lowercase hex characters): the page sees its name and size only. The shell keeps
+ * the path, and the credential the person types once the backup is checked, to itself, and lets the pick go at every lock, after five minutes unused, when
+ * another is picked, and at `forgetRestorePick`.
+ */
+export interface RestorePick {
+  choice: string;
+  file_name: string;
+  size: number;
+}
+
+/**
+ * What a checked backup says about itself and where it would go (the shell's `RestoreChecked`): the vault's name inside it, the day it was made
+ * (`YYYY-MM-DD`, the PC's own, or `null`), the folder it would go in as display text (never sent back), whether that is the usual vaults folder, and
+ * whether a vault with this backup's own vault ID is already in that folder (a restore then replaces it, after asking).
+ */
+export interface RestoreChecked {
+  name: string;
+  made: string | null;
+  folder_shown: string;
+  usual: boolean;
+  replaces_existing: boolean;
+}
+
+/** A finished copy, waiting for its swap (the shell's `RestorePreparedView`): `kept_as` is the folder name the older copy will have, when one is replaced. */
+export interface RestorePreparedView {
+  restore: number;
+  name: string;
+  replaces_existing: boolean;
+  kept_as: string | null;
+}
+
+/** A finished swap (the shell's `RestoredView`): the vault to unlock, and whether the one it replaced was kept beside it. */
+export interface RestoredView {
+  vault: number;
+  before_restore: boolean;
+}
+
+/**
+ * Opens the Windows picker (titled "Restore a backup") for a backup file and holds its path in the shell under a choice, launch-scoped. With `choice: null`
+ * it starts a pick; with the choice a pick answered, the new file replaces that one. `"Dismissed"` is a closed picker. A lock while the picker is open is
+ * refused as `locked` and holds nothing; `busy` (`what: "restore"`) while another restore is going. Plain: it needs no open vault.
+ */
+export function restorePick(choice: string | null): Promise<Outcome<RestorePick>> {
+  return callPlain<Outcome<RestorePick>>("restore_pick", { choice });
+}
+
+/**
+ * Unlocks the picked backup read-only (nothing is unpacked) with the typed text, as one box's (`password_or_key`), and answers what it is and where it
+ * would go. The shell keeps the working credential beside the pick, so the page sends the text once. A wrong one is `core` `wrong_password` (or a recovery
+ * key kind) and keeps the pick; a damaged backup is `core` `damaged`; a pick that is gone is `choice_expired`.
+ */
+export function restoreCheck(choice: string, credential: CredentialArg): Promise<RestoreChecked> {
+  return callPlain<RestoreChecked>("restore_check", { choice, credential });
+}
+
+/** Opens the Windows picker (titled "Restore into this folder") for another parent folder; answers the new `RestoreChecked`, or `"Dismissed"` (the folder stays). Needs a checked pick, else `choice_expired`. */
+export function restoreChooseFolder(choice: string): Promise<Outcome<RestoreChecked>> {
+  return callPlain<Outcome<RestoreChecked>>("restore_choose_folder", { choice });
+}
+
+/**
+ * The copy: checks the folder, then unpacks the backup beside the vault it replaces, as a launch-scoped job (`request` names it for `lockbox://job-started`
+ * and `lockbox://progress`, kind `restore`) that Cancel (`cancelOperation`) stops, leaving the vault as it was. A cloud-synced folder asks first
+ * (`Confirm` `CloudFolder`), and a folder holding a vault it can't tell apart asks for a new folder's name (`Confirm` `NewFolder`); both are answered with
+ * `restorePrepareConfirm`. A refusal of the copy (not enough space, a drive a vault can't live on, a file system limit) keeps the pick.
+ */
+export function restorePrepare(choice: string, request: number): Promise<Outcome<RestorePreparedView>> {
+  return callPlain<Outcome<RestorePreparedView>>("restore_prepare", { choice, request });
+}
+
+/** The person's answer to the question `restorePrepare` asked: the same copy job. `name` is the new folder's name the person chose, or `null` for none (the cloud question's yes, or the suggestion). */
+export function restorePrepareConfirm(token: string, name: string | null, request: number): Promise<Outcome<RestorePreparedView>> {
+  return callPlain<Outcome<RestorePreparedView>>("restore_prepare_confirm", { token, name, request });
+}
+
+/**
+ * The swap: puts the copy in place and keeps the vault it replaces beside it. A launch-scoped job with progress (`total` 1) and no Stop. Refused as
+ * `cancelled` when Windows locking, sleep, Lock all or closing ended the finished restore; `core` `invalid_input` with `what` `too many before-restore copies`
+ * when all the older copies' names are taken.
+ */
+export function restoreCommit(restore: number, request: number): Promise<RestoredView> {
+  return callPlain<RestoredView>("restore_commit", { restore, request });
+}
+
+/** Lets a finished copy go without swapping it in (24d's Cancel). */
+export async function restoreDiscard(restore: number): Promise<void> {
+  await callPlain<null>("restore_discard", { restore });
+}
+
+/** Lets the picked backup go (the flow was cancelled). A pick that is unknown or already gone is no error. */
+export async function forgetRestorePick(choice: string): Promise<void> {
+  await callPlain<null>("forget_restore_pick", { choice });
+}
+
 /** Whether the vault's last backup, or its making when it has none, is 30 or more days ago. `null` when it is not, and always for a read-only copy. */
 export function vaultBackupDue(vault: SessionRef): Promise<Tagged<BackupDue | null>> {
   return call<BackupDue | null>("vault_backup_due", { session: vault.session, generation: vault.generation });

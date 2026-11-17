@@ -280,12 +280,20 @@ impl Progress for Reporter {
 impl Shell {
     /// Begins a job with no session, in the lock epoch it starts in: its token is a child of the launch's, which a lock
     /// of all vaults cancels. Its answer goes through [`AutoLock::answer_job`](crate::autolock::AutoLock::answer_job),
-    /// so one that outlived the epoch is refused as `Locked`. Testing a backup uses it; the others that will (a restore's
-    /// copy, opening a backup read-only) come in later tasks, and the tests drive them now.
+    /// so one that outlived the epoch is refused as `Locked`. Testing a backup and a restore's copy use it; the other that
+    /// will (opening a backup read-only) comes in a later task, and the tests drive it now.
     pub fn begin_launch_job(&self, kind: JobKind, request: Option<u32>) -> RunningJob {
         let (epoch, launch) = self.sessions.launch_scope();
         self.autolock
             .begin_job(JobScope::Launch { epoch }, kind, &launch, request)
+    }
+
+    /// [`begin_launch_job`](Self::begin_launch_job) for a job the page's Stop must not reach (a restore's swap, past the
+    /// point of cancelling): told to the page the same way, and still cancelled by a lock of all vaults.
+    pub fn begin_launch_job_without_stop(&self, kind: JobKind, request: Option<u32>) -> RunningJob {
+        let (epoch, launch) = self.sessions.launch_scope();
+        self.autolock
+            .begin_job_without_stop(JobScope::Launch { epoch }, kind, &launch, request)
     }
 }
 
@@ -576,6 +584,42 @@ mod tests {
             names.len(),
             "a quiet job spoke"
         );
+    }
+
+    /// A job with no Stop (a restore's swap) is told to the page like any other, and counts as an operation, but no Stop
+    /// of the page reaches it: the page's `cancel_operation` finds nothing to stop and its token stays. A lock of all
+    /// vaults still cancels it, as it does every job.
+    #[test]
+    fn a_job_with_no_stop_is_told_but_never_stopped_by_the_page() {
+        let ts = TestShell::new();
+        let job = ts
+            .shell
+            .begin_launch_job_without_stop(JobKind::Restore, Some(6));
+        let operation = operation_of(&job);
+        let launch = JobScope::Launch { epoch: 0 };
+        assert_eq!(job.scope(), launch);
+        assert_eq!(
+            ts.shell.autolock.cancel_operation(operation, launch),
+            Err(ShellError::NotFound)
+        );
+        assert!(!job.token().is_cancelled(), "the page's Stop did nothing");
+
+        job.progress().advance(0, 1);
+        job.progress().advance(1, 1);
+        let started = ts.events.started();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0]["request"], json!(6));
+        assert_eq!(started[0]["kind"], json!("restore"));
+        assert_eq!(started[0]["scope"], json!({ "type": "launch", "epoch": 0 }));
+        assert_eq!(started[0]["operation"], json!(operation.0));
+        assert_eq!(ts.shell.autolock.running_kinds(), [JobKind::Restore]);
+
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(job.token().is_cancelled(), "a lock still stops it");
+        drop(job);
+        let sent = progress_of(&ts, operation);
+        assert_eq!(sent.last().unwrap()["finished"], json!(true));
+        assert!(ts.shell.autolock.running_kinds().is_empty());
     }
 
     /// Two starts in one session, both running at once: each is told to the page with its own `request`, and gets an

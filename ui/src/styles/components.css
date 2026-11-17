@@ -194,6 +194,11 @@
   margin-top: 14px;
 }
 
+/* A second line under the lock screen's form (Restore a backup): a quiet button whose words line up with the form's. */
+.lalt {
+  margin: 0 0 0 -8px;
+}
+
 .prim {
   height: 42px;
   padding: 0 20px;
@@ -253,6 +258,13 @@
 }
 
 .fu label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+/* The name of a group of the steps' controls that is not one control's label (24a's "Backup" over the file's row). */
+.fu-lab {
   display: block;
   margin-bottom: 6px;
   font-weight: 500;

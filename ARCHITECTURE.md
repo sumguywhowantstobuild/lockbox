@@ -80,7 +80,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `vault/source.rs` | One way to unlock and check a vault, whether it sits in a folder or inside a backup; also "test a backup" |
 | `vault/restore.rs` | Restore: check and extract into a hidden staging folder, the journaled swap into place, and recovery after a crash |
 | `vault/journal.rs` | The restore journal: its strict reader and validation, and the lock around it |
-| `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out |
+| `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out; for a backup, the date its signed manifest gives (`backup_created_at`) |
 | `search.rs` | The in-memory search index (returns item IDs, and the name of the attached file a match was in) |
 | `generator.rs` | Password and passphrase generator (EFF word list in `wordlists/`) |
 | `env_file.rs` | Reading and writing `.env` files (`NAME=value` lines) for keys; a line it can't read is reported by its number only, and every value is wiped |
@@ -316,14 +316,14 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
 | `outputs.rs` | The output journal (`pending-outputs.json`), the gate every decrypted file is published through, and the launch sweep |
 | `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries; also `save_name`, the lighter name rule for a folder's saved files (only what Windows refuses or what could leave the folder is changed) |
-| `restore.rs` | One restore at a time: its state machine, launch recovery, pre-restore copies and their checks |
+| `restore.rs` | One restore at a time: the five steps (pick, password check, folder, copy, swap), its state machine, launch recovery, pre-restore copies and their checks |
 | `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
 | `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
 | `settings.rs` | The app-wide settings with their bounds (`settings.json`): idle time, clipboard delay, theme, the save shortcut (two modifiers, a letter, digit or F1 to F12, never Ctrl with C, V or X) and capture protection |
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
 | `dates.rs` | The one date shape the shell writes and reads (RFC 3339, UTC, whole seconds), and "whole days since": the 30-day backup reminder counts from the last backup, else from the vault's creation |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again; a backup picked to be restored is held the same way (`PendingChoice::RestorePick`, with `forget_restore_pick`, and every use of it, a check or a copy, in use until it ends), and once the password has worked it also holds the credential that worked and what the check found (the vault's name, ID and date, and the folder), so the typed text is on the page only until it is sent; a lock of all vaults of any kind, an idle one included, drops it |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
@@ -332,7 +332,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `commands/add_files.rs` | Many files in: the picker and its held list (paths stay in Rust), and `add_files`, one job for the batch (one bar over every file's bytes) where each file is its own change of the vault, the vault is let go between two files, a file that cannot be read, or is no longer the size measured, is named and skipped, and a Stop or a refusal names what was not added |
 | `commands/batch.rs` | What the two batch jobs share: the bar over every file's bytes together, the 30 ms the vault is let go between two files, the wait while another command has the vault (tried every 50 ms for 30 s by the shell's clock), and what a cancelled job's token means |
 | `commands/save_all.rs` | Saving all of a folder's files: `save_all_files` (the picker, the shared destination checks, the batch's space, the plan), `save_all_files_confirm` (the cloud question's yes), `save_all_start` (the checks again, then one job over every file, each its own read of the vault, never replacing; a damaged file, one that went, a full drive and a Stop each named in the summary) and the summary's handle (`show_output_in_explorer`, `close_output`) |
-| `os/mod.rs` | The traits (`Dialogs`, `Launcher` (a link, an opened copy, a folder in Explorer), `IdleSource`, `Power`, `Clock` (monotonic time, the wall clock and the PC's local date), `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
+| `os/mod.rs` | The traits (`Dialogs`, `Launcher` (a link, an opened copy, a folder in Explorer), `IdleSource`, `Power`, `Clock` (monotonic time, the wall clock, the PC's local date and its offset from UTC, which turns a backup's UTC date into the day the person calls it), `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
 | `os/win.rs` | The real Windows calls (the real clocks included), the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
 | `os/signals.rs` | Turns a window message into an `OsSignal` |
 | `testing.rs` | The fakes (test builds only) |
@@ -447,11 +447,38 @@ the read-only flag. The generation is checked as the vault is let go, and the la
 so a blocked "How do you want to open this?" dialog cannot delay locking. Copies go at the lock, at close and at launch;
 one a viewer still holds is reported and retried.
 
-**Restore** (`restore_prepare`, `restore_commit`). The pickers run first, then `check_location` on the parent, then
-the engine's `prepare` in a long operation. `Prepared` holds no long operation: a question waiting for the user does not
-keep every vault unlocked. `restore_commit` locks the vault open at the destination with `LockReason::Restore`, waits
-up to 10 s for it to let go, and commits. Any other lock of the destination ends a restore that is not swapping (matched
-by location, so it also catches a vault unlocked after `prepare`). Once the swap starts it finishes or rolls back by the
+**Restore** (`restore_pick`, `restore_check`, `restore_choose_folder`, `restore_prepare`, `restore_prepare_confirm`,
+`restore_commit`, `restore_discard`, `forget_restore_pick`). Five steps on one held pick, none of which takes a path.
+`restore_pick` opens the picker ("Restore a backup", the backup filter) and holds the path as
+`PendingChoice::RestorePick { path, epoch, checked }`; `Busy` while a restore is alive. `restore_check` takes the typed
+text (`{ "password_or_key": text }`: a well-formed key is tried as a key, then as a password), opens the backup read-only
+without unpacking it (`ReadOnlyVault::open_backup`), and keeps the credential that worked (`Attempts::run_keeping`), the
+vault's name and ID, the day it was made (`backup_created_at` read in the PC's zone, `Clock::utc_offset_secs`) and the
+usual folder (`<Profile>\Lockbox Vaults`) in the pick; it is not a job, and a wrong password leaves the pick unchecked and
+held. `restore_choose_folder` (needs a checked pick) opens "Restore into this folder" starting in the pick's folder and
+moves the pick there, the credential kept (in the pending table only: across the dialog the call holds the folder it starts
+in and a use guard, `RestorePickUse::release_checked`, and takes the pick again after it, `ChoiceExpired` if it is gone, so
+a lock wipes the credential while the dialog is open). Both answer `RestoreChecked { name, made, folder_shown, usual,
+replaces_existing }`; the folder is shown as text and never accepted back. `restore_prepare` makes the usual folder when it
+is missing, runs `check_location` on the folder (a cloud folder asks first, the question holding the pick's token and no
+credential), then the engine's `prepare` as a launch-scoped job of kind `restore` (`begin_launch_job`: `job-started`, the
+bytes written as progress, a Stop by `cancel_operation`); the engine's own checks (the credential, the vault ID the check
+saw against the archive actually opened, `PreparedRestore::prepare_expecting`, free space, the destination) come first
+inside it, so a refusal is the job's answer. A refusal leaves the pick held (another folder can be chosen), except `backup
+changed` (the file is another vault's now: `InvalidInput`, nothing written, the pick and its credential forgotten); a
+finished copy, a Stop and a lock drop it, since the staged restore holds all it needs. An existing folder the
+engine cannot tell is the same vault asks for a new name (`Confirm::NewFolder`, suggested from the name and ID the check
+found, with no second unlocking). The answer carries `kept_as`: the name the swap will give the older copy, the first free
+of `<folder>.before-restore` and `-2` to `-99` by the engine's own rule (`None` when all are taken; the swap then refuses).
+
+`Prepared` holds no long operation, no credential and no unlocked vault (its staging folder is encrypted), so **an idle
+lock leaves it**: the lock hook (`Restores::locked`) tells `LockReason::Idle` apart and ends the restore for every other
+reason (Lock all, the window's close, Windows locking, sleep, closing), and `Sessions::non_idle_lock_since` says the same
+before the hook has run. `restore_commit` is a launch-scoped job with no Stop (`begin_launch_job_without_stop`:
+`job-started`, nought of one to one of one, and `cancel_operation` finds nothing to stop); it locks the vault open at
+the destination with `LockReason::Restore`, waits up to 10 s for it to let go, and commits. It is refused `Cancelled` only
+when the restore was ended by a lock other than an idle one, or by the person's lock of the destination (matched by
+location, so it also catches a vault unlocked after `prepare`). Once the swap starts it finishes or rolls back by the
 journal, whatever locks. A commit the engine says cannot be retried goes straight to recovery. A stale journal at
 `restore_prepare` runs recovery and answers with its result.
 
@@ -485,7 +512,10 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
 9. **A lock during an unlock discards the vault.** `lock_during_unlock_discards_vault`, `open_since_a_stale_epoch_answers_locked_and_does_not_open`.
 10. **A long operation pauses the idle timer; Windows lock and sleep cancel it.** `long_operation_pauses_idle`,
     `idle_counts_from_end_of_long_operation`, `windows_lock_cancels_long_operations`, `sleep_locks_all`, `keep_awake_off_when_last_op_ends`.
-    A question waiting for an answer does not pause it: `prepared_restore_does_not_stop_idle_lock`. The page's "Lock all"
+    A question waiting for an answer does not pause it, but a finished restore waiting for its answer survives an idle lock
+    (and only an idle one): `restore_copy_pauses_idle_time`, `finished_restore_survives_an_idle_lock`,
+    `lock_all_discards_a_finished_restore`, `windows_lock_discards_a_finished_restore`, `sleep_discards_a_finished_restore`.
+    The page's "Lock all"
     also cancels operations that have no session: `the_pages_lock_all_cancels_operations_without_a_session`. A Stop stops one
     job and a lock stops every job of its scope: `cancel_operation_stops_only_that_job`, `a_lock_cancels_every_job_of_its_session_and_sends_finished`,
     `lock_all_cancels_launch_jobs_and_refuses_their_answers`; the job events go to the main window only:

@@ -56,6 +56,19 @@ test("a_refusal_is_an_alert_tied_to_the_box", async () => {
   await expectNoAxe(document.body);
 });
 
+test("a_read_only_box_can_be_read_and_shown_but_not_typed_in", () => {
+  render(<CredentialField label={LABEL} value="kept" onChange={() => undefined} readOnly />);
+  const box = screen.getByLabelText<HTMLInputElement>(LABEL);
+  expect(box.readOnly).toBe(true);
+  expect(box.value).toBe("kept");
+  fireEvent.click(screen.getByRole("button", { name: "Show what you typed" }));
+  expect(box.getAttribute("type")).toBe("text");
+  // By default it is open.
+  cleanup();
+  render(<Probe />);
+  expect(screen.getByLabelText<HTMLInputElement>(LABEL).readOnly).toBe(false);
+});
+
 test("caps_lock_is_said_as_a_hint", () => {
   render(<Probe />);
   const box = screen.getByLabelText(LABEL);

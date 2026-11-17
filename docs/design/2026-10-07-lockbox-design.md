@@ -380,7 +380,11 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
    itself). Refused while a restore journal exists.
 2. **Unlock from the archive** with the backup's header and the user's password **or recovery key** (the backup may hold
    an older password; the UI says the restored vault's password is the backup's). Then verify the header MAC and the
-   manifest MAC.
+   manifest MAC. The app asks for this credential on the first screen, with the backup picked, and opens the backup
+   read-only without unpacking it (to say the vault's name and the day it was made); the credential that worked then waits
+   in Rust, never on the page, and the copy unlocks again with it (7.4). The copy opens the file again, so it compares
+   the vault ID it finds with the one the first look saw, and refuses before writing anything if the file was replaced by
+   another vault's backup in between.
 3. **Choose the destination** in the chosen parent folder:
    - The folder of the vault with the same ID: replace it (**several such folders → refuse**). The user may instead open
      the backup read-only (6.9).
@@ -631,7 +635,12 @@ combination, among them Bitwarden's browser extension, which fills a login with 
 - **Long operations** check for cancellation between chunks, delete their partial output (via 6.4 / 7.2 rules) and
   report "Cancelled: vault locked." A restore holds its own key from unlocking the backup, independent of any session
   of the destination vault; locking or closing the destination vault cancels a restore only before its swap starts (6.8).
-  A finished restore waiting for its answer stays through an idle lock; Windows locking or sleeping still cancels it.
+  A finished restore waiting for its answer stays through an idle lock (it holds no credential and no unlocked vault: its
+  staging folder is encrypted, and the person must still answer and then unlock the restored vault); every other lock of
+  all vaults still cancels it: Lock all, the window's close, Windows locking or sleeping, and the app closing. Before it
+  is finished, the backup is picked first and the password typed for it is checked then (the backup is opened, not
+  unpacked) and kept in Rust, in the choice held for the pick, until the copy finishes: any lock of all vaults, an idle
+  one included, drops that choice.
   **Each long operation has its own stop,** linked to the session's, and an operation ID says which: Cancel stops that
   operation and leaves others in the vault running, and a lock stops them all. A credential change or a new vault that a lock interrupts after it was written says so ("changed, but locked before it
   could be shown") instead of plain "locked".

@@ -49,6 +49,9 @@ const SEVERAL_COPIES: CoreError = CoreError::InvalidInput {
 const ALREADY_HERE: CoreError = CoreError::InvalidInput {
     what: "vault already here",
 };
+const CHANGED: CoreError = CoreError::InvalidInput {
+    what: "backup changed",
+};
 
 /// Where a restore puts the vault, in the parent folder it is given (spec 6.8 step 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +200,34 @@ impl PreparedRestore {
         cancel: &CancelToken,
         progress: &dyn Progress,
     ) -> Result<PreparedRestore> {
+        Self::prepare_expecting(
+            archive,
+            parent,
+            credential,
+            destination,
+            journal,
+            cancel,
+            progress,
+            None,
+        )
+    }
+
+    /// [`prepare`](Self::prepare) for a caller that looked at the backup before and shows the person what it saw:
+    /// `expected` is the vault ID it saw. The archive this call opens (the file may have been replaced since) is
+    /// compared with it as soon as it is unlocked, and another vault's is refused as `InvalidInput`
+    /// (`backup changed`) before the free-space look, the journal, the staging folder or any copy, so nothing is
+    /// written. `None` asks for no such look.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_expecting(
+        archive: &Path,
+        parent: &Path,
+        credential: Credential,
+        destination: RestoreDestination,
+        journal: &Path,
+        cancel: &CancelToken,
+        progress: &dyn Progress,
+        expected: Option<VaultId>,
+    ) -> Result<PreparedRestore> {
         // A bad name is refused before the archive is even opened (unlocking takes a second).
         if let RestoreDestination::NewFolder(chosen) = &destination {
             check_folder_name(chosen)?;
@@ -220,6 +251,9 @@ impl PreparedRestore {
         }
         let src = VaultSource::Archive(BackupArchive::open(archive, cancel)?);
         let opened = unlock_source(&src, &credential, cancel, None)?;
+        if expected.is_some_and(|seen| seen != opened.header.vault_id) {
+            return Err(CHANGED);
+        }
         check_opened(&opened)?;
         let refs = attached_refs(&opened);
         attached_blobs(&src, &refs)?;
@@ -955,6 +989,37 @@ pub(super) mod tests {
         );
         assert!(matches!(error(result), CoreError::WrongPassword));
         assert!(recorder.calls().is_empty());
+    }
+
+    /// A caller that checked a backup names the vault it saw: an archive of another vault (the file was replaced since)
+    /// is refused once it is unlocked, before the journal, the staging folder or any copy; the right one goes on.
+    #[test]
+    fn a_backup_of_another_vault_is_refused_before_anything_is_written() {
+        let _reset = Cleanup;
+        let (f, backup) = backed_up();
+        let other = VaultId([0x5A; 16]);
+        assert_ne!(other, f.vault.id());
+        let d = Dest::new();
+        let ask = |expected: VaultId| {
+            PreparedRestore::prepare_expecting(
+                &backup,
+                d.parent(),
+                Credential::Password(PW),
+                RestoreDestination::SameVault,
+                &d.journal(),
+                &CancelToken::new(),
+                &NoProgress,
+                Some(expected),
+            )
+        };
+
+        let refused = error(ask(other));
+        assert_eq!(format!("{refused:?}"), format!("{CHANGED:?}"));
+        d.assert_not_written();
+
+        let p = ask(f.vault.id()).unwrap();
+        assert_eq!(p.vault_id(), f.vault.id());
+        drop(p);
     }
 
     #[test]

@@ -367,14 +367,39 @@ impl AutoLock {
         parent: &CancelToken,
         request: Option<u32>,
     ) -> RunningJob {
+        self.begin_job_as(scope, kind, parent, request, true)
+    }
+
+    /// Like [`begin_job`](Self::begin_job), for a job past the point of cancelling by the page's Stop (a restore's swap):
+    /// it is told to the page and counts as an operation, but no Stop reaches it ([`cancel_operation`](Self::cancel_operation)
+    /// finds nothing to stop). A lock of its scope, Windows locking, sleep and closing still cancel its token, as they
+    /// do every job's; what it guards decides whether that still counts.
+    pub fn begin_job_without_stop(
+        &self,
+        scope: JobScope,
+        kind: JobKind,
+        parent: &CancelToken,
+        request: Option<u32>,
+    ) -> RunningJob {
+        self.begin_job_as(scope, kind, parent, request, false)
+    }
+
+    fn begin_job_as(
+        &self,
+        scope: JobScope,
+        kind: JobKind,
+        parent: &CancelToken,
+        request: Option<u32>,
+        stoppable: bool,
+    ) -> RunningJob {
         let session = match scope {
             JobScope::Session { session, .. } => Some(session),
             JobScope::Launch { .. } => None,
         };
         let token = parent.child();
-        let operation = self
-            .operations
-            .begin(session, kind, Some(scope), token.clone());
+        let operation =
+            self.operations
+                .begin(session, kind, stoppable.then_some(scope), token.clone());
         // Told as the job registers, before the engine reports anything. A closing app registers nothing: nothing is told.
         if let (Some(request), Some(operation)) = (request, operation.id()) {
             self.operations.notifier.job_started(&JobStarted {

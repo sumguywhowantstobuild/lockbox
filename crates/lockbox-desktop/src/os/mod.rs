@@ -756,6 +756,10 @@ pub trait Clock: Send + Sync {
     /// Today's date in the PC's own time zone, `YYYY-MM-DD`: what a person calls today (a backup file's suggested
     /// name). Only Windows knows the zone, so the real one is in `os::win`.
     fn local_date(&self) -> String;
+    /// How far the PC's time zone is east of UTC now, in seconds (negative: west): what turns a UTC moment (a backup's
+    /// date) into the day the person calls it. The offset in force now, not the one of the moment asked about, so a date
+    /// from the other side of a clock change can be an hour out: never more.
+    fn utc_offset_secs(&self) -> i64;
     /// Waits `time`: a test's fake clock just moves on by it.
     fn sleep(&self, time: Duration);
 }

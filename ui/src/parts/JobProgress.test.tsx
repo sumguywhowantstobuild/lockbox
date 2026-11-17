@@ -60,6 +60,21 @@ afterEach(() => {
   cleanup();
 });
 
+test("progress_bar_can_say_the_per_cent_alone_as_the_restore_draws_it", () => {
+  start(1, "restore");
+  render(<JobProgress operation={1} label="Checking and unpacking" figures="percent" />);
+  expect(screen.getByText("Starting…")).toBeTruthy();
+  move(1, 48, 100, false, "restore");
+  expect(screen.getByText("48%")).toBeTruthy();
+  expect(screen.queryByText(/ of /)).toBeNull();
+  const bar = screen.getByRole("progressbar");
+  expect(bar.getAttribute("aria-valuenow")).toBe("48");
+  expect(bar.getAttribute("aria-valuetext")).toBe("48%");
+  // Never rounded up to 100 before the work is done.
+  move(1, 999, 1000, false, "restore");
+  expect(screen.getByText("99%")).toBeTruthy();
+});
+
 test("progress_bar_shows_done_and_total_in_words", () => {
   start(1);
   render(<JobProgress operation={1} label="Adding a file" />);

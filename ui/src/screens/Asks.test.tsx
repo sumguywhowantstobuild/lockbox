@@ -369,8 +369,8 @@ test("ask13_newer_vault_has_no_buttons", async () => {
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toBe("Update Lockbox to open this vault. A newer version made it.");
   expect(messageFor(NEWER_VAULT)).toEqual({ title: "Update Lockbox to open this vault.", body: "A newer version made it." });
-  // The design gives it no button: the lock screen's own Unlock is the only one.
-  expect(buttonNames()).toEqual(["Unlock"]);
+  // The design gives it no button: the lock screen's own Unlock and its Restore a backup link are the only ones.
+  expect(buttonNames()).toEqual(["Unlock", "Restore a backup"]);
   await expectNoAxe(container);
 });
 
@@ -384,7 +384,7 @@ test("ask16_says_the_change_was_saved", async () => {
   });
   const words = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
   expect(await screen.findByText(words)).toBeTruthy();
-  expect(buttonNames()).toEqual(["Unlock"]);
+  expect(buttonNames()).toEqual(["Unlock", "Restore a backup"]);
   await expectNoAxe(container);
   // Unlocking with the new password is what it asked for: the note goes.
   await unlockIt();
@@ -400,9 +400,9 @@ test("unavailable_vault_says_so", async () => {
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toBe(words);
   expect(words).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
-  // Nothing to unlock and nothing that leads nowhere.
+  // Nothing to unlock; the one way on is the lock screen's Restore a backup (a backup can bring the vault back).
   expect(screen.queryByLabelText(/^Password for /)).toBeNull();
-  expect(buttonNames()).toEqual([]);
+  expect(buttonNames()).toEqual(["Restore a backup"]);
   await expectNoAxe(container);
 });
 
@@ -416,8 +416,8 @@ test("restore_notice_shows_words_with_no_buttons_until_4b", async () => {
   const { container } = start([vault()], [{ kind: "restore", state: "recovered", how: "finished" }]);
   const words = "Lockbox finished restoring a vault. Unlock with the password from when that backup was made.";
   expect(await screen.findByText(words)).toBeTruthy();
-  // Words only: no button of its own (the lock screen's Unlock is the answer).
-  expect(buttonNames()).toEqual(["Unlock"]);
+  // Words only: no button of its own (the lock screen's Unlock is the answer, beside its Restore a backup link).
+  expect(buttonNames()).toEqual(["Unlock", "Restore a backup"]);
   await expectNoAxe(container);
   // Unlocking is the answer: it does not come back after the next lock.
   await unlockIt();
@@ -443,7 +443,7 @@ test("a_restore_notice_of_4b_shows_nothing_and_no_path", async () => {
     expect(commandsSent()).toContain("launch_notices");
   });
   expect(container.textContent).not.toContain("SENTINEL");
-  expect(buttonNames()).toEqual(["Unlock"]);
+  expect(buttonNames()).toEqual(["Unlock", "Restore a backup"]);
 });
 
 test("damaged_vault_list_shows_its_own_screen_with_the_way_out", async () => {

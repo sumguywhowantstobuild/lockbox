@@ -81,7 +81,7 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
-use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime, GetTickCount};
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetLastInputInfo, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
@@ -864,6 +864,38 @@ impl Clock for SystemClock {
         // SAFETY: `now` is a writable SYSTEMTIME, which the call fills in; it cannot fail.
         unsafe { GetLocalTime(&mut now) };
         format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
+    }
+
+    /// The same instant read twice, as Windows' local time and as UTC, and the difference rounded to the minute (the two
+    /// reads are a few microseconds apart; every zone is a whole number of minutes from UTC).
+    fn utc_offset_secs(&self) -> i64 {
+        let empty = || SYSTEMTIME {
+            wYear: 0,
+            wMonth: 0,
+            wDayOfWeek: 0,
+            wDay: 0,
+            wHour: 0,
+            wMinute: 0,
+            wSecond: 0,
+            wMilliseconds: 0,
+        };
+        let (mut local, mut utc) = (empty(), empty());
+        // SAFETY: each is a writable SYSTEMTIME, which its call fills in; neither can fail.
+        unsafe {
+            GetLocalTime(&mut local);
+            GetSystemTime(&mut utc);
+        }
+        let seconds = |time: &SYSTEMTIME| {
+            crate::dates::civil_secs(
+                i64::from(time.wYear),
+                i64::from(time.wMonth),
+                i64::from(time.wDay),
+                i64::from(time.wHour),
+                i64::from(time.wMinute),
+                i64::from(time.wSecond),
+            )
+        };
+        (seconds(&local) - seconds(&utc) + 30).div_euclid(60) * 60
     }
 
     fn sleep(&self, time: Duration) {
@@ -3942,5 +3974,21 @@ mod tests {
             |text: &str| crate::dates::parse_utc(&format!("{}T00:00:00Z", &text[..10])).unwrap();
         let apart = day(&local).abs_diff(day(&utc));
         assert!(apart <= 86_400, "{local} against {utc}");
+    }
+
+    /// The real clock's zone is a whole number of minutes within the 14 hours either side of UTC that exist, and it is
+    /// the zone `local_date` names the day in: the UTC moment moved by it falls on the same date (read again once when
+    /// midnight passed between the two readings).
+    #[test]
+    fn the_real_clock_names_its_offset_from_utc() {
+        let clock = SystemClock;
+        let same_day = || {
+            let offset = clock.utc_offset_secs();
+            assert!(offset.abs() <= 14 * 3600, "{offset}");
+            assert_eq!(offset % 60, 0, "{offset}");
+            let secs = crate::dates::unix_secs(clock.wall());
+            crate::dates::local_date_of(secs, offset) == clock.local_date()
+        };
+        assert!(same_day() || same_day());
     }
 }

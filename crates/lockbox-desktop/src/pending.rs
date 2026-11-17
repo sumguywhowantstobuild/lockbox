@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 use crate::commands::readable::ReadableJob;
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
+use crate::restore::Checked;
 use crate::session::{Location, SessionId};
 
 /// How long a choice waits for its answer.
@@ -95,10 +96,11 @@ pub enum PendingChoice {
     /// `add_existing_vault` of a folder a cloud provider syncs, waiting for the user's yes (`Confirm::CloudFolder`):
     /// the folder chosen (canonical), so the dialog is not shown again.
     AddVault { dir: PathBuf },
-    /// `restore_prepare` waiting for a yes (`Confirm::CloudFolder` or `Confirm::NewFolder`): the backup and parent
-    /// picked, and the credential typed, so the confirming command neither asks for files again nor lets another
-    /// backup in. Boxed: the variant is much larger than the others.
-    Restore(Box<crate::restore::RestoreChoice>),
+    /// `restore_prepare` waiting for a yes (`Confirm::CloudFolder` or `Confirm::NewFolder`): the held pick it was asked
+    /// for (by its token) and what the yes decides, so the confirming command neither asks for files again nor lets
+    /// another backup in. It holds no credential and no path: those wait in the pick, which a refusal of the copy leaves
+    /// held.
+    Restore(crate::restore::RestoreChoice),
     /// `save_readable` to a cloud folder, waiting for the user's yes (`Confirm::CloudFolder`): the session and
     /// generation that asked (the yes goes on only while that session is still unlocked in that generation, never for
     /// another one), the job, and the destination (its folder canonical, as checked), so the dialog is not shown again.
@@ -172,6 +174,18 @@ pub enum PendingChoice {
     /// with the rest ([`Pending::drain`]). Kept through every answer of `test_backup`, each one starting its five minutes
     /// again ([`Pending::use_test_backup`]); dropped by [`Pending::forget_test_backup`]. Holds no secret.
     TestBackup { path: PathBuf, epoch: u64 },
+    /// The backup picked to be restored (`restore_pick`), waiting for the password check, the folder and the copy: its
+    /// path, which never goes to the page, the lock epoch it was held in, and, once the password has worked
+    /// (`restore_check`), what that found and the credential that worked, which waits here and not on the page (zeroized,
+    /// never logged). Launch-scoped as a held test backup is: a lock of one vault leaves it, and every lock of all vaults
+    /// (an idle one too), Windows locking or sleeping and closing drop it with the rest ([`Pending::drain`]). Kept
+    /// through a wrong password and through a refusal of the copy, each use starting its five minutes again
+    /// ([`Pending::use_restore_pick`]); dropped by [`Pending::forget_restore_pick`]. Holds a secret once checked.
+    RestorePick {
+        path: PathBuf,
+        epoch: u64,
+        checked: Option<crate::restore::Checked>,
+    },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
     Test(Option<Box<lockbox_core::Vault>>),
@@ -235,8 +249,8 @@ pub struct Pending {
 struct Parked {
     token: Token,
     until: Instant,
-    /// The attempts running on a held backup ([`Pending::use_test_backup`]): while any does, it is not swept for being
-    /// old. Always 0 for every other choice.
+    /// The attempts running on a held backup ([`Pending::use_test_backup`], [`Pending::use_restore_pick`]): while any
+    /// does, it is not swept for being old. Always 0 for every other choice.
     in_use: u32,
     choice: PendingChoice,
 }
@@ -260,6 +274,63 @@ impl TestBackupUse<'_> {
 impl Drop for TestBackupUse<'_> {
     fn drop(&mut self) {
         self.pending.end_test_backup(&self.token, (self.clock)());
+    }
+}
+
+/// A held restore pick a check or a copy is using: it is not swept for being old while this lives, and its five minutes
+/// start again when it is dropped ([`Pending::use_restore_pick`]). It carries what the pick held when the use began,
+/// the working credential included (shared, so a lock that drops the pick cannot pull it out from under the engine, which
+/// a lock cancels at once).
+pub struct RestorePickUse<'a> {
+    pending: &'a Pending,
+    token: Token,
+    path: PathBuf,
+    checked: Option<Checked>,
+    clock: &'a dyn Fn() -> Instant,
+}
+
+impl RestorePickUse<'_> {
+    /// The backup's path: never sent to the page.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// What the last successful check found, when one has.
+    pub fn checked(&self) -> Option<&Checked> {
+        self.checked.as_ref()
+    }
+
+    /// Lets go of the copy of what the pick found that this use carries, the credential among it: the use goes on as a
+    /// guard only (the pick is still in use, and not swept), and a long wait (a dialog) holds no secret outside the
+    /// pending table, whose drain then wipes it.
+    pub fn release_checked(&mut self) {
+        self.checked = None;
+    }
+
+    /// Keeps `checked` in the held pick, replacing what was there. Whether the pick was still held (a lock or a forget
+    /// has dropped it otherwise, and nothing is kept).
+    pub fn set_checked(&self, checked: Checked) -> bool {
+        self.pending.update_restore_pick(&self.token, |held| {
+            *held = Some(checked);
+            true
+        })
+    }
+
+    /// Moves the held pick's folder, keeping the rest of what it found and the credential. Whether it could: false for a
+    /// pick that is gone or not yet checked.
+    pub fn set_parent(&self, parent: PathBuf, usual: bool) -> bool {
+        self.pending.update_restore_pick(&self.token, |held| {
+            held.as_mut().is_some_and(|checked| {
+                checked.move_to(parent, usual);
+                true
+            })
+        })
+    }
+}
+
+impl Drop for RestorePickUse<'_> {
+    fn drop(&mut self) {
+        self.pending.end_restore_pick(&self.token, (self.clock)());
     }
 }
 
@@ -649,6 +720,91 @@ impl Pending {
         }
     }
 
+    /// Starts a use of the restore pick held under `token`, which must have been held in lock epoch `epoch` (the current
+    /// one), as [`use_test_backup`](Self::use_test_backup) does for a held test backup: its path and what it found
+    /// so far are the answer's, it is in use (no sweep drops it for being old) until the answer is dropped, and its five
+    /// minutes start again then, by `clock`. A forget, a new pick or a lock of all vaults still drops it, in use or not.
+    /// `ChoiceExpired` for a token that is not there, was dropped, is five minutes old and not in use, holds another kind
+    /// of choice (a held test backup too) or a pick of another epoch, with nothing changed. Never the generic `NotFound`.
+    pub fn use_restore_pick<'a>(
+        &'a self,
+        token: &Token,
+        epoch: u64,
+        clock: &'a dyn Fn() -> Instant,
+    ) -> ShellResult<RestorePickUse<'a>> {
+        let now = clock();
+        let (answer, expired) = {
+            let mut parked = lock(&self.parked);
+            let expired = take_expired(&mut parked, now);
+            let answer = parked
+                .iter_mut()
+                .find_map(|p| match &p.choice {
+                    PendingChoice::RestorePick {
+                        path,
+                        epoch: held,
+                        checked,
+                    } if *held == epoch && p.token.matches(token) => {
+                        let found = (path.clone(), checked.clone());
+                        p.until = now + LIFETIME;
+                        p.in_use += 1;
+                        Some(found)
+                    }
+                    _ => None,
+                })
+                .ok_or(ShellError::ChoiceExpired);
+            (answer, expired)
+        };
+        drop(expired);
+        answer.map(|(path, checked)| RestorePickUse {
+            pending: self,
+            token: Token(token.0.clone()),
+            path,
+            checked,
+            clock,
+        })
+    }
+
+    /// The end of a use ([`RestorePickUse`] dropped): one less in use, and five minutes from `now`. Nothing for a pick a
+    /// forget or a lock has dropped since.
+    fn end_restore_pick(&self, token: &Token, now: Instant) {
+        let mut parked = lock(&self.parked);
+        if let Some(p) = parked.iter_mut().find(|p| {
+            p.token.matches(token) && matches!(p.choice, PendingChoice::RestorePick { .. })
+        }) {
+            p.in_use = p.in_use.saturating_sub(1);
+            p.until = now + LIFETIME;
+        }
+    }
+
+    /// Changes what the restore pick held under `token` found, in place: `change` is given it, and its answer (whether it
+    /// changed anything) is returned; false for a pick that is not there. Under the table's lock: nothing slow in it.
+    fn update_restore_pick(
+        &self,
+        token: &Token,
+        change: impl FnOnce(&mut Option<Checked>) -> bool,
+    ) -> bool {
+        let mut parked = lock(&self.parked);
+        let held = parked.iter_mut().find_map(|p| match &mut p.choice {
+            PendingChoice::RestorePick { checked, .. } if p.token.matches(token) => Some(checked),
+            _ => None,
+        });
+        held.is_some_and(change)
+    }
+
+    /// Drops the restore pick held under `token`, and nothing else: a token that is not there, was dropped already, or
+    /// holds another kind of choice (a held test backup included) is left alone, with no error (forgetting is
+    /// idempotent). What it held, the credential among it, is wiped as it drops, with the table's lock released.
+    pub fn forget_restore_pick(&self, token: &Token) {
+        let gone = {
+            let mut parked = lock(&self.parked);
+            let found = parked.iter().position(|p| {
+                p.token.matches(token) && matches!(p.choice, PendingChoice::RestorePick { .. })
+            });
+            found.map(|at| parked.swap_remove(at))
+        };
+        drop(gone);
+    }
+
     /// Drops the backup held under `token`, and nothing else: a token that is not there, was dropped already, or holds
     /// another kind of choice is left alone, with no error (forgetting is idempotent).
     pub fn forget_test_backup(&self, token: &Token) {
@@ -755,8 +911,8 @@ fn find_picked<'a>(
     })
 }
 
-/// Takes the expired choices out of `parked`, for the caller to drop after releasing its lock. A held backup an attempt
-/// is using is not expired, whatever its age.
+/// Takes the expired choices out of `parked`, for the caller to drop after releasing its lock. A held backup (a test's or a
+/// restore's) a use is running on is not expired, whatever its age.
 fn take_expired(parked: &mut Vec<Parked>, now: Instant) -> Vec<PendingChoice> {
     let (expired, live): (Vec<Parked>, Vec<Parked>) = std::mem::take(parked)
         .into_iter()
@@ -1322,6 +1478,204 @@ mod tests {
         drop(pending.drain());
         assert_eq!(
             used(&pending, &token, 1, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    fn restore_pick(epoch: u64) -> PendingChoice {
+        PendingChoice::RestorePick {
+            path: PathBuf::from("a.lockbox-backup"),
+            epoch,
+            checked: None,
+        }
+    }
+
+    fn checked(parent: &str) -> crate::restore::Checked {
+        crate::restore::Checked::new(
+            crate::commands::backup::Typed::Password(Zeroizing::new("made-up".to_owned())),
+            "Family".to_owned(),
+            VaultId::random(),
+            Some("2026-11-16".to_owned()),
+            PathBuf::from(parent),
+            true,
+        )
+    }
+
+    /// One whole use of the held restore pick at `now`.
+    fn restore_used(
+        pending: &Pending,
+        token: &Token,
+        epoch: u64,
+        now: Instant,
+    ) -> ShellResult<PathBuf> {
+        let clock = || now;
+        pending
+            .use_restore_pick(token, epoch, &clock)
+            .map(|held| held.path().to_path_buf())
+    }
+
+    /// A held restore pick is used by its own token in the epoch it was held in, and by nothing else: another kind of
+    /// choice under the token (a held test backup too), a token that is not there and another epoch's pick answer
+    /// `ChoiceExpired` (never `NotFound`), and what is parked stays. The two held backups never take each other's.
+    #[test]
+    fn a_held_restore_pick_is_used_by_its_token_and_epoch_only() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(restore_pick(3), now);
+        let test_pick = pending.put_at(held(3), now);
+        let other = pending.put_at(picked(1, 1, &["a"]), now);
+        assert_eq!(
+            restore_used(&pending, &token, 3, now),
+            Ok(PathBuf::from("a.lockbox-backup"))
+        );
+        for (token, epoch) in [
+            (&token, 4),
+            (&test_pick, 3),
+            (&other, 3),
+            (&Token::random(), 3),
+        ] {
+            assert_eq!(
+                restore_used(&pending, token, epoch, now),
+                Err(ShellError::ChoiceExpired)
+            );
+        }
+        assert_eq!(
+            used(&pending, &token, 3, now),
+            Err(ShellError::ChoiceExpired),
+            "a restore pick is no test backup"
+        );
+        assert_eq!(pending.len(), 3, "nothing was taken");
+        assert!(pending.take_at(&token, now).is_ok());
+        assert_eq!(
+            restore_used(&pending, &token, 3, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// A held restore pick a use holds (a check, the copy) is not swept however long it runs, and its five minutes start
+    /// again when the use ends; each use starts them again, and one left alone is gone. A forget or a lock still drops
+    /// it in use, and the end of the use brings nothing back.
+    #[test]
+    fn a_held_restore_pick_in_use_is_not_swept_and_restarts_when_the_use_ends() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(restore_pick(1), now);
+        let time = std::cell::Cell::new(now);
+        let clock = || time.get();
+
+        let held = pending.use_restore_pick(&token, 1, &clock).unwrap();
+        time.set(now + LIFETIME + Duration::from_secs(60));
+        pending.sweep_at(time.get());
+        assert_eq!(pending.len(), 1, "swept while in use");
+        let ended = time.get();
+        drop(held);
+        pending.sweep_at(ended + LIFETIME - Duration::from_secs(1));
+        assert_eq!(pending.len(), 1, "five minutes from the end");
+        let again = ended + LIFETIME - Duration::from_secs(1);
+        assert!(restore_used(&pending, &token, 1, again).is_ok());
+        pending.sweep_at(again + LIFETIME);
+        assert_eq!(pending.len(), 0, "five minutes after the last use");
+
+        let token = pending.put_at(restore_pick(1), again);
+        let held = pending.use_restore_pick(&token, 1, &clock).unwrap();
+        pending.forget_restore_pick(&token);
+        drop(held);
+        assert_eq!(pending.len(), 0, "the end of the use brought it back");
+        let token = pending.put_at(restore_pick(1), again);
+        let held = pending.use_restore_pick(&token, 1, &clock).unwrap();
+        drop(pending.drain());
+        drop(held);
+        assert_eq!(
+            restore_used(&pending, &token, 1, again),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// Forgetting drops a held restore pick and only that: a held test backup under the token stays, and an unknown or
+    /// already-dropped token is nothing to forget, with no error.
+    #[test]
+    fn forget_restore_pick_drops_only_a_restore_pick() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(restore_pick(1), now);
+        let test_pick = pending.put_at(held(1), now);
+        pending.forget_restore_pick(&test_pick);
+        assert_eq!(pending.len(), 2);
+        pending.forget_test_backup(&token);
+        assert_eq!(pending.len(), 2, "a test backup's forget leaves a pick");
+        pending.forget_restore_pick(&token);
+        assert_eq!(pending.len(), 1);
+        pending.forget_restore_pick(&token);
+        pending.forget_restore_pick(&Token::random());
+        assert_eq!(pending.len(), 1);
+        assert!(used(&pending, &test_pick, 1, now).is_ok());
+    }
+
+    /// What the check found waits in the pick: put there once, replaced by the next check, its folder changed in place
+    /// with the credential kept; gone with the pick (a forget, a lock), and putting it back then says so.
+    #[test]
+    fn the_checked_credential_waits_in_the_pick_and_goes_with_it() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let clock = || now;
+        let token = pending.put_at(restore_pick(1), now);
+
+        let held = pending.use_restore_pick(&token, 1, &clock).unwrap();
+        assert!(held.checked().is_none(), "nothing checked yet");
+        assert!(!held.set_parent(PathBuf::from("early"), false), "no check");
+        assert!(held.set_checked(checked("usual")));
+        drop(held);
+
+        let held = pending.use_restore_pick(&token, 1, &clock).unwrap();
+        let first = held.checked().unwrap();
+        assert_eq!(
+            (first.name(), first.parent(), first.usual()),
+            ("Family", Path::new("usual"), true)
+        );
+        assert!(held.set_parent(PathBuf::from("elsewhere"), false));
+        drop(held);
+
+        let held = pending.use_restore_pick(&token, 1, &clock).unwrap();
+        let moved = held.checked().unwrap();
+        assert_eq!(
+            (moved.name(), moved.parent(), moved.usual()),
+            ("Family", Path::new("elsewhere"), false),
+            "the folder moved, the rest stayed"
+        );
+        assert!(matches!(
+            moved.credential(),
+            lockbox_core::Credential::Password("made-up")
+        ));
+        // Another check replaces it.
+        assert!(held.set_checked(checked("again")));
+        drop(held);
+        let held = pending.use_restore_pick(&token, 1, &clock).unwrap();
+        assert_eq!(held.checked().unwrap().parent(), Path::new("again"));
+
+        pending.forget_restore_pick(&token);
+        assert!(!held.set_checked(checked("late")), "the pick is gone");
+        assert!(!held.set_parent(PathBuf::from("late"), true));
+        drop(held);
+        assert_eq!(
+            restore_used(&pending, &token, 1, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// A lock of one vault leaves a held restore pick alone (it has no vault); a lock of all vaults drains it.
+    #[test]
+    fn locking_one_vault_leaves_a_restore_pick_and_draining_drops_it() {
+        let pending = Pending::default();
+        let token = pending.put(restore_pick(1));
+        pending.drop_env_pastes(Some(SessionId(1)));
+        pending.drop_stored_copies(Some(SessionId(1)));
+        pending.drop_picked_files(Some(SessionId(1)));
+        pending.drop_save_alls(Some(SessionId(1)));
+        let now = Instant::now();
+        assert!(restore_used(&pending, &token, 1, now).is_ok());
+        drop(pending.drain());
+        assert_eq!(
+            restore_used(&pending, &token, 1, now),
             Err(ShellError::ChoiceExpired)
         );
     }

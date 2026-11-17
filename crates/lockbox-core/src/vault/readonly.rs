@@ -100,6 +100,15 @@ impl ReadOnlyVault {
         self.header.vault_id
     }
 
+    /// When the backup was made (RFC 3339, UTC), as its manifest says: the manifest's MAC has been checked, so it is the
+    /// time the backup's maker signed. `None` for a vault folder, which has no manifest.
+    pub fn backup_created_at(&self) -> Option<&str> {
+        match &self.source {
+            VaultSource::Archive(archive) => Some(archive.manifest().created_at.as_str()),
+            VaultSource::Folder(_) => None,
+        }
+    }
+
     /// Whether the header MAC holds. Always true for a backup, which is refused otherwise.
     pub fn header_mac_ok(&self) -> bool {
         self.header_mac_ok
@@ -583,6 +592,28 @@ mod tests {
             &NoProgress,
         );
         assert!(matches!(result, Err(CoreError::NotFound)));
+    }
+
+    /// A backup says when it was made, as its signed manifest does (the date `verify_backup` reports); a vault folder has
+    /// no manifest, so it says nothing.
+    #[test]
+    fn a_backup_says_when_it_was_made_and_a_folder_does_not() {
+        let f = Fixture::new();
+        let backup = f.backup("a.lockbox-backup");
+        let made = crate::vault::source::verify_backup(
+            &backup,
+            Credential::Password(PW),
+            &CancelToken::new(),
+            &NoProgress,
+        )
+        .unwrap()
+        .created_at;
+        assert!(made.ends_with('Z'), "{made}");
+
+        let ro = open_backup(&backup).unwrap();
+        assert_eq!(ro.backup_created_at(), Some(made.as_str()));
+        let folder = open_folder(f.vault.dir()).unwrap();
+        assert_eq!(folder.backup_created_at(), None);
     }
 
     #[test]

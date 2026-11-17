@@ -623,12 +623,29 @@ test("shows_the_version", async () => {
   expect(commands("app_info")).toEqual([{}]);
 });
 
-test("no_restore_or_password_links_until_their_plans", async () => {
+test("restore_a_backup_follows_test_a_backup_in_this_vault_and_opens_the_first_step", async () => {
   const { panel } = await opened();
-  // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`) and Test a backup with Task 4 (`TestBackup.test.tsx`); the rest of the vault's rows wait
-  // for their own plans.
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Restore a backup"]);
+  const button = within(group).getByRole("button", { name: "Restore a backup" });
+  expect(button.getAttribute("aria-describedby")).not.toBeNull();
+  fireEvent.click(button);
+  await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+  expect(commands("restore_pick")).toEqual([{ choice: null }]);
+});
+
+test("a_read_only_vault_can_restore_a_backup_too", async () => {
+  // A restore does not write the open vault, so a copy opened from a backup offers it as any vault does (Back up is the one it hides).
+  const { panel } = await opened({ readOnly: true });
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Restore a backup"]);
+});
+
+test("no_password_links_until_their_plans", async () => {
+  const { panel } = await opened();
+  // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`), Test a backup with Task 4 (`TestBackup.test.tsx`) and Restore a backup with Task 5
+  // (`RestoreFlow.test.tsx`); the rest of the vault's rows wait for their own plans.
   for (const name of [
-    /restore/i,
     /older copies/i,
     /open a backup/i,
     /export/i,
@@ -647,6 +664,7 @@ test("no_restore_or_password_links_until_their_plans", async () => {
     "Change",
     "Back up",
     "Test a backup",
+    "Restore a backup",
   ]);
 });
 

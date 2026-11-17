@@ -6,7 +6,7 @@ import { Button } from "../parts/Button";
 import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
-import { closeTool, loadSettings, openBackup, saveSettings, startTestBackup, useSettings, type SaveTicket, type SessionData } from "../store";
+import { closeTool, loadSettings, openBackup, saveSettings, startRestore, startTestBackup, useRestore, useSettings, type SaveTicket, type SessionData } from "../store";
 
 /** The lists of the two time settings: the session's own steps, inside what the shell takes (1 to 60 minutes, 10 to 300 seconds). */
 const IDLE_MINUTES = [1, 2, 5, 10, 15, 30, 60];
@@ -123,6 +123,8 @@ function said(error: unknown, names?: { shortcut?: string }): string {
 export function SettingsPanel({ data }: { data: SessionData }) {
   const id = useId();
   const saved = useSettings();
+  // The picker of Restore a backup is open (or its steps are): a second press sends nothing.
+  const restoring = useRestore() !== null;
   const title = useRef<HTMLHeadingElement>(null);
   // What the person chose and the shell has not answered: the controls show it meanwhile.
   const [pending, setPending] = useState<Partial<api.Settings>>({});
@@ -423,6 +425,18 @@ export function SettingsPanel({ data }: { data: SessionData }) {
               }}
             >
               Test a backup
+            </Button>
+          </SettingsRow>
+          {/* Any vault's, a read-only one too: a restore unpacks a backup beside the vaults and writes nothing into the one that is open. */}
+          <SettingsRow label="Restore a backup" hint="Unpack a backup. Your current vault is kept beside it." hintId={`${id}-restore-hint`}>
+            <Button
+              aria-describedby={`${id}-restore-hint`}
+              aria-disabled={restoring ? true : undefined}
+              onClick={() => {
+                if (!restoring) void startRestore();
+              }}
+            >
+              Restore a backup
             </Button>
           </SettingsRow>
         </div>

@@ -518,6 +518,10 @@ impl Clock for FakeClock {
         crate::dates::rfc3339_utc(local)[..10].to_owned()
     }
 
+    fn utc_offset_secs(&self) -> i64 {
+        *lock(&self.2)
+    }
+
     /// No real wait: the clock moves on by `time`.
     fn sleep(&self, time: Duration) {
         *lock(&self.0) += time;

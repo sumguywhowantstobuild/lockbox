@@ -2,8 +2,9 @@
 //! copy an item out of one into an open vault. Every file comes from a dialog Rust opens inside the command, outside
 //! every lock; the page sends IDs and the typed credential only (§4.1).
 //!
-//! The restore commands are here too (their logic is in [`crate::restore`]). Nothing here puts a path, a name or an item's content in an error (R5): the views and
-//! [`Confirm::MissingFiles`] may carry the user's own file names, as the other results do.
+//! The restore commands are here too (their logic is in [`crate::restore`]). Nothing here puts a path, a name or an
+//! item's content in an error (R5): the views and [`Confirm::MissingFiles`] may carry the user's own file names, as the
+//! other results do.
 
 use std::fs;
 use std::path::Path;
@@ -28,7 +29,7 @@ use crate::jobs::{JobKind, JobScope};
 use crate::open::safe_name;
 use crate::pending::{PendingChoice, Token};
 use crate::restore::{
-    DestinationArg, PreRestoreEntry, RestoreNotice, RestorePreparedView, RestoredView,
+    PreRestoreEntry, RestoreChecked, RestoreNotice, RestorePick, RestorePreparedView, RestoredView,
 };
 use crate::session::{Location, OpenStep, Opened, SessionId, SessionInfo, Tagged, VaultRef};
 use crate::shell::Shell;
@@ -156,8 +157,9 @@ pub struct CopiedItemView {
 pub enum CredentialArg {
     Password(Zeroizing<String>),
     RecoveryKey(Zeroizing<String>),
-    /// Text that is either. Only [`CredentialArg::attempts`] reads it (`test_backup` is the one command that does so far):
-    /// [`CredentialArg::typed`] refuses it, so a command that has not been taught the two tries never takes it for one.
+    /// Text that is either. Only [`CredentialArg::attempts`] reads it (`test_backup` and `restore_check` are the commands
+    /// that do): [`CredentialArg::typed`] refuses it, so a command that has not been taught the two tries never takes it
+    /// for one.
     PasswordOrKey(Zeroizing<String>),
 }
 
@@ -221,6 +223,24 @@ impl Attempts {
     }
 }
 
+impl Attempts {
+    /// [`run`](Self::run), keeping the credential that worked: the answer and that try, which a restore holds in Rust for
+    /// the copy so the person types it once. Nothing is kept for an answer that is not good (the tries are wiped).
+    pub(crate) fn run_keeping<T>(
+        self,
+        mut try_with: impl FnMut(Credential<'_>) -> Result<T, CoreError>,
+    ) -> Result<(T, Typed), CoreError> {
+        let Attempts { first, then } = self;
+        match (try_with(first.credential()), then) {
+            (Ok(answer), _) => Ok((answer, first)),
+            (Err(CoreError::WrongPassword), Some(then)) => {
+                try_with(then.credential()).map(|answer| (answer, then))
+            }
+            (Err(refusal), _) => Err(refusal),
+        }
+    }
+}
+
 impl Typed {
     pub(crate) fn credential(&self) -> Credential<'_> {
         match self {
@@ -231,7 +251,7 @@ impl Typed {
 }
 
 /// The file's name, for the page to show as text (the user's own data; the folder never goes with it).
-fn display_name(path: &Path) -> String {
+pub(crate) fn display_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -710,23 +730,62 @@ pub(super) async fn copy_item_to(
     .await
 }
 
-/// `restore_prepare`: the backup's credential, and where the vault goes.
+/// `restore_pick`: the pick being replaced (Pick another), or `null` for the first pick.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestorePickArgs {
+    choice: Option<Token>,
+}
+
+/// `restore_check`: the held pick, and what was typed (a password or a recovery key, in the one box).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreCheckArgs {
+    choice: Token,
+    credential: CredentialArg,
+}
+
+/// `restore_choose_folder`: the held pick, whose folder is chosen.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChooseRestoreFolder {
+    choice: Token,
+}
+
+/// `forget_restore_pick`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForgetRestorePick {
+    choice: Token,
+}
+
+/// `restore_prepare`: the held pick, whose credential and folder are in Rust already, and the page's number for the job.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestorePrepare {
-    credential: CredentialArg,
-    destination: DestinationArg,
+    choice: Token,
+    /// The page's number for this job: its operation reaches the page by `lockbox://job-started` under it.
+    request: u32,
 }
 
-/// `restore_prepare_confirm`: the token of the question, and for a new folder its name.
+/// `restore_prepare_confirm`: the token of the question, for a new folder its name, and the page's number for the job.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestorePrepareConfirm {
     token: Token,
     name: Option<String>,
+    request: u32,
 }
 
-/// `restore_commit` and `restore_discard`.
+/// `restore_commit`: the finished restore, and the page's number for the swap's job.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreCommit {
+    restore: u32,
+    request: u32,
+}
+
+/// `restore_discard`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestoreArg {
@@ -754,16 +813,53 @@ struct OpenPreRestore {
 }
 
 #[tauri::command]
+pub(super) async fn restore_pick(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Outcome<RestorePick>> {
+    let RestorePickArgs { choice } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.restore_pick(choice.as_ref())).await
+}
+
+#[tauri::command]
+pub(super) async fn restore_check(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<RestoreChecked> {
+    let RestoreCheckArgs { choice, credential } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.restore_check(&choice, credential)).await
+}
+
+#[tauri::command]
+pub(super) async fn restore_choose_folder(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Outcome<RestoreChecked>> {
+    let ChooseRestoreFolder { choice } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.restore_choose_folder(&choice)).await
+}
+
+#[tauri::command]
+pub(super) async fn forget_restore_pick(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let ForgetRestorePick { choice } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.forget_restore_pick(&choice)).await
+}
+
+#[tauri::command]
 pub(super) async fn restore_prepare(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Outcome<RestorePreparedView>> {
-    let RestorePrepare {
-        credential,
-        destination,
-    } = args(&request)?;
+    let RestorePrepare { choice, request } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.restore_prepare(credential, destination)).await
+    blocking(move || shell.restore_prepare(&choice, request)).await
 }
 
 #[tauri::command]
@@ -771,9 +867,13 @@ pub(super) async fn restore_prepare_confirm(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Outcome<RestorePreparedView>> {
-    let RestorePrepareConfirm { token, name } = args(&request)?;
+    let RestorePrepareConfirm {
+        token,
+        name,
+        request,
+    } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.restore_prepare_confirm(&token, name)).await
+    blocking(move || shell.restore_prepare_confirm(&token, name, request)).await
 }
 
 #[tauri::command]
@@ -781,9 +881,9 @@ pub(super) async fn restore_commit(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<RestoredView> {
-    let RestoreArg { restore } = args(&request)?;
+    let RestoreCommit { restore, request } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.restore_commit(restore)).await
+    blocking(move || shell.restore_commit(restore, request)).await
 }
 
 #[tauri::command]
@@ -2264,21 +2364,36 @@ mod tests {
             sneaked["path"] = json!("SENTINEL-7f3a");
             assert!(!parses(sneaked));
         };
-        refuses_a_path(
-            json!({ "credential": password, "destination": "same_vault" }),
-            &|body| parse::<RestorePrepare>(&InvokeBody::Json(body)).is_ok(),
-        );
-        refuses_a_path(
-            json!({ "credential": password, "destination": { "new_folder": "Clients (restored)" } }),
-            &|body| parse::<RestorePrepare>(&InvokeBody::Json(body)).is_ok(),
-        );
-        refuses_a_path(json!({ "token": hex, "name": null }), &|body| {
-            parse::<RestorePrepareConfirm>(&InvokeBody::Json(body)).is_ok()
+        let one_box = json!({ "password_or_key": "pw" });
+        refuses_a_path(json!({ "choice": null }), &|body| {
+            parse::<RestorePickArgs>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "choice": hex }), &|body| {
+            parse::<RestorePickArgs>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "choice": hex, "credential": one_box }), &|body| {
+            parse::<RestoreCheckArgs>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "choice": hex }), &|body| {
+            parse::<ChooseRestoreFolder>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "choice": hex, "request": 4 }), &|body| {
+            parse::<RestorePrepare>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "choice": hex }), &|body| {
+            parse::<ForgetRestorePick>(&InvokeBody::Json(body)).is_ok()
         });
         refuses_a_path(
-            json!({ "token": hex, "name": "Clients (restored)" }),
+            json!({ "token": hex, "name": null, "request": 4 }),
             &|body| parse::<RestorePrepareConfirm>(&InvokeBody::Json(body)).is_ok(),
         );
+        refuses_a_path(
+            json!({ "token": hex, "name": "Clients (restored)", "request": 4 }),
+            &|body| parse::<RestorePrepareConfirm>(&InvokeBody::Json(body)).is_ok(),
+        );
+        refuses_a_path(json!({ "restore": 4, "request": 5 }), &|body| {
+            parse::<RestoreCommit>(&InvokeBody::Json(body)).is_ok()
+        });
         refuses_a_path(json!({ "restore": 4 }), &|body| {
             parse::<RestoreArg>(&InvokeBody::Json(body)).is_ok()
         });
@@ -2291,29 +2406,86 @@ mod tests {
         refuses_a_path(json!({ "id": 2, "credential": password }), &|body| {
             parse::<OpenPreRestore>(&InvokeBody::Json(body)).is_ok()
         });
+        // The copy takes the held pick and the page's number: the credential and the folder are in Rust already, so
+        // neither is accepted again, and neither is a destination or a path.
         for bad in [
-            json!({ "credential": password, "destination": "elsewhere" }),
-            json!({ "credential": password, "destination": { "new_folder": 7 } }),
-            json!({ "credential": password, "destination": { "path": "SENTINEL-7f3a" } }),
-            json!({ "credential": password }),
-            json!({ "credential": password, "destination": "same_vault", "restore": 1 }),
+            json!({ "choice": hex }),
+            json!({ "request": 4 }),
+            json!({ "choice": null, "request": 4 }),
+            json!({ "choice": "SENTINEL-7f3a", "request": 4 }),
+            json!({ "choice": hex, "request": -1 }),
+            json!({ "choice": hex, "request": "4" }),
+            json!({ "choice": hex, "request": 4, "credential": password }),
+            json!({ "choice": hex, "request": 4, "destination": "same_vault" }),
+            json!({ "choice": hex, "request": 4, "destination": { "new_folder": "x" } }),
         ] {
             let refused = parse::<RestorePrepare>(&InvokeBody::Json(bad.clone()));
             assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
         }
+        // The check takes a token and one credential: a password, a key, or the one box; not two, and not none.
+        for good in [
+            json!({ "password": "pw" }),
+            json!({ "recovery_key": "k" }),
+            json!({ "password_or_key": "pw" }),
+        ] {
+            let body = json!({ "choice": hex, "credential": good });
+            assert!(parse::<RestoreCheckArgs>(&InvokeBody::Json(body)).is_ok());
+        }
+        for bad in [
+            json!({ "choice": hex }),
+            json!({ "credential": one_box }),
+            json!({ "choice": null, "credential": one_box }),
+            json!({ "choice": "SENTINEL-7f3a", "credential": one_box }),
+            json!({ "choice": hex, "credential": { "password_or_key": "x", "password": "y" } }),
+            json!({ "choice": hex, "credential": one_box, "request": 4 }),
+        ] {
+            let refused = parse::<RestoreCheckArgs>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        // The folder and the forget name a held pick: always one, never none.
+        for bad in [
+            json!({}),
+            json!({ "choice": null }),
+            json!({ "choice": 7 }),
+            json!({ "choice": "x" }),
+        ] {
+            let refused = parse::<ChooseRestoreFolder>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+            let refused = parse::<ForgetRestorePick>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        // The first pick has no choice yet: `null`, or left out.
+        assert!(parse::<RestorePickArgs>(&InvokeBody::Json(json!({}))).is_ok());
+        for bad in [json!({ "choice": 7 }), json!({ "choice": "x" })] {
+            let refused = parse::<RestorePickArgs>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
         // A token is exactly 32 lowercase hex characters, and the answer's name is text or nothing.
         for bad in [
-            json!({ "token": "SENTINEL-7f3a", "name": null }),
-            json!({ "token": hex.to_uppercase(), "name": null }),
-            json!({ "token": hex, "name": 5 }),
-            json!({ "name": "x" }),
+            json!({ "token": "SENTINEL-7f3a", "name": null, "request": 4 }),
+            json!({ "token": hex.to_uppercase(), "name": null, "request": 4 }),
+            json!({ "token": hex, "name": 5, "request": 4 }),
+            json!({ "token": hex, "name": null }),
+            json!({ "name": "x", "request": 4 }),
         ] {
             let refused = parse::<RestorePrepareConfirm>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        // The swap takes the restore's number and the page's; the discard takes the number only.
+        for bad in [
+            json!({ "restore": -1, "request": 5 }),
+            json!({ "restore": "4", "request": 5 }),
+            json!({ "restore": 4 }),
+            json!({ "request": 5 }),
+            json!({}),
+        ] {
+            let refused = parse::<RestoreCommit>(&InvokeBody::Json(bad.clone()));
             assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
         }
         for bad in [
             json!({ "restore": -1 }),
             json!({ "restore": "4" }),
+            json!({ "restore": 4, "request": 5 }),
             json!({}),
         ] {
             let refused = parse::<RestoreArg>(&InvokeBody::Json(bad.clone()));

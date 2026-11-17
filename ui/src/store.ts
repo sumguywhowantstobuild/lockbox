@@ -16,7 +16,7 @@ import { spokenEnd } from "./saveAllWords";
 import { announceJob, cancelRequest, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
 import { leftOutWords } from "./format";
 import { backupNotFinishedMore, BACKUP_NOT_FINISHED } from "./messages";
-import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, SearchHit, VaultEntry } from "./api";
+import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, LockEpochEvent, SearchHit, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
 
 /** A stored file the shell refused to open or save as damaged, for the item panel to say beside that file. */
@@ -127,6 +127,48 @@ export interface TestFlow {
   view: api.BackupSummaryView | null;
   /** The engine's refusal for a damaged backup, for 23d. */
   damage: unknown;
+}
+
+/**
+ * Where Restore a backup is (24a to 24e), or `null` when it is not begun. It is the app's, not a vault's: it lives beside the sessions, so a lock of the
+ * open vault (or the swap closing the vault it replaces) does not take its screens away. The backup's path and the credential typed for it are never
+ * here: the shell holds the path, and the credential waits in the shell beside the pick once the backup is checked. The page holds the name and size it
+ * was told and the choice, and the typed text is the box's own state, wiped as it is sent.
+ */
+export interface RestoreFlow {
+  /** Counts the times a restore was begun: an answer meant for an earlier one is dropped. */
+  opening: number;
+  /** Moves on at every step: an answer meant for an earlier step of this restore is dropped. */
+  run: number;
+  /**
+   * `picking`: Windows' picker is open (nothing is on screen yet); `pick`: 24a (and 24c's refusals' way back, with `problem`); `checking`: the backup is
+   * being opened with what was typed; `where`: 24b; `cloud` and `name`: the questions the copy asked first, over 24b; `copying`: 24c's bar; `replace`: 24d;
+   * `swapping`: 24c's last words, with no bar; `refused`: a refusal on a screen of its own; `done`: 24e.
+   */
+  phase: "picking" | "pick" | "checking" | "where" | "cloud" | "name" | "copying" | "replace" | "swapping" | "refused" | "done";
+  /** The choice the shell holds the backup's path under, or `null` while none is picked (before the first pick, or once the shell let it go). */
+  choice: string | null;
+  fileName: string | null;
+  size: number;
+  /** The picker is open for Pick another or Choose another. */
+  busy: boolean;
+  /** What the last step was refused with, said under the box (a wrong password), under the file, or on the refusal's own screen; or `null`. */
+  problem: unknown;
+  /** What the checked backup is and where it would go (24b, and the date 24e names). `null` before the check. */
+  checked: api.RestoreChecked | null;
+  /** The number the copy's or the swap's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
+  request: number | null;
+  /** The token a question waits under (`cloud`, `name`), and the name suggested for a new folder (`name`). */
+  token: string | null;
+  suggested: string;
+  /** The finished copy, waiting for its swap (24d), until the swap is done. */
+  prepared: api.RestorePreparedView | null;
+  /** The swap's answer: the vault to unlock (24e). */
+  restored: api.RestoredView | null;
+  /** On `refused`: whether OK goes back to 24b with the pick kept (`again`), or the finished copy can only be let go (`discard`). */
+  refusedAs: "again" | "discard";
+  /** During the copy: a lock that is not an idle one came, so the shell has ended whatever the copy was making. An answer that comes after it is not acted on. */
+  lockEnded: boolean;
 }
 
 /** What the new-login form sends: the person's own text, as typed. The shell completes the website and checks the limits. */
@@ -439,6 +481,8 @@ export interface StoreState {
   search: SearchState | null;
   /** The copy the shortcut left waiting, or `null` for none. */
   capture: CaptureView | null;
+  /** Restore a backup, or `null` while none is begun. It is the app's own: no vault's lock takes it away. */
+  restore: RestoreFlow | null;
   /**
    * The app's settings as the shell has them saved: read once at the start and made current by each save (`saveSettings`). `null` until
    * they come, and when they could not be read; the screens then use `DEFAULT_SETTINGS`. Nothing secret is in them, so a lock leaves them.
@@ -476,6 +520,7 @@ const EMPTY: StoreState = {
   lockNote: null,
   search: null,
   capture: null,
+  restore: null,
   settings: null,
 };
 
@@ -1272,6 +1317,12 @@ export function startNotices(): Promise<void> {
     }
     // The jobs' progress; each of its listeners can fail alone, and the window then shows no bar.
     await startJobs();
+    // Where a lock epoch leaves the restore's steps (24a to 24e): the reason matters there, and nowhere else.
+    try {
+      await api.onLockEpoch(takeRestoreEpoch);
+    } catch {
+      // Without it a restore's steps stay up after a lock, and the shell's answers to what they send say it has gone.
+    }
     // The question a close or a Quit asks while a job runs (33b); it is heard from here on, whichever screen is up.
     await startCloseAsk();
     try {
@@ -1871,6 +1922,408 @@ export function clearTestProblem(session: number): void {
 /** Closes the Test a backup panel (Cancel, Done, Close, Escape): a test that runs is stopped and the backup picked is let go. */
 export function closeTestBackup(session: number): void {
   update(session, (current) => ({ ...current, tool: current.tool?.kind === "test_backup" ? null : current.tool, test: null }));
+}
+
+// ---- Restore a backup (24a to 24e) ----
+//
+// The backup is picked first, in Windows' own dialog that Rust opens, and Rust holds its path under a choice. The password or recovery key is typed once and
+// sent with the choice to check the backup (`restoreCheck`); Rust keeps the working credential beside the pick, so the page never holds it after it is sent.
+// Then the folder, the copy (a job with a bar and a Cancel), the question when a vault is replaced, and the swap (a job with no Cancel). Every answer is
+// matched to the step it was asked in (`opening` and `run`): one that comes after the flow was left or moved on comes to nothing.
+
+/** The number of the last time Restore a backup was begun, and of the last step taken in any of them. */
+let restoreOpenings = 0;
+let restoreRuns = 0;
+
+/** What the first step says after a copy was stopped (Cancel, Windows locking or sleeping, Lock all, closing): `messages.ts` has its words. */
+const RESTORE_CANCELLED = { code: "page", kind: "restore_cancelled" };
+
+/** The flow's first step, waiting for the picker (`pick` is `null`) or with a backup picked. */
+function newRestore(opening: number, run: number, pick: api.RestorePick | null): RestoreFlow {
+  return {
+    opening,
+    run,
+    phase: pick === null ? "picking" : "pick",
+    choice: pick?.choice ?? null,
+    fileName: pick?.file_name ?? null,
+    size: pick?.size ?? 0,
+    busy: false,
+    problem: null,
+    checked: null,
+    request: null,
+    token: null,
+    suggested: "",
+    prepared: null,
+    restored: null,
+    refusedAs: "again",
+    lockEnded: false,
+  };
+}
+
+/** Whether the restore the caller began is still at the step it was in. */
+function restoreStill(opening: number, run: number): boolean {
+  return state.restore?.opening === opening && state.restore.run === run;
+}
+
+/**
+ * Takes the flow to its next step while it is still at `run`: the changes are made and the run number moves on, so an answer to the step before is
+ * dropped. Returns the new run, or `null` when the flow had been left or had moved on.
+ */
+function moveRestore(opening: number, run: number, change: (flow: RestoreFlow) => Partial<RestoreFlow>): number | null {
+  const flow = state.restore;
+  if (flow?.opening !== opening || flow.run !== run) return null;
+  restoreRuns += 1;
+  set({ ...state, restore: { ...flow, ...change(flow), run: restoreRuns } });
+  return restoreRuns;
+}
+
+/** What the first step says when the shell has let the picked backup go, and nothing is picked: the same words as Test a backup's. */
+function noFile(problem: unknown): Partial<RestoreFlow> {
+  return { phase: "pick", busy: false, choice: null, fileName: null, size: 0, checked: null, request: null, token: null, problem };
+}
+
+/** A pick the page no longer has a place for (the flow was left, or a lock came while the picker was open): the shell is told to forget it. */
+function forgetRestoreStray(choice: string): void {
+  void api.forgetRestorePick(choice).catch(() => undefined);
+}
+
+/**
+ * Settings' and the lock screen's "Restore a backup": opens Windows' picker for the backup file first, and the first step opens on it, with nothing sent
+ * but the pick. A closed picker says nothing and opens nothing; a lock while it was open too. Any other refusal (another restore is going) opens the first
+ * step with no file and its words under the row. While the picker is open the button waits, so a second press sends nothing.
+ */
+export async function startRestore(): Promise<void> {
+  if (state.restore !== null) return;
+  restoreOpenings += 1;
+  restoreRuns += 1;
+  const opening = restoreOpenings;
+  const run = restoreRuns;
+  set({ ...state, restore: newRestore(opening, run, null) });
+  let answer: Awaited<ReturnType<typeof api.restorePick>>;
+  try {
+    answer = await api.restorePick(null);
+  } catch (error) {
+    if (!restoreStill(opening, run)) return;
+    if (refusedAsLocked(error)) set({ ...state, restore: null });
+    else moveRestore(opening, run, () => ({ phase: "pick", problem: error }));
+    return;
+  }
+  if (!restoreStill(opening, run)) {
+    if (typeof answer === "object" && "Done" in answer) forgetRestoreStray(answer.Done.choice);
+    return;
+  }
+  if (answer === "Dismissed") {
+    set({ ...state, restore: null });
+  } else if ("Done" in answer) {
+    const pick = answer.Done;
+    moveRestore(opening, run, () => ({ phase: "pick", choice: pick.choice, fileName: pick.file_name, size: pick.size }));
+  } else {
+    moveRestore(opening, run, () => ({ phase: "pick", problem: UNEXPECTED }));
+  }
+}
+
+/** Pick another (and Pick a backup, when the choice has gone): the new file replaces the old one in the shell; a closed picker leaves the file as it was. */
+export async function pickAnotherRestore(): Promise<void> {
+  const flow = state.restore;
+  if (flow === null || flow.phase !== "pick" || flow.busy) return;
+  const { opening, choice } = flow;
+  const run = moveRestore(opening, flow.run, () => ({ busy: true, problem: null }));
+  if (run === null) return;
+  try {
+    const answer = await api.restorePick(choice);
+    if (answer === "Dismissed") {
+      moveRestore(opening, run, () => ({ busy: false }));
+    } else if ("Done" in answer) {
+      const pick = answer.Done;
+      const moved = moveRestore(opening, run, () => ({ busy: false, choice: pick.choice, fileName: pick.file_name, size: pick.size, checked: null, problem: null }));
+      if (moved === null) forgetRestoreStray(pick.choice);
+    } else {
+      moveRestore(opening, run, () => ({ busy: false, problem: UNEXPECTED }));
+    }
+  } catch (error) {
+    // A choice the shell let go takes the file with it: the person picks again.
+    const gone = refusedWith(error, "choice_expired") || refusedAsLocked(error);
+    moveRestore(opening, run, () => (gone ? noFile(TEST_CHOICE_EXPIRED) : { busy: false, problem: error }));
+  }
+}
+
+/**
+ * Continue, pressed on 24a with the text typed: sends the choice and the text as one box's (`password_or_key`) and nothing else. The screen wipes its box as
+ * it calls this; the shell keeps the working credential beside the pick. A wrong password (or any refusal) comes back to 24a with its words and the file
+ * still picked; a choice the shell no longer holds takes the file away. The backup opened, 24b follows.
+ */
+export async function checkRestore(credential: string): Promise<void> {
+  const flow = state.restore;
+  if (flow === null || flow.phase !== "pick" || flow.busy || flow.choice === null || credential === "") return;
+  const { opening, choice } = flow;
+  const run = moveRestore(opening, flow.run, () => ({ phase: "checking", problem: null }));
+  if (run === null) return;
+  let checked: api.RestoreChecked | { refused: unknown };
+  try {
+    const answer = await api.restoreCheck(choice, { password_or_key: credential });
+    checked = typeof answer === "object" && typeof (answer as { name?: unknown }).name === "string" ? answer : { refused: UNEXPECTED };
+  } catch (error) {
+    checked = { refused: error };
+  }
+  if ("refused" in checked) {
+    const { refused } = checked;
+    const gone = refusedWith(refused, "choice_expired") || refusedAsLocked(refused);
+    moveRestore(opening, run, () => (gone ? noFile(TEST_CHOICE_EXPIRED) : { phase: "pick", problem: refused }));
+  } else {
+    const found = checked;
+    moveRestore(opening, run, () => ({ phase: "where", checked: found, problem: null }));
+  }
+}
+
+/**
+ * 24b's Choose another (and the cloud question's): Windows' picker for another parent folder, opened by the shell. The question goes at once; 24b follows
+ * whatever the picker comes to, with the new folder when one was chosen and the old one when it was closed.
+ */
+export async function chooseRestoreFolder(): Promise<void> {
+  const flow = state.restore;
+  if (flow === null || (flow.phase !== "where" && flow.phase !== "cloud") || flow.busy || flow.choice === null) return;
+  const { opening, choice } = flow;
+  const run = moveRestore(opening, flow.run, () => ({ phase: "where", busy: true, token: null, problem: null }));
+  if (run === null) return;
+  try {
+    const answer = await api.restoreChooseFolder(choice);
+    if (answer === "Dismissed") {
+      moveRestore(opening, run, () => ({ busy: false }));
+    } else if ("Done" in answer) {
+      const found = answer.Done;
+      moveRestore(opening, run, () => ({ busy: false, checked: found }));
+    } else {
+      moveRestore(opening, run, () => ({ busy: false, problem: UNEXPECTED }));
+    }
+  } catch (error) {
+    const gone = refusedWith(error, "choice_expired") || refusedAsLocked(error);
+    moveRestore(opening, run, () => (gone ? noFile(TEST_CHOICE_EXPIRED) : { busy: false, problem: error }));
+  }
+}
+
+/** The copy's own end, however it came: a finished copy goes on (to its question, or straight to the swap), and every refusal has its step. */
+async function copyRestore(flow: RestoreFlow, send: (request: number) => Promise<api.Outcome<api.RestorePreparedView>>): Promise<void> {
+  const { opening } = flow;
+  const request = nextRequest();
+  const run = moveRestore(opening, flow.run, () => ({ phase: "copying", busy: false, request, problem: null, token: null, lockEnded: false }));
+  if (run === null) {
+    releaseRequest(request);
+    return;
+  }
+  let ended: { answer: api.Outcome<api.RestorePreparedView> } | { refused: unknown };
+  try {
+    ended = { answer: await send(request) };
+  } catch (error) {
+    ended = { refused: error };
+  } finally {
+    releaseRequest(request);
+  }
+  if (!restoreStill(opening, run)) {
+    // The flow was left meanwhile: a copy that finished is let go.
+    if ("answer" in ended && typeof ended.answer === "object" && "Done" in ended.answer) void api.restoreDiscard(ended.answer.Done.restore).catch(() => undefined);
+    return;
+  }
+  if ("refused" in ended) {
+    const { refused } = ended;
+    if (refusedWith(refused, "cancelled") || refusedAsLocked(refused)) {
+      // A stop (the person's, Windows locking or sleeping, Lock all, closing): nothing was changed, and the shell let the pick go.
+      moveRestore(opening, run, () => noFile(RESTORE_CANCELLED));
+    } else if (refusedWith(refused, "choice_expired")) {
+      moveRestore(opening, run, () => noFile(TEST_CHOICE_EXPIRED));
+    } else if (refusedWith(refused, "invalid_input") && (refused as { what?: unknown }).what === "backup changed") {
+      // The archive the copy opened is not the one that was checked: nothing was copied and the shell forgot the pick, so the person picks again.
+      moveRestore(opening, run, () => noFile(refused));
+    } else {
+      moveRestore(opening, run, () => ({ phase: "refused", refusedAs: "again", request: null, problem: refused }));
+    }
+    return;
+  }
+  const { answer } = ended;
+  if (state.restore?.lockEnded === true) {
+    // A lock that is not idle came while the answer was on its way: the shell ended the finished restore (and dropped the questions), so whatever the
+    // answer says is for a restore that is gone. The flow closes without a word, and a copy the shell may still hold is let go.
+    set({ ...state, restore: null });
+    if (typeof answer === "object" && "Done" in answer) void api.restoreDiscard(answer.Done.restore).catch(() => undefined);
+    return;
+  }
+  if (typeof answer === "object" && "Done" in answer) {
+    const view = answer.Done;
+    // The shell let the pick go as the copy finished: what 24d and 24e need is in the finished copy's answer and the checked backup.
+    const next = moveRestore(opening, run, () => ({
+      phase: view.replaces_existing ? "replace" : "swapping",
+      request: null,
+      choice: null,
+      prepared: view,
+    }));
+    if (next === null) void api.restoreDiscard(view.restore).catch(() => undefined);
+    else if (!view.replaces_existing) await swapRestore(opening, next);
+  } else if (typeof answer === "object" && "Confirm" in answer) {
+    const question = answer.Confirm;
+    if (typeof question === "object" && "CloudFolder" in question) {
+      const { token } = question.CloudFolder;
+      moveRestore(opening, run, () => ({ phase: "cloud", request: null, token }));
+    } else if (typeof question === "object" && "NewFolder" in question) {
+      const { token, suggested } = question.NewFolder;
+      moveRestore(opening, run, () => ({ phase: "name", request: null, token, suggested }));
+    } else {
+      moveRestore(opening, run, () => ({ phase: "refused", refusedAs: "again", request: null, problem: UNEXPECTED }));
+    }
+  } else {
+    // Nothing was picked or asked: 24b as it was.
+    moveRestore(opening, run, () => ({ phase: "where", request: null }));
+  }
+}
+
+/** 24b's Restore: the copy of the picked backup, as a job with a bar and a Cancel. */
+export async function runRestore(): Promise<void> {
+  const flow = state.restore;
+  if (flow === null || flow.phase !== "where" || flow.busy || flow.choice === null) return;
+  const { choice } = flow;
+  await copyRestore(flow, (request) => api.restorePrepare(choice, request));
+}
+
+/**
+ * The answer to the question the copy asked first: the cloud folder's yes (`name` is `null`), or the new folder's name. The same copy then runs. A no is
+ * `backToRestoreFolder`.
+ */
+export async function answerRestoreQuestion(name: string | null): Promise<void> {
+  const flow = state.restore;
+  if (flow === null || (flow.phase !== "cloud" && flow.phase !== "name") || flow.token === null) return;
+  const { token } = flow;
+  await copyRestore(flow, (request) => api.restorePrepareConfirm(token, name, request));
+}
+
+/** The swap, as a job with a bar's worth of progress and no Cancel; the vault it replaces is closed by it. A finished swap reads the vault list again, and 24e follows. */
+async function swapRestore(opening: number, from: number): Promise<void> {
+  const flow = state.restore;
+  if (flow?.opening !== opening || flow.run !== from || flow.prepared === null) return;
+  const { restore } = flow.prepared;
+  const request = nextRequest();
+  const run = moveRestore(opening, from, () => ({ phase: "swapping", request, problem: null }));
+  if (run === null) {
+    releaseRequest(request);
+    return;
+  }
+  let ended: { restored: api.RestoredView } | { refused: unknown };
+  try {
+    const answer = await api.restoreCommit(restore, request);
+    ended = typeof answer === "object" && typeof (answer as { vault?: unknown }).vault === "number" ? { restored: answer } : { refused: UNEXPECTED };
+  } catch (error) {
+    ended = { refused: error };
+  } finally {
+    releaseRequest(request);
+  }
+  if (!restoreStill(opening, run)) return;
+  if ("refused" in ended) {
+    const { refused } = ended;
+    if (refusedWith(refused, "cancelled") || refusedAsLocked(refused)) {
+      // The finished restore was ended by Windows locking, sleep, Lock all or closing: nothing was changed.
+      moveRestore(opening, run, () => ({ ...noFile(RESTORE_CANCELLED), prepared: null }));
+    } else {
+      // The copy is made and waits: the person can only let it go.
+      moveRestore(opening, run, () => ({ phase: "refused", refusedAs: "discard", request: null, problem: refused }));
+    }
+    return;
+  }
+  const { restored } = ended;
+  // The restored vault may be new to the list.
+  await refreshVaults();
+  moveRestore(opening, run, () => ({ phase: "done", request: null, restored }));
+}
+
+/** 24d's Replace: the swap, with the finished copy the question was about. */
+export function replaceRestore(): void {
+  const flow = state.restore;
+  if (flow === null || flow.phase !== "replace" || flow.prepared === null) return;
+  void swapRestore(flow.opening, flow.run);
+}
+
+/** Takes the refusal under 24a's box away, as typing again does (a wrong password's line stays only until the next try is begun). No step is taken. */
+export function clearRestoreProblem(): void {
+  const flow = state.restore;
+  if (flow === null || flow.phase !== "pick" || flow.problem === null) return;
+  set({ ...state, restore: { ...flow, problem: null } });
+}
+
+/** 24b's Back: to 24a with the file still picked; what was typed there is in the shell, and is typed again. */
+export function backToRestoreFile(): void {
+  const flow = state.restore;
+  if (flow === null || flow.phase !== "where" || flow.busy) return;
+  moveRestore(flow.opening, flow.run, () => ({ phase: "pick", checked: null, problem: null }));
+}
+
+/** OK on a refusal of the copy, and No on the copy's questions: back to 24b, with the pick kept. */
+export function backToRestoreFolder(): void {
+  const flow = state.restore;
+  if (flow === null || (flow.phase !== "refused" && flow.phase !== "cloud" && flow.phase !== "name") || flow.refusedAs === "discard") return;
+  moveRestore(flow.opening, flow.run, () => ({ phase: "where", token: null, problem: null }));
+}
+
+/**
+ * Cancel, on any step that has one: the restore goes. A copy that runs is stopped, the shell lets the pick go, and a finished copy that was not swapped is
+ * let go. Nothing of the vault changes. Where the flow had come from is what the app shows next.
+ */
+export function closeRestore(): void {
+  const flow = state.restore;
+  if (flow === null) return;
+  set({ ...state, restore: null });
+  if (flow.phase === "copying" && flow.request !== null) cancelRequest(flow.request);
+  if (flow.choice !== null) forgetRestoreStray(flow.choice);
+  if (flow.prepared !== null && flow.restored === null && flow.phase !== "swapping") void api.restoreDiscard(flow.prepared.restore).catch(() => undefined);
+}
+
+/**
+ * 24e's Unlock: the restored vault, with the password from when the backup was made. A refusal (a wrong password) is thrown for the screen to say, and the
+ * step stays. Once the vault is open the restore is over, and the app shows the vault.
+ */
+export async function unlockRestored(password: string): Promise<"opened" | "stale"> {
+  const flow = state.restore;
+  if (flow === null || flow.phase !== "done" || flow.restored === null) return "stale";
+  const { opening } = flow;
+  const result = await unlock(flow.restored.vault, password);
+  if (result === "opened" && state.restore?.opening === opening) set({ ...state, restore: null });
+  return result;
+}
+
+/**
+ * A lock epoch (Lock all, an idle lock, Windows locking or sleeping, the app closing), as the restore's steps meet it. Before the copy, the shell dropped
+ * the pick whatever the reason, so the flow goes back to the first step with nothing picked. A finished restore waits through an idle lock, which the
+ * shell lets it do, and is gone for every other reason (the shell discarded it), so 24d goes away without a word. The copy's and the swap's own answers
+ * say how they ended.
+ */
+function takeRestoreEpoch(event: LockEpochEvent): void {
+  const flow = state.restore;
+  if (flow === null) return;
+  const { opening, run } = flow;
+  switch (flow.phase) {
+    case "pick":
+    case "checking":
+    case "where":
+    case "cloud":
+    case "name":
+      moveRestore(opening, run, () => noFile(TEST_CHOICE_EXPIRED));
+      break;
+    case "refused":
+      if (flow.refusedAs === "again") moveRestore(opening, run, () => noFile(TEST_CHOICE_EXPIRED));
+      else if (event.reason !== "idle") set({ ...state, restore: null });
+      break;
+    case "replace":
+      if (event.reason !== "idle") set({ ...state, restore: null });
+      break;
+    case "copying":
+      // The copy's own answer says how it ended, and a refusal (`locked`, `cancelled`) takes the flow back to the first step. A copy that had finished is
+      // another matter: its successful answer may be on its way when the lock lands, and the shell has ended what it made. The run is not moved on (the
+      // answer is still the one this step waits for); the flag says not to act on it. An idle lock leaves a finished restore, so it leaves this too.
+      if (event.reason !== "idle") set({ ...state, restore: { ...flow, lockEnded: true } });
+      break;
+    default:
+      break;
+  }
+}
+
+/** Restore a backup as the screens read it: `null` while none is begun. */
+export function useRestore(): RestoreFlow | null {
+  return useSelect((current) => current.restore);
 }
 
 /** How a save came out: made (the form is gone and the login is open), the vault locked meanwhile, or the shell's refusal. */
