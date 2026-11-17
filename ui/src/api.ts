@@ -281,7 +281,7 @@ export function createVaultConfirm(token: string): Promise<Opened<CreatedView>> 
 }
 
 /**
- * Adds a vault folder the person already has (21a's "I already have a vault"): a folder picker, then the folder is
+ * Adds a vault folder the person already has (26a's "A vault folder", after 21a's "I already have a vault or a backup"): a folder picker, then the folder is
  * checked and listed. A cloud-synced folder asks first (`CloudFolder`), confirmed with `addExistingVaultConfirm`.
  */
 export function addExistingVault(): Promise<Outcome<VaultEntry>> {

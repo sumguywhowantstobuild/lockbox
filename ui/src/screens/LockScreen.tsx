@@ -3,7 +3,7 @@ import type { VaultEntry } from "../api";
 import { messageFor, type Message } from "../messages";
 import { PasswordField } from "../parts/PasswordField";
 import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
-import { cancelCapture, startRestore, unlock, useCapture, useRestore, useStartError, useVaults } from "../store";
+import { cancelCapture, clearUnlockPick, startRestore, unlock, useCapture, useRestore, useStartError, useUnlockPick, useVaults } from "../store";
 import { useMode } from "../theme";
 import { LockScreenAsks } from "./Asks";
 
@@ -26,7 +26,12 @@ export function LockScreen() {
   const capture = useCapture();
   // The picker of Restore a backup is open: a second press sends nothing.
   const restoring = useRestore() !== null;
-  const [chosenId, setChosenId] = useState<number | null>(null);
+  // The vault 26c's Unlock asked for (a folder that just came in): chosen from the first drawing on, once.
+  const asked = useUnlockPick();
+  const [chosenId, setChosenId] = useState<number | null>(asked);
+  useEffect(() => {
+    if (asked !== null) clearUnlockPick();
+  }, [asked]);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

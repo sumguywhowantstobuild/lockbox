@@ -140,9 +140,9 @@ test("no_vaults_goes_to_welcome", async () => {
   const { container } = start([]);
   expect(await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Create a vault" })).toBeTruthy();
-  // 21a's second way in, in the words the plan gives; backups wait for 4B.
-  expect(screen.getByRole("button", { name: "I already have a vault" })).toBeTruthy();
-  expect(screen.queryByText(/backup/i)).toBeNull();
+  // 21a's second way in, in the design's words: a vault or a backup (Task 9 opens 26a with it).
+  expect(screen.getByRole("button", { name: "I already have a vault or a backup" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "I already have a vault" })).toBeNull();
   expect(screen.queryByText(/forgot/i)).toBeNull();
   // The nine-point pattern of the setup screens, not a vault's own.
   const drawn = container.querySelector(".rose path")?.getAttribute("d");
@@ -155,19 +155,25 @@ test("i_already_have_a_vault_adds_one_and_goes_to_the_lock_screen", async () => 
   start([]);
   shell.offerExisting({ id: 40, name: "Old vault", items: sampleItems() });
   await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
-  click("I already have a vault");
+  click("I already have a vault or a backup");
+  await screen.findByRole("heading", { level: 1, name: "What do you have?" });
+  click("A vault folder");
+  await screen.findByRole("heading", { level: 1, name: "Old vault is here" });
+  click("Unlock Old vault");
   expect(await screen.findByRole("heading", { level: 1, name: "Unlock Old vault" })).toBeTruthy();
   expect(commandsSent()).toContain("add_existing_vault");
 });
 
-test("a_folder_that_is_not_a_vault_says_so_on_the_first_screen", async () => {
+test("a_folder_that_is_not_a_vault_says_so_on_the_second_way_in", async () => {
   const { container } = start([]);
   await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
-  click("I already have a vault");
+  click("I already have a vault or a backup");
+  await screen.findByRole("heading", { level: 1, name: "What do you have?" });
+  click("A vault folder");
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).not.toContain("not a vault folder");
   expect(alert.textContent.length).toBeGreaterThan(5);
-  expect(screen.getByRole("heading", { level: 1, name: "Welcome to Lockbox" })).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 1, name: "What do you have?" })).toBeTruthy();
   await expectNoAxe(container);
 });
 
@@ -860,12 +866,16 @@ test("an_existing_vault_in_a_cloud_folder_asks_too", async () => {
   shell.offerExisting({ id: 40, name: "Old vault", items: [] });
   shell.cloudNext();
   await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
-  click("I already have a vault");
+  click("I already have a vault or a backup");
+  await screen.findByRole("heading", { level: 1, name: "What do you have?" });
+  click("A vault folder");
   expect(await screen.findByRole("heading", { level: 1, name: "This folder is synced to the cloud" })).toBeTruthy();
   // Adding a vault you already have isn't a numbered step.
   expect(screen.queryByText(/^Step \d of \d$/)).toBeNull();
   await expectNoAxe(container);
   click("Continue anyway");
+  expect(await screen.findByRole("heading", { level: 1, name: "Old vault is here" })).toBeTruthy();
+  click("Unlock Old vault");
   expect(await screen.findByRole("heading", { level: 1, name: "Unlock Old vault" })).toBeTruthy();
   expect(commandsSent()).toContain("add_existing_vault_confirm");
 });

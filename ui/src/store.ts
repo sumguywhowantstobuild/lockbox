@@ -129,6 +129,19 @@ export interface TestFlow {
   damage: unknown;
 }
 
+/** Where a restore was begun from, when that decides what Cancel goes back to: the first screen's "A backup file" (26a). Every other caller has none. */
+export type RestoreOrigin = "first_screen";
+
+/** What `startRestore` is told: only where the restore was begun from, for now. */
+export type RestoreStart = { origin?: RestoreOrigin };
+
+/**
+ * Moving to a new computer (26a to 26c), the app's own like the restore: `what` is 26a ("What do you have?"), `here` is 26c, a vault has come in (`how`: its
+ * backup was restored, or its folder was added). The vault list stops being empty after the first vault comes in, so these steps are held here and not in the
+ * first screen's own state, or the app would switch to the lock screen under 26c.
+ */
+export type MoveIn = { step: "what" } | { step: "here"; how: "restore" | "folder"; name: string; vault: number };
+
 /**
  * Where Restore a backup is (24a to 24e), or `null` when it is not begun. It is the app's, not a vault's: it lives beside the sessions, so a lock of the
  * open vault (or the swap closing the vault it replaces) does not take its screens away. The backup's path and the credential typed for it are never
@@ -152,6 +165,8 @@ export interface RestoreFlow {
   size: number;
   /** The picker is open for Pick another or Choose another. */
   busy: boolean;
+  /** Where the restore was begun from, or `null` for Settings and the lock screen. */
+  origin: RestoreOrigin | null;
   /** What the last step was refused with, said under the box (a wrong password), under the file, or on the refusal's own screen; or `null`. */
   problem: unknown;
   /** What the checked backup is and where it would go (24b, and the date 24e names). `null` before the check. */
@@ -483,6 +498,10 @@ export interface StoreState {
   capture: CaptureView | null;
   /** Restore a backup, or `null` while none is begun. It is the app's own: no vault's lock takes it away. */
   restore: RestoreFlow | null;
+  /** Moving to a new computer (26a to 26c), or `null` while it is not open. */
+  moveIn: MoveIn | null;
+  /** The vault the lock screen chooses when it next opens (26c's Unlock after a folder came in), or `null`; the lock screen takes it once. */
+  unlockPick: number | null;
   /**
    * The app's settings as the shell has them saved: read once at the start and made current by each save (`saveSettings`). `null` until
    * they come, and when they could not be read; the screens then use `DEFAULT_SETTINGS`. Nothing secret is in them, so a lock leaves them.
@@ -521,6 +540,8 @@ const EMPTY: StoreState = {
   search: null,
   capture: null,
   restore: null,
+  moveIn: null,
+  unlockPick: null,
   settings: null,
 };
 
@@ -837,7 +858,7 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
   return "done";
 }
 
-/** Adds a vault folder the person picks (21a's "I already have a vault"). */
+/** Adds a vault folder the person picks (26a's "A vault folder"); once it is in, 26c says so. */
 export async function addExistingVault(): Promise<SetupResult> {
   return finishAdd(() => api.addExistingVault());
 }
@@ -850,7 +871,12 @@ async function finishAdd(run: () => Promise<api.Outcome<VaultEntry>>): Promise<S
   const answer = await run();
   if (answer === "Dismissed") return "dismissed";
   if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
-  await refreshVaults();
+  const list = await refreshVaults();
+  // 26c: the vault's own name, from the entry the shell answered with.
+  const { id, name } = answer.Done;
+  // The list could not be read again (the old one is kept): the vault that was added is put on it all the same, so Unlock has it to choose.
+  if (list === null && !(state.vaults ?? []).some((vault) => vault.id === id)) set({ ...state, vaults: [...(state.vaults ?? []), answer.Done] });
+  if (state.moveIn?.step === "what") set({ ...state, moveIn: { step: "here", how: "folder", name: name ?? "Your vault", vault: id } });
   return "done";
 }
 
@@ -1939,7 +1965,7 @@ let restoreRuns = 0;
 const RESTORE_CANCELLED = { code: "page", kind: "restore_cancelled" };
 
 /** The flow's first step, waiting for the picker (`pick` is `null`) or with a backup picked. */
-function newRestore(opening: number, run: number, pick: api.RestorePick | null): RestoreFlow {
+function newRestore(opening: number, run: number, pick: api.RestorePick | null, origin: RestoreOrigin | null = null): RestoreFlow {
   return {
     opening,
     run,
@@ -1948,6 +1974,7 @@ function newRestore(opening: number, run: number, pick: api.RestorePick | null):
     fileName: pick?.file_name ?? null,
     size: pick?.size ?? 0,
     busy: false,
+    origin,
     problem: null,
     checked: null,
     request: null,
@@ -1990,15 +2017,16 @@ function forgetRestoreStray(choice: string): void {
 /**
  * Settings' and the lock screen's "Restore a backup": opens Windows' picker for the backup file first, and the first step opens on it, with nothing sent
  * but the pick. A closed picker says nothing and opens nothing; a lock while it was open too. Any other refusal (another restore is going) opens the first
- * step with no file and its words under the row. While the picker is open the button waits, so a second press sends nothing.
+ * step with no file and its words under the row. While the picker is open the button waits, so a second press sends nothing. From the first screen's
+ * 26a (`origin`), Cancel goes back to 26a and the end is 26c; the usual folder is suggested as for every restore, and no vault need be listed.
  */
-export async function startRestore(): Promise<void> {
+export async function startRestore(options: RestoreStart = {}): Promise<void> {
   if (state.restore !== null) return;
   restoreOpenings += 1;
   restoreRuns += 1;
   const opening = restoreOpenings;
   const run = restoreRuns;
-  set({ ...state, restore: newRestore(opening, run, null) });
+  set({ ...state, restore: newRestore(opening, run, null, options.origin ?? null) });
   let answer: Awaited<ReturnType<typeof api.restorePick>>;
   try {
     answer = await api.restorePick(null);
@@ -2228,7 +2256,13 @@ async function swapRestore(opening: number, from: number): Promise<void> {
   const { restored } = ended;
   // The restored vault may be new to the list.
   await refreshVaults();
-  moveRestore(opening, run, () => ({ phase: "done", request: null, restored }));
+  const done = moveRestore(opening, run, () => ({ phase: "done", request: null, restored }));
+  // Begun from 26a: 26c comes in place of 24e, and its Unlock goes to 24e.
+  const finished = state.restore;
+  if (done !== null && finished?.origin === "first_screen") {
+    const name = finished.prepared?.name ?? finished.checked?.name ?? "Your vault";
+    set({ ...state, moveIn: { step: "here", how: "restore", name, vault: restored.vault } });
+  }
 }
 
 /** 24d's Replace: the swap, with the finished copy the question was about. */
@@ -2324,6 +2358,52 @@ function takeRestoreEpoch(event: LockEpochEvent): void {
 /** Restore a backup as the screens read it: `null` while none is begun. */
 export function useRestore(): RestoreFlow | null {
   return useSelect((current) => current.restore);
+}
+
+// ---- Moving to a new computer (26a to 26c) ----
+
+/** The first screen's "I already have a vault or a backup": 26a. */
+export function openMoveIn(): void {
+  if (state.moveIn !== null) return;
+  set({ ...state, moveIn: { step: "what" } });
+}
+
+/** 26a's Back: the steps close, and the app shows the first screen, or the lock screen when a vault has come in. Nothing happens while a backup is being picked or restored. */
+export function leaveMoveIn(): void {
+  if (state.moveIn?.step !== "what" || state.restore !== null) return;
+  set({ ...state, moveIn: null });
+}
+
+/** 26c's Bring in another vault: back to 26a. A restore that finished is over (its vault is listed and stays). */
+export function bringInAnother(): void {
+  if (state.moveIn?.step !== "here") return;
+  if (state.restore !== null) closeRestore();
+  set({ ...state, moveIn: { step: "what" } });
+}
+
+/**
+ * 26c's Unlock: after a restore, the restore's own 24e (the password from when the backup was made); after a folder, the lock screen with that vault chosen
+ * and its password field ready. Either way the moving-in steps are over.
+ */
+export function unlockBroughtIn(): void {
+  const here = state.moveIn;
+  if (here?.step !== "here") return;
+  set({ ...state, moveIn: null, unlockPick: here.how === "folder" ? here.vault : null });
+}
+
+/** The moving-in steps as the screens read them: `null` while they are not open. */
+export function useMoveIn(): MoveIn | null {
+  return useSelect((current) => current.moveIn);
+}
+
+/** The vault the lock screen is to choose when it opens, once (see `clearUnlockPick`). */
+export function useUnlockPick(): number | null {
+  return useSelect((current) => current.unlockPick);
+}
+
+/** The lock screen has taken the vault it was asked to choose. */
+export function clearUnlockPick(): void {
+  if (state.unlockPick !== null) set({ ...state, unlockPick: null });
 }
 
 /** How a save came out: made (the form is gone and the login is open), the vault locked meanwhile, or the shell's refusal. */

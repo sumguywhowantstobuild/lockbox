@@ -9,7 +9,7 @@ const SAY_LOST_LIST = "Your vaults are safe. Only the list of where they are was
 /**
  * Ask 12, shown instead of the lock screen when the shell can't read the list of vaults because the file is damaged: it is the first-use
  * screens' layout with one way out. "Start a new list" has the shell set the damaged file aside (it is kept, not deleted) and make an
- * empty list; the list is then read again, which opens the first screen, where "I already have a vault" adds each vault back. The
+ * empty list; the list is then read again, which opens the first screen, where "I already have a vault or a backup" adds each vault back. The
  * button is busy while the shell works. A refusal is said here in words and focus goes back to the button, which works again.
  */
 export function LostList() {
