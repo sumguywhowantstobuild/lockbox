@@ -572,8 +572,10 @@ test("settings_opens_from_the_side_menu_and_focus_comes_back_to_its_button", asy
 });
 
 test("a_read_only_vault_can_open_settings_and_change_them", async () => {
-  await opened({ readOnly: true });
-  expect(screen.getByText("Read-only", { selector: ".chip" })).toBeTruthy();
+  const { panel } = await opened({ readOnly: true });
+  // The header says it, and so does the Settings panel itself (every screen of a read-only session carries the label).
+  expect(screen.getAllByText("Read-only", { selector: ".chip" })).toHaveLength(2);
+  expect(within(panel).getByText("Read-only", { selector: ".chip" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Dark" }));
   await vi.waitFor(() => {
     expect(shell.settings().theme).toBe("dark");
@@ -627,10 +629,30 @@ test("shows_the_version", async () => {
   expect(commands("app_info")).toEqual([{}]);
 });
 
+test("open_a_backup_follows_test_a_backup_with_its_hint_and_opens_the_panel", async () => {
+  const { panel } = await opened();
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  const button = within(group).getByRole("button", { name: "Open a backup" });
+  // The row's own words (a hint the button is described by), after Test a backup.
+  const hint = within(group).getByText("Browse a backup and copy items out, without restoring it.");
+  expect(button.getAttribute("aria-describedby")).toBe(hint.id);
+  const names = within(group).getAllByRole("button").map((each) => each.textContent);
+  expect(names.indexOf("Open a backup")).toBe(names.indexOf("Test a backup") + 1);
+  fireEvent.click(button);
+  await screen.findByRole("complementary", { name: "Open a backup" });
+  expect(commands("open_backup_pick")).toEqual([{ choice: null }]);
+});
+
+test("a_read_only_vault_can_open_a_backup_too", async () => {
+  const { panel } = await opened({ readOnly: true });
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  expect(within(group).getByRole("button", { name: "Open a backup" })).toBeTruthy();
+});
+
 test("restore_a_backup_follows_test_a_backup_in_this_vault_and_opens_the_first_step", async () => {
   const { panel } = await opened();
   const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
-  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Restore a backup"]);
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup"]);
   const button = within(group).getByRole("button", { name: "Restore a backup" });
   expect(button.getAttribute("aria-describedby")).not.toBeNull();
   fireEvent.click(button);
@@ -642,7 +664,7 @@ test("a_read_only_vault_can_restore_a_backup_too", async () => {
   // A restore does not write the open vault, so a copy opened from a backup offers it as any vault does (Back up is the one it hides).
   const { panel } = await opened({ readOnly: true });
   const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
-  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Restore a backup"]);
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Open a backup", "Restore a backup"]);
 });
 
 test("older_copies_hidden_when_there_are_none", async () => {
@@ -679,7 +701,7 @@ test("older_copies_follows_restore_a_backup_with_the_count_of_this_vaults", asyn
   });
   const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
   const button = await within(group).findByRole("button", { name: "Older copies (2)" });
-  expect(within(group).getAllByRole("button").map((each) => each.textContent)).toEqual(["Back up", "Test a backup", "Restore a backup", "Older copies (2)"]);
+  expect(within(group).getAllByRole("button").map((each) => each.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup", "Older copies (2)"]);
   expect(button.getAttribute("aria-describedby")).not.toBeNull();
   fireEvent.click(button);
   await screen.findByRole("complementary", { name: "Older copies" });
@@ -693,17 +715,16 @@ test("a_read_only_vault_with_older_copies_offers_them_too", async () => {
   });
   const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
   await within(group).findByRole("button", { name: "Older copies (1)" });
-  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Restore a backup", "Older copies (1)"]);
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Open a backup", "Restore a backup", "Older copies (1)"]);
 });
 
 test("no_password_links_until_their_plans", async () => {
   const { panel } = await opened();
   // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`), Test a backup with Task 4 (`TestBackup.test.tsx`), Restore a backup with Task 5
-  // (`RestoreFlow.test.tsx`) and Older copies with Task 8 (`OlderCopies.test.tsx`, hidden here while none are kept); the rest of the vault's rows
-  // wait for their own plans.
+  // (`RestoreFlow.test.tsx`), Older copies with Task 8 (`OlderCopies.test.tsx`, hidden here while none are kept) and Open a backup with Task 7
+  // (`OpenBackup.test.tsx`); the rest of the vault's rows wait for their own plans.
   for (const name of [
     /older copies/i,
-    /open a backup/i,
     /export/i,
     /change password/i,
     /recovery key/i,
@@ -720,6 +741,7 @@ test("no_password_links_until_their_plans", async () => {
     "Change",
     "Back up",
     "Test a backup",
+    "Open a backup",
     "Restore a backup",
   ]);
 });

@@ -74,6 +74,8 @@ pub const COMMANDS: &[&str] = &[
     "test_backup_pick",
     "test_backup",
     "forget_test_backup",
+    "open_backup_pick",
+    "forget_open_backup",
     "open_backup_read_only",
     "copy_item_to",
     "restore_pick",

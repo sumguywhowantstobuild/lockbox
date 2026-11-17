@@ -11,6 +11,7 @@ import {
   lockThisVault,
   retryOpenFiles,
   setOutputRecordAside,
+  startOpenBackup,
   startRestore,
   useLockNote,
   useNotices,
@@ -142,7 +143,7 @@ export function VaultBanners({ data }: { data: SessionData }) {
         <Notice
           text={`${String(asks.unreadable)} ${count(asks.unreadable, "item in this vault can't be read. Everything else works. It may be damaged", "items in this vault can't be read. Everything else works. They may be damaged")}, so Lockbox left all stored files where they are until this is sorted.`}
           actions={[
-            // A backup can bring the vault back, beside it. A copy opened from a backup is not a vault on the list, so it has none. Open a backup comes with Task 7.
+            // A backup can bring the vault back, beside it. A copy opened from a backup is not a vault on the list, so it has none.
             ...(data.readOnly
               ? []
               : [
@@ -153,6 +154,13 @@ export function VaultBanners({ data }: { data: SessionData }) {
                     },
                   },
                 ]),
+            // A backup can also be opened to look through and copy a good copy of an item out of: from any window, a read-only one too.
+            {
+              name: "Open a backup",
+              onPress: () => {
+                void startOpenBackup();
+              },
+            },
             { name: "Close", onPress: close("unreadable") },
           ]}
         />

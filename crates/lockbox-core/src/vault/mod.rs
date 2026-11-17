@@ -4,6 +4,8 @@
 mod backup;
 mod cleanup;
 mod files;
+#[cfg(any(test, feature = "test-internals"))]
+pub(crate) mod fixture;
 mod items;
 mod journal;
 mod naming;

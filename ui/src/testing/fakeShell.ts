@@ -36,11 +36,18 @@ export interface FakeItem {
   /** What `get_item` says the revision is (2 unless set); an accepted `update_item` adds one, as the engine does. */
   revision?: number;
   attachments?: { file_id: string; name: string; length: number; media_type: string }[];
+  /**
+   * In a backup's items: the names of attached files the backup does not hold (the item refers to a file entry the backup lacks). A copy out of the
+   * backup asks first (`Confirm` `MissingFiles`) and, once told to go on, leaves them out (`left_out`).
+   */
+  missingFiles?: string[];
 }
 
 export interface FakeVault {
   id: number;
   name: string | null;
+  /** What the session is, as `SessionInfo.kind` says it: a vault when left out, an older copy a restore kept, or a backup opened read-only. */
+  kind?: "older_copy" | "backup";
   available?: boolean;
   /** Both copies of the vault's details are unreadable (Ask 8): the list says `details_damaged: true`. False unless a test makes it so. */
   detailsDamaged?: boolean;
@@ -512,6 +519,31 @@ export interface FakeShell {
    * and the job is running in the shell; the page has not heard which operation it is).
    */
   holdJobStarted(): () => void;
+  /**
+   * Open a backup read-only (Plan 4B Task 7). The shell holds the picked backups under choices of 32 hex characters, launch-scoped and of their own kind (a
+   * test's choice never answers for an open's): a pick forgets the choice it was sent, a session opened uses its choice up, a wrong password or a Stop keeps
+   * it, and the shell's lock epoch drops every one. These are the names and sizes held now, and their tokens, in order of the picks (the picker uses
+   * `pickBackupNext`, `dismissFile` and `holdPicker`, as Test a backup's does).
+   */
+  openChoices(): { name: string; size: number }[];
+  openChoiceTokens(): string[];
+  /** Lets the shell forget every held open choice at once, as five minutes do: an `open_backup_read_only` for one is then `choice_expired`. */
+  expireOpenChoices(): void;
+  /** Holds every `open_backup_read_only` until `release` is called: its job (kind `open_backup`, scope `launch`) runs from the moment the command arrives. */
+  holdOpen(): () => void;
+  /**
+   * Holds every `copy_item_to` answer until `release` is called, as a copy with big attachments would: the shell decides and writes when the command arrives (a
+   * `MissingFiles` question or the copy itself), and the answer reaches the page only at release, so a switch of window or a Cancel can come in between.
+   */
+  holdCopy(): () => void;
+  /** The items the next backups that are opened hold (a made-up set when none is given): copied for each open, so a copy out never changes what the next open finds. */
+  backupHolds(items: FakeItem[]): void;
+  /** The file names (as picked) of the backups open now: a session of this page on each. */
+  backupsOpen(): string[];
+  /** The session of the backup opened from this file name, when it is open. */
+  sessionOfBackup(fileName: string): Live | undefined;
+  /** What `copy_item_to` copied, in order: the item (by id), the folder it went to (`null` for none), whether the missing files were left out, and the new item's id. */
+  copiedOut: { from: number; to: number; id: string; folder: string | null; skipMissing: boolean; newId: string }[];
   /**
    * Restore a backup (Plan 4B Task 5). The shell holds the picked backups under choices of 32 hex characters, launch-scoped, as for Test a backup (the
    * pick uses `pickBackupNext`, `dismissFileNext` and `holdPicker`): a pick forgets the choice it was sent, every lock epoch drops them all, and one that is
@@ -1106,6 +1138,14 @@ export function installFakeShell(
   let heldTests: (() => void)[] | undefined;
   let heldStarts: (() => void)[] | undefined;
   let lastBackup: { name: string; choice: string } | undefined;
+  // Open a backup read-only (Task 7): the backups the shell holds paths of for it, by choice (their own kind, so a test's choice and an open's never answer for
+  // each other), what the next opened backups hold, the sessions made on backups (by the file's name), what was copied out, and the hold on the open.
+  const openHeld = new Map<string, { name: string; size: number; password: string }>();
+  let backupItems: FakeItem[] | undefined;
+  const backupSessions = new Map<number, string>();
+  const copiedOut: FakeShell["copiedOut"] = [];
+  let heldOpens: (() => void)[] | undefined;
+  let heldCopies: (() => void)[] | undefined;
   // Restore a backup (Task 5): the picks the shell holds by choice (with what a check found, once it has), the finished copies waiting for their swap,
   // the questions parked for their answer, what the next checks find, and the holds and refusals a test can put on each step.
   interface RestoreHeld {
@@ -1231,6 +1271,7 @@ export function installFakeShell(
     lockEpoch += 1;
     pendingClose = undefined;
     testHeld.clear();
+    openHeld.clear();
     // Every lock drops the picks and the questions; a finished copy waits through an idle lock and is ended by every other reason.
     restoreHeld.clear();
     restoreAsked.clear();
@@ -1333,6 +1374,7 @@ export function installFakeShell(
     name: vault.name ?? "",
     read_only: vault.readOnly ?? false,
     state: "unlocked",
+    kind: vault.kind ?? "vault",
   });
 
   const makeKey = (vault: FakeVault): string => {
@@ -2144,6 +2186,78 @@ export function installFakeShell(
         testHeld.delete(sent.choice);
         return null;
       }
+      case "open_backup_pick": {
+        const sent = exactly(args, ["choice"]);
+        if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
+        // A closed picker: nothing is picked, and the choice that was sent is left as it was.
+        if (dismissFile) {
+          dismissFile = false;
+          return "Dismissed";
+        }
+        const file = nextBackupPick ?? { name: BACKUP_NAME, size: BACKUP_SIZE };
+        nextBackupPick = undefined;
+        // A new pick forgets the old one.
+        if (typeof sent.choice === "string") openHeld.delete(sent.choice);
+        nextToken += 1;
+        const token = nextToken.toString(16).padStart(32, "0");
+        openHeld.set(token, { ...file, password: BACKUP_PASSWORD });
+        return { Done: { choice: token, file_name: file.name, size: file.size } };
+      }
+      case "forget_open_backup": {
+        const sent = exactly(args, ["choice"]);
+        if (typeof sent.choice !== "string") return refuse(MALFORMED);
+        // Idempotent, and only an open's own choices: a test's choice is another kind.
+        openHeld.delete(sent.choice);
+        return null;
+      }
+      case "copy_item_to": {
+        const sent = exactly(args, ["from", "from_generation", "id", "to", "to_generation", "folder", "skip_missing"]) as {
+          from: unknown;
+          from_generation: unknown;
+          id: unknown;
+          to: unknown;
+          to_generation: unknown;
+          folder: unknown;
+          skip_missing: unknown;
+        };
+        if (
+          typeof sent.from !== "number" ||
+          typeof sent.from_generation !== "number" ||
+          typeof sent.to !== "number" ||
+          typeof sent.to_generation !== "number" ||
+          typeof sent.id !== "string" ||
+          (sent.folder !== null && typeof sent.folder !== "string") ||
+          typeof sent.skip_missing !== "boolean"
+        ) {
+          return refuse(MALFORMED);
+        }
+        // Either session locked or foreign (a stale generation) is the shell's `locked`, before anything else is looked at.
+        const source = vaultFor(sent.from, sent.from_generation);
+        const target = vaultFor(sent.to, sent.to_generation);
+        if (target.readOnly ?? false) return refuse({ code: "read_only" });
+        const item = source.items?.find((one) => one.id === sent.id && one.kind !== "collection" && !(one.trashed ?? false));
+        if (item === undefined) return refuse({ code: "core", kind: "not_found" });
+        // The folder is the target's own, by the engine's rule: one that is not in it, or is in its trash, is refused before anything is written.
+        if (sent.folder !== null && target.items?.find((one) => one.id === sent.folder && one.kind === "collection" && !(one.trashed ?? false)) === undefined) {
+          return refuse({ code: "core", kind: "invalid_input", what: "collection" });
+        }
+        const lacking = item.missingFiles ?? [];
+        if (lacking.length > 0 && !sent.skip_missing) {
+          return tagged(sent.to, sent.to_generation, { Confirm: { MissingFiles: { names: [...lacking] } } });
+        }
+        nextItem += 1;
+        const made: FakeItem = {
+          ...item,
+          id: itemId(nextItem),
+          collection: sent.folder,
+          attachments: (item.attachments ?? []).filter((file) => !lacking.includes(file.name)).map((file) => ({ ...file })),
+          missingFiles: undefined,
+          modified_at: nowText(),
+        };
+        target.items = [...(target.items ?? []), made];
+        copiedOut.push({ from: sent.from, to: sent.to, id: sent.id, folder: sent.folder, skipMissing: sent.skip_missing, newId: made.id });
+        return tagged(sent.to, sent.to_generation, { Done: { id: made.id, left_out: [...lacking] } });
+      }
       case "restore_pick": {
         const sent = exactly(args, ["choice", "vault"]);
         if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
@@ -2268,6 +2382,7 @@ export function installFakeShell(
           name: copy.name === undefined ? (vaults.find((v) => v.id === copy.vault)?.name ?? "") : copy.name,
           password: copy.password,
           readOnly: true,
+          kind: "older_copy",
           items: sampleItems(),
         };
         nextSession += 1;
@@ -2964,6 +3079,105 @@ export function installFakeShell(
     });
   };
 
+  /**
+   * Open a backup read-only, as the shell does it: the arguments are checked and the credential read as one box's (`password_or_key`); a choice that is not
+   * held (or is a test's) is `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `open_backup`, `lockbox://job-started` before
+   * the answer). It ends when the answer is decided (held until released with `holdOpen`): a Cancel answers `cancelled`; a lock epoch that moved meanwhile
+   * refuses `locked` (the choice went with it); a wrong password is `wrong_password`; a damaged backup is `damaged`; else the backup is a read-only session whose
+   * name is the file's name without `.lockbox-backup`, and the choice is used up. A wrong password, damage and a Stop keep the choice. A backup that is open
+   * already is answered as it is (and its choice is used up too).
+   */
+  const openBackupCommand = (args: unknown): Promise<unknown> => {
+    const sent = exactly(args, ["choice", "credential", "request"]);
+    const request = requestOf(sent);
+    const credential = sent.credential;
+    if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
+    const text = (credential as { password_or_key?: unknown }).password_or_key;
+    if (typeof text !== "string" || typeof sent.choice !== "string") return refuse(MALFORMED);
+    const token = sent.choice;
+    const held = openHeld.get(token);
+    if (held === undefined) return refuse(CHOICE_EXPIRED);
+    const epoch = lockEpoch;
+    nextOperation += 1;
+    const job: RunningJob = {
+      request,
+      operation: nextOperation,
+      scope: { type: "launch", epoch },
+      kind: "open_backup",
+      done: 0,
+      total: held.size,
+      cancel: () => undefined,
+    };
+    running.set(job.operation, job);
+    const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
+    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    else heldStarts.push(() => {
+      emit("lockbox://job-started", startedEvent);
+    });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const end = (cancelled: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (running.delete(job.operation)) {
+          if (!cancelled) job.done = job.total;
+          emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+        }
+        if (cancelled) {
+          rejectPlain(reject, { code: "cancelled" });
+          return;
+        }
+        if (lockEpoch !== epoch) {
+          // The lock took the choice with it.
+          openHeld.delete(token);
+          rejectPlain(reject, LOCKED);
+          return;
+        }
+        if (text !== held.password) {
+          rejectPlain(reject, WRONG_PASSWORD);
+          return;
+        }
+        if (damage !== undefined) {
+          const { what } = damage;
+          damage = undefined;
+          rejectPlain(reject, { code: "core", kind: "damaged", ...(what === undefined ? {} : { what }) });
+          return;
+        }
+        // The choice is used up by a session opened, and by one that was open already.
+        openHeld.delete(token);
+        const already = [...backupSessions].find(([session, name]) => name === held.name && live.get(session)?.unlocked === true);
+        if (already !== undefined) {
+          const state = live.get(already[0]);
+          if (state !== undefined) {
+            resolve({ Done: tagged(state.session, state.generation, infoOf(sessionVault.get(state.session) as FakeVault, state.session, state.generation)) });
+            return;
+          }
+        }
+        const vault: FakeVault = {
+          id: -(nextSession + 1),
+          name: held.name.replace(/\.lockbox-backup$/, ""),
+          password: held.password,
+          readOnly: true,
+          kind: "backup",
+          items: (backupItems ?? sampleItems()).map((one) => ({ ...one, missingFiles: one.missingFiles === undefined ? undefined : [...one.missingFiles] })),
+        };
+        nextSession += 1;
+        const entry: Live = { session: nextSession, generation: 1, unlocked: true };
+        live.set(nextSession, entry);
+        sessionVault.set(nextSession, vault);
+        backupSessions.set(nextSession, held.name);
+        resolve({ Done: tagged(nextSession, entry.generation, infoOf(vault, nextSession, entry.generation)) });
+      };
+      job.cancel = () => {
+        end(true);
+      };
+      if (heldOpens === undefined) end(false);
+      else heldOpens.push(() => {
+        end(false);
+      });
+    });
+  };
+
   /** Rejects as Tauri does, with the plain object the refusal was serialised to. */
   const rejectPlain = (reject: (reason?: unknown) => void, error: object): void => {
     reject(error);
@@ -3149,6 +3363,33 @@ export function installFakeShell(
         return Promise.reject(error);
       }
     }
+    if (cmd === "copy_item_to" && heldCopies !== undefined) {
+      // Decided (and written) now, as the shell does; the answer comes when it is let go.
+      const waiting = heldCopies;
+      try {
+        const decided = answer(cmd, args);
+        return new Promise((resolve) => {
+          waiting.push(() => {
+            resolve(decided);
+          });
+        });
+      } catch (error) {
+        return new Promise((_, reject) => {
+          waiting.push(() => {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          });
+        });
+      }
+    }
+    if (cmd === "open_backup_read_only") {
+      try {
+        return openBackupCommand(args);
+      } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+        return Promise.reject(error);
+      }
+    }
     if (cmd === "restore_prepare" || cmd === "restore_prepare_confirm" || cmd === "restore_commit") {
       try {
         return cmd === "restore_commit" ? restoreCommitCommand(args) : restorePrepareCommand(cmd, args);
@@ -3190,7 +3431,7 @@ export function installFakeShell(
         });
       });
     }
-    if ((cmd === "test_backup_pick" || cmd === "restore_pick") && heldPicker !== undefined) {
+    if ((cmd === "test_backup_pick" || cmd === "open_backup_pick" || cmd === "restore_pick") && heldPicker !== undefined) {
       // The picker stays open: the pick is made when it closes.
       const waiting = heldPicker;
       return new Promise((resolve, reject) => {
@@ -3758,6 +3999,36 @@ export function installFakeShell(
         for (const release of waiting) release();
       };
     },
+    openChoices: () => [...openHeld.values()].map(({ name, size }) => ({ name, size })),
+    openChoiceTokens: () => [...openHeld.keys()],
+    expireOpenChoices: () => {
+      openHeld.clear();
+    },
+    holdOpen: () => {
+      const waiting: (() => void)[] = [];
+      heldOpens = waiting;
+      return () => {
+        heldOpens = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdCopy: () => {
+      const waiting: (() => void)[] = [];
+      heldCopies = waiting;
+      return () => {
+        heldCopies = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    backupHolds: (items) => {
+      backupItems = items;
+    },
+    backupsOpen: () => [...backupSessions].filter(([session]) => live.get(session)?.unlocked === true).map(([, name]) => name),
+    sessionOfBackup: (fileName) => {
+      const found = [...backupSessions].find(([session, name]) => name === fileName && live.get(session)?.unlocked === true);
+      return found === undefined ? undefined : live.get(found[0]);
+    },
+    copiedOut,
     restorePicks: () => [...restoreHeld.values()].map(({ name, size, checked }) => ({ name, size, checked: checked !== undefined })),
     restorePickTokens: () => [...restoreHeld.keys()],
     restoreIs: (found) => {

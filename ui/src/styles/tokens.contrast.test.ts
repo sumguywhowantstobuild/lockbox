@@ -437,6 +437,13 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         check(`Move menu check mark, ${state}`, c("--ink"), fill, 3);
         check(`Move menu folder words, ${state}`, c("--ink"), fill, 4.5);
       }
+      // The vault menu's rows for the open vaults, backups and older copies (Task 7): the name, the quiet line under a read-only one ("Backup", "Older copy") and the
+      // check mark on the one on screen, which is also said in words to a screen reader ("checked"), on the menu's card at rest, highlighted and pressed.
+      for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`vault menu open row words, ${state}`, c("--ink"), fill, 4.5);
+        check(`vault menu open row second line, ${state}`, c("--ink2"), fill, 4.5);
+        check(`vault menu open row current mark, ${state}`, c("--ink"), fill, 3);
+      }
       // The new folder's name box in the side menu: its edge (the quiet text colour, since the ordinary field edge is a hair
       // under 3 to 1 against the side menu's tint) against the side menu, its words on its own card, its error edge.
       check("new folder box edge on the side menu", c("--ink2"), rail, 3);

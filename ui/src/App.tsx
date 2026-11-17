@@ -8,6 +8,7 @@ import { CloseQuestion } from "./screens/CloseQuestion";
 import { FirstClose } from "./screens/FirstClose";
 import { LockScreen } from "./screens/LockScreen";
 import { MainWindow } from "./screens/MainWindow";
+import { OpenBackupSteps } from "./screens/OpenBackup";
 import { RestoreFlow } from "./screens/RestoreFlow";
 import { RestoreNotices } from "./screens/RestoreNotices";
 import { FirstRun } from "./screens/setup/FirstRun";
@@ -21,6 +22,7 @@ import {
   startStore,
   useMoveIn,
   useNotices,
+  useOpenBackup,
   useRestore,
   useSessions,
   useStartError,
@@ -39,7 +41,8 @@ import "./styles/print.css";
  * The whole app: first-time setup while there is no vault, the lost-list screen while the list of vaults is damaged, the lock screen while none is open, the main window of the
  * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. A restore
  * (24a to 24e) takes the whole window above any of these while it is open, and gives it back when it ends; so does the notice of a restore that didn't
- * finish, below an open restore; moving to a new computer (26a to 26c) takes the place of the first screen and the lock screen in the same way. The
+ * finish, below an open restore; Open a backup begun from the lock screen (25a) does the same below those; moving to a new computer (26a to 26c) takes the place of the
+ * first screen and the lock screen in the same way. The
  * store starts listening for locks before anything asks the shell for anything. The first close of the window is explained
  * over whichever of these is up (5b). Light or dark follows the theme chosen in Settings, and Windows' own setting for System.
  */
@@ -92,12 +95,25 @@ export default function App() {
   // finished one is the lock screen's own and is not here.
   const { restore: unfinished } = useNotices();
   const notice = unfinished !== null && unfinished.ask !== "finished";
+  // Open a backup (25a) begun from the lock screen takes the window the same way, below a restore and its notices; begun from a window it is that window's panel.
+  const openFlow = useOpenBackup();
+  const openingFromLock = openFlow !== null && openFlow.host === null && openFlow.phase !== "picking";
 
   return (
     <LockboxParts>
       <PortalContainerProvider value={root ?? undefined}>
         <div ref={setRoot} className={`app mode-${mode} v-${look.accent}`}>
-          {restoring && moveIn?.step !== "here" ? <RestoreFlow /> : notice ? <RestoreNotices /> : movingIn ? <MoveIn /> : screen}
+          {restoring && moveIn?.step !== "here" ? (
+            <RestoreFlow />
+          ) : notice ? (
+            <RestoreNotices />
+          ) : openingFromLock ? (
+            <OpenBackupSteps />
+          ) : movingIn ? (
+            <MoveIn />
+          ) : (
+            screen
+          )}
           <FirstClose />
           <CloseQuestion />
         </div>

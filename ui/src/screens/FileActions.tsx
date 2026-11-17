@@ -9,7 +9,8 @@ import { Dialog } from "../parts/Dialog";
 import { KindIcon, PlusIcon } from "../parts/Icon";
 import { JobProgress } from "../parts/JobProgress";
 import { KEEP_OPEN } from "../saveAllWords";
-import { startAddFiles, confirmStoredCopy, openStoredFile, replaceStoredFile, saveStoredFile, type SessionData } from "../store";
+import { COPYING } from "../openBackupWords";
+import { startAddFiles, startOpenBackup, confirmStoredCopy, openStoredFile, replaceStoredFile, saveStoredFile, type SessionData } from "../store";
 
 // Stored files in an item's panel (10a to 10f, 9d): Open, Save a copy and Replace file on each, and Attach a file on a login, key or note.
 // What the buttons do, and what is said when it is done, is the store's (`openStoredFile` and the rest): this file draws the rows, asks
@@ -121,7 +122,7 @@ export function typeWord(name: string): string | null {
  * One stored file of an item: its name and size, and Open, Save a copy and Replace file (no Replace in a vault opened from a backup, which
  * can only save a copy and open). While the vault is working on a file the pressed button says so (`aria-busy`) and every file button in
  * the panel is off (`aria-disabled`, so it keeps focus) and sends nothing. A file that did not decrypt shows the words of 10d in place of
- * Open and Save a copy, with no button to a backup (4B's), and keeps Replace file, which is how a good copy goes in.
+ * Open and Save a copy, with Open a backup under them (a backup may hold a good copy), and keeps Replace file, which is how a good copy goes in.
  */
 function FileRow({ data, summary, file }: { data: SessionData; summary: ItemSummary; file: FileView }) {
   const [asking, setAsking] = useState<"program" | "replace" | { cloud: string } | null>(null);
@@ -193,9 +194,19 @@ function FileRow({ data, summary, file }: { data: SessionData; summary: ItemSumm
             </Button>
           </>
         ) : (
-          <p className="err" role="alert">
-            {messageText(messageFor(refused.error))}
-          </p>
+          <>
+            <p className="err" role="alert">
+              {messageText(messageFor(refused.error))}
+            </p>
+            {/* As drawn (10d): a backup may hold a good copy, so the way to one is here, under the words. */}
+            <Button
+              onClick={() => {
+                void startOpenBackup();
+              }}
+            >
+              Open a backup
+            </Button>
+          </>
         )}
         {data.readOnly ? null : (
           <Button
@@ -319,6 +330,7 @@ const WORK: Record<string, string> = {
   open: "Opening the file.",
   backup: "Backing up this vault.",
   save_all: "Saving files.",
+  copy_item: COPYING,
 };
 
 /** What 9b says for a Save a copy with progress, in the words the session chose (the design is silent beyond the sentence about the laptop). */

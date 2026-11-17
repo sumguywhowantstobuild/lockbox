@@ -119,7 +119,20 @@ test("open_unwraps_outcome", async () => {
   invoke.mockResolvedValueOnce(question);
   await expect(bridge.open("recover_vault")).resolves.toEqual(question);
   invoke.mockResolvedValueOnce("Dismissed");
-  await expect(bridge.open("open_backup_read_only")).resolves.toBe("Dismissed");
+  await expect(bridge.open("recover_vault")).resolves.toBe("Dismissed");
+});
+
+// Task 7: Open a backup is two steps. The picker is `open_backup_pick`; `open_backup_read_only` takes the held choice, the one box's credential and a request,
+// and answers the new session in `Done`, never a closed picker.
+test("open_backup_read_only_takes_a_choice_a_credential_and_a_request_and_answers_the_session", async () => {
+  const args = { choice: "a".repeat(32), credential: { password_or_key: "typed" }, request: 3 };
+  invoke.mockResolvedValueOnce({ Done: tagged(9, 1, { session: 9, generation: 1, name: "Old laptop backup", read_only: true, state: "unlocked", kind: "backup" }) });
+  const answer = await bridge.open("open_backup_read_only", args);
+  expect(invoke).toHaveBeenLastCalledWith("open_backup_read_only", args);
+  expect(answer).toEqual(tagged(9, 1, { session: 9, generation: 1, name: "Old laptop backup", read_only: true, state: "unlocked", kind: "backup" }));
+  // The session's generation is the bridge's now: an answer for it from before is stale.
+  invoke.mockResolvedValueOnce(tagged(9, 0, "items read before"));
+  await expect(bridge.call("list_items")).rejects.toBeInstanceOf(bridge.StaleAnswer);
 });
 
 test("call_plain_returns_answer_as_is", async () => {

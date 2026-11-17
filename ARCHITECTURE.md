@@ -80,7 +80,8 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `vault/source.rs` | One way to unlock and check a vault, whether it sits in a folder or inside a backup; also "test a backup" |
 | `vault/restore.rs` | Restore: check and extract into a hidden staging folder, the journaled swap into place, and recovery after a crash |
 | `vault/journal.rs` | The restore journal: its strict reader and validation, and the lock around it |
-| `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out; for a backup, the date its signed manifest gives (`backup_created_at`) |
+| `vault/readonly.rs` | `ReadOnlyVault`: look inside a backup or a `.before-restore` folder, save a file out, copy an item out (`Vault::copy_item_from` puts the copy in the collection the caller names, by the live vault's own rule, and never carries the source's); for a backup, the date its signed manifest gives (`backup_created_at`) |
+| `vault/fixture.rs` | Tests only (`test-internals`): a real backup the engine writes whose one item refers to a file the backup does not hold (`backup_missing_a_file`), for the shell's copy-out question |
 | `search.rs` | The in-memory search index (returns item IDs, and the name of the attached file a match was in) |
 | `generator.rs` | Password and passphrase generator (EFF word list in `wordlists/`) |
 | `env_file.rs` | Reading and writing `.env` files (`NAME=value` lines) for keys; a line it can't read is reported by its number only, and every value is wiped |
@@ -310,7 +311,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 |---|---|
 | `lib.rs` | Builds the app: the launch order, the signal and tick threads, locking on every way out |
 | `shell.rs` | `Shell`: owns everything below, runs the launch work, sends the page's events |
-| `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard; the lock epoch and the launch token (cancelled and replaced with each lock of all vaults); locking in two phases; the ordered lock-hook thread |
+| `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard (`SessionInfo` also says its `kind`, from the location and the read-only flag: `vault`, `older_copy` or `backup`; a backup's `name` is its file's name without `.lockbox-backup`); the lock epoch and the launch token (cancelled and replaced with each lock of all vaults); locking in two phases; the ordered lock-hook thread |
 | `autolock.rs` | The idle timer, the table of long operations (jobs) that pauses it, Windows signals, and the shutdown with its 2 s bound |
 | `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `lockbox://job-started`, `lockbox://progress` and `lockbox://lock-epoch` events; also the shape of `lockbox://close-asked` |
 | `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
@@ -323,7 +324,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
 | `dates.rs` | The one date shape the shell writes and reads (RFC 3339, UTC, whole seconds), and "whole days since": the 30-day backup reminder counts from the last backup, else from the vault's creation |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again; a backup picked to be restored is held the same way (`PendingChoice::RestorePick`, with `forget_restore_pick`, and every use of it, a check or a copy, in use until it ends), and once the password has worked it also holds the credential that worked and what the check found (the vault's name, ID and date, and the folder), so the typed text is on the page only until it is sent; a lock of all vaults of any kind, an idle one included, drops it |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again; a backup picked to be opened read-only (`PendingChoice::OpenBackup`) is held the same way, as a kind of its own that the test never answers for (and the other way round), with `forget_open_backup`; a backup picked to be restored is held the same way (`PendingChoice::RestorePick`, with `forget_restore_pick`, and every use of it, a check or a copy, in use until it ends), and once the password has worked it also holds the credential that worked and what the check found (the vault's name, ID and date, and the folder), so the typed text is on the page only until it is sent; a lock of all vaults of any kind, an idle one included, drops it |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
@@ -439,6 +440,26 @@ answer keeps the choice. The credential's third form, `{ "password_or_key": text
 the text is a well-formed key (and as a password too when that is wrong), and as a password only when it is not
 (`CredentialArg::attempts`); the other commands' `CredentialArg::typed` refuses it. No session is needed, so the three
 commands take no session or generation. Testing writes nothing.
+
+**Open a backup read-only, and copy items out of it** (`open_backup_pick`, `forget_open_backup`, `open_backup_read_only`,
+`copy_item_to`). Two steps, as testing is. `open_backup_pick` (picker titled "Open a backup") holds the path as
+`PendingChoice::OpenBackup { path, epoch }` with exactly the rules of a held test backup (the page gets
+`{ choice, file_name, size }`; a lock while the picker is open is `Locked` with nothing held; a closed picker is
+`Dismissed`; a lock of all vaults, closing, a new pick, `forget_open_backup` or five minutes drop it), and it is a kind
+of its own: a test choice sent to the open, or an open choice to the test, is `ChoiceExpired` and is left where it is.
+`open_backup_read_only(choice, credential, request)` reads the credential as the test does (`attempts`: the one box tries
+a well-formed key as a key, then as a password) and runs `ReadOnlyVault::open_backup` in a launch-scoped job
+(`JobKind::OpenBackup`, progress, a Stop through `cancel_operation`, the engine's token the job's own); the session it
+opens is keyed by the backup's location and a backup already open is answered as it is. A wrong credential, damage, a
+Stop or an I/O refusal keep the choice; a session opened, and any `Locked` (a lock of all vaults or closing, found as the
+job begins, when the open ends, or in the announcement that ends the job), use it up. Every session answer carries
+`kind` (`vault`, `older_copy`, `backup`), computed from the session's location and read-only flag; a backup session is
+named for its file. `copy_item_to` takes the target vault's `folder` (a folder ID in hex, or `null`; the key is
+required) and passes it to `Vault::copy_item_from`, which refuses a folder the target does not have, or has in the trash,
+with `InvalidInput { "collection" }` before anything is written (`Vault::check_copy_collection` is that same check, which
+the shell runs first, so a folder that would be refused is never preceded by `Confirm::MissingFiles`, the question about
+files the backup lacks; the yes is the same command again, with the same folder). A backup or an older copy is only ever
+a source: as a target it is `ReadOnly`, and a writable session as a source is `InvalidInput { "source vault" }`.
 
 **Open** (`open_file`). The stored name goes through the allowlist. An executable type asks first, before anything is
 decrypted. Then in a long operation (the idle timer pauses): a new folder only this user can reach, recorded in the

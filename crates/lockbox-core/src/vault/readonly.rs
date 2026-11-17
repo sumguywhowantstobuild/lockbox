@@ -244,13 +244,24 @@ pub struct CopiedItem {
 }
 
 impl Vault {
+    /// Whether a copied item may go in `collection` (`None`: in no collection, always): this vault's own rule, the one
+    /// [`copy_item_from`](Self::copy_item_from) applies. The collection must be one this vault has, not in its trash;
+    /// anything else is `InvalidInput { "collection" }`. For a caller that must refuse a collection before it asks the
+    /// person anything else about the copy. Reads only.
+    pub fn check_copy_collection(&self, collection: Option<ItemId>) -> Result<()> {
+        // A copy is never a collection, and its ID is new, so neither of those rules can refuse it.
+        self.check_collection(&ItemId::random(), &ItemKind::Note, collection, None)
+    }
+
     /// Copies the item `id` of a read-only vault into this one (spec 6.9) and returns the new
     /// item's ID with the attachments left out. The copy has a new ID, revision 0 and the time of
     /// now, and is never trashed; each attachment is decrypted with the source's key and
     /// re-encrypted under a new file ID and key, through a pipe, so no plaintext is written
-    /// anywhere. The copy keeps the item's collection only if this vault has that collection and
-    /// it is not in the trash. A trashed source item may be copied; a collection or an item being
-    /// purged may not.
+    /// anywhere. The copy goes in `collection` (none: in no collection), whatever collection the
+    /// item sat in at the source; this vault's own rule applies to it (`check_collection`): it
+    /// must be a collection this vault has and not in the trash, or the copy is refused as
+    /// `InvalidInput { "collection" }` before anything is written. A trashed source item may be
+    /// copied; a collection or an item being purged may not.
     ///
     /// An attachment whose file the source does not hold (see
     /// [`ReadOnlyVault::missing_attachments`]) stops the copy with `Damaged { "file missing" }`
@@ -266,6 +277,7 @@ impl Vault {
         &mut self,
         source: &ReadOnlyVault,
         id: &ItemId,
+        collection: Option<ItemId>,
         skip_missing: bool,
         cancel: &CancelToken,
     ) -> Result<CopiedItem> {
@@ -276,17 +288,15 @@ impl Vault {
         if stored.purging {
             return Err(BEING_DELETED);
         }
+        // Before the files are looked at, so a collection that would refuse the copy is never preceded by a question
+        // about files.
+        self.check_copy_collection(collection)?;
         // Listed once, from the source's entries, before anything of the copy exists.
         let left_out = source.source.missing_blobs(&stored.attachments)?;
         if !left_out.is_empty() && !skip_missing {
             return Err(FILE_MISSING);
         }
         let new_id = self.fresh_item_id()?;
-        // This vault's own rule: the collection must exist here and not be in the trash.
-        let collection = stored.collection.filter(|_| {
-            let fits = self.check_collection(&new_id, &stored.kind, stored.collection, None);
-            fits.is_ok()
-        });
         // The copy starts as the stored item under its new ID, with only the attachments whose
         // files the source holds.
         let mut copy = stored.clone();
@@ -1473,7 +1483,10 @@ mod tests {
         assert_eq!(from.retired_blobs.len(), 1);
 
         let (_parent, mut live) = live_vault();
-        let new = live.copy_item_from(&ro, &item, false, &cancel).unwrap().id;
+        let new = live
+            .copy_item_from(&ro, &item, None, false, &cancel)
+            .unwrap()
+            .id;
         assert_ne!(new, item);
         let copy = live.get_item(&new).unwrap();
         assert_eq!(copy.id, new);
@@ -1508,8 +1521,11 @@ mod tests {
         assert_eq!(ro.get_item(&item).unwrap().attachments.len(), 2);
     }
 
+    /// The copy goes in the collection the caller names, if the target has it and it is not in the trash (the target's
+    /// own rule), whatever collection the item sat in at the source; no collection means none. A collection the target
+    /// does not hold, or holds in the trash, is refused before anything is written.
     #[test]
-    fn collection_kept_only_if_live_has_it() {
+    fn copy_goes_in_the_chosen_collection_only_if_the_target_has_it() {
         let mut f = Fixture::new();
         let c = f
             .vault
@@ -1520,25 +1536,55 @@ mod tests {
         let ro = open_backup(&backup).unwrap();
         let cancel = CancelToken::new();
 
-        // A vault without that collection: the copy sits outside any collection.
+        // A vault without that collection: refused, nothing written; with none chosen the copy sits outside any.
         let (_parent, mut other) = live_vault();
-        let new = other.copy_item_from(&ro, &note, false, &cancel).unwrap().id;
+        let before = files_listing(&other);
+        invalid(
+            other.copy_item_from(&ro, &note, Some(c), false, &cancel),
+            "collection",
+        );
+        assert_eq!(other.items().count(), 0);
+        assert_eq!(files_listing(&other), before);
+        let new = other
+            .copy_item_from(&ro, &note, None, false, &cancel)
+            .unwrap()
+            .id;
         assert_eq!(other.get_item(&new).unwrap().collection, None);
 
-        // The vault the backup came from has it: kept.
+        // Its own collection is used, and the source's is not carried over.
+        let mine = other.new_item(ItemKind::Collection, "Mine", None).unwrap();
+        let new = other
+            .copy_item_from(&ro, &note, Some(mine), false, &cancel)
+            .unwrap()
+            .id;
+        assert_eq!(other.get_item(&new).unwrap().collection, Some(mine));
+
+        // The vault the backup came from has the collection: used when chosen, and not kept when none is.
         let new = f
             .vault
-            .copy_item_from(&ro, &note, false, &cancel)
+            .copy_item_from(&ro, &note, Some(c), false, &cancel)
             .unwrap()
             .id;
         assert_eq!(f.vault.get_item(&new).unwrap().collection, Some(c));
-
-        // In the trash there: not kept.
-        f.vault.delete_collection(&c).unwrap();
-        assert!(f.vault.get_item(&c).unwrap().trashed_at.is_some());
         let new = f
             .vault
-            .copy_item_from(&ro, &note, false, &cancel)
+            .copy_item_from(&ro, &note, None, false, &cancel)
+            .unwrap()
+            .id;
+        assert_eq!(f.vault.get_item(&new).unwrap().collection, None);
+
+        // In the trash there: refused, and a copy with none chosen still goes.
+        f.vault.delete_collection(&c).unwrap();
+        assert!(f.vault.get_item(&c).unwrap().trashed_at.is_some());
+        let count = f.vault.items().count();
+        invalid(
+            f.vault.copy_item_from(&ro, &note, Some(c), false, &cancel),
+            "collection",
+        );
+        assert_eq!(f.vault.items().count(), count);
+        let new = f
+            .vault
+            .copy_item_from(&ro, &note, None, false, &cancel)
             .unwrap()
             .id;
         let copy = f.vault.get_item(&new).unwrap();
@@ -1552,9 +1598,81 @@ mod tests {
         let from = ro.get_item(&note).unwrap();
         assert!(from.trashed_at.is_some() && from.trashed_with == Some(c));
         let (_parent, mut other) = live_vault();
-        let new = other.copy_item_from(&ro, &note, false, &cancel).unwrap().id;
+        let new = other
+            .copy_item_from(&ro, &note, None, false, &cancel)
+            .unwrap()
+            .id;
         let copy = other.get_item(&new).unwrap();
         assert!(copy.trashed_at.is_none() && copy.trashed_with.is_none());
+    }
+
+    /// The collection is checked before the item's missing files are looked at, so a caller never asks about files for a
+    /// copy that the collection would refuse; `check_copy_collection` is that same check on its own.
+    #[test]
+    fn a_collection_is_refused_before_missing_files_are_asked_about() {
+        let mut f = Fixture::new();
+        let c = f
+            .vault
+            .new_item(ItemKind::Collection, "Work", None)
+            .unwrap();
+        let (item, [_, gone, _]) = three_file_login(&mut f);
+        let (backup, _) = lose(&f, &[gone]);
+        let ro = open_backup(&backup).unwrap();
+        let (_parent, mut live) = live_vault();
+        let cancel = CancelToken::new();
+        let before = files_listing(&live);
+
+        assert!(live.check_copy_collection(None).is_ok());
+        assert!(matches!(
+            live.check_copy_collection(Some(c)),
+            Err(CoreError::InvalidInput { what: "collection" })
+        ));
+        for skip_missing in [false, true] {
+            invalid(
+                live.copy_item_from(&ro, &item, Some(c), skip_missing, &cancel),
+                "collection",
+            );
+        }
+        assert_eq!(files_listing(&live), before, "nothing written");
+        // A collection the live vault has: the missing file is asked about, as before.
+        let mine = live.new_item(ItemKind::Collection, "Mine", None).unwrap();
+        assert!(live.check_copy_collection(Some(mine)).is_ok());
+        let asked = live.copy_item_from(&ro, &item, Some(mine), false, &cancel);
+        assert!(
+            matches!(
+                asked,
+                Err(CoreError::Damaged {
+                    what: "file missing"
+                })
+            ),
+            "{asked:?}"
+        );
+        let copied = live
+            .copy_item_from(&ro, &item, Some(mine), true, &cancel)
+            .unwrap();
+        assert_eq!(live.get_item(&copied.id).unwrap().collection, Some(mine));
+    }
+
+    /// A refused collection stops an item with files before any file is written: no blob, no partial, no item.
+    #[test]
+    fn a_collection_the_target_lacks_stops_a_copy_before_any_file_is_written() {
+        let mut f = Fixture::new();
+        let c = f
+            .vault
+            .new_item(ItemKind::Collection, "Work", None)
+            .unwrap();
+        let (item, _, _) = two_file_login(&mut f);
+        let backup = f.backup("a.lockbox-backup");
+        let ro = open_backup(&backup).unwrap();
+        let (_parent, mut live) = live_vault();
+        let before = files_listing(&live);
+        invalid(
+            live.copy_item_from(&ro, &item, Some(c), false, &CancelToken::new()),
+            "collection",
+        );
+        assert_eq!(live.items().count(), 0);
+        assert_eq!(files_listing(&live), before, "nothing written");
+        assert_eq!(blob_count(&live), 0);
     }
 
     #[test]
@@ -1578,12 +1696,15 @@ mod tests {
         let (_parent, mut live) = live_vault();
         let before = files_listing(&live);
         let cancel = CancelToken::new();
-        invalid(live.copy_item_from(&ro, &c, false, &cancel), "collection");
         invalid(
-            live.copy_item_from(&ro, &purging, false, &cancel),
+            live.copy_item_from(&ro, &c, None, false, &cancel),
+            "collection",
+        );
+        invalid(
+            live.copy_item_from(&ro, &purging, None, false, &cancel),
             "being deleted",
         );
-        let unknown = live.copy_item_from(&ro, &ItemId::random(), false, &cancel);
+        let unknown = live.copy_item_from(&ro, &ItemId::random(), None, false, &cancel);
         assert!(matches!(unknown, Err(CoreError::NotFound)));
         assert_eq!(live.items().count(), 0);
         assert_eq!(files_listing(&live), before, "nothing written");
@@ -1596,7 +1717,7 @@ mod tests {
         let ro = tampered_folder(&f, &big);
         let (_parent, mut live) = live_vault();
         let before = files_listing(&live);
-        let result = live.copy_item_from(&ro, &item, false, &CancelToken::new());
+        let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
         assert!(
             matches!(result, Err(CoreError::Damaged { .. })),
             "{result:?}"
@@ -1638,7 +1759,7 @@ mod tests {
         // The second attachment fails: the first one's new blob is already published.
         published.set(0);
         watch("copy.mid_stream", &live);
-        let result = live.copy_item_from(&tampered, &item, false, &cancel);
+        let result = live.copy_item_from(&tampered, &item, None, false, &cancel);
         failpoint::disarm_all();
         assert!(
             matches!(result, Err(CoreError::Damaged { .. })),
@@ -1657,7 +1778,7 @@ mod tests {
         watch("copy.before_commit", &live);
         let token = CancelToken::new();
         failpoint::arm_cancel("copy.before_commit", token.clone());
-        let result = live.copy_item_from(&good, &item, false, &token);
+        let result = live.copy_item_from(&good, &item, None, false, &token);
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
         assert_eq!(published.get(), 3, "both new blobs were published");
@@ -1668,7 +1789,7 @@ mod tests {
         published.set(0);
         watch("copy.before_commit", &live);
         failpoint::arm("atomic_write.before_replace");
-        let result = live.copy_item_from(&good, &item, false, &cancel);
+        let result = live.copy_item_from(&good, &item, None, false, &cancel);
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))), "{result:?}");
         assert_eq!(published.get(), 3, "both new blobs were published");
@@ -1678,7 +1799,8 @@ mod tests {
         assert_eq!(items.len(), 1, "no item file or temp left: {items:?}");
 
         // Still works afterwards.
-        live.copy_item_from(&good, &item, false, &cancel).unwrap();
+        live.copy_item_from(&good, &item, None, false, &cancel)
+            .unwrap();
         assert_eq!(live.items().count(), 2);
     }
 
@@ -1719,7 +1841,7 @@ mod tests {
         failpoint::observe("copy.before_commit", Box::new(look));
         let token = CancelToken::new();
         failpoint::arm_cancel("copy.before_commit", token.clone());
-        let result = live.copy_item_from(&ro, &item, false, &token);
+        let result = live.copy_item_from(&ro, &item, None, false, &token);
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
         assert!(published.get(), "the new blob took the quarantined ID");
@@ -1746,7 +1868,7 @@ mod tests {
         };
         failpoint::observe("import.after_publish", Box::new(count));
         failpoint::arm("import.after_publish");
-        let result = live.copy_item_from(&ro, &item, false, &CancelToken::new());
+        let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))), "{result:?}");
         assert_eq!(published.get(), 1, "the blob was in place when it failed");
@@ -1765,7 +1887,7 @@ mod tests {
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
         failpoint::arm("items.after_write");
-        let result = live.copy_item_from(&ro, &item, false, &CancelToken::new());
+        let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))), "{result:?}");
         assert_eq!(live.items().count(), 1, "the item is in the vault");
@@ -1797,7 +1919,7 @@ mod tests {
         };
         failpoint::observe("items.after_write", Box::new(damage));
         failpoint::arm("items.after_write");
-        let result = live.copy_item_from(&ro, &item, false, &CancelToken::new());
+        let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Io(_))), "{result:?}");
         assert_eq!(live.items().count(), 0, "memory could not take the item");
@@ -1833,7 +1955,7 @@ mod tests {
             max_file_bytes: None,
         }));
         let started = std::time::Instant::now();
-        let result = live.copy_item_from(&ro, &item, false, &CancelToken::new());
+        let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
         done.send(()).unwrap();
         assert!(
             matches!(result, Err(CoreError::NotEnoughSpace { .. })),
@@ -1858,13 +1980,13 @@ mod tests {
         let (_parent, mut live) = live_vault();
         let before = files_listing(&live);
         PANIC_IN_WORKER.with(|flag| flag.set(true));
-        let result = live.copy_item_from(&ro, &item, false, &CancelToken::new());
+        let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
         PANIC_IN_WORKER.with(|flag| flag.set(false));
         assert!(matches!(result, Err(CoreError::Io(_))), "{result:?}");
         assert_eq!(live.items().count(), 0);
         assert_eq!(files_listing(&live), before);
         // The vault is fine afterwards.
-        live.copy_item_from(&ro, &item, false, &CancelToken::new())
+        live.copy_item_from(&ro, &item, None, false, &CancelToken::new())
             .unwrap();
         assert_eq!(live.items().count(), 1);
     }
@@ -1883,7 +2005,7 @@ mod tests {
         // Cancelled after the last attachment went through.
         let token = CancelToken::new();
         failpoint::arm_cancel("copy.before_commit", token.clone());
-        let result = live.copy_item_from(&ro, &item, false, &token);
+        let result = live.copy_item_from(&ro, &item, None, false, &token);
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
         assert!(token.is_cancelled());
@@ -1893,7 +2015,7 @@ mod tests {
         // Nothing to stream: the token is still looked at before the item is written.
         let token = CancelToken::new();
         token.cancel();
-        let result = live.copy_item_from(&ro, &note, false, &token);
+        let result = live.copy_item_from(&ro, &note, None, false, &token);
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
         assert_eq!(live.items().count(), 0);
         let items = names(&live.dir().join("items"));
@@ -1908,7 +2030,7 @@ mod tests {
         let ro = open_backup(&backup).unwrap();
         let new = f
             .vault
-            .copy_item_from(&ro, &item, false, &CancelToken::new());
+            .copy_item_from(&ro, &item, None, false, &CancelToken::new());
         let new = new.unwrap().id;
         assert_ne!(new, item);
         assert_eq!(f.vault.items().count(), 2);
@@ -2039,7 +2161,7 @@ mod tests {
         assert_eq!(ro.missing_attachments(&item).unwrap(), [gone]);
         let (_parent, mut live) = live_vault();
         let cancel = CancelToken::new();
-        let refused = live.copy_item_from(&ro, &item, false, &cancel);
+        let refused = live.copy_item_from(&ro, &item, None, false, &cancel);
         assert!(
             matches!(
                 refused,
@@ -2049,7 +2171,9 @@ mod tests {
             ),
             "{refused:?}"
         );
-        let copied = live.copy_item_from(&ro, &item, true, &cancel).unwrap();
+        let copied = live
+            .copy_item_from(&ro, &item, None, true, &cancel)
+            .unwrap();
         assert_eq!(copied.left_out, [gone]);
         assert_eq!(live.get_item(&copied.id).unwrap().attachments.len(), 2);
         assert_eq!(blob_count(&live), 2, "the linked blob was copied");
@@ -2075,7 +2199,7 @@ mod tests {
         not_plain(ro.missing_attachments(&item));
         let imports = count_imports();
         for skip_missing in [false, true] {
-            let result = live.copy_item_from(&ro, &item, skip_missing, &CancelToken::new());
+            let result = live.copy_item_from(&ro, &item, None, skip_missing, &CancelToken::new());
             not_plain(result);
         }
         assert_eq!(imports.get(), 0, "a file was written");
@@ -2118,7 +2242,9 @@ mod tests {
         for ro in [open_backup(&backup).unwrap(), open_folder(&folder).unwrap()] {
             assert_eq!(ro.missing_attachments(&item).unwrap(), [ids[1], ids[3]]);
             let (_parent, mut live) = live_vault();
-            let copied = live.copy_item_from(&ro, &item, true, &cancel).unwrap();
+            let copied = live
+                .copy_item_from(&ro, &item, None, true, &cancel)
+                .unwrap();
             assert_eq!(copied.left_out, [ids[1], ids[3]]);
             let copy = live.get_item(&copied.id).unwrap();
             let lengths: Vec<_> = copy.attachments.iter().map(|a| a.length).collect();
@@ -2161,7 +2287,7 @@ mod tests {
             }
         };
         failpoint::observe("import.before_publish", Box::new(vanish));
-        let result = live.copy_item_from(&ro, &item, true, &CancelToken::new());
+        let result = live.copy_item_from(&ro, &item, None, true, &CancelToken::new());
         failpoint::disarm_all();
         assert!(
             matches!(
@@ -2190,7 +2316,7 @@ mod tests {
 
         let imports = count_imports();
         for ro in [open_backup(&backup).unwrap(), open_folder(&folder).unwrap()] {
-            let result = live.copy_item_from(&ro, &item, false, &CancelToken::new());
+            let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
             assert!(
                 matches!(
                     result,
@@ -2220,7 +2346,9 @@ mod tests {
         {
             let (_parent, mut live) = live_vault();
             // A file item whose only file is missing: a file item with no file at all.
-            let copied = live.copy_item_from(&ro, &file_item, true, &cancel).unwrap();
+            let copied = live
+                .copy_item_from(&ro, &file_item, None, true, &cancel)
+                .unwrap();
             assert_eq!(copied.left_out, [only]);
             let copy = live.get_item(&copied.id).unwrap();
             assert!(matches!(copy.kind, ItemKind::File), "{:?}", copy.kind);
@@ -2228,7 +2356,9 @@ mod tests {
             assert!(copy.attachments.is_empty());
             assert_eq!(blob_count(&live), 0);
 
-            let copied = live.copy_item_from(&ro, &item, true, &cancel).unwrap();
+            let copied = live
+                .copy_item_from(&ro, &item, None, true, &cancel)
+                .unwrap();
             assert_eq!(copied.left_out, [gone]);
             let from = ro.get_item(&item).unwrap();
             let copy = live.get_item(&copied.id).unwrap();
@@ -2272,7 +2402,9 @@ mod tests {
         let backup = f.backup("later.lockbox-backup");
         let ro = open_backup(&backup).unwrap();
         let (_parent, mut live) = live_vault();
-        let copied = live.copy_item_from(&ro, &note, true, &cancel).unwrap();
+        let copied = live
+            .copy_item_from(&ro, &note, None, true, &cancel)
+            .unwrap();
         assert!(copied.left_out.is_empty());
         assert_eq!(live.get_item(&copied.id).unwrap().title, "no files");
     }
@@ -2297,7 +2429,7 @@ mod tests {
             // The damaged file is there, so it is not missing.
             assert_eq!(ro.missing_attachments(&item).unwrap(), [gone]);
             let imports = count_imports();
-            let result = live.copy_item_from(&ro, &item, true, &CancelToken::new());
+            let result = live.copy_item_from(&ro, &item, None, true, &CancelToken::new());
             failpoint::disarm_all();
             assert!(
                 matches!(result, Err(CoreError::Damaged { what }) if what != "file missing"),
@@ -2364,7 +2496,7 @@ mod tests {
         let (seen, watched, owned_run) = (Rc::clone(&scans), roots.clone(), run.to_vec());
         let at_mid_stream = move || seen.borrow_mut().push(scan(&owned_run, &watched));
         failpoint::observe("copy.mid_stream", Box::new(at_mid_stream));
-        let result = live.copy_item_from(&ro, &item, false, &CancelToken::new());
+        let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
         failpoint::disarm_all();
         let new = result.unwrap().id;
 

@@ -265,12 +265,12 @@ test("no_forgot_password_link_until_4c", async () => {
     { id: 8, name: "Home", items: sampleItems() },
   ]);
   // Nothing on the lock screen leads to a screen a later plan builds: no forgotten password, no adding a vault folder, no generator. Restore a backup
-  // is the one link under the form (4B's Task 5); the rest are the vaults, the password and Unlock.
+  // (4B's Task 5) and Open a backup (Task 7) are the two links under the form; the rest are the vaults, the password and Unlock.
   for (const words of [/forgot/i, /add existing/i, /generate/i, /recovery/i]) {
     expect(screen.queryByText(words)).toBeNull();
   }
   expect(screen.queryAllByRole("link")).toEqual([]);
-  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Restore a backup"]);
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
   expect(container.querySelectorAll("[style]")).toHaveLength(0);
 });
 

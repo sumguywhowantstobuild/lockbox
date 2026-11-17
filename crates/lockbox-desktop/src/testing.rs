@@ -1715,6 +1715,27 @@ impl TestShell {
         (tagged.session, tagged.generation)
     }
 
+    /// The backup at `path` opened read-only with `credential`, the page's two steps: the picker answers `path`, then
+    /// the held choice is opened (as request 1).
+    pub fn open_backup_read_only(
+        &self,
+        path: &Path,
+        credential: crate::commands::backup::CredentialArg,
+    ) -> crate::session::Tagged<crate::session::SessionInfo> {
+        self.dialogs.answer(Some(path.to_path_buf()));
+        let Ok(crate::error::Outcome::Done(picked)) = self.shell.open_backup_pick(None) else {
+            panic!("the backup was not picked");
+        };
+        let opened = heavy(|| {
+            self.shell
+                .open_backup_read_only(&picked.choice, credential, 1)
+        });
+        match opened {
+            Ok(crate::error::Outcome::Done(tagged)) => tagged,
+            _ => panic!("the backup did not open"),
+        }
+    }
+
     /// A file item holding a file named `name` with `bytes`, stored in the session's vault: the item's ID and the
     /// file's ID, in hex.
     pub fn stored_file(

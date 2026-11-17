@@ -4,6 +4,7 @@
 import {
   call,
   callMany,
+  callPair,
   callPlain,
   open,
   type CaptureEvent,
@@ -60,12 +61,18 @@ export interface VaultEntry {
   details_damaged: boolean;
 }
 
+/** What a session is: a vault, an older copy a restore kept (opened read-only), or a backup opened read-only. */
+export type SessionKind = "vault" | "older_copy" | "backup";
+
 export interface SessionInfo {
   session: number;
   generation: number;
+  /** A backup's is the backup file's name without `.lockbox-backup`, not the vault's name inside it; an older copy keeps its vault's name. */
   name: string;
   read_only: boolean;
   state: "unlocked" | "locked" | "unavailable";
+  /** Says what a read-only session is: an older copy or a backup. A vault's is `vault`. */
+  kind: SessionKind;
 }
 
 /** What the cleanup at unlock did (spec 6.4), as counts: the shell's `CleanupView`, field by field. */
@@ -917,6 +924,72 @@ export function testBackup(choice: string, credential: CredentialArg, request: n
 /** Lets the picked backup go (the panel closed, or another panel took its place). A choice that is unknown or already gone is no error. */
 export async function forgetTestBackup(choice: string): Promise<void> {
   await callPlain<null>("forget_test_backup", { choice });
+}
+
+/**
+ * A backup file the shell holds for Open a backup under `choice` (32 lowercase hex characters, of its own kind: a Test a backup choice never answers for it):
+ * the page sees its name and size only. The shell keeps the path to itself, and lets the choice go at a lock of every vault, after five minutes unused,
+ * when another is picked, at `forgetOpenBackup`, and once a session has been opened with it.
+ */
+export interface OpenPick {
+  choice: string;
+  file_name: string;
+  size: number;
+}
+
+/**
+ * Opens the Windows picker (titled "Open a backup") for a backup file and holds its path in the shell under a choice, launch-scoped. With `choice: null` it starts
+ * a pick; with the choice a pick answered, Pick another replaces that file with the new one and the shell forgets the old. `"Dismissed"` is a closed picker, which
+ * leaves the sent choice as it was. It needs no open vault, and is plain (not tagged with a session).
+ */
+export function openBackupPick(choice: string | null): Promise<Outcome<OpenPick>> {
+  return callPlain<Outcome<OpenPick>>("open_backup_pick", { choice });
+}
+
+/** Lets the picked backup go (the panel closed, or another took its place). A choice that is unknown or already gone is no error; a Test a backup choice is not this kind. */
+export async function forgetOpenBackup(choice: string): Promise<void> {
+  await callPlain<null>("forget_open_backup", { choice });
+}
+
+/**
+ * Opens the picked backup read-only, with what was typed as one box's (`password_or_key`). A launch-scoped job (`request` names it for `lockbox://job-started`
+ * and `lockbox://progress`, kind `open_backup`, scope `launch`): it shows progress and a Stop (`cancelOperation`). The answer is the new session, tagged: a
+ * read-only session of `kind` `backup` whose name is the backup file's name without `.lockbox-backup`. A wrong password (`core` `wrong_password`), damage (`core`
+ * `damaged`), `core` `io` and a stop (`cancelled`) keep the choice; a session opened uses it up. A choice that is gone is `choice_expired`; `locked` means every
+ * vault was locked while it ran. A backup that is open already is answered as it is.
+ */
+export async function openBackupReadOnly(choice: string, credential: CredentialArg, request: number): Promise<Tagged<SessionInfo>> {
+  const answer = await open<SessionInfo>("open_backup_read_only", { choice, credential, request });
+  // The command answers a tagged session and never asks a question; there is no picker in it any more.
+  if (answer === "Dismissed" || "Confirm" in answer) throw new Error("unexpected answer to open_backup_read_only");
+  return answer;
+}
+
+/** The item a copy put in the target vault: its new id, and the names of the attached files the backup did not hold (so they were left out). */
+export interface CopiedItemView {
+  id: string;
+  left_out: string[];
+}
+
+/**
+ * Copies an item out of one open session (`from`, a backup or an older copy) into another (`to`, a vault in use), into the target's folder `folder` (its id, or
+ * `null` for none). The answer is tagged with `to`, and is dropped (`StaleAnswer`) unless both sessions are current. When the backup lacks files that are attached to
+ * the item and `skipMissing` is false, nothing is copied and the answer is the question (`Confirm` `MissingFiles` with their names); sent again with `skipMissing`
+ * it copies the item without them. A folder that is not in the target, or is in its Trash, is `invalid_input` (`what` `collection`); a read-only target is
+ * `read_only`; either session locked is `locked`.
+ */
+export function copyItemTo(
+  from: SessionRef,
+  id: string,
+  to: SessionRef,
+  folder: string | null,
+  skipMissing: boolean,
+): Promise<Tagged<Outcome<CopiedItemView>>> {
+  return callPair<Outcome<CopiedItemView>>(
+    "copy_item_to",
+    { from: from.session, from_generation: from.generation, id, to: to.session, to_generation: to.generation, folder, skip_missing: skipMissing },
+    from,
+  );
 }
 
 /**

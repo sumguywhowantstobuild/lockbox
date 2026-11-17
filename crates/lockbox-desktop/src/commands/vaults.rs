@@ -881,7 +881,7 @@ mod tests {
     use crate::os::{DriveType, KnownFolder};
     use crate::paths::MAX_STATE_FILE;
     use crate::registry::MAX_VAULTS;
-    use crate::session::{LockReason, SessionState};
+    use crate::session::{LockReason, SessionKind, SessionState};
     use crate::testing::{FakeVolume, LOCAL_NTFS, TestShell, heavy};
 
     const PW: &str = "correct horse battery";
@@ -2460,9 +2460,8 @@ mod tests {
                 .data,
         );
         ts.shell.sessions.lock_all(LockReason::Manual);
-        ts.dialogs.answer(Some(backup));
         let credential = super::super::backup::CredentialArg::Password(secret(PW));
-        let copy = done(heavy(|| ts.shell.open_backup_read_only(credential)).unwrap());
+        let copy = ts.open_backup_read_only(&backup, credential);
         assert!(copy.data.read_only);
         let state_before = fs::read(&ts.shell.paths.vault_state).unwrap();
         assert_eq!(
@@ -2593,9 +2592,8 @@ mod tests {
         ts.shell.sessions.lock_all(LockReason::Manual);
 
         // The copy holds the vault's ID and is opened read-only.
-        ts.dialogs.answer(Some(backup.clone()));
         let credential = super::super::backup::CredentialArg::Password(secret(PW));
-        let opened = done(heavy(|| ts.shell.open_backup_read_only(credential)).unwrap());
+        let opened = ts.open_backup_read_only(&backup, credential);
         assert!(opened.data.read_only);
         let copy = Location::backup(&backup).unwrap();
         assert!(!ts.shell.recovery_unconfirmed(&copy, true));
@@ -2676,9 +2674,8 @@ mod tests {
                 .data,
         );
         ts.shell.sessions.lock_all(LockReason::Manual);
-        ts.dialogs.answer(Some(backup));
         let credential = super::super::backup::CredentialArg::Password(secret(PW));
-        let copy = done(heavy(|| ts.shell.open_backup_read_only(credential)).unwrap());
+        let copy = ts.open_backup_read_only(&backup, credential);
         let refused = ts.shell.recovery_confirmed(copy.session, copy.generation);
         assert_eq!(refused.err(), Some(ShellError::ReadOnly));
         let json = serde_json::to_value(ShellError::ReadOnly).unwrap();
@@ -2694,11 +2691,12 @@ mod tests {
             name: "Family".to_owned(),
             read_only: false,
             state: SessionState::Unlocked,
+            kind: SessionKind::Vault,
         };
         let cleanup = r#"{"partials_removed":0,"temps_removed":0,"retired_deleted":0,"purges_finished":0,"orphans_quarantined":0,"orphans_restored":0,"skipped_damaged":0,"failed":0}"#;
         let expected = |mark: bool| {
             format!(
-                r#"{{"info":{{"session":7,"generation":3,"name":"Family","read_only":false,"state":"unlocked"}},"used_backup_header":false,"header_mac_mismatch":false,"header_repair_failed":false,"cleanup":{cleanup},"cloud":null,"recovery_unconfirmed":{mark}}}"#
+                r#"{{"info":{{"session":7,"generation":3,"name":"Family","read_only":false,"state":"unlocked","kind":"vault"}},"used_backup_header":false,"header_mac_mismatch":false,"header_repair_failed":false,"cleanup":{cleanup},"cloud":null,"recovery_unconfirmed":{mark}}}"#
             )
         };
         for mark in [true, false] {
