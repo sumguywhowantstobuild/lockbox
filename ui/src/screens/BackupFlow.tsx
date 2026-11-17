@@ -5,6 +5,7 @@ import { useJob } from "../jobs";
 import { backupNotFinishedMore, BACKUP_NOT_FINISHED, messageFor, messageText } from "../messages";
 import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
+import { Figure } from "../parts/Figure";
 import { JobProgress } from "../parts/JobProgress";
 import { Panel } from "../parts/Panel";
 import {
@@ -13,6 +14,7 @@ import {
   putBackupAside,
   seeTheChange,
   startBackup,
+  testThisBackup,
   type BackupStep,
   type SessionData,
 } from "../store";
@@ -36,18 +38,6 @@ function isNoSpace(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const { code, kind } = error as { code?: unknown; kind?: unknown };
   return code === "core" && kind === "not_enough_space";
-}
-
-/** A row of the saved view: its label and its figure. */
-function Figure({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="fld">
-      <div className="fv">
-        <span className="fl">{label}</span>
-        <span className="fval">{value}</span>
-      </div>
-    </div>
-  );
 }
 
 /** What the panel is showing, as a key: focus goes to its heading when this changes, so a screen reader reads the new view. */
@@ -84,9 +74,18 @@ export function BackupPanel({ data }: { data: SessionData }) {
         titleRef={title}
         onClose={close}
         footer={
-          <Button look="pill-main" onClick={close}>
-            Done
-          </Button>
+          <>
+            <Button
+              onClick={() => {
+                testThisBackup(data.session);
+              }}
+            >
+              Test this backup
+            </Button>
+            <Button look="pill-main" onClick={close}>
+              Done
+            </Button>
+          </>
         }
       >
         <section className="gp">

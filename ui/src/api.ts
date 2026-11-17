@@ -758,7 +758,36 @@ export interface BackupView {
   damaged_files: number;
   missing_files: number;
   size_on_disk: number;
+  /** The backup just written, held by the shell for Test a backup (22c's "Test this backup"): its choice, and the name and size to show. Never the path. */
+  test: TestPick;
 }
+
+/**
+ * A backup file the shell holds for Test a backup under `choice` (32 lowercase hex characters): the page only ever sees its name and size. The shell
+ * keeps the path to itself, and lets the choice go at a lock of every vault, after five minutes unused, when another is picked, and at `forgetTestBackup`.
+ */
+export interface TestPick {
+  choice: string;
+  file_name: string;
+  size: number;
+}
+
+/** What testing a backup found (the shell's `BackupSummaryView`): when it was made (RFC 3339, UTC), the counts of what it holds, and its size on disk. Never a name. */
+export interface BackupSummaryView {
+  created_at: string;
+  items: number;
+  files: number;
+  /** Attached files the backup does not hold. */
+  missing_files: number;
+  size_on_disk: number;
+}
+
+/**
+ * What is typed to open a backup: one box for a password or a recovery key (`password_or_key`). The shell tries the text as a recovery key when it
+ * is a well-formed one (then as a password, if that was not it) and as a password otherwise. `password` and `recovery_key` are the shell's other forms,
+ * for other screens.
+ */
+export type CredentialArg = { password: string } | { recovery_key: string } | { password_or_key: string };
 
 /** A backup is due: the vault's last one (else its making) is `days` whole days ago, and that is 30 or more. */
 export interface BackupDue {
@@ -775,6 +804,31 @@ export interface BackupDue {
  */
 export function backupVault(vault: SessionRef, request: number): Promise<Tagged<Outcome<BackupView>>> {
   return call<Outcome<BackupView>>("backup_vault", { session: vault.session, generation: vault.generation, request });
+}
+
+/**
+ * Opens the Windows picker (titled "Test a backup") for a backup file and holds its path in the shell under a choice, launch-scoped (not one vault's). With
+ * `choice: null` it starts a pick; with the choice a pick answered, Pick another replaces that file with the new one and the shell forgets the old.
+ * `"Dismissed"` is a closed picker, which leaves the sent choice as it was. It needs no open vault, and is plain (not tagged with a session).
+ */
+export function testBackupPick(choice: string | null): Promise<Outcome<TestPick>> {
+  return callPlain<Outcome<TestPick>>("test_backup_pick", { choice });
+}
+
+/**
+ * Tests the picked backup without restoring it: opens it with the typed text, checks everything in it and writes nothing. A launch-scoped job (`request`
+ * names it for `lockbox://job-started` and `lockbox://progress`, kind `test`, scope `launch`; sent only once the job begins). Every answer keeps the
+ * choice: a wrong password (`core` `wrong_password`, also for a well-formed recovery key that is not the one), a damaged backup (`core` `damaged` with the
+ * first failing `what`), `core` `io`, `unsupported_version` or `params_out_of_bounds`, and a stop (`cancelled`). A choice that is gone (expired, used,
+ * dropped by a lock) is `choice_expired`; `locked` means every vault was locked while it ran.
+ */
+export function testBackup(choice: string, credential: CredentialArg, request: number): Promise<Outcome<BackupSummaryView>> {
+  return callPlain<Outcome<BackupSummaryView>>("test_backup", { choice, credential, request });
+}
+
+/** Lets the picked backup go (the panel closed, or another panel took its place). A choice that is unknown or already gone is no error. */
+export async function forgetTestBackup(choice: string): Promise<void> {
+  await callPlain<null>("forget_test_backup", { choice });
 }
 
 /** Whether the vault's last backup, or its making when it has none, is 30 or more days ago. `null` when it is not, and always for a read-only copy. */

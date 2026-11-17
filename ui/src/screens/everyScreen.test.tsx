@@ -582,6 +582,21 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Test a backup: the file and the box, progress, the result and a damaged backup (23a to 23d)",
+    shows: ["TestBackup#TestBackupPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Test a backup", settings);
+      const panel = await screen.findByRole("complementary", { name: "Test a backup" });
+      // The last of its views with a field on it: a wrong password said under the box.
+      fireEvent.change(within(panel).getByLabelText("Password or recovery key from when it was made"), { target: { value: "not the one" } });
+      click("Test", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
     name: "Backup refused, and the questions beside it (Ask 2)",
     shows: ["BackupFlow#BackupRefusedAsk"],
     reach: async () => {

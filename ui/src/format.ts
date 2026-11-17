@@ -70,6 +70,16 @@ export function dayWords(when: string, now: Date): string {
 }
 
 /**
+ * A day with its year, in the PC's own time: "2 October 2026" (23b's "Made"). A date that cannot be read gives an empty string, so the screen
+ * says nothing instead of something wrong.
+ */
+export function fullDay(when: string): string {
+  const then = new Date(when);
+  if (when === "" || Number.isNaN(then.getTime())) return "";
+  return `${String(then.getDate())} ${MONTHS[then.getMonth()] ?? ""} ${String(then.getFullYear())}`;
+}
+
+/**
  * How long ago `when` was, in the words "changed ..." and "deleted ..." follow and a list sorted by date shows on each row:
  * "today", "yesterday", "2 days ago" for the first week, then "this month", "last month", "in September", "in December
  * 2025". Empty when the date cannot be read.

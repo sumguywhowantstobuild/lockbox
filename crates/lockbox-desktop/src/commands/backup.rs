@@ -10,10 +10,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use lockbox_core::blob::{CancelToken, NoProgress};
+use lockbox_core::blob::NoProgress;
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::recovery::RecoverySecret;
-use lockbox_core::{BackupReport, Credential, ReadOnlyVault, UnverifiedSlot, Vault, verify_backup};
+use lockbox_core::{
+    BackupReport, CoreError, Credential, ReadOnlyVault, UnverifiedSlot, Vault, verify_backup,
+};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Request;
@@ -24,7 +26,7 @@ use crate::dates;
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
 use crate::jobs::{JobKind, JobScope};
 use crate::open::safe_name;
-use crate::pending::Token;
+use crate::pending::{PendingChoice, Token};
 use crate::restore::{
     DestinationArg, PreRestoreEntry, RestoreNotice, RestorePreparedView, RestoredView,
 };
@@ -48,10 +50,25 @@ pub struct BackupView {
     pub missing_files: usize,
     /// The backup file's size in bytes, as the file system says (`fs::metadata`), not the engine's count of content.
     pub size_on_disk: u64,
+    /// The backup just written, held in Rust to be tested (22c's "Test this backup"): the page tests it with the choice
+    /// and never sees the path.
+    pub test: TestPick,
 }
 
+/// A backup held in Rust for `test_backup`: the token that stands for its path, which never crosses; its name, for the
+/// page to show as text; and its size on disk.
+#[derive(Debug, Serialize)]
+pub struct TestPick {
+    pub choice: Token,
+    pub file_name: String,
+    pub size: u64,
+}
+
+/// The title of the picker of "Test a backup".
+const TEST_PICK_TITLE: &str = "Test a backup";
+
 impl BackupView {
-    fn of(report: BackupReport, size_on_disk: u64) -> BackupView {
+    fn of(report: BackupReport, size_on_disk: u64, test: TestPick) -> BackupView {
         let BackupReport {
             items,
             files,
@@ -67,6 +84,7 @@ impl BackupView {
             damaged_files: skipped_damaged_files,
             missing_files,
             size_on_disk,
+            test,
         }
     }
 }
@@ -129,14 +147,18 @@ pub struct CopiedItemView {
     pub left_out: Vec<String>,
 }
 
-/// What the user typed to open a backup, in the two shapes the page sends: `{ "password": ".." }` or
-/// `{ "recovery_key": ".." }`. Anything else (both, none, another field, another type) fails to parse, and the
-/// command answers the fixed malformed-request refusal without quoting the input. No `Debug`: it holds a secret.
+/// What the user typed to open a backup, in the three shapes the page sends: `{ "password": ".." }`,
+/// `{ "recovery_key": ".." }` or `{ "password_or_key": ".." }` (the one box of "Test a backup", which cannot know which
+/// the person typed). Anything else (two, none, another field, another type) fails to parse, and the command answers
+/// the fixed malformed-request refusal without quoting the input. No `Debug`: it holds a secret.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialArg {
     Password(Zeroizing<String>),
     RecoveryKey(Zeroizing<String>),
+    /// Text that is either. Only [`CredentialArg::attempts`] reads it (`test_backup` is the one command that does so far):
+    /// [`CredentialArg::typed`] refuses it, so a command that has not been taught the two tries never takes it for one.
+    PasswordOrKey(Zeroizing<String>),
 }
 
 /// A [`CredentialArg`] checked: the recovery key parsed (a typo or a wrong format is refused here).
@@ -145,12 +167,57 @@ pub(crate) enum Typed {
     Recovery(RecoverySecret),
 }
 
+/// A typed credential read as one or two tries, in order: the second is made only when the first is a wrong password.
+/// Wiped when dropped.
+pub(crate) struct Attempts {
+    first: Typed,
+    then: Option<Typed>,
+}
+
 impl CredentialArg {
+    /// For the commands that take one meaning only. The one-box form is refused (`InvalidInput`, fixed text).
     pub(crate) fn typed(self) -> ShellResult<Typed> {
-        Ok(match self {
-            CredentialArg::Password(password) => Typed::Password(password),
-            CredentialArg::RecoveryKey(key) => Typed::Recovery(RecoverySecret::parse(&key)?),
-        })
+        match self {
+            CredentialArg::Password(password) => Ok(Typed::Password(password)),
+            CredentialArg::RecoveryKey(key) => Ok(Typed::Recovery(RecoverySecret::parse(&key)?)),
+            CredentialArg::PasswordOrKey(_) => Err(ShellError::InvalidInput { what: "credential" }),
+        }
+    }
+
+    /// The tries to make. The one box's text that reads as a well-formed recovery key is tried as the key first and, if
+    /// that is a wrong password, as a password too; text that does not read as one (a near miss included: no typo words
+    /// in this box) is tried as a password only. The other two forms are one try, as [`typed`](Self::typed) reads them.
+    pub(crate) fn attempts(self) -> ShellResult<Attempts> {
+        match self {
+            CredentialArg::PasswordOrKey(text) => Ok(match RecoverySecret::parse(&text) {
+                Ok(key) => Attempts {
+                    first: Typed::Recovery(key),
+                    then: Some(Typed::Password(text)),
+                },
+                Err(_) => Attempts {
+                    first: Typed::Password(text),
+                    then: None,
+                },
+            }),
+            one => Ok(Attempts {
+                first: one.typed()?,
+                then: None,
+            }),
+        }
+    }
+}
+
+impl Attempts {
+    /// Runs `try_with` on the first try, and on the second when the first answers a wrong password. Any other answer,
+    /// a stop included, is final.
+    pub(crate) fn run<T>(
+        &self,
+        mut try_with: impl FnMut(Credential<'_>) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        match (try_with(self.first.credential()), &self.then) {
+            (Err(CoreError::WrongPassword), Some(then)) => try_with(then.credential()),
+            (answer, _) => answer,
+        }
     }
 }
 
@@ -161,6 +228,13 @@ impl Typed {
             Typed::Recovery(secret) => Credential::Recovery(secret),
         }
     }
+}
+
+/// The file's name, for the page to show as text (the user's own data; the folder never goes with it).
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// Whether `dest`'s file name ends in `.lockbox-backup`, in any case.
@@ -246,7 +320,9 @@ impl Shell {
                 let finished = dates::rfc3339_utc(self.os.clock.wall());
                 let _ = self.vault_state.set_last_backup(vault.dir(), &finished);
                 let size_on_disk = fs::metadata(&dest)?.len();
-                Ok(Outcome::Done(BackupView::of(report, size_on_disk)))
+                // The new backup is held to be tested (22c's "Test this backup"), by its own token and never its path.
+                let test = self.hold_backup(&dest, size_on_disk)?;
+                Ok(Outcome::Done(BackupView::of(report, size_on_disk, test)))
             })
     }
 
@@ -274,31 +350,106 @@ impl Shell {
         })
     }
 
-    /// Checks a backup the user picks, without restoring it (spec §6.7): the credential opens it, every entry and
-    /// file is read and checked. The lock epoch is read before the dialog, so a lock of all vaults while the picker
-    /// is open is not forgotten; a closed picker is still `Dismissed`, since it shows nothing. It runs as a long
-    /// operation without a session. A lock of all vaults, or the app closing, is looked for as the operation
-    /// begins (before the backup is read) and again after it has ended, its announcement included (a lock can land
-    /// there): `Locked`, whatever was found. Writes nothing; a damaged output journal does not stop it.
-    pub fn test_backup(
-        &self,
-        credential: CredentialArg,
-    ) -> ShellResult<Outcome<BackupSummaryView>> {
+    /// Holds the backup at `path` (just written, `size` bytes) as a choice for `test_backup`, and answers its token with
+    /// the file's name and size. `Locked` when all vaults were locked, or the app began closing, while it was being held:
+    /// nothing is left held then.
+    fn hold_backup(&self, path: &Path, size: u64) -> ShellResult<TestPick> {
         let epoch = self.sessions.epoch();
-        let Some(backup) = self.os.dialogs.pick_file("Test a backup", Some(FILTER)) else {
+        let pending = self.sessions.pending();
+        let choice = pending.put_at(
+            PendingChoice::TestBackup {
+                path: path.to_path_buf(),
+                epoch,
+            },
+            self.os.clock.now(),
+        );
+        if self.locked_since(epoch) {
+            pending.forget_test_backup(&choice);
+            return Err(ShellError::Locked);
+        }
+        Ok(TestPick {
+            choice,
+            file_name: display_name(path),
+            size,
+        })
+    }
+
+    /// Opens the picker of "Test a backup" (outside every lock) and holds the backup picked in Rust, as a choice that
+    /// lives until it is forgotten ([`forget_test_backup`](Self::forget_test_backup)), a lock of all vaults, closing, a
+    /// new pick or five minutes without an attempt (spec §6.7). `choice` is the one being replaced (Pick another): once
+    /// the new pick is held it is forgotten; a closed picker answers `Dismissed` and leaves it as it was. The answer is
+    /// the new token, the file's name and its size: never the path. The lock epoch is read before the picker, so a lock of
+    /// all vaults while it is open is not forgotten: `Locked`, with nothing held. Needs no session.
+    pub fn test_backup_pick(&self, choice: Option<&Token>) -> ShellResult<Outcome<TestPick>> {
+        let epoch = self.sessions.epoch();
+        let Some(path) = self.os.dialogs.pick_file(TEST_PICK_TITLE, Some(FILTER)) else {
             return Ok(Outcome::Dismissed);
         };
-        let credential = credential.typed()?;
-        let cancel = CancelToken::new();
-        let operation = self.autolock.begin(None, JobKind::Test, cancel.clone());
-        // A lock before this point left `cancel` fresh and uncancelled: nothing is read.
+        let size = fs::metadata(&path)?.len();
+        let file_name = display_name(&path);
+        let pending = self.sessions.pending();
+        let held = pending.put_at(
+            PendingChoice::TestBackup { path, epoch },
+            self.os.clock.now(),
+        );
+        // A lock of all vaults came while the picker was open (or the app is closing): what was just held is no one's.
+        if self.locked_since(epoch) {
+            pending.forget_test_backup(&held);
+            return Err(ShellError::Locked);
+        }
+        if let Some(old) = choice {
+            pending.forget_test_backup(old);
+        }
+        Ok(Outcome::Done(TestPick {
+            choice: held,
+            file_name,
+            size,
+        }))
+    }
+
+    /// Drops the held backup `choice` (the page's panel closed, or its vault locked). Forgetting is idempotent: a token
+    /// that is unknown, dropped already or another kind of choice's is nothing to forget, and answers without error.
+    pub fn forget_test_backup(&self, choice: &Token) -> ShellResult<()> {
+        self.sessions.pending().forget_test_backup(choice);
+        Ok(())
+    }
+
+    /// Checks the backup held under `choice`, without restoring it (spec §6.7): the credential opens it, every entry and
+    /// file is read and checked. `ChoiceExpired` (before anything else) for a choice that is not held: unknown, dropped,
+    /// used, five minutes old or another kind. The credential is read before the job begins, so one that cannot be read
+    /// (a recovery key that is no key) starts nothing. The job is launch-scoped (progress, and a Stop through
+    /// `cancel_operation`), begun with the page's `request`.
+    ///
+    /// A lock of all vaults, or the app closing, is looked for as the job begins (before the backup is read) and again
+    /// when it ends, its announcement included (a lock can land there): `Locked`, whatever was found. Every other answer
+    /// (good, a wrong password, damaged, a stop, an I/O refusal) keeps the choice, each starting its five minutes again,
+    /// so the person can try another password. Writes nothing; a damaged output journal does not stop it. Needs no
+    /// session.
+    pub fn test_backup(
+        &self,
+        choice: &Token,
+        credential: CredentialArg,
+        request: u32,
+    ) -> ShellResult<Outcome<BackupSummaryView>> {
+        let pending = self.sessions.pending();
+        let epoch = self.sessions.epoch();
+        // In use from here to the end of the run: the timer's sweeps leave it alone however long the check takes, and its
+        // five minutes start again, by the shell's clock, when `attempt` is dropped (on every way out, a refusal included).
+        let now = || self.os.clock.now();
+        let attempt = pending.use_test_backup(choice, epoch, &now)?;
+        let backup = attempt.path();
+        let attempts = credential.attempts()?;
+        let job = self.begin_launch_job(JobKind::Test, Some(request));
+        // A lock before the job began: nothing is read. (One after it cancels the job's token, and its answer is refused
+        // by `answer_job`.)
         if self.locked_since(epoch) {
             return Err(ShellError::Locked);
         }
-        let verified = verify_backup(&backup, credential.credential(), &cancel, &NoProgress);
-        drop(credential);
+        let verified = attempts
+            .run(|credential| verify_backup(backup, credential, job.token(), job.progress()));
+        drop(attempts);
         let checked = verified.map_err(ShellError::from).and_then(|found| {
-            let size_on_disk = fs::metadata(&backup)?.len();
+            let size_on_disk = fs::metadata(backup)?.len();
             Ok(BackupSummaryView {
                 created_at: found.created_at,
                 items: found.items,
@@ -307,12 +458,11 @@ impl Shell {
                 size_on_disk,
             })
         });
-        // Ending the operation announces on `lockbox://busy`, where a lock can land: the last check comes after it.
-        drop(operation);
-        if self.locked_since(epoch) {
-            return Err(ShellError::Locked);
-        }
-        checked.map(Outcome::Done)
+        // Kept for the next attempt, with its five minutes started again from here (nothing to do if a lock or a forget
+        // has taken it).
+        drop(attempt);
+        // Ending the job announces on `lockbox://busy`, where a lock can land: the answer is checked after it.
+        self.autolock.answer_job(job, checked).map(Outcome::Done)
     }
 
     /// Whether all vaults were locked since `epoch` was read, or the app is closing (spec §7.4).
@@ -426,11 +576,35 @@ struct BackupDueArgs {
     generation: u64,
 }
 
-/// `test_backup` and `open_backup_read_only`.
+/// `open_backup_read_only`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CredentialOnly {
     credential: CredentialArg,
+}
+
+/// `test_backup_pick`: the choice being replaced (Pick another), or `null` for the first pick.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestBackupPick {
+    choice: Option<Token>,
+}
+
+/// `test_backup`: the held backup, what was typed, and the page's number for this job.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestBackupArgs {
+    choice: Token,
+    credential: CredentialArg,
+    /// The page's number for this job: its operation reaches the page by `lockbox://job-started` under it.
+    request: u32,
+}
+
+/// `forget_test_backup`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForgetTestBackup {
+    choice: Token,
 }
 
 #[derive(Deserialize)]
@@ -473,13 +647,37 @@ pub(super) async fn vault_backup_due(
 }
 
 #[tauri::command]
+pub(super) async fn test_backup_pick(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Outcome<TestPick>> {
+    let TestBackupPick { choice } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.test_backup_pick(choice.as_ref())).await
+}
+
+#[tauri::command]
 pub(super) async fn test_backup(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Outcome<BackupSummaryView>> {
-    let CredentialOnly { credential } = args(&request)?;
+    let TestBackupArgs {
+        choice,
+        credential,
+        request,
+    } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.test_backup(credential)).await
+    blocking(move || shell.test_backup(&choice, credential, request)).await
+}
+
+#[tauri::command]
+pub(super) async fn forget_test_backup(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let ForgetTestBackup { choice } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.forget_test_backup(&choice)).await
 }
 
 #[tauri::command]
@@ -663,8 +861,9 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Mutex;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
+    use lockbox_core::blob::CancelToken;
     use lockbox_core::internals::fsio::testutil::{flip_byte, names};
     use lockbox_core::internals::fsio::{VolumeInfo, failpoint, set_volume_override};
     use lockbox_core::internals::header::{
@@ -679,6 +878,7 @@ mod tests {
     use super::*;
     use crate::dates;
     use crate::jobs::{JobScope, OperationId};
+    use crate::os::Clock;
     use crate::session::{LockReason, SessionState};
     use crate::testing::{TEST_PASSWORD, TestShell, heavy};
 
@@ -730,9 +930,30 @@ mod tests {
         (tagged.session, tagged.generation)
     }
 
+    /// The backup in `dest` picked (the picker answers it) and tested with the vault's password.
     fn summary(ts: &TestShell, dest: &Path) -> BackupSummaryView {
-        ts.dialogs.answer(Some(dest.to_path_buf()));
-        done(heavy(|| ts.shell.test_backup(password())).unwrap())
+        let picked = pick(ts, dest);
+        done(test_with(ts, &picked, typed(TEST_PASSWORD)).unwrap())
+    }
+
+    /// The page's first pick: the picker answers `path`, no choice sent.
+    fn pick(ts: &TestShell, path: &Path) -> TestPick {
+        ts.dialogs.answer(Some(path.to_path_buf()));
+        done(ts.shell.test_backup_pick(None).unwrap())
+    }
+
+    /// One `test_backup` attempt on the choice `picked`, as request 1.
+    fn test_with(
+        ts: &TestShell,
+        picked: &TestPick,
+        credential: CredentialArg,
+    ) -> ShellResult<Outcome<BackupSummaryView>> {
+        heavy(|| ts.shell.test_backup(&picked.choice, credential, 1))
+    }
+
+    /// What the page sends from the one box: a password or a recovery key.
+    fn typed(text: &str) -> CredentialArg {
+        CredentialArg::PasswordOrKey(Zeroizing::new(text.to_owned()))
     }
 
     /// The folder of the first vault the shell lists.
@@ -876,68 +1097,347 @@ mod tests {
         assert_eq!(ts.dialogs.opened(), opened);
     }
 
-    /// The typed credential opens the backup: the password, the recovery key; a wrong password is refused as one; a
-    /// closed dialog does not look at the credential; a lock of all vaults while it runs, or the app closing, drops
-    /// the answer.
+    // ---- Task 4: testing a backup, picked first and held in Rust ----
+
+    const EXPIRED: Option<ShellError> = Some(ShellError::ChoiceExpired);
+
+    /// A folder name that no answer or event may ever hold: it is found if a path leaks.
+    const SECRET_FOLDER: &str = "Private-Folder-4d1c9e";
+
+    /// A backup of a fresh vault, written into the folder [`SECRET_FOLDER`].
+    fn secret_backup(ts: &TestShell, s: SessionId, g: u64) -> PathBuf {
+        let dest = ts.folder(SECRET_FOLDER).join("family.lockbox-backup");
+        back_up(ts, s, g, &dest);
+        dest
+    }
+
+    /// Every file of `dir` with its bytes and its time of last change, by name.
+    fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>, std::time::SystemTime)> {
+        let mut all: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let modified = entry.metadata().unwrap().modified().unwrap();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name, fs::read(entry.path()).unwrap(), modified)
+            })
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        all
+    }
+
+    /// The typed credential opens the backup: the password, the recovery key, either in the one box; a wrong password
+    /// is refused as one; the counts, the date and the size are the backup's.
     #[test]
     fn test_backup_needs_the_credential() {
         let ts = TestShell::new();
-        // After the shell, so it drops first: an observer holds a clone of the shell, which would keep it open.
-        let _cleanup = Cleanup;
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
         let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
         let dest = backup_file(&ts, "family.lockbox-backup");
         back_up(&ts, s, g, &dest);
 
-        let found = summary(&ts, &dest);
+        let picked = pick(&ts, &dest);
+        let found = done(test_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap());
         assert_eq!((found.items, found.files, found.missing_files), (1, 1, 0));
         assert!(found.created_at.starts_with("20"), "{}", found.created_at);
-        ts.dialogs.answer(Some(dest.clone()));
+        assert_eq!(found.size_on_disk, fs::metadata(&dest).unwrap().len());
+        // The old forms still work for the callers that use them.
         let by_key = CredentialArg::RecoveryKey(key);
-        let found = done(heavy(|| ts.shell.test_backup(by_key)).unwrap());
-        assert_eq!(found.items, 1);
+        assert_eq!(done(test_with(&ts, &picked, by_key).unwrap()).items, 1);
+        let by_password = password();
+        assert_eq!(done(test_with(&ts, &picked, by_password).unwrap()).items, 1);
 
-        ts.dialogs.answer(Some(dest.clone()));
         let wrong = CredentialArg::Password(Zeroizing::new("another long password".into()));
-        let refused = heavy(|| ts.shell.test_backup(wrong)).err();
-        assert_eq!(refused, Some(wrong_password()));
-        // A recovery key that is no key at all is refused too.
-        ts.dialogs.answer(Some(dest.clone()));
+        assert_eq!(test_with(&ts, &picked, wrong).err(), Some(wrong_password()));
+        // A recovery key that is no key at all is refused as one, before any job begins.
+        let started = ts.events.started().len();
         let junk = CredentialArg::RecoveryKey(Zeroizing::new("not a key".into()));
         assert!(matches!(
-            ts.shell.test_backup(junk).err(),
+            test_with(&ts, &picked, junk).err(),
             Some(ShellError::Core(_))
         ));
-
-        // A closed dialog: nothing looked at, not even a credential that could not be parsed.
-        let junk = CredentialArg::RecoveryKey(Zeroizing::new("not a key".into()));
-        assert!(matches!(ts.shell.test_backup(junk), Ok(Outcome::Dismissed)));
-
-        // A lock of all vaults during the work (here as the operation begins): the answer is dropped.
-        let shell = Arc::clone(&ts.shell);
-        ts.events.during_next_busy(Box::new(move || {
-            shell.sessions.lock_all(LockReason::Manual)
-        }));
-        ts.dialogs.answer(Some(dest.clone()));
-        assert_eq!(heavy(|| ts.shell.test_backup(password())).err(), LOCKED);
-        let busy = ts.events.busy();
-        assert!(busy.contains(&(None, vec!["test_backup"])), "{busy:?}");
-
-        // The app closing: dropped too, even when the check itself would have passed.
-        ts.shell.sessions.shut();
-        ts.dialogs.answer(Some(dest.clone()));
-        assert_eq!(heavy(|| ts.shell.test_backup(password())).err(), LOCKED);
+        assert_eq!(ts.events.started().len(), started, "no job for it");
     }
 
-    /// A lock of all vaults while the picker of "Test a backup" is open: `Locked`, and the backup was never read (a
-    /// credential that would be refused still answers `Locked`). A closed picker still answers `Dismissed`.
+    /// One box, two meanings: text that reads as a well-formed recovery key is tried as the key and, when that is wrong,
+    /// as a password too; anything else (a near-miss key included, with no typo words) is tried as a password only.
     #[test]
-    fn lock_during_test_backup_picker() {
+    fn password_or_key_tries_a_well_formed_key_then_a_password() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
+        let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
+        // Another vault's recovery key, which is also a well-formed key: made this vault's password, so that only the
+        // fallback to a password can open the backup with it.
+        let (other, og) = ts.open_vault("Other");
+        let other_key = ts.shell.regenerate_recovery(other, og).unwrap().data;
         let dest = backup_file(&ts, "family.lockbox-backup");
         back_up(&ts, s, g, &dest);
+        ts.shell
+            .change_password(s, g, Zeroizing::new(other_key.to_string()))
+            .unwrap();
+        let by_new_password = backup_file(&ts, "second.lockbox-backup");
+        back_up(&ts, s, g, &by_new_password);
+
+        // The key opens the first backup as a key, though its text is a good password for no one.
+        let picked = pick(&ts, &dest);
+        let found = done(test_with(&ts, &picked, typed(&key)).unwrap());
+        assert_eq!(found.items, 0);
+        // The password that is not a key opens it as a password.
+        done(test_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap());
+
+        // The second backup's password is a well-formed key: the key attempt is wrong, the password attempt opens it.
+        let picked = pick(&ts, &by_new_password);
+        done(test_with(&ts, &picked, typed(&other_key)).unwrap());
+        // A well-formed key that is wrong as a key and as a password: the first backup's password is not that text.
+        let picked_first = pick(&ts, &dest);
+        assert_eq!(
+            test_with(&ts, &picked_first, typed(&other_key)).err(),
+            Some(wrong_password())
+        );
+
+        // A near-miss key (a word short) is no key: tried as a password, so no count or typo words, just a wrong
+        // password.
+        let words: Vec<&str> = key.split(' ').collect();
+        assert_eq!(words.len(), 24);
+        let near_miss = words[..23].join(" ");
+        assert!(RecoverySecret::parse(&near_miss).is_err(), "it is no key");
+        assert_eq!(
+            test_with(&ts, &picked, typed(&near_miss)).err(),
+            Some(wrong_password())
+        );
+        // Plain wrong text is a wrong password.
+        assert_eq!(
+            test_with(&ts, &picked, typed("another long password")).err(),
+            Some(wrong_password())
+        );
+    }
+
+    /// The pick is held in Rust and kept through every answer: a wrong password, a damaged backup, a missing file;
+    /// the picker is not opened again, and the right password then opens it.
+    #[test]
+    fn test_pick_kept_through_a_wrong_password() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", &vec![3u8; 300_000]);
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        // The backup's own offer to be tested is held too.
+        let base = ts.shell.sessions.pending().len();
+        let picked = pick(&ts, &dest);
+        let opened = ts.dialogs.opened();
+
+        for _ in 0..2 {
+            assert_eq!(
+                test_with(&ts, &picked, typed("another long password")).err(),
+                Some(wrong_password())
+            );
+        }
+        assert_eq!(
+            done(test_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap()).files,
+            1
+        );
+        assert_eq!(
+            ts.dialogs.opened(),
+            opened,
+            "the picker was not opened again"
+        );
+        assert_eq!(ts.shell.sessions.pending().len(), base + 1, "still held");
+
+        // Damaged: the answer says so, and the choice stays.
+        let len = fs::metadata(&dest).unwrap().len();
+        let copy = backup_file(&ts, "damaged.lockbox-backup");
+        fs::copy(&dest, &copy).unwrap();
+        for at in len - 900..len - 10 {
+            flip_byte(&copy, at).unwrap();
+        }
+        let damaged = pick(&ts, &copy);
+        assert!(matches!(
+            test_with(&ts, &damaged, typed(TEST_PASSWORD)).err(),
+            Some(ShellError::Core(view)) if view.kind == "damaged"
+        ));
+        // The file gone: an I/O refusal, and the choice stays for a retry.
+        fs::remove_file(&copy).unwrap();
+        assert!(matches!(
+            test_with(&ts, &damaged, typed(TEST_PASSWORD)).err(),
+            Some(ShellError::Core(view)) if view.kind == "io"
+        ));
+        assert_eq!(ts.shell.sessions.pending().len(), base + 2);
+        fs::copy(&dest, &copy).unwrap();
+        assert_eq!(
+            done(test_with(&ts, &damaged, typed(TEST_PASSWORD)).unwrap()).files,
+            1
+        );
+    }
+
+    /// A Stop answers `Cancelled` and keeps the choice too.
+    #[test]
+    fn a_stopped_test_keeps_the_pick() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        ts.stored_file(s, g, "report.pdf", &bytes);
+        let dest = backup_file(&ts, "family.lockbox-backup");
+        back_up(&ts, s, g, &dest);
+        let picked = pick(&ts, &dest);
+        let (shell, flag) = (
+            Arc::clone(&ts.shell),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        ts.events.watch(move |name, payload| {
+            if name == crate::shell::PROGRESS_EVENT && !flag.swap(true, Ordering::SeqCst) {
+                let operation = OperationId(payload["operation"].as_u64().unwrap());
+                let scope: JobScope = serde_json::from_value(payload["scope"].clone()).unwrap();
+                shell.autolock.cancel_operation(operation, scope).unwrap();
+            }
+        });
+        let answer = test_with(&ts, &picked, typed(TEST_PASSWORD));
+        ts.events.watch(|_, _| {});
+        assert_eq!(answer.err(), Some(ShellError::Cancelled));
+        assert_eq!(
+            done(test_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap()).files,
+            1
+        );
+    }
+
+    /// No answer and no event holds the backup's folder or path: the page sees the file's name, its size and the
+    /// token, nothing else.
+    #[test]
+    fn backup_path_never_reaches_the_page() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", &vec![3u8; 300_000]);
+        let dest = ts.folder(SECRET_FOLDER).join("family.lockbox-backup");
+        ts.dialogs.answer(Some(dest.clone()));
+        let made = ts.shell.backup_vault(s, g, 1).unwrap().data;
+        let mut seen = vec![serde_json::to_string(&made).unwrap()];
+        let made = done(made);
+        let picked = pick(&ts, &dest);
+        seen.push(serde_json::to_string(&picked).unwrap());
+        assert_eq!(picked.file_name, "family.lockbox-backup");
+        for credential in [typed("another long password"), typed(TEST_PASSWORD)] {
+            let answer = test_with(&ts, &picked, credential);
+            seen.push(match answer {
+                Ok(answer) => serde_json::to_string(&answer).unwrap(),
+                Err(refused) => serde_json::to_string(&refused).unwrap(),
+            });
+        }
+        // The backup's own offer to test it, a choice made up, a dismissed picker, a forget.
+        seen.push(serde_json::to_string(&made.test).unwrap());
+        let made_up = ts.shell.test_backup(&made.test.choice, typed("x"), 2);
+        seen.push(serde_json::to_string(&made_up.err()).unwrap());
+        ts.dialogs.answer(None);
+        let closed = ts.shell.test_backup_pick(Some(&picked.choice)).unwrap();
+        seen.push(serde_json::to_string(&closed).unwrap());
+        seen.push(
+            serde_json::to_string(&ts.shell.forget_test_backup(&picked.choice).unwrap()).unwrap(),
+        );
+        let gone = ts.shell.test_backup(&picked.choice, typed("x"), 3).err();
+        seen.push(serde_json::to_string(&gone).unwrap());
+        for (name, payload) in ts.events.job_events() {
+            seen.push(format!("{name} {payload}"));
+        }
+        seen.extend(ts.events.notices().iter().map(Value::to_string));
+
+        let root = ts.temp.path().to_string_lossy().into_owned();
+        let escaped = serde_json::to_string(&root).unwrap();
+        for text in &seen {
+            assert!(!text.contains(SECRET_FOLDER), "{text}");
+            assert!(!text.contains(&root), "{text}");
+            assert!(!text.contains(escaped.trim_matches('"')), "{text}");
+        }
+    }
+
+    /// Testing writes nothing: the backup's folder holds the same files, byte for byte and time for time; no output
+    /// journal is made.
+    #[test]
+    fn test_writes_nothing() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", &vec![3u8; 300_000]);
+        let dest = secret_backup(&ts, s, g);
+        let folder = dest.parent().unwrap().to_path_buf();
+        let journal = ts.journal();
+        let before = snapshot(&folder);
+        let state = names(&ts.shell.paths.root);
+
+        let picked = pick(&ts, &dest);
+        for credential in [typed("another long password"), typed(TEST_PASSWORD)] {
+            let _ = test_with(&ts, &picked, credential);
+        }
+        let _ = ts.shell.forget_test_backup(&picked.choice);
+
+        assert_eq!(snapshot(&folder), before);
+        assert_eq!(ts.journal(), journal);
+        assert_eq!(names(&ts.shell.paths.root), state, "no state file written");
+    }
+
+    /// Locking one vault does not drop the held backup; a lock of all vaults, an idle lock, Windows locking, sleep and
+    /// closing each drop it (every one is a revoke of all, which drains the table).
+    #[test]
+    fn test_choice_dropped_on_lock_all_and_on_close() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+
+        let picked = pick(&ts, &dest);
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(
+            done(test_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap()).items,
+            0
+        );
+        for reason in [
+            LockReason::Manual,
+            LockReason::Idle,
+            LockReason::WindowsLocked,
+            LockReason::Sleep,
+        ] {
+            let picked = pick(&ts, &dest);
+            ts.shell.sessions.lock_all(reason);
+            assert_eq!(
+                test_with(&ts, &picked, typed(TEST_PASSWORD)).err(),
+                EXPIRED,
+                "{reason:?}"
+            );
+            assert_eq!(ts.shell.sessions.pending().len(), 0);
+        }
+        // Closing: the same.
+        let picked = pick(&ts, &dest);
+        if let Some(hooks) = ts.shell.sessions.close() {
+            hooks.wait();
+        }
+        assert_eq!(ts.shell.sessions.pending().len(), 0);
+        assert_eq!(test_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
+    }
+
+    /// A lock of all vaults between two tries of the credential drops the held backup: the retry is refused as an
+    /// expired choice, and picking again works.
+    #[test]
+    fn test_lock_all_between_credential_retries_drops_the_choice() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+        let picked = pick(&ts, &dest);
+        assert_eq!(
+            test_with(&ts, &picked, typed("another long password")).err(),
+            Some(wrong_password())
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert_eq!(test_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
+        let again = pick(&ts, &dest);
+        assert_eq!(
+            done(test_with(&ts, &again, typed(TEST_PASSWORD)).unwrap()).items,
+            0
+        );
+    }
+
+    /// A lock of all vaults while the picker is open: `Locked`, and what the pick would have held is not held; the
+    /// choice sent with it is dropped by the lock too. A closed picker still answers `Dismissed`.
+    #[test]
+    fn lock_all_during_a_picker_drops_the_choice() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
         let lock_in_picker = || {
             let shell = Arc::clone(&ts.shell);
             ts.dialogs.during_next_dialog(Box::new(move || {
@@ -946,24 +1446,71 @@ mod tests {
         };
         lock_in_picker();
         ts.dialogs.answer(Some(dest.clone()));
-        let wrong = CredentialArg::Password(Zeroizing::new("another long password".into()));
-        assert_eq!(ts.shell.test_backup(wrong).err(), LOCKED);
+        assert_eq!(ts.shell.test_backup_pick(None).err(), LOCKED);
+        assert_eq!(ts.shell.sessions.pending().len(), 0, "nothing held");
+
+        // Pick another: the sent choice goes with the lock, the new one is never held.
+        let first = pick(&ts, &dest);
+        lock_in_picker();
+        ts.dialogs.answer(Some(dest.clone()));
+        assert_eq!(ts.shell.test_backup_pick(Some(&first.choice)).err(), LOCKED);
+        assert_eq!(ts.shell.sessions.pending().len(), 0);
+        assert_eq!(test_with(&ts, &first, typed(TEST_PASSWORD)).err(), EXPIRED);
 
         lock_in_picker();
         assert!(matches!(
-            ts.shell.test_backup(password()),
+            ts.shell.test_backup_pick(None),
             Ok(Outcome::Dismissed)
         ));
+        // The app closing while the picker is open is refused the same way.
+        ts.shell.sessions.shut();
+        ts.dialogs.answer(Some(dest));
+        assert_eq!(ts.shell.test_backup_pick(None).err(), LOCKED);
+        assert_eq!(ts.shell.sessions.pending().len(), 0);
     }
 
-    /// A lock of all vaults in the announcement that ends the test (the `LongOp` dropping): `Locked`. The final
-    /// check must come after the operation is dropped.
+    /// A lock of all vaults while the test runs (as it begins, in the middle, and in the announcement that ends it):
+    /// `Locked`, whatever the check found, and the choice is gone with the lock. The app closing is the same.
     #[test]
-    fn lock_as_test_backup_ends() {
+    fn lock_all_during_a_test_refuses_its_answer() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let dest = backup_file(&ts, "family.lockbox-backup");
-        back_up(&ts, s, g, &dest);
+        let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        ts.stored_file(s, g, "report.pdf", &bytes);
+        let dest = secret_backup(&ts, s, g);
+
+        // As the operation begins.
+        let picked = pick(&ts, &dest);
+        let shell = Arc::clone(&ts.shell);
+        ts.events.during_next_busy(Box::new(move || {
+            shell.sessions.lock_all(LockReason::Manual)
+        }));
+        assert_eq!(test_with(&ts, &picked, typed(TEST_PASSWORD)).err(), LOCKED);
+        let busy = ts.events.busy();
+        assert!(busy.contains(&(None, vec!["test_backup"])), "{busy:?}");
+        assert_eq!(
+            test_with(&ts, &picked, typed(TEST_PASSWORD)).err(),
+            EXPIRED,
+            "the choice went with the lock"
+        );
+
+        // In the middle: the first progress event.
+        let picked = pick(&ts, &dest);
+        let (shell, flag) = (
+            Arc::clone(&ts.shell),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        ts.events.watch(move |name, _| {
+            if name == crate::shell::PROGRESS_EVENT && !flag.swap(true, Ordering::SeqCst) {
+                shell.sessions.lock_all(LockReason::Manual);
+            }
+        });
+        let answer = test_with(&ts, &picked, typed(TEST_PASSWORD));
+        ts.events.watch(|_, _| {});
+        assert_eq!(answer.err(), LOCKED);
+
+        // In the announcement that ends it: the final check comes after the operation is dropped.
+        let picked = pick(&ts, &dest);
         let (events, shell) = (Arc::clone(&ts.events), Arc::clone(&ts.shell));
         // The first announcement is the start; the hook it leaves runs in the second, the end.
         ts.events.during_next_busy(Box::new(move || {
@@ -971,10 +1518,434 @@ mod tests {
                 shell.sessions.lock_all(LockReason::Manual)
             }));
         }));
-        ts.dialogs.answer(Some(dest));
-        assert_eq!(heavy(|| ts.shell.test_backup(password())).err(), LOCKED);
+        assert_eq!(test_with(&ts, &picked, typed(TEST_PASSWORD)).err(), LOCKED);
         let busy = ts.events.busy();
         assert_eq!(busy.last(), Some(&(None, vec![])), "the end was announced");
+
+        // The app closing, with the choice held: dropped even when the check itself would have passed.
+        let picked = pick(&ts, &dest);
+        ts.shell.sessions.shut();
+        assert_eq!(test_with(&ts, &picked, typed(TEST_PASSWORD)).err(), LOCKED);
+    }
+
+    /// Forgetting drops the choice: the next attempt is refused as expired, and the picker is not opened.
+    #[test]
+    fn test_backup_choice_refused_after_forget() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+        // The backup's own offer to be tested is held too.
+        let base = ts.shell.sessions.pending().len();
+        let picked = pick(&ts, &dest);
+        assert!(ts.shell.forget_test_backup(&picked.choice).is_ok());
+        let opened = ts.dialogs.opened();
+        assert_eq!(test_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
+        assert_eq!(ts.dialogs.opened(), opened);
+        assert_eq!(ts.shell.sessions.pending().len(), base);
+    }
+
+    /// Forgetting is idempotent (an unknown or already-dropped token answers nothing wrong) and drops only a held
+    /// backup: a choice of any other kind under the token is left where it is.
+    #[test]
+    fn forget_test_backup_is_idempotent_and_drops_only_its_kind() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+        let base = ts.shell.sessions.pending().len();
+        let picked = pick(&ts, &dest);
+        assert!(ts.shell.forget_test_backup(&picked.choice).is_ok());
+        assert!(ts.shell.forget_test_backup(&picked.choice).is_ok());
+        let made_up = ts.shell.sessions.pending().put(PendingChoice::PickedFiles {
+            session: s,
+            generation: g,
+            paths: vec![PathBuf::from("a")],
+        });
+        let other = ts.shell.sessions.pending().put(PendingChoice::PickedFiles {
+            session: s,
+            generation: g,
+            paths: vec![PathBuf::from("b")],
+        });
+        assert!(ts.shell.forget_test_backup(&made_up).is_ok());
+        assert_eq!(
+            ts.shell.sessions.pending().len(),
+            base + 2,
+            "another kind stays"
+        );
+        assert!(
+            ts.shell
+                .sessions
+                .pending()
+                .peek_picked(&other, s, g)
+                .is_ok()
+        );
+        assert!(
+            ts.shell
+                .sessions
+                .pending()
+                .peek_picked(&made_up, s, g)
+                .is_ok()
+        );
+    }
+
+    /// A token that is not there, is used, is five minutes old or holds another kind of choice answers
+    /// `ChoiceExpired`, never `NotFound`; and a choice of another kind is left alone by the refusal.
+    #[test]
+    fn expired_choice_answers_choice_expired() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+        let pending = ts.shell.sessions.pending();
+        let credential = || typed(TEST_PASSWORD);
+
+        // A token that was never parked.
+        let made_up = pending.put(PendingChoice::Test(None));
+        let _ = pending.take(&made_up);
+        assert_eq!(
+            heavy(|| ts.shell.test_backup(&made_up, credential(), 1)).err(),
+            EXPIRED
+        );
+        // A choice that was used up (taken by the generic take).
+        let picked = pick(&ts, &dest);
+        assert!(pending.take(&picked.choice).is_ok());
+        assert_eq!(test_with(&ts, &picked, credential()).err(), EXPIRED);
+        // Five minutes old.
+        let picked = pick(&ts, &dest);
+        pending.sweep_at(Instant::now() + Duration::from_secs(10 * 60));
+        assert_eq!(test_with(&ts, &picked, credential()).err(), EXPIRED);
+        // Another kind of choice under the token: refused, and it stays.
+        let files = pending.put(PendingChoice::PickedFiles {
+            session: s,
+            generation: g,
+            paths: vec![dest.clone()],
+        });
+        assert_eq!(
+            heavy(|| ts.shell.test_backup(&files, credential(), 1)).err(),
+            EXPIRED
+        );
+        assert!(pending.peek_picked(&files, s, g).is_ok());
+        // Picking another with an expired choice sent still picks.
+        let fresh = {
+            ts.dialogs.answer(Some(dest.clone()));
+            done(ts.shell.test_backup_pick(Some(&picked.choice)).unwrap())
+        };
+        assert_eq!(done(test_with(&ts, &fresh, credential()).unwrap()).items, 0);
+    }
+
+    /// Fix round 2: a test that runs longer than the choice's five minutes does not lose it. The shell's clock is moved
+    /// past the five minutes while the check runs and the timer ticks (as it does every few seconds): the choice stays,
+    /// the answer is given, and the next attempt needs no new pick. Its five minutes start again when the attempt ends
+    /// (by the same clock). A forget during the run still drops it, and so does a Lock all (the test above).
+    #[test]
+    fn a_test_longer_than_five_minutes_keeps_its_choice() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        ts.stored_file(s, g, "report.pdf", &bytes);
+        let dest = secret_backup(&ts, s, g);
+        let t0 = ts.clock.now();
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+
+        // A wrong password that ran for six minutes (it reports no progress before it fails: the clock moves as the
+        // operation begins): refused as wrong, the file still picked.
+        let picked = pick(&ts, &dest);
+        let (shell, clock) = (Arc::clone(&ts.shell), Arc::clone(&ts.clock));
+        ts.events.during_next_busy(Box::new(move || {
+            clock.set(t0 + minutes(6));
+            shell.autolock.tick(t0 + minutes(6));
+        }));
+        let answer = test_with(&ts, &picked, typed("another long password"));
+        assert!(
+            matches!(&answer, Err(ShellError::Core(view)) if view.kind == "wrong_password"),
+            "{:?}",
+            answer.as_ref().err()
+        );
+        assert_eq!(ts.clock.now(), t0 + minutes(6), "the run moved the clock");
+        // Its five minutes began again when the attempt ended, by the shell's clock.
+        let pending = ts.shell.sessions.pending();
+        pending.sweep_at(t0 + minutes(6 + 4));
+        assert_eq!(
+            done(test_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap()).files,
+            1,
+            "the retry needs no new pick"
+        );
+
+        // A Stop after another twenty minutes keeps it too.
+        let picked = pick(&ts, &dest);
+        let (shell, clock, flag) = (
+            Arc::clone(&ts.shell),
+            Arc::clone(&ts.clock),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        ts.events.watch(move |name, payload| {
+            if name == crate::shell::PROGRESS_EVENT && !flag.swap(true, Ordering::SeqCst) {
+                clock.set(t0 + minutes(30));
+                shell.autolock.tick(t0 + minutes(30));
+                let operation = OperationId(payload["operation"].as_u64().unwrap());
+                let scope: JobScope = serde_json::from_value(payload["scope"].clone()).unwrap();
+                shell.autolock.cancel_operation(operation, scope).unwrap();
+            }
+        });
+        let answer = test_with(&ts, &picked, typed(TEST_PASSWORD));
+        ts.events.watch(|_, _| {});
+        assert_eq!(answer.err(), Some(ShellError::Cancelled));
+        assert_eq!(
+            done(test_with(&ts, &picked, typed(TEST_PASSWORD)).unwrap()).files,
+            1,
+            "a stopped test that ran long keeps the pick"
+        );
+
+        // A forget during the run still drops it: the answer comes, and the choice is gone.
+        let picked = pick(&ts, &dest);
+        let (shell, clock, flag, choice) = (
+            Arc::clone(&ts.shell),
+            Arc::clone(&ts.clock),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            picked.choice.clone(),
+        );
+        ts.events.watch(move |name, _| {
+            if name == crate::shell::PROGRESS_EVENT && !flag.swap(true, Ordering::SeqCst) {
+                clock.set(t0 + minutes(60));
+                shell.autolock.tick(t0 + minutes(60));
+                shell.forget_test_backup(&choice).unwrap();
+            }
+        });
+        let answer = test_with(&ts, &picked, typed(TEST_PASSWORD));
+        ts.events.watch(|_, _| {});
+        assert_eq!(done(answer.unwrap()).files, 1);
+        assert_eq!(test_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
+    }
+
+    /// Picking another forgets the choice sent with it; a closed picker leaves it as it was.
+    #[test]
+    fn a_new_pick_forgets_the_old_choice() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let first = secret_backup(&ts, s, g);
+        let second = backup_file(&ts, "second.lockbox-backup");
+        back_up(&ts, s, g, &second);
+        // Each backup's own offer to be tested is held too.
+        let base = ts.shell.sessions.pending().len();
+        let old = pick(&ts, &first);
+
+        ts.dialogs.answer(None);
+        assert!(matches!(
+            ts.shell.test_backup_pick(Some(&old.choice)),
+            Ok(Outcome::Dismissed)
+        ));
+        assert_eq!(
+            done(test_with(&ts, &old, typed(TEST_PASSWORD)).unwrap()).items,
+            0
+        );
+
+        ts.dialogs.answer(Some(second.clone()));
+        let new = done(ts.shell.test_backup_pick(Some(&old.choice)).unwrap());
+        assert_eq!(new.file_name, "second.lockbox-backup");
+        assert_eq!(new.size, fs::metadata(&second).unwrap().len());
+        assert_ne!(
+            serde_json::to_value(&new.choice).unwrap(),
+            serde_json::to_value(&old.choice).unwrap()
+        );
+        assert_eq!(test_with(&ts, &old, typed(TEST_PASSWORD)).err(), EXPIRED);
+        assert_eq!(
+            done(test_with(&ts, &new, typed(TEST_PASSWORD)).unwrap()).items,
+            0
+        );
+        assert_eq!(ts.shell.sessions.pending().len(), base + 1);
+    }
+
+    /// A published backup offers its own held choice (22c's "Test this backup"): its name and size, tested with no
+    /// picker. A backup that was not written holds nothing.
+    #[test]
+    fn a_finished_backup_offers_its_own_test_choice() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let folder = ts.folder("Backups");
+        let dest = folder.join("family.lockbox-backup");
+        let opened = ts.dialogs.opened();
+        let view = back_up(&ts, s, g, &dest);
+        assert_eq!(view.test.file_name, "family.lockbox-backup");
+        assert_eq!(view.test.size, fs::metadata(&dest).unwrap().len());
+        assert_eq!(view.test.size, view.size_on_disk);
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["test"]["file_name"], "family.lockbox-backup");
+        assert!(
+            json["test"]["choice"]
+                .as_str()
+                .is_some_and(|t| t.len() == 32)
+        );
+
+        let opened_after_backup = ts.dialogs.opened();
+        assert_eq!(opened_after_backup, opened + 1, "only the save dialog");
+        let found = done(test_with(&ts, &view.test, typed(TEST_PASSWORD)).unwrap());
+        assert_eq!((found.items, found.files), (1, 1));
+        assert_eq!(ts.dialogs.opened(), opened_after_backup, "no picker");
+        // Kept after the answer, like any pick.
+        assert_eq!(
+            done(test_with(&ts, &view.test, typed(TEST_PASSWORD)).unwrap()).items,
+            1
+        );
+
+        // Nothing is parked for a backup that was refused, dismissed or never written.
+        let before = ts.shell.sessions.pending().len();
+        ts.dialogs.answer(Some(folder.join("x.zip")));
+        assert!(ts.shell.backup_vault(s, g, 1).is_err());
+        ts.dialogs.answer(None);
+        assert!(matches!(
+            ts.shell.backup_vault(s, g, 1).unwrap().data,
+            Outcome::Dismissed
+        ));
+        assert_eq!(ts.shell.sessions.pending().len(), before);
+        // A lock of all vaults drops it like any held pick.
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert_eq!(
+            test_with(&ts, &view.test, typed(TEST_PASSWORD)).err(),
+            EXPIRED
+        );
+    }
+
+    /// Testing needs no unlocked vault: with every vault locked, with a read-only copy open, and in a shell that has
+    /// no session at all, the pick and the test answer.
+    #[test]
+    fn test_needs_no_unlocked_vault() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+        // A read-only copy open beside the vault.
+        let (copy, _) = open_backup(&ts, &dest);
+        assert_eq!(summary(&ts, &dest).items, 0);
+        // Every vault locked (the copy too).
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let sessions = ts.shell.sessions.list();
+        assert!(sessions.iter().any(|info| info.session == copy));
+        assert!(
+            sessions
+                .iter()
+                .all(|info| info.state != SessionState::Unlocked)
+        );
+        assert_eq!(summary(&ts, &dest).items, 0);
+
+        // A shell with no session at all.
+        let bare = TestShell::new();
+        assert!(bare.shell.sessions.list().is_empty());
+        assert_eq!(summary(&bare, &dest).items, 0);
+    }
+
+    /// `test_backup`'s job: a launch-scoped one in the epoch it began in, begun only once the work starts (not for a
+    /// closed picker, a forgotten choice or a credential that cannot be read), with progress that ends at the total.
+    #[test]
+    fn test_backup_job_events_use_the_launch_scope() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let bytes: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        ts.stored_file(s, g, "report.pdf", &bytes);
+        let dest = secret_backup(&ts, s, g);
+        let before = ts.events.started().len();
+
+        let picked = pick(&ts, &dest);
+        let junk = CredentialArg::RecoveryKey(Zeroizing::new("not a key".into()));
+        assert!(test_with(&ts, &picked, junk).is_err());
+        let gone = pick(&ts, &dest);
+        ts.shell.forget_test_backup(&gone.choice).unwrap();
+        assert_eq!(test_with(&ts, &gone, typed(TEST_PASSWORD)).err(), EXPIRED);
+        assert_eq!(ts.events.started().len(), before, "nothing started");
+
+        let epoch = ts.shell.sessions.epoch();
+        let found = heavy(|| {
+            ts.shell
+                .test_backup(&picked.choice, typed(TEST_PASSWORD), 9)
+        });
+        assert!(found.is_ok());
+        let started = ts.events.started();
+        assert_eq!(started.len(), before + 1);
+        let started = &started[before];
+        assert_eq!(started["request"], json!(9));
+        assert_eq!(started["kind"], json!("test"));
+        assert_eq!(
+            started["scope"],
+            json!({ "type": "launch", "epoch": epoch })
+        );
+        let operation = started["operation"].as_u64().unwrap();
+        let progress: Vec<Value> = ts
+            .events
+            .progress()
+            .into_iter()
+            .filter(|event| event["operation"] == json!(operation))
+            .collect();
+        let (last, earlier) = progress.split_last().unwrap();
+        assert!(earlier.iter().all(|e| e["finished"] == json!(false)));
+        assert_eq!(last["finished"], json!(true));
+        assert_eq!(last["done"], last["total"]);
+        assert!(progress.iter().all(|e| e["kind"] == json!("test")));
+    }
+
+    /// The three commands take a token, a credential and the page's number: never a path, and nothing they do not
+    /// name. A bad shape is the fixed malformed-request answer.
+    #[test]
+    fn test_backup_requests_are_strict() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        let refuses_a_path = |body: Value, parses: &dyn Fn(Value) -> bool| {
+            assert!(parses(body.clone()), "{body}");
+            let mut sneaked = body;
+            sneaked["path"] = json!("SENTINEL-7f3a");
+            assert!(!parses(sneaked));
+        };
+        refuses_a_path(json!({ "choice": null }), &|body| {
+            parse::<TestBackupPick>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(json!({ "choice": hex }), &|body| {
+            parse::<TestBackupPick>(&InvokeBody::Json(body)).is_ok()
+        });
+        refuses_a_path(
+            json!({ "choice": hex, "credential": { "password_or_key": "x" }, "request": 4 }),
+            &|body| parse::<TestBackupArgs>(&InvokeBody::Json(body)).is_ok(),
+        );
+        refuses_a_path(json!({ "choice": hex }), &|body| {
+            parse::<ForgetTestBackup>(&InvokeBody::Json(body)).is_ok()
+        });
+        for bad in [
+            json!({ "choice": "SENTINEL-7f3a", "credential": { "password": "x" }, "request": 4 }),
+            json!({ "choice": hex.to_uppercase(), "credential": { "password": "x" }, "request": 4 }),
+            json!({ "choice": null, "credential": { "password": "x" }, "request": 4 }),
+            json!({ "credential": { "password": "x" }, "request": 4 }),
+            json!({ "choice": hex, "request": 4 }),
+            json!({ "choice": hex, "credential": { "password": "x" } }),
+            json!({ "choice": hex, "credential": { "password": "x" }, "request": -1 }),
+            json!({ "choice": hex, "credential": { "password": "x" }, "request": "4" }),
+            json!({ "choice": hex, "credential": { "password_or_key": "x", "password": "y" }, "request": 4 }),
+        ] {
+            let refused = parse::<TestBackupArgs>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        for bad in [json!({ "choice": 7 }), json!({ "choice": "x" })] {
+            let refused = parse::<TestBackupPick>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+        // No choice yet is `null`, or left out (the first pick); a forget always names one.
+        assert!(parse::<TestBackupPick>(&InvokeBody::Json(json!({}))).is_ok());
+        for bad in [
+            json!({}),
+            json!({ "choice": null }),
+            json!({ "choice": 7 }),
+            json!({ "choice": "x" }),
+        ] {
+            let refused = parse::<ForgetTestBackup>(&InvokeBody::Json(bad.clone()));
+            assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
+        }
+    }
+
+    /// The new box's shape is one more form of the credential, and the other callers refuse it: only `test_backup` tries
+    /// a key and then a password.
+    #[test]
+    fn password_or_key_is_refused_by_the_other_callers() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let dest = secret_backup(&ts, s, g);
+        ts.dialogs.answer(Some(dest));
+        assert_eq!(
+            ts.shell.open_backup_read_only(typed(TEST_PASSWORD)).err(),
+            Some(ShellError::InvalidInput { what: "credential" })
+        );
     }
 
     /// A lock of all vaults while the picker of "Open a backup" is open: `Locked`, and no session is opened.
@@ -1225,7 +2196,11 @@ mod tests {
         let ok = |body: Value| parse::<CredentialOnly>(&InvokeBody::Json(body)).is_ok();
         assert!(ok(json!({ "credential": { "password": "pw" } })));
         assert!(ok(json!({ "credential": { "recovery_key": "key" } })));
+        assert!(ok(json!({ "credential": { "password_or_key": "text" } })));
         for bad in [
+            json!({ "credential": { "password_or_key": "text", "password": "pw" } }),
+            json!({ "credential": { "password_or_key": 7 } }),
+            json!({ "credential": { "passwordOrKey": "text" } }),
             json!({ "credential": { "password": "pw", "recovery_key": "key" } }),
             json!({ "credential": {} }),
             json!({ "credential": { "password": "pw", "path": "SENTINEL-7f3a" } }),

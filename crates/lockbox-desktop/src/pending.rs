@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -144,6 +144,12 @@ pub enum PendingChoice {
         generation: u64,
         paths: Vec<PathBuf>,
     },
+    /// The backup picked to be tested (`test_backup_pick`, or a finished backup's own offer), waiting for `test_backup`: its
+    /// path, which never goes to the page, and the lock epoch it was held in. Launch-scoped: no session owns it, so a lock
+    /// of one vault leaves it, and a lock of all vaults, an idle lock, Windows locking or sleeping, and closing drop it
+    /// with the rest ([`Pending::drain`]). Kept through every answer of `test_backup`, each one starting its five minutes
+    /// again ([`Pending::use_test_backup`]); dropped by [`Pending::forget_test_backup`]. Holds no secret.
+    TestBackup { path: PathBuf, epoch: u64 },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
     Test(Option<Box<lockbox_core::Vault>>),
@@ -176,7 +182,32 @@ pub struct Pending {
 struct Parked {
     token: Token,
     until: Instant,
+    /// The attempts running on a held backup ([`Pending::use_test_backup`]): while any does, it is not swept for being
+    /// old. Always 0 for every other choice.
+    in_use: u32,
     choice: PendingChoice,
+}
+
+/// A held backup an attempt is using: it is not swept for being old while this lives, and its five minutes start again
+/// when it is dropped ([`Pending::use_test_backup`]).
+pub struct TestBackupUse<'a> {
+    pending: &'a Pending,
+    token: Token,
+    path: PathBuf,
+    clock: &'a dyn Fn() -> Instant,
+}
+
+impl TestBackupUse<'_> {
+    /// The backup's path: never sent to the page.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestBackupUse<'_> {
+    fn drop(&mut self) {
+        self.pending.end_test_backup(&self.token, (self.clock)());
+    }
 }
 
 impl Pending {
@@ -373,6 +404,73 @@ impl Pending {
         taken.map(drop).ok_or(ShellError::ChoiceExpired)
     }
 
+    /// Starts an attempt on the backup held under `token`, which must have been held in lock epoch `epoch` (the current
+    /// one): its path is the answer's [`path`](TestBackupUse::path). While the answer lives the backup is in use and no
+    /// sweep (the timer's, or any put or take) drops it for being old, however long the attempt runs; when the answer is
+    /// dropped its five minutes start again, by `clock`. A forget, a new pick or a lock of all vaults still drops it, in
+    /// use or not. `ChoiceExpired` for a token that is not there, was used or dropped, is five minutes old and not in
+    /// use, holds another kind of choice or a backup of another epoch, with nothing changed. Never the generic
+    /// `NotFound`.
+    pub fn use_test_backup<'a>(
+        &'a self,
+        token: &Token,
+        epoch: u64,
+        clock: &'a dyn Fn() -> Instant,
+    ) -> ShellResult<TestBackupUse<'a>> {
+        let now = clock();
+        let (answer, expired) = {
+            let mut parked = lock(&self.parked);
+            let expired = take_expired(&mut parked, now);
+            let answer = parked
+                .iter_mut()
+                .find_map(|p| match &p.choice {
+                    PendingChoice::TestBackup { path, epoch: held }
+                        if *held == epoch && p.token.matches(token) =>
+                    {
+                        let path = path.clone();
+                        p.until = now + LIFETIME;
+                        p.in_use += 1;
+                        Some(path)
+                    }
+                    _ => None,
+                })
+                .ok_or(ShellError::ChoiceExpired);
+            (answer, expired)
+        };
+        drop(expired);
+        answer.map(|path| TestBackupUse {
+            pending: self,
+            token: Token(token.0.clone()),
+            path,
+            clock,
+        })
+    }
+
+    /// The end of an attempt ([`TestBackupUse`] dropped): one less in use, and five minutes from `now`. Nothing for a
+    /// choice a forget or a lock has dropped since.
+    fn end_test_backup(&self, token: &Token, now: Instant) {
+        let mut parked = lock(&self.parked);
+        if let Some(p) = parked.iter_mut().find(|p| {
+            p.token.matches(token) && matches!(p.choice, PendingChoice::TestBackup { .. })
+        }) {
+            p.in_use = p.in_use.saturating_sub(1);
+            p.until = now + LIFETIME;
+        }
+    }
+
+    /// Drops the backup held under `token`, and nothing else: a token that is not there, was dropped already, or holds
+    /// another kind of choice is left alone, with no error (forgetting is idempotent).
+    pub fn forget_test_backup(&self, token: &Token) {
+        let gone = {
+            let mut parked = lock(&self.parked);
+            let found = parked.iter().position(|p| {
+                p.token.matches(token) && matches!(p.choice, PendingChoice::TestBackup { .. })
+            });
+            found.map(|at| parked.swap_remove(at))
+        };
+        drop(gone);
+    }
+
     fn park_at(&self, choice: PendingChoice, now: Instant) -> (Token, Vec<PendingChoice>) {
         let token = Token::random();
         let mut parked = lock(&self.parked);
@@ -380,12 +478,14 @@ impl Pending {
         parked.push(Parked {
             token: Token(token.0.clone()),
             until: now + LIFETIME,
+            in_use: 0,
             choice,
         });
         (token, expired)
     }
 
-    fn put_at(&self, choice: PendingChoice, now: Instant) -> Token {
+    /// Like [`put`](Self::put), with the time of the caller's own clock (the shell's, which a test moves).
+    pub(crate) fn put_at(&self, choice: PendingChoice, now: Instant) -> Token {
         // The expired choices are dropped here, after the lock is released.
         let (token, _expired) = self.park_at(choice, now);
         token
@@ -464,11 +564,12 @@ fn find_picked<'a>(
     })
 }
 
-/// Takes the expired choices out of `parked`, for the caller to drop after releasing its lock.
+/// Takes the expired choices out of `parked`, for the caller to drop after releasing its lock. A held backup an attempt
+/// is using is not expired, whatever its age.
 fn take_expired(parked: &mut Vec<Parked>, now: Instant) -> Vec<PendingChoice> {
     let (expired, live): (Vec<Parked>, Vec<Parked>) = std::mem::take(parked)
         .into_iter()
-        .partition(|p| p.until <= now);
+        .partition(|p| p.in_use == 0 && p.until <= now);
     *parked = live;
     expired.into_iter().map(|p| p.choice).collect()
 }
@@ -674,6 +775,204 @@ mod tests {
         pending.drop_picked_files(None);
         assert_eq!(pending.len(), 1);
         assert!(pending.peek_picked(&second, SessionId(2), 1).is_err());
+    }
+
+    fn held(epoch: u64) -> PendingChoice {
+        PendingChoice::TestBackup {
+            path: PathBuf::from("a.lockbox-backup"),
+            epoch,
+        }
+    }
+
+    /// A held backup is used by its own token in the epoch it was held in, and by nothing else: another kind of choice
+    /// under the token, a token that is not there and another epoch's choice answer `ChoiceExpired` (never `NotFound`),
+    /// and what is parked stays.
+    #[test]
+    fn a_held_backup_is_used_by_its_token_and_epoch_only() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(held(3), now);
+        let other = pending.put_at(picked(1, 1, &["a"]), now);
+        assert_eq!(
+            used(&pending, &token, 3, now),
+            Ok(PathBuf::from("a.lockbox-backup"))
+        );
+        assert_eq!(
+            used(&pending, &token, 4, now),
+            Err(ShellError::ChoiceExpired)
+        );
+        assert_eq!(
+            used(&pending, &other, 3, now),
+            Err(ShellError::ChoiceExpired)
+        );
+        assert_eq!(
+            used(&pending, &Token::random(), 3, now),
+            Err(ShellError::ChoiceExpired)
+        );
+        assert_eq!(pending.len(), 2, "nothing was taken");
+        assert!(pending.take_at(&token, now).is_ok());
+        assert_eq!(
+            used(&pending, &token, 3, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// One whole attempt on the held backup at `now`: begun and ended at the same moment.
+    fn used(pending: &Pending, token: &Token, epoch: u64, now: Instant) -> ShellResult<PathBuf> {
+        let clock = || now;
+        pending
+            .use_test_backup(token, epoch, &clock)
+            .map(|attempt| attempt.path().to_path_buf())
+    }
+
+    /// Fix round 2: a held backup an attempt is using is not swept, however long the attempt runs (a sweep from the
+    /// timer, or any put or take, finds it in use), and its five minutes start again when the attempt ends. Only after
+    /// that does it expire. A use that was refused holds nothing.
+    #[test]
+    fn a_held_backup_in_use_is_not_swept_and_restarts_when_the_attempt_ends() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(held(1), now);
+        let time = std::cell::Cell::new(now);
+        let clock = || time.get();
+
+        let attempt = pending.use_test_backup(&token, 1, &clock).unwrap();
+        time.set(now + LIFETIME + Duration::from_secs(60));
+        pending.sweep_at(time.get());
+        assert_eq!(pending.len(), 1, "swept while in use");
+        let other = pending.put_at(PendingChoice::Test(None), time.get());
+        assert_eq!(pending.len(), 2, "a put swept it while in use");
+        assert!(pending.take_at(&other, time.get()).is_ok());
+        assert_eq!(pending.len(), 1, "a take swept it while in use");
+
+        time.set(time.get() + Duration::from_secs(60));
+        let ended = time.get();
+        drop(attempt);
+        pending.sweep_at(ended + LIFETIME - Duration::from_secs(1));
+        assert_eq!(pending.len(), 1, "five minutes from the end");
+        assert_eq!(
+            used(
+                &pending,
+                &token,
+                1,
+                ended + LIFETIME - Duration::from_secs(1)
+            ),
+            Ok(PathBuf::from("a.lockbox-backup")),
+            "still there to try again"
+        );
+        let again = ended + LIFETIME - Duration::from_secs(1) + LIFETIME;
+        pending.sweep_at(again);
+        assert_eq!(pending.len(), 0, "five minutes after the last use");
+        assert_eq!(
+            used(&pending, &token, 1, again),
+            Err(ShellError::ChoiceExpired)
+        );
+
+        // A refused use (another epoch) holds nothing: it expires on time.
+        let stray = pending.put_at(held(1), again);
+        assert!(used(&pending, &stray, 2, again).is_err());
+        pending.sweep_at(again + LIFETIME);
+        assert_eq!(pending.len(), 0);
+    }
+
+    /// Two attempts at once keep the hold until the last one ends.
+    #[test]
+    fn a_held_backup_stays_while_any_attempt_uses_it() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(held(1), now);
+        let time = std::cell::Cell::new(now);
+        let clock = || time.get();
+        let first = pending.use_test_backup(&token, 1, &clock).unwrap();
+        let second = pending.use_test_backup(&token, 1, &clock).unwrap();
+        time.set(now + LIFETIME * 2);
+        drop(first);
+        time.set(now + LIFETIME * 4);
+        pending.sweep_at(time.get());
+        assert_eq!(pending.len(), 1, "the second attempt still runs");
+        drop(second);
+        pending.sweep_at(time.get() + LIFETIME);
+        assert_eq!(pending.len(), 0);
+    }
+
+    /// Being in use does not keep a choice against a forget or a lock of all vaults, and the attempt's end then
+    /// brings nothing back.
+    #[test]
+    fn a_held_backup_in_use_is_still_forgotten_and_drained() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let clock = || now;
+
+        let token = pending.put_at(held(1), now);
+        let attempt = pending.use_test_backup(&token, 1, &clock).unwrap();
+        pending.forget_test_backup(&token);
+        assert_eq!(pending.len(), 0);
+        drop(attempt);
+        assert_eq!(pending.len(), 0, "the end of the attempt brought it back");
+
+        let token = pending.put_at(held(1), now);
+        let attempt = pending.use_test_backup(&token, 1, &clock).unwrap();
+        drop(pending.drain());
+        assert_eq!(pending.len(), 0);
+        drop(attempt);
+        assert_eq!(
+            used(&pending, &token, 1, now),
+            Err(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// Each use starts the five minutes again, so someone retrying passwords is not timed out; one left alone for five
+    /// minutes is gone.
+    #[test]
+    fn a_held_backups_lifetime_restarts_with_each_use() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(held(1), now);
+        let at = now + LIFETIME - Duration::from_secs(1);
+        assert!(used(&pending, &token, 1, at).is_ok());
+        let later = now + LIFETIME + Duration::from_secs(10);
+        assert!(used(&pending, &token, 1, later).is_ok());
+        let expired = later + LIFETIME;
+        assert_eq!(
+            used(&pending, &token, 1, expired),
+            Err(ShellError::ChoiceExpired)
+        );
+        assert_eq!(pending.len(), 0, "an expired one is dropped");
+    }
+
+    /// Forgetting drops a held backup and only that: another kind of choice under the token stays, and an unknown or
+    /// already-dropped token is nothing to forget, with no error.
+    #[test]
+    fn forget_test_backup_drops_only_a_held_backup() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(held(1), now);
+        let other = pending.put_at(picked(1, 1, &["a"]), now);
+        pending.forget_test_backup(&other);
+        assert_eq!(pending.len(), 2);
+        pending.forget_test_backup(&token);
+        assert_eq!(pending.len(), 1);
+        pending.forget_test_backup(&token);
+        pending.forget_test_backup(&Token::random());
+        assert_eq!(pending.len(), 1);
+        assert!(pending.peek_picked(&other, SessionId(1), 1).is_ok());
+    }
+
+    /// A lock of one vault leaves a held backup alone (it has no vault); a lock of all vaults drains it with the rest.
+    #[test]
+    fn locking_one_vault_leaves_a_held_backup_and_draining_drops_it() {
+        let pending = Pending::default();
+        let token = pending.put(held(1));
+        pending.drop_env_pastes(Some(SessionId(1)));
+        pending.drop_stored_copies(Some(SessionId(1)));
+        pending.drop_picked_files(Some(SessionId(1)));
+        let now = Instant::now();
+        assert!(used(&pending, &token, 1, now).is_ok());
+        drop(pending.drain());
+        assert_eq!(
+            used(&pending, &token, 1, now),
+            Err(ShellError::ChoiceExpired)
+        );
     }
 
     /// A paste waits five minutes like every other choice.

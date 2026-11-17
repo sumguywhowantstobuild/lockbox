@@ -6,7 +6,7 @@ import { Button } from "../parts/Button";
 import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
-import { closeTool, loadSettings, openBackup, saveSettings, useSettings, type SaveTicket, type SessionData } from "../store";
+import { closeTool, loadSettings, openBackup, saveSettings, startTestBackup, useSettings, type SaveTicket, type SessionData } from "../store";
 
 /** The lists of the two time settings: the session's own steps, inside what the shell takes (1 to 60 minutes, 10 to 300 seconds). */
 const IDLE_MINUTES = [1, 2, 5, 10, 15, 30, 60];
@@ -117,8 +117,8 @@ function said(error: unknown, names?: { shortcut?: string }): string {
  * Settings (31a, 31b), from the side menu: the app's settings, for every vault, saved at once as each one changes. A change shows as it is
  * made and goes back to what is saved if the shell refuses it, with the refusal in words under its row. Saves go one after another (the store
  * sees to that), each as the whole settings. Start with Windows is not one of the settings the file keeps: it is the shell's own entry, read
- * when the panel opens and changed by its own command. "This vault" has Back up (a writable vault only); the vault's other rows (password,
- * export) and Help are not here until the plans that build them.
+ * when the panel opens and changed by its own command. "This vault" has Back up (a writable vault only) and Test a backup (any vault, a read-only
+ * one too); the vault's other rows (password, export) and Help are not here until the plans that build them.
  */
 export function SettingsPanel({ data }: { data: SessionData }) {
   const id = useId();
@@ -396,11 +396,11 @@ export function SettingsPanel({ data }: { data: SessionData }) {
         </div>
       </section>
 
-      {data.readOnly ? null : (
-        // The open vault's own: a copy kept on another drive. Not in a vault opened from a backup, which has nothing of its own to back up.
-        <section className="gp">
-          <h3 className="gh">This vault</h3>
-          <div className="grp">
+      <section className="gp">
+        <h3 className="gh">This vault</h3>
+        <div className="grp">
+          {data.readOnly ? null : (
+            // A copy kept on another drive. Not in a vault opened from a backup, which has nothing of its own to back up.
             <SettingsRow label="Back up" hint={`Keep a copy of ${data.name} on another drive.`} hintId={`${id}-backup-hint`}>
               <Button
                 aria-describedby={`${id}-backup-hint`}
@@ -411,9 +411,22 @@ export function SettingsPanel({ data }: { data: SessionData }) {
                 Back up
               </Button>
             </SettingsRow>
-          </div>
-        </section>
-      )}
+          )}
+          {/* Any vault's, a read-only one too: the backup it checks is a file, and no vault's contents are read. */}
+          <SettingsRow label="Test a backup" hint="Check that a backup opens, without restoring it." hintId={`${id}-test-hint`}>
+            <Button
+              aria-describedby={`${id}-test-hint`}
+              // The Windows picker is open: a second press sends nothing.
+              aria-disabled={data.test?.phase === "picking" ? true : undefined}
+              onClick={() => {
+                if (data.test === null) void startTestBackup(data.session);
+              }}
+            >
+              Test a backup
+            </Button>
+          </SettingsRow>
+        </div>
+      </section>
 
       <section className="gp">
         <h3 className="gh">This PC</h3>

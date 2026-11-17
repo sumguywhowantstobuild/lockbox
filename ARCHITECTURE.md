@@ -305,7 +305,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
 | `dates.rs` | The one date shape the shell writes and reads (RFC 3339, UTC, whole seconds), and "whole days since": the 30-day backup reminder counts from the last backup, else from the vault's creation |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question and the files picked to be added also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again) |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question and the files picked to be added also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
@@ -401,6 +401,24 @@ the job: the page is sent `job-started` only for work that has begun, so these r
 enough space" screen needs the numbers, not a "didn't finish" screen). The job then runs `BackupPlan::write`. Only a published backup notes its date;
 a date that cannot be saved does not fail a backup that is on disk. `vault_backup_due` answers `{ days }` once the last
 backup, else the vault's creation, is 30 or more whole days back, and `null` otherwise and always for a read-only session.
+A published backup's answer (`BackupView`) also carries `test`, a held `TestBackup` choice for the file just written
+(`{ choice, file_name, size }`), so "Test this backup" needs no picker.
+
+**Test a backup** (`test_backup_pick`, `test_backup`, `forget_test_backup`). The pick comes first: the picker (titled "Test
+a backup", with the backup filter) runs outside every lock and the path is held in `pending.rs` as
+`PendingChoice::TestBackup { path, epoch }`; the page gets `{ choice, file_name, size }` and never the path. The lock epoch
+is read before the picker, and a lock that came meanwhile takes the choice back out and answers `Locked` (a closed picker
+answers `Dismissed`, leaving the choice sent with it; a new pick forgets that choice). `test_backup` takes the choice, the
+credential and the page's `request`: a missing, used, expired, other-kind or other-epoch token answers `ChoiceExpired`
+(`Pending::use_test_backup`, which holds the choice in use until the attempt ends, so no sweep drops it however long the
+check runs, and then starts its five minutes again); the credential is read before the job
+begins (a malformed one starts none); the job is `begin_launch_job(JobKind::Test, Some(request))`, so the page hears
+`job-started` and `progress` under `{ "type": "launch", "epoch": N }` and can Stop it; and the answer goes through
+`answer_job`, so a lock of all vaults while it ran, or the app closing, answers `Locked` whatever was found. Every other
+answer keeps the choice. The credential's third form, `{ "password_or_key": text }`, is tried as a recovery key first when
+the text is a well-formed key (and as a password too when that is wrong), and as a password only when it is not
+(`CredentialArg::attempts`); the other commands' `CredentialArg::typed` refuses it. No session is needed, so the three
+commands take no session or generation. Testing writes nothing.
 
 **Open** (`open_file`). The stored name goes through the allowlist. An executable type asks first, before anything is
 decrypted. Then in a long operation (the idle timer pauses): a new folder only this user can reach, recorded in the

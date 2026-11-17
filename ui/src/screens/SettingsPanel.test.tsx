@@ -623,11 +623,11 @@ test("shows_the_version", async () => {
   expect(commands("app_info")).toEqual([{}]);
 });
 
-test("no_test_restore_or_password_links_until_their_plans", async () => {
+test("no_restore_or_password_links_until_their_plans", async () => {
   const { panel } = await opened();
-  // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`); the rest of the vault's rows wait for their own plans.
+  // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`) and Test a backup with Task 4 (`TestBackup.test.tsx`); the rest of the vault's rows wait
+  // for their own plans.
   for (const name of [
-    /test a backup/i,
     /restore/i,
     /older copies/i,
     /open a backup/i,
@@ -646,6 +646,7 @@ test("no_test_restore_or_password_links_until_their_plans", async () => {
     "System",
     "Change",
     "Back up",
+    "Test a backup",
   ]);
 });
 

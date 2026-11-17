@@ -30,6 +30,8 @@ const EARLY_MS = 1000;
 const byOperation = new Map<number, Job>();
 const byRequest = new Map<number, number>();
 const waiting = new Set<number>();
+/** Requests whose stop was asked for before the page knew their operation: the stop goes out the moment `job-started` names it. */
+const cancelWhenKnown = new Set<number>();
 const early = new Map<number, { event: JobStartedEvent; timer: ReturnType<typeof setTimeout> }>();
 const listeners = new Set<() => void>();
 let counter = 0;
@@ -95,6 +97,8 @@ function accept(event: JobStartedEvent): void {
   });
   byRequest.set(event.request, event.operation);
   notify();
+  // A stop that was asked for while this was not yet known goes out now, for the operation the event names.
+  if (cancelWhenKnown.delete(event.request)) void stopJob(event.operation);
 }
 
 function takeStarted(event: unknown): void {
@@ -137,8 +141,20 @@ function takeLocked(event: LockedEvent): void {
 
 function takeEpoch(event: LockEpochEvent): void {
   if (typeof event.epoch !== "number") return;
+  const before = lastEpoch;
   lastEpoch = Math.max(lastEpoch, event.epoch);
   dropWhere((job) => job.scope.type === "launch" && job.scope.epoch < lastEpoch);
+  if (lastEpoch !== before) notify();
+}
+
+/** The last lock epoch the shell announced (0 before any): a screen that holds typed text follows it and wipes the text when it moves. */
+export function currentLockEpoch(): number {
+  return lastEpoch;
+}
+
+/** The lock epoch as a screen reads it: it changes (and the screen draws again) on every `lockbox://lock-epoch`, even with no vault open. */
+export function useLockEpoch(): number {
+  return useSyncExternalStore(subscribe, currentLockEpoch);
 }
 
 /**
@@ -184,6 +200,8 @@ export function expectRequest(request: number): void {
 /** The command that took `request` has answered: its job is over, whatever it came to, and the page forgets it. */
 export function releaseRequest(request: number): void {
   waiting.delete(request);
+  // A stop still waiting for its `job-started` goes with the request: the answer came first, so there is nothing left to stop.
+  cancelWhenKnown.delete(request);
   const operation = byRequest.get(request);
   if (operation !== undefined) remove(operation);
   // What the start said has done its work; the end is said by the result the screen shows ("File added.", "Nothing was added.").
@@ -244,6 +262,17 @@ export async function stopJob(operation: number): Promise<void> {
   }
 }
 
+/**
+ * Stops whatever `request` became, even if the page does not yet know: a job the page has heard of is stopped now (`stopJob`); one it has not (the
+ * command has begun, its `job-started` has not come) is stopped the moment that event names it. A request whose answer has already come (or that
+ * the page never waited for) has nothing to stop, so nothing is kept for it; one whose answer comes before the event has its wish dropped with it.
+ */
+export function cancelRequest(request: number): void {
+  const operation = byRequest.get(request);
+  if (operation !== undefined) void stopJob(operation);
+  else if (waiting.has(request)) cancelWhenKnown.add(request);
+}
+
 /** The job a command's `request` became, once the shell has said so; `null` until then and after it ends. */
 export function useJob(request: number | null): Job | null {
   useEffect(() => {
@@ -262,6 +291,7 @@ export function resetJobsForTests(): void {
   byOperation.clear();
   byRequest.clear();
   waiting.clear();
+  cancelWhenKnown.clear();
   for (const { timer } of early.values()) clearTimeout(timer);
   early.clear();
   counter = 0;

@@ -532,6 +532,51 @@ fn vault_backup_due_is_granted_to_the_main_window_only() {
     assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
 }
 
+/// The commands of "Test a backup" (the pick, the test, the forget) are listed, granted to the main window and reach
+/// their handler from it; another window and a remote origin are refused by the ACL, before the handler. They take a
+/// token, a typed credential and the page's number, and no path and no session (their bodies are checked in
+/// `commands::backup`'s own tests).
+#[test]
+fn test_backup_commands_are_granted_to_the_main_window_only() {
+    let hex = "0123456789abcdef0123456789abcdef";
+    let commands = [
+        ("test_backup_pick", json!({ "choice": null })),
+        (
+            "test_backup",
+            json!({ "choice": hex, "credential": { "password_or_key": "x" }, "request": 1 }),
+        ),
+        ("forget_test_backup", json!({ "choice": hex })),
+    ];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for (cmd, request) in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(request.clone());
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
 /// The three job events go to the main window and no other window: a listener on the main window hears each of them with
 /// exactly the frozen payload, and one on another window hears none. Widening the target to every window (`Any`) fails
 /// this.
