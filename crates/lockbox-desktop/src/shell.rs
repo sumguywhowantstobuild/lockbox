@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
+use lockbox_core::fsio::refuse_vault_folder;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
@@ -20,7 +21,7 @@ use crate::clipboard::Clipboard;
 use crate::commands::env;
 use crate::error::{ShellError, ShellResult};
 use crate::jobs::{CloseAsked, CloseReason, JobStarted, LockEpochEvent, ProgressEvent};
-use crate::locations::{LocationCheck, check_location, is_within};
+use crate::locations::{LocationCheck, check_location, cloud_provider_of, is_within};
 use crate::lock;
 use crate::open::{OpenFolders, RemoveReport};
 use crate::os::{HotkeyTaken, KnownFolder, Os};
@@ -57,6 +58,13 @@ pub const CLOSE_ASKED_EVENT: &str = "lockbox://close-asked";
 pub struct PendingClose {
     reason: CloseReason,
     epoch: u64,
+}
+
+/// What [`Shell::checked_output`] found: a destination that may be written now, or one in a cloud-synced folder that
+/// needs the user's yes first. Either way, the canonical destination.
+pub(crate) enum Checked {
+    Ready(PathBuf),
+    Cloud(PathBuf),
 }
 
 pub struct Shell {
@@ -522,6 +530,35 @@ impl Shell {
             });
         }
         Ok(folder.join(name))
+    }
+
+    /// The checks every readable output passes before anything is made: a decrypted copy (Save a copy), a readable file
+    /// (the recovery key's PDF, a `.env`) and a folder's files saved together. The output journal must be readable
+    /// ([`Outputs::usable`]); the destination `dest` (a file's path: for a folder, any name in it, which is never
+    /// made) is made canonical and refused inside Lockbox's own state folder ([`output_destination`](Self::output_destination));
+    /// and refused in or below a vault's folder ([`refuse_vault_folder`]). Then, unless `cloud_confirmed`, the cloud
+    /// question: a folder a cloud provider syncs is [`Checked::Cloud`] and nothing is made until the user says yes.
+    ///
+    /// It refuses no kind of session: a read-only vault may save copies out.
+    pub(crate) fn checked_output(
+        &self,
+        dest: &Path,
+        cloud_confirmed: bool,
+    ) -> ShellResult<Checked> {
+        self.outputs.usable()?;
+        let dest = self.output_destination(dest)?;
+        // Every time, the yes included: the folder may have become a vault's while the question waited.
+        refuse_vault_folder(&dest)?;
+        if !cloud_confirmed {
+            let folder = dest
+                .parent()
+                .ok_or(ShellError::InvalidInput { what: "file name" })?;
+            if cloud_provider_of(self.os.volumes.as_ref(), self.os.env.as_ref(), folder)?.is_some()
+            {
+                return Ok(Checked::Cloud(dest));
+            }
+        }
+        Ok(Checked::Ready(dest))
     }
 
     /// Whether a vault may be at `dir` (see [`check_location`]).

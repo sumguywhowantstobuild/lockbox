@@ -453,6 +453,70 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Save all files, with one bar and Stop (Saving)",
+    shows: ["SaveAllFiles#SaveAllFiles"],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      shell.holdFiles();
+      await folderMenu("Save all files (1)");
+      const card = await screen.findByRole("region", { name: "Saving files" });
+      const job = shell.runningJobs()[0];
+      act(() => {
+        shell.sendProgress(job?.operation ?? 0, 4_608, 18_432);
+      });
+      await within(card).findByText("4.5 KB of 18 KB");
+    },
+  },
+  {
+    name: "Save all files, saved with the warning (Done)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      await folderMenu("Save all files (1)");
+      await screen.findByRole("complementary", { name: "1 file saved" });
+    },
+  },
+  {
+    name: "Save all files, stopped part way (Stopped)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      shell.batchEndsAfter(0, { code: "core", kind: "not_enough_space", needed: 10, available: 5 });
+      await folderMenu("Save all files (1)");
+      await screen.findByRole("complementary", { name: "Stopped after 0 of 1 file" });
+    },
+  },
+  {
+    name: "Save all files, the summary kept after moving on (Done)",
+    shows: ["SaveAllFiles#SaveAllLeft"],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      const release = shell.holdFiles();
+      await folderMenu("Save all files (1)");
+      await screen.findByRole("region", { name: "Saving files" });
+      await select("Rotation steps");
+      act(() => {
+        release();
+      });
+      await screen.findByRole("region", { name: "1 file saved" });
+    },
+  },
+  {
+    name: "Save all files into a cloud folder",
+    shows: ["SaveAllFiles#SaveAllCloudQuestion"],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      shell.cloudPdfNext();
+      await folderMenu("Save all files (1)");
+      return screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+    },
+  },
+  {
     name: "Attach files on an item (9d)",
     shows: [],
     reach: async () => {

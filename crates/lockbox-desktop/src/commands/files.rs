@@ -5,7 +5,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use lockbox_core::blob::{CancelToken, OutputJournal, Progress};
-use lockbox_core::fsio::refuse_vault_folder;
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::{CoreError, Result as CoreResult, Vault};
 use serde::Deserialize;
@@ -15,11 +14,10 @@ use tauri::ipc::Request;
 use super::{NoArgs, args, blocking};
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
 use crate::jobs::{JobKind, JobScope};
-use crate::locations::cloud_provider_of;
 use crate::open::{RemoveReport, is_executable, safe_name};
 use crate::pending::{PendingChoice, Token};
 use crate::session::{SessionId, Tagged, VaultRef};
-use crate::shell::Shell;
+use crate::shell::{Checked, Shell};
 
 impl Shell {
     /// Saves a decrypted copy of the stored file `file_id` of the item `id` where the user picks (spec §7.2). Refused
@@ -84,18 +82,11 @@ impl Shell {
         cloud_confirmed: bool,
         request: u32,
     ) -> ShellResult<Tagged<Outcome<()>>> {
-        // Again: after the dialog, or after a yes, the journal may have been damaged.
-        self.outputs.usable()?;
-        let dest = self.output_destination(dest)?;
-        // Every time, the yes included: the folder may have become a vault's while the question waited.
-        refuse_vault_folder(&dest)?;
-        if !cloud_confirmed {
-            let folder = dest
-                .parent()
-                .ok_or(ShellError::InvalidInput { what: "file name" })?;
-            let provider =
-                cloud_provider_of(self.os.volumes.as_ref(), self.os.env.as_ref(), folder)?;
-            if provider.is_some() {
+        // The shared checks, again: after the dialog, or after a yes, the journal may have been damaged and the folder
+        // may have become a vault's.
+        let dest = match self.checked_output(dest, cloud_confirmed)? {
+            Checked::Ready(dest) => dest,
+            Checked::Cloud(dest) => {
                 let token = self.sessions.pending().put(PendingChoice::StoredCopy {
                     session,
                     generation,
@@ -106,7 +97,7 @@ impl Shell {
                 let ask = Outcome::Confirm(Confirm::CloudFolder { token });
                 return self.still_current(session, generation, ask);
             }
-        }
+        };
         self.sessions
             .read_long(session, generation, |vault, cancel| {
                 let scope = JobScope::Session {

@@ -528,11 +528,21 @@ authenticated.
   it over the destination (6.2). On failure or cancellation only the temp file is deleted; **an existing destination is
   never touched unless the copy completed and verified.** Free space and file-size limits are checked first.
 - **Save all of a folder's files:** Rust opens the folder picker, then saves each stored file in the collection, attached
-  ones included, by the rules above up to the rename, as one job with one Cancel. The picker's title says the copies are
-  unencrypted. Free space for the whole batch is checked first. **An existing file is never replaced:** unlike a single
-  copy, the last step is a rename that refuses a taken name, under the same generation check, and a taken name gets " (2)",
-  then " (3)", also for a file that appears at the last moment. On a cancel or a lock, finished files stay and the file in progress leaves nothing. A damaged file is named in the result, and
-  the rest continue.
+  ones included, by the rules above up to the rename, as one job with one Cancel. It works on a read-only vault too, as
+  Save a copy does. The picker's title says the copies are unencrypted. The same checks as Save a copy run on the folder
+  (a damaged output journal, Lockbox's state folder, a vault's folder, a cloud-synced folder's warning), then free space for
+  the whole batch is checked, with the numbers, and the answer is a plan (each name as it will be written, its size, the
+  total) that a second step starts; every check runs again at the start, and the start is refused if the collection's
+  files are no longer exactly the planned ones. Each file is its own use of the vault, which is let go between two files.
+  **An existing file is never replaced:** unlike a single copy, the last step is a rename that refuses a taken name, under
+  the same generation check, and a taken name gets " (2)", then " (3)" and on to " (999)", also for a file that appears at
+  the last moment; the verified temp is moved to the next name, never decrypted twice. A stored name is changed only where
+  Windows refuses it or where it could leave the folder (`< > : " / \ | ? *` and control characters become `_`, trailing
+  dots and spaces go, a device name gets a `_` first, at most 100 characters), and each change, and each number, is listed
+  in the result. On a cancel or a lock, finished files stay and the file in progress leaves nothing. A damaged file, and a
+  file whose item was deleted meanwhile, are named in the result, and the rest continue; a full or missing drive, or
+  any other failure, ends the job and the result says how many were saved and which were not. The result's warning says the
+  copies aren't encrypted, and it offers Show in Explorer through a handle Rust holds, never a path.
 - **An export, a saved `.env` and a recovery key PDF** follow Save a copy's rules: Rust picks the destination, a vault
   folder or Lockbox's state folder is refused, a cloud-synced folder warns first, the file goes to a journaled hidden temp
   file beside it, and it's renamed into place only if the session's generation is still current. An existing file is

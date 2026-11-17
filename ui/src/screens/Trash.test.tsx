@@ -1149,14 +1149,20 @@ test("the_folders_menu_has_the_env_entries_rename_and_delete_and_nothing_a_later
   await expectNoAxe(menu);
 });
 
-test("save_all_not_in_folder_menu_until_4b", async () => {
-  await unlocked({ extra: [{ id: itemId(60), kind: "key", title: "A_KEY", collection: FOLDER, value: "demo-4b" }] });
+test("save_all_files_shows_in_the_folder_menu_only_when_the_folder_holds_a_stored_file", async () => {
+  const spec = { file_id: itemId(0xa2), name: "spec-demo.pdf", length: 2048, media_type: "application/pdf" };
+  await unlocked({
+    extra: [
+      { id: itemId(60), kind: "key", title: "A_KEY", collection: FOLDER, value: "demo-4b" },
+      { id: itemId(61), kind: "file", title: "Spec sheet", collection: FOLDER, attachments: [spec] },
+    ],
+  });
   await openFolder("Agency support agent");
   const menu = await openMenu(screen.getByRole("button", { name: "More for this folder" }));
   const names = within(menu).getAllByRole("menuitem").map((item) => item.textContent);
-  // With a key in the folder the two taking-out entries show; the files' own "Save all files" is 4B's.
-  expect(names).toEqual(["Paste a .env", "Copy all as .env", "Save as .env file", "Rename folder", "Delete folder"]);
-  expect(thePage()).not.toMatch(/Save all files|Save all/);
+  // With a key in the folder the two taking-out entries show, and with a stored file the files' own "Save all files (1)" comes after them.
+  expect(names).toEqual(["Paste a .env", "Copy all as .env", "Save as .env file", "Save all files (1)", "Rename folder", "Delete folder"]);
+  // The entry lives in the menu alone: no button for it sits on the page.
   expect(screen.queryByRole("button", { name: /Save all/ })).toBeNull();
 });
 

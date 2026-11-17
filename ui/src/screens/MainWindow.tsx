@@ -4,7 +4,7 @@ import { rememberOpener } from "../focus";
 import { messageFor } from "../messages";
 import { Button } from "../parts/Button";
 import { CloseIcon, FilterIcon, MoreIcon } from "../parts/Icon";
-import { Menu } from "../parts/Menu";
+import { Menu, type MenuItem } from "../parts/Menu";
 import type { VaultLook } from "../parts/Pattern";
 import { ToastStack } from "../parts/Toast";
 import { useSpokenLine } from "../useSpokenLine";
@@ -17,6 +17,7 @@ import {
   selectItem,
   setForm,
   setSearchQuery,
+  startSaveAll,
   useForm,
   useSessions,
   useVaults,
@@ -41,6 +42,7 @@ import { ItemList } from "./ItemList";
 import { FILTER, itemCount, kindCount, kindPlural, ListTools, showAll, useKind, useSort } from "./ListTools";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
+import { SaveAllCloudQuestion, SaveAllFiles, SaveAllLeft } from "./SaveAllFiles";
 import { SaveBox } from "./SaveBox";
 import { SearchPanel } from "./SearchPanel";
 import { SettingsPanel } from "./SettingsPanel";
@@ -87,12 +89,80 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
       ? "item"
       : null;
   const folderId = data.folder;
+  // The folder's menu is on a folder's list, not on All items and not in the Trash. A read-only vault has it too, for Save all files alone.
   const folderMenu =
-    data.trash || data.readOnly || folderId === null || folderName === undefined
+    data.trash || folderId === null || folderName === undefined
       ? null
       : { id: folderId, name: folderName, count: folders.find((folder) => folder.id === folderId)?.count ?? 0 };
   // Taking keys out is offered only where there is a key to take: one in this folder that is not in the Trash (`items` has none of those).
   const folderHasKeys = folderId !== null && items.some((item) => item.kind === "key" && item.collection === folderId);
+  // Save all files (N): N is every stored file of every item in this folder that is not in the Trash, attached ones included (`items` has no trashed ones).
+  const folderFiles = useMemo(
+    () => (folderId === null ? 0 : items.reduce((sum, item) => (item.collection === folderId ? sum + item.attachments.length : sum), 0)),
+    [items, folderId],
+  );
+  const folderMenuItems: MenuItem[] =
+    folderMenu === null
+      ? []
+      : [
+          ...(data.readOnly
+            ? []
+            : [
+                {
+                  label: "Paste a .env",
+                  onSelect: () => {
+                    // Closing the panel gives focus back to the folder's menu button, the way the dialogs below do.
+                    rememberOpener(document.querySelector<HTMLElement>('[aria-label="More for this folder"]'));
+                    openPasteEnv(data.session);
+                  },
+                },
+              ]),
+          ...(!data.readOnly && folderHasKeys
+            ? [
+                {
+                  label: "Copy all as .env",
+                  onSelect: () => {
+                    void copyEnv(data.session, folderMenu.id);
+                  },
+                },
+                {
+                  label: "Save as .env file",
+                  onSelect: () => {
+                    setAsking({ kind: "env_file", folder: folderMenu, count: folderMenu.count });
+                  },
+                },
+              ]
+            : []),
+          ...(folderFiles > 0
+            ? [
+                {
+                  label: `Save all files (${String(folderFiles)})`,
+                  apart: !data.readOnly,
+                  onSelect: () => {
+                    void startSaveAll(data.session, { id: folderMenu.id, name: folderMenu.name });
+                  },
+                },
+              ]
+            : []),
+          ...(data.readOnly
+            ? []
+            : [
+                {
+                  label: "Rename folder",
+                  apart: true,
+                  onSelect: () => {
+                    setAsking({ kind: "rename", folder: folderMenu, count: folderMenu.count });
+                  },
+                },
+                {
+                  label: "Delete folder",
+                  danger: true,
+                  onSelect: () => {
+                    setAsking({ kind: "delete", folder: folderMenu, count: folderMenu.count });
+                  },
+                },
+              ]),
+        ];
   // What the list holds before it is narrowed: the Trash (folders included), All items, or one folder's items.
   const inView = useMemo(
     () => (data.trash ? inTrash : data.folder === null ? items : items.filter((item) => item.collection === data.folder)),
@@ -198,54 +268,11 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               )}
             </div>
             <ListTools session={data.session} />
-            {folderMenu === null ? null : (
-              // The folder's own menu (14b, 15d): Paste a .env, the two ways to take the keys out (only when the folder holds a key), then
-              // Rename and Delete set apart, and nothing a later plan builds. Not on All items, not in the Trash, not in a read-only vault.
-              <Menu
-                label="More for this folder"
-                icon={<MoreIcon />}
-                triggerClassName="ib"
-                items={[
-                  {
-                    label: "Paste a .env",
-                    onSelect: () => {
-                      // Closing the panel gives focus back to the folder's menu button, the way the dialogs below do.
-                      rememberOpener(document.querySelector<HTMLElement>('[aria-label="More for this folder"]'));
-                      openPasteEnv(data.session);
-                    },
-                  },
-                  ...(folderHasKeys
-                    ? [
-                        {
-                          label: "Copy all as .env",
-                          onSelect: () => {
-                            void copyEnv(data.session, folderMenu.id);
-                          },
-                        },
-                        {
-                          label: "Save as .env file",
-                          onSelect: () => {
-                            setAsking({ kind: "env_file", folder: folderMenu, count: folderMenu.count });
-                          },
-                        },
-                      ]
-                    : []),
-                  {
-                    label: "Rename folder",
-                    apart: true,
-                    onSelect: () => {
-                      setAsking({ kind: "rename", folder: folderMenu, count: folderMenu.count });
-                    },
-                  },
-                  {
-                    label: "Delete folder",
-                    danger: true,
-                    onSelect: () => {
-                      setAsking({ kind: "delete", folder: folderMenu, count: folderMenu.count });
-                    },
-                  },
-                ]}
-              />
+            {folderMenu === null || folderMenuItems.length === 0 ? null : (
+              // The folder's own menu (14b, 15d, T09f): Paste a .env, the two ways to take the keys out (only when the folder holds a key), Save all
+              // files (only when it holds a stored file) set apart, then Rename and Delete set apart. Not on All items, not in the Trash. A
+              // read-only vault has the menu for Save all files alone, and none at all when the folder holds no file.
+              <Menu label="More for this folder" icon={<MoreIcon />} triggerClassName="ib" items={folderMenuItems} />
             )}
             {data.readOnly || data.trash ? null : <AddMenu session={data.session} folder={data.folder} />}
           </div>
@@ -257,6 +284,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             <div className="asks">
               <FileJobProgress data={data} />
               <AddFilesLeft data={data} />
+              <SaveAllLeft data={data} />
               <BusyNote data={data} />
               <OpenFilesAsk />
               <LostOutputsAsk />
@@ -422,6 +450,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
           />
         ) : null}
         {data.tool?.kind === "add_files" ? <AddFiles key={`${String(data.session)}:${String(data.generation)}:${String(data.addFiles?.opening)}`} data={data} folders={folders} /> : null}
+        {data.tool?.kind === "save_all" ? <SaveAllFiles key={`${String(data.session)}:${String(data.generation)}:${String(data.saveAll?.opening)}`} data={data} /> : null}
         {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "settings" ? <SettingsPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "backup" ? <BackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
@@ -429,6 +458,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
       {/* The window's own: messages sit at the foot of the whole window, whatever is open beside the side menu. */}
       <ToastStack />
       <SearchPanel />
+      <SaveAllCloudQuestion data={data} />
       {asking?.kind === "rename" ? (
         <RenameFolderDialog
           session={data.session}

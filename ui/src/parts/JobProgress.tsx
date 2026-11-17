@@ -23,6 +23,7 @@ export function JobProgress({
   warning,
   now,
   heading = true,
+  stopWord = "Cancel",
   onStop,
 }: {
   operation: number;
@@ -35,6 +36,8 @@ export function JobProgress({
   /** The file going in now and its place in the batch, from what the screen holds: `{ name, place: "2 of 3" }`. */
   now?: { name: string; place: string } | null;
   heading?: boolean;
+  /** The button's word: "Cancel" (what is not done is not kept), or "Stop" where what is done stays, as saving a folder's files draws it. */
+  stopWord?: "Cancel" | "Stop";
   onStop?: () => void;
 }) {
   const job = useJobByOperation(operation);
@@ -85,7 +88,7 @@ export function JobProgress({
             onStop?.();
           }}
         >
-          {job.stopping ? "Cancelling…" : "Cancel"}
+          {job.stopping ? (stopWord === "Stop" ? "Stopping…" : "Cancelling…") : stopWord}
         </Button>
       </div>
     </section>

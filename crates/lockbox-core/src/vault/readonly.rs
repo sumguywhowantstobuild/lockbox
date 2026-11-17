@@ -3,7 +3,10 @@
 //! backup): exports write only a decrypted copy, to a place the caller picks. Opening takes no
 //! lock and repairs, cleans and creates nothing, so a folder is exactly as it was afterwards.
 
-use super::files::{check_export_space, export_blob, refuse_inside, refuse_vault_folder};
+use super::files::{
+    NewExportError, check_batch_space, check_export_space, export_blob, export_blob_new,
+    refuse_inside, refuse_vault_folder,
+};
 use super::items::BEING_DELETED;
 use super::naming::created_at_now;
 use super::source::{FILE_MISSING, HEADER_MAC, VaultSource, unlock_source};
@@ -20,7 +23,7 @@ use std::collections::BTreeMap;
 use std::io;
 #[cfg(any(test, feature = "test-internals"))]
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const DESTINATION_IS_BACKUP: CoreError = CoreError::InvalidInput {
     what: "destination is the backup",
@@ -154,6 +157,57 @@ impl ReadOnlyVault {
         export_blob(
             &mut blob, blob_size, vault_id, fref, dest, journal, cancel, progress,
         )
+    }
+
+    /// [`Vault::export_file_new`](super::Vault::export_file_new) from a read-only vault: a copy that never replaces
+    /// anything, numbered as the caller's `candidates` say. Each destination is refused as [`export_file`](Self::export_file)
+    /// refuses one (the backup itself, the viewed folder, any vault's folder) before it is used.
+    pub fn export_file_new(
+        &self,
+        item: &ItemId,
+        file: &FileId,
+        candidates: &mut dyn FnMut(u32) -> PathBuf,
+        journal: &dyn OutputJournal,
+        cancel: &CancelToken,
+        progress: &dyn Progress,
+    ) -> std::result::Result<PathBuf, NewExportError> {
+        let fref = self
+            .get_item(item)?
+            .attachments
+            .iter()
+            .find(|f| f.file_id == *file)
+            .ok_or(CoreError::NotFound)?;
+        let allowed = |dest: PathBuf| -> Result<PathBuf> {
+            match &self.source {
+                VaultSource::Folder(dir) => refuse_inside(parent_dir(&dest), dir)?,
+                VaultSource::Archive(a) if a.is_same_file(&dest)? => {
+                    return Err(DESTINATION_IS_BACKUP);
+                }
+                VaultSource::Archive(_) => {}
+            }
+            refuse_vault_folder(&dest)?;
+            Ok(dest)
+        };
+        let first = allowed(candidates(1))?;
+        check_export_space(fref, &first)?;
+        let (mut blob, blob_size) = self.source.blob(file)?;
+        export_blob_new(
+            &mut blob,
+            blob_size,
+            &self.header.vault_id,
+            fref,
+            first,
+            &mut |number| allowed(candidates(number)),
+            journal,
+            cancel,
+            progress,
+        )
+    }
+
+    /// [`Vault::check_output_space`](super::Vault::check_output_space) for a read-only vault: free space for a batch of
+    /// copies in `dir` before the first is written.
+    pub fn check_output_space(&self, dir: &Path, sizes: &[u64]) -> Result<()> {
+        check_batch_space(dir, sizes)
     }
 
     /// The attachments of `id` whose file this source does not hold (a backup made while the
@@ -2268,5 +2322,118 @@ mod tests {
             "{missing:?}"
         );
         assert!(names(&f.out()).is_empty());
+    }
+
+    // ---- Plan 4B Task 11: copies that never replace, from a read-only vault ----
+
+    /// From a backup and from a viewed folder alike: a taken name is never replaced, the copy gets the next number, and
+    /// the engine's refusals hold for every name (the backup itself, a vault's folder).
+    #[test]
+    fn a_read_only_vault_saves_without_replacing() {
+        let mut f = Fixture::new();
+        let (item, file) = f.file_item(b"hello world");
+        let backup = f.backup("a.lockbox-backup");
+        let folder = f.parent.path().join("Family.before-restore");
+        copy_folder(f.vault.dir(), &folder);
+        let out = f.parent.path().join("saves");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("a.bin"), b"OLD").unwrap();
+        let named = |number: u32| match number {
+            1 => out.join("a.bin"),
+            number => out.join(format!("a ({number}).bin")),
+        };
+        let cancel = CancelToken::new();
+        for (opened, number) in [
+            (open_backup(&backup).unwrap(), 2),
+            (open_folder(&folder).unwrap(), 3),
+        ] {
+            let saved = opened
+                .export_file_new(
+                    &item,
+                    &file,
+                    &mut |n| named(n),
+                    &NoJournal,
+                    &cancel,
+                    &NoProgress,
+                )
+                .unwrap();
+            assert_eq!(saved, out.join(format!("a ({number}).bin")));
+            assert_eq!(fs::read(&saved).unwrap(), b"hello world");
+        }
+        assert_eq!(fs::read(out.join("a.bin")).unwrap(), b"OLD");
+        assert_eq!(names(&out), ["a (2).bin", "a (3).bin", "a.bin"]);
+
+        // The backup is never a destination, whatever number it comes at.
+        let ro = open_backup(&backup).unwrap();
+        let archive = backup.clone();
+        let result = ro
+            .export_file_new(
+                &item,
+                &file,
+                &mut |_| archive.clone(),
+                &NoJournal,
+                &cancel,
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::InvalidInput {
+                    what: "destination is the backup"
+                })
+            ),
+            "{result:?}"
+        );
+        // Nor a vault's folder.
+        let vault_dir = f.vault.dir().join("a.bin");
+        let result = ro
+            .export_file_new(
+                &item,
+                &file,
+                &mut |_| vault_dir.clone(),
+                &NoJournal,
+                &cancel,
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::InvalidInput {
+                    what: "destination in a vault folder"
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(names(&out), ["a (2).bin", "a (3).bin", "a.bin"]);
+    }
+
+    /// The batch space check works from a read-only vault as from a live one.
+    #[test]
+    fn a_read_only_vault_checks_the_space_of_a_batch() {
+        let mut f = Fixture::new();
+        f.file_item(b"hello world");
+        let ro = open_folder(f.vault.dir()).unwrap();
+        let (sizes, margin) = ([30 * MIB as u64, 31 * MIB as u64], 64 * MIB as u64);
+        let total: u64 = sizes.iter().sum();
+        let volume = |free| {
+            set_volume_override(Some(VolumeInfo {
+                free_bytes: free,
+                max_file_bytes: None,
+            }))
+        };
+        volume(Some(total + margin));
+        ro.check_output_space(f.out().as_path(), &sizes).unwrap();
+        volume(Some(total + margin - 1));
+        let result = ro.check_output_space(f.out().as_path(), &sizes);
+        assert!(
+            matches!(result, Err(CoreError::NotEnoughSpace { needed, available })
+                if needed == total + margin && available == total + margin - 1),
+            "{result:?}"
+        );
+        volume(None);
+        ro.check_output_space(f.out().as_path(), &sizes).unwrap();
+        set_volume_override(None);
     }
 }

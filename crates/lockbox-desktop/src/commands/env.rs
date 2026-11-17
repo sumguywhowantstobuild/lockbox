@@ -339,15 +339,17 @@ fn reached(step: &str) {
     }
 }
 
-/// A lock of one vault (or of all) drops the pasted keys, the copies waiting in a cloud folder's question and the files
-/// picked to be added, parked for it, as Lock all does itself: a lock of one vault drains nothing of its own, and one
-/// parked while a lock was under way is dropped by its hook.
+/// A lock of one vault (or of all) drops the pasted keys, the copies waiting in a cloud folder's question, the files
+/// picked to be added, and Save all's plans, cloud questions and summary handles, parked for it, as Lock all does itself:
+/// a lock of one vault drains nothing of its own, and one parked while a lock was under way is dropped by its hook.
 pub(crate) fn lock_hook(sessions: Weak<Sessions>) -> LockHook {
     Box::new(move |only, _| {
         if let Some(sessions) = sessions.upgrade() {
             sessions.pending().drop_env_pastes(only);
             sessions.pending().drop_stored_copies(only);
             sessions.pending().drop_picked_files(only);
+            sessions.pending().drop_save_alls(only);
+            sessions.pending().drop_saved_folders(only);
         }
     })
 }

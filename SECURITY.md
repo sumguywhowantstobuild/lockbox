@@ -74,7 +74,7 @@ has no way back through the app.
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the backup screens (4B) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the backup screens (4B) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box at its lock event |
 | R7 Documented limits | This file |
@@ -118,7 +118,7 @@ trusted than Rust.
   of work later (that bounds the work, not the time), and the vault key is released when the last one finishes. Two
   exceptions: an unlock runs to its end (see "Unlocking cannot be cancelled inside the engine"), and a restore whose swap
   has started finishes or rolls back.
-- **Long operations pause the idle timer** (import, Save a copy, Open, backup, restore) and keep the PC awake, and time
+- **Long operations pause the idle timer** (import, Save a copy, Save all files, Open, backup, restore) and keep the PC awake, and time
   spent in them does not count. Windows lock and sleep still cancel them. A question waiting for your answer does not
   pause anything.
 - **Closing or quitting while a long operation runs asks first, and nothing locks until you answer.** The window's close
@@ -202,6 +202,24 @@ in the code with a `shortcut:` comment.
   go: Lockbox reports it and keeps trying. Deleted files can still be recovered from the disk, and copies the other
   program makes (autosaves, recent-file caches, temp files) are outside Lockbox's reach. *Accepted:* opening a file in
   another program needs a file on disk; full-disk encryption covers the rest.
+- **"Save all files" writes many decrypted copies at once, and never replaces a file.** From a folder's menu, it saves
+  every stored file of every live item in that folder (a file item's own file and every attachment) into a folder you
+  pick, which Lockbox opens itself: the picker's title says how many unencrypted copies are coming before any is written,
+  and the page never receives the folder's path (it sees names, sizes and a token). The checks are the ones for "Save a
+  copy": a damaged output journal blocks it, Lockbox's own state folder and any vault's folder are refused, a
+  cloud-synced folder asks first, and free space for the whole batch is checked first, with the numbers; every check but the
+  cloud question (which was answered before) runs again when the job starts, and so does the check that the folder still holds
+  exactly the files that were listed. Each file is decrypted once into a hidden temp beside its destination, checked whole, and then moved
+  by a step that itself refuses a name that is taken (the move is one operation, so a file that appears at the last moment
+  is safe too): a taken name gets " (2)", " (3)" and on to 999, the file that was there is never touched, and the summary
+  says which names changed. A name Windows would refuse (`< > : " / \ | ?` `*`, control characters, a device name such as
+  `CON`, trailing dots or spaces) is changed to one it accepts and listed; any other character of your own names stays. A Stop,
+  a lock, a full drive or any failure leaves the files already saved where they are and nothing of the one in progress; a
+  damaged file is named and the rest go on. The summary says in so many words that the copies aren't encrypted, to delete
+  them and empty the Recycle Bin when you are done, and it offers Show in Explorer through a handle Lockbox holds (never a
+  path from the page). The handle goes when the summary closes, at a lock of that vault, at Lock all, Windows locking or
+  sleep, at close and after five minutes. *Accepted:* these are copies you asked to have in plaintext; once saved, they
+  are ordinary files that nothing in Lockbox protects or tracks, and a cloud folder you said yes to will upload them.
 - **What the launch sweep deletes.** Every temp plaintext file is recorded in `pending-outputs.json` (by its random temp
   path, never the original name) before it is created. At launch, an entry is deleted only if it has Lockbox's own temp
   name (`.<16 hex>.lockbox-partial`, `.<16 hex>.lockbox-backup-partial`) or is a folder directly inside `open\`, or is the
@@ -211,7 +229,7 @@ in the code with a `shortcut:` comment.
   first, then the folder only if it is empty (never a recursive delete), so a folder that holds anything else is left on
   disk and dropped from the list. Anything else is dropped from the list and left on disk. An entry on a drive that
   is not connected is kept for later. A damaged journal blocks new decrypted output until you let Lockbox set it aside;
-  after that, any "Save a copy" temp files it listed are no longer swept and may need deleting by hand (they are hidden,
+  after that, any "Save a copy" or "Save all files" temp files it listed are no longer swept and may need deleting by hand (they are hidden,
   named as above, and beside the place you saved to). The launch also lists `open\` itself, damaged journal or not, and removes folders named exactly 32 lowercase hex under the
   same no-link rule. The check runs again before each delete attempt, but it is a check followed by a delete, not one step:
   a program already running as you could swap something in between, and only a victim carrying one of those names could be hit.
@@ -343,8 +361,10 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   nothing), though Microsoft does not formally document it. Crashes of Lockbox itself are tested by simulation (the
   tests make each step fail in turn and rebuild the folder a crash would leave); no process is actually killed and power
   cuts are not tested (spec 6.2). *Accepted:* it is how nearly all software saves files on Windows.
-- **A crash during "Save a copy" can leave a decrypted file behind.** The copy is first built in a hidden temp file
-  (`.<random>.lockbox-partial`) beside the destination, and moved into place only after every chunk has been checked. If
+- **A crash during "Save a copy" or "Save all files" can leave a decrypted file behind.** The copy is first built in a
+  hidden temp file (`.<random>.lockbox-partial`) beside the destination (for "Save all files", one at a time, each
+  recorded before it exists, the ones already saved being whole files under their own names), and moved into place only
+  after every chunk has been checked. If
   Lockbox crashes, is killed or loses power while that temp file exists, it stays there as plaintext (part of the file
   you chose to export), until the next launch: the output journal, a record of temp files, lets the launch sweep delete
   it (see "What the launch sweep deletes"). A leftover on a drive that is not connected waits until it is. A normal
@@ -436,7 +456,7 @@ Lockbox defends.
   against a program already running as you that writes a journal on purpose: it could point recovery at a
   staging-shaped folder it chose. *Accepted:* such a program can already read and delete your files, and the checks
   still mean recovery deletes only a folder named `.restore-` plus 32 hex characters.
-- **Swapping the export destination.** Before saving a decrypted copy, Lockbox checks that the destination is not
+- **Swapping the export destination.** Before saving a decrypted copy (or each of a folder's files, for "Save all files"), Lockbox checks that the destination is not
   inside the vault. A local attacker could swap a folder link into place between that check and the save.
   *Accepted:* the window is tiny and the attacker already has the access to cause harm. The same check, and the same
   accepted window, apply when you save a file out of a backup or a `.before-restore` folder opened read-only: the

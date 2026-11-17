@@ -1128,6 +1128,16 @@ impl Launcher for WinLauncher {
             false => Err(io::Error::other("file not opened")),
         }
     }
+
+    fn open_folder(&self, folder: &Path) -> io::Result<()> {
+        // Lockbox spells a drive path `\\?\C:\..`, which Explorer is not asked to open: the path as the user knows it.
+        let plain = crate::restore::shown(folder);
+        let folder = wide_text(OsStr::new(&plain))?;
+        match shell_open(&folder, None) {
+            true => Ok(()),
+            false => Err(io::Error::other("folder not opened")),
+        }
+    }
 }
 
 /// `ShellExecuteW`, verb `open`, on `target`, with `directory` as the working directory if given (both NUL-terminated

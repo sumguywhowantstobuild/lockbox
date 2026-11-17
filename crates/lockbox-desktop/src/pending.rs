@@ -144,12 +144,65 @@ pub enum PendingChoice {
         generation: u64,
         paths: Vec<PathBuf>,
     },
+    /// Save all of a folder's files (`save_all_files`), parked from the plan to the start (`save_all_start`, which uses it
+    /// up): the session and generation that planned it (nothing of it goes on for any other), the folder, the destination
+    /// folder (canonical, as checked) and the stored files planned, as (item, file) IDs in the order they are saved. The
+    /// page sees names and sizes only, never a path. A plan always holds at least one file: the cloud folder's question is
+    /// this same variant with none, so it can only be answered by `save_all_files_confirm` and a plan only by the start.
+    /// Holds no secret, but it is the vault's: dropped by the lock of that one vault too ([`Pending::drop_save_alls`]).
+    SaveAll {
+        session: SessionId,
+        generation: u64,
+        folder: ItemId,
+        dest: PathBuf,
+        files: Vec<(ItemId, FileId)>,
+    },
+    /// The summary of a Save all, for Show in Explorer: the folder the files were saved in, behind a token the page
+    /// holds, for the session and generation that saved them. Read, never used up (it can be used again); dropped when the
+    /// summary closes (`close_output`), by the lock of that one vault ([`Pending::drop_saved_folders`]), Lock all, Windows
+    /// locking or sleep, the app closing, and its five minutes.
+    SavedFolder {
+        session: SessionId,
+        generation: u64,
+        folder: PathBuf,
+    },
     /// Tests only: a choice that may hold an unlocked vault, to see it dropped.
     #[cfg(test)]
     Test(Option<Box<lockbox_core::Vault>>),
     /// Tests only: records when it is dropped.
     #[cfg(test)]
     Marker(DropMarker),
+}
+
+/// What a plan of Save all, or its cloud question, holds (see [`PendingChoice::SaveAll`]). No `Debug`: the folder is the
+/// user's own.
+pub struct SaveAllChoice {
+    pub session: SessionId,
+    pub generation: u64,
+    pub folder: ItemId,
+    pub dest: PathBuf,
+    pub files: Vec<(ItemId, FileId)>,
+}
+
+impl SaveAllChoice {
+    fn of(choice: &PendingChoice) -> Option<SaveAllChoice> {
+        match choice {
+            PendingChoice::SaveAll {
+                session,
+                generation,
+                folder,
+                dest,
+                files,
+            } => Some(SaveAllChoice {
+                session: *session,
+                generation: *generation,
+                folder: *folder,
+                dest: dest.clone(),
+                files: files.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Tests only: sets its flag when dropped.
@@ -268,6 +321,144 @@ impl Pending {
             gone
         };
         drop(dropped);
+    }
+
+    /// Drops the plans and cloud questions of Save all waiting for `only` (those of every session when `None`), and
+    /// nothing else here: the lock hook's work, as for the pasted keys.
+    pub(crate) fn drop_save_alls(&self, only: Option<SessionId>) {
+        self.drop_where(|choice| match choice {
+            PendingChoice::SaveAll { session, .. } => only.is_none_or(|locked| locked == *session),
+            _ => false,
+        });
+    }
+
+    /// Drops the summary handles of Save all kept for `only` (those of every session when `None`), and nothing else here.
+    pub(crate) fn drop_saved_folders(&self, only: Option<SessionId>) {
+        self.drop_where(|choice| match choice {
+            PendingChoice::SavedFolder { session, .. } => {
+                only.is_none_or(|locked| locked == *session)
+            }
+            _ => false,
+        });
+    }
+
+    /// Removes every choice `ours` accepts, and drops them with the table's lock released.
+    fn drop_where(&self, ours: impl Fn(&PendingChoice) -> bool) {
+        let dropped = {
+            let mut parked = lock(&self.parked);
+            let (gone, kept): (Vec<Parked>, Vec<Parked>) = std::mem::take(&mut *parked)
+                .into_iter()
+                .partition(|p| ours(&p.choice));
+            *parked = kept;
+            gone
+        };
+        drop(dropped);
+    }
+
+    /// The plan of Save all parked under `token`, read: nothing is used up and the five minutes are not lengthened.
+    /// `ChoiceExpired` for a token that is not there, was used, has expired, belongs to another kind of choice or is the
+    /// cloud question's (a question is no plan).
+    pub fn peek_save_all(&self, token: &Token) -> ShellResult<SaveAllChoice> {
+        self.peek_save_all_at(token, Instant::now())
+    }
+
+    pub(crate) fn peek_save_all_at(
+        &self,
+        token: &Token,
+        now: Instant,
+    ) -> ShellResult<SaveAllChoice> {
+        self.claim_where(token, now, false, |choice| {
+            SaveAllChoice::of(choice).filter(|plan| !plan.files.is_empty())
+        })
+    }
+
+    /// Uses up the plan parked under `token`, once: `ChoiceExpired` as for [`peek_save_all`](Self::peek_save_all), and
+    /// then nothing is changed.
+    pub fn use_up_save_all(&self, token: &Token) -> ShellResult<()> {
+        self.use_up_save_all_at(token, Instant::now())
+    }
+
+    pub(crate) fn use_up_save_all_at(&self, token: &Token, now: Instant) -> ShellResult<()> {
+        self.claim_where(token, now, true, |choice| {
+            SaveAllChoice::of(choice)
+                .filter(|plan| !plan.files.is_empty())
+                .map(drop)
+        })
+    }
+
+    /// Takes the cloud question of Save all parked under `token`, once (the yes goes on with what it holds):
+    /// `ChoiceExpired` for a token that is not there, was used, has expired, belongs to another kind of choice or is a
+    /// plan's (a plan is no question), and then nothing is changed.
+    pub fn take_cloud_question(&self, token: &Token) -> ShellResult<SaveAllChoice> {
+        self.take_cloud_question_at(token, Instant::now())
+    }
+
+    pub(crate) fn take_cloud_question_at(
+        &self,
+        token: &Token,
+        now: Instant,
+    ) -> ShellResult<SaveAllChoice> {
+        self.claim_where(token, now, true, |choice| {
+            SaveAllChoice::of(choice).filter(|question| question.files.is_empty())
+        })
+    }
+
+    /// The summary handle parked under `token`, read as [`peek_save_all`](Self::peek_save_all) reads a plan: the session
+    /// and generation that saved the files, and the folder. `ChoiceExpired` for any other token.
+    pub fn peek_saved_folder(&self, token: &Token) -> ShellResult<(SessionId, u64, PathBuf)> {
+        self.peek_saved_folder_at(token, Instant::now())
+    }
+
+    pub(crate) fn peek_saved_folder_at(
+        &self,
+        token: &Token,
+        now: Instant,
+    ) -> ShellResult<(SessionId, u64, PathBuf)> {
+        self.claim_where(token, now, false, |choice| match choice {
+            PendingChoice::SavedFolder {
+                session,
+                generation,
+                folder,
+            } => Some((*session, *generation, folder.clone())),
+            _ => None,
+        })
+    }
+
+    /// Drops the summary handle parked under `token`. Nothing else is touched, and a token that is not a handle (never
+    /// given, already closed, expired, a plan's) is no error: closing is idempotent.
+    pub fn close_saved_folder(&self, token: &Token) {
+        let _ = self.claim_where(token, Instant::now(), true, |choice| match choice {
+            PendingChoice::SavedFolder { .. } => Some(()),
+            _ => None,
+        });
+    }
+
+    /// What `pick` makes of the choice parked under `token`, if it makes something of it; the choice is removed too when
+    /// `remove`. Expired choices are dropped on the way, after the table's lock is released. A token that is not there or
+    /// that `pick` has no use for is `ChoiceExpired`, with nothing changed.
+    fn claim_where<R>(
+        &self,
+        token: &Token,
+        now: Instant,
+        remove: bool,
+        pick: impl Fn(&PendingChoice) -> Option<R>,
+    ) -> ShellResult<R> {
+        let (answer, expired, removed) = {
+            let mut parked = lock(&self.parked);
+            let expired = take_expired(&mut parked, now);
+            let hit = parked.iter().enumerate().find_map(|(at, p)| {
+                let wanted = p.token.matches(token).then(|| pick(&p.choice)).flatten()?;
+                Some((at, wanted))
+            });
+            let removed = match hit {
+                Some((at, _)) if remove => Some(parked.swap_remove(at)),
+                _ => None,
+            };
+            (hit.map(|(_, wanted)| wanted), expired, removed)
+        };
+        drop(expired);
+        drop(removed);
+        answer.ok_or(ShellError::ChoiceExpired)
     }
 
     /// Changes the list of picked files parked under `token` in place, for the session and generation that picked it: `f`
@@ -674,6 +865,166 @@ mod tests {
         pending.drop_picked_files(None);
         assert_eq!(pending.len(), 1);
         assert!(pending.peek_picked(&second, SessionId(2), 1).is_err());
+    }
+
+    fn plan(session: u64, generation: u64, files: usize) -> PendingChoice {
+        PendingChoice::SaveAll {
+            session: SessionId(session),
+            generation,
+            folder: ItemId::random(),
+            dest: PathBuf::from("out"),
+            files: (0..files)
+                .map(|_| (ItemId::random(), FileId::random()))
+                .collect(),
+        }
+    }
+
+    fn handle(session: u64, generation: u64) -> PendingChoice {
+        PendingChoice::SavedFolder {
+            session: SessionId(session),
+            generation,
+            folder: PathBuf::from("out"),
+        }
+    }
+
+    /// A plan of Save all is read without being used or lengthened, used up once by the start, and told apart from the
+    /// cloud question that is parked as the same variant with no files: each answers `ChoiceExpired` for the other's token,
+    /// for a token of another kind, for one used, one never given and one that has waited five minutes, and a refusal
+    /// leaves what is parked.
+    #[test]
+    fn a_plan_and_its_cloud_question_are_told_apart_and_used_once() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let planned = pending.put_at(plan(1, 3, 2), now);
+        let asked = pending.put_at(plan(1, 3, 0), now);
+        let test = pending.put_at(PendingChoice::Test(None), now);
+        let made_up = Token::random();
+
+        let read = pending.peek_save_all_at(&planned, now).unwrap();
+        assert_eq!(
+            (read.session, read.generation, read.files.len()),
+            (SessionId(1), 3, 2)
+        );
+        // The question is no plan, a plan is no question, and neither is another kind.
+        for token in [&asked, &test, &made_up] {
+            assert_eq!(
+                pending.peek_save_all_at(token, now).err(),
+                Some(ShellError::ChoiceExpired)
+            );
+            assert_eq!(
+                pending.use_up_save_all_at(token, now).err(),
+                Some(ShellError::ChoiceExpired)
+            );
+        }
+        for token in [&planned, &test, &made_up] {
+            assert_eq!(
+                pending.take_cloud_question_at(token, now).err(),
+                Some(ShellError::ChoiceExpired)
+            );
+        }
+        assert_eq!(pending.len(), 3, "a refusal uses nothing up");
+
+        // Reading does not lengthen the five minutes.
+        assert!(
+            pending
+                .peek_save_all_at(&planned, now + LIFETIME - Duration::from_secs(1))
+                .is_ok()
+        );
+        assert_eq!(
+            pending.peek_save_all_at(&planned, now + LIFETIME).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert_eq!(pending.len(), 0, "an expired choice is dropped");
+
+        let planned = pending.put_at(plan(1, 3, 2), now);
+        let asked = pending.put_at(plan(2, 4, 0), now);
+        assert!(pending.use_up_save_all_at(&planned, now).is_ok());
+        assert_eq!(
+            pending.use_up_save_all_at(&planned, now).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        let question = pending.take_cloud_question_at(&asked, now).unwrap();
+        assert_eq!((question.session, question.generation), (SessionId(2), 4));
+        assert_eq!(
+            pending.take_cloud_question_at(&asked, now).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert_eq!(pending.len(), 0);
+    }
+
+    /// The summary's handle is read without being used or lengthened, closed by `close_saved_folder` (and closing a
+    /// handle that is not there is no error), and no other kind of token reads as one.
+    #[test]
+    fn a_saved_folder_handle_is_read_not_used_and_closed_once() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(handle(1, 2), now);
+        let other = pending.put_at(plan(1, 2, 1), now);
+        for _ in 0..3 {
+            let (session, generation, folder) = pending.peek_saved_folder_at(&token, now).unwrap();
+            assert_eq!(
+                (session, generation, folder),
+                (SessionId(1), 2, PathBuf::from("out"))
+            );
+        }
+        assert_eq!(
+            pending.peek_saved_folder_at(&other, now).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert_eq!(pending.len(), 2);
+
+        let closed = pending.put_at(handle(1, 2), now);
+        pending.close_saved_folder(&closed);
+        pending.close_saved_folder(&closed);
+        pending.close_saved_folder(&other);
+        assert_eq!(
+            pending.peek_saved_folder_at(&closed, now).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert!(
+            pending.peek_save_all_at(&other, now).is_ok(),
+            "closing a handle never closes another kind of choice"
+        );
+        // Five minutes after it was made, a handle is gone.
+        assert_eq!(
+            pending.peek_saved_folder_at(&token, now + LIFETIME).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+    }
+
+    /// A lock of one vault drops that vault's plans, cloud questions and summary handles and nothing else; a lock of all
+    /// drops every one.
+    #[test]
+    fn drop_save_alls_and_saved_folders_take_one_session_and_only_those() {
+        let pending = Pending::default();
+        let first = pending.put(plan(1, 1, 2));
+        let second = pending.put(plan(2, 1, 2));
+        let asked = pending.put(plan(1, 1, 0));
+        let shown = pending.put(handle(1, 1));
+        let theirs = pending.put(handle(2, 1));
+        let (dropped, marker) = marker();
+        pending.put(marker);
+
+        pending.drop_save_alls(Some(SessionId(1)));
+        assert_eq!(pending.len(), 4);
+        assert!(pending.peek_save_all(&first).is_err());
+        assert!(pending.take_cloud_question(&asked).is_err());
+        assert!(pending.peek_save_all(&second).is_ok());
+        assert!(
+            pending.peek_saved_folder(&shown).is_ok(),
+            "a handle is the other drop's"
+        );
+        pending.drop_saved_folders(Some(SessionId(1)));
+        assert!(pending.peek_saved_folder(&shown).is_err());
+        assert!(pending.peek_saved_folder(&theirs).is_ok());
+        assert!(!dropped.load(Ordering::SeqCst), "another kind stays");
+
+        pending.drop_save_alls(None);
+        pending.drop_saved_folders(None);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.peek_save_all(&second).is_err());
+        assert!(pending.peek_saved_folder(&theirs).is_err());
+        assert!(!dropped.load(Ordering::SeqCst));
     }
 
     /// A paste waits five minutes like every other choice.

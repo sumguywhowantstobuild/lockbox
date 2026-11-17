@@ -18,7 +18,8 @@ use crate::blob::{
     decrypt_stream, encrypt_stream, new_file_ref,
 };
 use crate::fsio::{
-    check_space, clear_hidden, create_hidden_file, hidden_temp_path, parent_dir, remove_file_retry,
+    check_space, clear_hidden, create_hidden_file, full_drive_refusal, hidden_temp_path,
+    is_destination_taken, is_disk_full, parent_dir, remove_file_retry, rename_no_replace_gated,
     rename_replace_gated, replace_file, sync_after_replace, volume_info,
 };
 use crate::header::{HEADER_BACKUP, HEADER_FILE};
@@ -27,7 +28,7 @@ use crate::item::{FileRef, Item, ItemKind};
 use crate::{CoreError, Result};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub(super) const FILES_DIR: &str = "files";
@@ -175,17 +176,52 @@ impl<'j> OutputTemp<'j> {
     /// also when the journal's `publish` then fails or panics) and the move is made durable; an
     /// error from that last step means `dest` is published but its durability is not confirmed,
     /// and nothing is removed.
-    pub(super) fn publish(mut self, dest: &Path) -> Result<()> {
+    ///
+    /// `cancel` is looked at inside every gated attempt, before the move: a Stop that comes while another program holds
+    /// the temp (during the wait between attempts) stops the publication, whatever the journal's gate lets through.
+    pub(super) fn publish(mut self, dest: &Path, cancel: &CancelToken) -> Result<()> {
         self.close();
         let journal = self.journal;
         rename_replace_gated(
             &self.path,
             dest,
-            |attempt| journal.publish(attempt),
+            |attempt| {
+                journal.publish(&mut || {
+                    cancel.check()?;
+                    attempt()
+                })
+            },
             || self.renamed = true,
         )?;
         drop(self);
         sync_after_replace(dest)
+    }
+
+    /// One try at giving the finished temp the name `dest`, which must not exist at all ([`rename_no_replace_gated`]:
+    /// the same gate, waits, disarming and look at `cancel` as [`publish`](Self::publish), but a taken name is never
+    /// replaced). A taken name answers `DESTINATION_EXISTS` and changes nothing, so the caller may try another name with
+    /// the same temp; any other failure leaves the temp to be removed when this is dropped, and `dest` untouched unless
+    /// [`published`](Self::published) says the move happened (the journal's gate may fail after it). Once the move has
+    /// happened the record is cleared when this is dropped.
+    pub(super) fn publish_new(&mut self, dest: &Path, cancel: &CancelToken) -> Result<()> {
+        self.close();
+        let journal = self.journal;
+        rename_no_replace_gated(
+            &self.path,
+            dest,
+            |attempt| {
+                journal.publish(&mut || {
+                    cancel.check()?;
+                    attempt()
+                })
+            },
+            || self.renamed = true,
+        )
+    }
+
+    /// Whether the move has happened: the temp is now the destination, whatever else was reported after it.
+    pub(super) fn published(&self) -> bool {
+        self.renamed
     }
 
     /// Clears the record. While a panic is unwinding, a panic from the journal is contained so
@@ -234,30 +270,209 @@ pub(super) fn export_blob(
     cancel: &CancelToken,
     progress: &dyn Progress,
 ) -> Result<()> {
-    // Every early return below, and a panic, leaves the clean-up to `temp`.
-    let mut temp = OutputTemp::create(
-        parent_dir(dest),
-        ".lockbox-partial",
-        journal,
-        "export.after_record",
-    )?;
     let meter = Meter::new(progress, cancel, fref.length);
-    let mut counted = CountWrite {
-        inner: temp.file(),
-        meter: &meter,
+    // Every early return below, and a panic, leaves the clean-up to the temp.
+    let temp = verified_copy(
+        blob,
+        blob_size,
+        vault_id,
+        fref,
+        parent_dir(dest),
+        journal,
+        cancel,
+        &meter,
+    )?;
+    temp.publish(dest, cancel)?;
+    meter.finish();
+    Ok(())
+}
+
+/// Where the decrypted copy is written: the temp itself, and in tests a drive that fills in the middle of a file (the
+/// second write fails as a full drive does, while the step `export.write` is armed with `arm_disk_full`).
+struct TempWriter<'a> {
+    file: &'a mut File,
+    #[cfg(any(test, feature = "test-internals"))]
+    written: bool,
+}
+
+impl Write for TempWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        #[cfg(any(test, feature = "test-internals"))]
+        {
+            if self.written
+                && let Err(CoreError::Io(error)) = crate::fsio::failpoint::check("export.write")
+            {
+                return Err(error);
+            }
+            self.written = true;
+        }
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// A write or flush that failed for want of space is the full-drive refusal, with what the engine knows
+/// ([`full_drive_refusal`]), not a generic I/O error that tells a person to check the drive's connection. Every other
+/// error is as it was.
+fn full_drive(error: CoreError, length: u64, folder: &Path) -> CoreError {
+    match &error {
+        CoreError::Io(e) if is_disk_full(e) => full_drive_refusal(length, folder),
+        _ => error,
+    }
+}
+
+/// The part of an export before the move: the decrypted copy in a new hidden temp in `folder`, recorded in `journal`
+/// before it exists, every chunk authenticated, flushed, closed and unhidden (Windows keeps a file's attributes when it
+/// moves over another), and the cancel looked at once more. What comes back is ready to be moved to its name; every way
+/// out before that, and the temp's drop, remove it.
+#[allow(clippy::too_many_arguments)]
+fn verified_copy<'j>(
+    blob: &mut impl Read,
+    blob_size: u64,
+    vault_id: &VaultId,
+    fref: &FileRef,
+    folder: &Path,
+    journal: &'j dyn OutputJournal,
+    cancel: &CancelToken,
+    meter: &Meter,
+) -> Result<OutputTemp<'j>> {
+    let mut temp = OutputTemp::create(folder, ".lockbox-partial", journal, "export.after_record")?;
+    // The write and the flush are the two places a drive that filled up since the space check shows itself.
+    let mut written = || -> Result<()> {
+        let mut counted = CountWrite {
+            inner: TempWriter {
+                file: temp.file(),
+                #[cfg(any(test, feature = "test-internals"))]
+                written: false,
+            },
+            meter,
+        };
+        decrypt_stream(blob, blob_size, &mut counted, vault_id, fref, cancel)?;
+        #[cfg(any(test, feature = "test-internals"))]
+        crate::fsio::failpoint::check("export.sync")?;
+        temp.file().sync_all()?;
+        Ok(())
     };
-    decrypt_stream(blob, blob_size, &mut counted, vault_id, fref, cancel)?;
-    temp.file().sync_all()?;
+    written().map_err(|error| full_drive(error, fref.length, folder))?;
     temp.close();
-    // Windows keeps a file's attributes when it replaces another: unhide first.
     clear_hidden(temp.path())?;
     #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("export.before_publish")?;
     // Last chance to cancel: from here only the journal's gate can still stop it.
     cancel.check()?;
-    temp.publish(dest)?;
+    Ok(temp)
+}
+
+/// The most names a copy tries: `a.txt`, then `a (2).txt` up to `a (999).txt`. Then the file is refused as
+/// "destination exists".
+const MAX_NAME_TRIES: u32 = 999;
+
+/// [`export_blob`] for a copy that must never replace anything. `first` is the file's own destination; `later` gives the
+/// destination for number 2 and up (the shell's `a (2).txt`) and is the caller's place to refuse one that must not be
+/// written; each is asked for only after the one before was found taken. The copy is decrypted and verified once, into
+/// one temp; the temp is moved to the first name that is free, by a move that itself refuses a taken name (so a file that
+/// appears at the last moment is safe), through the journal's gate. Answers the path it was given. A Stop, a refusal or
+/// any other failure before the move leaves nothing, and a taken name at [`MAX_NAME_TRIES`] answers "destination exists".
+///
+/// Once the move has happened the copy is published, and nothing after it is an error of the save: a failure to make the
+/// move durable (or the step `export.after_publish`, which tests make fail) is let go, since the answer the caller needs
+/// is where the file is. The journal's gate may fail after the move too (its contract allows it); the move is then not
+/// made again and nothing is removed, and the failure is answered together with the path ([`NewExportError`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn export_blob_new(
+    blob: &mut impl Read,
+    blob_size: u64,
+    vault_id: &VaultId,
+    fref: &FileRef,
+    first: PathBuf,
+    later: &mut dyn FnMut(u32) -> Result<PathBuf>,
+    journal: &dyn OutputJournal,
+    cancel: &CancelToken,
+    progress: &dyn Progress,
+) -> std::result::Result<PathBuf, NewExportError> {
+    let mut dest = first;
+    let meter = Meter::new(progress, cancel, fref.length);
+    let mut temp = verified_copy(
+        blob,
+        blob_size,
+        vault_id,
+        fref,
+        parent_dir(&dest),
+        journal,
+        cancel,
+        &meter,
+    )?;
+    let mut number = 1;
+    loop {
+        match temp.publish_new(&dest, cancel) {
+            Ok(()) => break,
+            // The copy is in place: it counts as saved whatever the gate said after the move. The record is cleared as
+            // the temp is dropped, and the move is made as durable as it can be.
+            Err(error) if temp.published() => {
+                drop(temp);
+                let _ = sync_after_replace(&dest);
+                return Err(NewExportError {
+                    error,
+                    published: Some(dest),
+                });
+            }
+            Err(error) if is_destination_taken(&error) && number < MAX_NAME_TRIES => {
+                number += 1;
+                dest = later(number)?;
+                // Nothing is published yet: a Stop that came while the name was taken still stops the copy.
+                cancel.check()?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // The record is cleared as the temp (now the copy) is dropped.
+    drop(temp);
+    #[cfg(any(test, feature = "test-internals"))]
+    let _ = crate::fsio::failpoint::check("export.after_publish");
+    let _ = sync_after_replace(&dest);
     meter.finish();
-    Ok(())
+    Ok(dest)
+}
+
+/// Why [`Vault::export_file_new`] did not answer a path. Usually the copy was not made (`published` is `None`: no copy,
+/// no temp, nothing replaced). When the journal's gate failed after the move, the copy is in place under `published`
+/// and `error` is what the gate said: the caller counts the file as saved and ends its work with that error.
+pub struct NewExportError {
+    pub error: CoreError,
+    pub published: Option<PathBuf>,
+}
+
+impl From<CoreError> for NewExportError {
+    fn from(error: CoreError) -> Self {
+        NewExportError {
+            error,
+            published: None,
+        }
+    }
+}
+
+/// Written by hand, as [`CoreError`]'s `Debug` is: a path never appears, only whether there is one.
+impl std::fmt::Debug for NewExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewExportError")
+            .field("error", &self.error)
+            .field("published", &self.published.is_some())
+            .finish()
+    }
+}
+
+/// Refuses a batch of copies, `sizes` bytes each, that would not fit in `dir`: the slack kept free is counted in
+/// `needed`, a file system's per-file limit counts for the largest alone, and a volume whose free space cannot be read
+/// never refuses ([`check_space`]).
+pub(super) fn check_batch_space(dir: &Path, sizes: &[u64]) -> Result<()> {
+    let total = sizes
+        .iter()
+        .fold(0u64, |sum, &size| sum.saturating_add(size));
+    let largest = sizes.iter().copied().max().unwrap_or(0);
+    check_space(total, largest, &volume_info(dir)?)
 }
 
 /// Opens the file to import and returns it with its size. On Windows other programs may
@@ -512,6 +727,63 @@ impl Vault {
             cancel,
             progress,
         )
+    }
+
+    /// [`export_file`](Self::export_file) for a copy that never replaces anything (saving all of a folder's files):
+    /// `candidates(1)` is the file's own destination and `candidates(n)` the one to try when the number before it was
+    /// taken (up to 999, then "destination exists"). The copy is decrypted and verified once, and moved to the first
+    /// free name by a move that refuses a taken one, through the journal's gate; the answer is the path it has. Each
+    /// destination is refused as `export_file` refuses one (inside this vault, in any vault's folder) before it is used,
+    /// and the file's own space is checked first. A Stop or a lock leaves no copy and no temp, and so does a drive that
+    /// fills during the write (answered as `NotEnoughSpace`). The one error that comes with a path is a failure of the
+    /// journal's gate after the move ([`NewExportError`]).
+    pub fn export_file_new(
+        &self,
+        item: &ItemId,
+        file: &FileId,
+        candidates: &mut dyn FnMut(u32) -> PathBuf,
+        journal: &dyn OutputJournal,
+        cancel: &CancelToken,
+        progress: &dyn Progress,
+    ) -> std::result::Result<PathBuf, NewExportError> {
+        let fref = self
+            .get_item(item)?
+            .attachments
+            .iter()
+            .find(|f| f.file_id == *file)
+            .ok_or(CoreError::NotFound)?;
+        let allowed = |dest: PathBuf| -> Result<PathBuf> {
+            refuse_inside(parent_dir(&dest), &self.dir)?;
+            refuse_vault_folder(&dest)?;
+            Ok(dest)
+        };
+        // The first destination is checked before the blob is opened, as `export_file` does.
+        let first = allowed(candidates(1))?;
+        check_export_space(fref, &first)?;
+        let mut blob = File::open(self.blob_path(file)).map_err(|e| match e.kind() {
+            ErrorKind::NotFound => FILE_MISSING,
+            _ => e.into(),
+        })?;
+        let blob_size = blob.metadata().map_err(CoreError::from)?.len();
+        export_blob_new(
+            &mut blob,
+            blob_size,
+            &self.header.vault_id,
+            fref,
+            first,
+            &mut |number| allowed(candidates(number)),
+            journal,
+            cancel,
+            progress,
+        )
+    }
+
+    /// Refuses a batch of copies of `sizes` bytes each (a file's plaintext length), made in `dir`, that would not fit,
+    /// before the first is written: free space for all of them together with the slack kept free, with the numbers
+    /// (`NotEnoughSpace`, whose `needed` includes that slack), and the file system's limit for the largest
+    /// (`FileSystemLimit`). A volume whose free space cannot be read never refuses.
+    pub fn check_output_space(&self, dir: &Path, sizes: &[u64]) -> Result<()> {
+        check_batch_space(dir, sizes)
     }
 
     /// Permanently deletes a trashed item and its blobs, except a blob another item still
@@ -1928,5 +2200,878 @@ pub(super) mod tests {
         assert!(matches!(result, Err(CoreError::Cancelled)));
         assert_eq!(listener.1.calls().len(), 1);
         assert!(!dest.exists(), "no copy published");
+    }
+
+    // ---- Plan 4B Task 11: saving a copy that never replaces ----
+
+    /// `a.txt`, then `a (2).txt`, `a (3).txt` and on, in `out`: how the shell names a copy and numbers a taken name.
+    fn numbered_in(out: &Path) -> impl FnMut(u32) -> PathBuf + '_ {
+        move |number| match number {
+            1 => out.join("a.txt"),
+            number => out.join(format!("a ({number}).txt")),
+        }
+    }
+
+    /// A vault with `count` file items, each holding `"file <n>"`, and the folder to save into.
+    fn vault_with_files(count: usize) -> (TempDir, Vault, Vec<(ItemId, FileId)>, PathBuf) {
+        let (parent, mut vault) = new_vault();
+        let mut stored = Vec::new();
+        for n in 0..count {
+            let src = source(
+                &parent,
+                &format!("src{n}.txt"),
+                format!("file {n}").as_bytes(),
+            );
+            let id = vault
+                .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
+                .unwrap();
+            let file = vault.get_item(&id).unwrap().attachments[0].file_id;
+            stored.push((id, file));
+        }
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        (parent, vault, stored, out)
+    }
+
+    /// A taken name is never replaced: the copy gets the next number, the file that was there is byte for byte as it
+    /// was, one temp serves every name (the file is decrypted once, so its bytes are reported once), and the journal saw
+    /// one temp, recorded and cleared.
+    #[test]
+    fn existing_file_is_never_replaced() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        fs::write(out.join("a (2).txt"), b"OLD TOO").unwrap();
+        let journal = Recorder::default();
+        let progress = Listener::default();
+        let saved = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &journal,
+                &CancelToken::new(),
+                &progress,
+            )
+            .unwrap();
+        assert_eq!(saved, out.join("a (3).txt"));
+        assert_eq!(fs::read(&saved).unwrap(), b"file 0");
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"OLD");
+        assert_eq!(fs::read(out.join("a (2).txt")).unwrap(), b"OLD TOO");
+        assert_eq!(file_names(&out), ["a (2).txt", "a (3).txt", "a.txt"]);
+        let calls = journal.0.borrow();
+        assert_eq!(
+            calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            ["record", "clear"]
+        );
+        assert_eq!(progress.assert_a_clean_run(), 6);
+    }
+
+    /// A file that appears between the check and the move is safe: the move itself refuses a taken name, so the copy
+    /// goes to the next one and the other program's file is untouched.
+    #[test]
+    fn a_file_appearing_at_the_last_moment_gets_a_new_name() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        let appeared = out.join("a.txt");
+        let made = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (seen, squat) = (std::rc::Rc::clone(&made), appeared.clone());
+        failpoint::observe(
+            "export.before_publish",
+            Box::new(move || {
+                // The folder holds only the finished temp now; the name is still free.
+                assert!(!squat.exists());
+                fs::write(&squat, b"ARRIVED").unwrap();
+                seen.set(true);
+            }),
+        );
+        let saved = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &NoJournal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .unwrap();
+        assert!(made.get(), "the file arrived during the export");
+        assert_eq!(saved, out.join("a (2).txt"));
+        assert_eq!(fs::read(&appeared).unwrap(), b"ARRIVED");
+        assert_eq!(fs::read(&saved).unwrap(), b"file 0");
+        assert_eq!(file_names(&out), ["a (2).txt", "a.txt"], "no temp");
+    }
+
+    /// Three stored files that share one name, saved in turn into one folder: `a.txt`, `a (2).txt`, `a (3).txt`, each
+    /// with its own contents.
+    #[test]
+    fn same_names_in_one_folder_get_numbers() {
+        let (_parent, vault, stored, out) = vault_with_files(3);
+        let mut saved = Vec::new();
+        for (id, file) in &stored {
+            saved.push(
+                vault
+                    .export_file_new(
+                        id,
+                        file,
+                        &mut numbered_in(&out),
+                        &NoJournal,
+                        &CancelToken::new(),
+                        &NoProgress,
+                    )
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            saved,
+            [
+                out.join("a.txt"),
+                out.join("a (2).txt"),
+                out.join("a (3).txt")
+            ]
+        );
+        for (n, path) in saved.iter().enumerate() {
+            assert_eq!(fs::read(path).unwrap(), format!("file {n}").as_bytes());
+        }
+        assert_eq!(file_names(&out).len(), 3, "no temp");
+    }
+
+    /// Names are tried up to number 999, then the file is refused as "destination exists", with the temp gone and its
+    /// record cleared. The closure is asked for each number once, from 1.
+    #[test]
+    fn numbering_stops_at_999_in_the_engine() {
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        fs::write(out.join("only.txt"), b"theirs").unwrap();
+        let mut asked = Vec::new();
+        let journal = Recorder::default();
+        let result = vault.export_file_new(
+            &id,
+            &file,
+            &mut |number| {
+                asked.push(number);
+                out.join("only.txt")
+            },
+            &journal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
+        assert!(
+            matches!(&result, Err(failed) if crate::fsio::is_destination_taken(&failed.error)),
+            "{result:?}"
+        );
+        assert_eq!(asked, (1..=999).collect::<Vec<u32>>());
+        assert_eq!(file_names(&out), ["only.txt"], "no temp");
+        let calls = journal.0.borrow();
+        assert_eq!(
+            calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            ["record", "clear"]
+        );
+    }
+
+    /// A failure right after the move (the step `export.after_publish`, armed here) cannot undo or hide the publication:
+    /// the copy is there, whole, under its name; the answer is that name; the temp is gone and cleared. Nothing after
+    /// the move is an error of the save.
+    #[test]
+    fn a_failure_right_after_publication_counts_the_file_as_saved() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let reached = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = std::rc::Rc::clone(&reached);
+        failpoint::observe(
+            "export.after_publish",
+            Box::new(move || seen.set(seen.get() + 1)),
+        );
+        failpoint::arm("export.after_publish");
+        let journal = Recorder::default();
+        let saved = vault.export_file_new(
+            &id,
+            &file,
+            &mut numbered_in(&out),
+            &journal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
+        assert_eq!(reached.get(), 1, "the step is after the one move");
+        assert_eq!(saved.unwrap(), out.join("a (2).txt"));
+        assert_eq!(fs::read(out.join("a (2).txt")).unwrap(), b"file 0");
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"OLD");
+        assert_eq!(file_names(&out), ["a (2).txt", "a.txt"], "no temp");
+        let calls = journal.0.borrow();
+        assert_eq!(
+            calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            ["record", "clear"]
+        );
+    }
+
+    /// A Stop (or lock) at the last moment, and a gate that refuses the move, each leave nothing: no copy, no temp, the
+    /// record cleared, and a file that was there untouched.
+    #[test]
+    fn a_stopped_or_refused_new_export_leaves_nothing() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let cancel = CancelToken::new();
+        failpoint::arm_cancel("export.before_publish", cancel.clone());
+        let journal = Recorder::default();
+        let result = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &journal,
+                &cancel,
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert_eq!(file_names(&out), ["a.txt"]);
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"OLD");
+        assert_eq!(
+            journal.0.borrow().iter().map(|c| c.0).collect::<Vec<_>>(),
+            ["record", "clear"]
+        );
+
+        let refusing = GateJournal {
+            refuse_publish: true,
+            ..GateJournal::default()
+        };
+        let result = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &refusing,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert_eq!(file_names(&out), ["a.txt"]);
+        assert_eq!(*refusing.calls.borrow(), ["record", "publish", "clear"]);
+    }
+
+    /// A stopped export after a name was taken (the Stop comes while the next name is tried) leaves nothing either.
+    #[test]
+    fn a_stop_between_two_names_leaves_nothing() {
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let cancel = CancelToken::new();
+        let stopper = cancel.clone();
+        let result = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut |number| {
+                    if number == 2 {
+                        stopper.cancel();
+                    }
+                    numbered_in(&out)(number)
+                },
+                &NoJournal,
+                &cancel,
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert_eq!(file_names(&out), ["a.txt"]);
+    }
+
+    /// A name inside this vault's folder, or in any vault's, is refused before anything is created, for every name the
+    /// closure gives, not only the first.
+    #[test]
+    fn a_new_export_never_lands_in_a_vault_folder() {
+        let (parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        let other = Vault::create(parent.path(), "Other", PW).unwrap().vault;
+        let journal = Recorder::default();
+        let inside = |dest: PathBuf| {
+            let result = vault
+                .export_file_new(
+                    &id,
+                    &file,
+                    &mut |_| dest.clone(),
+                    &journal,
+                    &CancelToken::new(),
+                    &NoProgress,
+                )
+                .map_err(|failed| failed.error);
+            assert!(
+                matches!(
+                    result,
+                    Err(CoreError::InvalidInput {
+                        what: "destination inside vault" | "destination in a vault folder"
+                    })
+                ),
+                "{result:?}"
+            );
+        };
+        inside(vault.dir().join("a.txt"));
+        inside(vault.dir().join("files").join("a.txt"));
+        inside(other.dir().join("a.txt"));
+        // The first name is fine and it is taken: the second is in the vault's folder.
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let (dir, dest) = (vault.dir().to_path_buf(), out.join("a.txt"));
+        let result = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut |number| match number {
+                    1 => dest.clone(),
+                    _ => dir.join("a (2).txt"),
+                },
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::InvalidInput {
+                    what: "destination inside vault"
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(file_names(&out), ["a.txt"]);
+        assert!(!vault.dir().join("a (2).txt").exists());
+        assert!(
+            file_names(vault.dir())
+                .iter()
+                .all(|n| !n.ends_with(".lockbox-partial"))
+        );
+    }
+
+    /// The export's own refusals before any temp: too little space for this file, and a file the file system cannot hold.
+    #[test]
+    fn a_new_export_checks_the_files_own_space_first() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        let journal = Recorder::default();
+        set_volume_override(volume(Some(MIB), None));
+        let result = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(matches!(result, Err(CoreError::NotEnoughSpace { .. })));
+        assert!(journal.0.borrow().is_empty(), "refused before the journal");
+        assert!(file_names(&out).is_empty());
+        // A file that is not in the item, or an item that is not in the vault.
+        set_volume_override(None);
+        let other = FileId::random();
+        let result = vault
+            .export_file_new(
+                &id,
+                &other,
+                &mut numbered_in(&out),
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(matches!(result, Err(CoreError::NotFound)));
+        let result = vault
+            .export_file_new(
+                &ItemId::random(),
+                &file,
+                &mut numbered_in(&out),
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(matches!(result, Err(CoreError::NotFound)));
+    }
+
+    /// The engine's own gate: the real move, refused twice by a program holding the temp (a sharing violation each
+    /// time, as a virus scan does), goes through the journal's gate once per attempt, and the third publishes.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_temp_publishes_once_per_attempt() {
+        use std::cell::Cell;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        /// Holds the temp (the move's source) open with no delete sharing while its first `holds` attempts run.
+        struct HoldingTemp {
+            temp: RefCell<Option<PathBuf>>,
+            holds: u32,
+            calls: Cell<u32>,
+        }
+        impl OutputJournal for HoldingTemp {
+            fn record(&self, temp: &Path) -> Result<()> {
+                *self.temp.borrow_mut() = Some(temp.to_path_buf());
+                Ok(())
+            }
+            fn clear(&self, _temp: &Path) {}
+            fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+                self.calls.set(self.calls.get() + 1);
+                let _held = (self.calls.get() <= self.holds).then(|| {
+                    let mut options = fs::OpenOptions::new();
+                    options.read(true).share_mode(1 | 2);
+                    options.open(self.temp.borrow().as_ref().unwrap()).unwrap()
+                });
+                attempt()
+            }
+        }
+
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        let journal = HoldingTemp {
+            temp: RefCell::default(),
+            holds: 2,
+            calls: Cell::new(0),
+        };
+        let saved = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .unwrap();
+        assert_eq!(journal.calls.get(), 3);
+        assert_eq!(fs::read(&saved).unwrap(), b"file 0");
+        assert_eq!(file_names(&out), ["a.txt"]);
+    }
+
+    // ---- review fixes (Task 11, round 2): a Stop inside the gated attempt, a gate error after the move, a full drive ----
+
+    /// A journal that lets a Stop arrive while a rename attempt is being made: inside `publish`, before the attempt it
+    /// was given, the job's token is cancelled (a Stop that came between the gate being taken and the move).
+    struct StopInTheGate(CancelToken);
+
+    impl OutputJournal for StopInTheGate {
+        fn record(&self, _temp: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn clear(&self, _temp: &Path) {}
+        fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+            self.0.cancel();
+            attempt()
+        }
+    }
+
+    /// The token is looked at inside every gated attempt, before the move: a Stop that reached the token after the
+    /// last look before publication still leaves no copy, for a copy that never replaces, for Save a copy's replacing
+    /// move, and a file that was there is untouched.
+    #[test]
+    fn a_stop_inside_the_gated_attempt_publishes_nothing() {
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+
+        let cancel = CancelToken::new();
+        let result = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &StopInTheGate(cancel.clone()),
+                &cancel,
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert!(file_names(&out).is_empty(), "no copy, no temp");
+
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let cancel = CancelToken::new();
+        let result = vault.export_file(
+            &id,
+            &file,
+            &out.join("a.txt"),
+            &StopInTheGate(cancel.clone()),
+            &cancel,
+            &NoProgress,
+        );
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert_eq!(file_names(&out), ["a.txt"], "no temp");
+        assert_eq!(
+            fs::read(out.join("a.txt")).unwrap(),
+            b"OLD",
+            "the file that was there is not replaced"
+        );
+    }
+
+    /// Holds the temp (the move's source) open with no delete sharing during the first `holds` attempts, as a virus scan
+    /// does; each attempt is counted.
+    #[cfg(windows)]
+    struct HoldingTemp {
+        temp: RefCell<Option<PathBuf>>,
+        holds: u32,
+        calls: std::cell::Cell<u32>,
+    }
+
+    #[cfg(windows)]
+    impl HoldingTemp {
+        fn new(holds: u32) -> Self {
+            HoldingTemp {
+                temp: RefCell::default(),
+                holds,
+                calls: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    impl OutputJournal for HoldingTemp {
+        fn record(&self, temp: &Path) -> Result<()> {
+            *self.temp.borrow_mut() = Some(temp.to_path_buf());
+            Ok(())
+        }
+        fn clear(&self, _temp: &Path) {}
+        fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+            use std::os::windows::fs::OpenOptionsExt;
+            self.calls.set(self.calls.get() + 1);
+            let _held = (self.calls.get() <= self.holds).then(|| {
+                let mut options = fs::OpenOptions::new();
+                options.read(true).share_mode(1 | 2);
+                options.open(self.temp.borrow().as_ref().unwrap()).unwrap()
+            });
+            attempt()
+        }
+    }
+
+    /// The temp is held by a program (a sharing violation, retried after a wait); the Stop comes during that wait and
+    /// the hold is then released, so the next attempt's move would work. The gate's check of the token stops it: no copy
+    /// appears, for a copy that never replaces and for Save a copy, and the temp is removed.
+    #[cfg(windows)]
+    #[test]
+    fn a_stop_during_a_retry_wait_publishes_nothing() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+
+        let cancel = CancelToken::new();
+        failpoint::arm_cancel("publish.retry_wait", cancel.clone());
+        let journal = HoldingTemp::new(1);
+        let result = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &journal,
+                &cancel,
+                &NoProgress,
+            )
+            .map_err(|failed| failed.error);
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert_eq!(
+            journal.calls.get(),
+            2,
+            "the held attempt, then the stopped one"
+        );
+        assert!(file_names(&out).is_empty(), "no copy, no temp");
+
+        let cancel = CancelToken::new();
+        failpoint::arm_cancel("publish.retry_wait", cancel.clone());
+        let journal = HoldingTemp::new(1);
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let result = vault.export_file(
+            &id,
+            &file,
+            &out.join("a.txt"),
+            &journal,
+            &cancel,
+            &NoProgress,
+        );
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert_eq!(file_names(&out), ["a.txt"], "no temp");
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"OLD");
+    }
+
+    /// A journal whose `publish` makes the move and then fails: the boundary its contract allows (the move happened,
+    /// "even if this call then fails"). Counts what it was asked and what was cleared.
+    #[derive(Default)]
+    struct FailsAfterTheMove {
+        publishes: std::cell::Cell<u32>,
+        moves: std::cell::Cell<u32>,
+        cleared: std::cell::Cell<u32>,
+    }
+
+    impl OutputJournal for FailsAfterTheMove {
+        fn record(&self, _temp: &Path) -> Result<()> {
+            Ok(())
+        }
+        fn clear(&self, _temp: &Path) {
+            self.cleared.set(self.cleared.get() + 1);
+        }
+        fn publish(&self, attempt: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+            self.publishes.set(self.publishes.get() + 1);
+            attempt()?;
+            self.moves.set(self.moves.get() + 1);
+            Err(CoreError::InvalidInput { what: GATE_FAILED })
+        }
+    }
+
+    /// A test gate's own refusal. Named, not a `what:` literal: the page's message check reads every `what:` literal in
+    /// the crates as a refusal the page must word, and this one never leaves the tests.
+    const GATE_FAILED: &str = "gate";
+
+    /// The gate fails after a successful move: the copy is published, so the engine says where it is together with the
+    /// gate's error (the caller counts the file as saved and ends its batch with that error); the move is not tried
+    /// again, no second copy appears, nothing is removed, and the record is cleared.
+    #[test]
+    fn a_gate_error_after_the_move_still_reports_the_published_copy() {
+        let (_parent, vault, stored, out) = vault_with_files(1);
+        let (id, file) = stored[0];
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let journal = FailsAfterTheMove::default();
+        let failed = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &journal,
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(failed.error, CoreError::InvalidInput { what } if what == GATE_FAILED),
+            "{:?}",
+            failed.error
+        );
+        assert_eq!(failed.published, Some(out.join("a (2).txt")));
+        assert_eq!(fs::read(out.join("a (2).txt")).unwrap(), b"file 0");
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"OLD");
+        assert_eq!(
+            file_names(&out),
+            ["a (2).txt", "a.txt"],
+            "no temp, no second copy"
+        );
+        // One refused move onto the taken name, then the one that worked: never a third.
+        assert_eq!((journal.publishes.get(), journal.moves.get()), (2, 1));
+        assert_eq!(journal.cleared.get(), 1);
+        // An error that is not one after a move says nothing was published.
+        let failed = vault
+            .export_file_new(
+                &id,
+                &file,
+                &mut numbered_in(&out),
+                &GateJournal {
+                    refuse_publish: true,
+                    ..GateJournal::default()
+                },
+                &CancelToken::new(),
+                &NoProgress,
+            )
+            .unwrap_err();
+        assert!(matches!(failed.error, CoreError::Cancelled));
+        assert_eq!(failed.published, None);
+        assert_eq!(file_names(&out), ["a (2).txt", "a.txt"]);
+    }
+
+    // ---- a drive that fills while a file is written ----
+
+    /// What a copy of `big_bytes()` needs: the file, then the slack kept free (the refusal's `needed`).
+    fn needed_for_big() -> u64 {
+        big_bytes().len() as u64 + 64 * MIB
+    }
+
+    /// A vault with one three-megabyte file (so a write fails in the middle of it) and a folder to save into.
+    fn vault_with_a_big_file() -> (TempDir, Vault, ItemId, FileId, PathBuf) {
+        let (parent, mut vault) = new_vault();
+        let src = parent.path().join("big.bin");
+        fs::write(&src, big_bytes()).unwrap();
+        let id = vault
+            .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
+            .unwrap();
+        let file = vault.get_item(&id).unwrap().attachments[0].file_id;
+        let out = parent.path().join("out");
+        fs::create_dir(&out).unwrap();
+        (parent, vault, id, file, out)
+    }
+
+    /// The drive fills in the middle of a write (the second chunk of three): the answer is the full-drive refusal with
+    /// the numbers the engine knows (what the copy needs; 0 where it could not read the free space), not a generic I/O
+    /// error; no copy, no temp, the record cleared. A copy that never replaces and Save a copy alike.
+    #[test]
+    fn a_drive_that_fills_mid_write_is_a_full_drive_refusal() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, id, file, out) = vault_with_a_big_file();
+        set_volume_override(volume(None, None));
+        failpoint::arm_disk_full("export.write");
+        let journal = Recorder::default();
+        let result = vault.export_file_new(
+            &id,
+            &file,
+            &mut numbered_in(&out),
+            &journal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
+        assert!(
+            matches!(result, Err(ref failed) if matches!(failed.error,
+                CoreError::NotEnoughSpace { needed, available: 0 } if needed == needed_for_big())),
+            "{result:?}"
+        );
+        assert!(file_names(&out).is_empty(), "no copy, no temp");
+        assert_eq!(
+            journal.0.borrow().iter().map(|c| c.0).collect::<Vec<_>>(),
+            ["record", "clear"]
+        );
+
+        // Save a copy, over a file that was there: it stays.
+        fs::write(out.join("a.txt"), b"OLD").unwrap();
+        let result = vault.export_file(
+            &id,
+            &file,
+            &out.join("a.txt"),
+            &NoJournal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
+        assert!(
+            matches!(result, Err(CoreError::NotEnoughSpace { needed, available: 0 })
+                if needed == needed_for_big()),
+            "{result:?}"
+        );
+        assert_eq!(file_names(&out), ["a.txt"]);
+        assert_eq!(fs::read(out.join("a.txt")).unwrap(), b"OLD");
+    }
+
+    /// The flush at the end of a write fails for want of space (a drive that took the data into its cache and then ran
+    /// out): the same refusal. The free space the engine reads then is the number it gives, kept below what is needed.
+    #[test]
+    fn a_drive_that_fills_at_the_flush_is_a_full_drive_refusal() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, id, file, out) = vault_with_a_big_file();
+        failpoint::arm_disk_full("export.sync");
+        // The space check before the write sees room; the drive is nearly full by the time the write fails.
+        failpoint::observe(
+            "export.after_record",
+            Box::new(|| set_volume_override(volume(Some(5 * MIB), None))),
+        );
+        let journal = Recorder::default();
+        let result = vault.export_file_new(
+            &id,
+            &file,
+            &mut numbered_in(&out),
+            &journal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
+        assert!(
+            matches!(result, Err(ref failed) if matches!(failed.error,
+                CoreError::NotEnoughSpace { needed, available }
+                    if needed == needed_for_big() && available == 5 * MIB)),
+            "{result:?}"
+        );
+        assert!(file_names(&out).is_empty(), "no copy, no temp");
+        assert_eq!(
+            journal.0.borrow().iter().map(|c| c.0).collect::<Vec<_>>(),
+            ["record", "clear"]
+        );
+        // Room that opened up since is never reported as more than the copy needs.
+        failpoint::disarm_all();
+        set_volume_override(None);
+        failpoint::arm_disk_full("export.sync");
+        failpoint::observe(
+            "export.after_record",
+            Box::new(|| set_volume_override(volume(Some(GIB), None))),
+        );
+        let result = vault.export_file_new(
+            &id,
+            &file,
+            &mut numbered_in(&out),
+            &NoJournal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
+        assert!(
+            matches!(result, Err(ref failed) if matches!(failed.error,
+                CoreError::NotEnoughSpace { needed, available }
+                    if available == needed - 1)),
+            "{result:?}"
+        );
+        assert!(file_names(&out).is_empty());
+    }
+
+    /// Only a full drive is mapped: another failure of the same flush stays the I/O error it was.
+    #[test]
+    fn another_write_failure_stays_an_io_error() {
+        let _cleanup = Cleanup;
+        let (_parent, vault, id, file, out) = vault_with_a_big_file();
+        failpoint::arm("export.sync");
+        let result = vault.export_file_new(
+            &id,
+            &file,
+            &mut numbered_in(&out),
+            &NoJournal,
+            &CancelToken::new(),
+            &NoProgress,
+        );
+        assert!(
+            matches!(result, Err(ref failed) if matches!(failed.error, CoreError::Io(_))),
+            "{result:?}"
+        );
+        assert!(file_names(&out).is_empty());
+    }
+
+    // ---- the space of a whole batch of copies ----
+
+    /// A batch's space is the sum of the plaintext sizes plus the slack kept free, and the refusal says so: three
+    /// files that each fit alone are refused together with numbers the page can show; one byte more room fits.
+    #[test]
+    fn output_space_check_counts_the_whole_batch() {
+        let _cleanup = Cleanup;
+        let (parent, vault) = new_vault();
+        let sizes = [30 * MIB, 30 * MIB + 5, 30 * MIB + 9];
+        let total: u64 = sizes.iter().sum();
+        let margin = 64 * MIB;
+        for size in sizes {
+            set_volume_override(volume(Some(size + margin), None));
+            vault.check_output_space(parent.path(), &[size]).unwrap();
+        }
+        set_volume_override(volume(Some(total + margin - 1), None));
+        let result = vault.check_output_space(parent.path(), &sizes);
+        assert!(
+            matches!(result, Err(CoreError::NotEnoughSpace { needed, available })
+                if needed == total + margin && available == total + margin - 1),
+            "{result:?}"
+        );
+        set_volume_override(volume(Some(total + margin), None));
+        vault.check_output_space(parent.path(), &sizes).unwrap();
+        vault.check_output_space(parent.path(), &[]).unwrap();
+    }
+
+    /// A volume whose free space cannot be read never blocks, whatever the batch; and a file system's per-file limit
+    /// counts for the largest file alone, not the sum.
+    #[test]
+    fn output_space_check_unknown_space_goes_ahead_and_the_limit_is_per_file() {
+        let _cleanup = Cleanup;
+        let (parent, vault) = new_vault();
+        set_volume_override(volume(None, None));
+        vault
+            .check_output_space(parent.path(), &[GIB, 50 * GIB, 100 * GIB])
+            .unwrap();
+        set_volume_override(volume(Some(100 * GIB), Some(4 * GIB - 1)));
+        vault
+            .check_output_space(parent.path(), &[3 * GIB, 3 * GIB])
+            .unwrap();
+        let result = vault.check_output_space(parent.path(), &[MIB, 5 * GIB]);
+        assert!(
+            matches!(result, Err(CoreError::FileSystemLimit { max_file }) if max_file == 4 * GIB - 1),
+            "{result:?}"
+        );
     }
 }

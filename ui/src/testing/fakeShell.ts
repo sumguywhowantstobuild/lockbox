@@ -110,6 +110,8 @@ export const PRINTERS = ["Office Laser", "Hall Inkjet"];
 export const DEFAULT_PRINTER = "Hall Inkjet";
 /** The folder the fake saves a PDF in: a made-up path, shown to the person after a save. */
 export const SAVED_FOLDER = "C:\\Users\\Someone\\Documents";
+/** The folder the fake's picker chooses for Save all files: made-up display text, as the shell sends it (`restore::shown`, no `\\?\`). */
+export const SAVE_ALL_FOLDER = "D:\\Clients\\Agency";
 
 /**
  * Made-up stand-ins for the engine's word list: 64 lowercase words, none of them a word the screens use themselves
@@ -448,6 +450,20 @@ export interface FakeShell {
   batchEndsAfter(count: number, refusal: object): void;
   /** The names `add_files` stored, in order. */
   addedFiles: string[];
+  /** The names Save all files wrote, as they are on disk (after the name rule and any " (2)"), in order. */
+  savedToDisk: string[];
+  /** Names that are already in the folder the next Save all files picks: a file with one of them is saved under the next free number. */
+  savedNamesTaken(names: string[]): void;
+  /** The files (by stored name) that go from the vault while the next Save all files runs: each is listed in `gone` and the batch goes on. */
+  filesGoneDuringSave(names: string[]): void;
+  /** A file is added to the folder just after the next `save_all_files` answers its plan, so `save_all_start` finds the folder changed. */
+  changeFolderAfterPlanNext(): void;
+  /** The folders `show_output_in_explorer` opened, as the shell shows them. */
+  openedFolders: string[];
+  /** The next `show_output_in_explorer` fails to open the folder (`{ code: "io" }`). */
+  explorerFailsNext(): void;
+  /** How many summary handles the shell holds now (one per finished Save all files, until `close_output`, a lock or `dropParkedChoices`). */
+  heldOutputs(): number;
   /**
    * Holds every stored-file command's answer until `release` is called, as a big file would: `lockbox://busy` says the vault is
    * working (`import`, `save_copy` or `open`) as the command arrives, and says it is not when the answer is decided, which is
@@ -720,6 +736,7 @@ const OPERATION: Record<string, string> = {
   add_files: "import",
   replace_file: "import",
   backup_vault: "backup",
+  save_all_start: "save_all",
 };
 
 /** What a stored-file command that takes a `request` is called in `lockbox://job-started` and `lockbox://progress` (the others start no job event). */
@@ -730,6 +747,7 @@ const JOB_KIND: Record<string, string> = {
   save_file_copy: "save_copy",
   save_file_copy_confirm: "save_copy",
   backup_vault: "backup",
+  save_all_start: "save_all",
 };
 
 /** The most one file can be (`MAX_FILE_BYTES`, 256 GiB): a file over it is refused before the batch starts. */
@@ -752,6 +770,40 @@ interface Batch {
   into: { type: "folder"; collection: string | null } | { type: "item"; id: string };
   files: PickedEntry[];
   total: number;
+}
+
+/** One stored file of a folder, as Save all files plans it: where it is stored, its name as stored and as written (after the shell's name rule), its size. */
+interface PlannedEntry {
+  itemId: string;
+  fileId: string;
+  stored: string;
+  name: string;
+  size: number;
+  attached_to: string | null;
+}
+
+/** A save the shell holds: the folder, where it goes (display text), and the files in the order they will be saved. Held from its plan to its start. */
+interface SaveRun {
+  session: number;
+  generation: number;
+  folder: string;
+  files: PlannedEntry[];
+  total: number;
+}
+
+/**
+ * `save_name`, in short: what Windows refuses (`< > : " / \ | ? *` and control characters) becomes `_`, and trailing dots and spaces go. The real
+ * one also handles device names and a cut at 100 characters; the page never works a name out, so the fake needs only a rule that changes some.
+ */
+function saveNameOf(name: string): string {
+  const changed = Array.from(name, (letter) => (`<>:"/\\|?*`.includes(letter) || letter.charCodeAt(0) < 32 ? "_" : letter)).join("");
+  return changed.replace(/[. ]+$/, "") || "file";
+}
+
+/** `name` with " (n)" before its last extension: "contract.pdf" and 2 make "contract (2).pdf". */
+function numberedName(name: string, number: number): string {
+  const dot = name.lastIndexOf(".");
+  return dot <= 0 ? `${name} (${String(number)})` : `${name.slice(0, dot)} (${String(number)})${name.slice(dot)}`;
 }
 
 /** A request is a whole number the page chose (a `u32`); anything else is the shell's malformed-request answer. */
@@ -903,6 +955,18 @@ export function installFakeShell(
   let freeSpace: number | null = null;
   let unreadable: string[] = [];
   let batchEnd: { count: number; refusal: object } | undefined;
+  // Save all files (Task 11): the plans the shell holds from the picker to the start (and the cloud question's parked folder), the saves taken for a
+  // job, the summary handles, and what the next save is told to meet.
+  const parkedSaves = new Map<string, { session: number; generation: number; folder: string }>();
+  const savePlans = new Map<string, SaveRun>();
+  const saveRuns = new Map<number, SaveRun>();
+  const outputs = new Map<string, { session: number; generation: number; shown: string }>();
+  const savedToDisk: string[] = [];
+  const openedFolders: string[] = [];
+  let takenNames: string[] = [];
+  let goneNames: string[] = [];
+  let changeAfterPlan = false;
+  let explorerFails = false;
   // The shell's job table, for the commands that take a request: operations are numbered from 1 and never reused.
   const running = new Map<number, RunningJob>();
   let nextOperation = 0;
@@ -945,6 +1009,10 @@ export function installFakeShell(
     for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
     // And of the files picked and not yet added.
     for (const [token, held] of choices) if (held.session === session) choices.delete(token);
+    // And of a save's plan, the folder a cloud question parked, and the summary's handle.
+    for (const [token, held] of savePlans) if (held.session === session) savePlans.delete(token);
+    for (const [token, held] of parkedSaves) if (held.session === session) parkedSaves.delete(token);
+    for (const [token, held] of outputs) if (held.session === session) outputs.delete(token);
     emit("lockbox://locked", { session, generation: entry.generation, reason });
     // A lock stops every job of its session, and each says it has ended.
     for (const job of [...running.values()]) {
@@ -1186,6 +1254,122 @@ export function installFakeShell(
     const one = pickedFile ?? { name: "picked-file.pdf", length: 2048 };
     pickedFile = undefined;
     return [{ name: one.name, size: one.length }];
+  };
+
+  /** Every stored file of every live item filed in the folder (a file item's own file and every attachment), in the vault's order. */
+  const filesOfFolder = (vault: FakeVault, folder: string): PlannedEntry[] =>
+    (vault.items ?? [])
+      .filter((item) => item.kind !== "collection" && !(item.trashed ?? false) && item.collection === folder)
+      .flatMap((item) =>
+        (item.attachments ?? []).map((file) => ({
+          itemId: item.id,
+          fileId: file.file_id,
+          stored: file.name,
+          name: saveNameOf(file.name),
+          size: file.length,
+          attached_to: item.kind === "file" ? null : item.title,
+        })),
+      );
+
+  /** The checks both steps make, in the shell's order: a folder with no files, then room for the whole batch (an unknown drive never blocks). */
+  const checkSave = (files: PlannedEntry[]): number => {
+    if (files.length === 0) return refuse({ code: "invalid_input", what: "no files" });
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    if (freeSpace !== null && total > freeSpace) return refuse({ code: "core", kind: "not_enough_space", needed: total, available: freeSpace });
+    return total;
+  };
+
+  /** The plan `save_all_files` and its cloud yes answer: the choice is held until the start takes it. */
+  const planSave = (session: number, generation: number, vault: FakeVault, folder: string): unknown => {
+    const files = filesOfFolder(vault, folder);
+    const total = checkSave(files);
+    nextToken += 1;
+    const choice = nextToken.toString(16).padStart(32, "0");
+    savePlans.set(choice, { session, generation, folder, files, total });
+    if (changeAfterPlan) {
+      changeAfterPlan = false;
+      nextItem += 1;
+      const late = { file_id: itemId(nextItem), name: "late-arrival-demo.pdf", length: 2048, media_type: "application/pdf" };
+      vault.items = [...(vault.items ?? []), { id: itemId(nextItem + 0x100), kind: "file", title: late.name, collection: folder, attachments: [late], modified_at: nowText() }];
+    }
+    return tagged(session, generation, {
+      Done: { choice, folder_shown: SAVE_ALL_FOLDER, files: files.map(({ name, size, attached_to }) => ({ name, size, attached_to })), total },
+    });
+  };
+
+  /** Everything `save_all_start` decides before its job starts, in the shell's order; only then is the choice used up. */
+  const startSave = (args: unknown): SaveRun => {
+    const sent = exactly(args, ["choice", "request"]);
+    requestOf(sent);
+    const run = typeof sent.choice === "string" ? savePlans.get(sent.choice) : undefined;
+    if (run === undefined) return refuse(CHOICE_EXPIRED);
+    const vault = vaultFor(run.session, run.generation);
+    const now = filesOfFolder(vault, run.folder);
+    // The files must still be exactly the planned ones (the checks run again at the start).
+    if (now.length !== run.files.length || now.some((file, at) => file.fileId !== run.files[at]?.fileId)) {
+      return refuse({ code: "invalid_input", what: "folder changed" });
+    }
+    checkSave(now);
+    savePlans.delete(sent.choice as string);
+    return run;
+  };
+
+  /**
+   * The save's end: each file in turn is written under a free name (the name rule, then " (2)", " (3)" for one that is taken), left out as damaged
+   * or gone, and the batch goes on; a stop (`cutAt` bytes done when Stop was pressed) or a refusal ends it at the file being written, which leaves
+   * nothing, and every file after it was not started.
+   */
+  const finishSave = (run: SaveRun, cutAt?: number): unknown => {
+    const vault = sessionVault.get(run.session);
+    const saved: { name: string; size: number; attached_to: string | null }[] = [];
+    const renamed: { from: string; to: string }[] = [];
+    const damaged: string[] = [];
+    const gone: string[] = [];
+    const notStarted: string[] = [];
+    let unfinished: string | null = null;
+    let stopped: object | null = null;
+    let sofar = 0;
+    const used = new Set(takenNames);
+    for (const file of run.files) {
+      if (stopped === null && cutAt !== undefined && sofar + file.size > cutAt) {
+        stopped = { code: "cancelled" };
+        unfinished = file.name;
+        continue;
+      }
+      if (stopped === null && batchEnd !== undefined && saved.length >= batchEnd.count) {
+        stopped = batchEnd.refusal;
+        batchEnd = undefined;
+        unfinished = file.name;
+        continue;
+      }
+      if (stopped !== null) {
+        notStarted.push(file.name);
+        continue;
+      }
+      const holder = vault?.items?.find((item) => item.id === file.itemId && !(item.trashed ?? false));
+      if (holder?.attachments?.some((stored) => stored.file_id === file.fileId) !== true || goneNames.includes(file.stored)) {
+        gone.push(file.name);
+        continue;
+      }
+      if ((vault?.damagedFiles ?? []).includes(file.fileId)) {
+        damaged.push(file.name);
+        continue;
+      }
+      let disk = file.name;
+      for (let number = 2; used.has(disk); number += 1) disk = numberedName(file.name, number);
+      used.add(disk);
+      sofar += file.size;
+      saved.push({ name: disk, size: file.size, attached_to: file.attached_to });
+      savedToDisk.push(disk);
+      if (disk !== file.stored) renamed.push({ from: file.stored, to: disk });
+    }
+    takenNames = [];
+    goneNames = [];
+    nextToken += 1;
+    const output = nextToken.toString(16).padStart(32, "0");
+    outputs.set(output, { session: run.session, generation: run.generation, shown: SAVE_ALL_FOLDER });
+    if (saved.length > 0) fileOps.push({ cmd: "save_all_files", collection: run.folder });
+    return { saved, renamed, damaged, gone, unfinished, not_started: notStarted, stopped, folder_shown: SAVE_ALL_FOLDER, output };
   };
 
   const answer = (cmd: string, args: unknown): unknown => {
@@ -1790,6 +1974,63 @@ export function installFakeShell(
         vaultFor(batch.session, batch.generation);
         return tagged(batch.session, batch.generation, { Done: finishBatch(batch) });
       }
+      case "save_all_files": {
+        const sent = exactly(args, ["session", "generation", "folder"]) as { session: number; generation: number; folder: string };
+        // A read-only vault saves too (as Save a copy does): no refusal for it here.
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.items?.find((item) => item.id === sent.folder && item.kind === "collection" && !(item.trashed ?? false)) === undefined) {
+          return refuse({ code: "core", kind: "not_found" });
+        }
+        // The count in the picker's title is the shell's own: a folder with no files is refused before any dialog opens.
+        if (filesOfFolder(vault, sent.folder).length === 0) return refuse({ code: "invalid_input", what: "no files" });
+        if (dismissFile) {
+          dismissFile = false;
+          return tagged(sent.session, sent.generation, "Dismissed");
+        }
+        // A cloud-synced folder asks first, before anything is checked further or written: the folder waits under a token.
+        if (cloudPdf > 0) {
+          cloudPdf -= 1;
+          nextToken += 1;
+          const token = `save-all-token-${String(nextToken)}`;
+          parkedSaves.set(token, { session: sent.session, generation: sent.generation, folder: sent.folder });
+          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token } } });
+        }
+        return planSave(sent.session, sent.generation, vault, sent.folder);
+      }
+      case "save_all_files_confirm": {
+        const { token } = exactly(args, ["token"]);
+        const parked = typeof token === "string" ? parkedSaves.get(token) : undefined;
+        // A token that is used, old, dropped by a lock or another kind's is the shell's `choice_expired`.
+        if (parked === undefined) return refuse(CHOICE_EXPIRED);
+        parkedSaves.delete(token as string);
+        // The checks run again on the yes.
+        return planSave(parked.session, parked.generation, vaultFor(parked.session, parked.generation), parked.folder);
+      }
+      case "save_all_start": {
+        const request = (args as { request?: unknown } | null)?.request;
+        const taken = typeof request === "number" ? saveRuns.get(request) : undefined;
+        const run = taken ?? startSave(args);
+        if (typeof request === "number") saveRuns.delete(request);
+        // A lock between the job's start and its end leaves a refusal, and nothing is written.
+        vaultFor(run.session, run.generation);
+        return tagged(run.session, run.generation, { Done: finishSave(run) });
+      }
+      case "show_output_in_explorer": {
+        const { output } = exactly(args, ["output"]);
+        const held = typeof output === "string" ? outputs.get(output) : undefined;
+        if (held === undefined) return refuse(CHOICE_EXPIRED);
+        if (explorerFails) {
+          explorerFails = false;
+          return refuse({ code: "io" });
+        }
+        openedFolders.push(held.shown);
+        return null;
+      }
+      case "close_output": {
+        const { output } = exactly(args, ["output"]);
+        if (typeof output === "string") outputs.delete(output);
+        return null;
+      }
       case "cancel_operation": {
         const sent = exactly(args, ["operation", "scope"]) as { operation: number; scope: RunningJob["scope"] };
         const job = running.get(sent.operation);
@@ -2296,10 +2537,21 @@ export function installFakeShell(
       const waiting = heldFiles;
       // A command that carries a session names it; the cloud question's yes names it by the copy it parked.
       const parkedFor = typeof args === "object" && args !== null && "token" in args ? pendingPdfs.get(args.token as string) : undefined;
-      const session = typeof args === "object" && args !== null && "session" in args ? (args.session as number) : (parkedFor?.session ?? null);
+      // A save's start carries only its choice and request: the session is the plan's, and it is checked, and the choice used up, before its job starts.
+      let run: SaveRun | undefined;
+      if (cmd === "save_all_start") {
+        try {
+          run = startSave(args);
+        } catch (error) {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+          return Promise.reject(error);
+        }
+        saveRuns.set((args as { request: number }).request, run);
+      }
+      const session = typeof args === "object" && args !== null && "session" in args ? (args.session as number) : (parkedFor?.session ?? run?.session ?? null);
       // A command that takes a request becomes a job in the table once its work starts, and the page is told before the first progress and the answer.
       const request = typeof args === "object" && args !== null && "request" in args && typeof args.request === "number" ? args.request : undefined;
-      const generation = typeof args === "object" && args !== null && "generation" in args ? (args.generation as number) : parkedFor?.generation;
+      const generation = typeof args === "object" && args !== null && "generation" in args ? (args.generation as number) : (parkedFor?.generation ?? run?.generation);
       // A batch is checked, and its choice used up, before its job starts: a refusal then starts no job and sends no `job-started`.
       let batch: Batch | undefined;
       if (cmd === "add_files") {
@@ -2320,7 +2572,7 @@ export function installFakeShell(
           scope: { type: "session", session, generation },
           kind: JOB_KIND[cmd] ?? "import",
           done: 0,
-          total: batch?.total ?? 0,
+          total: run?.total ?? batch?.total ?? 0,
           cancel: () => undefined,
         };
         running.set(job.operation, job);
@@ -2359,6 +2611,18 @@ export function installFakeShell(
             try {
               vaultFor(batch.session, batch.generation);
               resolve(tagged(batch.session, batch.generation, { Done: finishBatch(batch, job?.done ?? 0) }));
+            } catch (error) {
+              // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+              reject(error);
+            }
+            return;
+          }
+          if (cancelled && run !== undefined && request !== undefined) {
+            // A Stop on a save is a result too: the files before it stay written, and the answer names the one it caught and those not started.
+            saveRuns.delete(request);
+            try {
+              vaultFor(run.session, run.generation);
+              resolve(tagged(run.session, run.generation, { Done: finishSave(run, job?.done ?? 0) }));
             } catch (error) {
               // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
               reject(error);
@@ -2502,6 +2766,9 @@ export function installFakeShell(
       for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
       for (const [token, parked] of pendingPdfs) if (parked.session === session) pendingPdfs.delete(token);
       for (const [token, held] of choices) if (held.session === session) choices.delete(token);
+      for (const [token, held] of savePlans) if (held.session === session) savePlans.delete(token);
+      for (const [token, held] of parkedSaves) if (held.session === session) parkedSaves.delete(token);
+      for (const [token, held] of outputs) if (held.session === session) outputs.delete(token);
     },
     sessionOf: (vaultId) => {
       const vault = vaults.find((v) => v.id === vaultId);
@@ -2577,6 +2844,9 @@ export function installFakeShell(
     dropParkedChoices: () => {
       pendingPdfs.clear();
       choices.clear();
+      parkedSaves.clear();
+      savePlans.clear();
+      outputs.clear();
     },
     printed,
     setPrinters: (names, preferred = null) => {
@@ -2724,6 +2994,21 @@ export function installFakeShell(
       batchEnd = { count, refusal };
     },
     addedFiles,
+    savedToDisk,
+    savedNamesTaken: (names) => {
+      takenNames = [...names];
+    },
+    filesGoneDuringSave: (names) => {
+      goneNames = [...names];
+    },
+    changeFolderAfterPlanNext: () => {
+      changeAfterPlan = true;
+    },
+    openedFolders,
+    explorerFailsNext: () => {
+      explorerFails = true;
+    },
+    heldOutputs: () => outputs.size,
     holdFiles: () => {
       const waiting: (() => void)[] = [];
       heldFiles = waiting;
