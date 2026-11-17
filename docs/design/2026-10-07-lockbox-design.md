@@ -67,7 +67,7 @@ Moved to [docs/PRD.md](../PRD.md#scope).
 |---|---|---|
 | Vault keys, file keys, password/recovery-derived keys | **Never** | — |
 | File contents | **Never** | Rust streams between disk and the vault directly |
-| File system paths | **Never from the UI** | Dialogs are opened by Rust inside commands (4.2). Rust may send a path for the person to read (a saved export's folder); it is never accepted back |
+| File system paths | **Never from the UI** | Dialogs are opened by Rust inside commands (4.2). Rust may send a path for the person to read (the folder a restore or Save all files will use, a stuck restore's folders, and the folder of a file Lockbox saved where they chose); it is never accepted back |
 | Vault password, new password | UI → Rust | Typed into the UI on unlock, create, change |
 | Recovery key | Rust → UI once; UI → Rust | Displayed at creation/regeneration; typed in when recovering or restoring |
 | Item titles, usernames, URLs, notes, collection names | Rust → UI | While a list, item or search result is displayed |
@@ -368,7 +368,8 @@ design.
   - All arithmetic is checked.
 - **Test a backup:** any backup can be checked without restoring. Inside the archive, it checks the manifest MAC, every
   entry's SHA-256, every item and every file stream, and reports files the items attach that the backup lacks. Nothing
-  is written.
+  is written. The file is picked first and held in Rust under a token (so nothing is typed against an unknown file); no
+  vault or session is needed, and the test runs as a job with progress and a Stop.
 
 ### 6.8 Restore
 The existing vault is untouched until extraction and authentication have succeeded, and the swap is journaled so a crash
@@ -403,7 +404,9 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
    - Lock and close the existing vault (release `.lock` and every handle).
    - When the swap starts, before any rename, choose the first unused name of `<folder>.before-restore`,
      `<folder>.before-restore-2` … `-99`, so an earlier pre-restore copy is never replaced. If all are taken, the
-     restore is refused before any rename; the staged restore stays for the user to free a name.
+     restore is refused before any rename; the staged restore stays for the user to free a name. The page is told the
+     name the older copy will get, and which vault's older copies to tidy if all 99 are taken, before Replace is
+     pressed.
    - Journal `swapping`, then rename existing → the chosen `.before-restore` name, then staging → `<folder>`, retrying
      on sharing violations (6.2).
    - A rename refused by a brief lock, before anything has moved, keeps the staged restore for a retry.
@@ -464,7 +467,10 @@ A validation failure in the archive or during extraction deletes only this opera
 is kept until that cleanup has worked); the existing vault is untouched. A journal-validation failure touches nothing.
 
 ### 6.9 Read-only vaults
-- A `.lockbox-backup` file or a `.before-restore` folder can be opened **read-only**, alongside the live vault.
+- A `.lockbox-backup` file or a `.before-restore` folder can be opened **read-only**, alongside the live vault. For a
+  backup, the file is picked first and held in Rust as a choice of its own kind (a token, so the file is known before a
+  password is typed), with a credential box shared with the test; the open runs as a job scoped to the launch, with a
+  Stop, and the session is named for the backup's file (`SessionInfo.kind` is `vault`, `older_copy` or `backup`).
 - **Opening a folder read-only writes nothing:** no `.lock`, no header repair, no cleanup.
 - Sessions are keyed by **location**, not vault_id, so two copies of the same vault can be open at once; read-only ones
   are labelled in the UI and reject every write.
@@ -481,8 +487,9 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
 - **Copying an item** from a read-only vault into the live one:
   - The copy gets a new item ID, and each attachment a new file ID and key. Attachments are re-encrypted in memory,
     never as plaintext on disk.
-  - Its collection is kept only if the live vault has that collection and it is not in the trash. Collections
-    themselves are not copied, and the copy is never trashed.
+  - The copy goes into the folder of the live vault that the person chooses, or into none, whatever folder the item
+    sat in at the source. A folder the live vault does not have, or has in the trash, is refused before anything is
+    written. Folders themselves are not copied, and the copy is never trashed.
   - If the backup lacks some of the item's files, the copy stops and names them. The user may copy without them; the
     result lists what was left off. A file that is present but fails authentication is never skipped. Locking either
     vault stops the copy.
@@ -603,11 +610,12 @@ combination, among them Bitwarden's browser extension, which fills a login with 
 
 ### 7.4 Locking (concurrency contract)
 - **Idle** means no keyboard or mouse input anywhere in Windows for the configured minutes. **While a long operation the
-  user started is running** (import, Save a copy, Open, backup, restore), the idle timer is paused, the UI shows why, and
+  user started is running** (adding files, Save a copy, Save all, Open, Replace file, copying an item, backup, test a backup, open a backup,
+  restore), the idle timer is paused, the UI shows why, and
   Lockbox asks Windows to stay awake (`SetThreadExecutionState`). Paused means time spent in a long operation does not
   count: after it ends, idle time counts from its end. **Windows lock, sleep and hibernate always lock all vaults
   immediately**, cancelling such operations. Signing out, switching user and a remote-desktop disconnect count as
-  Windows lock. Closing the window locks all vaults and hides Lockbox to the tray, and Quit in the tray menu locks them and
+  Windows lock. Closing the window locks all vaults and, once the explanation has been seen, hides Lockbox to the tray, and Quit in the tray menu locks them and
   stops it. **While any long operation runs (every operation the idle timer counts), both ask first**, and until the
   person answers nothing is cancelled, locked or hidden: the operations go on and the vaults stay unlocked. Only **Close
   anyway** runs the close or Quit as above, which cancels the operations and locks; **Keep it running** changes nothing.

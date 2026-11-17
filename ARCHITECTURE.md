@@ -2,10 +2,11 @@
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
 restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
-The real screens come in Plan 4, in three parts; the first, daily use (4A), is built: `ui/` has the bridge to Rust, first-time
+The real screens come in Plan 4, in three parts; the first two, daily use (4A) and files and long jobs (4B), are built: `ui/` has the bridge to Rust, first-time
 setup with the recovery key, the lock screen, and the main window with search, the item panel, the forms, the Trash, folders,
-`.env` in and out, the save shortcut's box and settings ([the UI design](docs/design/2026-11-05-user-interface-design.md)).
-Backups and the long jobs come in 4B, the rest in 4C. The target design and the
+`.env` in and out, the save shortcut's box and settings ([the UI design](docs/design/2026-11-05-user-interface-design.md)),
+and the backup, restore, older-copy, open-a-backup, move-in, add-files and Save all screens with progress and a Stop.
+The rest comes in 4C: changing the password, "forgot password", a new recovery key, emptying the trash and export. The target design and the
 reasons behind it are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as
 "spec 5.2" and so on.
 
@@ -551,8 +552,10 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
 2. **Paths never come from the page.** Commands take IDs and values; Rust opens every dialog: `request_with_a_path_field_refused`
    (one each in `commands/vaults.rs`, `files.rs`, `backup.rs`), `restore_requests_are_strict`, `restore_pick_vault_field_is_strict`,
    `item_requests_refuse_unknown_fields`.
-   Paths go the other way in one case: a restore that cannot finish (its notice, and the question before dismissing it)
-   shows the user's own folders so they can act on them.
+   Paths go the other way as text, for showing only and never accepted back, in four cases: a restore that cannot
+   finish (its notice, and the question before dismissing it), the folder a restore will use, the folder Save all
+   files is about to write to (and later saved to), and a readable file Lockbox saved where you chose (the recovery
+   key's PDF, a saved `.env`).
 3. **Every command needs a permission, and the window has exactly the expected set.** `capability_grants_exactly_the_expected_set`,
    `granted_command_runs_in_main_window`, `every_listed_command_reaches_its_handler`, `other_window_is_refused`,
    `remote_origin_is_refused`, `plugin_commands_are_refused`. Spec 4.2.
