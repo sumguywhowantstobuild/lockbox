@@ -154,7 +154,7 @@ test("other_drive_refusals_show_their_words", async () => {
 test("restore_from_the_first_screen_suggests_the_usual_folder", async () => {
   await toTheFolder();
   // The pick, with nothing sent but the pick's own; the folder step names the usual folder, as a restore from the lock screen does.
-  expect(sent("restore_pick")).toEqual([{ choice: null }]);
+  expect(sent("restore_pick")).toEqual([{ choice: null, vault: null }]);
   expect(screen.getByText("C:\\Users\\Someone\\Lockbox Vaults\\My vault")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Choose another" })).toBeTruthy();
   expect(sent("restore_choose_folder")).toEqual([]);
