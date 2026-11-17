@@ -6,7 +6,23 @@ import { Button } from "../parts/Button";
 import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
-import { closeTool, loadSettings, openBackup, saveSettings, startRestore, startTestBackup, useRestore, useSettings, type SaveTicket, type SessionData } from "../store";
+import { SETTINGS_HINT } from "../olderCopiesWords";
+import {
+  closeTool,
+  loadOlderCopies,
+  loadSettings,
+  NOT_ON_THE_LIST,
+  openBackup,
+  openOlderCopies,
+  saveSettings,
+  startRestore,
+  startTestBackup,
+  useOlderCopies,
+  useRestore,
+  useSettings,
+  type SaveTicket,
+  type SessionData,
+} from "../store";
 
 /** The lists of the two time settings: the session's own steps, inside what the shell takes (1 to 60 minutes, 10 to 300 seconds). */
 const IDLE_MINUTES = [1, 2, 5, 10, 15, 30, 60];
@@ -125,6 +141,9 @@ export function SettingsPanel({ data }: { data: SessionData }) {
   const saved = useSettings();
   // The picker of Restore a backup is open (or its steps are): a second press sends nothing.
   const restoring = useRestore() !== null;
+  // The older copies the restores kept of this vault, from the store's one listing. A session that is itself an older copy has none of its own.
+  const kept = useOlderCopies();
+  const olderCount = data.vaultId === NOT_ON_THE_LIST ? 0 : (kept ?? []).filter((entry) => entry.vault === data.vaultId).length;
   const title = useRef<HTMLHeadingElement>(null);
   // What the person chose and the shell has not answered: the controls show it meanwhile.
   const [pending, setPending] = useState<Partial<api.Settings>>({});
@@ -143,8 +162,9 @@ export function SettingsPanel({ data }: { data: SessionData }) {
 
   useEffect(() => {
     title.current?.focus();
-    // Settings the page could not read at the start are read again now.
+    // Settings the page could not read at the start are read again now, and so are the older copies the restores kept.
     loadSettings();
+    void loadOlderCopies();
     let current = true;
     api.getStartup().then(
       (state) => {
@@ -439,6 +459,20 @@ export function SettingsPanel({ data }: { data: SessionData }) {
               Restore a backup
             </Button>
           </SettingsRow>
+          {olderCount === 0 ? null : (
+            // The copies a restore kept of this vault (shown only while there are some, so the button never leads to an empty list): the vault's own, whether it is open
+            // writable or read-only, and none for a session that is an older copy.
+            <SettingsRow label="Older copies" hint={SETTINGS_HINT} hintId={`${id}-older-hint`}>
+              <Button
+                aria-describedby={`${id}-older-hint`}
+                onClick={() => {
+                  openOlderCopies(data.session);
+                }}
+              >
+                {`Older copies (${String(olderCount)})`}
+              </Button>
+            </SettingsRow>
+          )}
         </div>
       </section>
 

@@ -157,9 +157,9 @@ pub struct CopiedItemView {
 pub enum CredentialArg {
     Password(Zeroizing<String>),
     RecoveryKey(Zeroizing<String>),
-    /// Text that is either. Only [`CredentialArg::attempts`] reads it (`test_backup` and `restore_check` are the commands
-    /// that do): [`CredentialArg::typed`] refuses it, so a command that has not been taught the two tries never takes it
-    /// for one.
+    /// Text that is either. Only [`CredentialArg::attempts`] reads it (`test_backup`, `restore_check` and
+    /// `open_pre_restore_read_only` are the commands that do): [`CredentialArg::typed`] refuses it, so a command that
+    /// has not been taught the two tries never takes it for one.
     PasswordOrKey(Zeroizing<String>),
 }
 
@@ -2406,6 +2406,11 @@ mod tests {
         refuses_a_path(json!({ "id": 2, "credential": password }), &|body| {
             parse::<OpenPreRestore>(&InvokeBody::Json(body)).is_ok()
         });
+        // An older copy opens with the one box too.
+        assert!(
+            parse::<OpenPreRestore>(&InvokeBody::Json(json!({ "id": 2, "credential": one_box })))
+                .is_ok()
+        );
         // The copy takes the held pick and the page's number: the credential and the folder are in Rust already, so
         // neither is accepted again, and neither is a destination or a path.
         for bad in [

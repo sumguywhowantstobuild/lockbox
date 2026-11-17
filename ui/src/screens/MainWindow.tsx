@@ -41,6 +41,7 @@ import { NoteForm } from "./forms/NoteForm";
 import { GeneratorPage } from "./GeneratorPanel";
 import { ItemList } from "./ItemList";
 import { FILTER, itemCount, kindCount, kindPlural, ListTools, showAll, useKind, useSort } from "./ListTools";
+import { OlderCopiesPanel } from "./OlderCopies";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
 import { SaveAllCloudQuestion, SaveAllFiles, SaveAllLeft } from "./SaveAllFiles";
@@ -455,6 +456,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "settings" ? <SettingsPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "backup" ? <BackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+        {data.tool?.kind === "older_copies" ? <OlderCopiesPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "test_backup" ? (
           <TestBackupPanel key={`${String(data.session)}:${String(data.generation)}:${String(data.test?.opening)}`} data={data} />
         ) : null}

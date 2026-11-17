@@ -679,6 +679,63 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Older copies: the list, and the box that opens one read-only (24f)",
+    shows: ["OlderCopies#OlderCopiesPanel", "OlderCopies#OlderCopiesList"],
+    reach: async () => {
+      start([vault()]);
+      shell.olderCopies([
+        { vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_395_864_371 },
+        { vault: 7, folder: "My vault.before-restore-2", last_written: null, size: 5_242_880 },
+      ]);
+      await unlockIt();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      fireEvent.click(await within(settings).findByRole("button", { name: "Older copies (2)" }));
+      const panel = await screen.findByRole("complementary", { name: "Older copies" });
+      // The last of its views, the one with a field on it: a wrong password said under the box.
+      click("Open read-only", within(panel).getByText("My vault.before-restore").closest(".frow") as HTMLElement);
+      fireEvent.change(within(panel).getByLabelText("Password or recovery key for this copy"), { target: { value: "not the one" } });
+      click("Open", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Delete an older copy, asked first and for good (24g)",
+    shows: [],
+    reach: async () => {
+      start([vault()]);
+      shell.olderCopies([{ vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_395_864_371 }]);
+      await unlockIt();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      fireEvent.click(await within(settings).findByRole("button", { name: "Older copies (1)" }));
+      const panel = await screen.findByRole("complementary", { name: "Older copies" });
+      click("Delete", panel);
+      return screen.findByRole("dialog", { name: "Delete My vault.before-restore?" });
+    },
+  },
+  {
+    name: "Older copies inside the restore, when there are too many (24f, from 24d's refusal)",
+    shows: ["RestoreFlow#RestoreFlow"],
+    reach: async () => {
+      start([vault()]);
+      shell.olderCopies([{ vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_395_864_371 }]);
+      fireEvent.click(await screen.findByRole("button", { name: "Restore a backup" }));
+      await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+      shell.restoreIs({ replaces: true });
+      fireEvent.change(screen.getByLabelText("Password or recovery key from when it was made"), { target: { value: BACKUP_PASSWORD } });
+      click("Continue");
+      await screen.findByRole("heading", { level: 1, name: "Where it goes" });
+      click("Restore");
+      await screen.findByRole("heading", { level: 1, name: "Replace your vault with this?" });
+      shell.restoreCommitRefuses({ code: "core", kind: "invalid_input", what: "too many before-restore copies" });
+      click("Replace");
+      fireEvent.click(await screen.findByRole("button", { name: "Older copies" }));
+      await screen.findByRole("heading", { level: 1, name: "Older copies" });
+      await screen.findByText("My vault.before-restore");
+    },
+  },
+  {
     name: "Backup refused, and the questions beside it (Ask 2)",
     shows: ["BackupFlow#BackupRefusedAsk"],
     reach: async () => {

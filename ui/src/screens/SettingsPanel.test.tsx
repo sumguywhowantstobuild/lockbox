@@ -13,6 +13,7 @@ import {
   SHORTCUT_NOT_SET,
   SHORTCUT_TAKEN,
   STARTUP_FAILED,
+  type FakeOlderCopy,
   type FakeSettings,
   type FakeShell,
   type FakeStartup,
@@ -61,6 +62,8 @@ interface Options {
   startup?: FakeStartup;
   readOnly?: boolean;
   vaults?: FakeVault[];
+  /** The older copies the shell lists (earlier restores kept them). */
+  older?: FakeOlderCopy[];
 }
 
 /** The app unlocked through its screen, with the shell as `options` has it; Settings is not opened yet. */
@@ -72,6 +75,7 @@ async function unlocked(options: Options = {}) {
     options.settings,
   );
   if (options.startup !== undefined) shell.setStartup(options.startup);
+  if (options.older !== undefined) shell.olderCopies(options.older);
   const view = render(<App />);
   const field = await screen.findByLabelText(/^Password for /);
   fireEvent.change(field, { target: { value: PASSWORD } });
@@ -641,10 +645,62 @@ test("a_read_only_vault_can_restore_a_backup_too", async () => {
   expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Restore a backup"]);
 });
 
+test("older_copies_hidden_when_there_are_none", async () => {
+  // None kept: the row is not there (a button to nothing would be a dead end).
+  const { panel } = await opened();
+  expect(within(panel).queryByRole("button", { name: /older copies/i })).toBeNull();
+  expect(within(panel).queryByText(/older copies/i)).toBeNull();
+  // The listing was asked for when Settings opened, and answered with none.
+  expect(commands("list_pre_restore")).toEqual([{}]);
+});
+
+test("older_copies_hidden_when_only_another_vaults_are_kept", async () => {
+  const { panel } = await opened({
+    vaults: [
+      { id: 7, name: "My vault", items: sampleItems() },
+      { id: 8, name: "Other", items: [] },
+    ],
+    older: [{ vault: 8, folder: "Other.before-restore", last_written: "2026-09-09", size: 1_000_000 }],
+  });
+  expect(within(panel).queryByRole("button", { name: /older copies/i })).toBeNull();
+});
+
+test("older_copies_follows_restore_a_backup_with_the_count_of_this_vaults", async () => {
+  const { panel } = await opened({
+    vaults: [
+      { id: 7, name: "My vault", items: sampleItems() },
+      { id: 8, name: "Other", items: [] },
+    ],
+    older: [
+      { vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_000_000 },
+      { vault: 7, folder: "My vault.before-restore-2", last_written: "2026-11-05", size: 1_000_000 },
+      { vault: 8, folder: "Other.before-restore", last_written: "2026-09-09", size: 1_000_000 },
+    ],
+  });
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  const button = await within(group).findByRole("button", { name: "Older copies (2)" });
+  expect(within(group).getAllByRole("button").map((each) => each.textContent)).toEqual(["Back up", "Test a backup", "Restore a backup", "Older copies (2)"]);
+  expect(button.getAttribute("aria-describedby")).not.toBeNull();
+  fireEvent.click(button);
+  await screen.findByRole("complementary", { name: "Older copies" });
+});
+
+test("a_read_only_vault_with_older_copies_offers_them_too", async () => {
+  // The copies belong to the vault, not to how it is open: a read-only session of it lists them.
+  const { panel } = await opened({
+    readOnly: true,
+    older: [{ vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_000_000 }],
+  });
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  await within(group).findByRole("button", { name: "Older copies (1)" });
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Restore a backup", "Older copies (1)"]);
+});
+
 test("no_password_links_until_their_plans", async () => {
   const { panel } = await opened();
-  // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`), Test a backup with Task 4 (`TestBackup.test.tsx`) and Restore a backup with Task 5
-  // (`RestoreFlow.test.tsx`); the rest of the vault's rows wait for their own plans.
+  // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`), Test a backup with Task 4 (`TestBackup.test.tsx`), Restore a backup with Task 5
+  // (`RestoreFlow.test.tsx`) and Older copies with Task 8 (`OlderCopies.test.tsx`, hidden here while none are kept); the rest of the vault's rows
+  // wait for their own plans.
   for (const name of [
     /older copies/i,
     /open a backup/i,

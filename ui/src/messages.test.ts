@@ -93,6 +93,16 @@ test("a_restore_that_was_stopped_and_one_with_too_many_older_copies_have_the_des
   expect(messageFor({ code: "core", kind: "invalid_input", what: "something else" }).title).toBe(MESSAGES["core:invalid_input"]?.title);
 });
 
+test("an_older_copy_that_is_open_says_to_close_it_before_it_is_deleted", () => {
+  // `delete_pre_restore` while a session is open on the copy (or an open of it is under way): the shell's busy refusal, with this `what`.
+  const open = messageFor({ code: "busy", what: "folder is open" });
+  expect(open).toEqual({ title: "Close this older copy first, then delete it.", body: "" });
+  // A busy vault of another kind keeps the busy words.
+  expect(messageFor({ code: "busy" }).title).toBe("That vault is busy.");
+  // An older copy the page's listing no longer matches is `not_found`: the screen says its own words, the table has the plain ones.
+  expect(messageFor({ code: "not_found" }).title).toBe("Lockbox can't find that.");
+});
+
 test("a_backup_that_changed_after_it_was_checked_says_to_pick_it_again", () => {
   // The shell's refusal when the archive prepare opened is not the one that was checked (the file was replaced in between).
   const changed = messageFor({ code: "invalid_input", what: "backup changed" });

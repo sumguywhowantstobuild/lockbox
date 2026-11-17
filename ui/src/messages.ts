@@ -66,6 +66,8 @@ export const MESSAGES: Record<string, Words> = {
   },
   // Printing: one print of Lockbox's own at a time, and a PDF that never came leaves nothing behind.
   "code:busy:printer": { title: "Lockbox is still printing.", body: "Wait for it to finish, then try again." },
+  // Older copies (Task 8): a copy open read-only (or being opened) can't be deleted. The words are the session's.
+  "code:busy:folder is open": { title: "Close this older copy first, then delete it.", body: "" },
   "code:print_failed": { title: "Lockbox couldn't print that.", body: "Try again." },
   "code:print_failed:pdf": { title: "Lockbox couldn't make the PDF.", body: "Nothing was saved. Try again." },
   "code:print_failed:print": {

@@ -546,6 +546,30 @@ export interface FakeShell {
   discardedRestores(): number[];
   /** The folder names `restore_prepare_confirm` was sent, in order (`null` for none). */
   confirmedNames(): (string | null)[];
+  /**
+   * The older copies the shell lists (Plan 4B Task 8), in order, from the next listing on. Every `list_pre_restore` replaces every ID it gave before, as the shell
+   * does; a copy opened read-only is a session of its own, and a delete of a copy a session has open is refused as `busy`.
+   */
+  olderCopies(copies: FakeOlderCopy[]): void;
+  /** The ID each listed copy has in the newest listing, by folder name. */
+  olderIds(): Record<string, number>;
+  /** Makes every ID the shell gave so far unknown, as another listing would: the page's IDs no longer match, and its next send is `not_found`. */
+  forgetOlderIds(): void;
+  /** The folder names `delete_pre_restore` deleted, in order. */
+  deletedOlderCopies(): string[];
+  /** Pretends another session has this copy open: its delete is refused as `busy`. */
+  olderCopyIsOpen(folder: string): void;
+  /** The folder names of the older copies a session of this page has open now. */
+  olderCopiesOpen(): string[];
+  /**
+   * Holds every `list_pre_restore` until `release` is called, which answers them in the reverse order they were sent: each listing is decided (its IDs given, and
+   * every earlier ID replaced) when it is let go, as the shell does when a slow scan ends after a quicker one that began later.
+   */
+  holdOlderListing(): () => void;
+  /** Holds every `open_pre_restore_read_only` until `release` is called: the credential is checked and the session made when it is let go. */
+  holdOlderOpen(): () => void;
+  /** Holds every `delete_pre_restore` until `release` is called: the copy is deleted (or the refusal decided) when it is let go. */
+  holdOlderDelete(): () => void;
   /** The name and the choice of the backup the last `backup_vault` wrote and parked for 22c's Test this backup. */
   lastBackupName(): string;
   lastBackupChoice(): string;
@@ -834,6 +858,22 @@ const BACKUP_DAY = "2026-11-04";
 /** What the shell sends for a file's number past the end of the picked list. */
 const NO_SUCH_PICK = { code: "invalid_input", what: "index" };
 
+/**
+ * An older copy a restore kept beside a vault (Plan 4B Task 8), as the fake shell holds it: `vault` is the vault's place on the list, `last_written` and `size`
+ * are what a listing says (the default is 4 November 2026 and 5 MB; `null` is a part the shell could not read), and `password` opens it (the vault's own
+ * password unless set). The folder is a name only: no path ever reaches the page.
+ */
+export interface FakeOlderCopy {
+  vault: number;
+  folder: string;
+  name?: string | null;
+  last_written?: string | null;
+  size?: number | null;
+  password?: string;
+  /** Its details were changed outside Lockbox: opening it answers `header_changed: true`. */
+  headerChanged?: boolean;
+}
+
 /** One file the page picked, as the shell holds it (the page sees the name and size only). */
 interface PickedEntry {
   name: string;
@@ -1068,6 +1108,17 @@ export function installFakeShell(
   const restoreAsked = new Map<string, string>();
   const restoreDiscarded: number[] = [];
   const restoreNames: (string | null)[] = [];
+  // Older copies (Task 8): what the shell lists, the IDs of the newest listing (each listing replaces them all), the folders deleted, the copies another session
+  // is pretended to have open, and the sessions this page opened on a copy.
+  let olderHeld: FakeOlderCopy[] = [];
+  const olderListed = new Map<number, FakeOlderCopy>();
+  let nextOlderId = 0;
+  const olderDeleted: string[] = [];
+  const olderOpenElsewhere = new Set<string>();
+  const olderSessions = new Map<number, string>();
+  let heldOlderListings: (() => void)[] | undefined;
+  let heldOlderOpens: (() => void)[] | undefined;
+  let heldOlderDeletes: (() => void)[] | undefined;
   let restoreFound = { name: "My vault", made: "2026-10-02" as string | null, replaces: false, keptAs: "My vault.before-restore" };
   let restoreQuestion: "cloud" | "name" | undefined;
   let restoreCopyRefusal: object | undefined;
@@ -2127,6 +2178,72 @@ export function installFakeShell(
         restoreDiscarded.push(sent.restore);
         return null;
       }
+      case "list_pre_restore": {
+        exactly(args ?? {}, []);
+        // Every listing replaces every ID.
+        olderListed.clear();
+        return olderHeld.map((copy) => {
+          nextOlderId += 1;
+          olderListed.set(nextOlderId, copy);
+          return {
+            id: nextOlderId,
+            vault: copy.vault,
+            name: copy.name === undefined ? (vaults.find((v) => v.id === copy.vault)?.name ?? null) : copy.name,
+            folder: copy.folder,
+            last_written: copy.last_written === undefined ? "2026-11-04" : copy.last_written,
+            size: copy.size === undefined ? 5 * 1024 * 1024 : copy.size,
+          };
+        });
+      }
+      case "open_pre_restore_read_only": {
+        const sent = exactly(args, ["id", "credential"]);
+        const credential = sent.credential;
+        const form = typeof credential === "object" && credential !== null ? Object.keys(credential) : [];
+        if (typeof sent.id !== "number" || form.length !== 1 || !["password", "recovery_key", "password_or_key"].includes(form[0] ?? "")) return refuse(MALFORMED);
+        const text = (credential as Record<string, unknown>)[form[0] ?? ""];
+        if (typeof text !== "string") return refuse(MALFORMED);
+        const copy = olderListed.get(sent.id);
+        if (copy === undefined) return refuse({ code: "not_found" });
+        if (text !== (copy.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        // A session open on the copy already is the one answered; else the copy is a read-only vault of its own, beside the live one and not on the list.
+        const open = [...olderSessions].find(([session, folder]) => folder === copy.folder && live.get(session)?.unlocked === true);
+        if (open !== undefined) {
+          const opened = live.get(open[0]);
+          if (opened !== undefined) {
+            return tagged(opened.session, opened.generation, {
+              ...infoOf(sessionVault.get(opened.session) as FakeVault, opened.session, opened.generation),
+              header_changed: false,
+            });
+          }
+        }
+        const vault: FakeVault = {
+          id: -nextOlderId,
+          name: copy.name === undefined ? (vaults.find((v) => v.id === copy.vault)?.name ?? "") : copy.name,
+          password: copy.password,
+          readOnly: true,
+          items: sampleItems(),
+        };
+        nextSession += 1;
+        const entry: Live = { session: nextSession, generation: 1, unlocked: true };
+        live.set(nextSession, entry);
+        sessionVault.set(nextSession, vault);
+        olderSessions.set(nextSession, copy.folder);
+        return tagged(nextSession, entry.generation, { ...infoOf(vault, nextSession, entry.generation), header_changed: copy.headerChanged ?? false });
+      }
+      case "delete_pre_restore": {
+        const sent = exactly(args, ["id", "confirm"]);
+        if (typeof sent.id !== "number" || typeof sent.confirm !== "boolean") return refuse(MALFORMED);
+        const copy = olderListed.get(sent.id);
+        if (copy === undefined) return refuse({ code: "not_found" });
+        // A session open on the copy (or an open under way) keeps it, before the question and again before the delete.
+        const inUse = olderOpenElsewhere.has(copy.folder) || [...olderSessions].some(([session, folder]) => folder === copy.folder && live.get(session)?.unlocked === true);
+        if (inUse) return refuse({ code: "busy", what: "folder is open" });
+        if (!sent.confirm) return { Confirm: "DeletePreRestore" };
+        olderHeld = olderHeld.filter((other) => other !== copy);
+        olderListed.delete(sent.id);
+        olderDeleted.push(copy.folder);
+        return { Done: null };
+      }
       case "backup_vault": {
         const sent = exactly(args, ["session", "generation", "request"]) as { session: number; generation: number };
         requestOf(sent);
@@ -2863,7 +2980,11 @@ export function installFakeShell(
           const name = restoreCopyName ?? checked.name;
           restoreCopyName = undefined;
           restorePrepared.set(nextRestore, { name, replaces: checked.replaces, keptAs: checked.keptAs, ended: false });
-          const view = { Done: { restore: nextRestore, name, replaces_existing: checked.replaces, kept_as: checked.replaces ? checked.keptAs : null } };
+          // The vault it replaces, as its place on the list (the swap's own find: the one with the archive's name, else the first).
+          const replaced = checked.replaces ? (vaults.find((v) => v.name === name) ?? vaults[0])?.id ?? null : null;
+          const view = {
+            Done: { restore: nextRestore, name, replaces_existing: checked.replaces, kept_as: checked.replaces ? checked.keptAs : null, replaces: replaced },
+          };
           // The answer can be on its way when a lock lands: the copy is done and the shell has decided, but the page has not heard.
           if (heldRestoreAnswers === undefined) resolve(view);
           else heldRestoreAnswers.push(() => {
@@ -2978,6 +3099,26 @@ export function installFakeShell(
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
         return Promise.reject(error);
       }
+    }
+    const heldOlder =
+      cmd === "list_pre_restore"
+        ? heldOlderListings
+        : cmd === "open_pre_restore_read_only"
+          ? heldOlderOpens
+          : cmd === "delete_pre_restore"
+            ? heldOlderDeletes
+            : undefined;
+    if (heldOlder !== undefined) {
+      // Decided when it is let go.
+      return new Promise((resolve, reject) => {
+        heldOlder.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            rejectPlain(reject, error as object);
+          }
+        });
+      });
     }
     if (cmd === "restore_check" && heldRestoreChecks !== undefined) {
       // Unlocking the backup takes a moment: it is decided when it is let go.
@@ -3611,6 +3752,42 @@ export function installFakeShell(
     },
     restoreCommitRefuses: (error) => {
       restoreCommitRefusal = error;
+    },
+    olderCopies: (copies) => {
+      olderHeld = [...copies];
+    },
+    olderIds: () => Object.fromEntries([...olderListed].map(([id, copy]) => [copy.folder, id])),
+    forgetOlderIds: () => {
+      olderListed.clear();
+    },
+    deletedOlderCopies: () => [...olderDeleted],
+    olderCopyIsOpen: (folder) => {
+      olderOpenElsewhere.add(folder);
+    },
+    olderCopiesOpen: () => [...olderSessions].filter(([session]) => live.get(session)?.unlocked === true).map(([, folder]) => folder),
+    holdOlderListing: () => {
+      const waiting: (() => void)[] = [];
+      heldOlderListings = waiting;
+      return () => {
+        heldOlderListings = undefined;
+        for (const release of waiting.reverse()) release();
+      };
+    },
+    holdOlderOpen: () => {
+      const waiting: (() => void)[] = [];
+      heldOlderOpens = waiting;
+      return () => {
+        heldOlderOpens = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdOlderDelete: () => {
+      const waiting: (() => void)[] = [];
+      heldOlderDeletes = waiting;
+      return () => {
+        heldOlderDeletes = undefined;
+        for (const release of waiting) release();
+      };
     },
     preparedRestores: () => [...restorePrepared.keys()],
     discardedRestores: () => [...restoreDiscarded],

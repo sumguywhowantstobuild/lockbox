@@ -469,7 +469,19 @@ changed` (the file is another vault's now: `InvalidInput`, nothing written, the 
 finished copy, a Stop and a lock drop it, since the staged restore holds all it needs. An existing folder the
 engine cannot tell is the same vault asks for a new name (`Confirm::NewFolder`, suggested from the name and ID the check
 found, with no second unlocking). The answer carries `kept_as`: the name the swap will give the older copy, the first free
-of `<folder>.before-restore` and `-2` to `-99` by the engine's own rule (`None` when all are taken; the swap then refuses).
+of `<folder>.before-restore` and `-2` to `-99` by the engine's own rule (`None` when all are taken; the swap then refuses), and
+`replaces`: the vault the swap would replace, as its ID on the vault list (`Some` when `replaces_existing` and that vault is
+listed), which the page lists the older copies of when the swap is refused for too many of them (the commit keeps the finished
+restore for that refusal, `too_many_copies_keeps_the_finished_restore`, so Replace can be pressed again after a delete).
+
+**Older copies** (`list_pre_restore`, `open_pre_restore_read_only`, `delete_pre_restore`; plain commands, not jobs). The listing
+replaces every ID, and each entry carries the folder's name (never its path), `last_written` (the local day of the newest
+modified time of the copy's two header files, in the PC's zone) and `size` (the regular files under the folder, links not
+followed), each `null` on a read error, read before the list is locked (`pre_restore_list_says_the_day_and_size`). Opening takes
+the same one-box credential as Test a backup (`CredentialArg::attempts`, `pre_restore_opens_with_the_one_box_credential`); a
+delete asks first and is refused `Busy` while a session is open on the copy (`pre_restore_delete_checks`). The page keeps one
+listing and sends the ID of the newest; a copy opened read-only is a session whose place on the vault list is none, so the live
+vault never shows as unlocked because of it (`ui/src/store.ts`, `NOT_ON_THE_LIST`).
 
 `Prepared` holds no long operation, no credential and no unlocked vault (its staging folder is encrypted), so **an idle
 lock leaves it**: the lock hook (`Restores::locked`) tells `LockReason::Idle` apart and ends the restore for every other
