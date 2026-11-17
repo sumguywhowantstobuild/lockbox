@@ -8,6 +8,11 @@ ignoreUntil = 2027-01-25
 reason = "block-buffer 0.10.4 only via sha2 0.10 -> tauri-codegen -> tauri-macros, a proc-macro run at compile time; the fix (0.12.1) is a new major version digest 0.10 cannot use"
 
 [[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-01-25
+reason = "chrono is marked unmaintained (no vulnerability); it is in Cargo.lock only as an optional dependency of serde_with and is built for no target (cargo tree -i chrono --target all -e all prints nothing)"
+
+[[IgnoredVulns]]
 id = "RUSTSEC-2024-0429"
 ignoreUntil = 2027-01-25
 reason = "glib 0.18.5 is Linux-only, not in the Windows build graph (cargo tree -i glib --target x86_64-pc-windows-msvc prints nothing)"
