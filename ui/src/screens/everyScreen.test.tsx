@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "../App";
 import { resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
-import { FOLDER, installFakeShell, itemId, PASSWORD, sampleItems, type FakeItem, type FakeShell, type FakeVault } from "../testing/fakeShell";
+import { BACKUP_PASSWORD, FOLDER, installFakeShell, itemId, PASSWORD, sampleItems, type FakeItem, type FakeShell, type FakeVault } from "../testing/fakeShell";
 import { listBelow, readBeside } from "../testing/files";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
@@ -658,6 +658,24 @@ const CASES: Case[] = [
       fireEvent.change(within(panel).getByLabelText("Password or recovery key from when it was made"), { target: { value: "not the one" } });
       click("Test", panel);
       await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Restore a backup: the file and the box, where it goes, progress, the replace question and the finish (24a to 24e)",
+    shows: ["RestoreFlow#RestoreFlow"],
+    reach: async () => {
+      start([vault()]);
+      fireEvent.click(await screen.findByRole("button", { name: "Restore a backup" }));
+      await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+      shell.restoreIs({ replaces: true });
+      fireEvent.change(screen.getByLabelText("Password or recovery key from when it was made"), { target: { value: BACKUP_PASSWORD } });
+      click("Continue");
+      await screen.findByRole("heading", { level: 1, name: "Where it goes" });
+      click("Restore");
+      await screen.findByRole("heading", { level: 1, name: "Replace your vault with this?" });
+      click("Replace");
+      // The last of its views, the one with a field on it.
+      await screen.findByRole("heading", { level: 1, name: "My vault is restored" });
     },
   },
   {

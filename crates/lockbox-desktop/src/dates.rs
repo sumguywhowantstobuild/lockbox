@@ -60,6 +60,22 @@ pub fn parse_utc(text: &str) -> Option<u64> {
     Some(days as u64 * DAY + hour * 3600 + minute * 60 + second)
 }
 
+/// The date (`YYYY-MM-DD`) the moment `secs` (seconds since the Unix epoch, UTC) falls on in a zone `offset_secs` east of
+/// UTC (negative: west): the day a person there calls it.
+pub fn local_date_of(secs: u64, offset_secs: i64) -> String {
+    let moved = i64::try_from(secs)
+        .unwrap_or(i64::MAX)
+        .saturating_add(offset_secs);
+    let (year, month, day) = civil_from_days(moved.div_euclid(DAY as i64));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Seconds since the Unix epoch of a civil time (the same moment in whatever zone the numbers are read in: the caller
+/// subtracts one reading from another to learn the zone). Before 1970 is negative.
+pub fn civil_secs(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
+    days_from_civil(year, month, day) * DAY as i64 + hour * 3600 + minute * 60 + second
+}
+
 /// Seconds since the Unix epoch of `time`; none for a clock set before 1970.
 pub fn unix_secs(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
@@ -194,5 +210,41 @@ mod tests {
         assert_eq!(whole_days_since(1_000, 1_000 + 30 * 86_400 + 5), 30);
         assert_eq!(whole_days_since(5_000, 1_000), 0);
         assert_eq!(whole_days_since(0, u64::MAX), u32::MAX);
+    }
+
+    /// The date a person calls a moment: the UTC moment moved by the PC's zone. A backup made at 07:30 in Manila is the
+    /// 17th there and the 16th in UTC.
+    #[test]
+    fn the_zone_moves_the_date() {
+        let local = |text: &str, hours: i64| local_date_of(parse_utc(text).unwrap(), hours * 3600);
+        assert_eq!(local("2026-11-16T23:30:00Z", 0), "2026-11-16");
+        assert_eq!(local("2026-11-16T23:30:00Z", 8), "2026-11-17");
+        assert_eq!(local("2026-11-16T16:00:00Z", 8), "2026-11-17");
+        assert_eq!(local("2026-11-16T15:59:59Z", 8), "2026-11-16");
+        assert_eq!(local("2026-11-17T01:00:00Z", -5), "2026-11-16");
+        assert_eq!(local("2026-12-31T20:00:00Z", 5), "2027-01-01");
+        assert_eq!(local("2024-03-01T01:00:00Z", -2), "2024-02-29");
+        // Half an hour, and before 1970 once the zone is applied.
+        assert_eq!(
+            local_date_of(parse_utc("2026-11-16T18:29:59Z").unwrap(), 19_800),
+            "2026-11-16"
+        );
+        assert_eq!(
+            local_date_of(parse_utc("2026-11-16T18:30:00Z").unwrap(), 19_800),
+            "2026-11-17"
+        );
+        assert_eq!(local_date_of(0, -3600), "1969-12-31");
+    }
+
+    /// The seconds of a civil time, which the real clock reads its zone from (two readings of the same moment).
+    #[test]
+    fn civil_seconds_match_the_epoch_ones() {
+        assert_eq!(civil_secs(1970, 1, 1, 0, 0, 0), 0);
+        assert_eq!(civil_secs(2026, 11, 16, 12, 0, 0), 1_794_830_400);
+        assert_eq!(civil_secs(1969, 12, 31, 23, 59, 59), -1);
+        assert_eq!(
+            civil_secs(2026, 11, 17, 7, 30, 0) - civil_secs(2026, 11, 16, 23, 30, 0),
+            8 * 3600
+        );
     }
 }

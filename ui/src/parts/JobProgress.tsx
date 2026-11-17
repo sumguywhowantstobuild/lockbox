@@ -24,6 +24,7 @@ export function JobProgress({
   now,
   heading = true,
   stopWord = "Cancel",
+  figures = "bytes",
   onStop,
 }: {
   operation: number;
@@ -38,6 +39,8 @@ export function JobProgress({
   heading?: boolean;
   /** The button's word: "Cancel" (what is not done is not kept), or "Stop" where what is done stays, as saving a folder's files draws it. */
   stopWord?: "Cancel" | "Stop";
+  /** What the figure under the bar says: the bytes in words ("1.2 GB of 3 GB", the default), or the per cent alone ("48%", as 24c draws it). */
+  figures?: "bytes" | "percent";
   onStop?: () => void;
 }) {
   const job = useJobByOperation(operation);
@@ -54,7 +57,8 @@ export function JobProgress({
     if (shown) announceJob(`${label} started.`, operation);
   }, [shown, label, operation]);
   if (job === null) return null;
-  const words = counted ? `${formatBytes(job.done)} of ${formatBytes(job.total)}` : "Starting…";
+  const shownPercent = `${String(percent ?? (job.finished ? 100 : 0))}%`;
+  const words = counted ? (figures === "percent" ? shownPercent : `${formatBytes(job.done)} of ${formatBytes(job.total)}`) : "Starting…";
   return (
     // `data-operation` says whose card it is: when a job ends, focus moves only if it was in that job's own card (`takeJobFocus`).
     <section className="ask job" aria-label={label} data-operation={operation}>

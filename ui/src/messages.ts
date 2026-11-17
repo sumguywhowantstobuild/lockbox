@@ -108,6 +108,8 @@ export const MESSAGES: Record<string, Words> = {
   // Save all of a folder's files (Task 11): the folder had none by the time the shell counted, or its files are no longer the ones planned.
   "code:invalid_input:no files": { title: "This folder has no files to save.", body: "" },
   "code:invalid_input:folder changed": { title: "The files in this folder changed.", body: "Save them again." },
+  // Restore a backup (24): the archive the copy opened is not the one that was checked (the file was replaced in between). The shell has let the pick go.
+  "code:invalid_input:backup changed": { title: "This backup changed after it was checked.", body: "Pick it again." },
   // Show in Explorer could not open the folder (the shell's own `io`, with no path): the same words as the engine's.
   "code:io": { title: "Lockbox couldn't reach that folder or file.", body: "Check that the drive is connected, then try again." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
@@ -125,6 +127,8 @@ export const MESSAGES: Record<string, Words> = {
   // The backup picked for Test a backup was let go by the shell (left too long, or a lock): this screen's own words, since "Pick the files again."
   // (`code:choice_expired`, Add files) is not what it asks.
   "page:test_choice_expired": { title: "That choice has expired.", body: "Pick the backup again." },
+  // A restore whose copy was stopped (Cancel, Windows locking or sleeping, Lock all, closing): nothing was changed. Said on the first step of the restore.
+  "page:restore_cancelled": { title: "The restore was cancelled.", body: "Your vault is as it was." },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
@@ -167,6 +171,17 @@ export const MESSAGES: Record<string, Words> = {
     title: "This item changed while you were editing it.",
     body: "Nothing was saved. Cancel, then open it again to see the change.",
   },
+  // Restore a backup (24): all 99 names for the older copy are taken, so the swap is refused (the design's words, without its Older copies button).
+  "core:invalid_input:too many before-restore copies": {
+    title: "There are too many older copies of this vault.",
+    body: "Delete some, then restore again.",
+  },
+  // A restore into a folder holding two working copies of the same vault (a folder copied beside its original): the engine won't guess which to
+  // replace. The design has no row for it; the words are the session's (Plan 4B Task 5's hands-on, 2026-11-17).
+  "core:invalid_input:several copies of this vault": {
+    title: "That folder holds more than one copy of this vault, so Lockbox can't tell which one to replace.",
+    body: "Choose another folder, or move the extra copies out of it first.",
+  },
   "core:invalid_input:destination in a vault folder": {
     title: "Lockbox won't save that inside a vault's folder.",
     body: "Choose another folder.",
@@ -194,6 +209,7 @@ export const MESSAGES: Record<string, Words> = {
 export const KNOWN_WHATS: readonly string[] = [
   "already restored",
   "backup",
+  "backup changed",
   "backup entries",
   "backup extension",
   "backup: archive writer",

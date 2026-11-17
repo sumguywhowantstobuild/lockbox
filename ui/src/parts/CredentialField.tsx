@@ -16,6 +16,7 @@ export function CredentialField({
   onChange,
   error,
   autoFocus = false,
+  readOnly = false,
 }: {
   label: string;
   value: string;
@@ -23,6 +24,8 @@ export function CredentialField({
   /** The words for a refusal, shown under the box; `null` for none. */
   error?: string | null;
   autoFocus?: boolean;
+  /** The box can be read (and shown) but not typed in, while what it held is being used. */
+  readOnly?: boolean;
 }) {
   const id = useId();
   const [shown, setShown] = useState(false);
@@ -58,6 +61,7 @@ export function CredentialField({
         autoCorrect="off"
         autoCapitalize="off"
         autoFocus={autoFocus}
+        readOnly={readOnly}
         value={value}
         aria-invalid={error ? true : undefined}
         aria-describedby={described === "" ? undefined : described}

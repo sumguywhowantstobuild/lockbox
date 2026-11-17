@@ -83,6 +83,23 @@ test("a_backup_choice_that_expired_has_the_test_screens_own_words", () => {
   expect(messageFor({ code: "choice_expired" }).body).toBe("Pick the files again.");
 });
 
+test("a_restore_that_was_stopped_and_one_with_too_many_older_copies_have_the_designs_words", () => {
+  const stopped = messageFor({ code: "page", kind: "restore_cancelled" });
+  expect(stopped).toEqual({ title: "The restore was cancelled.", body: "Your vault is as it was." });
+  // The swap's refusal when all 99 names for the older copy are taken, as the engine sends it (`CoreError::InvalidInput`).
+  const tooMany = messageFor({ code: "core", kind: "invalid_input", what: "too many before-restore copies" });
+  expect(tooMany).toEqual({ title: "There are too many older copies of this vault.", body: "Delete some, then restore again." });
+  // Any other invalid input keeps the kind's own words.
+  expect(messageFor({ code: "core", kind: "invalid_input", what: "something else" }).title).toBe(MESSAGES["core:invalid_input"]?.title);
+});
+
+test("a_backup_that_changed_after_it_was_checked_says_to_pick_it_again", () => {
+  // The shell's refusal when the archive prepare opened is not the one that was checked (the file was replaced in between).
+  const changed = messageFor({ code: "invalid_input", what: "backup changed" });
+  expect(changed).toEqual({ title: "This backup changed after it was checked.", body: "Pick it again." });
+  expect(KNOWN_WHATS).toContain("backup changed");
+});
+
 test("unknown_error_gets_the_generic_message", () => {
   const unknown: unknown[] = [
     new Error("boom"),

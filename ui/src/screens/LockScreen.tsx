@@ -3,7 +3,7 @@ import type { VaultEntry } from "../api";
 import { messageFor, type Message } from "../messages";
 import { PasswordField } from "../parts/PasswordField";
 import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
-import { cancelCapture, unlock, useCapture, useStartError, useVaults } from "../store";
+import { cancelCapture, startRestore, unlock, useCapture, useRestore, useStartError, useVaults } from "../store";
 import { useMode } from "../theme";
 import { LockScreenAsks } from "./Asks";
 
@@ -24,6 +24,8 @@ export function LockScreen() {
   const vaults = useVaults();
   const startError = useStartError();
   const capture = useCapture();
+  // The picker of Restore a backup is open: a second press sends nothing.
+  const restoring = useRestore() !== null;
   const [chosenId, setChosenId] = useState<number | null>(null);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -172,6 +174,21 @@ export function LockScreen() {
             </div>
           </form>
         )}
+        {/* A second line under the form: a backup can bring a vault back on this PC. Not while a saved copy waits for its vault. */}
+        {vaults !== null && capture === null ? (
+          <p className="lalt">
+            <button
+              type="button"
+              className="lnk"
+              aria-disabled={restoring ? true : undefined}
+              onClick={() => {
+                if (!restoring) void startRestore();
+              }}
+            >
+              Restore a backup
+            </button>
+          </p>
+        ) : null}
       </main>
     </div>
   );

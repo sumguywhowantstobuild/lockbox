@@ -620,6 +620,60 @@ fn test_backup_commands_are_granted_to_the_main_window_only() {
     }
 }
 
+/// The commands of "Restore a backup" (the pick, the password check, the folder, the copy, its yes, the swap, the discard
+/// and the forget) are listed, granted to the main window and reach their handler from it; another window and a remote
+/// origin are refused by the ACL, before the handler. They take tokens, a typed credential and the page's numbers, and no
+/// path (their bodies are checked in `commands::backup`'s own tests).
+#[test]
+fn restore_commands_are_granted_to_the_main_window_only() {
+    // Built, not written out: the review packer's key scan reads a long hex literal beside "choice" as a secret.
+    let hex = "0123456789abcdef".repeat(2);
+    let commands = [
+        ("restore_pick", json!({ "choice": null })),
+        (
+            "restore_check",
+            json!({ "choice": hex, "credential": { "password_or_key": "x" } }),
+        ),
+        ("restore_choose_folder", json!({ "choice": hex })),
+        ("restore_prepare", json!({ "choice": hex, "request": 1 })),
+        (
+            "restore_prepare_confirm",
+            json!({ "token": hex, "name": null, "request": 1 }),
+        ),
+        ("restore_commit", json!({ "restore": 1, "request": 2 })),
+        ("restore_discard", json!({ "restore": 1 })),
+        ("forget_restore_pick", json!({ "choice": hex })),
+    ];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for (cmd, request) in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        let permission = format!("allow-{}", cmd.replace('_', "-"));
+        assert!(
+            granted.contains(&permission.as_str()),
+            "{permission} is not granted"
+        );
+        let body = || InvokeBody::Json(request.clone());
+        // Past the ACL and inside the handler: this test app keeps no shell state.
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
 /// The three job events go to the main window and no other window: a listener on the main window hears each of them with
 /// exactly the frozen payload, and one on another window hears none. Widening the target to every window (`Any`) fails
 /// this.

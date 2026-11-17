@@ -107,6 +107,32 @@ trusted than Rust.
   nothing. The held pick holds no password and no key: the credential is typed again with each try, so a wrong password
   keeps the file picked and nothing else. A backup Lockbox has just written is held the same way, so "Test this backup"
   needs no picker. Testing reads the backup and writes nothing.
+- **A backup picked to be restored, and the password typed for it.** "Restore a backup" asks for the file first and holds
+  its path in Rust the same way (the page gets a token, the file's name and size, never the path). Unlike "Test a
+  backup", the credential is not typed again with each step: the box of the first screen is sent once, Rust opens the
+  backup with it (without unpacking it) to tell the page the vault's name and the day it was made, and keeps the
+  credential that worked inside the held pick, wiped when it is dropped and never logged or sent, so the folder screen and
+  the copy need nothing typed. The page empties the box the moment it is sent, so the text is on the page only until
+  then. The pick, with the credential in it, goes when the copy finishes (the staged restore holds no credential), on
+  Stop or Cancel, on a lock of all vaults of any kind (an idle lock included: it drops the pick, so a restore not yet
+  copied must be picked again), on closing, and after five minutes without a use (a use that is running is never timed
+  out). A wrong password, a damaged backup and a refusal of the copy (no room, a drive that cannot hold a vault) keep the
+  pick, so another folder or password is tried without picking the file again. A token that is unknown, expired or of
+  another kind answers "choice expired". The folders the screens show are your own, as text, and never accepted back.
+  While the folder dialog is open (it may stay open as long as the person likes) nothing outside the pending table holds
+  the credential: only the folder the dialog starts in and a use guard are kept, and the pick is taken again when the dialog
+  returns, so a lock that comes meanwhile wipes the credential at once, and a pick forgotten or drained meanwhile answers
+  "choice expired". The copy opens the file again by its path, so it compares the vault ID of the archive it actually opened
+  with the one the check saw, before it writes anything: if the file was replaced in between (even by another backup made
+  with the same password), the answer is "backup changed", nothing is written, and the pick, credential included, is
+  forgotten. Every name the screens show after the copy is the prepared restore's own, never the check's.
+- **A finished restore waits through an idle lock, and nothing else.** Once the copy has finished, the restore waits for
+  your answer (Replace, or Cancel) however long you take. The idle lock does not end it, because a finished restore holds
+  no password and no key and has no unlocked vault: its staging folder is encrypted exactly as the backup is, and you
+  must still answer and then unlock the restored vault with the backup's password, which the restore never held. Every
+  other lock does end it and removes its staging folder: Lock all, the window's close button (which locks all), Windows
+  locking or sleeping, signing out and closing the app. The copy and the swap pause the idle timer while they run, so no
+  idle lock lands in either.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
@@ -129,7 +155,8 @@ trusted than Rust.
   has started finishes or rolls back.
 - **Long operations pause the idle timer** (import, Save a copy, Save all files, Open, backup, restore) and keep the PC awake, and time
   spent in them does not count. Windows lock and sleep still cancel them. A question waiting for your answer does not
-  pause anything.
+  pause anything, and one exception to what a lock drops: a finished restore waiting for your answer survives an idle
+  lock (see "A finished restore waits through an idle lock").
 - **Closing or quitting while a long operation runs asks first, and nothing locks until you answer.** The window's close
   button and the tray's Quit ask whether to go on (any operation the idle timer counts, including Open, Replace and
   copying an item). Until you answer, the operations keep running and the vaults stay unlocked; the question is dropped
@@ -192,7 +219,9 @@ in the code with a `shortcut:` comment.
   The one box of "Test a backup" holds a password or a recovery key: Rust reads the text as a recovery key first and,
   if it is a well-formed key that turns out wrong, tries it as a password too (text that is not a well-formed key is
   tried as a password only, with no typo words); it is wiped when the try ends, and the page empties the box after
-  every send, a wrong password included (unlike the unlock form). *Accepted:* wiping the buffers would mean replacing Tauri's transport.
+  every send, a wrong password included (unlike the unlock form). The same box of "Restore a backup" is sent once, to
+  the check; the credential that worked then lives in Rust, in the held pick, until the copy finishes or the pick is
+  dropped (see "A backup picked to be restored"). *Accepted:* wiping the buffers would mean replacing Tauri's transport.
 - **Webview memory is not wiped.** Values typed or shown in the window live in WebView2's memory until the browser engine
   frees them. The screens clear their state at a lock, but that releases the text; it does not erase it. *Accepted:*
   no browser engine offers more. Keep the time a password is revealed short.
