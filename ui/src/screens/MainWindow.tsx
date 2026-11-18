@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CopyableField } from "../api";
 import { rememberOpener } from "../focus";
 import { messageFor } from "../messages";
@@ -75,6 +75,14 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   const sort = useSort(data.session);
   // The folder's own question, while one is open: which, for which folder (kept as it was when asked).
   const [asking, setAsking] = useState<{ kind: "rename" | "delete" | "env_file"; folder: { id: string; name: string }; count: number } | null>(null);
+  // A vault that comes on screen with focus nowhere (the lock screen and its field have gone, after an unlock) puts focus on its page heading, so a
+  // screen reader says where the person is and Tab goes on from there. Focus that is somewhere (a menu that switched vaults, a question that opened
+  // with the vault) is left where it is.
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    const now = document.activeElement;
+    if (now === null || now === document.body) heading.current?.focus();
+  }, [data.session]);
   const everything = useMemo(() => data.items ?? [], [data.items]);
   // The lists below are kept between redraws while what they come from is unchanged, so the item list's rows are not drawn again.
   const items = useMemo(() => everything.filter((item) => item.kind !== "collection" && !item.trashed), [everything]);
@@ -280,7 +288,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             {data.readOnly || data.trash ? null : <AddMenu session={data.session} folder={data.folder} />}
           </div>
           <div className="lscroll">
-            <h1 className="big" tabIndex={-1}>
+            <h1 ref={heading} className="big" tabIndex={-1}>
               {title}
             </h1>
             {locked === null ? null : <p className="lnote">{locked}</p>}

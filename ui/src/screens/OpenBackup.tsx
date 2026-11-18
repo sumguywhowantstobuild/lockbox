@@ -288,6 +288,15 @@ export function CopyToVault({ data, summary, folderNames }: { data: SessionData;
   const opener = useRef<HTMLButtonElement>(null);
   const askCancel = useRef<HTMLButtonElement>(null);
   const formId = useId();
+  // The form opens under the card, below the panel's fold at a small window: when it opens, focus goes to its first choice (or its Cancel when no
+  // vault is open to copy to), and the whole form is brought into view so its Copy button can be seen too.
+  const formBox = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const box = formBox.current;
+    if (!open || box === null) return;
+    box.querySelector<HTMLElement>('[role="combobox"], button')?.focus({ preventScroll: true });
+    if (typeof box.scrollIntoView === "function") box.scrollIntoView({ block: "nearest" });
+  }, [open]);
   // What the person chose; what is not chosen follows the defaults, so a vault that locks meanwhile moves the choice to the next.
   const [picked, setPicked] = useState<{ vault: string | null; folder: string | null }>({ vault: null, folder: null });
   const [busy, setBusy] = useState(false);
@@ -366,14 +375,14 @@ export function CopyToVault({ data, summary, folderNames }: { data: SessionData;
           </Button>
         </div>
         {!open ? null : vault === undefined ? (
-          <div id={formId} className="fld col" role="group" aria-label={COPY_TO_A_VAULT}>
+          <div ref={(node) => void (formBox.current = node)} id={formId} className="fld col" role="group" aria-label={COPY_TO_A_VAULT}>
             <p className="fhint">{NOWHERE_TO_COPY}</p>
             <div className="fact">
               <Button onClick={close}>Cancel</Button>
             </div>
           </div>
         ) : (
-          <form id={formId} className="fld col" aria-label={COPY_TO_A_VAULT} onSubmit={submit} noValidate>
+          <form ref={(node) => void (formBox.current = node)} id={formId} className="fld col" aria-label={COPY_TO_A_VAULT} onSubmit={submit} noValidate>
             <div className="fbox">
               <Select
                 label="Vault"

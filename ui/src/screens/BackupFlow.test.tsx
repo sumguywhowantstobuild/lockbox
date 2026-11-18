@@ -138,6 +138,37 @@ test("backup_says_keep_it_on_another_drive", async () => {
   expect(sent("backup_vault")).toEqual([]);
 });
 
+test("back_up_panel_closes_on_escape", async () => {
+  await unlocked();
+  // 22a closes on Escape, as Settings, Test a backup, Open a backup, Add files and Save all do; nothing is sent, and focus goes back to Settings.
+  let panel = await openBackup();
+  fireEvent.keyDown(within(panel).getByRole("button", { name: "Back up" }), { key: "Escape" });
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Back up" })).toBeNull();
+  });
+  expect(sent("backup_vault")).toEqual([]);
+  await waitFor(() => {
+    expect(document.activeElement).toBe(within(side()).getByRole("button", { name: "Settings" }));
+  });
+  // While the backup runs (22b) a stray Escape leaves the bar where it is, as Test a backup does: Cancel and Close panel are the ways out.
+  panel = await openBackup();
+  const release = shell.holdFiles();
+  press(panel, "Back up");
+  const card = await screen.findByRole("region", { name: "Backing up My vault" });
+  fireEvent.keyDown(within(card).getByRole("button", { name: "Cancel" }), { key: "Escape" });
+  expect(screen.getByRole("complementary", { name: "Back up" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Backing up My vault" })).toBe(card);
+  // The saved summary (22c) closes on Escape too.
+  act(() => {
+    release();
+  });
+  const saved = await screen.findByRole("complementary", { name: "Backup saved" });
+  fireEvent.keyDown(within(saved).getByRole("button", { name: "Done" }), { key: "Escape" });
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Backup saved" })).toBeNull();
+  });
+});
+
 test("backup_sends_this_vaults_session_generation_and_a_request_and_nothing_else", async () => {
   await unlocked();
   const panel = await openBackup();
