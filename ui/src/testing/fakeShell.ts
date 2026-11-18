@@ -327,9 +327,10 @@ export interface FakeShell {
   answerClearCopied(answer: "cleared" | "gone" | "busy"): void;
   /**
    * A close or a Quit while a job runs, as the shell asks it (Plan 4B Task 12): `lockbox://close-asked` goes out and the question is pending,
-   * with nothing locked, hidden or cancelled, until `close_answer`. `running` is the kinds as the shell names them (distinct, in start order).
+   * with nothing locked, hidden or cancelled, until `close_answer`. `running` is the kinds as the shell names them (distinct, in start order);
+   * `restoreWaiting` is a finished restore waiting for its yes at 24d (Task 13d), alone or beside jobs.
    */
-  askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean }): void;
+  askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean; restoreWaiting?: boolean }): void;
   /** The shell's lock epoch changes (Lock all, Windows locking or sleeping, an idle lock): `lockbox://lock-epoch` goes out and a pending question is dropped. */
   changeLockEpoch(reason?: string): void;
   /** Whether a question is waiting for `close_answer`. */
@@ -3814,9 +3815,9 @@ export function installFakeShell(
     },
     outputJournalResets: () => outputResets,
     closeWindow: closeAsBefore,
-    askClose: (reason, { running: kinds, pastSwap = false }) => {
+    askClose: (reason, { running: kinds, pastSwap = false, restoreWaiting = false }) => {
       pendingClose = reason;
-      emit("lockbox://close-asked", { reason, running: kinds, past_swap: pastSwap });
+      emit("lockbox://close-asked", { reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting });
     },
     changeLockEpoch: bumpEpoch,
     pendingClose: () => pendingClose !== undefined,

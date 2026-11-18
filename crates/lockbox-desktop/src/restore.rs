@@ -574,6 +574,11 @@ impl Restores {
         }
     }
 
+    /// Whether a restore is extracted, checked and waiting for the person's yes at 24d ([`RestoreState::Prepared`]).
+    pub fn waiting(&self) -> bool {
+        matches!(lock(&self.inner).state, RestoreState::Prepared { .. })
+    }
+
     /// The prepared restore `id`, taken out of the state, which becomes `Committing`. `NotFound`, `Cancelled` or `Busy`
     /// as [`Inner::not_prepared`] says.
     fn begin_commit(&self, id: u32) -> ShellResult<Commit> {
@@ -4363,8 +4368,9 @@ mod tests {
     /// Ask 15: a close or Quit that comes once the engine has written `swapping` says the restore is past the point of
     /// cancelling (`past_swap`), so the page can say it will finish or be undone the next time Lockbox opens; one that
     /// comes while the restore is committing but before that point does not, and neither does a restore waiting for its
-    /// yes. Asked from inside the commit, at each of the two points, and once while it waits. Close anyway in the swap
-    /// runs the old close, which cancels and locks, and the swap finishes all the same: nothing is lost.
+    /// yes (which asks for its own reason, `restore_waiting`, and is kept here). Asked from inside the commit, at each
+    /// of the two points, and once while it waits. Close anyway in the swap runs the old close, which cancels and
+    /// locks, and the swap finishes all the same: nothing is lost.
     #[test]
     fn close_past_the_swap_says_it_finishes_next_time() {
         let ts = TestShell::new();
@@ -4375,11 +4381,12 @@ mod tests {
         let backup = backup_of(&ts, s, g, "family.lockbox-backup");
         let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
 
-        // Waiting for the yes: no job runs, so a close does not ask at all.
+        // Waiting for the yes: no job runs and nothing is past its swap, so the question is about the waiting restore
+        // alone; Keep it open uses it up.
         let view = prepared(&ts, &backup, &parent);
         assert!(!ts.shell.restore.past_swap());
-        assert!(!ts.shell.ask_before_closing(CloseReason::Close));
-        assert!(ts.events.close_asked().is_empty());
+        assert!(ts.shell.ask_before_closing(CloseReason::Close));
+        assert_eq!(ts.shell.close_answer(false), Ok(()));
 
         // Committing, before the journal says `swapping`, then after it.
         let (shell, once) = (Arc::clone(&ts.shell), Cell::new(true));
@@ -4407,8 +4414,9 @@ mod tests {
         assert_eq!(
             ts.events.close_asked(),
             [
-                json!({ "reason": "close", "running": ["restore"], "past_swap": false }),
-                json!({ "reason": "quit", "running": ["restore"], "past_swap": true }),
+                waiting_question("close"),
+                json!({ "reason": "close", "running": ["restore"], "past_swap": false, "restore_waiting": false }),
+                json!({ "reason": "quit", "running": ["restore"], "past_swap": true, "restore_waiting": false }),
             ]
         );
         // The swap went through whatever was asked; nothing was lost, and the question outlived the commit.
@@ -4419,6 +4427,298 @@ mod tests {
         assert_eq!(ts.window.exits(), 0, "asking exited");
         let (s2, g2) = unlock(&ts, restored.vault);
         assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Task 13d: closing while a restore waits for its answer (24d).
+    // -----------------------------------------------------------------------------------------------------------
+
+    /// What the page is sent when a close or Quit finds a finished restore waiting and no job running.
+    fn waiting_question(reason: &str) -> Value {
+        json!({ "reason": reason, "running": [], "past_swap": false, "restore_waiting": true })
+    }
+
+    /// An open vault, a backup of it, and a restore of that backup waiting at 24d, with the window's first-close
+    /// explanation out of the way. What the close tests start from.
+    struct Waiting {
+        ts: TestShell,
+        dir: PathBuf,
+        parent: PathBuf,
+        before: Vec<String>,
+        view: RestorePreparedView,
+    }
+
+    fn a_restore_waiting() -> Waiting {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.shell.settings.mark_close_explained().unwrap();
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+        let before = names(&dir);
+        let view = prepared(&ts, &backup, &parent);
+        assert!(ts.shell.restore.waiting());
+        Waiting {
+            ts,
+            dir,
+            parent,
+            before,
+            view,
+        }
+    }
+
+    /// The window's close button with a restore waiting for the yes and nothing else running asks first: nothing is
+    /// locked, hidden or cancelled, the restore and its staging folder and journal stay, and the page is sent one
+    /// question that says only that a restore waits.
+    #[test]
+    fn close_with_a_restore_waiting_asks_first() {
+        let Waiting {
+            ts,
+            parent,
+            before,
+            dir,
+            ..
+        } = a_restore_waiting();
+
+        ts.shell.close_or_ask();
+
+        assert_eq!(ts.events.close_asked(), [waiting_question("close")]);
+        assert_eq!(ts.window.hides(), 0);
+        assert_eq!(ts.window.forwards(), 0, "a close has the window up already");
+        assert!(ts.events.locked().is_empty());
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .all(|s| s.state == SessionState::Unlocked)
+        );
+        assert!(ts.events.notices().is_empty());
+        assert!(ts.shell.restore.waiting(), "asking ended the restore");
+        assert_eq!(staging_in(&parent).len(), 1);
+        assert!(ts.shell.paths.journal.exists());
+        assert_eq!(names(&dir), before);
+        // A second close while the question shows changes nothing.
+        ts.shell.close_or_ask();
+        assert_eq!(ts.events.close_asked().len(), 1);
+    }
+
+    /// The tray's Quit is asked the same way, with the window shown first (it comes from the tray) and no exit until the
+    /// answer.
+    #[test]
+    fn quit_with_a_restore_waiting_asks_first() {
+        let Waiting { ts, .. } = a_restore_waiting();
+
+        assert!(ts.shell.ask_before_closing(CloseReason::Quit));
+
+        assert_eq!(ts.events.close_asked(), [waiting_question("quit")]);
+        assert_eq!(ts.window.forwards(), 1, "a Quit shows the window first");
+        assert_eq!(ts.window.exits(), 0);
+        assert!(ts.shell.restore.waiting());
+        assert!(ts.events.locked().is_empty());
+    }
+
+    /// Close anyway runs today's close, whose lock of every vault ends the prepared restore: its staging folder and
+    /// journal go, the vault is as it was, no older copy is made, and the commit that comes after is refused as
+    /// cancelled. The window hides last, with every vault locked. A Quit's yes ends it too, and exits.
+    #[test]
+    fn close_anyway_with_a_restore_waiting_ends_it_then_hides_and_locks() {
+        let Waiting {
+            ts,
+            dir,
+            parent,
+            before,
+            view,
+        } = a_restore_waiting();
+        ts.shell.close_or_ask();
+
+        let (seen, shell) = (Arc::new(Mutex::new(None)), Arc::clone(&ts.shell));
+        let at_hide = Arc::clone(&seen);
+        ts.window.during_next_hide(move || {
+            *lock(&at_hide) = Some((
+                shell.restore.is_idle(),
+                shell
+                    .sessions
+                    .list()
+                    .iter()
+                    .map(|s| s.state)
+                    .collect::<Vec<_>>(),
+            ));
+        });
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        ended(&ts);
+
+        assert_eq!(
+            *lock(&seen),
+            Some((true, vec![SessionState::Locked])),
+            "the window hid before the restore ended and the vault locked"
+        );
+        assert_eq!(ts.window.hides(), 1);
+        assert!(!ts.shell.restore.waiting());
+        assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
+        assert_eq!(names(&dir), before, "the vault was not touched");
+        assert_eq!(names(&parent).len(), 1, "no older copy was made");
+        assert_eq!(
+            ts.shell.restore_commit(view.restore, REQUEST).err(),
+            CANCELLED
+        );
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+
+        // The same for a Quit.
+        let Waiting {
+            ts,
+            dir,
+            parent,
+            before,
+            ..
+        } = a_restore_waiting();
+        assert!(ts.shell.ask_before_closing(CloseReason::Quit));
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        ended(&ts);
+        assert_eq!(ts.window.exits(), 1);
+        assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
+        assert_eq!(names(&dir), before);
+    }
+
+    /// Keep it open changes nothing: the restore still waits, with its staging folder and journal, and its commit goes
+    /// through afterwards and replaces the vault with the older copy kept. The next close asks again.
+    #[test]
+    fn keep_it_open_leaves_the_restore_waiting() {
+        let Waiting {
+            ts,
+            dir,
+            parent,
+            view,
+            ..
+        } = a_restore_waiting();
+        ts.shell.close_or_ask();
+
+        assert_eq!(ts.shell.close_answer(false), Ok(()));
+
+        assert!(ts.shell.restore.waiting());
+        assert_eq!(ts.window.hides(), 0);
+        assert!(ts.events.locked().is_empty());
+        assert_eq!(staging_in(&parent).len(), 1);
+        assert!(ts.shell.paths.journal.exists());
+        assert_eq!(ts.shell.close_answer(false), Err(ShellError::NotFound));
+        ts.shell.close_or_ask();
+        assert_eq!(
+            ts.events.close_asked(),
+            [waiting_question("close"), waiting_question("close")]
+        );
+        assert_eq!(ts.shell.close_answer(false), Ok(()));
+
+        let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        assert!(restored.before_restore);
+        assert!(dir.is_dir() && !ts.shell.paths.journal.exists());
+        assert!(staging_in(&parent).is_empty());
+        assert!(!ts.shell.restore.waiting());
+        let (s2, g2) = unlock(&ts, restored.vault);
+        assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
+    }
+
+    /// `restore_waiting` is true only between the copy being finished and the answer: false with nothing alive, while
+    /// the backup is being extracted, while it commits (before and after the swap is written), after the commit, after
+    /// a discard and after a lock ended it.
+    #[test]
+    fn restore_waiting_is_false_while_preparing_committing_or_idle() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        assert!(!ts.shell.restore.waiting(), "idle");
+
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        for step in [
+            "restore.after_entry",
+            "restore.before_swapping",
+            "restore.after_journal",
+        ] {
+            let (shell, seen) = (Arc::clone(&ts.shell), Rc::clone(&seen));
+            failpoint::observe(
+                step,
+                Box::new(move || seen.borrow_mut().push((step, shell.restore.waiting()))),
+            );
+        }
+        let view = prepared(&ts, &backup, &parent);
+        assert!(ts.shell.restore.waiting(), "waiting for the yes");
+        ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        failpoint::disarm_all();
+
+        let steps: Vec<&str> = seen.borrow().iter().map(|(step, _)| *step).collect();
+        for step in [
+            "restore.after_entry",
+            "restore.before_swapping",
+            "restore.after_journal",
+        ] {
+            assert!(steps.contains(&step), "{step} was never reached");
+        }
+        assert!(
+            seen.borrow().iter().all(|(_, waiting)| !waiting),
+            "{:?}",
+            seen.borrow()
+        );
+        assert!(!ts.shell.restore.waiting(), "after the commit");
+
+        let again = prepared(&ts, &backup, &parent);
+        assert!(ts.shell.restore.waiting());
+        ts.shell.restore_discard(again.restore).unwrap();
+        assert!(!ts.shell.restore.waiting(), "after a discard");
+
+        prepared(&ts, &backup, &parent);
+        assert!(ts.shell.restore.waiting());
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        ended(&ts);
+        assert!(!ts.shell.restore.waiting(), "after a lock ended it");
+    }
+
+    /// The old question stays as it was for a close with no job and no restore: every vault locks, the window hides,
+    /// and the page is asked nothing. Also after a restore that finished or was discarded, which leaves nothing waiting.
+    #[test]
+    fn close_with_no_job_and_no_restore_hides_and_locks_as_before() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.shell.settings.mark_close_explained().unwrap();
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        let discarded = prepared(&ts, &backup, &parent);
+        ts.shell.restore_discard(discarded.restore).unwrap();
+        assert!(ts.shell.restore.is_idle());
+
+        ts.shell.close_or_ask();
+
+        assert!(ts.events.close_asked().is_empty());
+        assert_eq!(ts.window.hides(), 1);
+        assert_eq!(ts.shell.sessions.list()[0].state, SessionState::Locked);
+        assert!(ts.events.locked().iter().any(|(id, _, _)| *id == s));
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+    }
+
+    /// A waiting restore and a running job make one question that names both; its yes cancels the job and ends the
+    /// restore. (The page shows the job's words.)
+    #[test]
+    fn a_waiting_restore_and_a_running_job_ask_once_and_one_yes_ends_both() {
+        let Waiting { ts, parent, .. } = a_restore_waiting();
+        let token = CancelToken::new();
+        let _backup = ts.shell.autolock.begin(
+            Some(ts.shell.sessions.list()[0].session),
+            crate::jobs::JobKind::Backup,
+            token.clone(),
+        );
+
+        ts.shell.close_or_ask();
+        assert_eq!(
+            ts.events.close_asked(),
+            [json!({
+                "reason": "close", "running": ["backup"], "past_swap": false, "restore_waiting": true
+            })]
+        );
+
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        ended(&ts);
+        assert!(token.is_cancelled());
+        assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
     }
 
     /// The destination is locked with the restore's reason before the first rename.

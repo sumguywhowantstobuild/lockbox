@@ -50,13 +50,16 @@ const BACKUP_TITLE = "A backup is running";
 const ONE_JOB_TEXT = "Closing will cancel it, and nothing half-made is left behind.";
 const MANY_TITLE = "Several jobs are running";
 const MANY_TEXT = "Closing will cancel them, and nothing half-made is left behind.";
+const KEEP_OPEN = "Keep it open";
+const WAITING_TITLE = "A restore is waiting for your answer";
+const WAITING_TEXT = "Closing cancels it. Your vault stays as it is, and you can start the restore again.";
 const SWAP_TITLE = "A restore is finishing";
 const SWAP_TEXT =
   "It's past the point of cancelling. If you close now, Lockbox finishes or undoes it the next time it opens, so nothing is lost.";
 
-function asked(reason: "close" | "quit", running: string[], pastSwap = false) {
+function asked(reason: "close" | "quit", running: string[], pastSwap = false, restoreWaiting = false) {
   act(() => {
-    shell.askClose(reason, { running, pastSwap });
+    shell.askClose(reason, { running, pastSwap, restoreWaiting });
   });
 }
 
@@ -376,12 +379,17 @@ test("an_event_that_is_not_a_question_asks_nothing", async () => {
     null,
     "close",
     { reason: "close" },
-    { reason: "shutdown", running: ["backup"], past_swap: false },
-    { reason: "close", running: "backup", past_swap: false },
-    { reason: "close", running: ["backup"], past_swap: "no" },
-    // Nothing running and nothing past its swap: there is nothing to say.
+    { reason: "shutdown", running: ["backup"], past_swap: false, restore_waiting: false },
+    { reason: "close", running: "backup", past_swap: false, restore_waiting: false },
+    { reason: "close", running: ["backup"], past_swap: "no", restore_waiting: false },
+    { reason: "close", running: ["backup"], past_swap: false, restore_waiting: "no" },
+    // A flag that is not a boolean is not a question, even beside a running job, and even when it says yes.
+    { reason: "close", running: [], past_swap: false, restore_waiting: "yes" },
+    { reason: "close", running: [], past_swap: false, restore_waiting: 1 },
     { reason: "close", running: [], past_swap: false },
-    { reason: "close", running: ["format_disk"], past_swap: false },
+    // Nothing running, nothing past its swap and no restore waiting: there is nothing to say.
+    { reason: "close", running: [], past_swap: false, restore_waiting: false },
+    { reason: "close", running: ["format_disk"], past_swap: false, restore_waiting: false },
   ];
   for (const payload of bad) {
     act(() => {
@@ -391,6 +399,102 @@ test("an_event_that_is_not_a_question_asks_nothing", async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(answersSent()).toEqual([]);
+});
+
+// Task 13d: a restore finished and waiting for its yes at 24d (nothing runs) is a question of its own.
+test("close_question_says_a_restore_is_waiting", async () => {
+  await unlocked();
+  for (const reason of ["close", "quit"] as const) {
+    asked(reason, [], false, true);
+    const dialog = await screen.findByRole("dialog", { name: WAITING_TITLE });
+    expect(within(dialog).getByText(WAITING_TEXT)).toBeTruthy();
+    expect(document.getElementById(dialog.getAttribute("aria-describedby") ?? "")?.textContent).toBe(WAITING_TEXT);
+    // Close anyway, then Keep it open; the safe one holds focus first, so a stray Enter closes nothing.
+    expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual([ANYWAY, KEEP_OPEN]);
+    await waitFor(() => {
+      expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: KEEP_OPEN }));
+    });
+    act(() => {
+      shell.changeLockEpoch();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+  }
+
+  // Past the swap, Ask 15's words win; a running job's question wins over the waiting restore, and says "Keep it running" as it does.
+  asked("close", ["restore"], true, true);
+  const swap = await screen.findByRole("dialog", { name: SWAP_TITLE });
+  expect(within(swap).getAllByRole("button").map((button) => button.textContent)).toEqual([ANYWAY, KEEP]);
+  act(() => {
+    shell.changeLockEpoch();
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  asked("close", ["backup"], false, true);
+  const job = await screen.findByRole("dialog", { name: BACKUP_TITLE });
+  expect(within(job).getByText(ONE_JOB_TEXT)).toBeTruthy();
+  expect(within(job).getAllByRole("button").map((button) => button.textContent)).toEqual([ANYWAY, KEEP]);
+  expect(screen.queryByText(WAITING_TITLE)).toBeNull();
+  act(() => {
+    shell.changeLockEpoch();
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  asked("quit", ["import", "backup"], false, true);
+  await screen.findByRole("dialog", { name: MANY_TITLE });
+  expect(screen.queryByText(WAITING_TITLE)).toBeNull();
+  expect(document.querySelectorAll("style")).toHaveLength(0);
+});
+
+test("a_waiting_restore_alone_is_a_question", async () => {
+  await unlocked();
+  // No known kind and nothing past its swap, but a restore waits: asked, and answered like any other question.
+  asked("close", [], false, true);
+  const dialog = await screen.findByRole("dialog", { name: WAITING_TITLE });
+  fireEvent.click(within(dialog).getByRole("button", { name: KEEP_OPEN }));
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
+  expect(shell.closeAnswers()).toEqual([false]);
+  expect(shell.sessionOf(7)?.unlocked).toBe(true);
+  expect(shell.windowHidden()).toBe(false);
+
+  // Kinds the page does not know do not hide it; Close anyway runs the close, which locks and explains 5b.
+  asked("close", ["format_disk"], false, true);
+  const again = await screen.findByRole("dialog", { name: WAITING_TITLE });
+  fireEvent.click(within(again).getByRole("button", { name: ANYWAY }));
+  expect(await screen.findByRole("dialog", { name: "Lockbox stays by the clock" })).toBeTruthy();
+  expect(answersSent()).toEqual([
+    ["close_answer", { go: false }],
+    ["close_answer", { go: true }],
+  ]);
+  expect(shell.closeAnswers()).toEqual([false, true]);
+  expect(shell.sessionOf(7)?.unlocked).toBe(false);
+  nothingOfTheVaultIsOnScreen();
+});
+
+test("a_waiting_restore_alone_over_the_lock_screen_is_a_question_and_escape_keeps_it_open", async () => {
+  await locked();
+  asked("quit", [], false, true);
+  const dialog = await screen.findByRole("dialog", { name: WAITING_TITLE });
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
+  expect(shell.quits()).toBe(0);
+});
+
+test("close_question_with_a_waiting_restore_has_no_axe_violations", async () => {
+  const { container } = await unlocked();
+  asked("close", [], false, true);
+  await screen.findByRole("dialog", { name: WAITING_TITLE });
+  await expectNoAxe(container);
+  await expectNoAxe(document.body);
 });
 
 test("a_second_question_while_one_shows_changes_its_words", async () => {

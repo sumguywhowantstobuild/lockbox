@@ -48,7 +48,7 @@ pub const JOB_STARTED_EVENT: &str = "lockbox://job-started";
 pub const PROGRESS_EVENT: &str = "lockbox://progress";
 /// All vaults locked, or the app closing, with or without any open: `{ epoch, reason }`.
 pub const LOCK_EPOCH_EVENT: &str = "lockbox://lock-epoch";
-/// A close or Quit arrived while a job runs: `{ reason, running, past_swap }`. Sent to the main window and never kept.
+/// A close or Quit arrived while a job runs or a restore waits: `{ reason, running, past_swap, restore_waiting }`. Sent to the main window and never kept.
 pub const CLOSE_ASKED_EVENT: &str = "lockbox://close-asked";
 
 /// A question asked of the page: what it was about, and the lock epoch it was asked in. A lock of all vaults changes the
@@ -306,11 +306,12 @@ impl Shell {
         }
     }
 
-    /// With at least one job running (every operation the auto-lock counts: [`AutoLock::running_kinds`]), asks the page
-    /// whether to go on with a close or Quit (`lockbox://close-asked`) and answers `true`; nothing is locked, hidden or
-    /// cancelled until [`close_answer`](Self::close_answer). With none running, answers `false` and does nothing: the
-    /// caller closes as always. A Quit shows the window first (it comes from the tray, with the window hidden), then
-    /// asks.
+    /// With at least one job running (every operation the auto-lock counts: [`AutoLock::running_kinds`]), or a restore
+    /// finished and waiting for its yes at 24d ([`Restores::waiting`]), asks the page whether to go on with a close or
+    /// Quit (`lockbox://close-asked`) and answers `true`; nothing is locked, hidden or cancelled until
+    /// [`close_answer`](Self::close_answer). The close's own lock of every vault is what ends a waiting restore. With
+    /// neither, answers `false` and does nothing: the caller closes as always. A Quit shows the window first (it comes
+    /// from the tray, with the window hidden), then asks.
     ///
     /// While a question is pending in the same lock epoch, a second request changes nothing: no second event, no second
     /// window show, the first one's reason stays. A change of the epoch (Lock all, Windows locking or sleeping, an idle
@@ -325,7 +326,8 @@ impl Shell {
             }
             *pending = None;
             let running = self.autolock.running_kinds();
-            if running.is_empty() {
+            let restore_waiting = self.restore.waiting();
+            if running.is_empty() && !restore_waiting {
                 return false;
             }
             *pending = Some(PendingClose { reason, epoch });
@@ -333,6 +335,7 @@ impl Shell {
                 reason,
                 running,
                 past_swap: self.restore.past_swap(),
+                restore_waiting,
             }
         };
         if reason == CloseReason::Quit {
@@ -1154,30 +1157,44 @@ mod tests {
 
     /// What the page is sent when a close arrives while jobs run.
     fn asked(reason: &str, running: &[&str], past_swap: bool) -> Value {
-        json!({ "reason": reason, "running": running, "past_swap": past_swap })
+        json!({
+            "reason": reason, "running": running, "past_swap": past_swap, "restore_waiting": false
+        })
     }
 
-    /// `lockbox://close-asked` has exactly the frozen JSON shape: a snake_case reason, the kinds in start order, and
-    /// whether the swap is past. Nothing else (no path, no name, no count).
+    /// `lockbox://close-asked` has exactly the frozen JSON shape: a snake_case reason, the kinds in start order,
+    /// whether the swap is past, and whether a restore waits for its yes. Nothing else (no path, no name, no count).
     #[test]
     fn close_asked_has_the_frozen_shape() {
         let event = CloseAsked {
             reason: CloseReason::Close,
             running: vec![JobKind::Import, JobKind::Backup],
             past_swap: false,
+            restore_waiting: false,
         };
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
-            r#"{"reason":"close","running":["import","backup"],"past_swap":false}"#
+            r#"{"reason":"close","running":["import","backup"],"past_swap":false,"restore_waiting":false}"#
         );
         let quit = CloseAsked {
             reason: CloseReason::Quit,
             running: vec![JobKind::SaveCopy, JobKind::OpenBackup, JobKind::CopyItem],
             past_swap: true,
+            restore_waiting: false,
         };
         assert_eq!(
             serde_json::to_value(&quit).unwrap(),
             asked("quit", &["save_copy", "open_backup", "copy_item"], true)
+        );
+        let waiting = CloseAsked {
+            reason: CloseReason::Close,
+            running: vec![],
+            past_swap: false,
+            restore_waiting: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&waiting).unwrap(),
+            r#"{"reason":"close","running":[],"past_swap":false,"restore_waiting":true}"#
         );
         assert_eq!(CLOSE_ASKED_EVENT, "lockbox://close-asked");
     }

@@ -197,7 +197,8 @@ test.each([
   ["onProgress", "lockbox://progress", { operation: 9, scope: { type: "launch", epoch: 2 }, kind: "test", done: 5, total: 10, finished: false }],
   ["onLockEpoch", "lockbox://lock-epoch", { epoch: 3, reason: "windows_locked" }],
   // Task 12: the shell asks before closing or quitting while a job runs; kinds and a flag only.
-  ["onCloseAsked", "lockbox://close-asked", { reason: "close", running: ["import", "backup"], past_swap: false }],
+  ["onCloseAsked", "lockbox://close-asked", { reason: "close", running: ["import", "backup"], past_swap: false, restore_waiting: false }],
+  ["onCloseAsked", "lockbox://close-asked", { reason: "quit", running: [], past_swap: false, restore_waiting: true }],
 ] as const)("%s_hands_over_each_event_as_it_came", async (name, channel, payload) => {
   const seen = vi.fn();
   await (bridge[name] as (handler: (event: unknown) => void) => Promise<unknown>)(seen);

@@ -304,7 +304,9 @@ mod tests {
         );
         assert_eq!(
             ts.events.close_asked(),
-            [serde_json::json!({ "reason": "quit", "running": ["backup"], "past_swap": false })]
+            [serde_json::json!({
+                "reason": "quit", "running": ["backup"], "past_swap": false, "restore_waiting": false
+            })]
         );
         assert!(!all_locked(&ts));
         assert!(ts.events.locked().is_empty());

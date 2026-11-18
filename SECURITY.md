@@ -175,12 +175,14 @@ trusted than Rust.
   spent in them does not count. Windows lock and sleep still cancel them. A question waiting for your answer does not
   pause anything, and one exception to what a lock drops: a finished restore waiting for your answer survives an idle
   lock (see "A finished restore waits through an idle lock").
-- **Closing or quitting while a long operation runs asks first, and nothing locks until you answer.** The window's close
-  button and the tray's Quit ask whether to go on (any operation the idle timer counts, including Open, Replace and
-  copying an item). Until you answer, the operations keep running and the vaults stay unlocked; the question is dropped
-  by any lock of all vaults (Lock all, Windows lock or sleep, an idle lock), and it is never kept across a restart.
-  "Close anyway" is the only answer that cancels the operations and locks (a close locks, then hides once the first-close explanation has been seen; a Quit locks and
-  exits, waiting at most 2 seconds for the lock to finish); "Keep it running" changes nothing. A restore past its swap
+- **Closing or quitting while a long operation runs, or while a finished restore waits for your answer, asks first, and
+  nothing locks until you answer.** The window's close button and the tray's Quit ask whether to go on (any operation the
+  idle timer counts, including Open, Replace and copying an item, or a restore waiting at "Replace your vault with
+  this?"). Until you answer, the operations keep running, a waiting restore keeps waiting, and the vaults stay unlocked;
+  the question is dropped by any lock of all vaults (Lock all, Windows lock or sleep, an idle lock), and it is never kept
+  across a restart.
+  "Close anyway" is the only answer that cancels the operations, ends a waiting restore (the vault stays as it is) and locks (a close locks, then hides once the first-close explanation has been seen; a Quit locks and
+  exits, waiting at most 2 seconds for the lock to finish); "Keep it running" (or "Keep it open" for a waiting restore) changes nothing. A restore past its swap
   cannot be cancelled and finishes, or is undone at the next launch. Windows ending the session (signing out, shutdown)
   never asks and never waits: it locks and exits as before. An unanswered question leaves the vaults unlocked while the operation runs,
   as the paused idle timer already does.
