@@ -761,6 +761,33 @@ test("copy_to_a_vault_sends_the_chosen_vault_and_folder", async () => {
   });
 });
 
+test("copy_to_a_vault_moves_focus_into_its_form", async () => {
+  await twoVaults();
+  await openTheBackupFrom("Home, vault menu");
+  const panel = await select("Bot admin console");
+  // jsdom draws nothing, so it has no scrolling of its own: the call is what is checked.
+  const scrolled = vi.fn();
+  Element.prototype.scrollIntoView = scrolled;
+  try {
+    const opener = within(panel).getByRole("button", { name: "Copy to a vault" });
+    fireEvent.click(opener);
+    // At a small window the form opens below the panel's fold: focus goes to its first choice, and the whole form is brought into view.
+    const form = within(panel).getByRole("form", { name: "Copy to a vault" });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(within(panel).getByRole("combobox", { name: "Vault" }));
+    });
+    expect(scrolled.mock.contexts).toContain(form);
+    expect(opener.getAttribute("aria-expanded")).toBe("true");
+    // Cancel gives focus back to the button, as before.
+    press(panel, "Cancel");
+    await waitFor(() => {
+      expect(document.activeElement).toBe(within(panel).getByRole("button", { name: "Copy to a vault" }));
+    });
+  } finally {
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  }
+});
+
 test("the_folder_of_the_same_name_is_chosen_and_cancel_closes_the_form_with_nothing_sent", async () => {
   await twoVaults();
   await openTheBackupFrom("Home, vault menu");

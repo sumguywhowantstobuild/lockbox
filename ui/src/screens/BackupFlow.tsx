@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import { formatBytes, leftOutWords } from "../format";
 import { focusBack } from "../focus";
 import { useJob } from "../jobs";
@@ -66,6 +66,13 @@ export function BackupPanel({ data }: { data: SessionData }) {
     focusBack("settings");
   };
   const waiting = step?.phase === "running" && job === null;
+  // Escape closes the panel, as the other panels do, except while the backup runs: a stray key does not put away a long backup's bar (Cancel and
+  // Close panel do).
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Escape" || event.defaultPrevented || step?.phase === "running") return;
+    event.preventDefault();
+    close();
+  };
   if (step?.phase === "saved") {
     const left = leftOutWords(step.view);
     return (
@@ -73,6 +80,7 @@ export function BackupPanel({ data }: { data: SessionData }) {
         title="Backup saved"
         titleRef={title}
         onClose={close}
+        onKeyDown={onKeyDown}
         footer={
           <>
             <Button
@@ -106,6 +114,7 @@ export function BackupPanel({ data }: { data: SessionData }) {
         title="Back up"
         titleRef={title}
         onClose={close}
+        onKeyDown={onKeyDown}
         footer={
           <Button look="pill-main" onClick={close}>
             OK
@@ -120,7 +129,7 @@ export function BackupPanel({ data }: { data: SessionData }) {
   if (job !== null) {
     // 22b: the bar and its Cancel are Task 2's progress part, named for the vault.
     return (
-      <Panel title="Back up" titleRef={title} onClose={close}>
+      <Panel title="Back up" titleRef={title} onClose={close} onKeyDown={onKeyDown}>
         <JobProgress operation={job.operation} label={`Backing up ${data.name}`} warning={KEEP_OPEN} />
       </Panel>
     );
@@ -133,6 +142,7 @@ export function BackupPanel({ data }: { data: SessionData }) {
       subtitle={`For ${data.name}.`}
       titleRef={title}
       onClose={close}
+      onKeyDown={onKeyDown}
       footer={
         <>
           <Button onClick={close}>Cancel</Button>
