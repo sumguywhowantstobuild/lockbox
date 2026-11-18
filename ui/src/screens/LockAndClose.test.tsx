@@ -410,3 +410,27 @@ test("the_vault_menu_keeps_its_action_in_reach_with_many_vaults", async () => {
   expect(rule(".mscroll")).toMatch(/overflow-y:\s*auto/);
   expect(rule(".mscroll")).toMatch(/min-height:\s*0/);
 });
+
+test("the_vault_menu_keeps_its_action_in_reach_with_many_open_vaults", async () => {
+  // Every open vault and backup is a row: with several of them at a small window, the rows scroll in an area of their own, and the Lock action
+  // stays outside it, as the locked vaults' lines do.
+  await unlocked([{ ...MINE }, { ...HOME }, { id: 9, name: "Work", items: [] }]);
+  for (const id of [8, 9]) {
+    await act(async () => {
+      expect(await unlock(id, PASSWORD)).toBe("opened");
+    });
+  }
+  const menu = await openVaultMenu("Work");
+  const rows = within(menu).getAllByRole("menuitemradio");
+  expect(rows).toHaveLength(3);
+  const area = rows[0]?.closest(".mscroll");
+  expect(area).not.toBeNull();
+  for (const row of rows) expect(row.closest(".mscroll")).toBe(area);
+  const lock = within(menu).getByRole("menuitem", { name: "Lock Work" });
+  expect(lock.closest(".mscroll")).toBeNull();
+  // With locked vaults listed too, the group that holds the rows may shrink inside the menu, so its own area is what scrolls (jsdom lays nothing out).
+  const css = readBeside(import.meta.url, "../styles/components.css");
+  const at = css.indexOf("\n.menu.mwide > .mgroup {");
+  expect(at).toBeGreaterThan(-1);
+  expect(css.slice(at, css.indexOf("}", at))).toMatch(/min-height:\s*0/);
+});

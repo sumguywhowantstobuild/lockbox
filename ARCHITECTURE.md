@@ -317,7 +317,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `lockbox://job-started`, `lockbox://progress` and `lockbox://lock-epoch` events; also the shape of `lockbox://close-asked` |
 | `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
 | `outputs.rs` | The output journal (`pending-outputs.json`), the gate every decrypted file is published through, and the launch sweep |
-| `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries; also `save_name`, the lighter name rule for a folder's saved files (only what Windows refuses or what could leave the folder is changed) |
+| `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries; also `save_name`, the lighter name rule for a folder's saved files (only what Windows refuses, what could leave the folder, or a direction control that makes an executable read as a document is changed) |
 | `restore.rs` | One restore at a time: the five steps (pick, password check, folder, copy, swap), its state machine, launch recovery, pre-restore copies and their checks |
 | `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
 | `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
@@ -402,11 +402,14 @@ timer counts (each once, in start order), and `Restores::waiting`, which is true
 restore extracted, checked and waiting at 24d for the yes). With none running and none waiting, both do what they always
 did. With either, nothing is locked, hidden or cancelled: the page is sent `lockbox://close-asked` (`reason` close or
 quit, the kinds, `past_swap` and `restore_waiting`; the page shows a job's question before the waiting restore's) and the shell keeps
-one pending question, with the lock epoch it was asked in. A Quit comes from the tray, so the window is shown first. A
-second close or Quit while it is pending changes nothing, and a lock of all vaults (a new epoch) clears it. The page
+one pending question, with the lock epoch it was asked in and what was sent. A Quit comes from the tray, so the window is shown first. A
+second close or Quit while it is pending sends the same event again (the first one's reason and payload; a Quit shows the window again), so a
+question the page never showed cannot leave Close and Quit dead; the page keeps one question, so a repeat changes nothing there
+(`a_second_close_sends_the_same_question_again`). A lock of all vaults (a new epoch) clears it. The page
 answers with `close_answer(go)`: `false` changes nothing, `true` runs the old path for the question's reason (a close:
 `close_window`, whose lock cancels the jobs, ends a waiting restore and which still shows 5b on a first close; a Quit: the shutdown within 2 s,
-then the exit through `MainWindow::exit_app`). Either answer uses the question up, and an answer with none pending is
+which also waits, inside that bound, for the waiting restore's clean-up so its staging folder and journal are gone before the exit
+(`quitting_removes_the_staging_folder_and_journal_before_it_returns`), then the exit through `MainWindow::exit_app`). Either answer uses the question up, and an answer with none pending is
 `NotFound`. `past_swap` is the engine's flag from `PreparedRestore::swap_flag`, which goes on when the restore's journal
 says `swapping` (the point from which a cancel no longer counts) and is kept in `RestoreState::Committing`: a restore
 there finishes, or is undone by recovery at the next launch, whatever is answered. Windows ending the session never
@@ -517,8 +520,9 @@ restore for that refusal, `too_many_copies_keeps_the_finished_restore`, so Repla
 
 **Older copies** (`list_pre_restore`, `open_pre_restore_read_only`, `delete_pre_restore`; plain commands, not jobs). The listing
 replaces every ID, and each entry carries the folder's name (never its path), `last_written` (the local day of the newest
-modified time of the copy's two header files, in the PC's zone) and `size` (the regular files under the folder, links not
-followed), each `null` on a read error, read before the list is locked (`pre_restore_list_says_the_day_and_size`). Opening takes
+modified time of any regular file under the folder, items and stored files included, in the PC's zone) and `size` (the regular
+files under the folder, links not followed), both from one walk and each `null` on a read error, read before the list is locked
+(`pre_restore_list_says_the_day_and_size`, `an_older_copys_day_counts_the_item_files_too`). Opening takes
 the same one-box credential as Test a backup (`CredentialArg::attempts`, `pre_restore_opens_with_the_one_box_credential`); a
 delete asks first and is refused `Busy` while a session is open on the copy (`pre_restore_delete_checks`). The page keeps one
 listing and sends the ID of the newest; a copy opened read-only is a session whose place on the vault list is none, so the live

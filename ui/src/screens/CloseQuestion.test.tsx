@@ -389,7 +389,6 @@ test("an_event_that_is_not_a_question_asks_nothing", async () => {
     { reason: "close", running: [], past_swap: false },
     // Nothing running, nothing past its swap and no restore waiting: there is nothing to say.
     { reason: "close", running: [], past_swap: false, restore_waiting: false },
-    { reason: "close", running: ["format_disk"], past_swap: false, restore_waiting: false },
   ];
   for (const payload of bad) {
     act(() => {
@@ -399,6 +398,22 @@ test("an_event_that_is_not_a_question_asks_nothing", async () => {
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(answersSent()).toEqual([]);
+});
+
+test("a_question_naming_only_kinds_the_page_does_not_know_still_asks", async () => {
+  await unlocked();
+  // The shell holds its question until it is answered, so a question the page drops leaves Close and Quit doing nothing. A job the page has no name
+  // for (a kind added in the shell before the page knows it) still asks, in the words for jobs in general.
+  act(() => {
+    shell.sendRaw("lockbox://close-asked", { reason: "close", running: ["format_disk"], past_swap: false, restore_waiting: false });
+  });
+  const dialog = await screen.findByRole("dialog", { name: "Several jobs are running" });
+  expect(within(dialog).getByText("Closing will cancel them, and nothing half-made is left behind.")).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Keep it running" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
 });
 
 // Task 13d: a restore finished and waiting for its yes at 24d (nothing runs) is a question of its own.

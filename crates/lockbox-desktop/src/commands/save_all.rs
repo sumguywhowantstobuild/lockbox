@@ -1541,30 +1541,38 @@ mod tests {
                 ("CON.txt", bytes(3, 1)),
                 ("notes.", bytes(4, 2)),
                 ("Report, final & signed #2.pdf", bytes(5, 3)),
+                // A right-to-left override would make this read as a document in Explorer.
+                ("invoice\u{202E}fdp.exe", bytes(6, 4)),
             ],
         );
         let dest = destination(&ts, "Out");
         let plan = plan_in(&ts, s, g, &folder, &dest);
         let planned: Vec<String> = plan.files.iter().map(|f| f.name.clone()).collect();
-        assert_eq!(
-            planned,
-            ["_CON.txt", "notes", "Report, final & signed #2.pdf"]
-        );
+        let in_order = [
+            "_CON.txt",
+            "invoice_fdp.exe",
+            "notes",
+            "Report, final & signed #2.pdf",
+        ];
+        assert_eq!(planned, in_order);
         let view = serde_json::to_value(done(ts.shell.save_all_start(&plan.choice, 1))).unwrap();
-        assert_eq!(
-            saved_names(&view),
-            ["_CON.txt", "notes", "Report, final & signed #2.pdf"]
-        );
+        assert_eq!(saved_names(&view), in_order);
         assert_eq!(
             view["renamed"],
             json!([
                 { "from": "CON.txt", "to": "_CON.txt" },
+                { "from": "invoice\u{202E}fdp.exe", "to": "invoice_fdp.exe" },
                 { "from": "notes.", "to": "notes" }
             ])
         );
         assert_eq!(
             names(&dest),
-            ["Report, final & signed #2.pdf", "_CON.txt", "notes"]
+            [
+                "Report, final & signed #2.pdf",
+                "_CON.txt",
+                "invoice_fdp.exe",
+                "notes"
+            ]
         );
     }
 

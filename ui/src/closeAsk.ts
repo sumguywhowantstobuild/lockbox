@@ -43,8 +43,8 @@ function isKind(name: unknown): name is JobKind {
 
 /**
  * Takes in one `lockbox://close-asked`. What is not a question is ignored: a reason that is not close or quit, a flag that is not a boolean, and
- * no known kind with nothing past its swap and no restore waiting (there is nothing to say). Kinds the page does not know are left out, and each
- * kind counts once.
+ * nothing running with nothing past its swap and no restore waiting (there is nothing to say). Kinds the page does not know are left out of the
+ * words (a question with none it knows says "Several jobs are running"), and each kind counts once.
  */
 function take(event: unknown): void {
   if (typeof event !== "object" || event === null) return;
@@ -58,7 +58,9 @@ function take(event: unknown): void {
     return;
   }
   const kinds = [...new Set(running.filter(isKind))];
-  if (kinds.length === 0 && !pastSwap && !restoreWaiting) return;
+  // Nothing running, nothing past its swap and no restore waiting: there is nothing to say. A job of a kind the page has no name for still asks (in
+  // the words for jobs in general): the shell holds its question until it is answered, so a dropped one would leave Close and Quit doing nothing.
+  if (running.length === 0 && !pastSwap && !restoreWaiting) return;
   set({ reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting });
 }
 

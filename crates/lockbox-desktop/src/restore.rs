@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lockbox_core::blob::{CancelToken, NoProgress};
 use lockbox_core::fsio::{is_destination_taken, remove_dir_all_retry};
@@ -988,8 +988,9 @@ pub struct PreRestoreEntry {
     pub name: Option<String>,
     /// The folder's name only, never its path.
     pub folder: String,
-    /// The local day (`YYYY-MM-DD`) that vault was last written: the newest modified time of the copy's header files.
-    /// `None` when neither can be read.
+    /// The local day (`YYYY-MM-DD`) that vault was last written: the newest modified time of any regular file under the
+    /// copy, an item or a stored file included, not only its two header files. `None` when the folder cannot be read all
+    /// through, or holds no file.
     pub last_written: Option<String>,
     /// Bytes of every regular file under the folder, links not followed. `None` on any read error.
     pub size: Option<u64>,
@@ -1841,7 +1842,7 @@ impl Shell {
         let found: Vec<_> = found
             .into_iter()
             .map(|(vault, folder)| {
-                let (day, size) = (last_written_day(&folder, offset), folder_size(&folder));
+                let (day, size) = measure_folder(&folder, offset);
                 (vault, folder, day, size)
             })
             .collect();
@@ -2020,24 +2021,25 @@ fn pre_restore_folders(dir: &Path, registered: &[(u32, PathBuf)]) -> Vec<PathBuf
     found
 }
 
-/// The two files that hold a vault's header, and so the last time the vault was written to.
-const HEADER_FILES: [&str; 2] = ["vault.json", "vault.json.bak"];
-
-/// The local day (`YYYY-MM-DD`, the zone `offset_secs` east of UTC) of the newest modified time among the header files
-/// in `folder`: the last day that vault was written. `None` when neither can be read, or the time is before 1970.
-fn last_written_day(folder: &Path, offset_secs: i64) -> Option<String> {
-    let newest = HEADER_FILES
-        .iter()
-        .filter_map(|file| fs::metadata(folder.join(file)).ok()?.modified().ok())
-        .max()?;
-    let secs = newest.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    Some(dates::local_date_of(secs, offset_secs))
+/// What one walk of an older copy's folder finds: the local day (`YYYY-MM-DD`, the zone `offset_secs` east of UTC) of the
+/// newest modified time of any regular file under `folder` (the last day that vault was written: an item edited since the
+/// headers were last written counts), and the bytes of all of them. Folders are walked and links not followed. Both are
+/// `None` on any read error: neither is ever a guess. The day is also `None` when the folder holds no file, or its newest
+/// time is before 1970.
+fn measure_folder(folder: &Path, offset_secs: i64) -> (Option<String>, Option<u64>) {
+    let Some((newest, total)) = walk_folder(folder) else {
+        return (None, None);
+    };
+    let day = newest
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|since| dates::local_date_of(since.as_secs(), offset_secs));
+    (day, Some(total))
 }
 
-/// The bytes of every regular file under `folder`, folders walked and links not followed. `None` on any read error:
-/// a size is never a guess.
-fn folder_size(folder: &Path) -> Option<u64> {
-    let mut total = 0u64;
+/// The newest modified time (none when no file has one) and the total bytes of every regular file under `folder`.
+/// `None` on any read error.
+fn walk_folder(folder: &Path) -> Option<(Option<SystemTime>, u64)> {
+    let (mut newest, mut total) = (None::<SystemTime>, 0u64);
     let mut pending = vec![folder.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(&dir).ok()? {
@@ -2046,11 +2048,13 @@ fn folder_size(folder: &Path) -> Option<u64> {
             if kind.is_dir() {
                 pending.push(entry.path());
             } else if kind.is_file() {
-                total = total.saturating_add(entry.metadata().ok()?.len());
+                let meta = entry.metadata().ok()?;
+                total = total.saturating_add(meta.len());
+                newest = newest.max(Some(meta.modified().ok()?));
             }
         }
     }
-    Some(total)
+    Some((newest, total))
 }
 
 /// What comes before `.before-restore` or `.before-restore-<2..=99>` at the end of `candidate` (any letter case), the names
@@ -4498,9 +4502,14 @@ mod tests {
         assert_eq!(staging_in(&parent).len(), 1);
         assert!(ts.shell.paths.journal.exists());
         assert_eq!(names(&dir), before);
-        // A second close while the question shows changes nothing.
+        // A second close while the question shows sends the same question again, and changes nothing else.
         ts.shell.close_or_ask();
-        assert_eq!(ts.events.close_asked().len(), 1);
+        assert_eq!(
+            ts.events.close_asked(),
+            [waiting_question("close"), waiting_question("close")]
+        );
+        assert_eq!(ts.window.hides(), 0);
+        assert!(ts.shell.restore.waiting());
     }
 
     /// The tray's Quit is asked the same way, with the window shown first (it comes from the tray) and no exit until the
@@ -4983,6 +4992,70 @@ mod tests {
                 done.wait();
             }
         });
+    }
+
+    /// Plan 4B end-of-plan review: quitting with a finished restore waiting (Quit after Close anyway at 24d) waits for the
+    /// restore's clean-up too, so the staging folder and the journal are gone when the shutdown returns and the next
+    /// launch finds nothing to recover. No wait for the clean-up first, as `finished_restore_ended_by` does.
+    #[test]
+    fn quitting_removes_the_staging_folder_and_journal_before_it_returns() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+        let before = names(&dir);
+        let view = prepared(&ts, &backup, &parent);
+        assert_eq!(staging_in(&parent).len(), 1);
+        assert!(ts.shell.paths.journal.exists());
+
+        ts.shell.shutdown();
+
+        assert!(
+            staging_in(&parent).is_empty(),
+            "the staging folder was left for the next launch"
+        );
+        assert!(!ts.shell.paths.journal.exists(), "the journal was left");
+        assert_eq!(names(&dir), before, "the vault was not touched");
+        assert_eq!(
+            ts.shell.restore_commit(view.restore, REQUEST).err(),
+            CANCELLED
+        );
+        let _ = (s, g);
+    }
+
+    /// The wait for a clean-up under way is the shutdown's own: it comes back when the clean-up ends, not before (a
+    /// cleanup is stood in for by a count held until a thread lets it go), and a clean-up that never ends costs no more
+    /// than [`SHUTDOWN_WAIT`], the second call included.
+    #[test]
+    fn shutdown_waits_for_a_restore_clean_up_under_way_within_its_own_wait() {
+        use crate::autolock::SHUTDOWN_WAIT;
+        use std::sync::atomic::AtomicBool;
+        let ts = TestShell::new();
+        *lock(&ts.shell.restore.workers) += 1;
+        let released = AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(300));
+                released.store(true, Ordering::SeqCst);
+                *lock(&ts.shell.restore.workers) -= 1;
+                ts.shell.restore.idle.notify_all();
+            });
+            ts.shell.shutdown();
+            assert!(
+                released.load(Ordering::SeqCst),
+                "the shutdown came back with a clean-up still under way"
+            );
+        });
+
+        // One that does not end: the shutdown still returns, at its wait and no later; a second call the same.
+        *lock(&ts.shell.restore.workers) += 1;
+        for _ in 0..2 {
+            let began = Instant::now();
+            ts.shell.shutdown();
+            assert!(began.elapsed() < SHUTDOWN_WAIT + Duration::from_secs(1));
+        }
+        *lock(&ts.shell.restore.workers) -= 1;
     }
 
     /// An idle lock does not end it, but a later lock of another kind does, and one of one other vault does not.
@@ -5483,9 +5556,50 @@ mod tests {
             .unwrap();
     }
 
-    /// An older copy says the last day its vault was written (the newest modified time of its header files, as the PC's
-    /// zone calls that day) and its size (every regular file under it, links not followed). A file written later that
-    /// is not a header does not move the day; what cannot be read is `null`, never a guess.
+    /// An older copy says the last day its vault was written (the newest modified time of any regular file under it, as
+    /// the PC's zone calls that day) and its size (every regular file under it, links not followed), from one walk. A
+    /// copy edited since its headers were last written says the day of the edit: an item file written after both header
+    /// files makes the day the item file's. What cannot be read is `null`, never a guess.
+    #[test]
+    fn an_older_copys_day_counts_the_item_files_too() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", &vec![5u8; 5000]);
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let parent = vaults_folder(&ts);
+        restore_once(&ts, &backup, &parent);
+        let listed = ts.shell.list_pre_restore();
+        let aside = parent.join(&listed[0].folder);
+        let is_header =
+            |file: &Path| file.ends_with("vault.json") || file.ends_with("vault.json.bak");
+        for file in files_under(&aside) {
+            touched(&file, "2026-10-01T10:00:00Z");
+        }
+        touched(&aside.join("vault.json"), "2026-11-03T10:00:00Z");
+        touched(&aside.join("vault.json.bak"), "2026-11-04T12:00:00Z");
+        let day = |ts: &TestShell| ts.shell.list_pre_restore().remove(0).last_written;
+        assert_eq!(day(&ts).as_deref(), Some("2026-11-04"), "headers only");
+
+        // An item or a file edited afterwards, a folder down, moves the day and does not touch the headers.
+        let edited: Vec<PathBuf> = files_under(&aside)
+            .into_iter()
+            .filter(|file| !is_header(file))
+            .collect();
+        assert!(edited.len() >= 2, "an item file and a stored file");
+        touched(&edited[0], "2026-11-10T08:00:00Z");
+        assert_eq!(day(&ts).as_deref(), Some("2026-11-10"));
+        touched(&edited[1], "2026-11-12T08:00:00Z");
+        assert_eq!(day(&ts).as_deref(), Some("2026-11-12"), "the newest of all");
+
+        // The size is still from the same walk.
+        assert_eq!(
+            ts.shell.list_pre_restore().remove(0).size,
+            Some(bytes_under(&aside))
+        );
+    }
+
+    /// An older copy says the last day its vault was written and its size; the PC's zone moves the day, a link inside
+    /// the folder is not followed, and what cannot be read is `null`, never a guess.
     #[test]
     fn pre_restore_list_says_the_day_and_size() {
         let ts = TestShell::new();
@@ -5500,11 +5614,12 @@ mod tests {
 
         touched(&aside.join("vault.json"), "2026-11-03T10:00:00Z");
         touched(&aside.join("vault.json.bak"), "2026-11-04T12:00:00Z");
-        let other = files_under(&aside)
-            .into_iter()
-            .find(|file| !file.ends_with("vault.json") && !file.ends_with("vault.json.bak"))
-            .expect("the older copy holds more than its header");
-        touched(&other, "2026-12-25T12:00:00Z");
+        // Everything else in the copy is older than its headers here.
+        for file in files_under(&aside) {
+            if !file.ends_with("vault.json") && !file.ends_with("vault.json.bak") {
+                touched(&file, "2026-10-01T10:00:00Z");
+            }
+        }
 
         let day = |ts: &TestShell, hours: i64| {
             ts.clock.set_utc_offset_hours(hours);
@@ -5539,9 +5654,8 @@ mod tests {
 
         // Nothing readable is `null`.
         let nothing = ts.folder("Nothing");
-        assert_eq!(last_written_day(&nothing, 0), None);
-        assert_eq!(folder_size(&nothing.join("gone")), None);
-        assert_eq!(folder_size(&nothing), Some(0));
+        assert_eq!(measure_folder(&nothing, 0), (None, Some(0)));
+        assert_eq!(measure_folder(&nothing.join("gone"), 0), (None, None));
     }
 
     /// 24f's Open read-only takes the one box every backup field uses: a well-formed recovery key is tried as a key, then

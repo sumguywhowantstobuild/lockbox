@@ -266,7 +266,8 @@ impl Vault {
     /// An attachment whose file the source does not hold (see
     /// [`ReadOnlyVault::missing_attachments`]) stops the copy with `Damaged { "file missing" }`
     /// before anything is written, unless `skip_missing` is set: the copy then goes without
-    /// those attachments and lists them in [`CopiedItem::left_out`]. The copy may then have no
+    /// those attachments and lists them in [`CopiedItem::left_out`]. The room for the attachments that remain is
+    /// checked together ([`check_import_space`](Vault::check_import_space)) before the first is written. The copy may then have no
     /// attachments at all, even a `File` item (whose only file was missing): it keeps its kind
     /// and title. A file that is there but fails authentication, or goes missing while the copy
     /// runs, still fails the whole copy.
@@ -303,6 +304,12 @@ impl Vault {
         copy.id = new_id;
         copy.collection = collection;
         copy.attachments.retain(|a| !left_out.contains(&a.file_id));
+        // The space for the files that will be written, all together, before the first byte of any of them: each file is
+        // also checked as it goes in, but only a check of the whole copy refuses before a long copy has started.
+        let lengths: Vec<u64> = copy.attachments.iter().map(|a| a.length).collect();
+        if !lengths.is_empty() {
+            self.check_import_space(&lengths)?;
+        }
         let mut published = Vec::new();
         let built = self.build_copy(source, copy, cancel, &mut published);
         // Whether `commit_item` was reached: only then may the new item be on the disk.
@@ -1968,6 +1975,102 @@ mod tests {
         );
         assert_eq!(live.items().count(), 0);
         assert_eq!(files_listing(&live), before);
+    }
+
+    /// A volume whose free space is `free` (unknown: `None`), for the copy's own space check.
+    fn free_space(free: Option<u64>) {
+        set_volume_override(Some(VolumeInfo {
+            free_bytes: free,
+            max_file_bytes: None,
+        }));
+    }
+
+    /// Plan 4B end-of-plan review: the files of a copied item are checked for space together, before the first is
+    /// written, as an import of several files is. Two files that each fit alone but not together refuse the copy with
+    /// the numbers for both, and nothing is written; one byte more room, and the copy goes through.
+    #[test]
+    fn copying_an_item_checks_the_space_of_its_files_together() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        let (item, small, big) = two_file_login(&mut f);
+        let backup = f.backup("a.lockbox-backup");
+        let ro = open_backup(&backup).unwrap();
+        let (_parent, mut live) = live_vault();
+        live.new_item(ItemKind::Note, "already here", None).unwrap();
+        let listing = |vault: &Vault| (names(&vault.dir().join("items")), files_listing(vault));
+        let before = listing(&live);
+        let margin = 64 * MIB as u64;
+        let stored = |file: &FileId| {
+            let old = ro
+                .get_item(&item)
+                .unwrap()
+                .attachments
+                .iter()
+                .find(|a| a.file_id == *file)
+                .unwrap()
+                .length;
+            crate::blob::blob_len(old)
+        };
+        let together = stored(&small) + stored(&big);
+
+        let imports = count_imports();
+        // Each file fits alone, so the file-by-file check never refuses; together they do not.
+        free_space(Some(together + margin - 1));
+        let result = live.copy_item_from(&ro, &item, None, false, &CancelToken::new());
+        assert!(
+            matches!(result, Err(CoreError::NotEnoughSpace { needed, available })
+                if needed == together + margin && available == together + margin - 1),
+            "{result:?}"
+        );
+        assert_eq!(imports.get(), 0, "a file was written before the refusal");
+        assert_eq!(listing(&live), before);
+        assert_eq!(live.items().count(), 1);
+
+        free_space(Some(together + margin));
+        let copied = live
+            .copy_item_from(&ro, &item, None, false, &CancelToken::new())
+            .unwrap();
+        assert_eq!(live.get_item(&copied.id).unwrap().attachments.len(), 2);
+        assert_eq!(imports.get(), 2);
+    }
+
+    /// Space that cannot be read never refuses the copy, and the files left out of a copy are not counted.
+    #[test]
+    fn copying_an_item_goes_ahead_when_space_is_unknown_and_skips_left_out_files() {
+        let _disarm = Disarm;
+        let mut f = Fixture::new();
+        let (item, [_, gone, _]) = three_file_login(&mut f);
+        let (backup, _folder) = lose(&f, &[gone]);
+        let ro = open_backup(&backup).unwrap();
+        let (_parent, mut live) = live_vault();
+        let margin = 64 * MIB as u64;
+
+        free_space(None);
+        let copied = live
+            .copy_item_from(&ro, &item, None, true, &CancelToken::new())
+            .unwrap();
+        assert_eq!(copied.left_out, [gone]);
+        assert_eq!(live.get_item(&copied.id).unwrap().attachments.len(), 2);
+
+        // The room the two kept files need, and not the lost one's: exactly that is enough.
+        let kept: u64 = ro
+            .get_item(&item)
+            .unwrap()
+            .attachments
+            .iter()
+            .filter(|a| a.file_id != gone)
+            .map(|a| crate::blob::blob_len(a.length))
+            .sum();
+        let (_parent, mut live) = live_vault();
+        free_space(Some(kept + margin - 1));
+        let result = live.copy_item_from(&ro, &item, None, true, &CancelToken::new());
+        assert!(
+            matches!(result, Err(CoreError::NotEnoughSpace { needed, .. }) if needed == kept + margin),
+            "{result:?}"
+        );
+        free_space(Some(kept + margin));
+        live.copy_item_from(&ro, &item, None, true, &CancelToken::new())
+            .unwrap();
     }
 
     #[test]

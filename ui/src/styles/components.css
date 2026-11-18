@@ -1999,6 +1999,20 @@
   flex: none;
 }
 
+/* The group under the locked vaults' lines holds the open rows (in their own scroll area) and the actions: it may shrink, so the rows scroll and
+   the actions stay. */
+.menu.mwide > .mgroup {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu.mwide > [role="menuitem"],
+.menu.mwide > .mgroup > [role="menuitem"] {
+  flex: none;
+}
+
 .mnote {
   display: flex;
   align-items: baseline;

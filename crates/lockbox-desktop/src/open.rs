@@ -104,13 +104,16 @@ pub fn safe_name(original: &str) -> String {
 
 /// The name a file gets when a folder's files are saved (task 11): only what Windows refuses or what could leave the
 /// folder is changed, so a person's own names stay as they wrote them. `< > : " / \ | ? *` and control characters
-/// (which cover every separator, a drive prefix and a `name:stream`) become `_`; no dots or spaces at the end; `file`
+/// (which cover every separator, a drive prefix and a `name:stream`) and the direction controls (a right-to-left override
+/// makes an executable read as a document) become `_`; no dots or spaces at the end; `file`
 /// when nothing is left (`..`, `...`); a `_` before a reserved device name, checked again after the cut; at most
 /// [`MAX_NAME_CHARS`] characters, keeping the extension. Whatever it is given, the result is one plain name that Windows
 /// makes where it is put, directly inside the chosen folder.
 pub fn save_name(original: &str) -> String {
     let name = cleaned(original, |c| {
-        c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        c.is_control()
+            || is_direction_control(c)
+            || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
     });
     // The rule above lists what to change; this is the shape the result must have whatever it missed: one plain
     // component (no separator, no `..`, no drive prefix, no `:`), with nothing Windows drops at the end.
@@ -123,6 +126,16 @@ pub fn save_name(original: &str) -> String {
         true => name,
         false => NO_NAME.to_owned(),
     }
+}
+
+/// The Unicode characters that set the direction text is shown in (the Arabic letter mark, the left-to-right and
+/// right-to-left marks, the embeddings and overrides, the isolates), which Explorer obeys in a file name: with one, an
+/// executable can read as a document. The joiners real names need (U+200C, U+200D) are not among them.
+fn is_direction_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{61C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// `original` with each character `replace` accepts turned into `_`, then fitted: see [`safe_name`] and [`save_name`].
@@ -660,11 +673,6 @@ mod tests {
             ("a\u{85}b\u{7f}c".into(), "a_b_c".into()),
             ("a.pdf:evil.exe".into(), "a.pdf_evil.exe".into()),
             ("x.exe::$DATA".into(), "x.exe__$DATA".into()),
-            // A right-to-left mark is a name Windows takes as it is.
-            (
-                "invoice\u{202E}fdp.exe".into(),
-                "invoice\u{202E}fdp.exe".into(),
-            ),
             // No dots or spaces at the end; nothing left is `file`.
             ("x. . ".into(), "x".into()),
             ("..".into(), "file".into()),
@@ -710,6 +718,40 @@ mod tests {
         for (_, saved) in &table {
             assert_eq!(&save_name(saved), saved, "{saved:?} is not stable");
         }
+    }
+
+    /// Plan 4B end-of-plan review: a direction control in a name makes `invoice<RLO>fdp.exe` look like `invoiceexe.pdf`
+    /// in Explorer, so each becomes `_` like the other characters that change what a person sees; the scripts that
+    /// need the joiners (Persian, Indic, emoji sequences) and every other name in `save_name_table` stay as written.
+    #[test]
+    fn save_name_turns_direction_controls_into_underscores() {
+        let controls = [
+            '\u{61C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ];
+        assert_eq!(
+            save_name("invoice\u{202E}fdp.exe"),
+            "invoice_fdp.exe",
+            "the override that makes an executable read as a document"
+        );
+        for control in controls {
+            assert_eq!(
+                save_name(&format!("a{control}b.txt")),
+                "a_b.txt",
+                "U+{:04X}",
+                control as u32
+            );
+        }
+        // A control at an end leaves a name that still ends cleanly; one that was only controls is `_` run, not lost.
+        assert_eq!(save_name("\u{202E}\u{202C}"), "__");
+        assert_eq!(save_name("report\u{200F}"), "report_");
+        // The joiners that real names use are a person's own and stay.
+        let own = "می\u{200C}خواهم.txt";
+        assert_eq!(save_name(own), own);
+        let family = "👨\u{200D}👩\u{200D}👧.png";
+        assert_eq!(save_name(family), family);
+        // Stable under a second pass, as the table's names are.
+        assert_eq!(save_name("invoice_fdp.exe"), "invoice_fdp.exe");
     }
 
     /// Task 11, Review Focus: whatever a stored name holds, the file it makes lands inside the chosen folder, directly in

@@ -99,19 +99,23 @@ export function Menu({
   ) : (
     <>
       {rows === undefined || rows.length === 0 ? null : (
-        <BaseMenu.RadioGroup value={rows.find((row) => row.checked)?.id ?? null} aria-label={rowsLabel}>
-          {rows.map((row) => (
-            <BaseMenu.RadioItem key={row.id} value={row.id} closeOnClick className="mi" onClick={row.onSelect}>
-              <span className="mtwo">
-                <span className="mt">{row.label}</span>
-                {row.detail === undefined ? null : <span className="ms">{row.detail}</span>}
-              </span>
-              <BaseMenu.RadioItemIndicator className="sel-on">
-                <CheckIcon />
-              </BaseMenu.RadioItemIndicator>
-            </BaseMenu.RadioItem>
-          ))}
-        </BaseMenu.RadioGroup>
+        // The rows scroll in an area of their own, as the locked vaults' lines do, so many open vaults and backups never push the actions out
+        // of a menu the window has made short.
+        <div className="mscroll">
+          <BaseMenu.RadioGroup value={rows.find((row) => row.checked)?.id ?? null} aria-label={rowsLabel}>
+            {rows.map((row) => (
+              <BaseMenu.RadioItem key={row.id} value={row.id} closeOnClick className="mi" onClick={row.onSelect}>
+                <span className="mtwo">
+                  <span className="mt">{row.label}</span>
+                  {row.detail === undefined ? null : <span className="ms">{row.detail}</span>}
+                </span>
+                <BaseMenu.RadioItemIndicator className="sel-on">
+                  <CheckIcon />
+                </BaseMenu.RadioItemIndicator>
+              </BaseMenu.RadioItem>
+            ))}
+          </BaseMenu.RadioGroup>
+        </div>
       )}
       {items.map((item) => (
         <Fragment key={item.label}>
@@ -145,7 +149,7 @@ export function Menu({
                   ))}
                 </div>
                 <div className="mline" aria-hidden="true" />
-                <BaseMenu.Group aria-label={notes.map((note) => `${note.name}, ${note.state}.`).join(" ")}>
+                <BaseMenu.Group className="mgroup" aria-label={notes.map((note) => `${note.name}, ${note.state}.`).join(" ")}>
                   {entries}
                 </BaseMenu.Group>
               </>

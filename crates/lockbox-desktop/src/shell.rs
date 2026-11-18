@@ -10,12 +10,13 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::Instant;
 
 use lockbox_core::fsio::refuse_vault_folder;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, EventTarget, Runtime};
 
-use crate::autolock::AutoLock;
+use crate::autolock::{AutoLock, SHUTDOWN_WAIT};
 use crate::capture::{Capture, CaptureEvent, Read};
 use crate::clipboard::Clipboard;
 use crate::commands::env;
@@ -54,10 +55,12 @@ pub const CLOSE_ASKED_EVENT: &str = "lockbox://close-asked";
 /// A question asked of the page: what it was about, and the lock epoch it was asked in. A lock of all vaults changes the
 /// epoch and so clears it (the page closes the question on `lockbox://lock-epoch`). Also what an answer claims
 /// ([`Shell::claim_close_answer`]).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PendingClose {
     reason: CloseReason,
     epoch: u64,
+    /// What the page was sent, kept so that a repeat request sends the same again.
+    asked: CloseAsked,
 }
 
 /// What [`Shell::checked_output`] found: a destination that may be written now, or one in a cloud-synced folder that
@@ -313,29 +316,38 @@ impl Shell {
     /// neither, answers `false` and does nothing: the caller closes as always. A Quit shows the window first (it comes
     /// from the tray, with the window hidden), then asks.
     ///
-    /// While a question is pending in the same lock epoch, a second request changes nothing: no second event, no second
-    /// window show, the first one's reason stays. A change of the epoch (Lock all, Windows locking or sleeping, an idle
-    /// lock) clears the pending question, so a request after it is judged afresh. Jobs that end meanwhile change nothing:
-    /// the question stays until it is answered.
+    /// While a question is pending in the same lock epoch, a second request sends the same question again (the same
+    /// event, the first one's reason and payload; the pending question is still the first), and a Quit shows the window
+    /// again: a page that never showed the first, because the event was lost or the page reloaded, would otherwise leave
+    /// Close and Quit dead until a lock. The page keeps one question, so a repeat changes nothing there. A change of the
+    /// epoch (Lock all, Windows locking or sleeping, an idle lock) clears the pending question, so a request after it is
+    /// judged afresh. Jobs that end meanwhile change nothing: the question stays until it is answered.
     pub fn ask_before_closing(&self, reason: CloseReason) -> bool {
         let asked = {
             let mut pending = lock(&self.close_question);
             let epoch = self.sessions.epoch();
-            if pending.is_some_and(|question| question.epoch == epoch) {
-                return true;
-            }
-            *pending = None;
-            let running = self.autolock.running_kinds();
-            let restore_waiting = self.restore.waiting();
-            if running.is_empty() && !restore_waiting {
-                return false;
-            }
-            *pending = Some(PendingClose { reason, epoch });
-            CloseAsked {
-                reason,
-                running,
-                past_swap: self.restore.past_swap(),
-                restore_waiting,
+            match pending.as_ref() {
+                Some(question) if question.epoch == epoch => question.asked.clone(),
+                _ => {
+                    *pending = None;
+                    let running = self.autolock.running_kinds();
+                    let restore_waiting = self.restore.waiting();
+                    if running.is_empty() && !restore_waiting {
+                        return false;
+                    }
+                    let asked = CloseAsked {
+                        reason,
+                        running,
+                        past_swap: self.restore.past_swap(),
+                        restore_waiting,
+                    };
+                    *pending = Some(PendingClose {
+                        reason,
+                        epoch,
+                        asked: asked.clone(),
+                    });
+                    asked
+                }
             }
         };
         if reason == CloseReason::Quit {
@@ -471,10 +483,17 @@ impl Shell {
     /// Closing the app (the main window's close request, the app's exit, or Windows ending the session): locks every
     /// vault on a helper thread and cancels every long operation, then waits at most
     /// [`SHUTDOWN_WAIT`](crate::autolock::SHUTDOWN_WAIT) for the lock and its hooks (the clipboard clear and the "Open"
-    /// cleanup, which treat `None` as all) before the process may exit. It does no hook work of its own. Every call,
-    /// the second included, waits the same way.
+    /// cleanup, which treat `None` as all) before the process may exit, and, inside the same wait, for the clean-up of a
+    /// restore that was waiting for its yes (its staging folder and journal, removed on a worker the lock hook starts):
+    /// a Quit after "Close anyway" leaves nothing for the next launch to recover. It does no hook work of its own. Every
+    /// call, the second included, waits the same way.
     pub fn shutdown(&self) {
         self.autolock.shutdown();
+        // The first call's deadline: the hooks are done by now (or the wait is), and the restore's hook has handed its
+        // clean-up to a worker before it ended, so the worker is counted.
+        let deadline =
+            (self.autolock.close_deadline())().unwrap_or_else(|| Instant::now() + SHUTDOWN_WAIT);
+        self.restore.wait_idle(deadline);
     }
 
     /// Launch work after restore recovery ([`launch_work`](Self::launch_work)): sweeps the output journal's leftovers.
@@ -1325,35 +1344,60 @@ mod tests {
         );
     }
 
-    /// While the question shows, a second close (or a Quit) changes nothing: the question stays, with its first
-    /// reason, and no second event is sent. The answer runs the old path of that first reason.
+    /// While the question shows, a second close (or a Quit) sends the same question again, with the first one's
+    /// reason and payload, because a page that never showed it would leave Close and Quit dead (the page keeps one
+    /// question, so a repeat changes nothing there); a Quit brings the window forward again. Nothing else changes: the
+    /// question pending is still the first, and its answer runs the old path of that first reason.
     #[test]
-    fn a_second_close_while_the_question_shows_changes_nothing() {
+    fn a_second_close_sends_the_same_question_again() {
         let ts = TestShell::new();
         ts.shell.settings.mark_close_explained().unwrap();
         let (session, _) = ts.open_vault("Family");
-        let _import = ts
+        let import = ts
             .shell
             .autolock
             .begin(Some(session), JobKind::Import, CancelToken::new());
         ts.shell.close_or_ask();
+        assert_eq!(ts.window.forwards(), 0, "a close has the window up already");
 
         ts.shell.close_or_ask();
-        assert!(ts.shell.ask_before_closing(CloseReason::Quit));
-
         assert_eq!(
             ts.events.close_asked(),
-            [asked("close", &["import"], false)]
+            [
+                asked("close", &["import"], false),
+                asked("close", &["import"], false)
+            ],
+            "the same event, sent a second time"
+        );
+        assert_eq!(ts.window.forwards(), 0, "a repeated close moves nothing");
+
+        assert!(ts.shell.ask_before_closing(CloseReason::Quit));
+        assert_eq!(
+            ts.events.close_asked(),
+            vec![asked("close", &["import"], false); 3],
+            "the Quit repeats the first question: its reason stays the close's"
         );
         assert_eq!(
             ts.window.forwards(),
-            0,
-            "the second request moved the window"
+            1,
+            "the Quit brings the window forward"
+        );
+        // The job ends meanwhile: the question stays as it was asked, so does its repeat.
+        drop(import);
+        ts.shell.close_or_ask();
+        assert_eq!(
+            ts.events.close_asked(),
+            vec![asked("close", &["import"], false); 4]
         );
         assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
         assert_eq!(ts.shell.close_answer(true), Ok(()));
-        assert_eq!(ts.window.exits(), 0, "the Quit that changed nothing exited");
-        assert_eq!(ts.window.hides(), 1, "the close's own answer did not run");
+        assert_eq!(
+            ts.window.exits(),
+            0,
+            "the Quit that only asked again exited"
+        );
+        assert_eq!(ts.window.hides(), 1, "the close's own answer ran");
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
     }
 
     /// Jobs that end while the question shows change nothing: the question stays, and Close anyway then just closes.
