@@ -6,7 +6,26 @@ import { Button } from "../parts/Button";
 import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
-import { closeTool, loadSettings, saveSettings, useSettings, type SaveTicket, type SessionData } from "../store";
+import { SETTINGS_HINT } from "../olderCopiesWords";
+import { SETTINGS_OPEN_HINT } from "../openBackupWords";
+import {
+  closeTool,
+  loadOlderCopies,
+  loadSettings,
+  NOT_ON_THE_LIST,
+  openBackup,
+  openOlderCopies,
+  saveSettings,
+  startOpenBackup,
+  startRestore,
+  startTestBackup,
+  useOlderCopies,
+  useOpenBackup,
+  useRestore,
+  useSettings,
+  type SaveTicket,
+  type SessionData,
+} from "../store";
 
 /** The lists of the two time settings: the session's own steps, inside what the shell takes (1 to 60 minutes, 10 to 300 seconds). */
 const IDLE_MINUTES = [1, 2, 5, 10, 15, 30, 60];
@@ -117,12 +136,19 @@ function said(error: unknown, names?: { shortcut?: string }): string {
  * Settings (31a, 31b), from the side menu: the app's settings, for every vault, saved at once as each one changes. A change shows as it is
  * made and goes back to what is saved if the shell refuses it, with the refusal in words under its row. Saves go one after another (the store
  * sees to that), each as the whole settings. Start with Windows is not one of the settings the file keeps: it is the shell's own entry, read
- * when the panel opens and changed by its own command. The rows for a vault (backup, password, export) and Help are not here until the
- * plans that build them.
+ * when the panel opens and changed by its own command. "This vault" has Back up (a writable vault only) and Test a backup (any vault, a read-only
+ * one too); the vault's other rows (password, export) and Help are not here until the plans that build them.
  */
 export function SettingsPanel({ data }: { data: SessionData }) {
   const id = useId();
   const saved = useSettings();
+  // The picker of Restore a backup is open (or its steps are): a second press sends nothing.
+  const restoring = useRestore() !== null;
+  // The same for Open a backup: its picker is open (or its panel is, in this panel's place).
+  const opening = useOpenBackup() !== null;
+  // The older copies the restores kept of this vault, from the store's one listing. A session that is itself an older copy has none of its own.
+  const kept = useOlderCopies();
+  const olderCount = data.vaultId === NOT_ON_THE_LIST ? 0 : (kept ?? []).filter((entry) => entry.vault === data.vaultId).length;
   const title = useRef<HTMLHeadingElement>(null);
   // What the person chose and the shell has not answered: the controls show it meanwhile.
   const [pending, setPending] = useState<Partial<api.Settings>>({});
@@ -141,8 +167,9 @@ export function SettingsPanel({ data }: { data: SessionData }) {
 
   useEffect(() => {
     title.current?.focus();
-    // Settings the page could not read at the start are read again now.
+    // Settings the page could not read at the start are read again now, and so are the older copies the restores kept.
     loadSettings();
+    void loadOlderCopies();
     let current = true;
     api.getStartup().then(
       (state) => {
@@ -289,6 +316,8 @@ export function SettingsPanel({ data }: { data: SessionData }) {
       title="Settings"
       subtitle="For every vault on this PC."
       titleRef={title}
+      // A backup or an older copy says it is read-only on every screen of its session, Settings too.
+      tools={data.readOnly ? <span className="chip">Read-only</span> : undefined}
       onClose={() => {
         closeTool(data.session);
         focusBack("settings");
@@ -393,6 +422,77 @@ export function SettingsPanel({ data }: { data: SessionData }) {
               </Button>
             </div>
           </SettingsRow>
+        </div>
+      </section>
+
+      <section className="gp">
+        <h3 className="gh">This vault</h3>
+        <div className="grp">
+          {data.readOnly ? null : (
+            // A copy kept on another drive. Not in a vault opened from a backup, which has nothing of its own to back up.
+            <SettingsRow label="Back up" hint={`Keep a copy of ${data.name} on another drive.`} hintId={`${id}-backup-hint`}>
+              <Button
+                aria-describedby={`${id}-backup-hint`}
+                onClick={() => {
+                  openBackup(data.session);
+                }}
+              >
+                Back up
+              </Button>
+            </SettingsRow>
+          )}
+          {/* Any vault's, a read-only one too: the backup it checks is a file, and no vault's contents are read. */}
+          <SettingsRow label="Test a backup" hint="Check that a backup opens, without restoring it." hintId={`${id}-test-hint`}>
+            <Button
+              aria-describedby={`${id}-test-hint`}
+              // The Windows picker is open: a second press sends nothing.
+              aria-disabled={data.test?.phase === "picking" ? true : undefined}
+              onClick={() => {
+                if (data.test === null) void startTestBackup(data.session);
+              }}
+            >
+              Test a backup
+            </Button>
+          </SettingsRow>
+          {/* Any vault's, a read-only one too: a backup is browsed in a session of its own and nothing is written into the vault that is open. */}
+          <SettingsRow label="Open a backup" hint={SETTINGS_OPEN_HINT} hintId={`${id}-open-hint`}>
+            <Button
+              aria-describedby={`${id}-open-hint`}
+              // The Windows picker is open: a second press sends nothing.
+              aria-disabled={opening ? true : undefined}
+              onClick={() => {
+                if (!opening) void startOpenBackup();
+              }}
+            >
+              Open a backup
+            </Button>
+          </SettingsRow>
+          {/* Any vault's, a read-only one too: a restore unpacks a backup beside the vaults and writes nothing into the one that is open. */}
+          <SettingsRow label="Restore a backup" hint="Unpack a backup. Your current vault is kept beside it." hintId={`${id}-restore-hint`}>
+            <Button
+              aria-describedby={`${id}-restore-hint`}
+              aria-disabled={restoring ? true : undefined}
+              onClick={() => {
+                if (!restoring) void startRestore();
+              }}
+            >
+              Restore a backup
+            </Button>
+          </SettingsRow>
+          {olderCount === 0 ? null : (
+            // The copies a restore kept of this vault (shown only while there are some, so the button never leads to an empty list): the vault's own, whether it is open
+            // writable or read-only, and none for a session that is an older copy.
+            <SettingsRow label="Older copies" hint={SETTINGS_HINT} hintId={`${id}-older-hint`}>
+              <Button
+                aria-describedby={`${id}-older-hint`}
+                onClick={() => {
+                  openOlderCopies(data.session);
+                }}
+              >
+                {`Older copies (${String(olderCount)})`}
+              </Button>
+            </SettingsRow>
+          )}
         </div>
       </section>
 

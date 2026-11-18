@@ -67,7 +67,7 @@ Moved to [docs/PRD.md](../PRD.md#scope).
 |---|---|---|
 | Vault keys, file keys, password/recovery-derived keys | **Never** | — |
 | File contents | **Never** | Rust streams between disk and the vault directly |
-| File system paths | **Never from the UI** | Dialogs are opened by Rust inside commands (4.2). Rust may send a path for the person to read (a saved export's folder); it is never accepted back |
+| File system paths | **Never from the UI** | Dialogs are opened by Rust inside commands (4.2). Rust may send a path for the person to read (the folder a restore or Save all files will use, a stuck restore's folders, and the folder of a file Lockbox saved where they chose); it is never accepted back |
 | Vault password, new password | UI → Rust | Typed into the UI on unlock, create, change |
 | Recovery key | Rust → UI once; UI → Rust | Displayed at creation/regeneration; typed in when recovering or restoring |
 | Item titles, usernames, URLs, notes, collection names | Rust → UI | While a list, item or search result is displayed |
@@ -368,7 +368,8 @@ design.
   - All arithmetic is checked.
 - **Test a backup:** any backup can be checked without restoring. Inside the archive, it checks the manifest MAC, every
   entry's SHA-256, every item and every file stream, and reports files the items attach that the backup lacks. Nothing
-  is written.
+  is written. The file is picked first and held in Rust under a token (so nothing is typed against an unknown file); no
+  vault or session is needed, and the test runs as a job with progress and a Stop.
 
 ### 6.8 Restore
 The existing vault is untouched until extraction and authentication have succeeded, and the swap is journaled so a crash
@@ -380,7 +381,11 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
    itself). Refused while a restore journal exists.
 2. **Unlock from the archive** with the backup's header and the user's password **or recovery key** (the backup may hold
    an older password; the UI says the restored vault's password is the backup's). Then verify the header MAC and the
-   manifest MAC.
+   manifest MAC. The app asks for this credential on the first screen, with the backup picked, and opens the backup
+   read-only without unpacking it (to say the vault's name and the day it was made); the credential that worked then waits
+   in Rust, never on the page, and the copy unlocks again with it (7.4). The copy opens the file again, so it compares
+   the vault ID it finds with the one the first look saw, and refuses before writing anything if the file was replaced by
+   another vault's backup in between.
 3. **Choose the destination** in the chosen parent folder:
    - The folder of the vault with the same ID: replace it (**several such folders → refuse**). The user may instead open
      the backup read-only (6.9).
@@ -399,7 +404,9 @@ can't lose both copies. The order is: unlock before extracting, so a wrong passw
    - Lock and close the existing vault (release `.lock` and every handle).
    - When the swap starts, before any rename, choose the first unused name of `<folder>.before-restore`,
      `<folder>.before-restore-2` … `-99`, so an earlier pre-restore copy is never replaced. If all are taken, the
-     restore is refused before any rename; the staged restore stays for the user to free a name.
+     restore is refused before any rename; the staged restore stays for the user to free a name. The page is told the
+     name the older copy will get, and which vault's older copies to tidy if all 99 are taken, before Replace is
+     pressed.
    - Journal `swapping`, then rename existing → the chosen `.before-restore` name, then staging → `<folder>`, retrying
      on sharing violations (6.2).
    - A rename refused by a brief lock, before anything has moved, keeps the staged restore for a retry.
@@ -460,7 +467,10 @@ A validation failure in the archive or during extraction deletes only this opera
 is kept until that cleanup has worked); the existing vault is untouched. A journal-validation failure touches nothing.
 
 ### 6.9 Read-only vaults
-- A `.lockbox-backup` file or a `.before-restore` folder can be opened **read-only**, alongside the live vault.
+- A `.lockbox-backup` file or a `.before-restore` folder can be opened **read-only**, alongside the live vault. For a
+  backup, the file is picked first and held in Rust as a choice of its own kind (a token, so the file is known before a
+  password is typed), with a credential box shared with the test; the open runs as a job scoped to the launch, with a
+  Stop, and the session is named for the backup's file (`SessionInfo.kind` is `vault`, `older_copy` or `backup`).
 - **Opening a folder read-only writes nothing:** no `.lock`, no header repair, no cleanup.
 - Sessions are keyed by **location**, not vault_id, so two copies of the same vault can be open at once; read-only ones
   are labelled in the UI and reject every write.
@@ -477,8 +487,9 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
 - **Copying an item** from a read-only vault into the live one:
   - The copy gets a new item ID, and each attachment a new file ID and key. Attachments are re-encrypted in memory,
     never as plaintext on disk.
-  - Its collection is kept only if the live vault has that collection and it is not in the trash. Collections
-    themselves are not copied, and the copy is never trashed.
+  - The copy goes into the folder of the live vault that the person chooses, or into none, whatever folder the item
+    sat in at the source. A folder the live vault does not have, or has in the trash, is refused before anything is
+    written. Folders themselves are not copied, and the copy is never trashed.
   - If the backup lacks some of the item's files, the copy stops and names them. The user may copy without them; the
     result lists what was left off. A file that is present but fails authentication is never skipped. Locking either
     vault stops the copy.
@@ -528,11 +539,21 @@ authenticated.
   it over the destination (6.2). On failure or cancellation only the temp file is deleted; **an existing destination is
   never touched unless the copy completed and verified.** Free space and file-size limits are checked first.
 - **Save all of a folder's files:** Rust opens the folder picker, then saves each stored file in the collection, attached
-  ones included, by the rules above up to the rename, as one job with one Cancel. The picker's title says the copies are
-  unencrypted. Free space for the whole batch is checked first. **An existing file is never replaced:** unlike a single
-  copy, the last step is a rename that refuses a taken name, under the same generation check, and a taken name gets " (2)",
-  then " (3)", also for a file that appears at the last moment. On a cancel or a lock, finished files stay and the file in progress leaves nothing. A damaged file is named in the result, and
-  the rest continue.
+  ones included, by the rules above up to the rename, as one job with one Cancel. It works on a read-only vault too, as
+  Save a copy does. The picker's title says the copies are unencrypted. The same checks as Save a copy run on the folder
+  (a damaged output journal, Lockbox's state folder, a vault's folder, a cloud-synced folder's warning), then free space for
+  the whole batch is checked, with the numbers, and the answer is a plan (each name as it will be written, its size, the
+  total) that a second step starts; every check runs again at the start, and the start is refused if the collection's
+  files are no longer exactly the planned ones. Each file is its own use of the vault, which is let go between two files.
+  **An existing file is never replaced:** unlike a single copy, the last step is a rename that refuses a taken name, under
+  the same generation check, and a taken name gets " (2)", then " (3)" and on to " (999)", also for a file that appears at
+  the last moment; the verified temp is moved to the next name, never decrypted twice. A stored name is changed only where
+  Windows refuses it or where it could leave the folder (`< > : " / \ | ? *` and control characters become `_`, trailing
+  dots and spaces go, a device name gets a `_` first, at most 100 characters), and each change, and each number, is listed
+  in the result. On a cancel or a lock, finished files stay and the file in progress leaves nothing. A damaged file, and a
+  file whose item was deleted meanwhile, are named in the result, and the rest continue; a full or missing drive, or
+  any other failure, ends the job and the result says how many were saved and which were not. The result's warning says the
+  copies aren't encrypted, and it offers Show in Explorer through a handle Rust holds, never a path.
 - **An export, a saved `.env` and a recovery key PDF** follow Save a copy's rules: Rust picks the destination, a vault
   folder or Lockbox's state folder is refused, a cloud-synced folder warns first, the file goes to a journaled hidden temp
   file beside it, and it's renamed into place only if the session's generation is still current. An existing file is
@@ -589,12 +610,21 @@ combination, among them Bitwarden's browser extension, which fills a login with 
 
 ### 7.4 Locking (concurrency contract)
 - **Idle** means no keyboard or mouse input anywhere in Windows for the configured minutes. **While a long operation the
-  user started is running** (import, Save a copy, Open, backup, restore), the idle timer is paused, the UI shows why, and
+  user started is running** (adding files, Save a copy, Save all, Open, Replace file, copying an item, backup, test a backup, open a backup,
+  restore), the idle timer is paused, the UI shows why, and
   Lockbox asks Windows to stay awake (`SetThreadExecutionState`). Paused means time spent in a long operation does not
   count: after it ends, idle time counts from its end. **Windows lock, sleep and hibernate always lock all vaults
   immediately**, cancelling such operations. Signing out, switching user and a remote-desktop disconnect count as
-  Windows lock. Closing the window locks all vaults and hides Lockbox to the tray, and Quit in the tray menu locks them and
-  stops it. During a long operation both ask first.
+  Windows lock. Closing the window locks all vaults and, once the explanation has been seen, hides Lockbox to the tray, and Quit in the tray menu locks them and
+  stops it. **While any long operation runs (every operation the idle timer counts), or a finished restore waits for the
+  person's answer (24d), both ask first**, and until the
+  person answers nothing is cancelled, locked or hidden: the operations go on and the vaults stay unlocked. Only **Close
+  anyway** runs the close or Quit as above, which cancels the operations, ends a waiting restore (the vault stays as it
+  is) and locks; **Keep it running** (**Keep it open** for a waiting restore) changes nothing.
+  The question is one at a time, is dropped by any lock of all vaults (Lock all, Windows lock or sleep, an idle lock), and
+  is never kept across a restart. A restore already past its swap cannot be cancelled: the question says it finishes, or
+  is undone by recovery at the next launch, and nothing is lost either way. **Windows ending the session** (signing out,
+  shutting down) never asks and never waits: it locks and exits as before.
 - **Two guarantees, kept separate:**
   - **Access is denied immediately.** From the moment of locking, no new command runs and no response carrying vault
     data is accepted by the UI.
@@ -615,7 +645,12 @@ combination, among them Bitwarden's browser extension, which fills a login with 
 - **Long operations** check for cancellation between chunks, delete their partial output (via 6.4 / 7.2 rules) and
   report "Cancelled: vault locked." A restore holds its own key from unlocking the backup, independent of any session
   of the destination vault; locking or closing the destination vault cancels a restore only before its swap starts (6.8).
-  A finished restore waiting for its answer stays through an idle lock; Windows locking or sleeping still cancels it.
+  A finished restore waiting for its answer stays through an idle lock (it holds no credential and no unlocked vault: its
+  staging folder is encrypted, and the person must still answer and then unlock the restored vault); every other lock of
+  all vaults still cancels it: Lock all, the window's close, Windows locking or sleeping, and the app closing. Before it
+  is finished, the backup is picked first and the password typed for it is checked then (the backup is opened, not
+  unpacked) and kept in Rust, in the choice held for the pick, until the copy finishes: any lock of all vaults, an idle
+  one included, drops that choice.
   **Each long operation has its own stop,** linked to the session's, and an operation ID says which: Cancel stops that
   operation and leaves others in the vault running, and a lock stops them all. A credential change or a new vault that a lock interrupts after it was written says so ("changed, but locked before it
   could be shown") instead of plain "locked".

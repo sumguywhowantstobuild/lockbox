@@ -14,6 +14,17 @@
     border: 1px solid CanvasText !important;
   }
 
+  /* A progress bar's track and fill are only colours, which this mode would flatten into one: the track gets an edge and the fill the
+     system's highlight, so how far it has come still shows. */
+  .app .prog {
+    border: 1px solid CanvasText !important;
+  }
+
+  .app .prog span {
+    forced-color-adjust: none !important;
+    background: Highlight !important;
+  }
+
   /* The rows of a card (Move to trash, Restore, Delete for good) sit inside the card's edge: a line between two rows, not a
      box round each. */
   .app .dgr + .dgr {

@@ -112,7 +112,7 @@ test("the_folders_menu_has_its_entries_in_order_and_a_divider_before_rename", as
   ]);
   const parts = Array.from(menu.querySelectorAll('[role="menuitem"], [role="separator"]')).map((part) => part.getAttribute("role"));
   expect(parts).toEqual(["menuitem", "menuitem", "menuitem", "separator", "menuitem", "menuitem"]);
-  // Save all files waits for a later plan.
+  // This folder holds no stored file, so Save all files (Plan 4B Task 11) has no entry in its menu.
   expect(within(menu).queryByText(/Save all/i)).toBeNull();
   await expectNoAxe(menu);
 });

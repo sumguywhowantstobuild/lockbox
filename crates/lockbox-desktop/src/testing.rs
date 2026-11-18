@@ -8,15 +8,16 @@ use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockWriteGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 
-use lockbox_core::blob::CancelToken;
+use lockbox_core::blob::{CancelToken, NoProgress};
 use lockbox_core::internals::fsio::testutil::TempDir;
 use zeroize::Zeroizing;
 
 use crate::capture::CaptureEvent;
 use crate::error::ShellResult;
+use crate::jobs::{CloseAsked, JobStarted, LockEpochEvent, ProgressEvent};
 use crate::lock;
 use crate::os::{
     CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Clock, Dialogs,
@@ -26,7 +27,7 @@ use crate::os::{
     Volumes,
 };
 use crate::session::{LockReason, Notice, Notifier, SessionId};
-use crate::shell::Shell;
+use crate::shell::{JOB_STARTED_EVENT, LOCK_EPOCH_EVENT, PROGRESS_EVENT, Shell};
 use crate::startup::{StartupState, state_of};
 
 /// Each Argon2 run (creating, unlocking or opening a vault) keeps several cores busy for about a second. Every test
@@ -57,9 +58,69 @@ pub struct Events {
     captures: Mutex<Vec<serde_json::Value>>,
     /// Run once, inside the next `busy` event, before it is recorded.
     on_busy: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Each job event (`lockbox://job-started`, `lockbox://progress`, `lockbox://lock-epoch`), as the page would
+    /// receive it, in the order they were sent.
+    jobs: Mutex<Vec<(&'static str, serde_json::Value)>>,
+    /// Run for each job event, on the thread that sent it, after it is recorded.
+    watcher: Mutex<Option<JobWatcher>>,
+    /// Each `lockbox://close-asked`, as the page would receive it.
+    close_asked: Mutex<Vec<serde_json::Value>>,
 }
 
+/// What [`Events::watch`] runs.
+type JobWatcher = Arc<dyn Fn(&'static str, &serde_json::Value) + Send + Sync>;
+
 impl Events {
+    /// Runs `watcher` for each job event from now on (the name, then the payload), on the thread that sent it, replacing
+    /// any earlier one.
+    pub fn watch(
+        &self,
+        watcher: impl Fn(&'static str, &serde_json::Value) + Send + Sync + 'static,
+    ) {
+        *lock(&self.watcher) = Some(Arc::new(watcher));
+    }
+
+    fn record_job_event(&self, name: &'static str, payload: serde_json::Value) {
+        lock(&self.jobs).push((name, payload.clone()));
+        let watcher = lock(&self.watcher).clone();
+        if let Some(watcher) = watcher {
+            watcher(name, &payload);
+        }
+    }
+
+    /// Every job event the shell sent, in order: its name and payload.
+    pub fn job_events(&self) -> Vec<(&'static str, serde_json::Value)> {
+        lock(&self.jobs).clone()
+    }
+
+    fn payloads(&self, wanted: &str) -> Vec<serde_json::Value> {
+        lock(&self.jobs)
+            .iter()
+            .filter(|(name, _)| *name == wanted)
+            .map(|(_, payload)| payload.clone())
+            .collect()
+    }
+
+    /// The payload of each `lockbox://job-started` the shell sent.
+    pub fn started(&self) -> Vec<serde_json::Value> {
+        self.payloads(JOB_STARTED_EVENT)
+    }
+
+    /// The payload of each `lockbox://progress` the shell sent.
+    pub fn progress(&self) -> Vec<serde_json::Value> {
+        self.payloads(PROGRESS_EVENT)
+    }
+
+    /// The payload of each `lockbox://lock-epoch` the shell sent.
+    pub fn epochs(&self) -> Vec<serde_json::Value> {
+        self.payloads(LOCK_EPOCH_EVENT)
+    }
+
+    /// The payload of each `lockbox://close-asked` the shell sent, in order.
+    pub fn close_asked(&self) -> Vec<serde_json::Value> {
+        lock(&self.close_asked).clone()
+    }
+
     /// Runs `hook` once, inside the next `busy` event: it may block or panic there.
     pub fn during_next_busy(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.on_busy) = Some(hook);
@@ -105,6 +166,26 @@ impl Notifier for Events {
         let event = serde_json::to_value(event).expect("a capture event serialises");
         lock(&self.captures).push(event);
     }
+
+    fn job_started(&self, event: &JobStarted) {
+        let event = serde_json::to_value(event).expect("a job-started event serialises");
+        self.record_job_event(JOB_STARTED_EVENT, event);
+    }
+
+    fn progress(&self, event: &ProgressEvent) {
+        let event = serde_json::to_value(event).expect("a progress event serialises");
+        self.record_job_event(PROGRESS_EVENT, event);
+    }
+
+    fn lock_epoch(&self, event: &LockEpochEvent) {
+        let event = serde_json::to_value(event).expect("a lock-epoch event serialises");
+        self.record_job_event(LOCK_EPOCH_EVENT, event);
+    }
+
+    fn close_asked(&self, event: &CloseAsked) {
+        let event = serde_json::to_value(event).expect("a close-asked event serialises");
+        lock(&self.close_asked).push(event);
+    }
 }
 
 /// Idle time the test sets: none until it does.
@@ -136,9 +217,16 @@ pub struct FakeWindow {
     queued_hides: Mutex<Vec<Box<dyn FnOnce() -> bool + Send>>>,
     /// Each time the shell asked for capture protection to change while the window was up, in order.
     protections: Mutex<Vec<bool>>,
+    /// How many times the shell ended the app.
+    exits: AtomicUsize,
 }
 
 impl FakeWindow {
+    /// How many times the shell ended the app (a Quit's exit).
+    pub fn exits(&self) -> usize {
+        self.exits.load(Ordering::SeqCst)
+    }
+
     /// Each capture protection the shell asked the window for (`true`: kept out of captures), in order.
     pub fn protections(&self) -> Vec<bool> {
         lock(&self.protections).clone()
@@ -216,6 +304,10 @@ impl MainWindow for FakeWindow {
 
     fn protect_from_capture(&self, on: bool) {
         lock(&self.protections).push(on);
+    }
+
+    fn exit_app(&self) {
+        self.exits.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -380,24 +472,54 @@ impl Power for FakePower {
     }
 }
 
-/// A clock that stands still until the test moves it.
-pub struct FakeClock(Mutex<Instant>);
+/// A clock that stands still until the test moves it: the monotonic one, and the wall clock beside it (2026-11-16
+/// 12:00:00 UTC to begin with).
+pub struct FakeClock(Mutex<Instant>, Mutex<SystemTime>, Mutex<i64>);
 
 impl FakeClock {
     pub fn set(&self, now: Instant) {
         *lock(&self.0) = now;
     }
+
+    /// Moves the wall clock (the date a backup is noted under, and "how many days ago").
+    pub fn set_wall(&self, now: SystemTime) {
+        *lock(&self.1) = now;
+    }
+
+    /// Puts the PC's time zone `hours` east of UTC (negative: west), for the local date.
+    pub fn set_utc_offset_hours(&self, hours: i64) {
+        *lock(&self.2) = hours * 3600;
+    }
 }
 
 impl Default for FakeClock {
     fn default() -> Self {
-        FakeClock(Mutex::new(Instant::now()))
+        FakeClock(
+            Mutex::new(Instant::now()),
+            Mutex::new(UNIX_EPOCH + Duration::from_secs(1_794_830_400)),
+            Mutex::new(0),
+        )
     }
 }
 
 impl Clock for FakeClock {
     fn now(&self) -> Instant {
         *lock(&self.0)
+    }
+
+    fn wall(&self) -> SystemTime {
+        *lock(&self.1)
+    }
+
+    /// The wall clock moved by the zone, as its date.
+    fn local_date(&self) -> String {
+        let utc = crate::dates::unix_secs(*lock(&self.1)) as i64;
+        let local = UNIX_EPOCH + Duration::from_secs((utc + *lock(&self.2)).max(0) as u64);
+        crate::dates::rfc3339_utc(local)[..10].to_owned()
+    }
+
+    fn utc_offset_secs(&self) -> i64 {
+        *lock(&self.2)
     }
 
     /// No real wait: the clock moves on by `time`.
@@ -1025,11 +1147,15 @@ impl Volumes for FakeVolumes {
 #[derive(Default)]
 pub struct FakeDialogs {
     answers: Mutex<VecDeque<Option<PathBuf>>>,
+    /// What the many-files dialog answers, in order (`None`, as if closed, once the queue is empty).
+    file_answers: Mutex<VecDeque<Option<Vec<PathBuf>>>>,
     opened: AtomicUsize,
     /// Run once, inside the next dialog, before it answers: while the user would be choosing.
     on_open: Mutex<Option<Hook>>,
     /// The start folder each folder dialog was given, in order.
     starts: Mutex<Vec<Option<PathBuf>>>,
+    /// The title each folder dialog was given, in order.
+    folder_titles: Mutex<Vec<String>>,
     /// The name each save dialog suggested, in order.
     suggested: Mutex<Vec<String>>,
     /// The title each save dialog was given, in order.
@@ -1057,8 +1183,18 @@ impl FakeDialogs {
         lock(&self.starts).clone()
     }
 
+    /// The title each folder dialog was opened with, in order.
+    pub fn folder_titles(&self) -> Vec<String> {
+        lock(&self.folder_titles).clone()
+    }
+
     pub fn answer(&self, answer: Option<PathBuf>) {
         lock(&self.answers).push_back(answer);
+    }
+
+    /// What the next many-files dialog answers (`None`: closed).
+    pub fn answer_files(&self, answer: Option<Vec<PathBuf>>) {
+        lock(&self.file_answers).push_back(answer);
     }
 
     pub fn opened(&self) -> usize {
@@ -1074,24 +1210,34 @@ impl FakeDialogs {
         *lock(&self.on_open) = Some(hook);
     }
 
-    fn next(&self) -> Option<PathBuf> {
+    fn opening(&self) {
         self.opened.fetch_add(1, Ordering::SeqCst);
         let hook = lock(&self.on_open).take();
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    fn next(&self) -> Option<PathBuf> {
+        self.opening();
         lock(&self.answers).pop_front().flatten()
     }
 }
 
 impl Dialogs for FakeDialogs {
-    fn pick_folder(&self, _title: &str, start: Option<&Path>) -> Option<PathBuf> {
+    fn pick_folder(&self, title: &str, start: Option<&Path>) -> Option<PathBuf> {
         lock(&self.starts).push(start.map(Path::to_path_buf));
+        lock(&self.folder_titles).push(title.to_owned());
         self.next()
     }
 
     fn pick_file(&self, _title: &str, _filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
         self.next()
+    }
+
+    fn pick_files(&self, _title: &str, _filter: Option<(&str, &[&str])>) -> Option<Vec<PathBuf>> {
+        self.opening();
+        lock(&self.file_answers).pop_front().flatten()
     }
 
     fn save_file(
@@ -1117,10 +1263,13 @@ impl Dialogs for FakeDialogs {
 pub struct FakeLauncher {
     opened: Mutex<Vec<String>>,
     opened_files: Mutex<Vec<PathBuf>>,
+    opened_folders: Mutex<Vec<PathBuf>>,
     /// Run once, inside the next launch, before it returns.
     on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// The next file launch fails.
     fail_next_file: AtomicBool,
+    /// The next folder launch fails.
+    fail_next_folder: AtomicBool,
 }
 
 impl FakeLauncher {
@@ -1130,6 +1279,16 @@ impl FakeLauncher {
 
     pub fn opened_files(&self) -> Vec<PathBuf> {
         lock(&self.opened_files).clone()
+    }
+
+    /// The folders it was asked to open, in order.
+    pub fn opened_folders(&self) -> Vec<PathBuf> {
+        lock(&self.opened_folders).clone()
+    }
+
+    /// The next folder launch fails, as when Explorer cannot be started.
+    pub fn fail_next_folder(&self) {
+        self.fail_next_folder.store(true, Ordering::SeqCst);
     }
 
     /// Runs `hook` once, inside the next launch: while the link or file is being opened.
@@ -1162,6 +1321,15 @@ impl Launcher for FakeLauncher {
         self.run_hook();
         match self.fail_next_file.swap(false, Ordering::SeqCst) {
             true => Err(io::Error::other("no app")),
+            false => Ok(()),
+        }
+    }
+
+    fn open_folder(&self, folder: &Path) -> io::Result<()> {
+        lock(&self.opened_folders).push(folder.to_path_buf());
+        self.run_hook();
+        match self.fail_next_folder.swap(false, Ordering::SeqCst) {
+            true => Err(io::Error::other("no explorer")),
             false => Ok(()),
         }
     }
@@ -1547,6 +1715,27 @@ impl TestShell {
         (tagged.session, tagged.generation)
     }
 
+    /// The backup at `path` opened read-only with `credential`, the page's two steps: the picker answers `path`, then
+    /// the held choice is opened (as request 1).
+    pub fn open_backup_read_only(
+        &self,
+        path: &Path,
+        credential: crate::commands::backup::CredentialArg,
+    ) -> crate::session::Tagged<crate::session::SessionInfo> {
+        self.dialogs.answer(Some(path.to_path_buf()));
+        let Ok(crate::error::Outcome::Done(picked)) = self.shell.open_backup_pick(None) else {
+            panic!("the backup was not picked");
+        };
+        let opened = heavy(|| {
+            self.shell
+                .open_backup_read_only(&picked.choice, credential, 1)
+        });
+        match opened {
+            Ok(crate::error::Outcome::Done(tagged)) => tagged,
+            _ => panic!("the backup did not open"),
+        }
+    }
+
     /// A file item holding a file named `name` with `bytes`, stored in the session's vault: the item's ID and the
     /// file's ID, in hex.
     pub fn stored_file(
@@ -1564,7 +1753,7 @@ impl TestShell {
             .shell
             .sessions
             .write(session, generation, |vault, cancel| {
-                let id = vault.new_file_item(None, &source, cancel)?;
+                let id = vault.new_file_item(None, &source, cancel, &NoProgress)?;
                 let file = vault.get_item(&id)?.attachments[0].file_id;
                 Ok((id.to_hex(), file.to_hex()))
             });

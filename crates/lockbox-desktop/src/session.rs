@@ -19,7 +19,9 @@ use lockbox_core::{ReadOnlyVault, Vault};
 use serde::{Deserialize, Serialize};
 
 use crate::capture::CaptureEvent;
+use crate::commands::backup::EXTENSION;
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
+use crate::jobs::{CloseAsked, JobStarted, LockEpochEvent, ProgressEvent};
 use crate::pending::{Pending, PendingChoice, Token};
 use crate::{lock, os};
 
@@ -152,7 +154,8 @@ pub enum Notice {
 }
 
 /// Tells the UI what changed: the shell's events (`lockbox://locked`, `lockbox://busy`, `lockbox://notice`,
-/// `lockbox://capture`).
+/// `lockbox://capture`, `lockbox://job-started`, `lockbox://progress`, `lockbox://lock-epoch`,
+/// `lockbox://close-asked`).
 pub trait Notifier: Send + Sync {
     fn locked(&self, session: SessionId, generation: u64, reason: LockReason);
     /// The long operations running for `session`, or for none (`None`: testing or restoring a backup).
@@ -161,6 +164,14 @@ pub trait Notifier: Send + Sync {
     /// The copied value waiting in the capture slot changed, or the slot emptied: what the page may know of it, never
     /// the value.
     fn capture(&self, event: &CaptureEvent);
+    /// A job began for the command that sent `request`: its operation, scope and kind.
+    fn job_started(&self, event: &JobStarted);
+    /// A job's bytes done of its total, or its end (`finished`). Two numbers: never a name, a path or a value.
+    fn progress(&self, event: &ProgressEvent);
+    /// All vaults were locked (or the app is closing): the epoch they are now in, even when no vault was open.
+    fn lock_epoch(&self, event: &LockEpochEvent);
+    /// A close or Quit arrived while a job runs: the page is asked whether to go on (`lockbox://close-asked`).
+    fn close_asked(&self, event: &CloseAsked);
 }
 
 /// What an opening closure gives back: a new session, or a question to ask first, whose state waits in [`Pending`]
@@ -176,7 +187,8 @@ pub enum OpenStep<X> {
 /// opening closure ran, or its question.
 pub type OpenAnswer<X> = Outcome<Tagged<(SessionInfo, Option<X>)>>;
 
-/// One session as the UI lists it.
+/// One session as the UI lists it. For a backup, `name` is the backup file's name without `.lockbox-backup`; for the
+/// others, the vault's own.
 #[derive(Clone, Serialize)]
 pub struct SessionInfo {
     pub session: SessionId,
@@ -184,9 +196,10 @@ pub struct SessionInfo {
     pub name: String,
     pub read_only: bool,
     pub state: SessionState,
+    pub kind: SessionKind,
 }
 
-/// Never shows the vault's name (R5).
+/// Never shows the session's name (R5).
 impl fmt::Debug for SessionInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionInfo")
@@ -194,7 +207,42 @@ impl fmt::Debug for SessionInfo {
             .field("generation", &self.generation)
             .field("read_only", &self.read_only)
             .field("state", &self.state)
+            .field("kind", &self.kind)
             .finish_non_exhaustive()
+    }
+}
+
+/// What a session is, from where it is and whether it can be written (never stored apart from them): a vault on the
+/// list, an older copy of one (a read-only vault folder) or a backup opened read-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    Vault,
+    OlderCopy,
+    Backup,
+}
+
+impl SessionKind {
+    fn of(location: &Location, read_only: bool) -> SessionKind {
+        match (location, read_only) {
+            (Location::Backup(_), _) => SessionKind::Backup,
+            (Location::Folder(_), true) => SessionKind::OlderCopy,
+            (Location::Folder(_), false) => SessionKind::Vault,
+        }
+    }
+}
+
+/// A backup session's name: its file's name without the `.lockbox-backup` ending (any case). A name without that
+/// ending, or with nothing before it, stays whole.
+fn backup_name(file: &Path) -> String {
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let ending = EXTENSION.len();
+    match name.len().checked_sub(ending) {
+        // The last bytes equal an ASCII ending, so the cut is on a character boundary.
+        Some(at) if at > 0 && name.as_bytes()[at..].eq_ignore_ascii_case(EXTENSION.as_bytes()) => {
+            name[..at].to_owned()
+        }
+        _ => name.into_owned(),
     }
 }
 
@@ -429,6 +477,7 @@ impl Entry {
             name: self.name.clone(),
             read_only: self.read_only,
             state: self.state,
+            kind: SessionKind::of(&self.location, self.read_only),
         }
     }
 }
@@ -530,6 +579,12 @@ struct Inner {
     opening: Vec<Opening>,
     /// Bumped by every lock of all vaults: an open that started before one discards what it made.
     epoch: u64,
+    /// The token the jobs with no session are children of: cancelled and replaced by every lock of all vaults, in the
+    /// same step as the epoch's bump.
+    launch: CancelToken,
+    /// The epoch of the last lock of all vaults whose reason was not [`LockReason::Idle`]: set in the same step as the
+    /// epoch's bump, so it is right before any hook has run.
+    non_idle_epoch: u64,
     last_session: u64,
     /// Numbers opens and two-session links.
     last_serial: u64,
@@ -604,7 +659,7 @@ impl Inner {
         };
         let entry = &mut self.sessions[at];
         let counted = Counted::new(&entry.vaults);
-        let (name, read_only, handle) = match opened {
+        let (vault_name, read_only, handle) = match opened {
             Opened::Writable(vault) => (
                 vault.name().to_owned(),
                 false,
@@ -623,7 +678,12 @@ impl Inner {
             ),
         };
         entry.gate.generation.fetch_add(1, Ordering::SeqCst);
-        entry.name = name;
+        // A backup is called what its file is called; the vault inside it is the vault's own name, which an older copy
+        // keeps.
+        entry.name = match &entry.location {
+            Location::Backup(file) => backup_name(file),
+            Location::Folder(_) => vault_name,
+        };
         entry.read_only = read_only;
         entry.state = SessionState::Unlocked;
         entry.live = Some(Live {
@@ -754,6 +814,21 @@ impl Sessions {
     /// (testing a backup) reads it before its work and compares after: a lock of all vaults in between drops its answer.
     pub(crate) fn epoch(&self) -> u64 {
         self.inner().epoch
+    }
+
+    /// Whether all vaults were locked since `epoch` was read for any reason but idle time (the person's Lock all, the
+    /// window's close, Windows locking, sleep, the app closing), or the app is closing. What a finished restore waiting
+    /// for its answer asks: an idle lock leaves it, any of these ends it. Read from the sessions' own count, so it is true
+    /// from the moment of the lock, before its hooks have run.
+    pub(crate) fn non_idle_lock_since(&self, epoch: u64) -> bool {
+        self.inner().non_idle_epoch > epoch || self.closing.load(Ordering::SeqCst)
+    }
+
+    /// The epoch now and the token of the jobs with no session in it, read in one step: a lock of all vaults either comes
+    /// before (the new epoch and a fresh token) or after (it cancels this token and the epoch no longer matches).
+    pub fn launch_scope(&self) -> (u64, CancelToken) {
+        let inner = self.inner();
+        (inner.epoch, inner.launch.clone())
     }
 
     /// Tests only: how many times a thread has had to wait for the sessions mutex.
@@ -1175,18 +1250,23 @@ impl Sessions {
         // early. Hooks are not part of it: a hook that blocks never keeps another session unlocked.
         let turn = self.lock_turn();
         // (1) Under the sessions mutex: the state, the generation, and everything a lock takes away...
-        let (locked, opening, pending) = {
+        let (locked, opening, pending, epoch_change) = {
             let mut inner = self.inner();
-            let (opening, pending) = match which {
-                Which::Some(_) => (Vec::new(), Vec::new()),
+            let (opening, pending, epoch_change) = match which {
+                Which::Some(_) => (Vec::new(), Vec::new(), None),
                 Which::All { close } => {
                     inner.epoch += 1;
+                    if reason != LockReason::Idle {
+                        inner.non_idle_epoch = inner.epoch;
+                    }
                     if close {
                         self.shut();
                     }
                     let opening: Vec<CancelToken> =
                         inner.opening.iter().map(|o| o.cancel.clone()).collect();
-                    (opening, self.pending.drain())
+                    // The jobs with no session stop with the epoch; the ones begun after this step get a fresh token.
+                    let launch = std::mem::take(&mut inner.launch);
+                    (opening, self.pending.drain(), Some((inner.epoch, launch)))
                 }
             };
             let state = match reason {
@@ -1215,7 +1295,7 @@ impl Sessions {
                     })
                 })
                 .collect();
-            (locked, opening, pending)
+            (locked, opening, pending, epoch_change)
         };
         if matches!(which, Which::Some(_)) && locked.is_empty() {
             return None;
@@ -1227,6 +1307,9 @@ impl Sessions {
         // (2) Cancel what runs.
         for cancel in &opening {
             cancel.cancel();
+        }
+        if let Some((_, launch)) = &epoch_change {
+            launch.cancel();
         }
         for session in &locked {
             session.live.cancel.cancel();
@@ -1244,6 +1327,10 @@ impl Sessions {
         // (4) Tell the UI.
         for &(id, generation) in &notices {
             self.notifier.locked(id, generation, reason);
+        }
+        // A lock of all vaults is an epoch change whether or not any vault was open: the page drops what has no session.
+        if let Some((epoch, _)) = epoch_change {
+            self.notifier.lock_epoch(&LockEpochEvent { epoch, reason });
         }
         let notified: Vec<SessionId> = notices.into_iter().map(|(id, _)| id).collect();
         // (5) The hooks, in the order they were added (the clipboard's first), on the hook thread: after the hooks of
@@ -1361,7 +1448,7 @@ mod tests {
     use std::time::Instant;
 
     use lockbox_core::Credential;
-    use lockbox_core::blob::NoJournal;
+    use lockbox_core::blob::{NoJournal, NoProgress};
     use lockbox_core::internals::fsio::testutil::TempDir;
     use lockbox_core::internals::lockfile::VaultLock;
     use serde_json::json;
@@ -1416,6 +1503,10 @@ mod tests {
         fn busy(&self, _session: Option<SessionId>, _operations: &[&'static str]) {}
         fn notice(&self, _notice: &Notice) {}
         fn capture(&self, _event: &CaptureEvent) {}
+        fn job_started(&self, _event: &JobStarted) {}
+        fn progress(&self, _event: &ProgressEvent) {}
+        fn lock_epoch(&self, _event: &LockEpochEvent) {}
+        fn close_asked(&self, _event: &CloseAsked) {}
     }
 
     fn sessions() -> (Arc<Recorder>, Sessions) {
@@ -1438,8 +1529,15 @@ mod tests {
     }
 
     fn open_read_only_vault(dir: &Path) -> ReadOnlyVault {
-        heavy(|| ReadOnlyVault::open_folder(dir, Credential::Password(PW), &CancelToken::new()))
-            .unwrap()
+        heavy(|| {
+            ReadOnlyVault::open_folder(
+                dir,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &NoProgress,
+            )
+        })
+        .unwrap()
     }
 
     /// Opens `opened` as the session at `location`: its id and generation.
@@ -1841,6 +1939,81 @@ mod tests {
         assert!(read.unwrap().data);
     }
 
+    /// A session's kind comes from where it is and whether it can be written: a writable folder is a `vault`, a read-only
+    /// folder an `older_copy`, a read-only backup a `backup`, whatever vault is inside it; the same in every answer
+    /// (the open's, `list`) and after a lock. A backup's name is its file's, an older copy's its vault's.
+    #[test]
+    fn a_sessions_kind_comes_from_its_location_and_read_only_flag() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let (live, _, dir) = open_writable(&sessions, parent.path());
+        let older = parent.path().join("Family.before-restore");
+        copy_folder(&dir, &older);
+        let (copy, _) = open_read_only(&sessions, &older);
+        let file = parent.path().join("Task 14 check.lockbox-backup");
+        fs::write(&file, b"stands in for a backup").unwrap();
+        let location = Location::backup(&file).unwrap();
+        let opened = Opened::ReadOnly(open_read_only_vault(&dir));
+        let (backup, _) = open_as(&sessions, location, opened);
+
+        let listed = sessions.list();
+        let seen = |id: SessionId| {
+            let info = listed.iter().find(|info| info.session == id).unwrap();
+            (info.kind, info.name.clone(), info.read_only)
+        };
+        assert_eq!(seen(live), (SessionKind::Vault, "Family".to_owned(), false));
+        assert_eq!(
+            seen(copy),
+            (SessionKind::OlderCopy, "Family".to_owned(), true)
+        );
+        assert_eq!(
+            seen(backup),
+            (SessionKind::Backup, "Task 14 check".to_owned(), true)
+        );
+        let json = serde_json::to_value(&listed).unwrap();
+        let kinds: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|info| info["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["vault", "older_copy", "backup"]);
+
+        sessions.lock_all(LockReason::Manual);
+        let locked = sessions.list();
+        let kinds: Vec<SessionKind> = locked.iter().map(|info| info.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                SessionKind::Vault,
+                SessionKind::OlderCopy,
+                SessionKind::Backup
+            ]
+        );
+    }
+
+    /// A backup session's name is the file's name without `.lockbox-backup`, in any case; a name without that ending, or
+    /// with nothing before it, stays whole; only the one ending goes.
+    #[test]
+    fn a_backups_name_is_its_file_name_without_the_extension() {
+        for (file, name) in [
+            (
+                "Task 14 check 2026-11-17.lockbox-backup",
+                "Task 14 check 2026-11-17",
+            ),
+            ("FAMILY.LOCKBOX-BACKUP", "FAMILY"),
+            ("a.Lockbox-Backup", "a"),
+            ("héllo wörld.lockbox-backup", "héllo wörld"),
+            ("a.lockbox-backup.lockbox-backup", "a.lockbox-backup"),
+            ("no extension", "no extension"),
+            ("x.zip", "x.zip"),
+            ("x.lockbox-backups", "x.lockbox-backups"),
+            (".lockbox-backup", ".lockbox-backup"),
+        ] {
+            assert_eq!(backup_name(Path::new(file)), name, "{file}");
+        }
+    }
+
     #[test]
     fn sessions_keyed_by_location() {
         let parent = TempDir::new();
@@ -1849,7 +2022,7 @@ mod tests {
         let dir = vault.dir().to_path_buf();
         let backup = parent.path().join("Family.lockbox-backup");
         vault
-            .backup(&backup, &NoJournal, &CancelToken::new())
+            .backup(&backup, &NoJournal, &CancelToken::new(), &NoProgress)
             .unwrap();
         let mut before_restore = dir.clone().into_os_string();
         before_restore.push(".before-restore");
@@ -1862,7 +2035,12 @@ mod tests {
             Opened::Writable(vault),
         );
         let from_backup = heavy(|| {
-            ReadOnlyVault::open_backup(&backup, Credential::Password(PW), &CancelToken::new())
+            ReadOnlyVault::open_backup(
+                &backup,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &NoProgress,
+            )
         })
         .unwrap();
         let backup_session = open_as(
@@ -2318,6 +2496,10 @@ mod tests {
         fn busy(&self, _session: Option<SessionId>, _operations: &[&'static str]) {}
         fn notice(&self, _notice: &Notice) {}
         fn capture(&self, _event: &CaptureEvent) {}
+        fn job_started(&self, _event: &JobStarted) {}
+        fn progress(&self, _event: &ProgressEvent) {}
+        fn lock_epoch(&self, _event: &LockEpochEvent) {}
+        fn close_asked(&self, _event: &CloseAsked) {}
     }
 
     #[test]
@@ -2503,6 +2685,46 @@ mod tests {
         assert!(held, "the first unlock's vault was still held");
         assert!(released, "every copy dropped");
         assert_eq!(answer.err(), Some(ShellError::Locked));
+    }
+
+    /// An idle lock of all vaults moves the epoch but is not a lock "by the person or by Windows" (the finished restore
+    /// survives it); every other lock of all vaults is, and so is the app closing. Read from the sessions' own
+    /// bookkeeping, so it is right even before a lock's hooks have run. One session's lock is none of them.
+    #[test]
+    fn an_idle_lock_is_told_apart_from_every_other_lock_of_all_vaults() {
+        let (_, sessions) = sessions();
+        let start = sessions.epoch();
+        assert!(!sessions.non_idle_lock_since(start));
+
+        sessions.lock_all(LockReason::Idle);
+        assert_ne!(sessions.epoch(), start);
+        assert!(!sessions.non_idle_lock_since(start), "idle is not one");
+
+        for reason in [
+            LockReason::Manual,
+            LockReason::WindowsLocked,
+            LockReason::Sleep,
+        ] {
+            let before = sessions.epoch();
+            sessions.lock_all(LockReason::Idle);
+            assert!(!sessions.non_idle_lock_since(before), "{reason:?}");
+            sessions.lock_all(reason);
+            assert!(sessions.non_idle_lock_since(before), "{reason:?}");
+            assert!(sessions.non_idle_lock_since(start), "{reason:?}");
+            assert!(
+                !sessions.non_idle_lock_since(sessions.epoch()),
+                "{reason:?}: only later locks count"
+            );
+        }
+
+        // A lock of one session moves nothing.
+        let now = sessions.epoch();
+        sessions.lock(SessionId(99), LockReason::Manual);
+        assert!(!sessions.non_idle_lock_since(now));
+
+        // The app closing counts, whatever the epoch.
+        sessions.shut();
+        assert!(sessions.non_idle_lock_since(sessions.epoch()));
     }
 
     /// Fix round 1: locations compare as Windows compares names (ordinal, ignoring case), not by Unicode lowercase.

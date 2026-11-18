@@ -1,11 +1,16 @@
 import { useRef, useState } from "react";
 import type { FileView, ItemSummary } from "../api";
+import { verbs } from "../addFilesWords";
 import { formatBytes } from "../format";
+import { useJob } from "../jobs";
 import { messageText, messageFor } from "../messages";
 import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
 import { KindIcon, PlusIcon } from "../parts/Icon";
-import { attachStoredFile, confirmStoredCopy, openStoredFile, replaceStoredFile, saveStoredFile, type SessionData } from "../store";
+import { JobProgress } from "../parts/JobProgress";
+import { KEEP_OPEN } from "../saveAllWords";
+import { COPYING } from "../openBackupWords";
+import { startAddFiles, startOpenBackup, confirmStoredCopy, openStoredFile, replaceStoredFile, saveStoredFile, type SessionData } from "../store";
 
 // Stored files in an item's panel (10a to 10f, 9d): Open, Save a copy and Replace file on each, and Attach a file on a login, key or note.
 // What the buttons do, and what is said when it is done, is the store's (`openStoredFile` and the rest): this file draws the rows, asks
@@ -54,11 +59,14 @@ export function CloudCopyQuestion({
   onAnother,
   onContinue,
   onNo,
+  many = false,
 }: {
   open: boolean;
   onAnother: () => void;
   onContinue: () => void;
   onNo: () => void;
+  /** Many files are going there (Save all files): the words are the plural of the singular's, and the yes is "Save here anyway". */
+  many?: boolean;
 }) {
   const another = useRef<HTMLButtonElement>(null);
   return (
@@ -68,10 +76,10 @@ export function CloudCopyQuestion({
         if (!next) onNo();
       }}
       title="This folder is synced to the cloud"
-      description="This file would be uploaded unprotected."
+      description={many ? "These files would be uploaded unprotected." : "This file would be uploaded unprotected."}
       initialFocus={another}
     >
-      <Button onClick={onContinue}>Continue</Button>
+      <Button onClick={onContinue}>{many ? "Save here anyway" : "Continue"}</Button>
       <Button ref={another} look="pill-main" onClick={onAnother}>
         Pick another folder
       </Button>
@@ -114,7 +122,7 @@ export function typeWord(name: string): string | null {
  * One stored file of an item: its name and size, and Open, Save a copy and Replace file (no Replace in a vault opened from a backup, which
  * can only save a copy and open). While the vault is working on a file the pressed button says so (`aria-busy`) and every file button in
  * the panel is off (`aria-disabled`, so it keeps focus) and sends nothing. A file that did not decrypt shows the words of 10d in place of
- * Open and Save a copy, with no button to a backup (4B's), and keeps Replace file, which is how a good copy goes in.
+ * Open and Save a copy, with Open a backup under them (a backup may hold a good copy), and keeps Replace file, which is how a good copy goes in.
  */
 function FileRow({ data, summary, file }: { data: SessionData; summary: ItemSummary; file: FileView }) {
   const [asking, setAsking] = useState<"program" | "replace" | { cloud: string } | null>(null);
@@ -186,9 +194,20 @@ function FileRow({ data, summary, file }: { data: SessionData; summary: ItemSumm
             </Button>
           </>
         ) : (
-          <p className="err" role="alert">
-            {messageText(messageFor(refused.error))}
-          </p>
+          <>
+            <p className="err" role="alert">
+              {messageText(messageFor(refused.error))}
+            </p>
+            {/* As drawn (10d): a backup may hold a good copy, so the way to one is here, under the words, and it is the filled button. */}
+            <Button
+              look="pill-main"
+              onClick={() => {
+                void startOpenBackup();
+              }}
+            >
+              Open a backup
+            </Button>
+          </>
         )}
         {data.readOnly ? null : (
           <Button
@@ -260,9 +279,9 @@ export function FileRows({ data, summary }: { data: SessionData; summary: ItemSu
 }
 
 /**
- * "Attached files" on a login, key or note (9d): its files with their buttons, and Attach a file, which picks one file in the Windows picker
- * (many at once is 4B's, so the words say one). In a vault opened from a backup there is no Attach, and the section shows only when there is
- * a file to open.
+ * "Attached files" on a login, key or note (9d): its files with their buttons, and Attach files, which picks one file or many in the Windows
+ * picker and lists them in the Add files panel before they go on this item (`AddFiles`). In a vault opened from a backup there is no Attach,
+ * and the section shows only when there is a file to open.
  */
 export function AttachedFiles({ data, summary }: { data: SessionData; summary: ItemSummary }) {
   const job = data.fileJob;
@@ -277,7 +296,7 @@ export function AttachedFiles({ data, summary }: { data: SessionData; summary: I
             aria-disabled={job !== null ? true : undefined}
             aria-busy={mine ? true : undefined}
             onClick={() => {
-              if (data.fileJob === null) void attachStoredFile(data.session, summary.id);
+              if (data.fileJob === null) void startAddFiles(data.session, { type: "item", id: summary.id });
             }}
           >
             {mine ? (
@@ -285,7 +304,7 @@ export function AttachedFiles({ data, summary }: { data: SessionData; summary: I
             ) : (
               <>
                 <PlusIcon />
-                Attach a file
+                Attach files
               </>
             )}
           </Button>
@@ -302,27 +321,76 @@ export function AttachedFiles({ data, summary }: { data: SessionData; summary: I
   );
 }
 
+/** 9b's line about the laptop for a batch of files, as drawn. */
+const BATCH_WARNING = "Keep the laptop open. Windows locking or sleeping cancels this, and files not finished aren't added.";
+
 /** What each long operation the shell names is, in the window's words. */
 const WORK: Record<string, string> = {
   import: "Adding a file to your vault.",
   save_copy: "Saving a copy of the file.",
   open: "Opening the file.",
+  backup: "Backing up this vault.",
+  save_all: "Saving files.",
+  copy_item: COPYING,
 };
+
+/** What 9b says for a Save a copy with progress, in the words the session chose (the design is silent beyond the sentence about the laptop). */
+const SAVE_CARD = {
+  label: "Saving a copy",
+  sentence: WORK.save_copy,
+  warning: "Keep the laptop open. Windows locking or sleeping cancels this, and a copy not finished isn't saved.",
+} as const;
+
+/**
+ * 9b outside the Add files panel: the bar, the bytes in words and Cancel, for the Save a copy this vault is working on, or for a batch of
+ * files once the person has gone from its panel, once the job has told the page which operation it is (`lockbox://job-started`, matched by the
+ * request the page sent). Nothing before that, and nothing for Open or Replace file, which have no progress of their own: 4A's "working" words
+ * are all they show. A batch has its bar in the panel while that is on screen (one bar, never two); here it is what can still stop it.
+ */
+export function FileJobProgress({ data }: { data: SessionData }) {
+  const job = useJob(data.fileJob?.request ?? null);
+  if (job === null || (job.kind !== "import" && job.kind !== "save_copy" && job.kind !== "save_all")) return null;
+  if (data.fileJob?.kind === "save_all") {
+    // A folder's files being saved, once the person has gone from its panel (which has the one bar while it is on screen).
+    if (data.tool?.kind === "save_all") return null;
+    const plan = data.saveAll?.plan ?? null;
+    const sentence = plan === null || data.saveAll === null ? undefined : `From ${data.saveAll.folder.name}, to ${plan.folder_shown}.`;
+    return <JobProgress operation={job.operation} label="Saving files" sentence={sentence} warning={KEEP_OPEN} stopWord="Stop" />;
+  }
+  if (data.fileJob?.kind === "add_files") {
+    if (data.tool?.kind === "add_files") return null;
+    const { doing } = verbs(data.addFiles?.into ?? { type: "folder", collection: null });
+    return <JobProgress operation={job.operation} label={`${doing} files`} sentence={`${doing} files to your vault.`} warning={BATCH_WARNING} />;
+  }
+  return job.kind === "save_copy" ? <JobProgress operation={job.operation} {...SAVE_CARD} /> : null;
+}
 
 /**
  * What 5d draws for a long job: while the shell says the vault is working (`lockbox://busy`), the window says what, and why it does not
  * lock for being idle. Windows locking or sleeping still locks, and the words say so. Nothing while no job runs, and a lock takes it with
- * the vault's record.
+ * the vault's record. A job that has its own progress card says what it is doing, and the Windows part, there, so only "Auto-lock is waiting
+ * until this finishes." is left here.
  */
 export function BusyNote({ data }: { data: SessionData }) {
+  // A backup's progress card sits in its panel; with that panel open it says the Windows part itself, as a file job's card does.
+  const backup = useJob(data.backup?.phase === "running" && data.tool?.kind === "backup" ? data.backup.request : null);
+  const card = useJob(data.fileJob?.request ?? null) ?? backup;
   if (data.operations.length === 0) return null;
-  const doing = data.operations.map((name) => (Object.hasOwn(WORK, name) ? WORK[name] : "Working.")).filter((words, at, all) => all.indexOf(words) === at);
+  const doing =
+    card !== null
+      ? []
+      : data.operations.map((name) => (Object.hasOwn(WORK, name) ? WORK[name] : "Working.")).filter((words, at, all) => all.indexOf(words) === at);
   return (
     <div className="ask" role="status">
       {doing.map((words) => (
         <p key={words}>{words}</p>
       ))}
-      <p>Auto-lock is waiting until this finishes. Windows locking or sleeping still locks your vaults and stops it.</p>
+      {/* A progress card already says the Windows part ("Windows locking or sleeping cancels this"), so it is not said twice. */}
+      <p>
+        {card !== null
+          ? "Auto-lock is waiting until this finishes."
+          : "Auto-lock is waiting until this finishes. Windows locking or sleeping still locks your vaults and stops it."}
+      </p>
     </div>
   );
 }

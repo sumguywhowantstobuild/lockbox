@@ -36,6 +36,40 @@ export function focusButton(selector: string, fallback?: () => void): void {
   }, 0);
 }
 
+/**
+ * A progress card goes when its job ends, and a keyboard user whose focus was on its Cancel would be left at the top of the page. Call this
+ * before the card goes, with the operation that is ending (`null` for a job that never had a card): when focus is inside that job's own card
+ * (not another job's), the function it returns, called once the card is gone, puts focus on the message the
+ * job's result shows (its "Got it" or Dismiss, the first button of the message stack), or on the list when there is none. A card inside the
+ * search box (a Save a copy begun there) sends focus back to the search box instead, since the box is still open and holds focus.
+ */
+export function takeJobFocus(operation: number | null): () => void {
+  const active = document.activeElement;
+  const card = active instanceof Element ? active.closest(".job") : null;
+  // Only the ending job's own card counts: with two jobs side by side, one ending leaves focus in the other's card alone.
+  if (card === null || operation === null || card.getAttribute("data-operation") !== String(operation)) return () => undefined;
+  // A card in the Add files panel: the panel's own result takes focus (its heading), so nothing here races it.
+  if (card.closest("aside.panel") !== null) return () => undefined;
+  const inSearch = card.closest('[role="dialog"]') !== null;
+  return () => {
+    focusButton(inSearch ? ".pin" : ".tstack .tb2", focusList);
+  };
+}
+
+/**
+ * Whether focus is now in an Add files batch's own place: its progress card (the one with this operation, whether the card is in the panel or in
+ * the list's column), or, while the panel is on screen (`panelShowing`), anywhere in that panel. Asked while the bar is still there, before the
+ * result takes its place: the result moves focus to itself only for a person who was in the batch's place, and never pulls focus back from the
+ * filter, the list or a field they went to meanwhile.
+ */
+export function batchHasFocus(operation: number | null, panelShowing: boolean): boolean {
+  const active = document.activeElement;
+  if (!(active instanceof Element)) return false;
+  const card = active.closest(".job");
+  if (card !== null) return operation !== null && card.getAttribute("data-operation") === String(operation);
+  return panelShowing && active.closest("aside.panel") !== null;
+}
+
 export function focusBack(fallback: keyof typeof OPENERS): void {
   const button = opener;
   opener = null;

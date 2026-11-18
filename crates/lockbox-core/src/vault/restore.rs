@@ -23,7 +23,7 @@ use super::source::{
 };
 use super::unlock::{Credential, load};
 use crate::archive::{BackupArchive, EntryKind, copy_hashed};
-use crate::blob::CancelToken;
+use crate::blob::{CancelToken, CountWrite, Meter, Progress};
 use crate::fsio::{
     DESTINATION_EXISTS, atomic_write, check_space, clear_hidden, open_shared_read, parent_dir,
     read_retry, remove_file_retry, rename_dir_no_replace, set_hidden, sync_dir, volume_info,
@@ -37,6 +37,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const BAD_PATH: CoreError = CoreError::InvalidInput {
     what: "restore path",
@@ -46,6 +48,9 @@ const SEVERAL_COPIES: CoreError = CoreError::InvalidInput {
 };
 const ALREADY_HERE: CoreError = CoreError::InvalidInput {
     what: "vault already here",
+};
+const CHANGED: CoreError = CoreError::InvalidInput {
+    what: "backup changed",
 };
 
 /// Where a restore puts the vault, in the parent folder it is given (spec 6.8 step 3).
@@ -80,6 +85,9 @@ pub struct PreparedRestore {
     /// The last swap attempt got as far as writing `swapping` into the journal, so only
     /// recovery can say what its error left behind.
     swap_started: bool,
+    /// On while the journal says `swapping` (the point from which a cancel no longer counts): shared with the caller
+    /// through [`swap_flag`](Self::swap_flag), since `commit` holds `&mut self` for the whole swap.
+    swapping: Arc<AtomicBool>,
 }
 
 /// What a finished (or recovered) swap left on disk.
@@ -179,6 +187,10 @@ impl PreparedRestore {
     /// once it exists, and then the journal; from then on, while the parent folder is missing
     /// (its drive is not plugged in), both stay, for startup recovery or the user's dismissal to
     /// settle. A failed `create_dir` made no staging folder, so only the journal goes.
+    ///
+    /// `progress` hears the bytes written into the staging folder, out of the sum of the entries
+    /// (the manifest apart); nothing is reported until the copying starts. The read-back of each
+    /// entry is not counted.
     pub fn prepare(
         archive: &Path,
         parent: &Path,
@@ -186,6 +198,35 @@ impl PreparedRestore {
         destination: RestoreDestination,
         journal: &Path,
         cancel: &CancelToken,
+        progress: &dyn Progress,
+    ) -> Result<PreparedRestore> {
+        Self::prepare_expecting(
+            archive,
+            parent,
+            credential,
+            destination,
+            journal,
+            cancel,
+            progress,
+            None,
+        )
+    }
+
+    /// [`prepare`](Self::prepare) for a caller that looked at the backup before and shows the person what it saw:
+    /// `expected` is the vault ID it saw. The archive this call opens (the file may have been replaced since) is
+    /// compared with it as soon as it is unlocked, and another vault's is refused as `InvalidInput`
+    /// (`backup changed`) before the free-space look, the journal, the staging folder or any copy, so nothing is
+    /// written. `None` asks for no such look.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_expecting(
+        archive: &Path,
+        parent: &Path,
+        credential: Credential,
+        destination: RestoreDestination,
+        journal: &Path,
+        cancel: &CancelToken,
+        progress: &dyn Progress,
+        expected: Option<VaultId>,
     ) -> Result<PreparedRestore> {
         // A bad name is refused before the archive is even opened (unlocking takes a second).
         if let RestoreDestination::NewFolder(chosen) = &destination {
@@ -209,7 +250,10 @@ impl PreparedRestore {
             refuse_vault_folder(&target)?;
         }
         let src = VaultSource::Archive(BackupArchive::open(archive, cancel)?);
-        let opened = unlock_source(&src, &credential, cancel)?;
+        let opened = unlock_source(&src, &credential, cancel, None)?;
+        if expected.is_some_and(|seen| seen != opened.header.vault_id) {
+            return Err(CHANGED);
+        }
         check_opened(&opened)?;
         let refs = attached_refs(&opened);
         attached_blobs(&src, &refs)?;
@@ -286,8 +330,11 @@ impl PreparedRestore {
             armed: true,
             finished: false,
             swap_started: false,
+            swapping: Arc::default(),
         };
-        prepared.extract(&refs, cancel)?;
+        let meter = Meter::new(progress, cancel, archive_of(&prepared.archive).total_size());
+        prepared.extract(&refs, cancel, &meter)?;
+        meter.finish();
         Ok(prepared)
     }
 
@@ -295,7 +342,12 @@ impl PreparedRestore {
     /// `vault.json.bak`.
     /// Each entry gets a new file that is synced and closed before the next, then read back
     /// from disk: the bytes on disk, not the ones just written, must hash to the manifest.
-    fn extract(&self, refs: &BTreeMap<FileId, &FileRef>, cancel: &CancelToken) -> Result<()> {
+    fn extract(
+        &self,
+        refs: &BTreeMap<FileId, &FileRef>,
+        cancel: &CancelToken,
+        meter: &Meter,
+    ) -> Result<()> {
         let staging = &self.staging;
         let (items, files) = (staging.join(ITEMS_DIR), staging.join(FILES_DIR));
         set_hidden(staging)?;
@@ -307,6 +359,10 @@ impl PreparedRestore {
             cancel.check()?;
             let path = staging.join(&e.name);
             let mut file = File::create_new(&path)?;
+            let mut counted = CountWrite {
+                inner: &mut file,
+                meter,
+            };
             match e.kind {
                 EntryKind::Blob(id) => {
                     let (vault_id, fref) = (&self.vault_id, refs[&id]);
@@ -316,13 +372,13 @@ impl PreparedRestore {
                         fref,
                         vault_id,
                         &listed,
-                        &mut file,
+                        &mut counted,
                         cancel,
                     )?;
                 }
                 _ => {
                     let src = &mut archive_of(&self.archive).reader(e);
-                    let hash = copy_hashed(src, e.size, &mut file, cancel)?;
+                    let hash = copy_hashed(src, e.size, &mut counted, cancel)?;
                     check_listed(&listed, &e.name, hash)?;
                 }
             }
@@ -367,6 +423,13 @@ impl PreparedRestore {
     /// state when the vault is open, a cancel came first, or the first rename was refused.
     pub fn can_retry(&self) -> bool {
         self.armed && !self.finished
+    }
+
+    /// A flag that is on from the moment the journal says `swapping` (a cancel no longer counts; a crash is settled by
+    /// recovery at the next launch) and off again if the first rename is refused and the restore goes back to its
+    /// pre-swap state. It is the one thing a caller can read while [`commit`](Self::commit) runs.
+    pub fn swap_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.swapping)
     }
 
     /// Spec 6.8 steps 5 and 6: swaps the staged vault into place. Cancelling is checked before
@@ -532,6 +595,7 @@ impl PreparedRestore {
         cancel: &CancelToken,
     ) -> Result<RestoreOutcome> {
         self.swap_started = false;
+        self.swapping.store(false, Ordering::SeqCst);
         let parent = parent_dir(&self.target).to_owned();
         let lock = lock_journal(&self.journal)?;
         // Step 2.
@@ -544,6 +608,7 @@ impl PreparedRestore {
         self.rewrite_journal(&lock, JournalStep::Swapping, before.clone())?;
         self.armed = false;
         self.swap_started = true;
+        self.swapping.store(true, Ordering::SeqCst);
         #[cfg(any(test, feature = "test-internals"))]
         crate::fsio::failpoint::check("restore.after_journal")?;
 
@@ -576,6 +641,8 @@ impl PreparedRestore {
                     self.armed = self
                         .rewrite_journal(&lock, JournalStep::Extracting, None)
                         .is_ok();
+                    // Back before the swap: a cancel counts again.
+                    self.swapping.store(!self.armed, Ordering::SeqCst);
                 }
                 return Err(e);
             }
@@ -708,6 +775,7 @@ pub(super) mod tests {
     use crate::archive::testkit::{
         ManifestMode, central_offset, patch, resize_entry, rewrite_backup,
     };
+    use crate::blob::NoProgress;
     use crate::fsio::testutil::{TempDir, make_dir_link, names};
     use crate::fsio::{VolumeInfo, failpoint, set_volume_override};
     use crate::item::ItemKind;
@@ -722,6 +790,7 @@ pub(super) mod tests {
     use std::fs;
     use std::path::Component;
     use std::rc::Rc;
+    use std::sync::atomic::Ordering;
 
     /// Always resets, so a failing test cannot leak a failpoint or volume on this thread.
     struct Cleanup;
@@ -764,7 +833,7 @@ pub(super) mod tests {
         }
 
         fn prepare(&self, archive: &Path, credential: Credential) -> Result<PreparedRestore> {
-            self.prepare_with(archive, credential, &CancelToken::new())
+            self.prepare_with(archive, credential, &CancelToken::new(), &NoProgress)
         }
 
         fn prepare_with(
@@ -772,6 +841,7 @@ pub(super) mod tests {
             archive: &Path,
             credential: Credential,
             cancel: &CancelToken,
+            progress: &dyn Progress,
         ) -> Result<PreparedRestore> {
             PreparedRestore::prepare(
                 archive,
@@ -780,6 +850,7 @@ pub(super) mod tests {
                 RestoreDestination::SameVault,
                 &self.journal(),
                 cancel,
+                progress,
             )
         }
 
@@ -872,6 +943,83 @@ pub(super) mod tests {
                 fs::read(b.join(&name)).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn restore_progress_counts_what_it_copies() {
+        use crate::blob::testkit::{CancelAtFirst, Recorder};
+
+        let (_f, backup) = backed_up();
+        let copied = BackupArchive::open(&backup, &CancelToken::new())
+            .unwrap()
+            .total_size();
+
+        // Every entry the restore writes: vault.json, the items and the blobs.
+        let d = Dest::new();
+        let recorder = Recorder::default();
+        let p = d
+            .prepare_with(
+                &backup,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &recorder,
+            )
+            .unwrap();
+        assert_eq!(recorder.assert_a_clean_run(), copied);
+        assert!(recorder.calls().len() as u64 <= copied / MIB as u64 + 1);
+        drop(p);
+
+        // A stop is the last the listener hears, and the staging folder goes.
+        let d = Dest::new();
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Recorder::default());
+        let result = d.prepare_with(&backup, Credential::Password(PW), &cancel, &listener);
+        assert!(matches!(error(result), CoreError::Cancelled));
+        assert_eq!(listener.1.calls().len(), 1);
+        d.assert_untouched();
+
+        // A refusal before anything is copied reports nothing.
+        let d = Dest::new();
+        let recorder = Recorder::default();
+        let result = d.prepare_with(
+            &backup,
+            Credential::Password("not the password"),
+            &CancelToken::new(),
+            &recorder,
+        );
+        assert!(matches!(error(result), CoreError::WrongPassword));
+        assert!(recorder.calls().is_empty());
+    }
+
+    /// A caller that checked a backup names the vault it saw: an archive of another vault (the file was replaced since)
+    /// is refused once it is unlocked, before the journal, the staging folder or any copy; the right one goes on.
+    #[test]
+    fn a_backup_of_another_vault_is_refused_before_anything_is_written() {
+        let _reset = Cleanup;
+        let (f, backup) = backed_up();
+        let other = VaultId([0x5A; 16]);
+        assert_ne!(other, f.vault.id());
+        let d = Dest::new();
+        let ask = |expected: VaultId| {
+            PreparedRestore::prepare_expecting(
+                &backup,
+                d.parent(),
+                Credential::Password(PW),
+                RestoreDestination::SameVault,
+                &d.journal(),
+                &CancelToken::new(),
+                &NoProgress,
+                Some(expected),
+            )
+        };
+
+        let refused = error(ask(other));
+        assert_eq!(format!("{refused:?}"), format!("{CHANGED:?}"));
+        d.assert_not_written();
+
+        let p = ask(f.vault.id()).unwrap();
+        assert_eq!(p.vault_id(), f.vault.id());
+        drop(p);
     }
 
     #[test]
@@ -1151,7 +1299,13 @@ pub(super) mod tests {
                 let credential = Credential::Password(PW);
                 let same = RestoreDestination::SameVault;
                 let p = PreparedRestore::prepare(
-                    &archive, &parent, credential, same, &journal, &cancel,
+                    &archive,
+                    &parent,
+                    credential,
+                    same,
+                    &journal,
+                    &cancel,
+                    &NoProgress,
                 );
                 *slot.borrow_mut() = Some(p.unwrap());
             }),
@@ -1271,6 +1425,7 @@ pub(super) mod tests {
             RestoreDestination::SameVault,
             &d.journal(),
             &CancelToken::new(),
+            &NoProgress,
         );
         match result {
             Err(e) => {
@@ -1437,7 +1592,7 @@ pub(super) mod tests {
         let d = Dest::new();
         let token = CancelToken::new();
         failpoint::arm_cancel("restore.after_entry", token.clone());
-        let result = d.prepare_with(&backup, Credential::Password(PW), &token);
+        let result = d.prepare_with(&backup, Credential::Password(PW), &token, &NoProgress);
         assert!(matches!(error(result), CoreError::Cancelled));
         d.assert_untouched();
     }
@@ -1490,7 +1645,14 @@ pub(super) mod tests {
             for file in &item.attachments {
                 let cancel = CancelToken::new();
                 vault
-                    .export_file(&item.id, &file.file_id, &dest, &NoJournal, &cancel)
+                    .export_file(
+                        &item.id,
+                        &file.file_id,
+                        &dest,
+                        &NoJournal,
+                        &cancel,
+                        &NoProgress,
+                    )
                     .unwrap();
                 all.push(fs::read(&dest).unwrap());
             }
@@ -1616,6 +1778,7 @@ pub(super) mod tests {
                 RestoreDestination::SameVault,
                 &self.journal(),
                 &cancel,
+                &NoProgress,
             )
             .unwrap()
         }
@@ -1872,6 +2035,68 @@ pub(super) mod tests {
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::RestorePending)));
         assert!(!p.can_retry());
+    }
+
+    /// The flag the shell reads to tell "past the point of cancelling": off as prepared, off through every refusal and
+    /// every cancel before the journal says `swapping`, off again after a refused first rename, on from the moment the
+    /// journal says `swapping` (seen from inside the swap), and on after an error that recovery settled.
+    #[test]
+    fn swap_flag_is_on_only_from_the_journal_saying_swapping() {
+        let _reset = Cleanup;
+        let (s, vault) = Scene::replacing();
+        let mut p = s.prepare();
+        let flag = p.swap_flag();
+        assert!(!flag.load(Ordering::SeqCst), "as prepared");
+
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::VaultInUse)
+        ));
+        assert!(!flag.load(Ordering::SeqCst), "the vault is open");
+        drop(vault);
+
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        assert!(matches!(p.commit(&cancelled), Err(CoreError::Cancelled)));
+        assert!(!flag.load(Ordering::SeqCst), "cancelled before the swap");
+
+        failpoint::arm("restore.fail_move_existing");
+        assert!(matches!(
+            p.commit(&CancelToken::new()),
+            Err(CoreError::Io(_))
+        ));
+        failpoint::disarm_all();
+        assert!(!flag.load(Ordering::SeqCst), "a refused first rename");
+
+        // Seen from inside the swap: off at the last cancel check, on once the journal says `swapping`.
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        for step in ["restore.before_swapping", "restore.after_journal"] {
+            let (flag, seen) = (flag.clone(), seen.clone());
+            failpoint::observe(
+                step,
+                Box::new(move || seen.borrow_mut().push((step, flag.load(Ordering::SeqCst)))),
+            );
+        }
+        p.commit(&CancelToken::new()).unwrap();
+        failpoint::disarm_all();
+        assert_eq!(
+            *seen.borrow(),
+            [
+                ("restore.before_swapping", false),
+                ("restore.after_journal", true)
+            ]
+        );
+        assert!(flag.load(Ordering::SeqCst), "the swap went through");
+
+        // An error after the swap began is settled by recovery: the flag stays on.
+        let s = Scene::replace();
+        let mut p = s.prepare();
+        let flag = p.swap_flag();
+        failpoint::arm("restore.after_move_existing");
+        let result = p.commit(&CancelToken::new());
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert!(flag.load(Ordering::SeqCst), "rolled back after it began");
     }
 
     #[test]
@@ -2961,6 +3186,7 @@ pub(super) mod tests {
                 destination,
                 &journal,
                 &CancelToken::new(),
+                &NoProgress,
             )
         }
     }

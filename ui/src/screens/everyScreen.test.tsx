@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "../App";
 import { resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
-import { FOLDER, installFakeShell, itemId, PASSWORD, sampleItems, type FakeItem, type FakeShell, type FakeVault } from "../testing/fakeShell";
+import { BACKUP_PASSWORD, FOLDER, installFakeShell, itemId, PASSWORD, sampleItems, type FakeItem, type FakeShell, type FakeVault } from "../testing/fakeShell";
 import { listBelow, readBeside } from "../testing/files";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
@@ -49,6 +49,13 @@ function items(): FakeItem[] {
     { id: itemId(31), kind: "key", title: "TELEGRAM_BOT_TOKEN", collection: FOLDER, value: "demo-screen-key-2" },
   ];
 }
+
+/** Three made-up files picked for Add files: 2.1 MB, 3.2 GB and 84 KB. */
+const THREE_FILES = [
+  { name: "signed-contract-demo.pdf", size: 2_202_010 },
+  { name: "design-files-demo.zip", size: 3_435_973_837 },
+  { name: "scope-notes-demo.docx", size: 86_016 },
+];
 
 function vault(extra: Partial<FakeVault> = {}): FakeVault {
   return { id: 7, name: "My vault", items: items(), ...extra };
@@ -159,6 +166,33 @@ const CASES: Case[] = [
     reach: async () => {
       start([]);
       await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+    },
+  },
+  {
+    name: "What do you have? (26a, 26b)",
+    shows: ["setup/MoveIn#MoveIn"],
+    reach: async () => {
+      start([]);
+      await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+      click("I already have a vault or a backup");
+      await screen.findByRole("heading", { level: 1, name: "What do you have?" });
+      // 26b: the folder on a USB stick, refused, with its words as the alert.
+      shell.refuseNext("add_existing_vault", { code: "invalid_input", what: "removable drive" });
+      click("A vault folder");
+      await screen.findByRole("alert");
+    },
+  },
+  {
+    name: "A vault is here, bring in the next (26c)",
+    shows: ["setup/MoveIn#MoveIn"],
+    reach: async () => {
+      start([]);
+      await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
+      click("I already have a vault or a backup");
+      await screen.findByRole("heading", { level: 1, name: "What do you have?" });
+      shell.offerExisting({ id: 40, name: "Old vault", items: [] });
+      click("A vault folder");
+      await screen.findByRole("heading", { level: 1, name: "Old vault is here" });
     },
   },
   {
@@ -348,6 +382,179 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "A copy being saved, with its progress and Cancel (9b)",
+    shows: ["FileActions#FileJobProgress"],
+    reach: async () => {
+      await unlocked();
+      const panel = await select("Client contract");
+      shell.holdFiles();
+      click("Save a copy of contract-demo.pdf", panel);
+      const card = await screen.findByRole("region", { name: "Saving a copy" });
+      const job = shell.runningJobs()[0];
+      act(() => {
+        shell.sendProgress(job?.operation ?? 0, 1_288_490_189, 3_221_225_472);
+      });
+      await within(card).findByText("1.2 GB of 3 GB");
+    },
+  },
+  {
+    name: "Many files picked (9a)",
+    shows: ["AddFiles#AddFiles"],
+    reach: async () => {
+      await unlocked();
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      await screen.findByRole("complementary", { name: "Add files" });
+    },
+  },
+  {
+    name: "Many files, no room for them (9e)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      shell.setFreeSpace(1_181_116_006);
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      const panel = await screen.findByRole("complementary", { name: "Add files" });
+      click("Add 3 files", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Many files being added, with one bar and Cancel (9b)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      shell.holdFiles();
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      click("Add 3 files", await screen.findByRole("complementary", { name: "Add files" }));
+      const card = await screen.findByRole("region", { name: "Adding files" });
+      const job = shell.runningJobs()[0];
+      act(() => {
+        shell.sendProgress(job?.operation ?? 0, 1_395_864_371, 3_438_175_847);
+      });
+      await within(card).findByText("2 of 3");
+    },
+  },
+  {
+    name: "Many files added, and the originals still on the PC (9c)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      click("Add 3 files", await screen.findByRole("complementary", { name: "Add files" }));
+      await screen.findByRole("complementary", { name: "3 files added" });
+    },
+  },
+  {
+    name: "Many files, some not added, named (9c)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      shell.unreadableFiles(["scope-notes-demo.docx"]);
+      shell.batchEndsAfter(1, { code: "busy", what: "vault" });
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      click("Add 3 files", await screen.findByRole("complementary", { name: "Add files" }));
+      await screen.findByRole("complementary", { name: "1 of 3 files added" });
+    },
+  },
+  {
+    name: "Many files, the summary kept after moving on (9c)",
+    shows: ["AddFiles#AddFilesLeft"],
+    reach: async () => {
+      await unlocked();
+      shell.batchEndsAfter(1, { code: "busy", what: "vault" });
+      const release = shell.holdFiles();
+      shell.pickFilesNext(THREE_FILES);
+      await addMenu("File");
+      click("Add 3 files", await screen.findByRole("complementary", { name: "Add files" }));
+      await screen.findByRole("region", { name: "Adding files" });
+      await select("Client contract");
+      act(() => {
+        release();
+      });
+      await screen.findByRole("region", { name: "1 of 3 files added" });
+    },
+  },
+  {
+    name: "Save all files, with one bar and Stop (Saving)",
+    shows: ["SaveAllFiles#SaveAllFiles"],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      shell.holdFiles();
+      await folderMenu("Save all files (1)");
+      const card = await screen.findByRole("region", { name: "Saving files" });
+      const job = shell.runningJobs()[0];
+      act(() => {
+        shell.sendProgress(job?.operation ?? 0, 4_608, 18_432);
+      });
+      await within(card).findByText("4.5 KB of 18 KB");
+    },
+  },
+  {
+    name: "Save all files, saved with the warning (Done)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      await folderMenu("Save all files (1)");
+      await screen.findByRole("complementary", { name: "1 file saved" });
+    },
+  },
+  {
+    name: "Save all files, stopped part way (Stopped)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      shell.batchEndsAfter(0, { code: "core", kind: "not_enough_space", needed: 10, available: 5 });
+      await folderMenu("Save all files (1)");
+      await screen.findByRole("complementary", { name: "Stopped after 0 of 1 file" });
+    },
+  },
+  {
+    name: "Save all files, the summary kept after moving on (Done)",
+    shows: ["SaveAllFiles#SaveAllLeft"],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      const release = shell.holdFiles();
+      await folderMenu("Save all files (1)");
+      await screen.findByRole("region", { name: "Saving files" });
+      await select("Rotation steps");
+      act(() => {
+        release();
+      });
+      await screen.findByRole("region", { name: "1 file saved" });
+    },
+  },
+  {
+    name: "Save all files into a cloud folder",
+    shows: ["SaveAllFiles#SaveAllCloudQuestion"],
+    reach: async () => {
+      await unlocked();
+      await openFolder("Agency support agent");
+      shell.cloudPdfNext();
+      await folderMenu("Save all files (1)");
+      return screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+    },
+  },
+  {
+    name: "Attach files on an item (9d)",
+    shows: [],
+    reach: async () => {
+      await unlocked();
+      const panel = await select("Bot admin console");
+      shell.pickFilesNext(THREE_FILES);
+      click("Attach files", panel);
+      await screen.findByRole("complementary", { name: "Attach files" });
+    },
+  },
+  {
     name: "Open a program? (10b)",
     shows: ["FileActions#ProgramQuestion"],
     reach: async () => {
@@ -451,6 +658,210 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Back up: where it goes, progress, saved and not enough space (22a to 22d)",
+    shows: ["BackupFlow#BackupPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Back up", settings);
+      const panel = await screen.findByRole("complementary", { name: "Back up" });
+      // The last of its views, the one with the most on it: a refusal said under the advice.
+      shell.refuseNext("backup_vault", { code: "core", kind: "not_enough_space", needed: 1_288_490_189, available: 419_430_400 });
+      click("Back up", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Test a backup: the file and the box, progress, the result and a damaged backup (23a to 23d)",
+    shows: ["TestBackup#TestBackupPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Test a backup", settings);
+      const panel = await screen.findByRole("complementary", { name: "Test a backup" });
+      // The last of its views with a field on it: a wrong password said under the box.
+      fireEvent.change(within(panel).getByLabelText("Password or recovery key from when it was made"), { target: { value: "not the one" } });
+      click("Test", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Open a backup: the file and the box, progress and a wrong password (25a)",
+    shows: ["OpenBackup#OpenBackupPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Open a backup", settings);
+      const panel = await screen.findByRole("complementary", { name: "Open a backup" });
+      // The last of its views with a field on it: a wrong password said under the box.
+      fireEvent.change(within(panel).getByLabelText("Password or recovery key from when it was made"), { target: { value: "not the one" } });
+      click("Open read-only", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Open a backup from the lock screen: the same steps full-screen (25a)",
+    shows: ["OpenBackup#OpenBackupSteps"],
+    reach: async () => {
+      start([vault()]);
+      fireEvent.click(await screen.findByRole("button", { name: "Open a backup" }));
+      await screen.findByRole("heading", { level: 1, name: "Open a backup" });
+      fireEvent.change(screen.getByLabelText("Password or recovery key from when it was made"), { target: { value: "not the one" } });
+      click("Open read-only");
+      await screen.findByRole("alert");
+    },
+  },
+  {
+    name: "A backup open: Copy to a vault and the question about the files it lacks (25b to 25d)",
+    shows: ["OpenBackup#CopyToVault"],
+    reach: async () => {
+      await unlocked();
+      shell.backupHolds(
+        items().map((item) =>
+          item.id === itemId(1) ? { ...item, missingFiles: ["console-access-demo.pdf"] } : item,
+        ),
+      );
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Open a backup", settings);
+      const panel = await screen.findByRole("complementary", { name: "Open a backup" });
+      fireEvent.change(within(panel).getByLabelText("Password or recovery key from when it was made"), { target: { value: BACKUP_PASSWORD } });
+      click("Open read-only", panel);
+      await screen.findByRole("button", { name: /read-only, vault menu$/ });
+      const item = await select("Bot admin console");
+      click("Copy to a vault", item);
+      await within(item).findByRole("combobox", { name: "Vault" });
+      click("Copy", item);
+      return screen.findByRole("dialog", { name: "Copy without these files?" });
+    },
+  },
+  {
+    name: "Restore a backup: the file and the box, where it goes, progress, the replace question and the finish (24a to 24e)",
+    shows: ["RestoreFlow#RestoreFlow"],
+    reach: async () => {
+      start([vault()]);
+      fireEvent.click(await screen.findByRole("button", { name: "Restore a backup" }));
+      await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+      shell.restoreIs({ replaces: true });
+      fireEvent.change(screen.getByLabelText("Password or recovery key from when it was made"), { target: { value: BACKUP_PASSWORD } });
+      click("Continue");
+      await screen.findByRole("heading", { level: 1, name: "Where it goes" });
+      click("Restore");
+      await screen.findByRole("heading", { level: 1, name: "Replace your vault with this?" });
+      click("Replace");
+      // The last of its views, the one with a field on it.
+      await screen.findByRole("heading", { level: 1, name: "My vault is restored" });
+    },
+  },
+  {
+    name: "A restore that didn't finish: Ask 6, Ask 7 and the two states with no drawn screen",
+    shows: ["RestoreNotices#RestoreNotices"],
+    reach: async () => {
+      const paths = { step: "swapping", staging: "C:\\Vaults\\demo", target: "C:\\Vaults\\demo", before_restore: null };
+      start([vault()], [{ kind: "restore", state: "drive_missing", paths, folder: "E:\\Vaults" }]);
+      await screen.findByRole("heading", { level: 1, name: "A restore is waiting for a drive" });
+      // Try again that comes to a second screen: the rename that failed, then the one that was undone.
+      shell.retryRestoreGives({ state: "pending", paths });
+      click("Try again");
+      await screen.findByRole("heading", { level: 1, name: "A restore is waiting" });
+      shell.retryRestoreGives({ state: "recovered", how: "rolled_back", vault: { id: 7, name: "My vault" } });
+      click("Try again");
+      await screen.findByRole("heading", { level: 1, name: "A restore didn't finish" });
+    },
+  },
+  {
+    name: "A vault whose details are both damaged: Ask 8",
+    shows: ["RestoreNotices#DamagedVaultAsk"],
+    reach: async () => {
+      start([vault(), { id: 9, name: null, available: true, detailsDamaged: true }]);
+      fireEvent.click(await screen.findByRole("radio", { name: /A vault that can't be read/ }));
+      await screen.findByRole("heading", { level: 1, name: "This vault can't be opened" });
+    },
+  },
+  {
+    name: "Older copies: the list, and the box that opens one read-only (24f)",
+    shows: ["OlderCopies#OlderCopiesPanel", "OlderCopies#OlderCopiesList"],
+    reach: async () => {
+      start([vault()]);
+      shell.olderCopies([
+        { vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_395_864_371 },
+        { vault: 7, folder: "My vault.before-restore-2", last_written: null, size: 5_242_880 },
+      ]);
+      await unlockIt();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      fireEvent.click(await within(settings).findByRole("button", { name: "Older copies (2)" }));
+      const panel = await screen.findByRole("complementary", { name: "Older copies" });
+      // The last of its views, the one with a field on it: a wrong password said under the box.
+      click("Open read-only", within(panel).getByText("My vault.before-restore").closest(".frow") as HTMLElement);
+      fireEvent.change(within(panel).getByLabelText("Password or recovery key for this copy"), { target: { value: "not the one" } });
+      click("Open", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Delete an older copy, asked first and for good (24g)",
+    shows: [],
+    reach: async () => {
+      start([vault()]);
+      shell.olderCopies([{ vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_395_864_371 }]);
+      await unlockIt();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      fireEvent.click(await within(settings).findByRole("button", { name: "Older copies (1)" }));
+      const panel = await screen.findByRole("complementary", { name: "Older copies" });
+      click("Delete", panel);
+      return screen.findByRole("dialog", { name: "Delete My vault.before-restore?" });
+    },
+  },
+  {
+    name: "Older copies inside the restore, when there are too many (24f, from 24d's refusal)",
+    shows: ["RestoreFlow#RestoreFlow"],
+    reach: async () => {
+      start([vault()]);
+      shell.olderCopies([{ vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_395_864_371 }]);
+      fireEvent.click(await screen.findByRole("button", { name: "Restore a backup" }));
+      await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+      shell.restoreIs({ replaces: true });
+      fireEvent.change(screen.getByLabelText("Password or recovery key from when it was made"), { target: { value: BACKUP_PASSWORD } });
+      click("Continue");
+      await screen.findByRole("heading", { level: 1, name: "Where it goes" });
+      click("Restore");
+      await screen.findByRole("heading", { level: 1, name: "Replace your vault with this?" });
+      shell.restoreCommitRefuses({ code: "core", kind: "invalid_input", what: "too many before-restore copies" });
+      click("Replace");
+      fireEvent.click(await screen.findByRole("button", { name: "Older copies" }));
+      await screen.findByRole("heading", { level: 1, name: "Older copies" });
+      await screen.findByText("My vault.before-restore");
+    },
+  },
+  {
+    name: "Backup refused, and the questions beside it (Ask 2)",
+    shows: ["BackupFlow#BackupRefusedAsk"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Back up", settings);
+      const panel = await screen.findByRole("complementary", { name: "Back up" });
+      shell.refuseNext("backup_vault", { code: "invalid_input", what: "details changed" });
+      click("Back up", panel);
+      return screen.findByRole("dialog", { name: "Can't back up My vault yet" });
+    },
+  },
+  {
+    name: "Backup overdue (Ask 1)",
+    shows: ["BackupReminder#BackupReminder"],
+    reach: async () => {
+      start([vault({ backupDays: 40 })]);
+      await unlockIt(null);
+      return screen.findByRole("dialog", { name: "My vault hasn't been backed up in 30 days" });
+    },
+  },
+  {
     name: "Save what you copied, in the vault (8a)",
     shows: ["SaveBox#SaveBox"],
     reach: async () => {
@@ -546,6 +957,17 @@ const CASES: Case[] = [
         shell.closeWindow();
       });
       await screen.findByRole("dialog", { name: "Lockbox stays by the clock" });
+    },
+  },
+  {
+    name: "Closing or quitting with a job running (33b, Ask 15)",
+    shows: ["CloseQuestion#CloseQuestion"],
+    reach: async () => {
+      await unlocked();
+      act(() => {
+        shell.askClose("close", { running: ["backup"], pastSwap: false });
+      });
+      await screen.findByRole("dialog", { name: "A backup is running" });
     },
   },
 ];

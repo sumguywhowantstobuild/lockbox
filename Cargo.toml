@@ -18,3 +18,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.lockbox-core]
 opt-level = 3
+# Every test vault derives its key with Argon2 at real settings, and unoptimised the tests spent most of their time
+# there: `cargo test --locked` took 744 s, and 345 s with these two optimised (measured 2026-11-16, 8 cores).
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

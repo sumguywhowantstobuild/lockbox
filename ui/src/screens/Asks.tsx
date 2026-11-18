@@ -6,16 +6,20 @@ import { Dialog } from "../parts/Dialog";
 import {
   acceptDetails,
   closeBanner,
+  closeRestoreNotice,
   dismissShortcutNotice,
   lockThisVault,
   retryOpenFiles,
   setOutputRecordAside,
+  startOpenBackup,
+  startRestore,
   useLockNote,
   useNotices,
   useSettings,
   type Banner,
   type SessionData,
 } from "../store";
+import { finishedWords } from "../restoreWords";
 import { shortcutText } from "../shortcut";
 
 // The app's questions that an unlock, or the launch before it, has to tell (the design's "The app's questions"). Each
@@ -35,6 +39,9 @@ const PROVIDER: Record<CloudProvider, string> = {
 const DETAILS_CHANGED =
   "Its name, or other details kept beside your items, don't match what Lockbox last saved. Moving a vault or restoring a backup doesn't cause this. If you edited that file yourself, accept it. If you didn't, lock it and check your PC first; restoring a backup you trust is the safer way back. Backups stay off until you accept.";
 
+/** What Ask 3 says is wrong, in the design's words: also the first sentences of an older copy's warning. */
+const DETAILS_DIFFER = "Its name, or other details kept beside your items, don't match what Lockbox last saved.";
+
 /** The one word that fits one or many. */
 function count(n: number, one: string, many: string): string {
   return n === 1 ? one : many;
@@ -51,7 +58,8 @@ function Notice({
   children,
 }: {
   text: string;
-  actions: { name: string; onPress: () => void; disabled?: boolean }[];
+  /** `main` is the way out the words point to, drawn filled. */
+  actions: { name: string; onPress: () => void; disabled?: boolean; main?: boolean }[];
   children?: ReactNode;
 }) {
   const words = useId();
@@ -62,7 +70,13 @@ function Notice({
       {actions.length === 0 ? null : (
         <div className="ask-acts">
           {actions.map((action) => (
-            <Button key={action.name} aria-describedby={words} disabled={action.disabled} onClick={action.onPress}>
+            <Button
+              key={action.name}
+              look={action.main === true ? "pill-main" : "pill"}
+              aria-describedby={words}
+              disabled={action.disabled}
+              onClick={action.onPress}
+            >
               {action.name}
             </Button>
           ))}
@@ -135,7 +149,31 @@ export function VaultBanners({ data }: { data: SessionData }) {
       {asks.unreadable > 0 && open("unreadable") ? (
         <Notice
           text={`${String(asks.unreadable)} ${count(asks.unreadable, "item in this vault can't be read. Everything else works. It may be damaged", "items in this vault can't be read. Everything else works. They may be damaged")}, so Lockbox left all stored files where they are until this is sorted.`}
-          actions={[{ name: "Close", onPress: close("unreadable") }]}
+          actions={[
+            // A backup can bring the vault back, beside it. A copy opened from a backup is not a vault on the list, so it has none.
+            ...(data.readOnly
+              ? []
+              : [
+                  {
+                    name: "Restore a backup",
+                    // As drawn (Ask 4): the way back is the filled button.
+                    main: true,
+                    onPress: () => {
+                      void startRestore({ vault: data.vaultId });
+                    },
+                  },
+                ]),
+            // A backup can also be opened to look through and copy a good copy of an item out of: from any window, a read-only one too.
+            {
+              name: "Open a backup",
+              // With no restore offered (a read-only copy), this is the way out.
+              main: data.readOnly,
+              onPress: () => {
+                void startOpenBackup();
+              },
+            },
+            { name: "Close", onPress: close("unreadable") },
+          ]}
         />
       ) : null}
       {asks.leftover > 0 && open("leftover") ? (
@@ -148,6 +186,14 @@ export function VaultBanners({ data }: { data: SessionData }) {
         <Notice
           text="Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password."
           actions={[{ name: "Later", onPress: close("spare") }]}
+        />
+      ) : null}
+      {asks.headerChanged && open("details") ? (
+        // An older copy opened read-only whose details were changed outside Lockbox. Ask 3's first sentences, for a copy that can't change: there is nothing to
+        // accept, and nothing is locked or turned off, so it is a banner. The last two sentences are this screen's own words.
+        <Notice
+          text={`${data.name}'s details were changed outside Lockbox. ${DETAILS_DIFFER} Nothing in this older copy can change. If you didn't edit its files yourself, check your PC first.`}
+          actions={[{ name: "Close", onPress: close("details") }]}
         />
       ) : null}
       {cloud !== null && open("cloud") ? (
@@ -271,22 +317,32 @@ export function ShortcutAsk() {
 }
 
 /**
- * What the lock screen says beside the password: a restore that Lockbox finished at launch (words only; the lock
- * screen's own Unlock is its button, and unlocking is what clears it), and a refusal that the vault it was about has
- * locked before (Ask 16, "Locked before it could say"; words, no button).
+ * What the lock screen says beside the password: a restore that Lockbox finished at launch (the vault's name as the notice gave it, and an Unlock
+ * button that closes the notice and leaves that vault chosen with its password box focused; unlocking clears it too), and a refusal that the vault
+ * it was about has locked before (Ask 16, "Locked before it could say"; words, no button). `onUnlock` is the lock screen's: it gets the vault the notice names, or
+ * `null` when it names none.
  */
-export function LockScreenAsks() {
-  const { restoreFinished } = useNotices();
+export function LockScreenAsks({ onUnlock }: { onUnlock: (vault: number | null) => void }) {
+  const { restore } = useNotices();
   const note = useLockNote();
+  const finished = restore?.ask === "finished" ? restore : null;
   return (
     <div className="asks">
       {note === null ? null : <Notice text={messageText(messageFor(note))} actions={[]} />}
-      {restoreFinished ? (
+      {finished === null ? null : (
         <Notice
-          text="Lockbox finished restoring a vault. Unlock with the password from when that backup was made."
-          actions={[]}
+          text={finishedWords(finished.vault?.name ?? null)}
+          actions={[
+            {
+              name: "Unlock",
+              onPress: () => {
+                closeRestoreNotice();
+                onUnlock(finished.vault?.id ?? null);
+              },
+            },
+          ]}
         />
-      ) : null}
+      )}
       <OpenFilesAsk />
       <LostOutputsAsk />
       <ShortcutAsk />

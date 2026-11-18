@@ -37,37 +37,65 @@ pub struct VolumeInfo {
 
 /// Free space and per-file size limit of the volume holding `dir`.
 pub fn volume_info(dir: &Path) -> Result<VolumeInfo> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     if let Some(fake) = VOLUME_OVERRIDE.with(|v| v.get()) {
         return Ok(fake);
     }
     Ok(sys::volume_info(dir)?)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 thread_local! {
     static VOLUME_OVERRIDE: std::cell::Cell<Option<VolumeInfo>> = const { std::cell::Cell::new(None) };
 }
 
-/// Lets a test pretend the disk is full or FAT32 (this thread only).
-#[cfg(test)]
-pub(crate) fn set_volume_override(v: Option<VolumeInfo>) {
+/// Lets a test pretend the disk is full, FAT32 or of unknown size (this thread only: set it on the thread that runs
+/// the engine call). The engine's own tests, and the shell's through `internals::fsio`; no shipped build has it.
+#[cfg(any(test, feature = "test-internals"))]
+pub fn set_volume_override(v: Option<VolumeInfo>) {
     VOLUME_OVERRIDE.with(|cell| cell.set(v));
 }
 
-/// Pure check: can `needed` more bytes be written, and can a single file of `file_bytes` exist here?
+/// Pure check: can `needed` more bytes be written, and can a single file of `file_bytes` exist here? A refusal's
+/// `needed` includes the slack kept free, so "needs X, has Y" always has X above Y.
 pub fn check_space(needed: u64, file_bytes: u64, v: &VolumeInfo) -> Result<()> {
     if let Some(max_file) = v.max_file_bytes
         && file_bytes > max_file
     {
         return Err(CoreError::FileSystemLimit { max_file });
     }
+    let with_margin = needed.saturating_add(SPACE_MARGIN);
     if let Some(available) = v.free_bytes
-        && needed.saturating_add(SPACE_MARGIN) > available
+        && with_margin > available
     {
-        return Err(CoreError::NotEnoughSpace { needed, available });
+        return Err(CoreError::NotEnoughSpace {
+            needed: with_margin,
+            available,
+        });
     }
     Ok(())
+}
+
+/// Whether `e` says the drive is out of space: the portable kind, or the Windows codes `ERROR_DISK_FULL` (112) and
+/// `ERROR_HANDLE_DISK_FULL` (39). Those numbers mean other things elsewhere, so they only count on Windows.
+pub(crate) fn is_disk_full(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::StorageFull
+        || (cfg!(windows) && matches!(e.raw_os_error(), Some(112 | 39)))
+}
+
+/// The refusal for a drive that filled while a copy of `length` bytes was written in `folder`: `needed` is the file and
+/// the slack [`check_space`] keeps free, and `available` is what the volume reports now, 0 where that cannot be read.
+/// It is kept below `needed`, so that "needs X, has Y" always has X above Y, as the refusal of [`check_space`] does.
+pub(crate) fn full_drive_refusal(length: u64, folder: &Path) -> CoreError {
+    let needed = length.saturating_add(SPACE_MARGIN);
+    let free = volume_info(folder)
+        .ok()
+        .and_then(|volume| volume.free_bytes)
+        .unwrap_or(0);
+    CoreError::NotEnoughSpace {
+        needed,
+        available: free.min(needed - 1),
+    }
 }
 
 /// Runs `op`, retrying while another program briefly holds the file (Windows errors
@@ -161,6 +189,48 @@ pub(crate) fn rename_replace_gated(
         std::thread::sleep(time)
     };
     retry_gated(attempt, gate, wait)
+}
+
+/// [`rename_replace_gated`] for a destination that must not exist at all: the move is one `MoveFileExW` without
+/// `MOVEFILE_REPLACE_EXISTING` (the check and the move are one step, so a file that appears at the last moment is
+/// safe), run through `gate` once per attempt with the waits outside it. A name that is taken (a file, a folder, a
+/// link, even one that leads nowhere) is answered [`DESTINATION_EXISTS`] at once, with no retry: `to` and `from` are
+/// untouched and the caller may give `from` another name. `renamed` runs inside the attempt, the moment the move has
+/// succeeded, so the caller knows the file was published even if the gate then fails or panics. A sharing violation
+/// (a program holding `from`, as a virus scan does) is retried like any other publish. Once the move has happened it is
+/// never made again, whatever the gate then answers: if the gate fails after it, that error is returned (or a retried
+/// attempt is a no-op), and `renamed` has run exactly once.
+///
+/// Elsewhere than Windows the move is a hard link then the removal of `from` (see `portable`); if the removal fails the
+/// file is published under `to` but the attempt reports the failure and `renamed` has not run. That edge is left as it is.
+pub(crate) fn rename_no_replace_gated(
+    from: &Path,
+    to: &Path,
+    gate: impl FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()>,
+    mut renamed: impl FnMut(),
+) -> Result<()> {
+    // Once the move has happened it is not made again, even if the gate then fails with an error a retry follows: the
+    // later attempts are then no-ops, and the file stays published once.
+    let mut moved = false;
+    let attempt = || -> io::Result<()> {
+        if !moved {
+            sys::rename_file_no_replace(from, to)?;
+            moved = true;
+            renamed();
+        }
+        Ok(())
+    };
+    let wait = |time| {
+        // Tests: the start of each wait between attempts, outside the gate (observers only, as for the replacing move).
+        #[cfg(any(test, feature = "test-internals"))]
+        let _ = failpoint::check("publish.retry_wait");
+        std::thread::sleep(time)
+    };
+    // A taken name is no transient error, so `retry_gated` stops at it; here it gets its own answer.
+    retry_gated(attempt, gate, wait).map_err(|error| match error {
+        CoreError::Io(e) => taken_or_io(e),
+        other => other,
+    })
 }
 
 /// The durability half of [`replace_file`], after a successful [`rename_replace_gated`] to
@@ -418,6 +488,7 @@ pub mod failpoint {
 
     thread_local! {
         static ARMED: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+        static DISK_FULL: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
         static CANCELS: RefCell<Vec<(&'static str, CancelToken)>> = const { RefCell::new(Vec::new()) };
         static OBSERVERS: RefCell<Vec<Observer>> = const { RefCell::new(Vec::new()) };
     }
@@ -438,8 +509,15 @@ pub mod failpoint {
         ARMED.with(|a| a.borrow_mut().push(name));
     }
 
+    /// Like [`arm`], but the step fails the way a full drive does: Windows' `ERROR_DISK_FULL` (112), elsewhere the
+    /// portable `StorageFull` kind.
+    pub fn arm_disk_full(name: &'static str) {
+        DISK_FULL.with(|a| a.borrow_mut().push(name));
+    }
+
     pub fn disarm_all() {
         ARMED.with(|a| a.borrow_mut().clear());
+        DISK_FULL.with(|a| a.borrow_mut().clear());
         CANCELS.with(|c| c.borrow_mut().clear());
         OBSERVERS.with(|o| o.borrow_mut().clear());
     }
@@ -464,6 +542,13 @@ pub mod failpoint {
                 }
             }
         });
+        if DISK_FULL.with(|a| a.borrow().contains(&name)) {
+            return Err(match cfg!(windows) {
+                true => std::io::Error::from_raw_os_error(112),
+                false => std::io::Error::from(std::io::ErrorKind::StorageFull),
+            }
+            .into());
+        }
         if ARMED.with(|a| a.borrow().contains(&name)) {
             return Err(std::io::Error::other(name).into());
         }
@@ -707,6 +792,255 @@ mod tests {
             what: "destination inside vault"
         }));
         assert!(!is_destination_taken(&CoreError::NotFound));
+    }
+
+    /// Task 11: the gated no-replace move publishes to a free name through the gate (one attempt), and `renamed` runs
+    /// inside that attempt, after the move and before the gate gets control back.
+    #[test]
+    fn no_replace_move_publishes_a_free_name_through_the_gate() {
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"mine").unwrap();
+        let steps = std::cell::RefCell::new(Vec::new());
+        rename_no_replace_gated(
+            &from,
+            &to,
+            |attempt| {
+                steps.borrow_mut().push("gate in");
+                let result = attempt();
+                steps.borrow_mut().push("gate out");
+                result
+            },
+            || steps.borrow_mut().push("renamed"),
+        )
+        .unwrap();
+        assert_eq!(*steps.borrow(), ["gate in", "renamed", "gate out"]);
+        assert_eq!(std::fs::read(&to).unwrap(), b"mine");
+        assert!(!from.exists());
+    }
+
+    /// A taken name is answered `DESTINATION_EXISTS` at once: one gate call, no wait, `renamed` never runs, and both
+    /// files are as they were (the temp stays for the caller to give the next name).
+    #[test]
+    fn no_replace_move_onto_a_taken_name_stops_at_once_and_touches_nothing() {
+        use super::testutil::make_dir_link;
+        struct Disarm;
+        impl Drop for Disarm {
+            fn drop(&mut self) {
+                failpoint::disarm_all();
+            }
+        }
+        let _disarm = Disarm;
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"mine").unwrap();
+        std::fs::write(&to, b"theirs").unwrap();
+        let waits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = std::rc::Rc::clone(&waits);
+        failpoint::observe(
+            "publish.retry_wait",
+            Box::new(move || counted.set(counted.get() + 1)),
+        );
+        let (mut gate_calls, mut moved) = (0, false);
+        let taken = rename_no_replace_gated(
+            &from,
+            &to,
+            |attempt| {
+                gate_calls += 1;
+                attempt()
+            },
+            || moved = true,
+        );
+        assert!(
+            matches!(&taken, Err(error) if is_destination_taken(error)),
+            "{taken:?}"
+        );
+        assert_eq!((gate_calls, moved, waits.get()), (1, false, 0));
+        assert_eq!(std::fs::read(&to).unwrap(), b"theirs");
+        assert_eq!(std::fs::read(&from).unwrap(), b"mine");
+
+        // Whatever is there counts: a folder, and a link that leads nowhere.
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let gone = TempDir::new();
+        let link = dir.path().join("link");
+        make_dir_link(&link, gone.path());
+        drop(gone);
+        for name in [&folder, &link] {
+            let result = rename_no_replace_gated(&from, name, |attempt| attempt(), || {});
+            assert!(
+                matches!(&result, Err(error) if is_destination_taken(error)),
+                "{result:?}"
+            );
+        }
+        assert_eq!(std::fs::read(&from).unwrap(), b"mine");
+    }
+
+    /// A gate that refuses stops the move before it is tried: `renamed` never runs, the temp stays, nothing is made.
+    #[test]
+    fn no_replace_move_stops_when_the_gate_refuses() {
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"mine").unwrap();
+        let (mut gate_calls, mut moved) = (0, false);
+        let refused = rename_no_replace_gated(
+            &from,
+            &to,
+            |_attempt| {
+                gate_calls += 1;
+                Err(CoreError::Cancelled)
+            },
+            || moved = true,
+        );
+        assert!(matches!(refused, Err(CoreError::Cancelled)));
+        assert_eq!((gate_calls, moved), (1, false));
+        assert!(!to.exists());
+        assert_eq!(std::fs::read(&from).unwrap(), b"mine");
+    }
+
+    /// The wait between two attempts of a no-replace move starts after one gate call has returned and before the next
+    /// begins, as for the replacing move: a held source never holds the gate.
+    #[cfg(windows)]
+    #[test]
+    fn no_replace_move_waits_outside_the_gate() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        struct Disarm;
+        impl Drop for Disarm {
+            fn drop(&mut self) {
+                failpoint::disarm_all();
+            }
+        }
+        let _disarm = Disarm;
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"new").unwrap();
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let waits = Rc::clone(&steps);
+        failpoint::observe(
+            "publish.retry_wait",
+            Box::new(move || waits.borrow_mut().push("wait")),
+        );
+        let mut calls = 0;
+        rename_no_replace_gated(
+            &from,
+            &to,
+            |attempt| {
+                calls += 1;
+                steps.borrow_mut().push("gate in");
+                // The first attempt meets a sharing violation, as when another program holds the temp.
+                let result = match calls {
+                    1 => Err(io::Error::from_raw_os_error(32).into()),
+                    _ => attempt(),
+                };
+                steps.borrow_mut().push("gate out");
+                result
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(
+            *steps.borrow(),
+            ["gate in", "gate out", "wait", "gate in", "gate out"]
+        );
+        assert_eq!(std::fs::read(&to).unwrap(), b"new");
+    }
+
+    /// A gate that fails after the move (its contract allows it) never makes the move run again, even when the error
+    /// is one a retry would follow: the file is published once, and nothing is moved over it or lost.
+    #[test]
+    fn no_replace_move_is_never_repeated_once_it_has_happened() {
+        let dir = TempDir::new();
+        let (from, to) = (dir.path().join("from"), dir.path().join("to"));
+        std::fs::write(&from, b"mine").unwrap();
+        let (mut gate_calls, mut moves) = (0, 0);
+        let result = rename_no_replace_gated(
+            &from,
+            &to,
+            |attempt| {
+                gate_calls += 1;
+                attempt()?;
+                match gate_calls {
+                    // A sharing violation: retried on Windows, so the attempt comes round again.
+                    1 => Err(io::Error::from_raw_os_error(32).into()),
+                    _ => Ok(()),
+                }
+            },
+            || moves += 1,
+        );
+        assert_eq!(moves, 1, "the move ran once ({gate_calls} gate calls)");
+        // Where the error is retried the second attempt is a no-op that the gate lets through; where it is not (a
+        // sharing violation is only transient on Windows) the error is the answer. Never "not found" from a second move.
+        match cfg!(windows) {
+            true => assert!(result.is_ok(), "{result:?}"),
+            false => assert!(matches!(result, Err(CoreError::Io(_))), "{result:?}"),
+        }
+        assert_eq!(std::fs::read(&to).unwrap(), b"mine");
+        assert!(!from.exists());
+    }
+
+    /// A drive that is out of space, as the two Windows codes and the portable kind say it, and nothing else.
+    #[test]
+    fn disk_full_errors_are_recognised() {
+        assert!(is_disk_full(&io::Error::from(io::ErrorKind::StorageFull)));
+        assert!(!is_disk_full(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(!is_disk_full(&io::Error::other("x")));
+        // 112 is ERROR_DISK_FULL and 39 ERROR_HANDLE_DISK_FULL on Windows; elsewhere those numbers mean other things.
+        for (code, full) in [(112, true), (39, true), (5, false), (32, false), (0, false)] {
+            assert_eq!(
+                is_disk_full(&io::Error::from_raw_os_error(code)),
+                full && cfg!(windows),
+                "{code}"
+            );
+        }
+    }
+
+    /// The refusal for a drive that filled while a file was written: what the copy needs (its length and the slack kept
+    /// free), the free space the volume reports now but kept below it (so "needs X, has Y" always has X above Y), and 0
+    /// where the space cannot be read.
+    #[test]
+    fn a_full_drive_refusal_carries_what_the_engine_knows() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                set_volume_override(None);
+            }
+        }
+        let _reset = Reset;
+        let dir = TempDir::new();
+        let needed = 10 + SPACE_MARGIN;
+        let volume = |free_bytes| {
+            set_volume_override(Some(VolumeInfo {
+                free_bytes,
+                max_file_bytes: None,
+            }))
+        };
+        for (free, available) in [
+            (None, 0),
+            (Some(3), 3),
+            (Some(needed - 1), needed - 1),
+            (Some(needed), needed - 1),
+            (Some(u64::MAX), needed - 1),
+        ] {
+            volume(free);
+            let refusal = full_drive_refusal(10, dir.path());
+            assert!(
+                matches!(refusal, CoreError::NotEnoughSpace { needed: n, available: a }
+                    if n == needed && a == available),
+                "{free:?}: {refusal:?}"
+            );
+        }
+        // A length no file has: the number saturates instead of wrapping.
+        volume(None);
+        assert!(matches!(
+            full_drive_refusal(u64::MAX, dir.path()),
+            CoreError::NotEnoughSpace {
+                needed: u64::MAX,
+                available: 0
+            }
+        ));
     }
 
     /// `publish_readable` moves the finished temp over what is at the destination, through the gate, and makes the
@@ -1075,7 +1409,7 @@ mod tests {
         assert!(matches!(
             check_space(50 * MIB, 0, &small),
             Err(CoreError::NotEnoughSpace { needed, available })
-                if needed == 50 * MIB && available == 100 * MIB
+                if needed == 50 * MIB + SPACE_MARGIN && available == 100 * MIB
         ));
         check_space(36 * MIB, 0, &small).unwrap(); // needed + margin == free exactly
 

@@ -80,7 +80,11 @@ test("the_vaults_are_added_back_from_the_first_screen_after_a_new_list", async (
   shell.offerExisting({ id: 40, name: "Old vault", items: sampleItems() });
   fireEvent.click(await screen.findByRole("button", { name: BUTTON }));
   await screen.findByRole("heading", { level: 1, name: "Welcome to Lockbox" });
-  fireEvent.click(screen.getByRole("button", { name: "I already have a vault" }));
+  fireEvent.click(screen.getByRole("button", { name: "I already have a vault or a backup" }));
+  await screen.findByRole("heading", { level: 1, name: "What do you have?" });
+  fireEvent.click(screen.getByRole("button", { name: "A vault folder" }));
+  await screen.findByRole("heading", { level: 1, name: "Old vault is here" });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Old vault" }));
   expect(await screen.findByRole("heading", { level: 1, name: "Unlock Old vault" })).toBeTruthy();
 });
 

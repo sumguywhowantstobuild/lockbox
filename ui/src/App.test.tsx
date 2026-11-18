@@ -1,9 +1,9 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import { resetStoreForTests } from "./store";
 import { expectNoAxe } from "./testing/axe";
-import { installFakeShell, sampleItems } from "./testing/fakeShell";
+import { installFakeShell, PASSWORD, sampleItems } from "./testing/fakeShell";
 import { listBelow, readBeside } from "./testing/files";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
@@ -31,6 +31,21 @@ test("the_app_opens_on_the_lock_screen", async () => {
   // Nothing is written into the page's styles: the policy would refuse it.
   expect(container.querySelectorAll("style, [style]")).toHaveLength(0);
   await expectNoAxe(container);
+});
+
+test("focus_lands_on_the_page_heading_after_an_unlock", async () => {
+  installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: sampleItems() }]);
+  render(<App />);
+  const field = await screen.findByLabelText(/^Password for /);
+  field.focus();
+  fireEvent.change(field, { target: { value: PASSWORD } });
+  fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+  // The lock screen goes with the focus that was in it: the vault's page heading takes it, so a screen reader says where the person is and Tab
+  // starts from the top of the page.
+  const heading = await screen.findByRole("heading", { level: 1, name: "All items" });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(heading);
+  });
 });
 
 test("the_screen_follows_windows_light_or_dark", async () => {

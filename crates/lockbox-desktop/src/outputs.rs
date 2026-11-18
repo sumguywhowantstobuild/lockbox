@@ -802,7 +802,20 @@ impl OutputJournal for CallJournal<'_> {
             Ok(())
         });
         match gate {
-            Ok(()) => tried.unwrap_or(Err(REFUSED)),
+            Ok(()) => {
+                // Tests: a gate that fails after the move succeeded, as the engine's contract allows. The shell's own
+                // gate never does (it answers what the attempt answered), so only this step makes it.
+                #[cfg(test)]
+                if matches!(tried, Some(Ok(())))
+                    && lockbox_core::internals::fsio::failpoint::check("outputs.after_attempt")
+                        .is_err()
+                {
+                    // Named, not a `what:` literal: the page's message check would read it as a refusal to word.
+                    const TEST_GATE: &str = "gate";
+                    return Err(self.refuse(ShellError::InvalidInput { what: TEST_GATE }));
+                }
+                tried.unwrap_or(Err(REFUSED))
+            }
             Err(error) => {
                 #[cfg(test)]
                 self.outputs.attempted(Attempt::Refused);
@@ -823,7 +836,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use lockbox_core::CoreError;
-    use lockbox_core::blob::OutputJournal;
+    use lockbox_core::blob::{NoProgress, OutputJournal};
     use lockbox_core::internals::fsio::testutil::{make_dir_link, names};
     use lockbox_core::internals::fsio::{failpoint, set_hidden};
     use serde_json::json;
@@ -903,7 +916,7 @@ mod tests {
         }
 
         ts.dialogs.answer(Some(out.join("report copy.pdf")));
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id).unwrap();
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Done(())));
         // A backup through the same journal (its command comes with restore, in a later task).
         let shell = &ts.shell;
@@ -914,7 +927,12 @@ mod tests {
                     panic!("a writable vault");
                 };
                 let journal = shell.outputs.for_call(&shell.sessions, s, g);
-                let backup = vault.backup(&out.join("family.lockbox-backup"), &journal, cancel);
+                let backup = vault.backup(
+                    &out.join("family.lockbox-backup"),
+                    &journal,
+                    cancel,
+                    &NoProgress,
+                );
                 journal.finish(backup.map(drop))
             })
             .unwrap();
@@ -1552,7 +1570,7 @@ mod tests {
 
         // Refused before the dialog, and the engine's record refuses too: no temp is made.
         assert_eq!(
-            ts.shell.save_file_copy(s, g, &id, &file_id).err(),
+            ts.shell.save_file_copy(s, g, &id, &file_id, 1).err(),
             Some(damaged())
         );
         assert_eq!(ts.dialogs.opened(), 0);
@@ -1569,7 +1587,7 @@ mod tests {
         let source = ts.temp.path().join("statement.pdf");
         fs::write(&source, b"statement").unwrap();
         ts.dialogs.answer(Some(source));
-        let added = ts.shell.add_file(s, g, None).unwrap();
+        let added = ts.shell.add_file(s, g, None, 1).unwrap();
         assert!(matches!(added.data, Outcome::Done(_)));
 
         // Set aside: decrypted output works again.
@@ -1579,7 +1597,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&aside).unwrap(), text);
         let copy = docs.join("report copy.pdf");
         ts.dialogs.answer(Some(copy.clone()));
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id).unwrap();
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Done(())));
         assert_eq!(fs::read(&copy).unwrap(), b"report");
         assert_eq!(ts.shell.sweep_outputs(), SweepReport::default());

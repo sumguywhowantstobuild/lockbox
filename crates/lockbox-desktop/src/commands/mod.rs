@@ -1,15 +1,19 @@
 //! The commands the page may call. Each is `async` (Tauri runs sync commands on the main thread), takes the raw
 //! request and parses it with [`args`] into a struct that refuses unknown fields.
 
+pub mod add_files;
 mod args;
 pub mod backup;
+mod batch;
 pub mod capture;
 pub mod env;
 pub mod files;
 mod generator;
 pub mod items;
+mod jobs;
 mod list;
 pub mod readable;
+pub mod save_all;
 mod sessions;
 mod settings;
 pub mod vaults;
@@ -35,6 +39,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         sessions::lock_vault,
         sessions::lock_all,
         sessions::close_explained_ok,
+        sessions::close_answer,
         sessions::clear_copied,
         vaults::list_vaults,
         vaults::start_new_vault_list,
@@ -69,10 +74,19 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         files::save_file_copy_confirm,
         files::add_file,
         files::attach_file,
+        add_files::pick_files_to_add,
+        add_files::remove_picked_file,
+        add_files::add_files,
+        save_all::save_all_files,
+        save_all::save_all_files_confirm,
+        save_all::save_all_start,
+        save_all::show_output_in_explorer,
+        save_all::close_output,
         files::replace_file,
         files::open_file,
         files::retry_open_cleanup,
         files::reset_output_journal,
+        jobs::cancel_operation,
         readable::save_recovery_pdf,
         readable::save_readable_confirm,
         readable::list_printers,
@@ -88,9 +102,18 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         capture::capture_cancel,
         capture::capture_env,
         backup::backup_vault,
+        backup::vault_backup_due,
+        backup::test_backup_pick,
         backup::test_backup,
+        backup::forget_test_backup,
+        backup::open_backup_pick,
+        backup::forget_open_backup,
         backup::open_backup_read_only,
         backup::copy_item_to,
+        backup::restore_pick,
+        backup::restore_check,
+        backup::restore_choose_folder,
+        backup::forget_restore_pick,
         backup::restore_prepare,
         backup::restore_prepare_confirm,
         backup::restore_commit,

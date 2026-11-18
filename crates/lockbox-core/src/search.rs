@@ -389,7 +389,12 @@ mod tests {
         let source = parent.path().join("passport.pdf");
         std::fs::write(&source, b"demo").unwrap();
         let made = vault
-            .new_file_item(None, &source, &crate::blob::CancelToken::new())
+            .new_file_item(
+                None,
+                &source,
+                &crate::blob::CancelToken::new(),
+                &crate::blob::NoProgress,
+            )
             .unwrap();
         let named = |vault: &Vault| {
             let found = vault.search("passport", 10);

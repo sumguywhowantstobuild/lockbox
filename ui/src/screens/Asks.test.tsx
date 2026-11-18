@@ -242,10 +242,11 @@ test("ask4_counts_unreadable_items_and_closes", async () => {
   const words =
     "3 items in this vault can't be read. Everything else works. They may be damaged, so Lockbox left all stored files where they are until this is sorted.";
   expect(await screen.findByText(words)).toBeTruthy();
-  // A banner, not a dialog: nothing holds focus, and with its buttons held back to 4B it has only Close.
+  // A banner, not a dialog: nothing holds focus. It has Close, Restore a backup and Open a backup.
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(buttonNames()).toContain("Close");
-  expect(screen.queryByRole("button", { name: /Restore a backup|Open a backup/ })).toBeNull();
+  expect(screen.getAllByRole("button", { name: "Restore a backup" })).toHaveLength(1);
+  expect(screen.getAllByRole("button", { name: "Open a backup" })).toHaveLength(1);
   await expectNoAxe(container);
 
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
@@ -257,6 +258,16 @@ test("ask4_counts_unreadable_items_and_closes", async () => {
   expect(await screen.findByText(words)).toBeTruthy();
 });
 
+test("the_way_out_is_the_filled_button_on_ask_4", async () => {
+  start([vault({ unreadable: 3 })]);
+  await unlockIt();
+  await screen.findByText(/^3 items in this vault can't be read/);
+  // As drawn (Ask 4): Restore a backup is filled, the way back; Open a backup and Close are quiet pills.
+  expect(screen.getByRole("button", { name: "Restore a backup" }).classList.contains("cp")).toBe(true);
+  expect(screen.getByRole("button", { name: "Open a backup" }).classList.contains("cp")).toBe(false);
+  expect(screen.getByRole("button", { name: "Close" }).classList.contains("cp")).toBe(false);
+});
+
 test("ask4_one_item_reads_as_one", async () => {
   start([vault({ unreadable: 1 })]);
   await unlockIt();
@@ -265,6 +276,54 @@ test("ask4_one_item_reads_as_one", async () => {
       "1 item in this vault can't be read. Everything else works. It may be damaged, so Lockbox left all stored files where they are until this is sorted.",
     ),
   ).toBeTruthy();
+});
+
+test("ask_4_offers_restore_a_backup", async () => {
+  start([vault({ unreadable: 3 })]);
+  await unlockIt();
+  await screen.findByText(/^3 items in this vault can't be read/);
+  expect(buttonNames()).toContain("Restore a backup");
+  fireEvent.click(screen.getByRole("button", { name: "Restore a backup" }));
+  // The open vault goes with the pick, so the restore lands beside the damaged one, wherever it lives.
+  await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+  expect(invoke.mock.calls.filter(([name]) => name === "restore_pick")).toEqual([["restore_pick", { choice: null, vault: 7 }]]);
+  // Cancel goes back to the vault, with Ask 4 still there.
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await screen.findByRole("heading", { level: 1, name: "All items" });
+  expect(screen.getByText(/^3 items in this vault can't be read/)).toBeTruthy();
+});
+
+test("ask_4_offers_open_a_backup", async () => {
+  start([vault({ unreadable: 3 })]);
+  await unlockIt();
+  await screen.findByText(/^3 items in this vault can't be read/);
+  // As drawn (ASK04): Restore a backup, then Open a backup, side by side under the words.
+  const banner = screen.getByText(/^3 items in this vault can't be read/).closest(".ask") as HTMLElement;
+  expect(within(banner).getAllByRole("button").map((button) => button.textContent)).toEqual(["Restore a backup", "Open a backup", "Close"]);
+  fireEvent.click(within(banner).getByRole("button", { name: "Open a backup" }));
+  // The picker comes first, and the panel opens on the file with nothing sent but the pick; Ask 4 is still there under it.
+  const panel = await screen.findByRole("complementary", { name: "Open a backup" });
+  expect(invoke.mock.calls.filter(([name]) => name === "open_backup_pick")).toEqual([["open_backup_pick", { choice: null }]]);
+  expect(invoke.mock.calls.some(([name]) => name === "open_backup_read_only")).toBe(false);
+  expect(within(panel).getByRole("heading", { level: 2, name: "Open a backup" })).toBeTruthy();
+  // Cancel goes back to the vault, with Ask 4 still there.
+  fireEvent.click(within(panel).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Open a backup" })).toBeNull();
+  });
+  expect(screen.getByText(/^3 items in this vault can't be read/)).toBeTruthy();
+});
+
+test("ask_4_offers_open_a_backup_in_a_read_only_session_too", async () => {
+  // A backup that is itself open and has items that can't be read: it has no Restore a backup (it is no vault on the list), and it can open another backup.
+  start([vault({ readOnly: true, unreadable: 2 })]);
+  await unlockIt();
+  const words = await screen.findByText(/^2 items in this vault can't be read/);
+  const banner = words.closest(".ask") as HTMLElement;
+  expect(within(banner).getAllByRole("button").map((button) => button.textContent)).toEqual(["Open a backup", "Close"]);
+  // With no restore offered, Open a backup is the way out, and it is the filled one.
+  expect(within(banner).getByRole("button", { name: "Open a backup" }).classList.contains("cp")).toBe(true);
+  expect(within(banner).getByRole("button", { name: "Close" }).classList.contains("cp")).toBe(false);
 });
 
 test("ask5_banner_closes_with_no_delete", async () => {
@@ -369,8 +428,8 @@ test("ask13_newer_vault_has_no_buttons", async () => {
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toBe("Update Lockbox to open this vault. A newer version made it.");
   expect(messageFor(NEWER_VAULT)).toEqual({ title: "Update Lockbox to open this vault.", body: "A newer version made it." });
-  // The design gives it no button: the lock screen's own Unlock is the only one.
-  expect(buttonNames()).toEqual(["Unlock"]);
+  // The design gives it no button: the lock screen's own Unlock and its Restore a backup and Open a backup links are the only ones.
+  expect(buttonNames()).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
   await expectNoAxe(container);
 });
 
@@ -384,7 +443,7 @@ test("ask16_says_the_change_was_saved", async () => {
   });
   const words = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
   expect(await screen.findByText(words)).toBeTruthy();
-  expect(buttonNames()).toEqual(["Unlock"]);
+  expect(buttonNames()).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
   await expectNoAxe(container);
   // Unlocking with the new password is what it asked for: the note goes.
   await unlockIt();
@@ -400,9 +459,9 @@ test("unavailable_vault_says_so", async () => {
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toBe(words);
   expect(words).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
-  // Nothing to unlock and nothing that leads nowhere.
+  // Nothing to unlock; the ways on are the lock screen's Restore a backup (a backup can bring the vault back) and Open a backup (to look through one).
   expect(screen.queryByLabelText(/^Password for /)).toBeNull();
-  expect(buttonNames()).toEqual([]);
+  expect(buttonNames()).toEqual(["Restore a backup", "Open a backup"]);
   await expectNoAxe(container);
 });
 
@@ -412,38 +471,53 @@ test("an_unavailable_vault_in_the_list_is_marked", async () => {
   expect(screen.getByRole<HTMLInputElement>("radio", { name: /Old laptop/ }).disabled).toBe(true);
 });
 
-test("restore_notice_shows_words_with_no_buttons_until_4b", async () => {
-  const { container } = start([vault()], [{ kind: "restore", state: "recovered", how: "finished" }]);
-  const words = "Lockbox finished restoring a vault. Unlock with the password from when that backup was made.";
+test("restore_finished_at_launch_says_unlock_with_that_password", async () => {
+  const { container } = start([vault()], [{ kind: "restore", state: "recovered", how: "finished", vault: { id: 7, name: "My vault" } }]);
+  const words = "Lockbox finished restoring My vault. Unlock with the password from when that backup was made.";
   expect(await screen.findByText(words)).toBeTruthy();
-  // Words only: no button of its own (the lock screen's Unlock is the answer).
-  expect(buttonNames()).toEqual(["Unlock"]);
+  // The notice has its own Unlock, above the lock screen's (which stays off until a password is typed), beside Restore a backup.
+  expect(buttonNames()).toEqual(["Unlock", "Unlock", "Restore a backup", "Open a backup"]);
   await expectNoAxe(container);
-  // Unlocking is the answer: it does not come back after the next lock.
+  // Its Unlock closes the notice and leaves the password box for that vault, focused.
+  fireEvent.click(screen.getAllByRole("button", { name: "Unlock" })[0] as HTMLElement);
+  expect(screen.queryByText(words)).toBeNull();
+  expect(document.activeElement).toBe(await screen.findByLabelText("Password for My vault"));
+  // Unlocking is the answer too: it does not come back after the next lock.
   await unlockIt();
   await screen.findByRole("heading", { level: 1, name: "All items" });
-  expect(screen.queryByText(words)).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Lock all" }));
   await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
   expect(screen.queryByText(words)).toBeNull();
 });
 
-test("a_restore_notice_of_4b_shows_nothing_and_no_path", async () => {
-  const PATH = "C:\\Vaults\\SENTINEL-restore";
-  const paths = { step: "swapping", staging: PATH, target: PATH, before_restore: PATH };
-  const { container } = start(
-    [vault()],
-    [
-      { kind: "restore", state: "drive_missing", paths },
-      { kind: "restore", state: "unclear", journal: PATH, paths: null },
-    ],
-  );
-  await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
+test("restore_finished_at_launch_says_unlock_with_that_password: its Unlock selects the restored vault among several", async () => {
+  start([vault(), { id: 8, name: "Restored vault", items: sampleItems() }], [{ kind: "restore", state: "recovered", how: "finished", vault: { id: 8, name: "Restored vault" } }]);
+  expect(await screen.findByText("Lockbox finished restoring Restored vault. Unlock with the password from when that backup was made.")).toBeTruthy();
+  expect(screen.getByRole<HTMLInputElement>("radio", { name: /My vault/ }).checked).toBe(true);
+  fireEvent.click(screen.getAllByRole("button", { name: "Unlock" })[0] as HTMLElement);
   await waitFor(() => {
-    expect(commandsSent()).toContain("launch_notices");
+    expect(screen.getByRole<HTMLInputElement>("radio", { name: /Restored vault/ }).checked).toBe(true);
   });
+  expect(document.activeElement).toBe(screen.getByLabelText("Password for Restored vault"));
+});
+
+test("restore_finished_at_launch_says_unlock_with_that_password: a vault the notice can't name is 'a vault', and Unlock only closes it", async () => {
+  start([vault()], [{ kind: "restore", state: "recovered", how: "finished", vault: null }]);
+  expect(await screen.findByText("Lockbox finished restoring a vault. Unlock with the password from when that backup was made.")).toBeTruthy();
+  fireEvent.click(screen.getAllByRole("button", { name: "Unlock" })[0] as HTMLElement);
+  expect(screen.queryByText(/finished restoring/)).toBeNull();
+  expect(screen.getByLabelText("Password for My vault")).toBeTruthy();
+});
+
+test("a_restore_notice_that_needs_an_answer_shows_no_path_on_the_lock_screen", async () => {
+  const PATH = "C:\\Vaults\\SENTINEL-restore";
+  const { container } = start([vault()], [{ kind: "restore", state: "unclear", journal: PATH, paths: null }]);
+  await screen.findByRole("heading", { level: 1, name: "A restore didn't finish" });
   expect(container.textContent).not.toContain("SENTINEL");
-  expect(buttonNames()).toEqual(["Unlock"]);
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
+  expect(container.textContent).not.toContain("SENTINEL");
+  expect(buttonNames()).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
 });
 
 test("damaged_vault_list_shows_its_own_screen_with_the_way_out", async () => {

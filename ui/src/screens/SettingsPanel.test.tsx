@@ -13,6 +13,7 @@ import {
   SHORTCUT_NOT_SET,
   SHORTCUT_TAKEN,
   STARTUP_FAILED,
+  type FakeOlderCopy,
   type FakeSettings,
   type FakeShell,
   type FakeStartup,
@@ -61,6 +62,8 @@ interface Options {
   startup?: FakeStartup;
   readOnly?: boolean;
   vaults?: FakeVault[];
+  /** The older copies the shell lists (earlier restores kept them). */
+  older?: FakeOlderCopy[];
 }
 
 /** The app unlocked through its screen, with the shell as `options` has it; Settings is not opened yet. */
@@ -72,6 +75,7 @@ async function unlocked(options: Options = {}) {
     options.settings,
   );
   if (options.startup !== undefined) shell.setStartup(options.startup);
+  if (options.older !== undefined) shell.olderCopies(options.older);
   const view = render(<App />);
   const field = await screen.findByLabelText(/^Password for /);
   fireEvent.change(field, { target: { value: PASSWORD } });
@@ -568,8 +572,10 @@ test("settings_opens_from_the_side_menu_and_focus_comes_back_to_its_button", asy
 });
 
 test("a_read_only_vault_can_open_settings_and_change_them", async () => {
-  await opened({ readOnly: true });
-  expect(screen.getByText("Read-only", { selector: ".chip" })).toBeTruthy();
+  const { panel } = await opened({ readOnly: true });
+  // The header says it, and so does the Settings panel itself (every screen of a read-only session carries the label).
+  expect(screen.getAllByText("Read-only", { selector: ".chip" })).toHaveLength(2);
+  expect(within(panel).getByText("Read-only", { selector: ".chip" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Dark" }));
   await vi.waitFor(() => {
     expect(shell.settings().theme).toBe("dark");
@@ -578,7 +584,7 @@ test("a_read_only_vault_can_open_settings_and_change_them", async () => {
 
 test("says_which_vault", async () => {
   const { panel, container } = await opened();
-  // 4A's settings are all for the app, so the panel says so, and has no section for the open vault.
+  // Most settings are for the app, so the panel says so; the open vault has one section of its own, "This vault" (Back up, from 4B).
   expect(within(panel).getByText("For every vault on this PC.")).toBeTruthy();
   expect(within(panel).queryByRole("heading", { name: "My vault" })).toBeNull();
   // The sections as drawn, in order.
@@ -586,6 +592,7 @@ test("says_which_vault", async () => {
     "Appearance",
     "Locking and clipboard",
     "Saving what you copied",
+    "This vault",
     "This PC",
     "About",
   ]);
@@ -622,14 +629,102 @@ test("shows_the_version", async () => {
   expect(commands("app_info")).toEqual([{}]);
 });
 
-test("no_backup_or_password_links_until_their_plans", async () => {
+test("open_a_backup_follows_test_a_backup_with_its_hint_and_opens_the_panel", async () => {
   const { panel } = await opened();
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  const button = within(group).getByRole("button", { name: "Open a backup" });
+  // The row's own words (a hint the button is described by), after Test a backup.
+  const hint = within(group).getByText("Browse a backup and copy items out, without restoring it.");
+  expect(button.getAttribute("aria-describedby")).toBe(hint.id);
+  const names = within(group).getAllByRole("button").map((each) => each.textContent);
+  expect(names.indexOf("Open a backup")).toBe(names.indexOf("Test a backup") + 1);
+  fireEvent.click(button);
+  await screen.findByRole("complementary", { name: "Open a backup" });
+  expect(commands("open_backup_pick")).toEqual([{ choice: null }]);
+});
+
+test("a_read_only_vault_can_open_a_backup_too", async () => {
+  const { panel } = await opened({ readOnly: true });
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  expect(within(group).getByRole("button", { name: "Open a backup" })).toBeTruthy();
+});
+
+test("restore_a_backup_follows_test_a_backup_in_this_vault_and_opens_the_first_step", async () => {
+  const { panel } = await opened();
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup"]);
+  const button = within(group).getByRole("button", { name: "Restore a backup" });
+  expect(button.getAttribute("aria-describedby")).not.toBeNull();
+  fireEvent.click(button);
+  await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+  expect(commands("restore_pick")).toEqual([{ choice: null, vault: null }]);
+});
+
+test("a_read_only_vault_can_restore_a_backup_too", async () => {
+  // A restore does not write the open vault, so a copy opened from a backup offers it as any vault does (Back up is the one it hides).
+  const { panel } = await opened({ readOnly: true });
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Open a backup", "Restore a backup"]);
+});
+
+test("older_copies_hidden_when_there_are_none", async () => {
+  // None kept: the row is not there (a button to nothing would be a dead end).
+  const { panel } = await opened();
+  expect(within(panel).queryByRole("button", { name: /older copies/i })).toBeNull();
+  expect(within(panel).queryByText(/older copies/i)).toBeNull();
+  // The listing was asked for when Settings opened, and answered with none.
+  expect(commands("list_pre_restore")).toEqual([{}]);
+});
+
+test("older_copies_hidden_when_only_another_vaults_are_kept", async () => {
+  const { panel } = await opened({
+    vaults: [
+      { id: 7, name: "My vault", items: sampleItems() },
+      { id: 8, name: "Other", items: [] },
+    ],
+    older: [{ vault: 8, folder: "Other.before-restore", last_written: "2026-09-09", size: 1_000_000 }],
+  });
+  expect(within(panel).queryByRole("button", { name: /older copies/i })).toBeNull();
+});
+
+test("older_copies_follows_restore_a_backup_with_the_count_of_this_vaults", async () => {
+  const { panel } = await opened({
+    vaults: [
+      { id: 7, name: "My vault", items: sampleItems() },
+      { id: 8, name: "Other", items: [] },
+    ],
+    older: [
+      { vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_000_000 },
+      { vault: 7, folder: "My vault.before-restore-2", last_written: "2026-11-05", size: 1_000_000 },
+      { vault: 8, folder: "Other.before-restore", last_written: "2026-09-09", size: 1_000_000 },
+    ],
+  });
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  const button = await within(group).findByRole("button", { name: "Older copies (2)" });
+  expect(within(group).getAllByRole("button").map((each) => each.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup", "Older copies (2)"]);
+  expect(button.getAttribute("aria-describedby")).not.toBeNull();
+  fireEvent.click(button);
+  await screen.findByRole("complementary", { name: "Older copies" });
+});
+
+test("a_read_only_vault_with_older_copies_offers_them_too", async () => {
+  // The copies belong to the vault, not to how it is open: a read-only session of it lists them.
+  const { panel } = await opened({
+    readOnly: true,
+    older: [{ vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_000_000 }],
+  });
+  const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
+  await within(group).findByRole("button", { name: "Older copies (1)" });
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Open a backup", "Restore a backup", "Older copies (1)"]);
+});
+
+test("no_password_links_until_their_plans", async () => {
+  const { panel } = await opened();
+  // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`), Test a backup with Task 4 (`TestBackup.test.tsx`), Restore a backup with Task 5
+  // (`RestoreFlow.test.tsx`), Older copies with Task 8 (`OlderCopies.test.tsx`, hidden here while none are kept) and Open a backup with Task 7
+  // (`OpenBackup.test.tsx`); the rest of the vault's rows wait for their own plans.
   for (const name of [
-    /back up/i,
-    /test a backup/i,
-    /restore/i,
     /older copies/i,
-    /open a backup/i,
     /export/i,
     /change password/i,
     /recovery key/i,
@@ -644,6 +739,10 @@ test("no_backup_or_password_links_until_their_plans", async () => {
     "Dark",
     "System",
     "Change",
+    "Back up",
+    "Test a backup",
+    "Open a backup",
+    "Restore a backup",
   ]);
 });
 

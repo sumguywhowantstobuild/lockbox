@@ -31,6 +31,19 @@ export interface MenuNote {
 }
 
 /**
+ * A row that is chosen to bring something to the front (an open vault, backup or older copy in the vault menu): a menu item of a group of its own above the menu's
+ * actions, one of which, `checked`, is the one that is on screen now. `detail` is the quiet line under the name that says what a read-only one is.
+ */
+export interface MenuRow {
+  /** Tells the row apart from another with the same name. */
+  id: string;
+  label: string;
+  detail?: string;
+  checked: boolean;
+  onSelect: () => void;
+}
+
+/**
  * A short menu from a button. The button opens it by click or keyboard, the arrow keys move through the items, Enter
  * or a click chooses one and closes the menu, Escape closes it, and focus goes back to the button. With an `icon` the
  * button shows the picture and `label` is its name for a screen reader. `popupLabel` names the menu itself (a menu of
@@ -38,13 +51,16 @@ export interface MenuNote {
  * things stand; they can't be chosen, so a screen reader hears them as the name of the group the items sit in (arriving
  * at the first item says "My vault, Unlocked. Home, Locked.", then the item), and the lines themselves are left out of
  * its tree so nothing is said twice. With many lines the menu stays within the room the window leaves it: the lines
- * scroll in their own area and the items stay in view below them.
+ * scroll in their own area and the items stay in view below them. `rows` are choosable rows above the plain items, in a group of their own named `rowsLabel`: each is
+ * a menu item (a radio item, so the one that is `checked` is said as "checked" and marked with a check mark, never by colour alone), and choosing one closes the menu.
  */
 export function Menu({
   label,
   icon,
   items,
   notes,
+  rows,
+  rowsLabel = "Open now",
   popupLabel,
   triggerClassName = "pill",
 }: {
@@ -52,6 +68,8 @@ export function Menu({
   icon?: ReactNode;
   items: readonly MenuItem[];
   notes?: readonly MenuNote[];
+  rows?: readonly MenuRow[];
+  rowsLabel?: string;
   popupLabel?: string;
   triggerClassName?: string;
 }) {
@@ -79,15 +97,36 @@ export function Menu({
       ))}
     </BaseMenu.RadioGroup>
   ) : (
-    items.map((item) => (
-      <Fragment key={item.label}>
-        {item.apart === true ? <BaseMenu.Separator className="mline" /> : null}
-        <BaseMenu.Item className={item.danger === true ? "mi dng" : "mi"} onClick={item.onSelect}>
-          {item.icon}
-          {item.label}
-        </BaseMenu.Item>
-      </Fragment>
-    ))
+    <>
+      {rows === undefined || rows.length === 0 ? null : (
+        // The rows scroll in an area of their own, as the locked vaults' lines do, so many open vaults and backups never push the actions out
+        // of a menu the window has made short.
+        <div className="mscroll">
+          <BaseMenu.RadioGroup value={rows.find((row) => row.checked)?.id ?? null} aria-label={rowsLabel}>
+            {rows.map((row) => (
+              <BaseMenu.RadioItem key={row.id} value={row.id} closeOnClick className="mi" onClick={row.onSelect}>
+                <span className="mtwo">
+                  <span className="mt">{row.label}</span>
+                  {row.detail === undefined ? null : <span className="ms">{row.detail}</span>}
+                </span>
+                <BaseMenu.RadioItemIndicator className="sel-on">
+                  <CheckIcon />
+                </BaseMenu.RadioItemIndicator>
+              </BaseMenu.RadioItem>
+            ))}
+          </BaseMenu.RadioGroup>
+        </div>
+      )}
+      {items.map((item) => (
+        <Fragment key={item.label}>
+          {item.apart === true ? <BaseMenu.Separator className="mline" /> : null}
+          <BaseMenu.Item className={item.danger === true ? "mi dng" : "mi"} onClick={item.onSelect}>
+            {item.icon}
+            {item.label}
+          </BaseMenu.Item>
+        </Fragment>
+      ))}
+    </>
   );
   return (
     <BaseMenu.Root>
@@ -110,7 +149,7 @@ export function Menu({
                   ))}
                 </div>
                 <div className="mline" aria-hidden="true" />
-                <BaseMenu.Group aria-label={notes.map((note) => `${note.name}, ${note.state}.`).join(" ")}>
+                <BaseMenu.Group className="mgroup" aria-label={notes.map((note) => `${note.name}, ${note.state}.`).join(" ")}>
                   {entries}
                 </BaseMenu.Group>
               </>

@@ -267,7 +267,8 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         check(`link-button words, ${state}`, c("--ink"), tint, 4.5);
       }
       check("link-button words, disabled", c("--ink2"), ground, 4.5);
-      // The key screen's Print and Save as PDF: card-coloured buttons with an edge on the plate. Words at rest, hovered and
+      // The key screen's Print and Save as PDF, and 26a's "A vault folder" (the same card-coloured button, also waiting while a picker is open):
+      // card-coloured buttons with an edge on the plate. Words at rest, hovered and
       // pressed (the tint laid over the card), greyed while another print runs, and the edge against the plate at rest.
       for (const [state, fill] of [["rest", card], ["hover", over(c("--hov"), card)], ["pressed", over(c("--prs"), card)]] as const) {
         check(`Print and Save as PDF words, ${state}`, c("--ink"), fill, 4.5);
@@ -396,6 +397,26 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       }
       // "Saved" is the message bar's words, measured above.
 
+      // The progress bar (9b, `JobProgress`): its fill is the text colour and its track a tint of that colour at 10 per cent, laid on
+      // the banner's card. The fill is the state, so it is measured against its track and against the card (3 to 1; `progress.test.ts`
+      // holds the style sheet to these two colours and to the same alpha), and the bytes in words and the warning under it are text.
+      const progressTrack = over([...rgbOf("--sh"), 0.1] as Rgba, card);
+      check("progress bar fill against its track", c("--ink"), progressTrack, 3);
+      check("progress bar fill against the card", c("--ink"), card, 3);
+      check("progress bytes words on the card", c("--ink2"), card, 4.5);
+      check("progress warning words on the card", c("--ink"), card, 4.5);
+
+      // Many files in (Task 10), in the side panel: the picked list is a card of rows (a name, its size and the button that leaves it out;
+      // the button's icon is measured with the pasted keys' above), the refusal of 9e is the form's error line on the panel (measured
+      // above), and the end's lists and its sentence about the originals are words on the panel. The bar of 9b sits on its own card.
+      check("picked file name on its card", c("--ink"), card, 4.5);
+      check("picked file size on its card", c("--ink2"), card, 4.5);
+      check("add files sentence about the originals on the panel", c("--ink"), paper, 4.5);
+      check("add files summary lists on the panel", c("--ink"), paper, 4.5);
+      check("add files refusal on the panel", c("--danger"), paper, 4.5);
+      check("file now going in, on the bar's card", c("--ink"), card, 4.5);
+      check("file number going in, on the bar's card", c("--ink2"), card, 4.5);
+
       // Move, trash and folders (Task 14). Move to trash and the Trash's two answers are rows of a card: Delete for good and Move
       // to trash in the error colour, Restore in the vault's colour, at rest, hovered and pressed (the tints laid over the card).
       // A question's dangerous answer is the filled red button, measured above.
@@ -415,6 +436,13 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
         check(`Move menu check mark, ${state}`, c("--ink"), fill, 3);
         check(`Move menu folder words, ${state}`, c("--ink"), fill, 4.5);
+      }
+      // The vault menu's rows for the open vaults, backups and older copies (Task 7): the name, the quiet line under a read-only one ("Backup", "Older copy") and the
+      // check mark on the one on screen, which is also said in words to a screen reader ("checked"), on the menu's card at rest, highlighted and pressed.
+      for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`vault menu open row words, ${state}`, c("--ink"), fill, 4.5);
+        check(`vault menu open row second line, ${state}`, c("--ink2"), fill, 4.5);
+        check(`vault menu open row current mark, ${state}`, c("--ink"), fill, 3);
       }
       // The new folder's name box in the side menu: its edge (the quiet text colour, since the ordinary field edge is a hair
       // under 3 to 1 against the side menu's tint) against the side menu, its words on its own card, its error edge.
@@ -501,6 +529,29 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("settings switch, on track on the card", c("--add"), card, 3);
       check("settings switch, knob on the off track", c("--switch-knob"), c("--switch-off"), 3);
       check("settings switch, knob on the on track", c("--switch-knob"), c("--add"), 3);
+
+      // Test a backup (Plan 4B Task 4, 23a to 23d), in the side panel. The box a password or recovery key is typed into (`CredentialField`): what is
+      // typed, hidden or shown, is words on the box's own card; its edge, at rest, with the pointer on it and in error, is what marks it on the panel
+      // (3 to 1; its focus ring is the ordinary one); Show and Hide beside it is the quiet pill (measured on the panel above), and its refusal line
+      // ("Wrong password...") is the form's error line on the panel (4.5 to 1, measured above) and says it in words as well as in the edge.
+      check("credential box words on its card", c("--ink"), card, 4.5);
+      check("credential box edge on the panel", c("--edge"), paper, 3);
+      check("credential box edge, pointer on it, on the panel", c("--ink2"), paper, 3);
+      check("credential box edge, in error, on the panel", c("--danger"), paper, 3);
+      check("credential box label on the panel", c("--ink2"), paper, 4.5);
+      // The picked backup's row: its name, its size and the tile's letters on the card (the tile's tint laid over it, in each tile colour).
+      check("picked backup name on its card", c("--ink"), card, 4.5);
+      check("picked backup size on its card", c("--ink2"), card, 4.5);
+      check("picked backup tile letters on the card", c("--ink"), card, 4.5);
+      for (const tile of ["--t0", "--t1", "--t2", "--t3", "--t4"]) {
+        check(`picked backup tile letters on tile ${tile}`, c("--ink"), over([...rgbOf(tile), 0.15] as Rgba, card), 4.5);
+      }
+      // The result: its figures' labels (quiet words) and values on the group's card, the line that says nothing was changed on the panel, and
+      // the damaged backup's sentence (the error colour on the panel, which is also said by its heading).
+      check("test result labels on the card", c("--ink2"), card, 4.5);
+      check("test result values on the card", c("--ink"), card, 4.5);
+      check("test result sentence on the panel", c("--ink2"), paper, 4.5);
+      check("damaged backup sentence on the panel", c("--danger"), paper, 4.5);
     }
   }
 

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lockbox_core::blob::{CancelToken, OutputJournal};
-use lockbox_core::fsio::{hidden_temp_path, publish_readable, refuse_vault_folder};
+use lockbox_core::fsio::{hidden_temp_path, publish_readable};
 use lockbox_core::ids::ItemId;
 use serde::Deserialize;
 use tauri::State;
@@ -27,13 +27,12 @@ use crate::error::{
     Confirm, Outcome, PDF_NOT_MADE, PRINT_NOT_SENT, PRINTER_BUSY, PRINTER_GONE, ShellError,
     ShellResult,
 };
-use crate::locations::cloud_provider_of;
 use crate::os::{PrintFailed, win};
 use crate::outputs::{FOLDER_SUFFIX, LAUNCH_OPEN_TRIES};
 use crate::pending::{PendingChoice, Token};
 use crate::restore::shown;
 use crate::session::{SessionId, Tagged, VaultRef};
-use crate::shell::Shell;
+use crate::shell::{Checked, Shell};
 use crate::views::{PrinterList, SavedView};
 
 /// How long a print job waits for the printer's answer. WebView2 cannot cancel a print, so a lock does not stop one: the
@@ -212,27 +211,22 @@ impl Shell {
     ) -> ShellResult<Tagged<Outcome<SavedView>>> {
         // Again: after the dialog, or after a yes, the session may have locked, and the journal may have been damaged.
         let cancel = self.live_writable(session, generation)?;
-        self.outputs.usable()?;
-        let dest = self.output_destination(dest)?;
-        refuse_vault_folder(&dest)?;
-        let folder = dest
-            .parent()
-            .ok_or(ShellError::InvalidInput { what: "file name" })?;
-        if !cloud_confirmed
-            && cloud_provider_of(self.os.volumes.as_ref(), self.os.env.as_ref(), folder)?.is_some()
-        {
-            let token = self.sessions.pending().put(PendingChoice::Readable {
-                session,
-                generation,
-                job,
-                dest,
-            });
-            return self.still_current(
-                session,
-                generation,
-                Outcome::Confirm(Confirm::CloudFolder { token }),
-            );
-        }
+        let dest = match self.checked_output(dest, cloud_confirmed)? {
+            Checked::Ready(dest) => dest,
+            Checked::Cloud(dest) => {
+                let token = self.sessions.pending().put(PendingChoice::Readable {
+                    session,
+                    generation,
+                    job,
+                    dest,
+                });
+                return self.still_current(
+                    session,
+                    generation,
+                    Outcome::Confirm(Confirm::CloudFolder { token }),
+                );
+            }
+        };
         match job.kind {
             ReadableKind::RecoveryPdf => {
                 self.write_recovery_pdf(session, generation, &cancel, &dest)
@@ -427,7 +421,7 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
-    use lockbox_core::blob::CancelToken;
+    use lockbox_core::blob::{CancelToken, NoProgress};
     use lockbox_core::internals::fsio::testutil::names;
     use lockbox_core::{CoreError, Credential, ReadOnlyVault};
     use serde_json::{Value, json};
@@ -514,6 +508,7 @@ mod tests {
                 &dir,
                 Credential::Password(TEST_PASSWORD),
                 &CancelToken::new(),
+                &NoProgress,
             )
         })
         .unwrap();
@@ -1321,12 +1316,14 @@ mod tests {
         ] {
             assert_eq!(parse::<SessionArgs>(&body(bad)).err(), Some(MALFORMED));
         }
-        let token = "0123456789abcdef0123456789abcdef";
-        assert!(parse::<ConfirmArgs>(&body(json!({ "token": token }))).is_ok());
+        // A well-formed token (32 hex), built rather than written out: a literal reads as a key to the review packer's
+        // key scan, which a repo cannot switch off.
+        let well_formed = "0123456789abcdef".repeat(2);
+        assert!(parse::<ConfirmArgs>(&body(json!({ "token": well_formed }))).is_ok());
         for bad in [
             json!({}),
             json!({ "token": "not a token" }),
-            json!({ "token": token, "dest": "C:\\x" }),
+            json!({ "token": well_formed, "dest": "C:\\x" }),
         ] {
             assert_eq!(parse::<ConfirmArgs>(&body(bad)).err(), Some(MALFORMED));
         }

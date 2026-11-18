@@ -45,11 +45,13 @@ mod kdf_impl;
 #[path = "recovery.rs"]
 mod recovery_impl;
 
-/// Encrypted file blobs: cancelling a long operation, recording the outputs it creates, the size
-/// limit.
+/// Encrypted file blobs: cancelling a long operation, hearing how far it has got, recording the
+/// outputs it creates, the size limit.
 pub mod blob {
     pub(crate) use crate::blob_impl::*;
-    pub use crate::blob_impl::{CancelToken, MAX_FILE_BYTES, NoJournal, OutputJournal};
+    pub use crate::blob_impl::{
+        CancelToken, MAX_FILE_BYTES, NoJournal, NoProgress, OutputJournal, Progress,
+    };
 }
 
 /// Crash-safe file helpers, for the shell's own state files and sweeps.
@@ -98,6 +100,9 @@ pub mod internals {
         pub use crate::blob_impl::{
             BLOB_VERSION, CHUNK_SIZE, blob_len, chunk_count, decrypt_stream, encrypt_stream,
         };
+    }
+    pub mod fixture {
+        pub use crate::vault::fixture::*;
     }
     pub mod fsio {
         pub use crate::fsio_impl::*;
@@ -181,9 +186,10 @@ pub mod internals {
 pub use error::{CoreError, Result};
 pub use search::SearchHit;
 pub use vault::{
-    BackupReport, BackupSummary, CleanupReport, CopiedItem, CreatedVault, Credential, JournalStep,
-    JournalView, PreparedRestore, ReadOnlyVault, Recovery, RestoreDestination, RestoreOutcome,
-    UnlockReport, Vault, dismiss_restore_journal, folder_name, inspect_restore_journal,
+    BackupPlan, BackupReport, BackupSummary, CleanupReport, CopiedItem, CreatedVault, Credential,
+    JournalStep, JournalView, NewExportError, PreparedRestore, ReadOnlyVault, Recovery,
+    RestoreDestination, RestoreOutcome, UnlockReport, UnverifiedSlot, Vault,
+    dismiss_restore_journal, folder_name, header_is_damaged, inspect_restore_journal,
     is_reserved_device_name, read_vault_id, read_vault_name, recover_restore, verify_backup,
 };
 

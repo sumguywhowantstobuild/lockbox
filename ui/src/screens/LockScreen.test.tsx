@@ -264,14 +264,29 @@ test("no_forgot_password_link_until_4c", async () => {
     { id: 7, name: "My vault", items: sampleItems() },
     { id: 8, name: "Home", items: sampleItems() },
   ]);
-  // Nothing on the lock screen leads to a screen a later plan builds: no forgotten password, no restore, no adding a
-  // vault folder, no generator. Only the vaults, the password and Unlock.
-  for (const words of [/forgot/i, /restore/i, /add existing/i, /generate/i, /recovery/i]) {
+  // Nothing on the lock screen leads to a screen a later plan builds: no forgotten password, no adding a vault folder, no generator. Restore a backup
+  // (4B's Task 5) and Open a backup (Task 7) are the two links under the form; the rest are the vaults, the password and Unlock.
+  for (const words of [/forgot/i, /add existing/i, /generate/i, /recovery/i]) {
     expect(screen.queryByText(words)).toBeNull();
   }
   expect(screen.queryAllByRole("link")).toEqual([]);
-  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock"]);
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
   expect(container.querySelectorAll("[style]")).toHaveLength(0);
+});
+
+test("restore_a_backup_is_a_second_line_under_the_form_and_opens_the_first_step", async () => {
+  const { container } = await show([{ id: 7, name: "My vault", items: sampleItems() }]);
+  const form = container.querySelector("form") as HTMLFormElement;
+  const link = screen.getByRole("button", { name: "Restore a backup" });
+  // Under the form, on a line of its own, and not one of its buttons.
+  expect(form.contains(link)).toBe(false);
+  expect(form.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await expectNoAxe(container);
+  // It opens Windows' picker first, with nothing sent but the pick's own; the screens that follow belong to the app (`RestoreFlow.test.tsx`).
+  fireEvent.click(link);
+  await vi.waitFor(() => {
+    expect(invoke.mock.calls.filter(([name]) => name === "restore_pick")).toEqual([["restore_pick", { choice: null, vault: null }]]);
+  });
 });
 
 test("no_vaults_says_so", async () => {

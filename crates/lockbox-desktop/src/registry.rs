@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::{Arc, Mutex};
 
 use lockbox_core::fsio::{is_destination_taken, rename_file_no_replace};
-use lockbox_core::{CoreError, read_vault_name};
+use lockbox_core::{CoreError, header_is_damaged, read_vault_name};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ShellError, ShellResult};
@@ -37,6 +37,9 @@ pub struct VaultEntry {
     pub name: Option<String>,
     /// Whether the folder is there (its drive connected).
     pub available: bool,
+    /// The folder holds the vault's header files but neither copy can be read, so no password can open it (Ask 8). False
+    /// for a folder with no vault in it or no header files, though it too has no name.
+    pub details_damaged: bool,
 }
 
 impl fmt::Debug for VaultEntry {
@@ -45,6 +48,7 @@ impl fmt::Debug for VaultEntry {
             .field("id", &self.id)
             .field("named", &self.name.is_some())
             .field("available", &self.available)
+            .field("details_damaged", &self.details_damaged)
             .finish()
     }
 }
@@ -195,10 +199,15 @@ impl Registry {
 
     /// One vault as the page lists it.
     pub fn entry(&self, id: u32, path: &Path) -> VaultEntry {
+        let name = read_vault_name(path).ok();
+        // Damaged is what the engine says of the header files (corrupt or too large, every copy that is there): not a
+        // folder with no vault in it, and not a header another program is holding or the disk would not give up.
+        let details_damaged = name.is_none() && header_is_damaged(path);
         VaultEntry {
             id,
-            name: read_vault_name(path).ok(),
+            name,
             available: self.volumes.exists(path).unwrap_or(false),
+            details_damaged,
         }
     }
 
@@ -286,6 +295,7 @@ mod tests {
             id,
             name: name.map(str::to_owned),
             available,
+            details_damaged: false,
         }
     }
 
@@ -795,7 +805,13 @@ mod tests {
         registry.add(&fs::canonicalize(&bad).unwrap()).unwrap();
         assert_eq!(
             registry.list(),
-            Ok(vec![entry(1, Some("Family"), true), entry(2, None, true)])
+            Ok(vec![
+                entry(1, Some("Family"), true),
+                VaultEntry {
+                    details_damaged: true,
+                    ..entry(2, None, true)
+                }
+            ])
         );
     }
 }

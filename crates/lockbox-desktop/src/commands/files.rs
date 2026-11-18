@@ -4,8 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use lockbox_core::blob::{CancelToken, OutputJournal};
-use lockbox_core::fsio::refuse_vault_folder;
+use lockbox_core::blob::{CancelToken, OutputJournal, Progress};
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::{CoreError, Result as CoreResult, Vault};
 use serde::Deserialize;
@@ -14,33 +13,30 @@ use tauri::ipc::Request;
 
 use super::{NoArgs, args, blocking};
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
-use crate::locations::cloud_provider_of;
+use crate::jobs::{JobKind, JobScope};
 use crate::open::{RemoveReport, is_executable, safe_name};
 use crate::pending::{PendingChoice, Token};
 use crate::session::{SessionId, Tagged, VaultRef};
-use crate::shell::Shell;
-
-/// The long operations' names in `lockbox://busy`.
-const SAVE_COPY: &str = "save_copy";
-const IMPORT: &str = "import";
-const OPEN: &str = "open";
+use crate::shell::{Checked, Shell};
 
 impl Shell {
     /// Saves a decrypted copy of the stored file `file_id` of the item `id` where the user picks (spec §7.2). Refused
     /// first while the output journal is damaged. The save dialog opens outside every lock, suggesting the stored
-    /// name; Windows asks there before replacing an existing file, so its answer is final. Then, in a long operation:
-    /// the engine's export, its temp written down in the output journal before it exists and each rename attempt
+    /// name; Windows asks there before replacing an existing file, so its answer is final. Then, in a long job the
+    /// page's `request` names (it is told of it with `lockbox://job-started`, and sees its progress and Stop): the
+    /// engine's export, its temp written down in the output journal before it exists and each rename attempt
     /// only while the session is still unlocked in `generation`. An existing destination is touched only by the
     /// rename of a copy that has fully verified. `Dismissed` when the dialog is closed; `Locked` for a lock at any
-    /// point. A destination inside a vault's folder is refused, and one a cloud provider syncs answers
-    /// [`Confirm::CloudFolder`] before anything is decrypted or written: the copy waits in [`Pending`](crate::pending),
-    /// for [`save_file_copy_confirm`](Self::save_file_copy_confirm).
+    /// point; `Cancelled` for a Stop. A destination inside a vault's folder is refused, and one a cloud provider syncs
+    /// answers [`Confirm::CloudFolder`] before anything is decrypted or written, with no job begun: the copy waits in
+    /// [`Pending`](crate::pending), for [`save_file_copy_confirm`](Self::save_file_copy_confirm).
     pub fn save_file_copy(
         &self,
         session: SessionId,
         generation: u64,
         id: &str,
         file_id: &str,
+        request: u32,
     ) -> ShellResult<Tagged<Outcome<()>>> {
         let (id, file_id) = (ItemId::from_hex(id)?, FileId::from_hex(file_id)?);
         self.outputs.usable()?;
@@ -49,13 +45,18 @@ impl Shell {
         let Some(dest) = self.os.dialogs.save_file("Save a copy", &name, None) else {
             return self.still_current(session, generation, Outcome::Dismissed);
         };
-        self.copy_to(session, generation, id, file_id, &dest, false)
+        self.copy_to(session, generation, id, file_id, &dest, false, request)
     }
 
     /// The user's yes to saving a copy in a cloud folder: goes on with the copy parked before, for the session that asked
-    /// (and only while it is still unlocked in the generation that asked), by the same long operation. Everything is
-    /// checked again, since the folder may have changed since. A token for another question is used up and refused.
-    pub fn save_file_copy_confirm(&self, token: &Token) -> ShellResult<Tagged<Outcome<()>>> {
+    /// (and only while it is still unlocked in the generation that asked), by the same long job, which the yes's own
+    /// `request` names. Everything is checked again, since the folder may have changed since. A token for another
+    /// question is used up and refused.
+    pub fn save_file_copy_confirm(
+        &self,
+        token: &Token,
+        request: u32,
+    ) -> ShellResult<Tagged<Outcome<()>>> {
         match self.sessions.pending().take(token)? {
             PendingChoice::StoredCopy {
                 session,
@@ -63,13 +64,14 @@ impl Shell {
                 id,
                 file_id,
                 dest,
-            } => self.copy_to(session, generation, id, file_id, &dest, true),
+            } => self.copy_to(session, generation, id, file_id, &dest, true, request),
             _ => Err(ShellError::NotFound),
         }
     }
 
     /// The rest of a copy, after the dialog or after a yes: the checks on the destination, the cloud question unless
-    /// `cloud_confirmed`, then the long operation.
+    /// `cloud_confirmed`, then the long job.
+    #[allow(clippy::too_many_arguments)]
     fn copy_to(
         &self,
         session: SessionId,
@@ -78,19 +80,13 @@ impl Shell {
         file_id: FileId,
         dest: &Path,
         cloud_confirmed: bool,
+        request: u32,
     ) -> ShellResult<Tagged<Outcome<()>>> {
-        // Again: after the dialog, or after a yes, the journal may have been damaged.
-        self.outputs.usable()?;
-        let dest = self.output_destination(dest)?;
-        // Every time, the yes included: the folder may have become a vault's while the question waited.
-        refuse_vault_folder(&dest)?;
-        if !cloud_confirmed {
-            let folder = dest
-                .parent()
-                .ok_or(ShellError::InvalidInput { what: "file name" })?;
-            let provider =
-                cloud_provider_of(self.os.volumes.as_ref(), self.os.env.as_ref(), folder)?;
-            if provider.is_some() {
+        // The shared checks, again: after the dialog, or after a yes, the journal may have been damaged and the folder
+        // may have become a vault's.
+        let dest = match self.checked_output(dest, cloud_confirmed)? {
+            Checked::Ready(dest) => dest,
+            Checked::Cloud(dest) => {
                 let token = self.sessions.pending().put(PendingChoice::StoredCopy {
                     session,
                     generation,
@@ -101,14 +97,26 @@ impl Shell {
                 let ask = Outcome::Confirm(Confirm::CloudFolder { token });
                 return self.still_current(session, generation, ask);
             }
-        }
+        };
         self.sessions
             .read_long(session, generation, |vault, cancel| {
-                let _operation = self
+                let scope = JobScope::Session {
+                    session,
+                    generation,
+                };
+                let job = self
                     .autolock
-                    .begin(Some(session), SAVE_COPY, cancel.clone());
+                    .begin_job(scope, JobKind::SaveCopy, cancel, Some(request));
                 let journal = self.outputs.for_call(&self.sessions, session, generation);
-                let saved = export(vault, &id, &file_id, &dest, &journal, cancel);
+                let saved = export(
+                    vault,
+                    &id,
+                    &file_id,
+                    &dest,
+                    &journal,
+                    job.token(),
+                    job.progress(),
+                );
                 journal.finish(saved).map(Outcome::Done)
             })
     }
@@ -140,16 +148,29 @@ impl Shell {
         let copy = self
             .sessions
             .read_long(session, generation, |vault, cancel| {
-                let _operation = self.autolock.begin(Some(session), OPEN, cancel.clone());
+                let scope = JobScope::Session {
+                    session,
+                    generation,
+                };
+                // No request: Open tells the page nothing of its own beyond `lockbox://busy`.
+                let job = self.autolock.begin_job(scope, JobKind::Open, cancel, None);
                 // The app is closing: no new folder.
-                if cancel.is_cancelled() {
+                if job.token().is_cancelled() {
                     return Err(ShellError::Cancelled);
                 }
                 let folder = self.open_folders.create(session, generation)?;
                 let copy = folder.join(&name);
                 made = Some(folder);
                 let journal = self.outputs.for_call(&self.sessions, session, generation);
-                let exported = export(vault, &id, &file_id, &copy, &journal, cancel);
+                let exported = export(
+                    vault,
+                    &id,
+                    &file_id,
+                    &copy,
+                    &journal,
+                    job.token(),
+                    job.progress(),
+                );
                 journal.finish(exported)?;
                 self.open_folders.seal(&copy)?;
                 Ok(copy)
@@ -198,40 +219,54 @@ impl Shell {
         Ok(name.data)
     }
 
-    /// Adds a file item, in `collection` or none, holding a file the user picks: the new item's ID.
+    /// Adds a file item, in `collection` or none, holding a file the user picks: the new item's ID. A job the page's
+    /// `request` names, with progress and a Stop; stopped, nothing is added (`Cancelled`).
     pub fn add_file(
         &self,
         session: SessionId,
         generation: u64,
         collection: Option<String>,
+        request: u32,
     ) -> ShellResult<Tagged<Outcome<String>>> {
         let collection = collection.as_deref().map(ItemId::from_hex).transpose()?;
         self.import(
             session,
             generation,
             "Add a file",
-            |vault, source, cancel| Ok(vault.new_file_item(collection, source, cancel)?.to_hex()),
+            JobKind::Import,
+            Some(request),
+            |vault, source, cancel, progress| {
+                Ok(vault
+                    .new_file_item(collection, source, cancel, progress)?
+                    .to_hex())
+            },
         )
     }
 
-    /// Attaches a file the user picks to the item `id`: the new file's ID.
+    /// Attaches a file the user picks to the item `id`: the new file's ID. A job the page's `request` names.
     pub fn attach_file(
         &self,
         session: SessionId,
         generation: u64,
         id: &str,
+        request: u32,
     ) -> ShellResult<Tagged<Outcome<String>>> {
         let id = ItemId::from_hex(id)?;
         self.import(
             session,
             generation,
             "Attach a file",
-            |vault, source, cancel| Ok(vault.attach_file(&id, source, cancel)?.to_hex()),
+            JobKind::Import,
+            Some(request),
+            |vault, source, cancel, progress| {
+                Ok(vault.attach_file(&id, source, cancel, progress)?.to_hex())
+            },
         )
     }
 
     /// Replaces the stored file `file_id` of the item `id` with a file the user picks: the new file's ID. The old
-    /// file stays in the vault until cleanup removes it (spec §6.4).
+    /// file stays in the vault until cleanup removes it (spec §6.4). A job in the shell's table, but the page is told
+    /// nothing of it beyond `lockbox://busy`.
     pub fn replace_file(
         &self,
         session: SessionId,
@@ -244,24 +279,28 @@ impl Shell {
             session,
             generation,
             "Replace the file",
-            |vault, source, cancel| {
+            JobKind::Replace,
+            None,
+            |vault, source, cancel, progress| {
                 Ok(vault
-                    .replace_attachment(&id, &file_id, source, cancel)?
+                    .replace_attachment(&id, &file_id, source, cancel, progress)?
                     .to_hex())
             },
         )
     }
 
     /// An import: refused before the dialog when the session is locked or read-only; the open dialog (titled `title`)
-    /// outside every lock; then `store` in a long change, cancelled by a lock, Windows lock, sleep or the app closing
-    /// (the engine removes its partial blob). Imports write no decrypted output, so a damaged output journal does not
-    /// stop them.
+    /// outside every lock; then `store` in a long change of `kind`, cancelled by a Stop of its job, a lock, Windows lock,
+    /// sleep or the app closing (the engine removes its partial blob). Imports write no decrypted output, so a damaged
+    /// output journal does not stop them.
     fn import(
         &self,
         session: SessionId,
         generation: u64,
         title: &str,
-        store: impl FnOnce(&mut Vault, &Path, &CancelToken) -> CoreResult<String>,
+        kind: JobKind,
+        request: Option<u32>,
+        store: impl FnOnce(&mut Vault, &Path, &CancelToken, &dyn Progress) -> CoreResult<String>,
     ) -> ShellResult<Tagged<Outcome<String>>> {
         self.sessions
             .read(session, generation, |vault, _| match vault {
@@ -273,8 +312,17 @@ impl Shell {
         };
         self.sessions
             .write_long(session, generation, |vault, cancel| {
-                let _operation = self.autolock.begin(Some(session), IMPORT, cancel.clone());
-                Ok(Outcome::Done(store(vault, &source, cancel)?))
+                let scope = JobScope::Session {
+                    session,
+                    generation,
+                };
+                let job = self.autolock.begin_job(scope, kind, cancel, request);
+                Ok(Outcome::Done(store(
+                    vault,
+                    &source,
+                    job.token(),
+                    job.progress(),
+                )?))
             })
     }
 
@@ -311,14 +359,19 @@ fn export(
     dest: &Path,
     journal: &dyn OutputJournal,
     cancel: &CancelToken,
+    progress: &dyn Progress,
 ) -> CoreResult<()> {
     match vault {
-        VaultRef::Writable(vault) => vault.export_file(id, file_id, dest, journal, cancel),
-        VaultRef::ReadOnly(vault) => vault.export_file(id, file_id, dest, journal, cancel),
+        VaultRef::Writable(vault) => {
+            vault.export_file(id, file_id, dest, journal, cancel, progress)
+        }
+        VaultRef::ReadOnly(vault) => {
+            vault.export_file(id, file_id, dest, journal, cancel, progress)
+        }
     }
 }
 
-/// `save_file_copy` and `replace_file`.
+/// `replace_file`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileArgs {
@@ -326,6 +379,17 @@ struct FileArgs {
     generation: u64,
     id: String,
     file_id: String,
+}
+
+/// `save_file_copy`: a job the page numbered with `request`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveCopyArgs {
+    session: SessionId,
+    generation: u64,
+    id: String,
+    file_id: String,
+    request: u32,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +410,8 @@ struct AddFile {
     generation: u64,
     /// The collection the new item goes in; `None`: none.
     collection: Option<String>,
+    /// The page's number for this command, unique in its run: what `lockbox://job-started` answers.
+    request: u32,
 }
 
 #[derive(Deserialize)]
@@ -354,6 +420,7 @@ struct AttachFile {
     session: SessionId,
     generation: u64,
     id: String,
+    request: u32,
 }
 
 #[tauri::command]
@@ -361,21 +428,23 @@ pub(super) async fn save_file_copy(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Tagged<Outcome<()>>> {
-    let FileArgs {
+    let SaveCopyArgs {
         session,
         generation,
         id,
         file_id,
+        request,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.save_file_copy(session, generation, &id, &file_id)).await
+    blocking(move || shell.save_file_copy(session, generation, &id, &file_id, request)).await
 }
 
-/// `save_file_copy_confirm`: the token the cloud question gave, and nothing else.
+/// `save_file_copy_confirm`: the token the cloud question gave and the page's number for this job, and nothing else.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfirmCopy {
     token: Token,
+    request: u32,
 }
 
 /// The yes to saving a copy in a cloud-synced folder: the parked copy goes on.
@@ -384,9 +453,9 @@ pub(super) async fn save_file_copy_confirm(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Tagged<Outcome<()>>> {
-    let ConfirmCopy { token } = args(&request)?;
+    let ConfirmCopy { token, request } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.save_file_copy_confirm(&token)).await
+    blocking(move || shell.save_file_copy_confirm(&token, request)).await
 }
 
 #[tauri::command]
@@ -398,9 +467,10 @@ pub(super) async fn add_file(
         session,
         generation,
         collection,
+        request,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.add_file(session, generation, collection)).await
+    blocking(move || shell.add_file(session, generation, collection, request)).await
 }
 
 #[tauri::command]
@@ -412,9 +482,10 @@ pub(super) async fn attach_file(
         session,
         generation,
         id,
+        request,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.attach_file(session, generation, &id)).await
+    blocking(move || shell.attach_file(session, generation, &id, request)).await
 }
 
 #[tauri::command]
@@ -483,6 +554,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use lockbox_core::blob::NoProgress;
     use lockbox_core::internals::fsio::failpoint;
     use lockbox_core::internals::fsio::testutil::{make_dir_link, names};
     use lockbox_core::{Credential, ReadOnlyVault};
@@ -492,6 +564,7 @@ mod tests {
     use super::super::{MALFORMED, parse};
     use super::*;
     use crate::error::ShellError;
+    use crate::jobs::{JobScope, OperationId};
     use crate::outputs::Attempt;
     use crate::session::{Location, LockReason, OpenStep, Opened};
     use crate::testing::{TEST_PASSWORD, TestShell, heavy, quiet};
@@ -574,7 +647,7 @@ mod tests {
             (wait_began, started, returned)
         });
         ts.dialogs.answer(Some(dest.clone()));
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id);
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1);
         let (wait_began, lock_started, lock_returned) = locker.join().unwrap();
         let took = lock_returned - lock_started;
         assert!(took < Duration::from_millis(100), "the lock took {took:?}");
@@ -616,7 +689,7 @@ mod tests {
         failpoint::observe("export.after_record", Box::new(move || seen.set(true)));
         failpoint::arm("atomic_write.before_replace");
         ts.dialogs.answer(Some(dest.clone()));
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id);
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1);
         assert!(
             matches!(saved, Err(ShellError::Core(view)) if view.kind == "io"),
             "refused as an I/O error"
@@ -646,7 +719,7 @@ mod tests {
             Box::new(|| failpoint::arm("atomic_write.before_replace")),
         );
         ts.dialogs.answer(Some(dest.clone()));
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id);
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1);
         assert!(matches!(saved, Err(ShellError::Core(view)) if view.kind == "io"));
         untouched(&dest);
         one_temp_listed(&ts);
@@ -668,7 +741,7 @@ mod tests {
         ts.dialogs.answer(Some(dest.clone()));
         let shell = Arc::clone(&ts.shell);
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            shell.save_file_copy(s, g, &id, &file_id)
+            shell.save_file_copy(s, g, &id, &file_id, 1)
         }));
         assert!(unwound.is_err(), "the panic reached the caller");
         failpoint::disarm_all();
@@ -689,7 +762,10 @@ mod tests {
             Box::new(move || shell.sessions.lock_all(LockReason::Manual)),
         );
         ts.dialogs.answer(Some(dest.clone()));
-        assert_eq!(ts.shell.save_file_copy(s, g, &id, &file_id).err(), LOCKED);
+        assert_eq!(
+            ts.shell.save_file_copy(s, g, &id, &file_id, 1).err(),
+            LOCKED
+        );
         untouched(&dest);
         assert_eq!(ts.journal(), Vec::<PathBuf>::new());
     }
@@ -709,7 +785,10 @@ mod tests {
         lock_in_dialog();
         let copy = dest.with_file_name("report copy.pdf");
         ts.dialogs.answer(Some(copy));
-        assert_eq!(ts.shell.save_file_copy(s, g, &id, &file_id).err(), LOCKED);
+        assert_eq!(
+            ts.shell.save_file_copy(s, g, &id, &file_id, 1).err(),
+            LOCKED
+        );
         untouched(&dest);
         assert!(!ts.shell.paths.outputs.exists(), "no journal change");
 
@@ -718,7 +797,7 @@ mod tests {
         fs::write(&source, b"statement").unwrap();
         lock_in_dialog();
         ts.dialogs.answer(Some(source));
-        assert_eq!(ts.shell.add_file(s, g, None).err(), LOCKED);
+        assert_eq!(ts.shell.add_file(s, g, None, 1).err(), LOCKED);
         let work = ts.shell.registry.entries()[1].1.clone();
         assert_eq!(names(&work.join("files")), ["orphaned"], "no file stored");
         assert!(names(&work.join("items")).is_empty(), "no item stored");
@@ -736,9 +815,9 @@ mod tests {
             assert_eq!((answer.session, answer.generation), (s, g));
             assert!(matches!(answer.data, Outcome::Dismissed));
         }
-        dismissed(ts.shell.save_file_copy(s, g, &id, &file_id), s, g);
-        dismissed(ts.shell.add_file(s, g, None), s, g);
-        dismissed(ts.shell.attach_file(s, g, &id), s, g);
+        dismissed(ts.shell.save_file_copy(s, g, &id, &file_id, 1), s, g);
+        dismissed(ts.shell.add_file(s, g, None, 1), s, g);
+        dismissed(ts.shell.attach_file(s, g, &id, 1), s, g);
         dismissed(ts.shell.replace_file(s, g, &id, &file_id), s, g);
         assert_eq!(ts.dialogs.opened(), 4);
         untouched(&dest);
@@ -765,7 +844,7 @@ mod tests {
             let dest = dir.join("report copy.pdf");
             ts.dialogs.answer(Some(dest.clone()));
             assert_eq!(
-                ts.shell.save_file_copy(s, g, &id, &file_id).err(),
+                ts.shell.save_file_copy(s, g, &id, &file_id, 1).err(),
                 Some(ShellError::InvalidInput {
                     what: "state folder"
                 })
@@ -792,9 +871,9 @@ mod tests {
             _ => panic!("not done"),
         };
         source("statement.pdf", b"one");
-        let id = done(ts.shell.add_file(s, g, None).unwrap());
+        let id = done(ts.shell.add_file(s, g, None, 1).unwrap());
         source("scan.png", b"two");
-        let second = done(ts.shell.attach_file(s, g, &id).unwrap());
+        let second = done(ts.shell.attach_file(s, g, &id, 1).unwrap());
         source("scan v2.png", b"three");
         let third = done(ts.shell.replace_file(s, g, &id, &second).unwrap());
         let detail = serde_json::to_value(ts.shell.get_item(s, g, &id).unwrap()).unwrap();
@@ -812,7 +891,7 @@ mod tests {
 
         let dest = ts.folder("Documents").join("scan copy.png");
         ts.dialogs.answer(Some(dest.clone()));
-        let saved = ts.shell.save_file_copy(s, g, &id, &third).unwrap();
+        let saved = ts.shell.save_file_copy(s, g, &id, &third, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Done(())));
         assert_eq!(fs::read(&dest).unwrap(), b"three");
         let busy = ts.events.busy();
@@ -827,7 +906,7 @@ mod tests {
         let (s, g) = ts.open_vault("Family");
         let (id, file_id) = ts.stored_file(s, g, "invoice\u{202E}fdp.exe", b"x");
         ts.dialogs.answer(None);
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id).unwrap();
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Dismissed));
         assert_eq!(
             ts.dialogs.suggested().last().map(String::as_str),
@@ -844,7 +923,12 @@ mod tests {
             let path = ts.temp.path().join(name);
             fs::write(&path, name).unwrap();
             ts.dialogs.answer(Some(path));
-            match ts.shell.add_file(session, generation, None).unwrap().data {
+            match ts
+                .shell
+                .add_file(session, generation, None, 1)
+                .unwrap()
+                .data
+            {
                 Outcome::Done(id) => id,
                 _ => panic!("not done"),
             }
@@ -865,7 +949,7 @@ mod tests {
         let not_found = Some(ShellError::from(CoreError::NotFound));
         // Another vault's item, and my item with another vault's file.
         for id in [&theirs, &mine] {
-            let saved = ts.shell.save_file_copy(a, ga, id, &their_file);
+            let saved = ts.shell.save_file_copy(a, ga, id, &their_file, 1);
             assert_eq!(saved.err(), not_found);
             let opened = ts.shell.open_file(a, ga, id, &their_file, false);
             assert_eq!(opened.err(), not_found);
@@ -884,6 +968,7 @@ mod tests {
                 &dir,
                 Credential::Password(TEST_PASSWORD),
                 &CancelToken::new(),
+                &NoProgress,
             )
         })
         .unwrap();
@@ -919,10 +1004,18 @@ mod tests {
                 .shell
                 .open_file(session, generation, &id, &file_id, false);
             assert_eq!(opened.err(), wanted);
-            let saved = ts.shell.save_file_copy(session, generation, &id, &file_id);
+            let saved = ts
+                .shell
+                .save_file_copy(session, generation, &id, &file_id, 1);
             assert_eq!(saved.err(), wanted);
-            assert_eq!(ts.shell.add_file(session, generation, None).err(), wanted);
-            assert_eq!(ts.shell.attach_file(session, generation, &id).err(), wanted);
+            assert_eq!(
+                ts.shell.add_file(session, generation, None, 1).err(),
+                wanted
+            );
+            assert_eq!(
+                ts.shell.attach_file(session, generation, &id, 1).err(),
+                wanted
+            );
             let replaced = ts.shell.replace_file(session, generation, &id, &file_id);
             assert_eq!(replaced.err(), wanted);
         }
@@ -934,7 +1027,7 @@ mod tests {
         fs::write(&path, b"new").unwrap();
         let not_found = Some(ShellError::from(CoreError::NotFound));
         ts.dialogs.answer(Some(path.clone()));
-        let attached = ts.shell.attach_file(s, g, &their_id);
+        let attached = ts.shell.attach_file(s, g, &their_id, 1);
         assert_eq!(attached.err(), not_found);
         ts.dialogs.answer(Some(path));
         let replaced = ts.shell.replace_file(s, g, &id, &their_file);
@@ -956,8 +1049,8 @@ mod tests {
         let (r, gr) = read_only_session(&ts);
         let dialogs = ts.dialogs.opened();
         let refused = [
-            ts.shell.add_file(r, gr, None).err(),
-            ts.shell.attach_file(r, gr, &id).err(),
+            ts.shell.add_file(r, gr, None, 1).err(),
+            ts.shell.attach_file(r, gr, &id, 1).err(),
             ts.shell.replace_file(r, gr, &id, &file_id).err(),
         ];
         assert_eq!(refused, [Some(ShellError::ReadOnly); 3]);
@@ -965,7 +1058,7 @@ mod tests {
         // A copy of a stored file may be saved and opened from it.
         let dest = ts.folder("Documents").join("copy.pdf");
         ts.dialogs.answer(Some(dest.clone()));
-        let saved = ts.shell.save_file_copy(r, gr, &id, &file_id).unwrap();
+        let saved = ts.shell.save_file_copy(r, gr, &id, &file_id, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Done(())));
         assert_eq!(fs::read(&dest).unwrap(), b"contents");
         let opened = ts.shell.open_file(r, gr, &id, &file_id, false).unwrap();
@@ -990,7 +1083,7 @@ mod tests {
         let Ok(Tagged {
             data: Outcome::Confirm(Confirm::CloudFolder { token }),
             ..
-        }) = ts.shell.save_file_copy(session, generation, id, file_id)
+        }) = ts.shell.save_file_copy(session, generation, id, file_id, 1)
         else {
             panic!("a cloud folder asks first");
         };
@@ -1012,7 +1105,7 @@ mod tests {
         // A folder no provider syncs is not asked about.
         let plain = ts.folder("Plain").join("report.pdf");
         ts.dialogs.answer(Some(plain.clone()));
-        let saved = ts.shell.save_file_copy(s, g, &id, &file_id).unwrap();
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Done(())));
         assert_eq!(fs::read(&plain).unwrap(), stored_bytes());
     }
@@ -1025,7 +1118,7 @@ mod tests {
         let (s, g, id, file_id, dest) = with_destination(&ts);
         ts.volumes.add_sync_root(dest.parent().unwrap());
         let token = cloud_token(&ts, s, g, &id, &file_id, &dest);
-        let saved = ts.shell.save_file_copy_confirm(&token).unwrap();
+        let saved = ts.shell.save_file_copy_confirm(&token, 1).unwrap();
         assert_eq!((saved.session, saved.generation), (s, g));
         assert!(matches!(saved.data, Outcome::Done(())));
         assert_eq!(fs::read(&dest).unwrap(), stored_bytes());
@@ -1034,7 +1127,7 @@ mod tests {
         let busy = ts.events.busy();
         assert!(busy.contains(&(Some(s), vec!["save_copy"])), "{busy:?}");
         assert_eq!(
-            ts.shell.save_file_copy_confirm(&token).err(),
+            ts.shell.save_file_copy_confirm(&token, 1).err(),
             Some(ShellError::NotFound),
             "used up"
         );
@@ -1042,7 +1135,7 @@ mod tests {
         let (r, gr) = read_only_session(&ts);
         let token = cloud_token(&ts, r, gr, &id, &file_id, &dest);
         fs::write(&dest, b"old contents").unwrap();
-        let saved = ts.shell.save_file_copy_confirm(&token).unwrap();
+        let saved = ts.shell.save_file_copy_confirm(&token, 1).unwrap();
         assert!(matches!(saved.data, Outcome::Done(())));
         assert_eq!(fs::read(&dest).unwrap(), stored_bytes());
     }
@@ -1063,7 +1156,7 @@ mod tests {
         ts.shell.sessions.lock(s, LockReason::Manual);
         assert_eq!(ts.shell.sessions.pending().len(), 0, "its own lock");
         assert_eq!(
-            ts.shell.save_file_copy_confirm(&token).err(),
+            ts.shell.save_file_copy_confirm(&token, 1).err(),
             Some(ShellError::NotFound)
         );
         untouched(&dest);
@@ -1074,7 +1167,7 @@ mod tests {
         let token = cloud_token(&ts, s2, g2, &id2, &file2, &dest);
         ts.shell.sessions.lock_all(LockReason::Manual);
         assert_eq!(
-            ts.shell.save_file_copy_confirm(&token).err(),
+            ts.shell.save_file_copy_confirm(&token, 1).err(),
             Some(ShellError::NotFound)
         );
         untouched(&dest);
@@ -1089,7 +1182,7 @@ mod tests {
         ts.volumes.add_sync_root(dest.parent().unwrap());
         let token = cloud_token(&ts, s, g, &id, &file_id, &dest);
         fs::write(dest.parent().unwrap().join("vault.json"), b"not really").unwrap();
-        let refused = ts.shell.save_file_copy_confirm(&token);
+        let refused = ts.shell.save_file_copy_confirm(&token, 1);
         assert_eq!(
             refused.err(),
             Some(ShellError::from(CoreError::InvalidInput {
@@ -1116,7 +1209,10 @@ mod tests {
         let made_up: Token =
             serde_json::from_value(Value::String(["0123456789abcdef"; 2].concat())).unwrap();
         let not_found = Some(ShellError::NotFound);
-        assert_eq!(ts.shell.save_file_copy_confirm(&made_up).err(), not_found);
+        assert_eq!(
+            ts.shell.save_file_copy_confirm(&made_up, 1).err(),
+            not_found
+        );
 
         let other = ts
             .shell
@@ -1125,27 +1221,469 @@ mod tests {
             .put(crate::pending::PendingChoice::AddVault {
                 dir: ts.temp.path().to_path_buf(),
             });
-        assert_eq!(ts.shell.save_file_copy_confirm(&other).err(), not_found);
+        assert_eq!(ts.shell.save_file_copy_confirm(&other, 1).err(), not_found);
         assert_eq!(ts.shell.sessions.pending().len(), 0, "used up");
         // And the other way round: this token is no good to another question.
         let token = cloud_token(&ts, s, g, &id, &file_id, &dest);
         assert_eq!(ts.shell.save_readable_confirm(&token).err(), not_found);
-        assert_eq!(ts.shell.save_file_copy_confirm(&token).err(), not_found);
+        assert_eq!(ts.shell.save_file_copy_confirm(&token, 1).err(), not_found);
         untouched(&dest);
 
         let dialogs = ts.dialogs.opened();
         let foreign = SessionId(s.0 + 100);
         ts.dialogs.answer(Some(dest.clone()));
         assert_eq!(
-            ts.shell.save_file_copy(s, g + 1, &id, &file_id).err(),
+            ts.shell.save_file_copy(s, g + 1, &id, &file_id, 1).err(),
             LOCKED
         );
         assert_eq!(
-            ts.shell.save_file_copy(foreign, g, &id, &file_id).err(),
+            ts.shell.save_file_copy(foreign, g, &id, &file_id, 1).err(),
             not_found
         );
         assert_eq!(ts.dialogs.opened(), dialogs, "before the dialog");
         assert_eq!(ts.shell.sessions.pending().len(), 0);
+    }
+
+    /// The job events of one command: its `job-started` (with the `request` it was given), then its progress events in
+    /// order, the last one finished with `done == total == size`.
+    fn assert_one_job(ts: &TestShell, request: u32, kind: &str, size: u64) -> u64 {
+        let started: Vec<Value> = ts
+            .events
+            .started()
+            .into_iter()
+            .filter(|event| event["request"] == json!(request))
+            .collect();
+        assert_eq!(started.len(), 1, "request {request}: {started:?}");
+        assert_eq!(started[0]["kind"], json!(kind));
+        let operation = started[0]["operation"].as_u64().unwrap();
+        let progress: Vec<Value> = ts
+            .events
+            .progress()
+            .into_iter()
+            .filter(|event| event["operation"] == json!(operation))
+            .collect();
+        assert!(progress.len() >= 2, "{progress:?}");
+        assert!(progress.iter().all(|event| event["kind"] == json!(kind)));
+        assert!(
+            progress
+                .iter()
+                .all(|event| event["scope"] == started[0]["scope"])
+        );
+        let (last, earlier) = progress.split_last().unwrap();
+        assert!(earlier.iter().all(|e| e["finished"] == json!(false)));
+        assert_eq!(last["finished"], json!(true));
+        assert_eq!(last["done"], json!(size));
+        assert_eq!(last["total"], json!(size));
+        let mut before = 0;
+        for event in &progress {
+            let done = event["done"].as_u64().unwrap();
+            assert!(done >= before && done <= size, "{progress:?}");
+            before = done;
+        }
+        operation
+    }
+
+    /// The four commands this task gives progress each take a `request`: the page is told of the job with it, sees
+    /// progress that ends at the file's size, and the cloud question, a closed dialog and a refusal send no
+    /// `job-started` at all.
+    #[test]
+    fn one_file_add_and_save_copy_take_request() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let size = 3 * 1024 * 1024 + 5;
+        let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let source = ts.temp.path().join("big.bin");
+        fs::write(&source, &bytes).unwrap();
+        let done = |answer: Tagged<Outcome<String>>| match answer.data {
+            Outcome::Done(id) => id,
+            _ => panic!("not done"),
+        };
+
+        // A closed dialog and a refusal before the work start nothing.
+        ts.dialogs.answer(None);
+        assert!(matches!(
+            ts.shell.add_file(s, g, None, 1).unwrap().data,
+            Outcome::Dismissed
+        ));
+        assert_eq!(ts.shell.add_file(s, g + 1, None, 2).err(), LOCKED);
+        assert!(ts.events.started().is_empty());
+
+        ts.dialogs.answer(Some(source.clone()));
+        let id = done(ts.shell.add_file(s, g, None, 11).unwrap());
+        let scope = json!({ "type": "session", "session": s.0, "generation": g });
+        let added = assert_one_job(&ts, 11, "import", size as u64);
+        assert_eq!(
+            ts.events.started()[0]["scope"],
+            scope,
+            "the job's scope is its session and generation"
+        );
+
+        ts.dialogs.answer(Some(source));
+        let file_id = done(ts.shell.attach_file(s, g, &id, 12).unwrap());
+        let attached = assert_one_job(&ts, 12, "import", size as u64);
+        assert_ne!(added, attached);
+
+        let dest = ts.folder("Documents").join("copy.bin");
+        ts.dialogs.answer(Some(dest.clone()));
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 13).unwrap();
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&dest).unwrap(), bytes);
+        assert_one_job(&ts, 13, "save_copy", size as u64);
+
+        // The cloud question starts nothing; the yes starts the job, named by the confirm's own request.
+        let dest = ts.folder("Synced").join("cloud.bin");
+        ts.volumes.add_sync_root(dest.parent().unwrap());
+        ts.dialogs.answer(Some(dest.clone()));
+        let asked = ts.shell.save_file_copy(s, g, &id, &file_id, 20).unwrap();
+        let Outcome::Confirm(Confirm::CloudFolder { token }) = asked.data else {
+            panic!("a cloud folder asks first");
+        };
+        assert!(
+            ts.events
+                .started()
+                .iter()
+                .all(|e| e["request"] != json!(20))
+        );
+        let saved = ts.shell.save_file_copy_confirm(&token, 21).unwrap();
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&dest).unwrap(), bytes);
+        assert_one_job(&ts, 21, "save_copy", size as u64);
+    }
+
+    /// `job-started` and every progress event are sent while the command still runs, so before it answers, and the
+    /// page can match the operation to its request.
+    #[test]
+    fn job_started_is_sent_before_progress_and_before_the_answer() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let early = Arc::new(Mutex::new(Vec::new()));
+        let (flag, seen) = (Arc::clone(&answered), Arc::clone(&early));
+        ts.events.watch(move |name, _| {
+            seen.lock()
+                .unwrap()
+                .push((name, flag.load(std::sync::atomic::Ordering::SeqCst)));
+        });
+        ts.dialogs.answer(Some(dest));
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 31).unwrap();
+        answered.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(saved.data, Outcome::Done(())));
+
+        let seen = early.lock().unwrap().clone();
+        assert_eq!(seen[0].0, crate::shell::JOB_STARTED_EVENT);
+        assert!(
+            seen[1..]
+                .iter()
+                .all(|(name, _)| *name == crate::shell::PROGRESS_EVENT)
+        );
+        assert!(seen.len() >= 3, "{seen:?}");
+        assert!(
+            seen.iter().all(|(_, after_the_answer)| !after_the_answer),
+            "an event came after the answer"
+        );
+    }
+
+    /// A Stop (`cancel_operation`) sent while a copy runs ends it as cancelled with the destination as it was and no temp,
+    /// and stops nothing else: the same session saves the copy afterwards.
+    #[test]
+    fn stop_ends_a_running_copy_and_leaves_the_session_working() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        let shell = Arc::clone(&ts.shell);
+        ts.events.watch(move |name, payload| {
+            if name == crate::shell::PROGRESS_EVENT && payload["finished"] == json!(false) {
+                let operation = OperationId(payload["operation"].as_u64().unwrap());
+                let scope: JobScope = serde_json::from_value(payload["scope"].clone()).unwrap();
+                shell.autolock.cancel_operation(operation, scope).unwrap();
+            }
+        });
+        ts.dialogs.answer(Some(dest.clone()));
+        let stopped = ts.shell.save_file_copy(s, g, &id, &file_id, 41);
+        assert_eq!(stopped.err(), Some(ShellError::Cancelled));
+        untouched(&dest);
+        let last = ts.events.progress().pop().unwrap();
+        assert_eq!(last["finished"], json!(true));
+
+        ts.events.watch(|_, _| {});
+        ts.dialogs.answer(Some(dest.clone()));
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 42).unwrap();
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&dest).unwrap(), stored_bytes());
+    }
+
+    /// Every file under `dir` with its bytes, by path: what a folder holds, to compare before and after.
+    fn files_under(dir: &std::path::Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut found = std::collections::BTreeMap::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(folder) = pending.pop() {
+            for entry in fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                match path.is_dir() {
+                    true => pending.push(path),
+                    false => {
+                        // A file another handle holds exclusively (the vault's lock file, a temp being written) reads as
+                        // empty: its name still counts.
+                        found.insert(path.clone(), fs::read(&path).unwrap_or_default());
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// What a Stop found when it was sent: the folder's files at that moment, and how many bytes the job had done.
+    struct StoppedAt {
+        folder: std::sync::Mutex<Option<std::collections::BTreeMap<PathBuf, Vec<u8>>>>,
+        done: std::sync::atomic::AtomicU64,
+    }
+
+    /// From now on, the first progress event that says bytes were written (`done > 0`, not the finished one) sends the
+    /// job's Stop through `cancel_operation`, as the page's button does, after taking a snapshot of `watched`.
+    fn stop_once_bytes_are_written(ts: &TestShell, watched: PathBuf) -> Arc<StoppedAt> {
+        let stopped = Arc::new(StoppedAt {
+            folder: Mutex::new(None),
+            done: std::sync::atomic::AtomicU64::new(0),
+        });
+        let (shell, seen) = (Arc::clone(&ts.shell), Arc::clone(&stopped));
+        ts.events.watch(move |name, payload| {
+            let done = payload["done"].as_u64().unwrap_or(0);
+            if name != crate::shell::PROGRESS_EVENT
+                || payload["finished"] != json!(false)
+                || done == 0
+                || seen.done.load(std::sync::atomic::Ordering::SeqCst) != 0
+            {
+                return;
+            }
+            *seen.folder.lock().unwrap() = Some(files_under(&watched));
+            seen.done.store(done, std::sync::atomic::Ordering::SeqCst);
+            let operation = OperationId(payload["operation"].as_u64().unwrap());
+            let scope: JobScope = serde_json::from_value(payload["scope"].clone()).unwrap();
+            shell.autolock.cancel_operation(operation, scope).unwrap();
+        });
+        stopped
+    }
+
+    /// A made-up file of several MiB, so the engine reports bytes done before it ends.
+    fn big_source(ts: &TestShell, name: &str) -> PathBuf {
+        let path = ts.temp.path().join(name);
+        let bytes: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 241) as u8).collect();
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// The item's attachments, by file ID.
+    fn attachment_ids(ts: &TestShell, s: SessionId, g: u64, id: &str) -> Vec<String> {
+        let detail = serde_json::to_value(ts.shell.get_item(s, g, id).unwrap()).unwrap();
+        detail["data"]["summary"]["attachments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["file_id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn item_count(ts: &TestShell, s: SessionId, g: u64) -> usize {
+        let items = serde_json::to_value(ts.shell.list_items(s, g).unwrap()).unwrap();
+        items["data"]["items"].as_array().unwrap().len()
+    }
+
+    /// Stop an Add after bytes were written: `Cancelled`, the vault's folder byte for byte as it was (the partial blob
+    /// the engine had begun is gone, no item was added), and the session still works: the same file adds afterwards.
+    #[test]
+    fn stopped_add_after_a_partial_write_leaves_the_vault_as_it_was() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "existing.pdf", b"already here");
+        let vault_dir = ts.shell.registry.entries()[0].1.clone();
+        let before = files_under(&vault_dir);
+        let items = item_count(&ts, s, g);
+        let source = big_source(&ts, "big.bin");
+
+        let stopped = stop_once_bytes_are_written(&ts, vault_dir.clone());
+        ts.dialogs.answer(Some(source.clone()));
+        let answer = ts.shell.add_file(s, g, None, 51);
+        assert_eq!(answer.err(), Some(ShellError::Cancelled));
+
+        assert!(stopped.done.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let during = stopped.folder.lock().unwrap().take().unwrap();
+        assert_ne!(
+            during, before,
+            "no partial blob was there when it was stopped"
+        );
+        assert_eq!(files_under(&vault_dir), before, "a partial blob was left");
+        assert_eq!(item_count(&ts, s, g), items, "an item was added");
+        let last = ts.events.progress().pop().unwrap();
+        assert_eq!(last["finished"], json!(true));
+
+        ts.events.watch(|_, _| {});
+        ts.dialogs.answer(Some(source));
+        let added = ts.shell.add_file(s, g, None, 52).unwrap();
+        assert!(matches!(added.data, Outcome::Done(_)));
+        assert_eq!(item_count(&ts, s, g), items + 1);
+    }
+
+    /// The same for Attach: the item keeps its one file, the folder is as it was, and attaching works afterwards.
+    #[test]
+    fn stopped_attach_after_a_partial_write_leaves_the_item_as_it_was() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        let (id, file_id) = ts.stored_file(s, g, "existing.pdf", b"already here");
+        let vault_dir = ts.shell.registry.entries()[0].1.clone();
+        let before = files_under(&vault_dir);
+        let source = big_source(&ts, "big.bin");
+
+        let stopped = stop_once_bytes_are_written(&ts, vault_dir.clone());
+        ts.dialogs.answer(Some(source.clone()));
+        let answer = ts.shell.attach_file(s, g, &id, 53);
+        assert_eq!(answer.err(), Some(ShellError::Cancelled));
+
+        assert!(stopped.done.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let during = stopped.folder.lock().unwrap().take().unwrap();
+        assert_ne!(
+            during, before,
+            "no partial blob was there when it was stopped"
+        );
+        assert_eq!(files_under(&vault_dir), before, "a partial blob was left");
+        assert_eq!(
+            attachment_ids(&ts, s, g, &id),
+            std::slice::from_ref(&file_id)
+        );
+
+        ts.events.watch(|_, _| {});
+        ts.dialogs.answer(Some(source));
+        let attached = ts.shell.attach_file(s, g, &id, 54).unwrap();
+        assert!(matches!(attached.data, Outcome::Done(_)));
+        assert_eq!(attachment_ids(&ts, s, g, &id).len(), 2);
+    }
+
+    /// Stop a Save a copy after bytes were written, where nothing exists at the destination: no file and no partial
+    /// beside it, the output journal clear, and the same copy saves afterwards.
+    #[test]
+    fn stopped_save_after_a_partial_write_leaves_no_file_and_no_partial() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, _) = with_destination(&ts);
+        let folder = ts.folder("Fresh");
+        let dest = folder.join("copy.pdf");
+
+        let stopped = stop_once_bytes_are_written(&ts, folder.clone());
+        ts.dialogs.answer(Some(dest.clone()));
+        let answer = ts.shell.save_file_copy(s, g, &id, &file_id, 55);
+        assert_eq!(answer.err(), Some(ShellError::Cancelled));
+
+        assert!(stopped.done.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let during = stopped.folder.lock().unwrap().take().unwrap();
+        assert!(
+            !during.is_empty(),
+            "no partial file was there when it was stopped"
+        );
+        assert!(!dest.exists(), "a file was left");
+        assert!(
+            names(&folder).is_empty(),
+            "a partial was left: {:?}",
+            names(&folder)
+        );
+        assert!(ts.journal().is_empty(), "the output journal kept an entry");
+        let last = ts.events.progress().pop().unwrap();
+        assert_eq!(last["finished"], json!(true));
+
+        ts.events.watch(|_, _| {});
+        ts.dialogs.answer(Some(dest.clone()));
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 56).unwrap();
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&dest).unwrap(), stored_bytes());
+    }
+
+    /// Stop a Save a copy after bytes were written, onto a destination that exists: it stays byte for byte as it was,
+    /// with no partial beside it, and the vault's folder is unchanged (nothing decrypted is left anywhere).
+    #[test]
+    fn stopped_save_after_a_partial_write_keeps_an_existing_destination() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, dest) = with_destination(&ts);
+        let vault_dir = ts.shell.registry.entries()[0].1.clone();
+        let vault_before = files_under(&vault_dir);
+        let folder = dest.parent().unwrap().to_path_buf();
+
+        let stopped = stop_once_bytes_are_written(&ts, folder.clone());
+        ts.dialogs.answer(Some(dest.clone()));
+        let answer = ts.shell.save_file_copy(s, g, &id, &file_id, 57);
+        assert_eq!(answer.err(), Some(ShellError::Cancelled));
+
+        assert!(stopped.done.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        untouched(&dest);
+        assert!(ts.journal().is_empty(), "the output journal kept an entry");
+        assert_eq!(files_under(&vault_dir), vault_before);
+        assert!(!ts.shell.paths.open.exists() || names(&ts.shell.paths.open).is_empty());
+
+        ts.events.watch(|_, _| {});
+        ts.dialogs.answer(Some(dest.clone()));
+        let saved = ts.shell.save_file_copy(s, g, &id, &file_id, 58).unwrap();
+        assert!(matches!(saved.data, Outcome::Done(())));
+        assert_eq!(fs::read(&dest).unwrap(), stored_bytes());
+    }
+
+    /// Replace file and Open are jobs in the shell's table (they pause the idle lock and a lock stops them) but tell
+    /// the page nothing of their own: no `job-started`, no progress.
+    #[test]
+    fn open_and_replace_are_jobs_without_events() {
+        let ts = TestShell::new();
+        let (s, g, id, file_id, _) = with_destination(&ts);
+        let source = ts.temp.path().join("new.pdf");
+        fs::write(&source, b"new").unwrap();
+        ts.dialogs.answer(Some(source));
+        let replaced = ts.shell.replace_file(s, g, &id, &file_id).unwrap();
+        let Outcome::Done(new_file) = replaced.data else {
+            panic!("not replaced");
+        };
+        let opened = ts.shell.open_file(s, g, &id, &new_file, false).unwrap();
+        assert!(matches!(opened.data, Outcome::Done(())));
+        assert!(ts.events.job_events().is_empty());
+        let busy = ts.events.busy();
+        assert!(busy.contains(&(Some(s), vec!["import"])), "{busy:?}");
+    }
+
+    /// The five commands' bodies: the four that gained a `request` need it (a `u32`), and `replace_file` and `open_file`
+    /// still refuse one.
+    #[test]
+    fn request_is_required_by_the_four_and_refused_by_the_rest() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let with = |mut body: Value, request: Value| {
+            body["request"] = request;
+            body
+        };
+        let copy = json!({ "session": 1, "generation": 1, "id": id, "file_id": id });
+        let add = json!({ "session": 1, "generation": 1, "collection": null });
+        let attach = json!({ "session": 1, "generation": 1, "id": id });
+        let confirm = json!({ "token": id });
+        fn parses<T: serde::de::DeserializeOwned>(body: &Value) -> bool {
+            parse::<T>(&InvokeBody::Json(body.clone())).is_ok()
+        }
+        macro_rules! needs_request {
+            ($ty:ty, $body:expr) => {
+                assert!(!parses::<$ty>(&$body), "accepted without a request");
+                assert!(parses::<$ty>(&with($body.clone(), json!(5))));
+                assert!(parses::<$ty>(&with($body.clone(), json!(0))));
+                assert!(parses::<$ty>(&with($body.clone(), json!(u32::MAX))));
+                for bad in [
+                    json!(-1),
+                    json!(4294967296u64),
+                    json!("5"),
+                    json!(1.5),
+                    json!(null),
+                ] {
+                    assert!(
+                        !parses::<$ty>(&with($body.clone(), bad.clone())),
+                        "accepted request {bad}"
+                    );
+                }
+            };
+        }
+        needs_request!(SaveCopyArgs, copy);
+        needs_request!(AddFile, add);
+        needs_request!(AttachFile, attach);
+        needs_request!(ConfirmCopy, confirm);
+        // `replace_file` shares `copy`'s body without a request.
+        assert!(parses::<FileArgs>(&copy));
+        assert!(!parses::<FileArgs>(&with(copy, json!(5))));
     }
 
     fn refuses_a_path<T: serde::de::DeserializeOwned>(body: Value) {
@@ -1164,13 +1702,20 @@ mod tests {
     #[test]
     fn request_with_a_path_field_refused() {
         let id = "0123456789abcdef0123456789abcdef";
-        // `save_file_copy` and `replace_file`.
+        // `replace_file`, and `save_file_copy` with its `request`.
         refuses_a_path::<FileArgs>(
             json!({ "session": 1, "generation": 1, "id": id, "file_id": id }),
         );
-        refuses_a_path::<ConfirmCopy>(json!({ "token": id }));
-        refuses_a_path::<AddFile>(json!({ "session": 1, "generation": 1, "collection": null }));
-        refuses_a_path::<AttachFile>(json!({ "session": 1, "generation": 1, "id": id }));
+        refuses_a_path::<SaveCopyArgs>(
+            json!({ "session": 1, "generation": 1, "id": id, "file_id": id, "request": 1 }),
+        );
+        refuses_a_path::<ConfirmCopy>(json!({ "token": id, "request": 1 }));
+        refuses_a_path::<AddFile>(
+            json!({ "session": 1, "generation": 1, "collection": null, "request": 1 }),
+        );
+        refuses_a_path::<AttachFile>(
+            json!({ "session": 1, "generation": 1, "id": id, "request": 1 }),
+        );
         refuses_a_path::<OpenFile>(json!({
             "session": 1, "generation": 1, "id": id, "file_id": id, "confirmed_executable": false
         }));

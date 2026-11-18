@@ -13,6 +13,7 @@ use crate::secret::{Key32, random_bytes};
 use aead_stream::{DecryptorBE32, EncryptorBE32, Nonce, StreamBE32};
 use chacha20poly1305::XChaCha20Poly1305;
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -26,21 +27,49 @@ pub const CHUNK_SIZE: u32 = 1_048_576;
 /// Largest file accepted: 256 GiB, i.e. 262 144 chunks, far below the 2^32 counter limit.
 pub const MAX_FILE_BYTES: u64 = 274_877_906_944;
 
-/// Asks a long operation to stop. Clones share one flag.
+/// One token's flag, and the token it hangs from, if any.
+#[derive(Debug, Default)]
+struct CancelNode {
+    cancelled: AtomicBool,
+    parent: Option<Arc<CancelNode>>,
+}
+
+/// Asks a long operation to stop. Clones share one flag, so a clone of a token is the same token.
+/// [`child`](Self::child) makes a token of its own that also stops when this one does.
 #[derive(Clone, Debug, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken(Arc<CancelNode>);
 
 impl CancelToken {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+    /// A new token that is cancelled when it or any token above it is. Cancelling it leaves the
+    /// token it came from, and that token's other children, running.
+    pub fn child(&self) -> CancelToken {
+        CancelToken(Arc::new(CancelNode {
+            cancelled: AtomicBool::new(false),
+            parent: Some(Arc::clone(&self.0)),
+        }))
     }
 
+    pub fn cancel(&self) {
+        self.0.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// One relaxed load per token up the chain (a job's token, then its session's or launch's):
+    /// cheap enough for the per-chunk checks.
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        let mut node = &*self.0;
+        loop {
+            if node.cancelled.load(Ordering::Relaxed) {
+                return true;
+            }
+            match &node.parent {
+                Some(parent) => node = parent,
+                None => return false,
+            }
+        }
     }
 
     /// `Err(Cancelled)` once cancelled.
@@ -49,6 +78,113 @@ impl CancelToken {
             return Err(CoreError::Cancelled);
         }
         Ok(())
+    }
+}
+
+/// Hears how far a long job has got. Only two numbers go through it: bytes done and the total
+/// (known before the first byte). Called from the thread doing the work, at most once per MiB
+/// and once more at the end of a job that succeeded; never after a cancel.
+pub trait Progress: Send + Sync {
+    fn advance(&self, done: u64, total: u64);
+}
+
+/// For a caller that does not need progress.
+pub struct NoProgress;
+
+impl Progress for NoProgress {
+    fn advance(&self, _done: u64, _total: u64) {}
+}
+
+/// How many bytes pass between two reports.
+const REPORT_STEP: u64 = 1 << 20;
+
+/// Turns a job's byte counts into reports to a [`Progress`]: one per [`REPORT_STEP`], so the
+/// callback stays off the hot path, then one at the end of a job that succeeded. Done never
+/// passes the total, and nothing is reported once the job's token is cancelled.
+pub(crate) struct Meter<'a> {
+    progress: &'a dyn Progress,
+    cancel: &'a CancelToken,
+    total: Cell<u64>,
+    done: Cell<u64>,
+    reported: Cell<u64>,
+    sent: Cell<bool>,
+}
+
+impl<'a> Meter<'a> {
+    pub(crate) fn new(progress: &'a dyn Progress, cancel: &'a CancelToken, total: u64) -> Self {
+        Meter {
+            progress,
+            cancel,
+            total: Cell::new(total),
+            done: Cell::new(0),
+            reported: Cell::new(0),
+            sent: Cell::new(false),
+        }
+    }
+
+    /// `n` more bytes are done.
+    pub(crate) fn add(&self, n: u64) {
+        self.reach(self.done.get().saturating_add(n));
+    }
+
+    /// At least `at` bytes are done: a phase that skipped some of its bytes (a file that was not
+    /// there) counts them as done.
+    pub(crate) fn reach(&self, at: u64) {
+        let done = self.done.get().max(at).min(self.total.get());
+        self.done.set(done);
+        if done - self.reported.get() >= REPORT_STEP {
+            self.report(done);
+        }
+    }
+
+    /// The job succeeded: reports the total, unless that is already what was last reported.
+    pub(crate) fn finish(&self) {
+        let total = self.total.get();
+        self.done.set(total);
+        if !(self.sent.get() && self.reported.get() == total) {
+            self.report(total);
+        }
+    }
+
+    fn report(&self, done: u64) {
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        self.sent.set(true);
+        self.reported.set(done);
+        self.progress.advance(done, self.total.get());
+    }
+}
+
+/// Counts the bytes read from `inner` into a [`Meter`].
+pub(crate) struct CountRead<'m, 'a, R> {
+    pub(crate) inner: R,
+    pub(crate) meter: &'m Meter<'a>,
+}
+
+impl<R: Read> Read for CountRead<'_, '_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.meter.add(n as u64);
+        Ok(n)
+    }
+}
+
+/// Counts the bytes written to `inner` into a [`Meter`].
+pub(crate) struct CountWrite<'m, 'a, W> {
+    pub(crate) inner: W,
+    pub(crate) meter: &'m Meter<'a>,
+}
+
+impl<W: Write> Write for CountWrite<'_, '_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.meter.add(n as u64);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -370,8 +506,58 @@ pub fn authenticate_copy(
     Ok(tee.hash.finalize().into())
 }
 
+/// Progress listeners for tests here and in `vault/*`.
+#[cfg(test)]
+pub(crate) mod testkit {
+    use super::{CancelToken, Progress};
+    use std::sync::Mutex;
+
+    /// Remembers every report, in order.
+    #[derive(Default)]
+    pub(crate) struct Recorder(Mutex<Vec<(u64, u64)>>);
+
+    impl Progress for Recorder {
+        fn advance(&self, done: u64, total: u64) {
+            self.0.lock().unwrap().push((done, total));
+        }
+    }
+
+    impl Recorder {
+        pub(crate) fn calls(&self) -> Vec<(u64, u64)> {
+            self.0.lock().unwrap().clone()
+        }
+
+        /// Asserts the reports of one successful job: one total throughout, bytes done only
+        /// growing and never past it, and the last report is the total. Returns that total.
+        #[track_caller]
+        pub(crate) fn assert_a_clean_run(&self) -> u64 {
+            let calls = self.calls();
+            let (_, total) = *calls.last().expect("at least the final report");
+            let mut before = 0;
+            for &(done, t) in &calls {
+                assert_eq!(t, total, "one total throughout: {calls:?}");
+                assert!(done >= before && done <= total, "{calls:?}");
+                before = done;
+            }
+            assert_eq!(before, total, "ends at the total: {calls:?}");
+            total
+        }
+    }
+
+    /// Cancels `token` at its first report.
+    pub(crate) struct CancelAtFirst(pub(crate) CancelToken, pub(crate) Recorder);
+
+    impl Progress for CancelAtFirst {
+        fn advance(&self, done: u64, total: u64) {
+            self.1.advance(done, total);
+            self.0.cancel();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testkit::{CancelAtFirst, Recorder};
     use super::*;
     use crate::ad::{encode_ad, v16};
     use crate::aead;
@@ -851,5 +1037,152 @@ mod tests {
             (1, 1_048_576, 4)
         );
         assert!(!format!("{a:?}").contains("file_key"));
+    }
+
+    #[test]
+    fn child_cancel_leaves_parent_and_siblings_running() {
+        let parent = CancelToken::new();
+        let (a, b) = (parent.child(), parent.child());
+        let (a_clone, under_a, under_b) = (a.clone(), a.child(), b.child());
+        a.cancel();
+        // A clone of the child is the child itself, and what hangs from it stops with it.
+        assert!(a.is_cancelled() && a_clone.is_cancelled() && under_a.is_cancelled());
+        assert!(matches!(a_clone.check(), Err(CoreError::Cancelled)));
+        // The parent, the sibling and the sibling's own child keep running.
+        assert!(!parent.is_cancelled() && !b.is_cancelled() && !under_b.is_cancelled());
+        parent.check().unwrap();
+        b.check().unwrap();
+        under_b.check().unwrap();
+    }
+
+    #[test]
+    fn parent_cancel_stops_every_child() {
+        let parent = CancelToken::new();
+        let children: Vec<CancelToken> = (0..3).map(|_| parent.child()).collect();
+        let grandchild = children[0].child();
+        let clone_of_parent = parent.clone();
+        assert!(children.iter().all(|c| !c.is_cancelled()));
+        clone_of_parent.cancel();
+        assert!(parent.is_cancelled());
+        assert!(children.iter().all(|c| c.is_cancelled()));
+        assert!(matches!(grandchild.check(), Err(CoreError::Cancelled)));
+        // A child made after the cancel starts out cancelled too.
+        assert!(parent.child().is_cancelled());
+    }
+
+    /// Seals `len` bytes the way an import does: counted as they are read, then finished.
+    fn seal_counted(
+        len: usize,
+        read_step: usize,
+        progress: &dyn Progress,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let f = fref(len);
+        let data = plain(len);
+        let meter = Meter::new(progress, cancel, len as u64);
+        let mut src = CountRead {
+            inner: Trickle(Cursor::new(&data), read_step),
+            meter: &meter,
+        };
+        encrypt_stream(&mut src, len as u64, &mut Vec::new(), &VAULT, &f, cancel)?;
+        meter.finish();
+        Ok(())
+    }
+
+    #[test]
+    fn progress_reports_bytes_done_and_the_total() {
+        let len = 3 * MIB + 7;
+        let recorder = Recorder::default();
+        seal_counted(len, 4093, &recorder, &CancelToken::new()).unwrap();
+        let calls = recorder.calls();
+        assert_eq!(recorder.assert_a_clean_run(), len as u64);
+        // At most once per MiB, however small the reads: three steps and the end.
+        assert!(calls.len() <= 4, "{calls:?}");
+        let mut before = 0;
+        for &(done, total) in &calls[..calls.len() - 1] {
+            assert!(done - before >= MIB as u64, "{calls:?}");
+            assert_eq!(total, len as u64);
+            before = done;
+        }
+    }
+
+    #[test]
+    fn progress_never_passes_the_total() {
+        let cancel = CancelToken::new();
+        let recorder = Recorder::default();
+        let meter = Meter::new(&recorder, &cancel, 3 * MIB as u64);
+        for _ in 0..8 {
+            meter.add(MIB as u64 - 1); // more bytes than the total, in odd steps
+        }
+        meter.add(u64::MAX); // and a count that would overflow
+        meter.finish();
+        recorder.assert_a_clean_run();
+        // A phase that skips bytes moves done forward to where it ends, never past the total
+        // and never back.
+        let later = Recorder::default();
+        let meter = Meter::new(&later, &cancel, 5 * MIB as u64);
+        meter.add(3 * MIB as u64);
+        meter.reach(MIB as u64);
+        meter.reach(4 * MIB as u64);
+        meter.reach(u64::MAX);
+        meter.finish();
+        later.assert_a_clean_run();
+        assert_eq!(
+            later.calls(),
+            [
+                (3 * MIB as u64, 5 * MIB as u64),
+                (4 * MIB as u64, 5 * MIB as u64),
+                (5 * MIB as u64, 5 * MIB as u64)
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_ends_at_the_total_on_success() {
+        for len in [0, 1, MIB, MIB + 1, 2 * MIB, 3 * MIB + 7] {
+            let recorder = Recorder::default();
+            seal_counted(len, 70_000, &recorder, &CancelToken::new()).unwrap();
+            assert_eq!(recorder.assert_a_clean_run(), len as u64, "len {len}");
+            // The end is reported once: a job that stops on a whole MiB does not say it twice.
+            let calls = recorder.calls();
+            assert!(
+                calls.windows(2).all(|w| w[0] != w[1]),
+                "len {len}: {calls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_progress_after_a_cancel() {
+        let len = 3 * MIB + 7;
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Recorder::default());
+        let result = seal_counted(len, 70_000, &listener, &cancel);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(
+            listener.1.calls().len(),
+            1,
+            "only the report that cancelled"
+        );
+
+        // Cancelled after the last byte but before the end is reported: no final report either.
+        let cancel = CancelToken::new();
+        let recorder = Recorder::default();
+        let meter = Meter::new(&recorder, &cancel, MIB as u64 / 2);
+        meter.add(MIB as u64 / 2);
+        cancel.cancel();
+        meter.finish();
+        assert!(recorder.calls().is_empty());
+
+        // A cancel from above (the session's lock) counts the same.
+        let parent = CancelToken::new();
+        let job = parent.child();
+        let recorder = Recorder::default();
+        let meter = Meter::new(&recorder, &job, 4 * MIB as u64);
+        meter.add(MIB as u64);
+        parent.cancel();
+        meter.add(MIB as u64);
+        meter.finish();
+        assert_eq!(recorder.calls(), [(MIB as u64, 4 * MIB as u64)]);
     }
 }

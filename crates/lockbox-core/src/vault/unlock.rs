@@ -304,6 +304,29 @@ pub fn read_vault_id(dir: &Path) -> Result<VaultId> {
     read_unverified_header(dir).map(|h| h.vault_id)
 }
 
+/// Whether the folder `dir` holds a vault header file and no copy of it can be read because the copies are **damaged**:
+/// refused as corrupt, or too large. A copy that is not there says nothing; a copy that is readable, a newer vault's (it
+/// says "update Lockbox") and a copy the disk would not give up (another program holds it, a drive that does not answer)
+/// all mean "not known to be damaged", and the answer is `false` without reading the other copy (a held file is retried
+/// for seconds). For telling a vault whose details are lost from one that is merely busy; like the name it is not
+/// authenticated.
+pub fn header_is_damaged(dir: &Path) -> bool {
+    let mut damaged = false;
+    for file in [HEADER_FILE, HEADER_BACKUP] {
+        match load(&dir.join(file)) {
+            Ok(_) => return false,
+            Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(
+                CoreError::Damaged { .. }
+                | CoreError::TooLarge { .. }
+                | CoreError::ParamsOutOfBounds,
+            ) => damaged = true,
+            Err(_) => return false,
+        }
+    }
+    damaged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +338,35 @@ mod tests {
         let path = dir.path().join(HEADER_FILE);
         std::fs::write(&path, vec![b' '; MAX_HEADER_BYTES + 100]).unwrap();
         assert!(matches!(load(&path), Err(CoreError::TooLarge { .. })));
+    }
+
+    /// Damage is only what the engine's own header errors say: a copy that is corrupt or too large. A copy that is not
+    /// there says nothing, and a readable copy anywhere means the vault is not damaged. (A copy that cannot be read for
+    /// another reason is the shell's test, with a real sharing violation.)
+    #[test]
+    fn header_damage_is_told_from_missing_and_unreadable_copies() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", "correct horse battery").unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        drop(created.vault);
+        let (main, backup) = (dir.join(HEADER_FILE), dir.join(HEADER_BACKUP));
+        assert!(!header_is_damaged(&dir), "both copies read");
+
+        std::fs::write(&main, b"damaged").unwrap();
+        assert!(!header_is_damaged(&dir), "the other copy reads");
+        std::fs::write(&backup, b"damaged").unwrap();
+        assert!(header_is_damaged(&dir), "both corrupt");
+        std::fs::write(&main, vec![b' '; MAX_HEADER_BYTES + 100]).unwrap();
+        assert!(header_is_damaged(&dir), "one too large, one corrupt");
+
+        std::fs::remove_file(&main).unwrap();
+        assert!(header_is_damaged(&dir), "one corrupt copy is all there is");
+        std::fs::remove_file(&backup).unwrap();
+        assert!(
+            !header_is_damaged(&dir),
+            "no header files: nothing says damaged"
+        );
+        assert!(!header_is_damaged(&dir.join("not here")), "no folder");
     }
 
     #[test]

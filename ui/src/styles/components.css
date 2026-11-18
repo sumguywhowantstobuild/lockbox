@@ -194,6 +194,14 @@
   margin-top: 14px;
 }
 
+/* A second line under the lock screen's form (Restore a backup, Open a backup): quiet buttons whose words line up with the form's. */
+.lalt {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  margin: 0 0 0 -8px;
+}
+
 .prim {
   height: 42px;
   padding: 0 20px;
@@ -258,6 +266,13 @@
   font-weight: 500;
 }
 
+/* The name of a group of the steps' controls that is not one control's label (24a's "Backup" over the file's row). */
+.fu-lab {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
 .fu-step {
   margin: 0;
   color: var(--ink2);
@@ -307,6 +322,12 @@
   flex-wrap: wrap;
   gap: 8px 16px;
   align-items: center;
+}
+
+/* A quiet link in a step's row (Pick another, Choose another, Back, Bring in another vault) pulls back by its own padding, so its words line
+   up with the heading and the sentence when it starts a line (a long name wraps it under the button), and sit beside a button as drawn. */
+.fu-row .lnk {
+  margin-left: -8px;
 }
 
 /* A quiet button on its own line under the sentence that offers it (18c's Choose another): its words line up with the
@@ -1923,6 +1944,26 @@
   color: var(--danger);
 }
 
+/* A row of the vault menu that brings an open vault, backup or older copy to the front: its name, and under it what it is when it is read-only. */
+.mi .mtwo {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mi .mtwo .mt {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mi .mtwo .ms {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--ink2);
+}
+
 /* A menu that opens with lines saying how things stand (the vault menu: each vault, and Unlocked or Locked). */
 .menu.mwide {
   display: flex;
@@ -1955,6 +1996,28 @@
 }
 
 .menu.mwide > :is(.mline, [role="group"]) {
+  flex: none;
+}
+
+/* When the window leaves the menu short, the locked vaults' lines give up their room first, down to one line (they say only that a vault is
+   locked, and scroll); then the open rows scroll. The actions never shrink. Checked by measurement at 300 px of room: 19 locked and 1 open, 19
+   and 4, 3 and 12, 0 and 12 all keep Lock in view and every open row whole until the rows must scroll. */
+.menu.mwide > .mscroll:first-child {
+  flex-shrink: 1000;
+  min-height: 2.5em;
+}
+
+/* The group under the locked vaults' lines holds the open rows (in their own scroll area) and the actions: it may shrink, so the rows scroll and
+   the actions stay. */
+.menu.mwide > .mgroup {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu.mwide > [role="menuitem"],
+.menu.mwide > .mgroup > [role="menuitem"] {
   flex: none;
 }
 
@@ -2182,6 +2245,184 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
+}
+
+/* A long job's progress (9b): what it does, a thin bar, the bytes in words and the line about the laptop, with Cancel under them. The bar
+   is the text colour on a ten per cent tint of it; `tokens.contrast.test.ts` measures the pair and `progress.test.ts` keeps this sheet to
+   it. The fill's width is set by script, so the page needs no inline style. */
+.job .jt {
+  font-weight: 600;
+}
+
+.job .js {
+  margin-top: 2px;
+  color: var(--ink2);
+}
+
+.prog {
+  height: 6px;
+  margin-top: 12px;
+  border-radius: 3px;
+  background: rgba(var(--sh), 0.1);
+  overflow: hidden;
+}
+
+.prog span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ink);
+}
+
+.job .pnum {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+
+.job .fwarn {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* The file going in, and its place in the batch ("2 of 3"), above the bar (9b). */
+.job .jn {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.job .jn b {
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.job .jn span {
+  flex: none;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The panel and step layouts (22b, 9b, 24c): the first line is the job's name (or the file going in) with its per cent (or "2 of 3") beside
+   it, then the bar and its figure. In a panel the card holds only those, with the sentence above it and the line about the laptop below it;
+   on a full-window step there is no card, and Cancel follows the line about the laptop. */
+.job .jhead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.job .jhead b {
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* The per cent (or the place in a batch) keeps to the right, even when the name is left out under a heading that already says it. */
+.job .jhead span {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+
+.jcard {
+  margin-top: 12px;
+}
+
+.psub + .jcard {
+  margin-top: 14px;
+}
+
+.jcard + .fwarn {
+  margin: 14px 12px 0;
+  font-weight: 400;
+}
+
+.job.jstep {
+  margin-top: 14px;
+}
+
+.job.jstep p {
+  margin: 0;
+}
+
+.job.jstep .pnum {
+  margin-top: 6px;
+}
+
+.job.jstep .prog {
+  margin-top: 16px;
+}
+
+.job.jstep .fwarn {
+  margin-top: 14px;
+  color: var(--ink2);
+  font-weight: 400;
+}
+
+.job.jstep .ask-acts {
+  margin-top: 14px;
+}
+
+/* The card that keeps a batch's end when the person has gone from its panel: a heading as the bar's card has, then the summary. */
+.away .jt {
+  font-weight: 600;
+}
+
+/* Many files in (9a to 9c), in the side panel. A picked file is a row of a tile, its name, its size and the button that leaves it out. */
+.erow.pf {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
+.erow.pf .ftile {
+  width: 30px;
+  height: 30px;
+  font-size: 9px;
+}
+
+.erow.pf .en {
+  font-family: inherit;
+  font-size: 13.5px;
+}
+
+.erow.pf .ed {
+  letter-spacing: 0;
+}
+
+/* The end's lists of the files that did not go in: a label and the names under it, in the text colour. */
+.sumlist {
+  margin-top: 14px;
+}
+
+.sumlist .gh {
+  margin: 0 0 4px;
+}
+
+.names {
+  margin: 0;
+  padding: 0 0 0 18px;
+  color: var(--ink);
+  font-size: 13.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* A sentence in the panel that has to be read before something is deleted (the originals stay; keep the files that did not go in). */
+.fwarn {
+  margin: 12px 2px 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 500;
 }
 
 /* A refusal of the question's answer, above the buttons and left-aligned like the words. */

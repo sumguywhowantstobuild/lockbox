@@ -65,16 +65,17 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 ## Where each requirement stands today
 
-The Rust core (Plans 1 and 2) and the desktop shell (Plan 3) exist, and the screens for daily use (Plan 4's first part,
-4A). Backup and restore screens come in 4B and the forgotten-password screens in 4C, so a vault kept only in this version
-has no way back through the app.
+The Rust core (Plans 1 and 2), the desktop shell (Plan 3), the daily-use screens (4A) and the backup, restore, files and
+long-job screens (4B) exist. The forgotten-password screens, changing the password and export come in 4C, so a vault
+whose password is lost cannot be recovered in place yet; restoring a backup you can still open, with its password or the
+recovery key, is the way back.
 
 | Requirement | State |
 |---|---|
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy", to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the backup screens (4B) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the last screens (4C) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box at its lock event |
 | R7 Documented limits | This file |
@@ -94,10 +95,61 @@ trusted than Rust.
   answer with text built from what the page sent, so screens must never pass a secret to them; that text goes only back
   to the page.
 - **Paths.** Commands take IDs and values, never paths. Rust opens every file dialog, so a chosen path never comes from
-  the page. Paths go to the page in two cases only: a restore that cannot finish (its notice, and the question before
-  dismissing it) shows your own folders so you can act on them, and a readable file Lockbox saved where you chose (the
-  recovery key's PDF, a saved `.env`) names the folder it went to. Stored links are opened from Rust, and only for `http`
+  the page. Paths go to the page as text, for showing only and never accepted back, in four cases: a restore that cannot
+  finish (its notice, and the question before dismissing it), the folder a restore will use, the folder Save all files
+  is about to write to (and later saved to), and a readable file Lockbox saved where you chose (the recovery key's PDF,
+  a saved `.env`). Stored links are opened from Rust, and only for `http`
   and `https`.
+- **A backup picked to be tested.** "Test a backup" asks for the file first and holds its path in Rust under a one-time
+  token; the page gets the token, the file's name and its size, never the path, and the path is in no error or event.
+  The held pick belongs to no vault: locking one vault leaves it, and a lock of all vaults, an idle lock, Windows
+  locking or sleeping, and closing drop it, as do five minutes without an attempt (an attempt that is running is never timed out, and its end starts them again), a
+  new pick, and the page forgetting it when the panel closes. A token that is unknown, used, expired or of another kind
+  answers "choice expired", and a lock that comes while the picker is open or the test runs answers "locked" and holds
+  nothing. The held pick holds no password and no key: the credential is typed again with each try, so a wrong password
+  keeps the file picked and nothing else. A backup Lockbox has just written is held the same way, so "Test this backup"
+  needs no picker. Testing reads the backup and writes nothing.
+- **A backup picked to be opened read-only.** "Open a backup" is held exactly as a backup picked to be tested is (a token,
+  the file's name and size, never the path; the same lifetime and the same refusals), as a kind of choice of its own: a
+  test's token is "choice expired" when sent to the open, and an open's when sent to the test. The credential is typed
+  again with each try, in the one box the test uses (and wiped when the try ends); a wrong password, a damaged backup, a
+  Stop or a read error keep the file picked, and a backup that opened, or a lock, uses the pick up. The backup is opened
+  as a session that can never be written to: copying an item *into* it is refused, and it is only ever the source of a
+  copy into a vault you have unlocked, into a folder of that vault that you choose (a folder the vault does not have is
+  refused, or one the vault has in the trash, before anything is written). The session is named for the backup's file,
+  not for the vault inside it. A session open on a backup or an older copy holds no vault key; a backup whose header
+  stamp fails is refused, an older copy's still opens, and the screen warns. An older copy opened read-only is a source
+  for copying items under the same rules.
+- **Files picked to be added.** "Add files" holds the picker's paths in Rust under one token; the page sees names and
+  sizes. The pick is dropped by a lock of its vault, any lock of all vaults and five minutes (Pick more and Remove start
+  the five minutes again). Nothing is written in plain text; each file is its own change, and a file that cannot be read
+  or changed size is named and skipped.
+- **A backup picked to be restored, and the password typed for it.** "Restore a backup" asks for the file first and holds
+  its path in Rust the same way (the page gets a token, the file's name and size, never the path). Unlike "Test a
+  backup", the credential is not typed again with each step: the box of the first screen is sent once, Rust opens the
+  backup with it (without unpacking it) to tell the page the vault's name and the day it was made, and keeps the
+  credential that worked inside the held pick, wiped when it is dropped and never logged or sent, so the folder screen and
+  the copy need nothing typed. The page empties the box the moment it is sent, so the text is on the page only until
+  then. The pick, with the credential in it, goes when the copy finishes (the staged restore holds no credential), on
+  Stop or Cancel, on a lock of all vaults of any kind (an idle lock included: it drops the pick, so a restore not yet
+  copied must be picked again), on closing, and after five minutes without a use (a use that is running is never timed
+  out). A wrong password, a damaged backup and a refusal of the copy (no room, a drive that cannot hold a vault) keep the
+  pick, so another folder or password is tried without picking the file again. A token that is unknown, expired or of
+  another kind answers "choice expired". The folders the screens show are your own, as text, and never accepted back.
+  While the folder dialog is open (it may stay open as long as the person likes) nothing outside the pending table holds
+  the credential: only the folder the dialog starts in and a use guard are kept, and the pick is taken again when the dialog
+  returns, so a lock that comes meanwhile wipes the credential at once, and a pick forgotten or drained meanwhile answers
+  "choice expired". The copy opens the file again by its path, so it compares the vault ID of the archive it actually opened
+  with the one the check saw, before it writes anything: if the file was replaced in between (even by another backup made
+  with the same password), the answer is "backup changed", nothing is written, and the pick, credential included, is
+  forgotten. Every name the screens show after the copy is the prepared restore's own, never the check's.
+- **A finished restore waits through an idle lock, and nothing else.** Once the copy has finished, the restore waits for
+  your answer (Replace, or Cancel) however long you take. The idle lock does not end it, because a finished restore holds
+  no password and no key and has no unlocked vault: its staging folder is encrypted exactly as the backup is, and you
+  must still answer and then unlock the restored vault with the backup's password, which the restore never held. Every
+  other lock does end it and removes its staging folder: Lock all, the window's close button (which locks all), Windows
+  locking or sleeping, signing out and closing the app. The copy and the swap pause the idle timer while they run, so no
+  idle lock lands in either.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
@@ -118,9 +170,24 @@ trusted than Rust.
   of work later (that bounds the work, not the time), and the vault key is released when the last one finishes. Two
   exceptions: an unlock runs to its end (see "Unlocking cannot be cancelled inside the engine"), and a restore whose swap
   has started finishes or rolls back.
-- **Long operations pause the idle timer** (import, Save a copy, Open, backup, restore) and keep the PC awake, and time
+- **Long operations pause the idle timer** (adding files, Save a copy, Save all files, Open, Replace file, copying an
+  item, backup, test a backup, open a backup, restore) and keep the PC awake, and time
   spent in them does not count. Windows lock and sleep still cancel them. A question waiting for your answer does not
-  pause anything.
+  pause anything, and one exception to what a lock drops: a finished restore waiting for your answer survives an idle
+  lock (see "A finished restore waits through an idle lock").
+- **Closing or quitting while a long operation runs, or while a finished restore waits for your answer, asks first, and
+  nothing locks until you answer.** The window's close button and the tray's Quit ask whether to go on (any operation the
+  idle timer counts, including Open, Replace and copying an item, or a restore waiting at "Replace your vault with
+  this?"). Until you answer, the operations keep running, a waiting restore keeps waiting, and the vaults stay unlocked;
+  the question is dropped by any lock of all vaults (Lock all, Windows lock or sleep, an idle lock), and it is never kept
+  across a restart.
+  "Close anyway" is the only answer that cancels the operations, ends a waiting restore (the vault stays as it is) and locks (a close locks, then hides once the first-close explanation has been seen; a Quit locks and
+  exits, waiting at most 2 seconds for the lock to finish); "Keep it running" (or "Keep it open" for a waiting restore) changes nothing. A restore past its swap
+  cannot be cancelled and finishes, or is undone at the next launch. Windows ending the session (signing out, shutdown)
+  never asks and never waits: it locks and exits as before. An unanswered question leaves the vaults unlocked while the operation runs,
+  as the paused idle timer already does.
+- **Stop.** Each long job has its own stop, named by an operation ID inside its vault's (or the launch's) scope; it
+  stops that job and no other, and a lock stops all. A restore past its swap has no Stop.
 - **The app does not start** if it cannot listen for Windows lock and sleep.
 
 ## How Lockbox encrypts
@@ -171,7 +238,12 @@ in the code with a `shortcut:` comment.
   buffers, which Lockbox does not own. The fields Rust parses them into are wiped when they are dropped; a password kept
   for a question waiting for your answer lives until the answer, the five-minute limit or a lock of all vaults, and one
   typed before a file or folder picker lives until that picker closes, even past a lock (nothing is done with it then).
-  *Accepted:* wiping the buffers would mean replacing Tauri's transport.
+  The one box of "Test a backup" (and of "Open a backup") holds a password or a recovery key: Rust reads the text as a recovery key first and,
+  if it is a well-formed key that turns out wrong, tries it as a password too (text that is not a well-formed key is
+  tried as a password only, with no typo words); it is wiped when the try ends, and the page empties the box after
+  every send, a wrong password included (unlike the unlock form). The same box of "Restore a backup" is sent once, to
+  the check; the credential that worked then lives in Rust, in the held pick, until the copy finishes or the pick is
+  dropped (see "A backup picked to be restored"). *Accepted:* wiping the buffers would mean replacing Tauri's transport.
 - **Webview memory is not wiped.** Values typed or shown in the window live in WebView2's memory until the browser engine
   frees them. The screens clear their state at a lock, but that releases the text; it does not erase it. *Accepted:*
   no browser engine offers more. Keep the time a password is revealed short.
@@ -193,6 +265,26 @@ in the code with a `shortcut:` comment.
   go: Lockbox reports it and keeps trying. Deleted files can still be recovered from the disk, and copies the other
   program makes (autosaves, recent-file caches, temp files) are outside Lockbox's reach. *Accepted:* opening a file in
   another program needs a file on disk; full-disk encryption covers the rest.
+- **"Save all files" writes many decrypted copies at once, and never replaces a file.** From a folder's menu, it saves
+  every stored file of every live item in that folder (a file item's own file and every attachment) into a folder you
+  pick, which Lockbox opens itself: the picker's title says how many unencrypted copies are coming before any is written,
+  and the page is shown the folder's path as text but never sends a path back (it sends names' positions, a folder ID
+  and a token). The checks are the ones for "Save a
+  copy": a damaged output journal blocks it, Lockbox's own state folder and any vault's folder are refused, a
+  cloud-synced folder asks first, and free space for the whole batch is checked first, with the numbers; every check but the
+  cloud question (which was answered before) runs again when the job starts, and so does the check that the folder still holds
+  exactly the files that were listed. Each file is decrypted once into a hidden temp beside its destination, checked whole, and then moved
+  by a step that itself refuses a name that is taken (the move is one operation, so a file that appears at the last moment
+  is safe too): a taken name gets " (2)", " (3)" and on to 999, the file that was there is never touched, and the summary
+  says which names changed. A name Windows would refuse (`< > : " / \ | ?` `*`, control characters, a device name such as
+  `CON`, trailing dots or spaces) is changed to one it accepts and listed; any other character of your own names stays. A name longer than 100
+  characters is cut (the extension is kept), and a file whose names up to (999) are all taken is skipped and listed. A Stop,
+  a lock, a full drive or any failure leaves the files already saved where they are and nothing of the one in progress; a
+  damaged file is named and the rest go on. The summary says in so many words that the copies aren't encrypted, to delete
+  them and empty the Recycle Bin when you are done, and it offers Show in Explorer through a handle Lockbox holds (never a
+  path from the page). The handle goes when the summary closes, at a lock of that vault, at Lock all, Windows locking or
+  sleep, at close and after five minutes. *Accepted:* these are copies you asked to have in plaintext; once saved, they
+  are ordinary files that nothing in Lockbox protects or tracks, and a cloud folder you said yes to will upload them.
 - **What the launch sweep deletes.** Every temp plaintext file is recorded in `pending-outputs.json` (by its random temp
   path, never the original name) before it is created. At launch, an entry is deleted only if it has Lockbox's own temp
   name (`.<16 hex>.lockbox-partial`, `.<16 hex>.lockbox-backup-partial`) or is a folder directly inside `open\`, or is the
@@ -202,7 +294,7 @@ in the code with a `shortcut:` comment.
   first, then the folder only if it is empty (never a recursive delete), so a folder that holds anything else is left on
   disk and dropped from the list. Anything else is dropped from the list and left on disk. An entry on a drive that
   is not connected is kept for later. A damaged journal blocks new decrypted output until you let Lockbox set it aside;
-  after that, any "Save a copy" temp files it listed are no longer swept and may need deleting by hand (they are hidden,
+  after that, any "Save a copy" or "Save all files" temp files it listed are no longer swept and may need deleting by hand (they are hidden,
   named as above, and beside the place you saved to). The launch also lists `open\` itself, damaged journal or not, and removes folders named exactly 32 lowercase hex under the
   same no-link rule. The check runs again before each delete attempt, but it is a check followed by a delete, not one step:
   a program already running as you could swap something in between, and only a victim carrying one of those names could be hit.
@@ -219,7 +311,9 @@ in the code with a `shortcut:` comment.
   created or added, and reports it at each unlock, where the screen warns. They are found by asking Windows about sync
   roots, then by each provider's known location,
   so a provider that does neither goes unnoticed. Syncing can leave conflicting copies of vault files, and old versions on
-  the provider's servers. *Accepted:* v1 does not support these folders, and the warning says so.
+  the provider's servers. *Accepted:* v1 does not support these folders, and the warning says so. A vault brought to a
+  new computer ("Move to a new computer") keeps the settings calibrated on the PC that made it, and the old computer's
+  copies of it stay as readable as any old backup (see "Old copies of the vault").
 - **A USB hard drive that reports as fixed is accepted** (the checks use what Windows reports). Unplugging it locks its
   vault as unavailable. This path has been tested with simulated signals; the check with a real drive is on the
   pre-release list. A different disk mounted under the same drive letter is not told apart at recovery, which checks that
@@ -334,8 +428,10 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   nothing), though Microsoft does not formally document it. Crashes of Lockbox itself are tested by simulation (the
   tests make each step fail in turn and rebuild the folder a crash would leave); no process is actually killed and power
   cuts are not tested (spec 6.2). *Accepted:* it is how nearly all software saves files on Windows.
-- **A crash during "Save a copy" can leave a decrypted file behind.** The copy is first built in a hidden temp file
-  (`.<random>.lockbox-partial`) beside the destination, and moved into place only after every chunk has been checked. If
+- **A crash during "Save a copy" or "Save all files" can leave a decrypted file behind.** The copy is first built in a
+  hidden temp file (`.<random>.lockbox-partial`) beside the destination (for "Save all files", one at a time, each
+  recorded before it exists, the ones already saved being whole files under their own names), and moved into place only
+  after every chunk has been checked. If
   Lockbox crashes, is killed or loses power while that temp file exists, it stays there as plaintext (part of the file
   you chose to export), until the next launch: the output journal, a record of temp files, lets the launch sweep delete
   it (see "What the launch sweep deletes"). A leftover on a drive that is not connected waits until it is. A normal
@@ -427,7 +523,7 @@ Lockbox defends.
   against a program already running as you that writes a journal on purpose: it could point recovery at a
   staging-shaped folder it chose. *Accepted:* such a program can already read and delete your files, and the checks
   still mean recovery deletes only a folder named `.restore-` plus 32 hex characters.
-- **Swapping the export destination.** Before saving a decrypted copy, Lockbox checks that the destination is not
+- **Swapping the export destination.** Before saving a decrypted copy (or each of a folder's files, for "Save all files"), Lockbox checks that the destination is not
   inside the vault. A local attacker could swap a folder link into place between that check and the save.
   *Accepted:* the window is tiny and the attacker already has the access to cause harm. The same check, and the same
   accepted window, apply when you save a file out of a backup or a `.before-restore` folder opened read-only: the
@@ -482,16 +578,16 @@ Lockbox defends.
 - Dismissing a stuck restore (one that recovery cannot finish) while its drive is not connected removes only the
   restore journal. The hidden staging folder (`.restore-` plus 32 hex characters) stays on that drive, and nothing
   removes it later. It is an encrypted copy of the vault in the backup (complete if the restore had finished copying
-  it), and it still opens with the backup's password. When the drive is back, delete that folder by hand (Plan 4's
-  dialog will say so), unless the swap was left half done. A swap that replaces a vault moves the old one aside to
+  it), and it still opens with the backup's password. When the drive is back, delete that folder by hand (the stuck
+  restore's notice says dismissing leaves the folders for you to sort out), unless the swap was left half done. A swap that replaces a vault moves the old one aside to
   `<folder>.before-restore` (or `-2` and so on), then moves the restored copy into its place; if it stopped between
   the two (the drive went away, say), recovery would move the old vault back, but a dismissal does not. So once the
   drive is back, the vault's own folder is missing, the old vault is in that `.before-restore` folder and the
   restored copy is in the staging folder. No data is lost. To keep the old vault, rename that `.before-restore`
   folder back to the vault folder's name; to take the restored one, un-hide the staging folder and rename it to that
   name. Then delete the other when you no longer need it. Reconnecting the drive and letting recovery run, instead
-  of dismissing, is the better way out: it moves the old vault back and removes the staging folder itself. Plan 4's
-  dialog should offer it first. *Accepted:* dismissing is your confirmed way out of a restore that cannot finish, so
+  of dismissing, is the better way out: it moves the old vault back and removes the staging folder itself. The
+  notice offers Try again before Dismiss. *Accepted:* dismissing is your confirmed way out of a restore that cannot finish, so
   it has to work without the drive, and the folder holds nothing the backup itself does not.
 - A new vault, and a restore that makes a new folder, are refused anywhere under a folder holding a file named
   `vault.json` or `vault.json.bak`, so one is never nested inside another. An unrelated file of that name higher up (in
@@ -538,19 +634,22 @@ Lockbox defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plans 4B and 4C
-(backing up, testing and restoring a backup, opening one read-only, changing the password, "forgot password", a new
-recovery key from Settings, more than one vault, emptying the trash, export, Quit's questions, progress and a stop for long
-jobs, saving many files at once), the end-to-end tests on the running app, and the installer. Until backup and
-"forgot password" have screens, don't keep the only copy of anything important in Lockbox. Plan 4A's screens are built
+These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plan 4C
+(changing the password, "forgot password", a new recovery key from Settings, emptying the trash, export, and unlocking a
+second vault from inside the window; switching between vaults that are already open works from the side menu), the
+end-to-end tests on the running app, and the installer. Until "forgot password" has a screen, a lost password means the
+vault is reachable only through a backup you can still open (its password or your recovery key opens it), so test your
+backups. Plans 4A and 4B are built
 (first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
-folders and the trash, `.env` in and out, the save shortcut, stored files, settings), and the page clears what it shows at
+folders and the trash, `.env` in and out, the save shortcut, stored files, settings, and backing up, testing and
+restoring a backup, older copies, opening a backup read-only, moving a vault to a new computer, adding many files,
+Save all files, and progress and a stop for long jobs), and the page clears what it shows at
 a lock; the shell's other commands exist with no button yet. Unlocking a vault can still write to it (header repair and
 cleanup); to look at a vault or a backup without writing, open it read-only.
 
 ### Limits that come with the screens
 
-These come with Plan 4A's screens, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
+These come with the screens of Plans 4A and 4B, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
 
 - **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
   that value (the save box's tick box, and the same tick box in the paste panel for a `.env` you pasted): after the key is

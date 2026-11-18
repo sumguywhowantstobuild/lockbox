@@ -35,16 +35,21 @@ const CONTRACT = { file_id: itemId(0xa1), name: "contract-demo.pdf" };
 const CONSOLE_PDF = { file_id: itemId(0xb1), name: "console-access-demo.pdf", length: 18_432, media_type: "application/pdf" };
 const SETUP_EXE = { file_id: itemId(0xb2), name: "setup-demo.exe", length: 12 * 1_048_576, media_type: "application/x-msdownload" };
 const TOKEN = itemId(7);
+/** A long file command is sent with a request number the page chose: any whole number, for the tests that read what was sent. */
+const ANY_REQUEST = expect.any(Number) as number;
 
 const OPENED_NOTE =
   "Opened a temporary read-only copy. Edits there aren't saved back. To change the stored file, use Replace file.";
 const SAVED_NOTE = "Saved a copy. It isn't encrypted. Delete it when you're finished.";
-const ADDED_NOTE =
-  "File added. The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
-const ATTACHED_NOTE =
-  "File attached. The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
-const PAUSE =
-  "Auto-lock is waiting until this finishes. Windows locking or sleeping still locks your vaults and stops it.";
+/** What an add that finished while the person was on another item says, as one message (the panel that would have said it is gone). */
+const ADDED_AWAY =
+  "1 file added. The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
+const ORIGINAL_STAYS =
+  "The original is still unprotected on your PC. Lockbox didn't change or delete it, so remove it yourself if you no longer need it.";
+/** The auto-lock note's first sentence, whichever form the note takes: the whole of 5d's words, or beside a progress card, this sentence alone. */
+const PAUSE = /^Auto-lock is waiting until this finishes\./;
+/** 5d's whole note, as a job with no progress card (Open, Replace file) shows it. */
+const PAUSE_FULL = "Auto-lock is waiting until this finishes. Windows locking or sleeping still locks your vaults and stops it.";
 const DAMAGED = "This file is damaged, so it can't be opened or saved. A backup may have a good copy.";
 
 /** The sample vault with a PDF on the login, a program file as an item, a key and a note. */
@@ -103,6 +108,13 @@ async function addFile() {
   fireEvent.click(add);
   const menu = await screen.findByRole("menu");
   fireEvent.click(within(menu).getByRole("menuitem", { name: "File" }));
+}
+
+/** Add, then File, then the panel's "Add 1 file": the one file the picker chose goes in. */
+async function addOneFile() {
+  await addFile();
+  const panel = await screen.findByRole("complementary", { name: "Add files" });
+  fireEvent.click(within(panel).getByRole("button", { name: "Add 1 file" }));
 }
 
 function nothingOfTheFileIsOnScreen() {
@@ -204,14 +216,30 @@ test("program_file_asks_first", async () => {
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-test("damaged_file_shows_10d_without_backup_button", async () => {
+test("the_way_out_is_the_filled_button_on_10d", async () => {
   await unlocked(mine({ damagedFiles: [CONTRACT.file_id] }));
   const panel = await select("Client contract");
   fireEvent.click(within(panel).getByRole("button", { name: "Open contract-demo.pdf" }));
+  await within(panel).findByRole("alert");
+  // As drawn (10d): Open a backup is the filled button, the one way the words point to; Replace file stays a quiet pill beside it.
+  expect(within(panel).getByRole("button", { name: "Open a backup" }).classList.contains("cp")).toBe(true);
+  expect(within(panel).getByRole("button", { name: "Replace file contract-demo.pdf" }).classList.contains("cp")).toBe(false);
+});
+
+test("damaged_file_10d_offers_open_a_backup", async () => {
+  await unlocked(mine({ damagedFiles: [CONTRACT.file_id] }));
+  const panel = await select("Client contract");
+  // Nothing offers a backup until a file has failed.
+  expect(within(panel).queryByRole("button", { name: /backup/i })).toBeNull();
+  fireEvent.click(within(panel).getByRole("button", { name: "Open contract-demo.pdf" }));
   const refusal = await within(panel).findByRole("alert");
   expect(refusal.textContent).toBe(DAMAGED);
-  // No button for a backup (opening a backup is 4B's), and the words come from the table, never the shell's own text.
-  expect(screen.queryByRole("button", { name: /backup/i })).toBeNull();
+  // As drawn (10d): the words, then Open a backup, in the file's row; the words come from the table, never the shell's own text.
+  const row = refusal.closest(".frow") as HTMLElement;
+  expect(within(row).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual([
+    "Open a backup",
+    "Replace file contract-demo.pdf",
+  ]);
   expect(panel.textContent).not.toMatch(/"kind"|code|what/);
   // The file can't be opened or saved now: those two are replaced by the words; Replace file is still the way to a good copy.
   expect(within(panel).queryByRole("button", { name: /^Open contract-demo\.pdf/ })).toBeNull();
@@ -223,9 +251,20 @@ test("damaged_file_shows_10d_without_backup_button", async () => {
   await select("Rotation steps");
   const back = await select("Client contract");
   expect(within(back).queryByRole("alert")).toBeNull();
-  // Save a copy is refused the same way, in the same words.
+  // Save a copy is refused the same way, in the same words, with the same way to a backup.
   fireEvent.click(within(back).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
   expect((await within(back).findByRole("alert")).textContent).toBe(DAMAGED);
+  // Open a backup: the picker, then the backup's panel takes the item's place; nothing in the vault was changed.
+  expect(sent("open_backup_pick")).toEqual([]);
+  fireEvent.click(within(back).getByRole("button", { name: "Open a backup" }));
+  const opening = await screen.findByRole("complementary", { name: "Open a backup" });
+  expect(sent("open_backup_pick")).toEqual([{ choice: null }]);
+  expect(screen.queryByRole("complementary", { name: "Client contract" })).toBeNull();
+  expect(shell.fileOps).toEqual([]);
+  fireEvent.click(within(opening).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Open a backup" })).toBeNull();
+  });
 });
 
 test("still_open_at_lock_offers_retry", async () => {
@@ -294,7 +333,7 @@ test("save_copy_uses_the_windows_dialog", async () => {
   });
   // The shell opens the dialog and picks the place; the page sends the ids and nothing else, and has no file input or link of its own.
   expect(sent("save_file_copy")).toEqual([
-    { session: session(), generation: shell.sessionOf(7)?.generation, id: itemId(4), file_id: CONTRACT.file_id },
+    { session: session(), generation: shell.sessionOf(7)?.generation, id: itemId(4), file_id: CONTRACT.file_id, request: ANY_REQUEST },
   ]);
   expect(shell.fileOps).toEqual([{ cmd: "save_file_copy", id: itemId(4), file_id: CONTRACT.file_id }]);
   expect(document.querySelector('input[type="file"]')).toBeNull();
@@ -451,6 +490,7 @@ test("file_result_opens_with_the_same_questions", async () => {
     generation: shell.sessionOf(7)?.generation,
     id: itemId(1),
     file_id: CONSOLE_PDF.file_id,
+    request: ANY_REQUEST,
   });
   await waitFor(() => {
     expect(toast()).toContain(SAVED_NOTE);
@@ -488,83 +528,100 @@ test("attach_one_file_on_each_kind", async () => {
     // The section is there with the button even before there is a file in it.
     expect(within(panel).getByRole("heading", { name: "Attached files" })).toBeTruthy();
     shell.pickNext(picked, 3000);
-    fireEvent.click(within(panel).getByRole("button", { name: "Attach a file" }));
+    fireEvent.click(within(panel).getByRole("button", { name: "Attach files" }));
+    // The Attach panel (9a for an item) says where they go and that the original stays; Done puts the item's panel back.
+    const attach = await screen.findByRole("complementary", { name: "Attach files" });
+    fireEvent.click(within(attach).getByRole("button", { name: "Attach 1 file" }));
+    const done = await screen.findByRole("complementary", { name: "1 file attached" });
+    expect(within(done).getByText(ORIGINAL_STAYS)).toBeTruthy();
+    expect(sent("add_files").at(-1)).toEqual({
+      session: session(),
+      generation: shell.sessionOf(7)?.generation,
+      choice: expect.stringMatching(/^[0-9a-f]{32}$/) as string,
+      into: { type: "item", id },
+      request: ANY_REQUEST,
+    });
+    expect(shell.fileOps.at(-1)).toEqual({ cmd: "add_files", id });
+    fireEvent.click(within(done).getByRole("button", { name: "Done" }));
     await waitFor(() => {
       expect(within(screen.getByRole("complementary", { name: title })).getByText(picked)).toBeTruthy();
     });
-    expect(sent("attach_file").at(-1)).toEqual({ session: session(), generation: shell.sessionOf(7)?.generation, id });
-    expect(shell.fileOps.at(-1)).toEqual({ cmd: "attach_file", id });
-    expect(toast()).toContain(ATTACHED_NOTE);
-    // The new file has its buttons, and the panel is still the item's.
+    // The new file has its buttons, and the panel is the item's.
     const after = screen.getByRole("complementary", { name: title });
     expect(within(after).getByRole("button", { name: `Open ${picked}` })).toBeTruthy();
     expect(within(after).getByRole("button", { name: `Save a copy of ${picked}` })).toBeTruthy();
     expect(within(after).getByRole("button", { name: `Replace file ${picked}` })).toBeTruthy();
   }
-  expect(sent("attach_file")).toHaveLength(3);
+  // Each went through the batch's own command; the one-file commands stay for nothing the page sends now.
+  expect(sent("add_files")).toHaveLength(3);
+  expect(sent("attach_file")).toEqual([]);
   // The login that had a file already keeps it beside the new one.
   const login = await select("Bot admin console");
   expect(within(login).getByText("console-access-demo.pdf")).toBeTruthy();
   expect(within(login).getByText("scan-one.pdf")).toBeTruthy();
   // A file item is its file: there is nothing to attach to it.
   const file = await select("Client contract");
-  expect(within(file).queryByRole("button", { name: "Attach a file" })).toBeNull();
+  expect(within(file).queryByRole("button", { name: "Attach files" })).toBeNull();
 });
 
 test("adding_says_the_original_is_still_unprotected", async () => {
   await unlocked();
   shell.pickNext("tax-demo.pdf", 5120);
-  await addFile();
-  // The new item opens, with its file, and the sentence stays until it is read.
-  const panel = await screen.findByRole("complementary", { name: "tax-demo.pdf" });
-  expect(within(panel).getByText("5 KB")).toBeTruthy();
-  expect(toast()).toContain(ADDED_NOTE);
-  expect(sent("add_file")).toEqual([{ session: session(), generation: shell.sessionOf(7)?.generation, collection: null }]);
-  expect(shell.fileOps).toEqual([{ cmd: "add_file", collection: null }]);
+  await addOneFile();
+  // The panel says what went in and that the original stays, and the new item is in the list.
+  const panel = await screen.findByRole("complementary", { name: "1 file added" });
+  expect(within(panel).getByText(ORIGINAL_STAYS)).toBeTruthy();
+  expect(sent("add_files")).toEqual([
+    {
+      session: session(),
+      generation: shell.sessionOf(7)?.generation,
+      choice: expect.stringMatching(/^[0-9a-f]{32}$/) as string,
+      into: { type: "folder", collection: null },
+      request: ANY_REQUEST,
+    },
+  ]);
+  expect(sent("add_file")).toEqual([]);
+  expect(shell.fileOps).toEqual([{ cmd: "add_files", collection: null }]);
   expect(screen.getByRole("button", { name: /^File:\s*tax-demo\.pdf/ })).toBeTruthy();
-  // A file item is its file: there is nothing to attach to it.
-  expect(within(panel).queryByRole("button", { name: "Attach a file" })).toBeNull();
+  fireEvent.click(within(panel).getByRole("button", { name: "Done" }));
 
   // With a folder on screen, the file goes in that folder.
   fireEvent.click(screen.getByRole("button", { name: /^Agency support agent/ }));
   await screen.findByRole("heading", { level: 1, name: "Agency support agent" });
   shell.pickNext("in-folder-demo.pdf");
-  await addFile();
-  await screen.findByRole("complementary", { name: "in-folder-demo.pdf" });
-  expect(sent("add_file").at(-1)?.collection).toBe(FOLDER);
+  await addOneFile();
+  await screen.findByRole("complementary", { name: "1 file added" });
+  expect(sent("add_files").at(-1)?.into).toEqual({ type: "folder", collection: FOLDER });
 
   // A closed picker adds nothing and says nothing new.
+  fireEvent.click(within(screen.getByRole("complementary", { name: "1 file added" })).getByRole("button", { name: "Done" }));
   shell.dismissFileNext();
-  fireEvent.click(within(document.querySelector<HTMLElement>(".tstack") as HTMLElement).getByRole("button", { name: "Got it" }));
   await addFile();
   await waitFor(() => {
-    expect(sent("add_file")).toHaveLength(3);
+    expect(sent("pick_files_to_add")).toHaveLength(3);
   });
   await act(async () => {
     await Promise.resolve();
   });
   expect(toast()).toBe("");
+  expect(screen.queryByRole("complementary")).toBeNull();
   expect(shell.fileOps).toHaveLength(2);
 });
 
-test("no_multi_select_until_4b", async () => {
+// 4A's marker of "one file at a time" is gone with this task's own tests (`AddFiles.test.tsx`): the picker takes many, the page lists them.
+// What stays true is the menu's entries, and that nothing can be dropped onto the window.
+test("the_add_menu_keeps_its_entries_and_there_is_no_drop_zone", async () => {
   await unlocked();
-  // One file at a time: the words say so, and one press sends one command that picks one file.
   const add = screen.getByRole("button", { name: "Add" });
   add.focus();
   fireEvent.pointerDown(add, { button: 0 });
   fireEvent.click(add);
   const menu = await screen.findByRole("menu");
   expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
-  fireEvent.click(within(menu).getByRole("menuitem", { name: "File" }));
-  await screen.findByRole("complementary", { name: "picked-file.pdf" });
-  expect(sent("add_file")).toHaveLength(1);
-  expect(screen.queryByText(/pick more|add \d+ files|attach files|add files/i)).toBeNull();
+  fireEvent.keyDown(menu, { key: "Escape" });
+  expect(document.querySelector('input[type="file"], [aria-dropeffect], [data-dropzone]')).toBeNull();
   const panel = await select("Bot admin console");
-  expect(within(panel).getByRole("button", { name: "Attach a file" })).toBeTruthy();
-  expect(within(panel).queryByRole("button", { name: /attach files|pick more/i })).toBeNull();
-  // The picked file is one: no list of picked files, no Add N files, no drop zone.
-  expect(document.body.textContent).not.toMatch(/Pick more|Add \d+ files|Leave out/);
+  expect(within(panel).getByRole("button", { name: "Attach files" })).toBeTruthy();
   expect(document.querySelector('input[type="file"], [aria-dropeffect], [data-dropzone]')).toBeNull();
 });
 
@@ -647,9 +704,10 @@ test("idle_pause_says_why_during_a_big_file", async () => {
 
   // Storing a file: the same.
   const third = shell.holdFiles();
-  await addFile();
+  await addOneFile();
   await screen.findByText(PAUSE);
-  expect(screen.getByText("Adding a file to your vault.")).toBeTruthy();
+  // The batch has its own bar (in the panel), which says what it does and the Windows part, so the note is its own sentence only.
+  await screen.findByRole("region", { name: "Adding files" });
   // A lock takes the words away with the vault: Windows locking still locks, as the words say.
   act(() => {
     shell.lock(session());
@@ -860,7 +918,8 @@ test("an_attach_that_finishes_after_choosing_another_item_leaves_that_items_deta
   await unlocked();
   const panel = await select("Bot admin console");
   const releaseFiles = shell.holdFiles();
-  fireEvent.click(within(panel).getByRole("button", { name: "Attach a file" }));
+  fireEvent.click(within(panel).getByRole("button", { name: "Attach files" }));
+  fireEvent.click(within(await screen.findByRole("complementary", { name: "Attach files" })).getByRole("button", { name: "Attach 1 file" }));
   await screen.findByText(PAUSE);
   // The person chooses the note while the attach works, and its details have no answer yet when the attach finishes.
   const releaseItems = shell.holdGetItem();
@@ -891,7 +950,7 @@ test("an_attach_that_finishes_after_choosing_another_item_leaves_that_items_deta
 test("adding_a_file_does_not_take_the_panel_of_an_item_the_person_moved_to", async () => {
   await unlocked();
   const release = shell.holdFiles();
-  await addFile();
+  await addOneFile();
   await screen.findByText(PAUSE);
   const other = await select("Rotation steps");
   act(() => {
@@ -903,7 +962,7 @@ test("adding_a_file_does_not_take_the_panel_of_an_item_the_person_moved_to", asy
   await screen.findByRole("button", { name: /^File:\s*picked-file\.pdf/ });
   // The added file is in the list, said once, and the panel is still the note's.
   expect(screen.getByRole("complementary", { name: "Rotation steps" })).toBe(other);
-  expect(toast()).toContain(ADDED_NOTE);
+  expect(toast()).toContain(ADDED_AWAY);
 });
 
 test("a_late_answer_for_a_search_that_was_closed_shows_nothing", async () => {
@@ -958,10 +1017,12 @@ test("a_second_press_while_a_file_works_sends_nothing", async () => {
   await screen.findByText(PAUSE);
   // Adding a file from the Add menu while another file works does nothing either.
   await addFile();
-  fireEvent.click(within(panel).getByRole("button", { name: "Attach a file" }));
+  fireEvent.click(within(panel).getByRole("button", { name: "Attach files" }));
   await act(async () => {
     await Promise.resolve();
   });
+  expect(sent("pick_files_to_add")).toEqual([]);
+  expect(sent("add_files")).toEqual([]);
   expect(sent("add_file")).toEqual([]);
   expect(sent("attach_file")).toEqual([]);
   act(() => {
@@ -1015,7 +1076,7 @@ test("save_copy_cloud_question_shows_21e", async () => {
   });
   const confirmed = sent("save_file_copy_confirm");
   expect(confirmed).toHaveLength(1);
-  expect(Object.keys(confirmed[0] ?? {})).toEqual(["token"]);
+  expect(Object.keys(confirmed[0] ?? {}).sort()).toEqual(["request", "token"]);
   expect(shell.fileOps.filter((op) => op.cmd === "save_file_copy")).toHaveLength(2);
   expect(screen.queryByRole("dialog")).toBeNull();
 
@@ -1134,37 +1195,9 @@ test("a_cloud_yes_answered_after_moving_on_leaves_the_panel_alone", async () => 
 
 // ---- The fix round: answers that arrive out of order ----
 
-test("refresh_answers_in_reverse_order_never_put_back_older_details", async () => {
-  await unlocked();
-  const panel = await select("Bot admin console");
-  const before = sent("get_item").length;
-  const release = shell.holdGetItem();
-  shell.pickNext("scan-one.pdf");
-  fireEvent.click(within(panel).getByRole("button", { name: "Attach a file" }));
-  await waitFor(() => {
-    expect(sent("get_item")).toHaveLength(before + 1);
-  });
-  // A second file is attached while the first refresh has no answer yet.
-  shell.pickNext("scan-two.pdf");
-  fireEvent.click(within(screen.getByRole("complementary", { name: "Bot admin console" })).getByRole("button", { name: "Attach a file" }));
-  await waitFor(() => {
-    expect(sent("get_item")).toHaveLength(before + 2);
-  });
-  // The newer answer (both files) comes first, the older (one file) after it: the older never replaces the newer.
-  act(() => {
-    release();
-  });
-  await act(async () => {
-    await Promise.resolve();
-  });
-  const after = screen.getByRole("complementary", { name: "Bot admin console" });
-  await waitFor(() => {
-    expect(within(after).getByText("scan-two.pdf")).toBeTruthy();
-  });
-  expect(within(after).getByText("scan-one.pdf")).toBeTruthy();
-  expect(within(after).getByText("console-access-demo.pdf")).toBeTruthy();
-  expect(within(after).getByRole("button", { name: "Open scan-two.pdf" })).toBeTruthy();
-});
+// (4A's "refresh answers in reverse order" test attached two files while the first refresh had no answer. With the Add files panel between the
+// two, the item's panel is loading until its answer comes and has no Attach button, so that overlap can no longer happen; Replace file, the other
+// user of that refresh, is one at a time as well.)
 
 test("a_late_retry_answer_never_clears_a_newer_notice", async () => {
   shell = installFakeShell(invoke, listen, mine());
@@ -1342,4 +1375,369 @@ test("file_buttons_carry_no_name_in_a_title_or_url", async () => {
     expect(element.getAttribute("title") ?? "").not.toContain("contract-demo");
   }
   expect(document.querySelector("[href], [src]")).toBeNull();
+});
+
+// ---- Plan 4B Task 2: real progress and a Cancel for one file ----
+
+const GB = 1024 ** 3;
+const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this, and files not finished aren't added.";
+const KEEP_OPEN_COPY = "Keep the laptop open. Windows locking or sleeping cancels this, and a copy not finished isn't saved.";
+
+/** The one job the shell says is running, which the page has not been given except through `lockbox://job-started`. */
+function theJob(): { request: number; operation: number; scope: { type: string; session: number; generation: number }; kind: string } {
+  const [job, ...others] = shell.runningJobs();
+  expect(others).toEqual([]);
+  if (job === undefined) throw new Error("no job is running");
+  return job;
+}
+
+test("one_file_add_shows_progress_and_stop", async () => {
+  await unlocked();
+  const release = shell.holdFiles();
+  shell.pickNext("big-demo.zip", 3 * GB);
+  await addOneFile();
+  // The shell says the job started (by `lockbox://job-started`, matched to the request the page sent) and the bar is on screen, as 9b draws it.
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
+  const job = theJob();
+  expect(job.kind).toBe("import");
+  expect(job.request).toBe(sent("add_files")[0]?.request);
+  expect(within(place).getByText("Adding to My vault.")).toBeTruthy();
+  expect(within(place).getByText(KEEP_OPEN)).toBeTruthy();
+  act(() => {
+    shell.sendProgress(job.operation, 1.2 * GB, 3 * GB);
+  });
+  expect(within(place).getByText("1.2 GB of 3 GB")).toBeTruthy();
+  expect(within(place).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("40");
+  // Auto-lock's own words are still there (5d), once.
+  expect(screen.getAllByText(PAUSE)).toHaveLength(1);
+  expect(within(place).getByRole("button", { name: "Cancel" })).toBeTruthy();
+  act(() => {
+    release();
+  });
+  await screen.findByRole("complementary", { name: "1 file added" });
+  expect(screen.queryByRole("region", { name: "Adding files" })).toBeNull();
+});
+
+test("attach_shows_progress_and_stop", async () => {
+  const { container } = await unlocked();
+  const panel = await select("Bot admin console");
+  const release = shell.holdFiles();
+  fireEvent.click(within(panel).getByRole("button", { name: "Attach files" }));
+  fireEvent.click(within(await screen.findByRole("complementary", { name: "Attach files" })).getByRole("button", { name: "Attach 1 file" }));
+  const place = (await screen.findByRole("region", { name: "Attaching files" })).closest("aside") as HTMLElement;
+  expect(theJob().kind).toBe("import");
+  expect(sent("add_files")[0]?.request).toBe(theJob().request);
+  act(() => {
+    shell.sendProgress(theJob().operation, 1024, 4096);
+  });
+  expect(within(place).getByText("1 KB of 4 KB")).toBeTruthy();
+  await expectNoAxe(container);
+  fireEvent.click(within(place).getByRole("button", { name: "Cancel" }));
+  await screen.findByRole("complementary", { name: "Nothing was attached" });
+  act(() => {
+    release();
+  });
+});
+
+test("save_a_copy_shows_progress_and_stop", async () => {
+  await unlocked();
+  const panel = await select("Client contract");
+  // The cloud question comes first and starts no job: nothing is working yet, so there is nothing to show or stop.
+  shell.cloudPdfNext();
+  fireEvent.click(within(panel).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
+  const question = await screen.findByRole("dialog", { name: CLOUD });
+  expect(shell.runningJobs()).toEqual([]);
+  expect(screen.queryByRole("region", { name: "Saving a copy" })).toBeNull();
+  const first = sent("save_file_copy")[0]?.request;
+  // After the yes, the confirm call's own request names the job.
+  const release = shell.holdFiles();
+  fireEvent.click(within(question).getByRole("button", { name: "Continue" }));
+  const card = await screen.findByRole("region", { name: "Saving a copy" });
+  const job = theJob();
+  expect(job.kind).toBe("save_copy");
+  const confirmed = sent("save_file_copy_confirm")[0]?.request;
+  expect(job.request).toBe(confirmed);
+  expect(confirmed).not.toBe(first);
+  expect(within(card).getByText("Saving a copy of the file.")).toBeTruthy();
+  expect(within(card).getByText(KEEP_OPEN_COPY)).toBeTruthy();
+  act(() => {
+    shell.sendProgress(job.operation, 2 * GB, 3 * GB);
+  });
+  expect(within(card).getByText("2 GB of 3 GB")).toBeTruthy();
+  act(() => {
+    release();
+  });
+  await waitFor(() => {
+    expect(toast()).toContain(SAVED_NOTE);
+  });
+  expect(screen.queryByRole("region", { name: "Saving a copy" })).toBeNull();
+});
+
+test("save_a_copy_without_the_cloud_question_shows_progress", async () => {
+  await unlocked();
+  const panel = await select("Client contract");
+  const release = shell.holdFiles();
+  fireEvent.click(within(panel).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
+  await screen.findByRole("region", { name: "Saving a copy" });
+  expect(theJob().request).toBe(sent("save_file_copy")[0]?.request);
+  act(() => {
+    release();
+  });
+  await waitFor(() => {
+    expect(toast()).toContain(SAVED_NOTE);
+  });
+});
+
+test("stopped_add_says_nothing_was_added", async () => {
+  await unlocked();
+  const before = (await screen.findAllByRole("button", { name: /^(Login|Key|Note|File):/ })).length;
+  const release = shell.holdFiles();
+  await addOneFile();
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
+  const job = theJob();
+  fireEvent.click(within(place).getByRole("button", { name: "Cancel" }));
+  // The shell is asked to stop that one operation, in the scope the page was told.
+  expect(sent("cancel_operation")).toEqual([{ operation: job.operation, scope: job.scope }]);
+  expect(job.scope).toEqual({ type: "session", session: session(), generation: shell.sessionOf(7)?.generation });
+  const ended = await screen.findByRole("complementary", { name: "Nothing was added" });
+  // Said as a result, not as a refusal: no alert, no "stopped before it finished", and nothing was added.
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(ended.textContent).not.toContain("stopped before it finished");
+  expect(ended.textContent).not.toContain(ORIGINAL_STAYS);
+  expect(shell.fileOps).toEqual([]);
+  expect(screen.queryByRole("region", { name: "Adding files" })).toBeNull();
+  expect((await screen.findAllByRole("button", { name: /^(Login|Key|Note|File):/ })).length).toBe(before);
+  act(() => {
+    release();
+  });
+});
+
+test("stopped_save_leaves_no_file_message", async () => {
+  await unlocked();
+  const panel = await select("Client contract");
+  const release = shell.holdFiles();
+  fireEvent.click(within(panel).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
+  const card = await screen.findByRole("region", { name: "Saving a copy" });
+  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(toast()).toContain("No copy was saved.");
+  });
+  expect(toast()).not.toContain(SAVED_NOTE);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(shell.fileOps).toEqual([]);
+  // The file's buttons are live again.
+  const again = within(screen.getByRole("complementary", { name: "Client contract" })).getByRole("button", { name: "Save a copy of contract-demo.pdf" });
+  expect(again.getAttribute("aria-disabled")).toBeNull();
+  act(() => {
+    release();
+  });
+});
+
+test("a_lock_during_an_add_takes_the_bar_away_and_says_nothing", async () => {
+  await unlocked();
+  const release = shell.holdFiles();
+  await addOneFile();
+  await screen.findByRole("region", { name: "Adding files" });
+  act(() => {
+    shell.lock(session());
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("region", { name: "Adding files" })).toBeNull();
+  });
+  act(() => {
+    release();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(document.body.textContent).not.toContain("Nothing was added.");
+});
+
+test("a_save_from_the_search_shows_its_bar_inside_the_search", async () => {
+  await unlocked();
+  fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+  const dialog = await screen.findByRole("dialog", { name: SEARCH });
+  fireEvent.change(within(dialog).getByRole("textbox", { name: SEARCH }), { target: { value: "console" } });
+  const row = (await within(dialog).findByRole("button", { name: /^File:\s*console-access-demo\.pdf/ })).closest("li") as HTMLElement;
+  const release = shell.holdFiles();
+  fireEvent.click(within(row).getByRole("button", { name: "Save a copy" }));
+  // The search is over the window, so the bar and its Cancel are in the search: the one behind it can't be reached.
+  const card = await within(dialog).findByRole("region", { name: "Saving a copy" });
+  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(sent("cancel_operation")).toHaveLength(1);
+  });
+  act(() => {
+    release();
+  });
+});
+
+/** The message stack's always-present spoken place. */
+function spokenPlace(): HTMLElement {
+  const place = document.querySelector<HTMLElement>(".tstack [role='status']");
+  if (place === null) throw new Error("the spoken place is not on the page");
+  return place;
+}
+
+// Fix round, review finding 2: the start and the end of a job are spoken through the page's one region that is on the page before and after
+// them, never through a region that mounts with its text or goes with the card.
+test("a_jobs_start_and_end_are_spoken_in_the_region_that_stays_on_the_page", async () => {
+  await unlocked();
+  const place = spokenPlace();
+  expect(place.textContent).toBe("");
+  const release = shell.holdFiles();
+  await addOneFile();
+  const card = await screen.findByRole("region", { name: "Adding files" });
+  // The start: said in the place that was already there, after the card mounted, and the card has no live region of its own.
+  await waitFor(() => {
+    expect(place.textContent).toContain("Adding files started.");
+  });
+  expect(spokenPlace()).toBe(place);
+  expect(card.querySelector("[aria-live], [role='status'], [role='alert']")).toBeNull();
+  // Progress says nothing.
+  for (let step = 1; step <= 10; step += 1) {
+    act(() => {
+      shell.sendProgress(theJob().operation, step * 100, 1000);
+    });
+  }
+  expect(place.textContent).toBe("Adding files started.");
+  // The end: the card goes, and the result takes the panel's heading (the batch's panel says it, and has focus), the place never left the page.
+  act(() => {
+    release();
+  });
+  await screen.findByRole("complementary", { name: "1 file added" });
+  expect(screen.queryByRole("region", { name: "Adding files" })).toBeNull();
+  expect(place.isConnected).toBe(true);
+  expect(spokenPlace()).toBe(place);
+  expect(place.textContent).not.toContain("started");
+});
+
+test("a_stopped_save_is_spoken_in_the_same_place", async () => {
+  await unlocked();
+  const place = spokenPlace();
+  const panel = await select("Client contract");
+  const release = shell.holdFiles();
+  fireEvent.click(within(panel).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
+  const card = await screen.findByRole("region", { name: "Saving a copy" });
+  await waitFor(() => {
+    expect(place.textContent).toContain("Saving a copy started.");
+  });
+  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(place.textContent).toContain("No copy was saved.");
+  });
+  expect(spokenPlace()).toBe(place);
+  act(() => {
+    release();
+  });
+});
+
+// Session finding S1: focus that was on Cancel does not fall to the page when the card goes.
+test("focus_goes_to_the_result_message_when_the_card_with_focus_goes", async () => {
+  await unlocked();
+  const panel = await select("Client contract");
+  const release = shell.holdFiles();
+  fireEvent.click(within(panel).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
+  const card = await screen.findByRole("region", { name: "Saving a copy" });
+  const cancel = within(card).getByRole("button", { name: "Cancel" });
+  cancel.focus();
+  expect(document.activeElement).toBe(cancel);
+  fireEvent.click(cancel);
+  await waitFor(() => {
+    expect(toast()).toContain("No copy was saved.");
+  });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(within(document.querySelector<HTMLElement>(".tstack") as HTMLElement).getByRole("button", { name: "Got it" }));
+  });
+  act(() => {
+    release();
+  });
+});
+
+test("focus_that_was_not_on_the_card_is_left_alone_when_the_card_goes", async () => {
+  await unlocked();
+  const panel = await select("Client contract");
+  const release = shell.holdFiles();
+  fireEvent.click(within(panel).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
+  await screen.findByRole("region", { name: "Saving a copy" });
+  const heading = screen.getByRole("heading", { level: 1 });
+  heading.focus();
+  act(() => {
+    release();
+  });
+  await waitFor(() => {
+    expect(toast()).toContain(SAVED_NOTE);
+  });
+  await act(async () => {
+    await new Promise((done) => window.setTimeout(done, 10));
+  });
+  expect(document.activeElement).not.toBe(within(document.querySelector<HTMLElement>(".tstack") as HTMLElement).getByRole("button", { name: "Got it" }));
+});
+
+test("focus_in_a_card_inside_the_search_goes_back_to_the_search_box", async () => {
+  await unlocked();
+  fireEvent.keyDown(document.body, { key: "k", ctrlKey: true });
+  const dialog = await screen.findByRole("dialog", { name: SEARCH });
+  const box = within(dialog).getByRole("textbox", { name: SEARCH });
+  fireEvent.change(box, { target: { value: "console" } });
+  const row = (await within(dialog).findByRole("button", { name: /^File:\s*console-access-demo\.pdf/ })).closest("li") as HTMLElement;
+  const release = shell.holdFiles();
+  fireEvent.click(within(row).getByRole("button", { name: "Save a copy" }));
+  const card = await within(dialog).findByRole("region", { name: "Saving a copy" });
+  const cancel = within(card).getByRole("button", { name: "Cancel" });
+  cancel.focus();
+  fireEvent.click(cancel);
+  await waitFor(() => {
+    expect(within(dialog).queryByRole("region", { name: "Saving a copy" })).toBeNull();
+  });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(box);
+  });
+  act(() => {
+    release();
+  });
+});
+
+// Session finding S2: beside a card that already says the Windows part, the auto-lock note says only its own sentence.
+test("the_auto_lock_note_does_not_repeat_the_windows_warning_beside_a_card", async () => {
+  await unlocked();
+  const release = shell.holdFiles();
+  await addOneFile();
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
+  expect(within(place).getByText(KEEP_OPEN)).toBeTruthy();
+  const note = (await screen.findByText("Auto-lock is waiting until this finishes.")).closest("[role='status']") as HTMLElement;
+  expect(note.textContent).not.toContain("Windows locking or sleeping");
+  expect(screen.queryByText(PAUSE_FULL)).toBeNull();
+  // The Windows part is said once on the whole page.
+  expect(document.body.textContent.match(/Windows locking or sleeping/g)).toHaveLength(1);
+  act(() => {
+    release();
+  });
+  await waitFor(() => {
+    expect(screen.queryByText("Auto-lock is waiting until this finishes.")).toBeNull();
+  });
+  // Opening a file has no card, so its note keeps both sentences, as 5d draws it.
+  const panel = await select("Client contract");
+  const again = shell.holdFiles();
+  fireEvent.click(within(panel).getByRole("button", { name: "Open contract-demo.pdf" }));
+  await screen.findByText(PAUSE_FULL);
+  act(() => {
+    again();
+  });
+});
+
+test("each_long_file_call_sends_its_own_request", async () => {
+  await unlocked();
+  shell.pickNext("one.pdf");
+  await addOneFile();
+  await screen.findByRole("complementary", { name: "1 file added" });
+  const panel = await select("Client contract");
+  fireEvent.click(within(panel).getByRole("button", { name: "Save a copy of contract-demo.pdf" }));
+  await waitFor(() => {
+    expect(sent("save_file_copy")).toHaveLength(1);
+  });
+  const requests = [...sent("add_files"), ...sent("save_file_copy")].map((args) => args.request);
+  expect(requests.every((request) => Number.isInteger(request))).toBe(true);
+  expect(new Set(requests).size).toBe(requests.length);
 });

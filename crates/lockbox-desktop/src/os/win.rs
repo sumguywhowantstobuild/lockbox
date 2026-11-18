@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use std::{ptr, slice};
 
 use lockbox_core::blob::CancelToken;
@@ -36,8 +36,8 @@ use windows_core::{BOOL, Interface, PCWSTR};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_HOTKEY_ALREADY_REGISTERED,
     ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GetLastError,
-    GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, LocalFree, MAX_PATH, TRUE,
-    WPARAM,
+    GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, LocalFree, MAX_PATH, SYSTEMTIME,
+    TRUE, WPARAM,
 };
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Graphics::Printing::{
@@ -81,7 +81,7 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
-use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime, GetTickCount};
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetLastInputInfo, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
@@ -102,10 +102,10 @@ use windows_sys::core::PWSTR;
 
 use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
-    CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Dialogs, DriveType, Env,
-    Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters, KnownFolder, Launcher,
-    MainWindow, Os, OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls, PrintDone, PrintFailed,
-    PrintSteps, Shortcut, StartupEntry, SystemClock, ThreadTimer, Volumes,
+    CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Clock, Dialogs,
+    DriveType, Env, Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters,
+    KnownFolder, Launcher, MainWindow, Os, OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls,
+    PrintDone, PrintFailed, PrintSteps, Shortcut, StartupEntry, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
 use crate::startup::{self, StartupState};
@@ -837,6 +837,72 @@ impl IdleSource for WinIdle {
     }
 }
 
+/// The real clocks: [`Instant::now`], [`SystemTime::now`], Windows' own local date (`GetLocalTime`, in the zone the
+/// person set) and [`thread::sleep`].
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn wall(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn local_date(&self) -> String {
+        let mut now = SYSTEMTIME {
+            wYear: 0,
+            wMonth: 0,
+            wDayOfWeek: 0,
+            wDay: 0,
+            wHour: 0,
+            wMinute: 0,
+            wSecond: 0,
+            wMilliseconds: 0,
+        };
+        // SAFETY: `now` is a writable SYSTEMTIME, which the call fills in; it cannot fail.
+        unsafe { GetLocalTime(&mut now) };
+        format!("{:04}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay)
+    }
+
+    /// The same instant read twice, as Windows' local time and as UTC, and the difference rounded to the minute (the two
+    /// reads are a few microseconds apart; every zone is a whole number of minutes from UTC).
+    fn utc_offset_secs(&self) -> i64 {
+        let empty = || SYSTEMTIME {
+            wYear: 0,
+            wMonth: 0,
+            wDayOfWeek: 0,
+            wDay: 0,
+            wHour: 0,
+            wMinute: 0,
+            wSecond: 0,
+            wMilliseconds: 0,
+        };
+        let (mut local, mut utc) = (empty(), empty());
+        // SAFETY: each is a writable SYSTEMTIME, which its call fills in; neither can fail.
+        unsafe {
+            GetLocalTime(&mut local);
+            GetSystemTime(&mut utc);
+        }
+        let seconds = |time: &SYSTEMTIME| {
+            crate::dates::civil_secs(
+                i64::from(time.wYear),
+                i64::from(time.wMonth),
+                i64::from(time.wDay),
+                i64::from(time.wHour),
+                i64::from(time.wMinute),
+                i64::from(time.wSecond),
+            )
+        };
+        (seconds(&local) - seconds(&utc) + 30).div_euclid(60) * 60
+    }
+
+    fn sleep(&self, time: Duration) {
+        thread::sleep(time);
+    }
+}
+
 /// Keeps the PC awake through the signal window's thread ([`SignalThread::keep_awake`]), which the app keeps in its
 /// state from before the shell is made. Without it (never, once the app runs) nothing changes.
 pub struct WinPower<R: Runtime> {
@@ -884,6 +950,11 @@ impl<R: Runtime> MainWindow for WinMainWindow<R> {
         if let Some(main) = self.app.get_webview_window(window::MAIN) {
             let _ = window::set_capture_protection(&main, on);
         }
+    }
+
+    /// Tauri's own call (it queues the request for the event loop and does not wait): no `unsafe` here.
+    fn exit_app(&self) {
+        self.app.exit(0);
     }
 }
 
@@ -1087,6 +1158,16 @@ impl Launcher for WinLauncher {
         match shell_open(&file, Some(&folder)) {
             true => Ok(()),
             false => Err(io::Error::other("file not opened")),
+        }
+    }
+
+    fn open_folder(&self, folder: &Path) -> io::Result<()> {
+        // Lockbox spells a drive path `\\?\C:\..`, which Explorer is not asked to open: the path as the user knows it.
+        let plain = crate::restore::shown(folder);
+        let folder = wide_text(OsStr::new(&plain))?;
+        match shell_open(&folder, None) {
+            true => Ok(()),
+            false => Err(io::Error::other("folder not opened")),
         }
     }
 }
@@ -1622,6 +1703,22 @@ fn dialog_waits() -> usize {
     DIALOG_WAITS.load(Ordering::SeqCst)
 }
 
+/// Tests only: what the next many-files dialog on this thread shows instead of Windows' own dialog.
+#[cfg(test)]
+type ShowFiles = Box<dyn FnOnce() -> Option<Vec<PathBuf>>>;
+
+#[cfg(test)]
+thread_local! {
+    static SHOW_FILES: std::cell::RefCell<Option<ShowFiles>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Tests only: from now on, the next many-files dialog on this thread runs `show` in place of Windows' dialog, inside
+/// the wrapper that puts the working directory back.
+#[cfg(test)]
+fn show_files_with(show: ShowFiles) {
+    SHOW_FILES.with(|slot| *slot.borrow_mut() = Some(show));
+}
+
 /// Takes [`DIALOG`], waiting for a dialog shown on another thread.
 fn dialog_turn() -> std::sync::MutexGuard<'static, ()> {
     #[cfg(test)]
@@ -1670,6 +1767,19 @@ impl<R: Runtime> Dialogs for WinDialogs<R> {
 
     fn pick_file(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
         keeping_current_dir(|| self.filtered(title, filter).pick_file())
+    }
+
+    /// Through [`keeping_current_dir`] like every dialog, and this one needs it: rfd 0.17.2's multi-select open dialog
+    /// replaces the options (`FOS_ALLOWMULTISELECT` alone, `dialog_ffi.rs:348`), dropping `FOS_NOCHANGEDIR`, so Windows
+    /// may move the working directory into the folder the files were picked in.
+    fn pick_files(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<Vec<PathBuf>> {
+        keeping_current_dir(|| {
+            #[cfg(test)]
+            if let Some(show) = SHOW_FILES.with(|show| show.borrow_mut().take()) {
+                return show();
+            }
+            self.filtered(title, filter).pick_files()
+        })
     }
 
     /// Windows asks before replacing an existing file: rfd leaves the save dialog's default options, which include
@@ -2812,6 +2922,41 @@ mod tests {
         assert_eq!(after_two, before);
     }
 
+    /// The many-files dialog goes through the wrapper that puts the working directory back: rfd 0.17.2's multi-select
+    /// replaces the dialog's options (`dialog_ffi.rs:348`), dropping `FOS_NOCHANGEDIR`, so Windows may move it. The
+    /// dialog itself is stood in for by a function that moves the directory and answers two paths; everything around
+    /// it is the real `pick_files`. Reads the directory only inside the wrapper's turn, since another test moves it too.
+    #[test]
+    fn pick_files_restores_the_working_directory() {
+        use lockbox_core::internals::fsio::testutil::TempDir;
+
+        let moved_to = TempDir::new();
+        let (started_in, hold) = (Arc::new(Mutex::new(None)), moved_to.path().to_path_buf());
+        let seen = Arc::clone(&started_in);
+        show_files_with(Box::new(move || {
+            *seen.lock().unwrap() = Some(std::env::current_dir().unwrap());
+            std::env::set_current_dir(&hold).unwrap();
+            Some(vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")])
+        }));
+        let app = tauri::test::mock_app();
+        let dialogs = WinDialogs {
+            app: app.handle().clone(),
+        };
+        let answer = dialogs.pick_files("Add files", None);
+        let after = keeping_current_dir(|| std::env::current_dir().unwrap());
+        let before = started_in.lock().unwrap().clone().expect("the dialog ran");
+        // Put back here as well, so a failure does not leave the test program in a folder about to be deleted.
+        std::env::set_current_dir(&before).unwrap();
+        assert_eq!(
+            answer,
+            Some(vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")])
+        );
+        assert_eq!(after, before, "the working directory was left moved");
+        // A closed dialog is no answer.
+        show_files_with(Box::new(|| None));
+        assert_eq!(dialogs.pick_files("Add files", None), None);
+    }
+
     fn started() -> (SignalThread, Receiver<OsSignal>) {
         let (sink, signals) = mpsc::channel();
         (spawn(sink).expect("the signal window starts"), signals)
@@ -3813,5 +3958,37 @@ mod tests {
         assert!(claim("Local\\bad\0name").is_err());
         // The real name is a `Local\` one: per sign-in.
         assert!(INSTANCE_NAME.starts_with("Local\\"));
+    }
+
+    /// The real clock's local date is a `YYYY-MM-DD` date, and today in some zone: no more than a day from the UTC
+    /// date of the wall clock (every zone is within 14 hours of it).
+    #[test]
+    fn the_real_clock_names_todays_local_date() {
+        let clock = SystemClock;
+        let local = clock.local_date();
+        let bytes = local.as_bytes();
+        assert_eq!(bytes.len(), 10, "{local}");
+        assert!(bytes[4] == b'-' && bytes[7] == b'-', "{local}");
+        let utc = crate::dates::rfc3339_utc(clock.wall());
+        let day =
+            |text: &str| crate::dates::parse_utc(&format!("{}T00:00:00Z", &text[..10])).unwrap();
+        let apart = day(&local).abs_diff(day(&utc));
+        assert!(apart <= 86_400, "{local} against {utc}");
+    }
+
+    /// The real clock's zone is a whole number of minutes within the 14 hours either side of UTC that exist, and it is
+    /// the zone `local_date` names the day in: the UTC moment moved by it falls on the same date (read again once when
+    /// midnight passed between the two readings).
+    #[test]
+    fn the_real_clock_names_its_offset_from_utc() {
+        let clock = SystemClock;
+        let same_day = || {
+            let offset = clock.utc_offset_secs();
+            assert!(offset.abs() <= 14 * 3600, "{offset}");
+            assert_eq!(offset % 60, 0, "{offset}");
+            let secs = crate::dates::unix_secs(clock.wall());
+            crate::dates::local_date_of(secs, offset) == clock.local_date()
+        };
+        assert!(same_day() || same_day());
     }
 }

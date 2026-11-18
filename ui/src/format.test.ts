@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { agoWords, changedText, dayWords, deletedText, formatBytes } from "./format";
+import { agoWords, changedText, dayWords, deletedText, formatBytes, fullDay } from "./format";
 
 test("a_row_sorted_by_date_says_when_in_the_words_of_a_change", () => {
   const now = new Date("2026-11-10T12:00:00Z");
@@ -52,6 +52,14 @@ test("an_until_line_says_today_or_the_date", () => {
   expect(said("2025-11-09T08:00:00Z")).toBe("9 November 2025");
   expect(said("")).toBe("");
   expect(said("not a date")).toBe("");
+});
+
+test("a_backup_says_the_local_day_it_was_made_with_its_year", () => {
+  // 23b's "Made": the day in the PC's own time, whatever year it is (a backup is looked for by its date), and nothing when it can't be read.
+  expect(fullDay("2026-10-02T12:00:00Z")).toBe("2 October 2026");
+  expect(fullDay("2025-01-30T12:00:00Z")).toBe("30 January 2025");
+  expect(fullDay("")).toBe("");
+  expect(fullDay("not a date")).toBe("");
 });
 
 test("this_month_is_named_when_it_is_older_than_a_week", () => {

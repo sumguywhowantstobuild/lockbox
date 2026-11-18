@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::thread;
 use std::time::Instant;
@@ -26,8 +26,8 @@ use crate::os::{same_name, win};
 use crate::outputs::{DELETE_TRIES, LAUNCH_OPEN_TRIES, Outputs, set_read_only};
 use crate::session::{LockHook, Notice, Notifier, SessionId, Sessions};
 
-/// Longest name of an opened copy, in characters (spec §7.2: length capped).
-const MAX_NAME_CHARS: usize = 100;
+/// Longest name of an opened or saved copy, in characters (spec §7.2: length capped).
+pub(crate) const MAX_NAME_CHARS: usize = 100;
 
 /// What Lockbox calls a stored file that has no usable name.
 const NO_NAME: &str = "file";
@@ -99,9 +99,50 @@ const INTERNET_MARK: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
 /// `file` when nothing is left.
 pub fn safe_name(original: &str) -> String {
     let kept = |c: char| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')');
+    cleaned(original, |c| !kept(c))
+}
+
+/// The name a file gets when a folder's files are saved (task 11): only what Windows refuses or what could leave the
+/// folder is changed, so a person's own names stay as they wrote them. `< > : " / \ | ? *` and control characters
+/// (which cover every separator, a drive prefix and a `name:stream`) and the direction controls (a right-to-left override
+/// makes an executable read as a document) become `_`; no dots or spaces at the end; `file`
+/// when nothing is left (`..`, `...`); a `_` before a reserved device name, checked again after the cut; at most
+/// [`MAX_NAME_CHARS`] characters, keeping the extension. Whatever it is given, the result is one plain name that Windows
+/// makes where it is put, directly inside the chosen folder.
+pub fn save_name(original: &str) -> String {
+    let name = cleaned(original, |c| {
+        c.is_control()
+            || is_direction_control(c)
+            || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+    });
+    // The rule above lists what to change; this is the shape the result must have whatever it missed: one plain
+    // component (no separator, no `..`, no drive prefix, no `:`), with nothing Windows drops at the end.
+    let plain = matches!(
+        Path::new(&name).components().collect::<Vec<_>>()[..],
+        [Component::Normal(only)] if only == name.as_str()
+    ) && !name.contains([':', '/', '\\'])
+        && !name.ends_with(['.', ' ']);
+    match plain {
+        true => name,
+        false => NO_NAME.to_owned(),
+    }
+}
+
+/// The Unicode characters that set the direction text is shown in (the Arabic letter mark, the left-to-right and
+/// right-to-left marks, the embeddings and overrides, the isolates), which Explorer obeys in a file name: with one, an
+/// executable can read as a document. The joiners real names need (U+200C, U+200D) are not among them.
+fn is_direction_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{61C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// `original` with each character `replace` accepts turned into `_`, then fitted: see [`safe_name`] and [`save_name`].
+fn cleaned(original: &str, replace: impl Fn(char) -> bool) -> String {
     let name: String = original
         .chars()
-        .map(|c| if kept(c) { c } else { '_' })
+        .map(|c| if replace(c) { '_' } else { c })
         .collect();
     let name = fit(&name);
     if name.is_empty() {
@@ -601,6 +642,291 @@ mod tests {
         assert_eq!(made_by_the_cut.chars().count(), 100);
         assert!(made_by_the_cut.starts_with("_CO"), "{made_by_the_cut}");
         assert!(!is_reserved_device_name(&made_by_the_cut));
+    }
+
+    /// Task 11: the name rule for saving a folder's files changes only what Windows refuses or what could leave the
+    /// folder, so ordinary punctuation and every script stay as the person named the file.
+    #[test]
+    fn save_name_table() {
+        let long = "a".repeat(300);
+        let table: Vec<(String, String)> = vec![
+            ("report.pdf".into(), "report.pdf".into()),
+            // Punctuation and letters Open's rule would turn into `_` stay.
+            (
+                "Report, final & signed #2! 'v3'.pdf".into(),
+                "Report, final & signed #2! 'v3'.pdf".into(),
+            ),
+            (
+                "Résumé 文件 😀 (1)-final_v2.pdf".into(),
+                "Résumé 文件 😀 (1)-final_v2.pdf".into(),
+            ),
+            (
+                "a+b=c;d@e[f]{g}~h`i^j%k$l.txt".into(),
+                "a+b=c;d@e[f]{g}~h`i^j%k$l.txt".into(),
+            ),
+            (".env".into(), ".env".into()),
+            ("a  b.txt".into(), "a  b.txt".into()),
+            // What Windows refuses, and the separators.
+            (r"a/b\c:d*e?.txt".into(), "a_b_c_d_e_.txt".into()),
+            ("a<b>c\"d|e".into(), "a_b_c_d_e".into()),
+            ("tab\tnew\nnul\0.txt".into(), "tab_new_nul_.txt".into()),
+            ("a\u{85}b\u{7f}c".into(), "a_b_c".into()),
+            ("a.pdf:evil.exe".into(), "a.pdf_evil.exe".into()),
+            ("x.exe::$DATA".into(), "x.exe__$DATA".into()),
+            // No dots or spaces at the end; nothing left is `file`.
+            ("x. . ".into(), "x".into()),
+            ("..".into(), "file".into()),
+            (".".into(), "file".into()),
+            ("...".into(), "file".into()),
+            ("   ".into(), "file".into()),
+            ("".into(), "file".into()),
+            // Device names, with or without an extension, in any case.
+            ("CON.txt".into(), "_CON.txt".into()),
+            ("con".into(), "_con".into()),
+            ("nul.tar.gz".into(), "_nul.tar.gz".into()),
+            ("NUL .txt".into(), "_NUL .txt".into()),
+            ("COM1".into(), "_COM1".into()),
+            ("lpt9.log".into(), "_lpt9.log".into()),
+            ("COM¹.txt".into(), "_COM¹.txt".into()),
+            ("CONSOLE.txt".into(), "CONSOLE.txt".into()),
+        ];
+        for (original, saved) in &table {
+            assert_eq!(&save_name(original), saved, "{original:?}");
+        }
+        // At most 100 characters, counted in characters, the extension kept.
+        let cut = save_name(&format!("{long}.pdf"));
+        assert_eq!(cut, format!("{}.pdf", "a".repeat(96)));
+        let cut = save_name(&format!("{}.pdf", "é".repeat(300)));
+        assert_eq!(cut, format!("{}.pdf", "é".repeat(96)));
+        let cut = save_name(&format!("x.{long}"));
+        assert_eq!(cut.chars().count(), 100);
+        assert!(cut.starts_with("x.aaa"));
+        // A cut that leaves spaces or dots at the end: they go too.
+        assert_eq!(
+            save_name(&format!("{}   {long}", "b".repeat(98))),
+            "b".repeat(98)
+        );
+        // A device name at the limit, the prefix counted, and one only the cut makes (checked again after the cut).
+        let device = save_name(&format!("CON.{long}"));
+        assert_eq!(device.chars().count(), 100);
+        assert!(device.starts_with("_CO"), "{device}");
+        let made_by_the_cut = save_name(&format!("CONSOLE.{}", "e".repeat(96)));
+        assert_eq!(made_by_the_cut.chars().count(), 100);
+        assert!(made_by_the_cut.starts_with("_CO"), "{made_by_the_cut}");
+        assert!(!is_reserved_device_name(&made_by_the_cut));
+        // A name the rule has already cleaned is left as it is.
+        for (_, saved) in &table {
+            assert_eq!(&save_name(saved), saved, "{saved:?} is not stable");
+        }
+    }
+
+    /// Plan 4B end-of-plan review: a direction control in a name makes `invoice<RLO>fdp.exe` look like `invoiceexe.pdf`
+    /// in Explorer, so each becomes `_` like the other characters that change what a person sees; the scripts that
+    /// need the joiners (Persian, Indic, emoji sequences) and every other name in `save_name_table` stay as written.
+    #[test]
+    fn save_name_turns_direction_controls_into_underscores() {
+        let controls = [
+            '\u{61C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ];
+        assert_eq!(
+            save_name("invoice\u{202E}fdp.exe"),
+            "invoice_fdp.exe",
+            "the override that makes an executable read as a document"
+        );
+        for control in controls {
+            assert_eq!(
+                save_name(&format!("a{control}b.txt")),
+                "a_b.txt",
+                "U+{:04X}",
+                control as u32
+            );
+        }
+        // A control at an end leaves a name that still ends cleanly; one that was only controls is `_` run, not lost.
+        assert_eq!(save_name("\u{202E}\u{202C}"), "__");
+        assert_eq!(save_name("report\u{200F}"), "report_");
+        // The joiners that real names use are a person's own and stay.
+        let own = "می\u{200C}خواهم.txt";
+        assert_eq!(save_name(own), own);
+        let family = "👨\u{200D}👩\u{200D}👧.png";
+        assert_eq!(save_name(family), family);
+        // Stable under a second pass, as the table's names are.
+        assert_eq!(save_name("invoice_fdp.exe"), "invoice_fdp.exe");
+    }
+
+    /// Task 11, Review Focus: whatever a stored name holds, the file it makes lands inside the chosen folder, directly in
+    /// it, under one plain name: no separator, no `..`, no drive prefix, no `name:stream`, no device name.
+    #[test]
+    fn a_stored_name_cannot_leave_the_chosen_folder() {
+        use lockbox_core::internals::fsio::testutil::TempDir;
+        use std::path::Component;
+        let nasty = [
+            "../escape.txt",
+            r"..\escape.txt",
+            "..",
+            ".",
+            "a/../../b",
+            r"a\..\..\b",
+            "/etc/passwd",
+            r"\windows\system32\x.dll",
+            r"C:\Windows\x.dll",
+            "C:x.txt",
+            "c:",
+            r"\\server\share\x.txt",
+            r"\\?\C:\x.txt",
+            "name:stream",
+            "name:stream:$DATA",
+            "name::$DATA",
+            "CON",
+            "nul.txt",
+            "COM1",
+            "LPT9.log",
+            "AUX.tar.gz",
+            "PRN ",
+            "CONIN$",
+            "CONOUT$",
+            "a\u{0}b",
+            "a\nb",
+            " ",
+            "...",
+            "x. .",
+        ];
+        let outer = TempDir::new();
+        let chosen = outer.path().join("chosen");
+        fs::create_dir(&chosen).unwrap();
+        let chosen = fs::canonicalize(chosen).unwrap();
+        let mut made = 0;
+        for original in nasty {
+            let name = save_name(original);
+            let parts: Vec<Component<'_>> = Path::new(&name).components().collect();
+            assert!(
+                matches!(parts[..], [Component::Normal(only)] if only == name.as_str()),
+                "{original:?} became {name:?}"
+            );
+            assert!(!name.contains([':', '/', '\\']), "{name:?}");
+            assert!(!name.ends_with(['.', ' ']) && !name.is_empty(), "{name:?}");
+            assert!(!is_reserved_device_name(&name), "{name:?}");
+            let path = chosen.join(&name);
+            assert_eq!(path.parent(), Some(chosen.as_path()), "{original:?}");
+            // Made for real (a second file of the same name gets one more, as the batch does): it is directly inside.
+            if !path.exists() {
+                fs::write(&path, b"x").unwrap();
+                made += 1;
+            }
+            assert_eq!(
+                fs::canonicalize(&path).unwrap().parent(),
+                Some(chosen.as_path()),
+                "{original:?}"
+            );
+        }
+        assert_eq!(fs::read_dir(&chosen).unwrap().count(), made);
+        assert!(made >= 20, "the names did not collapse into a few: {made}");
+        // Nothing was made above the chosen folder: it is all the folder that holds them has.
+        assert_eq!(fs::read_dir(outer.path()).unwrap().count(), 1);
+    }
+
+    /// Task 11, the allow-list of what comes out: whatever the rule is given (many generated names built from separators,
+    /// dots, spaces, device names, drive prefixes, streams, control characters and long runs), the result and every
+    /// numbered copy of it is one plain name directly inside a folder, never empty, nothing Windows drops at the end, at
+    /// most 100 characters, no device name, and stable under a second pass. The slowest name is timed: a name of a few
+    /// hundred characters takes microseconds.
+    #[test]
+    fn save_name_fuzz_always_gives_one_plain_name() {
+        use crate::commands::save_all::numbered;
+        use std::time::{Duration, Instant};
+        const PIECES: &[&str] = &[
+            "a",
+            "b",
+            "report",
+            "é",
+            "文",
+            "😀",
+            " ",
+            "  ",
+            ".",
+            "..",
+            "...",
+            "/",
+            "\\",
+            "\\\\?\\",
+            ":",
+            "C:",
+            "*",
+            "?",
+            "\"",
+            "<",
+            ">",
+            "|",
+            "\u{0}",
+            "\n",
+            "\t",
+            "\u{7f}",
+            "\u{85}",
+            "\u{202E}",
+            "CON",
+            "nul",
+            "COM1",
+            "LPT9",
+            "AUX",
+            "CONIN$",
+            ".txt",
+            ".exe",
+            "$DATA",
+            "::$DATA",
+            "_",
+            "-",
+            "(",
+            ")",
+            "(2)",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut slowest = Duration::ZERO;
+        for round in 0..20_000 {
+            let count = (next() % 40) as usize + usize::from(round % 50 == 0) * 200;
+            let original: String = (0..count)
+                .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+                .collect();
+            // The best of three, so a busy PC's pause is not counted against the name.
+            let name = save_name(&original);
+            let best = (0..3)
+                .map(|_| {
+                    let began = Instant::now();
+                    let _ = save_name(&original);
+                    began.elapsed()
+                })
+                .min()
+                .unwrap();
+            slowest = slowest.max(best);
+            let ok = |name: &str| {
+                matches!(
+                    Path::new(name).components().collect::<Vec<_>>()[..],
+                    [Component::Normal(only)] if only == name
+                ) && !name.is_empty()
+                    && !name.contains([':', '/', '\\'])
+                    && !name.ends_with(['.', ' '])
+                    && name.chars().count() <= MAX_NAME_CHARS
+                    && !name.chars().any(char::is_control)
+            };
+            assert!(ok(&name), "{original:?} became {name:?}");
+            assert!(
+                !is_reserved_device_name(&name),
+                "{original:?} became {name:?}"
+            );
+            assert_eq!(save_name(&name), name, "{original:?} is not stable");
+            for number in [2, 3, 10, 999] {
+                let again = numbered(&name, number);
+                assert!(ok(&again), "{name:?} numbered {number} became {again:?}");
+                assert!(!is_reserved_device_name(&again), "{again:?}");
+            }
+        }
+        assert!(slowest < Duration::from_millis(20), "slowest {slowest:?}");
     }
 
     /// Review Focus 5: a right-to-left mark cannot disguise an executable.

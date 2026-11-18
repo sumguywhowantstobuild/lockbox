@@ -36,12 +36,21 @@ export interface FakeItem {
   /** What `get_item` says the revision is (2 unless set); an accepted `update_item` adds one, as the engine does. */
   revision?: number;
   attachments?: { file_id: string; name: string; length: number; media_type: string }[];
+  /**
+   * In a backup's items: the names of attached files the backup does not hold (the item refers to a file entry the backup lacks). A copy out of the
+   * backup asks first (`Confirm` `MissingFiles`) and, once told to go on, leaves them out (`left_out`).
+   */
+  missingFiles?: string[];
 }
 
 export interface FakeVault {
   id: number;
   name: string | null;
+  /** What the session is, as `SessionInfo.kind` says it: a vault when left out, an older copy a restore kept, or a backup opened read-only. */
+  kind?: "older_copy" | "backup";
   available?: boolean;
+  /** Both copies of the vault's details are unreadable (Ask 8): the list says `details_damaged: true`. False unless a test makes it so. */
+  detailsDamaged?: boolean;
   password?: string;
   readOnly?: boolean;
   items?: FakeItem[];
@@ -66,6 +75,20 @@ export interface FakeVault {
   busy?: boolean;
   /** Stored files (by file id) that do not decrypt: opening or saving one is refused as `damaged`. */
   damagedFiles?: string[];
+  /**
+   * Whole days since the vault's last backup, or since it was made when it has none (`vault_backup_due`): 30 or more is "due" and is answered
+   * as `{ days }`, less (and unset) as `null`. A backup that works clears it, as the shell's written date does.
+   */
+  backupDays?: number;
+  /** What a finished backup says it holds and left out (`BackupView`); the default is the vault's own counts, nothing left out, 1.2 GB on disk. */
+  backupView?: Partial<{
+    items: number;
+    files: number;
+    damaged_items: number;
+    damaged_files: number;
+    missing_files: number;
+    size_on_disk: number;
+  }>;
 }
 
 interface Live {
@@ -96,6 +119,8 @@ export const PRINTERS = ["Office Laser", "Hall Inkjet"];
 export const DEFAULT_PRINTER = "Hall Inkjet";
 /** The folder the fake saves a PDF in: a made-up path, shown to the person after a save. */
 export const SAVED_FOLDER = "C:\\Users\\Someone\\Documents";
+/** The folder the fake's picker chooses for Save all files: made-up display text, as the shell sends it (`restore::shown`, no `\\?\`). */
+export const SAVE_ALL_FOLDER = "D:\\Clients\\Agency";
 
 /**
  * Made-up stand-ins for the engine's word list: 64 lowercase words, none of them a word the screens use themselves
@@ -208,6 +233,9 @@ function summary(item: FakeItem) {
   };
 }
 
+/** What a job belongs to, as `lockbox://job-started` says: a session at a generation, or the launch at a lock epoch (a test of a backup). */
+type JobScopeOf = { type: "session"; session: number; generation: number } | { type: "launch"; epoch: number };
+
 export interface FakeShell {
   /** Every command sent, in order, with its arguments. */
   calls: { cmd: string; args: unknown }[];
@@ -297,6 +325,22 @@ export interface FakeShell {
   clearCopiedCalls(): number;
   /** What the next `clear_copied` answers (`"cleared"` until set): `"gone"` or `"busy"` for the shell's other answers. */
   answerClearCopied(answer: "cleared" | "gone" | "busy"): void;
+  /**
+   * A close or a Quit while a job runs, as the shell asks it (Plan 4B Task 12): `lockbox://close-asked` goes out and the question is pending,
+   * with nothing locked, hidden or cancelled, until `close_answer`. `running` is the kinds as the shell names them (distinct, in start order);
+   * `restoreWaiting` is a finished restore waiting for its yes at 24d (Task 13d), alone or beside jobs.
+   */
+  askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean; restoreWaiting?: boolean }): void;
+  /** The shell's lock epoch changes (Lock all, Windows locking or sleeping, an idle lock): `lockbox://lock-epoch` goes out and a pending question is dropped. */
+  changeLockEpoch(reason?: string): void;
+  /** Whether a question is waiting for `close_answer`. */
+  pendingClose(): boolean;
+  /** Every `close_answer` the shell accepted, as `go` was sent (an answer with no question pending is refused and not here). */
+  closeAnswers(): boolean[];
+  /** How many times the app was quit (a Quit with nothing running, or a yes to a Quit's question). */
+  quits(): number;
+  /** Sends `payload` on `channel` exactly as given, for an event the page must not trust. */
+  sendRaw(channel: string, payload: unknown): void;
   /** The shell has already shown 5b in an earlier run: the next close hides at once. */
   markCloseExplained(): void;
   /** A notice sent as `lockbox://notice` only, never kept for `launch_notices` (`first_close` is only ever an event). */
@@ -405,11 +449,173 @@ export interface FakeShell {
   /** The file the next picker chooses, by its name and size in bytes (a made-up name; a made-up one is chosen when none is set). */
   pickNext(name: string, length?: number): void;
   /**
+   * The files the next `pick_files_to_add` chooses (a first pick, or Pick more), by name and size in bytes. A pick with none set chooses
+   * the one file `pickNext` names, or a made-up one, so a test of one file needs nothing more.
+   */
+  pickFilesNext(files: { name: string; size: number }[]): void;
+  /** The choices the shell holds now (the page's picks), as the names and sizes in each, in order of the picks. */
+  heldChoices(): { name: string; size: number }[][];
+  /** Free space on the drive, in bytes, as `add_files` checks it; `null` (to begin with) is a drive whose free space can't be read, which never blocks. */
+  setFreeSpace(bytes: number | null): void;
+  /** The names a batch can't read (deleted or held open after the pick, or not a file): each goes in `failed`, and the batch goes on. */
+  unreadableFiles(names: string[]): void;
+  /** The next batch ends after `count` files went in, for the vault's `refusal` (a drive that filled, a vault that stayed busy). */
+  batchEndsAfter(count: number, refusal: object): void;
+  /** The names `add_files` stored, in order. */
+  addedFiles: string[];
+  /** The names Save all files wrote, as they are on disk (after the name rule and any " (2)"), in order. */
+  savedToDisk: string[];
+  /** Names that are already in the folder the next Save all files picks: a file with one of them is saved under the next free number. */
+  savedNamesTaken(names: string[]): void;
+  /** The files (by stored name) that go from the vault while the next Save all files runs: each is listed in `gone` and the batch goes on. */
+  filesGoneDuringSave(names: string[]): void;
+  /** A file is added to the folder just after the next `save_all_files` answers its plan, so `save_all_start` finds the folder changed. */
+  changeFolderAfterPlanNext(): void;
+  /** The folders `show_output_in_explorer` opened, as the shell shows them. */
+  openedFolders: string[];
+  /** The next `show_output_in_explorer` fails to open the folder (`{ code: "io" }`). */
+  explorerFailsNext(): void;
+  /** How many summary handles the shell holds now (one per finished Save all files, until `close_output`, a lock or `dropParkedChoices`). */
+  heldOutputs(): number;
+  /**
    * Holds every stored-file command's answer until `release` is called, as a big file would: `lockbox://busy` says the vault is
    * working (`import`, `save_copy` or `open`) as the command arrives, and says it is not when the answer is decided, which is
    * at release, as the shell decides it: a lock in between leaves a refusal (`locked`) and nothing done.
    */
   holdFiles(): () => void;
+  /**
+   * The long jobs of a held command that has a request (an add, an attach, a Save a copy and its cloud yes), as the shell's job table would
+   * list them: sent to the page by `lockbox://job-started` as the command arrives, ended by `lockbox://progress` with `finished` when it is let
+   * go, cancelled (`cancel_operation`) or its vault locks. The operation is the shell's number, which the page learns from that event only.
+   */
+  runningJobs(): { request: number; operation: number; scope: { type: "session"; session: number; generation: number }; kind: string }[];
+  /** The launch-scoped jobs running (a test of a backup), as `runningJobs` lists a vault's: the scope names the lock epoch the job began in. */
+  runningLaunchJobs(): { request: number; operation: number; scope: { type: "launch"; epoch: number }; kind: string }[];
+  /** Sends `lockbox://progress` for a running job with these figures. */
+  sendProgress(operation: number, done: number, total: number): void;
+  /**
+   * Test a backup (Plan 4B Task 4). The shell holds the picked backups under choices of 32 hex characters, launch-scoped: a pick forgets the choice it was
+   * sent, and the shell's lock epoch (`lock_all`, `changeLockEpoch`) drops every one. These are the names and sizes held now, in order of the picks.
+   */
+  testChoices(): { name: string; size: number }[];
+  /** The tokens of the choices held now, in order of the picks (the page only learns one from an answer). */
+  testChoiceTokens(): string[];
+  /** The file the next `test_backup_pick` chooses, by name and size in bytes (`BACKUP_NAME` and 1.2 GB when none is set). */
+  pickBackupNext(name: string, size?: number): void;
+  /** Lets the shell forget every held backup at once, as five minutes do: a `test_backup` for one is then `choice_expired`. */
+  expireTestChoices(): void;
+  /** What the next tests find when they open (changes what `test_backup` answers with): the summary's fields over a made-up one. Stays until changed. */
+  backupSummary(summary: Partial<{ created_at: string; items: number; files: number; missing_files: number; size_on_disk: number }>): void;
+  /** The next test that opens the backup finds it damaged, with this first failing `what` (`undefined`: a refusal with none). Once. */
+  damageBackup(what: string | undefined): void;
+  /** Holds every `test_backup_pick` answer until `release` is called, as the picker stays open: the choice is made at release. */
+  holdPicker(): () => void;
+  /**
+   * Holds every `test_backup` until `release` is called, as a big backup would: its job (kind `test`, scope `launch` with the epoch it began in) is
+   * running from the moment the command arrives, and it is decided at release (a lock epoch in between leaves `locked`, a Cancel leaves `cancelled`).
+   */
+  holdTest(): () => void;
+  /**
+   * Holds the `lockbox://job-started` of a test of a backup until `release` is called, as an event that reaches the page late (the command has begun
+   * and the job is running in the shell; the page has not heard which operation it is).
+   */
+  holdJobStarted(): () => void;
+  /**
+   * Open a backup read-only (Plan 4B Task 7). The shell holds the picked backups under choices of 32 hex characters, launch-scoped and of their own kind (a
+   * test's choice never answers for an open's): a pick forgets the choice it was sent, a session opened uses its choice up, a wrong password or a Stop keeps
+   * it, and the shell's lock epoch drops every one. These are the names and sizes held now, and their tokens, in order of the picks (the picker uses
+   * `pickBackupNext`, `dismissFile` and `holdPicker`, as Test a backup's does).
+   */
+  openChoices(): { name: string; size: number }[];
+  openChoiceTokens(): string[];
+  /** Lets the shell forget every held open choice at once, as five minutes do: an `open_backup_read_only` for one is then `choice_expired`. */
+  expireOpenChoices(): void;
+  /** Holds every `open_backup_read_only` until `release` is called: its job (kind `open_backup`, scope `launch`) runs from the moment the command arrives. */
+  holdOpen(): () => void;
+  /**
+   * Holds every `copy_item_to` answer until `release` is called, as a copy with big attachments would: the shell decides and writes when the command arrives (a
+   * `MissingFiles` question or the copy itself), and the answer reaches the page only at release, so a switch of window or a Cancel can come in between.
+   */
+  holdCopy(): () => void;
+  /** The items the next backups that are opened hold (a made-up set when none is given): copied for each open, so a copy out never changes what the next open finds. */
+  backupHolds(items: FakeItem[]): void;
+  /** The file names (as picked) of the backups open now: a session of this page on each. */
+  backupsOpen(): string[];
+  /** The session of the backup opened from this file name, when it is open. */
+  sessionOfBackup(fileName: string): Live | undefined;
+  /** What `copy_item_to` copied, in order: the item (by id), the folder it went to (`null` for none), whether the missing files were left out, and the new item's id. */
+  copiedOut: { from: number; to: number; id: string; folder: string | null; skipMissing: boolean; newId: string }[];
+  /**
+   * Restore a backup (Plan 4B Task 5). The shell holds the picked backups under choices of 32 hex characters, launch-scoped, as for Test a backup (the
+   * pick uses `pickBackupNext`, `dismissFileNext` and `holdPicker`): a pick forgets the choice it was sent, every lock epoch drops them all, and one that is
+   * checked also holds the credential and the parent folder. These are the names and sizes held, and whether each is checked, in order of the picks.
+   */
+  restorePicks(): { name: string; size: number; checked: boolean }[];
+  /** The tokens of the restore picks held now, in order of the picks. */
+  restorePickTokens(): string[];
+  /** What the next checks find in the backup: its vault's name, the day it was made (`null`: it does not say), and whether a vault with its ID is in the folder (and the name its older copy gets). Stays until changed. */
+  restoreIs(found: Partial<{ name: string; made: string | null; replaces: boolean; keptAs: string }>): void;
+  /** Lets the shell forget every held restore pick at once, as five minutes do. */
+  expireRestorePicks(): void;
+  /** Holds every `restore_check` until `release` is called, as unlocking the backup takes a moment: the answer is decided at release. */
+  holdRestoreCheck(): () => void;
+  /** Holds every restore copy (`restore_prepare`, `restore_prepare_confirm`) until `release` is called: its job (kind `restore`, scope `launch`) runs from the moment it starts. */
+  holdRestoreCopy(): () => void;
+  /** Holds every `restore_commit` until `release` is called: the swap's job (kind `restore`, `total` 1) runs, with no Stop. */
+  holdRestoreSwap(): () => void;
+  /**
+   * Holds the answer of every restore copy that finishes until `release` is called: the copy is done in the shell (its job has ended, the finished restore
+   * is held, the pick is gone) but the page has not heard yet, so a lock can land in between. A lock epoch of any reason but `idle` ends the finished restore.
+   */
+  holdRestoreAnswer(): () => void;
+  /** The next finished copy's answer names the vault this (the archive the copy actually opened), not the name the check found. */
+  restoreCopyNames(name: string): void;
+  /** The next `restore_prepare` asks a question first, as the shell does: the cloud folder's, or the new folder's name (suggested `<name> (restored)`). */
+  restoreAsksNext(kind: "cloud" | "name"): void;
+  /** The next restore copy starts its job and then ends with this refusal (the pick is kept, except for `backup changed`, which forgets it), as the engine's own checks come first inside the job. */
+  restoreCopyRefuses(error: object): void;
+  /** The next `restore_commit` is refused with this, after its job started (a swap that could not be made: nothing changes). */
+  restoreCommitRefuses(error: object): void;
+  /** The finished copies the shell holds, waiting for their swap, by number; and the numbers `restore_discard` let go. */
+  preparedRestores(): number[];
+  discardedRestores(): number[];
+  /** The folder names `restore_prepare_confirm` was sent, in order (`null` for none). */
+  confirmedNames(): (string | null)[];
+  /**
+   * Plan 4B Task 6, a restore that didn't finish. `restore_notice` answers what launch kept (the last `kind: "restore"` of `setLaunchNotices` or `tell`, without its
+   * kind), or `{ state: "none" }`. `retry_restore_recovery` answers the next of these (and that becomes what `restore_notice` answers), or the same notice again when
+   * none is given; `dismiss_restore` with `confirm: true` leaves nothing, and without it asks (`Confirm` `Dismissal`). A refusal is `refuseNext`.
+   */
+  retryRestoreGives(...answers: object[]): void;
+  /** The next `restore_prepare` (or its confirm) is not answered with a copy but with `Confirm` `Recovery` carrying this notice, as an unfinished restore's journal makes it. */
+  restoreRecoversNext(notice: object): void;
+  /**
+   * The older copies the shell lists (Plan 4B Task 8), in order, from the next listing on. Every `list_pre_restore` replaces every ID it gave before, as the shell
+   * does; a copy opened read-only is a session of its own, and a delete of a copy a session has open is refused as `busy`.
+   */
+  olderCopies(copies: FakeOlderCopy[]): void;
+  /** The ID each listed copy has in the newest listing, by folder name. */
+  olderIds(): Record<string, number>;
+  /** Makes every ID the shell gave so far unknown, as another listing would: the page's IDs no longer match, and its next send is `not_found`. */
+  forgetOlderIds(): void;
+  /** The folder names `delete_pre_restore` deleted, in order. */
+  deletedOlderCopies(): string[];
+  /** Pretends another session has this copy open: its delete is refused as `busy`. */
+  olderCopyIsOpen(folder: string): void;
+  /** The folder names of the older copies a session of this page has open now. */
+  olderCopiesOpen(): string[];
+  /**
+   * Holds every `list_pre_restore` until `release` is called, which answers them in the reverse order they were sent: each listing is decided (its IDs given, and
+   * every earlier ID replaced) when it is let go, as the shell does when a slow scan ends after a quicker one that began later.
+   */
+  holdOlderListing(): () => void;
+  /** Holds every `open_pre_restore_read_only` until `release` is called: the credential is checked and the session made when it is let go. */
+  holdOlderOpen(): () => void;
+  /** Holds every `delete_pre_restore` until `release` is called: the copy is deleted (or the refusal decided) when it is let go. */
+  holdOlderDelete(): () => void;
+  /** The name and the choice of the backup the last `backup_vault` wrote and parked for 22c's Test this backup. */
+  lastBackupName(): string;
+  lastBackupChoice(): string;
   /** How many opened copies another program holds, as the last `lockbox://notice` of `open_cleanup` told. `retry_open_cleanup` leaves this many. */
   retryLeaves(stillOpen: number): void;
   /** How many times `retry_open_cleanup` reached the shell. */
@@ -665,8 +871,121 @@ const OPERATION: Record<string, string> = {
   save_file_copy_confirm: "save_copy",
   add_file: "import",
   attach_file: "import",
+  add_files: "import",
   replace_file: "import",
+  backup_vault: "backup",
+  save_all_start: "save_all",
 };
+
+/** What a stored-file command that takes a `request` is called in `lockbox://job-started` and `lockbox://progress` (the others start no job event). */
+const JOB_KIND: Record<string, string> = {
+  add_file: "import",
+  attach_file: "import",
+  add_files: "import",
+  save_file_copy: "save_copy",
+  save_file_copy_confirm: "save_copy",
+  backup_vault: "backup",
+  save_all_start: "save_all",
+};
+
+/** The most one file can be (`MAX_FILE_BYTES`, 256 GiB): a file over it is refused before the batch starts. */
+const MAX_FILE = 256 * 1024 ** 3;
+/** What the shell sends for a choice that was used, dropped, expired or is another session's. */
+export const CHOICE_EXPIRED = { code: "choice_expired" };
+/** The backup the picker chooses when a test names none, how big it is, and the password it was made with (the day it was made, not today's). */
+export const BACKUP_NAME = "My vault 2026-10-02.lockbox-backup";
+const BACKUP_SIZE = 1_288_490_188;
+export const BACKUP_PASSWORD = "from-the-day-it-was-made";
+/** The backup the fake's backups write, as named and kept for 22c. */
+const BACKUP_DAY = "2026-11-04";
+/** What the shell sends for a file's number past the end of the picked list. */
+const NO_SUCH_PICK = { code: "invalid_input", what: "index" };
+
+/**
+ * An older copy a restore kept beside a vault (Plan 4B Task 8), as the fake shell holds it: `vault` is the vault's place on the list, `last_written` and `size`
+ * are what a listing says (the default is 4 November 2026 and 5 MB; `null` is a part the shell could not read), and `password` opens it (the vault's own
+ * password unless set). The folder is a name only: no path ever reaches the page.
+ */
+export interface FakeOlderCopy {
+  vault: number;
+  folder: string;
+  name?: string | null;
+  last_written?: string | null;
+  size?: number | null;
+  password?: string;
+  /** Its details were changed outside Lockbox: opening it answers `header_changed: true`. */
+  headerChanged?: boolean;
+}
+
+/** One file the page picked, as the shell holds it (the page sees the name and size only). */
+interface PickedEntry {
+  name: string;
+  size: number;
+}
+
+/** A batch the shell has taken the choice for: where it goes, and the files in the order picked. */
+interface Batch {
+  session: number;
+  generation: number;
+  into: { type: "folder"; collection: string | null } | { type: "item"; id: string };
+  files: PickedEntry[];
+  total: number;
+}
+
+/** One stored file of a folder, as Save all files plans it: where it is stored, its name as stored and as written (after the shell's name rule), its size. */
+interface PlannedEntry {
+  itemId: string;
+  fileId: string;
+  stored: string;
+  name: string;
+  size: number;
+  attached_to: string | null;
+}
+
+/** A save the shell holds: the folder, where it goes (display text), and the files in the order they will be saved. Held from its plan to its start. */
+interface SaveRun {
+  session: number;
+  generation: number;
+  folder: string;
+  files: PlannedEntry[];
+  total: number;
+}
+
+/**
+ * `save_name`, in short: what Windows refuses (`< > : " / \ | ? *` and control characters) becomes `_`, and trailing dots and spaces go. The real
+ * one also handles device names and a cut at 100 characters; the page never works a name out, so the fake needs only a rule that changes some.
+ */
+function saveNameOf(name: string): string {
+  const changed = Array.from(name, (letter) => (`<>:"/\\|?*`.includes(letter) || letter.charCodeAt(0) < 32 ? "_" : letter)).join("");
+  return changed.replace(/[. ]+$/, "") || "file";
+}
+
+/** `name` with " (n)" before its last extension: "contract.pdf" and 2 make "contract (2).pdf". */
+function numberedName(name: string, number: number): string {
+  const dot = name.lastIndexOf(".");
+  return dot <= 0 ? `${name} (${String(number)})` : `${name.slice(0, dot)} (${String(number)})${name.slice(dot)}`;
+}
+
+/** A request is a whole number the page chose (a `u32`); anything else is the shell's malformed-request answer. */
+function requestOf(sent: Record<string, unknown>): number {
+  const { request } = sent;
+  if (typeof request !== "number" || !Number.isInteger(request) || request < 0 || request > 0xffff_ffff) return refuse(MALFORMED);
+  return request;
+}
+
+/** One long job in the fake shell's table. */
+interface RunningJob {
+  request: number;
+  operation: number;
+  scope: JobScopeOf;
+  kind: string;
+  done: number;
+  total: number;
+  /** Ends the held command as a Cancel does: it answers `cancelled`. */
+  cancel: () => void;
+  /** A restore's swap: no lock epoch ends it (it is past the point of cancelling), and it has no Stop. */
+  pastTheSwap?: boolean;
+}
 
 /** The first free `NAME_2`, `NAME_3`, ... among the live keys of one place. */
 function freeName(items: readonly FakeItem[], place: string | null, name: string): string {
@@ -716,6 +1035,11 @@ export function installFakeShell(
   let explaining = false;
   let hidden = false;
   let closeExplainedCalls = 0;
+  // The question a close or a Quit asked and the shell is holding, what was answered, how often the app quit, and the lock epoch's number.
+  let pendingClose: "close" | "quit" | undefined;
+  const closeAnswers: boolean[] = [];
+  let quits = 0;
+  let lockEpoch = 0;
   let clearCopiedCalls = 0;
   let clearCopiedAnswer: "cleared" | "gone" | "busy" = "cleared";
   const live = new Map<number, Live>();
@@ -785,6 +1109,107 @@ export function installFakeShell(
   let dismissFile = false;
   let pickedFile: { name: string; length: number } | undefined;
   let heldFiles: (() => void)[] | undefined;
+  // Many files (Task 10): the choices the shell holds (one per pick session, kept by Pick more and Remove), the next picks, and how a batch ends.
+  const choices = new Map<string, { session: number; generation: number; files: PickedEntry[] }>();
+  const nextPicks: PickedEntry[][] = [];
+  const batches = new Map<number, Batch>();
+  const addedFiles: string[] = [];
+  let freeSpace: number | null = null;
+  let unreadable: string[] = [];
+  let batchEnd: { count: number; refusal: object } | undefined;
+  // Save all files (Task 11): the plans the shell holds from the picker to the start (and the cloud question's parked folder), the saves taken for a
+  // job, the summary handles, and what the next save is told to meet.
+  const parkedSaves = new Map<string, { session: number; generation: number; folder: string }>();
+  const savePlans = new Map<string, SaveRun>();
+  const saveRuns = new Map<number, SaveRun>();
+  const outputs = new Map<string, { session: number; generation: number; shown: string }>();
+  const savedToDisk: string[] = [];
+  const openedFolders: string[] = [];
+  let takenNames: string[] = [];
+  let goneNames: string[] = [];
+  let changeAfterPlan = false;
+  let explorerFails = false;
+  // Test a backup (Task 4): the backups the shell holds paths of, by choice (the password each was made with is the shell's own), the next pick, what a test
+  // finds, a damage to find once, the holds a test can put on the picker and on the test, and the backup the last `backup_vault` wrote.
+  const testHeld = new Map<string, { name: string; size: number; password: string }>();
+  let nextBackupPick: { name: string; size: number } | undefined;
+  let summaryMade: Partial<{ created_at: string; items: number; files: number; missing_files: number; size_on_disk: number }> = {};
+  let damage: { what: string | undefined } | undefined;
+  let heldPicker: (() => void)[] | undefined;
+  let heldTests: (() => void)[] | undefined;
+  let heldStarts: (() => void)[] | undefined;
+  let lastBackup: { name: string; choice: string } | undefined;
+  // Open a backup read-only (Task 7): the backups the shell holds paths of for it, by choice (their own kind, so a test's choice and an open's never answer for
+  // each other), what the next opened backups hold, the sessions made on backups (by the file's name), what was copied out, and the hold on the open.
+  const openHeld = new Map<string, { name: string; size: number; password: string }>();
+  let backupItems: FakeItem[] | undefined;
+  const backupSessions = new Map<number, string>();
+  const copiedOut: FakeShell["copiedOut"] = [];
+  let heldOpens: (() => void)[] | undefined;
+  let heldCopies: (() => void)[] | undefined;
+  // Restore a backup (Task 5): the picks the shell holds by choice (with what a check found, once it has), the finished copies waiting for their swap,
+  // the questions parked for their answer, what the next checks find, and the holds and refusals a test can put on each step.
+  interface RestoreHeld {
+    name: string;
+    size: number;
+    checked: { name: string; made: string | null; replaces: boolean; keptAs: string; usual: boolean } | undefined;
+    /** The listed vault the pick was made for (Ask 4, Ask 8): its parent folder is where the restore goes, not the usual one. */
+    vault: number | null;
+  }
+  const restoreHeld = new Map<string, RestoreHeld>();
+  const restorePrepared = new Map<number, { name: string; replaces: boolean; keptAs: string; ended: boolean }>();
+  const restoreAsked = new Map<string, string>();
+  const restoreDiscarded: number[] = [];
+  const restoreNames: (string | null)[] = [];
+  // Older copies (Task 8): what the shell lists, the IDs of the newest listing (each listing replaces them all), the folders deleted, the copies another session
+  // is pretended to have open, and the sessions this page opened on a copy.
+  let olderHeld: FakeOlderCopy[] = [];
+  const olderListed = new Map<number, FakeOlderCopy>();
+  let nextOlderId = 0;
+  const olderDeleted: string[] = [];
+  const olderOpenElsewhere = new Set<string>();
+  const olderSessions = new Map<number, string>();
+  let heldOlderListings: (() => void)[] | undefined;
+  let heldOlderOpens: (() => void)[] | undefined;
+  let heldOlderDeletes: (() => void)[] | undefined;
+  let restoreFound = { name: "My vault", made: "2026-10-02" as string | null, replaces: false, keptAs: "My vault.before-restore" };
+  let restoreQuestion: "cloud" | "name" | undefined;
+  let restoreCopyRefusal: object | undefined;
+  let restoreCommitRefusal: object | undefined;
+  /** What the next restore copy answers instead of copying: an unfinished restore's notice (`Confirm` `Recovery`). */
+  let restoreRecovery: object | undefined;
+  /** The answers the next `retry_restore_recovery` calls give, and the notice `restore_notice` answers since the last of them (`undefined`: what launch kept). */
+  const retryAnswers: object[] = [];
+  let restoreNoticeNow: object | undefined;
+  let nextRestore = 0;
+  let heldRestoreChecks: (() => void)[] | undefined;
+  let heldRestoreCopies: (() => void)[] | undefined;
+  let heldRestoreSwaps: (() => void)[] | undefined;
+  let heldRestoreAnswers: (() => void)[] | undefined;
+  /** The name the next finished copy's answer gives (the archive prepare actually opened), when it is not the checked one's. */
+  let restoreCopyName: string | undefined;
+  /** What launch kept of a restore that didn't finish, as `restore_notice` answers it: the last of its notices without their `kind`, or none. */
+  const noticeOfLaunch = (): object => {
+    const last = [...launchNotices].reverse().find((notice) => (notice as { kind?: unknown }).kind === "restore");
+    if (last === undefined) return { state: "none" };
+    const plain: Record<string, unknown> = { ...(last as Record<string, unknown>) };
+    delete plain.kind;
+    return plain;
+  };
+  /** What a checked pick says (the shell's `RestoreChecked`): where it goes is display text, never sent back. */
+  const restoreViewOf = (held: RestoreHeld) => {
+    const found = held.checked ?? { ...restoreFound, usual: true };
+    return {
+      name: found.name,
+      made: found.made,
+      folder_shown: `${found.usual ? "C:\\Users\\Someone\\Lockbox Vaults" : "D:\\Vaults"}\\${found.name}`,
+      usual: found.usual,
+      replaces_existing: found.replaces,
+    };
+  };
+  // The shell's job table, for the commands that take a request: operations are numbered from 1 and never reused.
+  const running = new Map<number, RunningJob>();
+  let nextOperation = 0;
   let heldRetry: (() => void)[] | undefined;
   let heldGetItem: (() => void)[] | undefined;
   let stillOpenAfterRetry = 0;
@@ -822,9 +1247,42 @@ export function installFakeShell(
     entry.generation += 1;
     // A lock lets go of the values of every paste its vault held.
     for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
+    // And of the files picked and not yet added.
+    for (const [token, held] of choices) if (held.session === session) choices.delete(token);
+    // And of a save's plan, the folder a cloud question parked, and the summary's handle.
+    for (const [token, held] of savePlans) if (held.session === session) savePlans.delete(token);
+    for (const [token, held] of parkedSaves) if (held.session === session) parkedSaves.delete(token);
+    for (const [token, held] of outputs) if (held.session === session) outputs.delete(token);
     emit("lockbox://locked", { session, generation: entry.generation, reason });
+    // A lock stops every job of its session, and each says it has ended.
+    for (const job of [...running.values()]) {
+      if (job.scope.type !== "session" || job.scope.session !== session) continue;
+      running.delete(job.operation);
+      emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+    }
     // The copy handed to this vault goes with its lock.
     if (slot?.chosen === session) emptySlot();
+  };
+
+  /**
+   * The shell's lock epoch moves on (Lock all, an idle lock, Windows locking or sleeping, the app closing): `lockbox://lock-epoch` goes out, the backups
+   * it held for Test a backup are let go, and every launch-scoped job ends (its command, still out, is refused as `locked` when it answers).
+   */
+  const bumpEpoch = (reason = "manual"): void => {
+    lockEpoch += 1;
+    pendingClose = undefined;
+    testHeld.clear();
+    openHeld.clear();
+    // Every lock drops the picks and the questions; a finished copy waits through an idle lock and is ended by every other reason.
+    restoreHeld.clear();
+    restoreAsked.clear();
+    if (reason !== "idle") for (const copy of restorePrepared.values()) copy.ended = true;
+    for (const job of [...running.values()]) {
+      if (job.scope.type !== "launch" || (job.pastTheSwap ?? false)) continue;
+      running.delete(job.operation);
+      emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+    }
+    emit("lockbox://lock-epoch", { epoch: lockEpoch, reason });
   };
 
   /** 5b's button, or a second close while it shows: the flag is kept, `explain: false` is sent, the window hides. */
@@ -833,6 +1291,21 @@ export function installFakeShell(
     explaining = false;
     hidden = true;
     emit("lockbox://notice", { kind: "first_close", explain: false });
+  };
+
+  /** The window's close, as the shell does it with nothing running (and after a yes): every vault locks, then 5b or the hide. */
+  const closeAsBefore = (): void => {
+    for (const session of [...live.keys()]) lock(session);
+    emptySlot();
+    bumpEpoch();
+    if (explaining) {
+      explained();
+    } else if (closeExplained) {
+      hidden = true;
+    } else {
+      explaining = true;
+      emit("lockbox://notice", { kind: "first_close", explain: true });
+    }
   };
 
   const vaultFor = (session: number, generation: number): FakeVault => {
@@ -902,6 +1375,7 @@ export function installFakeShell(
     name: vault.name ?? "",
     read_only: vault.readOnly ?? false,
     state: "unlocked",
+    kind: vault.kind ?? "vault",
   });
 
   const makeKey = (vault: FakeVault): string => {
@@ -943,12 +1417,230 @@ export function installFakeShell(
     return { Done: { id: vault.id, name: vault.name, available: true } };
   };
 
+  /** The held choice of a pick session, when it is this session's at this generation; otherwise the shell's `choice_expired`. */
+  const choiceOf = (token: unknown, session: number, generation: number) => {
+    const held = typeof token === "string" ? choices.get(token) : undefined;
+    if (held === undefined || held.session !== session || held.generation !== generation) return refuse(CHOICE_EXPIRED);
+    return held;
+  };
+
+  /**
+   * Everything `add_files` decides before the job starts, in the shell's order: the request, the vault, read-only, the choice, where it
+   * goes, a file over 256 GiB, and room for the whole batch (an unknown drive never blocks). Only then is the choice used up.
+   */
+  const startBatch = (args: unknown): Batch => {
+    const sent = exactly(args, ["session", "generation", "choice", "into", "request"]) as {
+      session: number;
+      generation: number;
+      choice: unknown;
+      into: Batch["into"];
+      request: unknown;
+    };
+    requestOf(sent);
+    const vault = vaultFor(sent.session, sent.generation);
+    if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+    const held = choiceOf(sent.choice, sent.session, sent.generation);
+    if (sent.into.type === "folder") {
+      const place = sent.into.collection;
+      if (place !== null && vault.items?.find((item) => item.id === place && item.kind === "collection") === undefined) return refuse({ code: "core", kind: "not_found" });
+    } else {
+      const holder = vault.items?.find((item) => item.id === (sent.into as { id: string }).id);
+      if (holder === undefined) return refuse({ code: "core", kind: "not_found" });
+      if (holder.kind === "collection" || holder.kind === "file") return refuse(CANNOT_HOLD_FILES);
+    }
+    if (held.files.some((file) => file.size > MAX_FILE)) return refuse({ code: "core", kind: "too_large", what: "file" });
+    const total = held.files.reduce((sum, file) => sum + file.size, 0);
+    if (freeSpace !== null && total > freeSpace) return refuse({ code: "core", kind: "not_enough_space", needed: total, available: freeSpace });
+    choices.delete(sent.choice as string);
+    return { session: sent.session, generation: sent.generation, into: sent.into, files: held.files, total };
+  };
+
+  /**
+   * The batch's end: each file in turn is stored, or named in `failed` when it can't be read, until a stop (`cutAt` bytes done when Cancel
+   * was pressed) or a refusal ends it, and every file after that is `not_added`, in the order picked. A file the stop caught part way is
+   * `not_added` too: the engine leaves nothing of it.
+   */
+  const finishBatch = (batch: Batch, cutAt?: number): unknown => {
+    const vault = sessionVault.get(batch.session);
+    const failed: string[] = [];
+    const notAdded: string[] = [];
+    let stopped: object | null = null;
+    let count = 0;
+    let sofar = 0;
+    for (const file of batch.files) {
+      if (stopped === null && cutAt !== undefined && sofar + file.size > cutAt) stopped = { code: "cancelled" };
+      if (stopped === null && batchEnd !== undefined && count >= batchEnd.count) {
+        stopped = batchEnd.refusal;
+        batchEnd = undefined;
+      }
+      if (stopped !== null) {
+        notAdded.push(file.name);
+        continue;
+      }
+      if (unreadable.includes(file.name)) {
+        failed.push(file.name);
+        continue;
+      }
+      sofar += file.size;
+      count += 1;
+      nextItem += 1;
+      const stored = { file_id: itemId(nextItem), name: file.name, length: file.size, media_type: "application/octet-stream" };
+      if (batch.into.type === "folder") {
+        const made: FakeItem = {
+          id: itemId(nextItem + 0x100),
+          kind: "file",
+          title: file.name,
+          collection: batch.into.collection,
+          attachments: [stored],
+          modified_at: nowText(),
+        };
+        if (vault !== undefined) vault.items = [...(vault.items ?? []), made];
+      } else {
+        const id = batch.into.id;
+        const holder = vault?.items?.find((item) => item.id === id);
+        if (holder !== undefined) {
+          holder.attachments = [...(holder.attachments ?? []), stored];
+          bump(holder);
+        }
+      }
+      addedFiles.push(file.name);
+    }
+    // A batch that stored anything is one operation of the vault's, so it counts once; one stopped before its first file counts for nothing.
+    if (count > 0) fileOps.push(batch.into.type === "folder" ? { cmd: "add_files", collection: batch.into.collection } : { cmd: "add_files", id: batch.into.id });
+    return { added: count, failed, not_added: notAdded, stopped };
+  };
+
+  /** The next pick: what `pickFilesNext` queued, else the one file `pickNext` names, else a made-up one. */
+  const nextPick = (): PickedEntry[] => {
+    const queued = nextPicks.shift();
+    if (queued !== undefined) return queued;
+    const one = pickedFile ?? { name: "picked-file.pdf", length: 2048 };
+    pickedFile = undefined;
+    return [{ name: one.name, size: one.length }];
+  };
+
+  /** Every stored file of every live item filed in the folder (a file item's own file and every attachment), in the vault's order. */
+  const filesOfFolder = (vault: FakeVault, folder: string): PlannedEntry[] =>
+    (vault.items ?? [])
+      .filter((item) => item.kind !== "collection" && !(item.trashed ?? false) && item.collection === folder)
+      .flatMap((item) =>
+        (item.attachments ?? []).map((file) => ({
+          itemId: item.id,
+          fileId: file.file_id,
+          stored: file.name,
+          name: saveNameOf(file.name),
+          size: file.length,
+          attached_to: item.kind === "file" ? null : item.title,
+        })),
+      );
+
+  /** The checks both steps make, in the shell's order: a folder with no files, then room for the whole batch (an unknown drive never blocks). */
+  const checkSave = (files: PlannedEntry[]): number => {
+    if (files.length === 0) return refuse({ code: "invalid_input", what: "no files" });
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    if (freeSpace !== null && total > freeSpace) return refuse({ code: "core", kind: "not_enough_space", needed: total, available: freeSpace });
+    return total;
+  };
+
+  /** The plan `save_all_files` and its cloud yes answer: the choice is held until the start takes it. */
+  const planSave = (session: number, generation: number, vault: FakeVault, folder: string): unknown => {
+    const files = filesOfFolder(vault, folder);
+    const total = checkSave(files);
+    nextToken += 1;
+    const choice = nextToken.toString(16).padStart(32, "0");
+    savePlans.set(choice, { session, generation, folder, files, total });
+    if (changeAfterPlan) {
+      changeAfterPlan = false;
+      nextItem += 1;
+      const late = { file_id: itemId(nextItem), name: "late-arrival-demo.pdf", length: 2048, media_type: "application/pdf" };
+      vault.items = [...(vault.items ?? []), { id: itemId(nextItem + 0x100), kind: "file", title: late.name, collection: folder, attachments: [late], modified_at: nowText() }];
+    }
+    return tagged(session, generation, {
+      Done: { choice, folder_shown: SAVE_ALL_FOLDER, files: files.map(({ name, size, attached_to }) => ({ name, size, attached_to })), total },
+    });
+  };
+
+  /** Everything `save_all_start` decides before its job starts, in the shell's order; only then is the choice used up. */
+  const startSave = (args: unknown): SaveRun => {
+    const sent = exactly(args, ["choice", "request"]);
+    requestOf(sent);
+    const run = typeof sent.choice === "string" ? savePlans.get(sent.choice) : undefined;
+    if (run === undefined) return refuse(CHOICE_EXPIRED);
+    const vault = vaultFor(run.session, run.generation);
+    const now = filesOfFolder(vault, run.folder);
+    // The files must still be exactly the planned ones (the checks run again at the start).
+    if (now.length !== run.files.length || now.some((file, at) => file.fileId !== run.files[at]?.fileId)) {
+      return refuse({ code: "invalid_input", what: "folder changed" });
+    }
+    checkSave(now);
+    savePlans.delete(sent.choice as string);
+    return run;
+  };
+
+  /**
+   * The save's end: each file in turn is written under a free name (the name rule, then " (2)", " (3)" for one that is taken), left out as damaged
+   * or gone, and the batch goes on; a stop (`cutAt` bytes done when Stop was pressed) or a refusal ends it at the file being written, which leaves
+   * nothing, and every file after it was not started.
+   */
+  const finishSave = (run: SaveRun, cutAt?: number): unknown => {
+    const vault = sessionVault.get(run.session);
+    const saved: { name: string; size: number; attached_to: string | null }[] = [];
+    const renamed: { from: string; to: string }[] = [];
+    const damaged: string[] = [];
+    const gone: string[] = [];
+    const notStarted: string[] = [];
+    let unfinished: string | null = null;
+    let stopped: object | null = null;
+    let sofar = 0;
+    const used = new Set(takenNames);
+    for (const file of run.files) {
+      if (stopped === null && cutAt !== undefined && sofar + file.size > cutAt) {
+        stopped = { code: "cancelled" };
+        unfinished = file.name;
+        continue;
+      }
+      if (stopped === null && batchEnd !== undefined && saved.length >= batchEnd.count) {
+        stopped = batchEnd.refusal;
+        batchEnd = undefined;
+        unfinished = file.name;
+        continue;
+      }
+      if (stopped !== null) {
+        notStarted.push(file.name);
+        continue;
+      }
+      const holder = vault?.items?.find((item) => item.id === file.itemId && !(item.trashed ?? false));
+      if (holder?.attachments?.some((stored) => stored.file_id === file.fileId) !== true || goneNames.includes(file.stored)) {
+        gone.push(file.name);
+        continue;
+      }
+      if ((vault?.damagedFiles ?? []).includes(file.fileId)) {
+        damaged.push(file.name);
+        continue;
+      }
+      let disk = file.name;
+      for (let number = 2; used.has(disk); number += 1) disk = numberedName(file.name, number);
+      used.add(disk);
+      sofar += file.size;
+      saved.push({ name: disk, size: file.size, attached_to: file.attached_to });
+      savedToDisk.push(disk);
+      if (disk !== file.stored) renamed.push({ from: file.stored, to: disk });
+    }
+    takenNames = [];
+    goneNames = [];
+    nextToken += 1;
+    const output = nextToken.toString(16).padStart(32, "0");
+    outputs.set(output, { session: run.session, generation: run.generation, shown: SAVE_ALL_FOLDER });
+    if (saved.length > 0) fileOps.push({ cmd: "save_all_files", collection: run.folder });
+    return { saved, renamed, damaged, gone, unfinished, not_started: notStarted, stopped, folder_shown: SAVE_ALL_FOLDER, output };
+  };
+
   const answer = (cmd: string, args: unknown): unknown => {
     switch (cmd) {
       case "list_vaults":
         exactly(args ?? {}, []);
         if (listDamaged) return refuse(VAULT_LIST_DAMAGED);
-        return vaults.map((v) => ({ id: v.id, name: v.name, available: v.available ?? true }));
+        return vaults.map((v) => ({ id: v.id, name: v.name, available: v.available ?? true, details_damaged: v.detailsDamaged ?? false }));
       case "start_new_vault_list":
         exactly(args ?? {}, []);
         // Only a damaged list is started over: a good one is refused and left as it is.
@@ -1386,13 +2078,17 @@ export function installFakeShell(
       }
       case "open_file":
       case "save_file_copy": {
-        const sent = exactly(args, cmd === "open_file" ? ["session", "generation", "id", "file_id", "confirmed_executable"] : ["session", "generation", "id", "file_id"]) as {
+        const sent = exactly(
+          args,
+          cmd === "open_file" ? ["session", "generation", "id", "file_id", "confirmed_executable"] : ["session", "generation", "id", "file_id", "request"],
+        ) as {
           session: number;
           generation: number;
           id: string;
           file_id: string;
           confirmed_executable?: boolean;
         };
+        if (cmd === "save_file_copy") requestOf(sent);
         const vault = vaultFor(sent.session, sent.generation);
         const holder = vault.items?.find((item) => item.id === sent.id);
         const file = holder?.attachments?.find((stored) => stored.file_id === sent.file_id);
@@ -1418,7 +2114,9 @@ export function installFakeShell(
         return tagged(sent.session, sent.generation, { Done: null });
       }
       case "save_file_copy_confirm": {
-        const { token } = exactly(args, ["token"]) as { token: string };
+        const sent = exactly(args, ["token", "request"]);
+        requestOf(sent);
+        const { token } = sent as { token: string };
         const parked = pendingPdfs.get(token);
         if (parked?.copy === undefined) return refuse({ code: "not_found" });
         pendingPdfs.delete(token);
@@ -1429,8 +2127,13 @@ export function installFakeShell(
       case "add_file":
       case "attach_file":
       case "replace_file": {
-        const keys = { add_file: ["session", "generation", "collection"], attach_file: ["session", "generation", "id"], replace_file: ["session", "generation", "id", "file_id"] };
+        const keys = {
+          add_file: ["session", "generation", "collection", "request"],
+          attach_file: ["session", "generation", "id", "request"],
+          replace_file: ["session", "generation", "id", "file_id"],
+        };
         const sent = exactly(args, keys[cmd]) as { session: number; generation: number; collection?: string | null; id?: string; file_id?: string };
+        if (cmd !== "replace_file") requestOf(sent);
         const vault = vaultFor(sent.session, sent.generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         const holder = cmd === "add_file" ? undefined : vault.items?.find((item) => item.id === sent.id);
@@ -1459,6 +2162,405 @@ export function installFakeShell(
         bump(holder);
         fileOps.push({ cmd, id: sent.id, ...(cmd === "replace_file" ? { file_id: sent.file_id } : {}) });
         return tagged(sent.session, sent.generation, { Done: stored.file_id });
+      }
+      case "test_backup_pick": {
+        const sent = exactly(args, ["choice"]);
+        if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
+        // A closed picker: nothing is picked, and the choice that was sent is left as it was.
+        if (dismissFile) {
+          dismissFile = false;
+          return "Dismissed";
+        }
+        const file = nextBackupPick ?? { name: BACKUP_NAME, size: BACKUP_SIZE };
+        nextBackupPick = undefined;
+        // A new pick forgets the old one.
+        if (typeof sent.choice === "string") testHeld.delete(sent.choice);
+        nextToken += 1;
+        const token = nextToken.toString(16).padStart(32, "0");
+        testHeld.set(token, { ...file, password: BACKUP_PASSWORD });
+        return { Done: { choice: token, file_name: file.name, size: file.size } };
+      }
+      case "forget_test_backup": {
+        const sent = exactly(args, ["choice"]);
+        if (typeof sent.choice !== "string") return refuse(MALFORMED);
+        // Forgetting is idempotent: a token that is unknown or already gone is no error.
+        testHeld.delete(sent.choice);
+        return null;
+      }
+      case "open_backup_pick": {
+        const sent = exactly(args, ["choice"]);
+        if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
+        // A closed picker: nothing is picked, and the choice that was sent is left as it was.
+        if (dismissFile) {
+          dismissFile = false;
+          return "Dismissed";
+        }
+        const file = nextBackupPick ?? { name: BACKUP_NAME, size: BACKUP_SIZE };
+        nextBackupPick = undefined;
+        // A new pick forgets the old one.
+        if (typeof sent.choice === "string") openHeld.delete(sent.choice);
+        nextToken += 1;
+        const token = nextToken.toString(16).padStart(32, "0");
+        openHeld.set(token, { ...file, password: BACKUP_PASSWORD });
+        return { Done: { choice: token, file_name: file.name, size: file.size } };
+      }
+      case "forget_open_backup": {
+        const sent = exactly(args, ["choice"]);
+        if (typeof sent.choice !== "string") return refuse(MALFORMED);
+        // Idempotent, and only an open's own choices: a test's choice is another kind.
+        openHeld.delete(sent.choice);
+        return null;
+      }
+      case "copy_item_to": {
+        const sent = exactly(args, ["from", "from_generation", "id", "to", "to_generation", "folder", "skip_missing"]) as {
+          from: unknown;
+          from_generation: unknown;
+          id: unknown;
+          to: unknown;
+          to_generation: unknown;
+          folder: unknown;
+          skip_missing: unknown;
+        };
+        if (
+          typeof sent.from !== "number" ||
+          typeof sent.from_generation !== "number" ||
+          typeof sent.to !== "number" ||
+          typeof sent.to_generation !== "number" ||
+          typeof sent.id !== "string" ||
+          (sent.folder !== null && typeof sent.folder !== "string") ||
+          typeof sent.skip_missing !== "boolean"
+        ) {
+          return refuse(MALFORMED);
+        }
+        // Either session locked or foreign (a stale generation) is the shell's `locked`, before anything else is looked at.
+        const source = vaultFor(sent.from, sent.from_generation);
+        const target = vaultFor(sent.to, sent.to_generation);
+        if (target.readOnly ?? false) return refuse({ code: "read_only" });
+        const item = source.items?.find((one) => one.id === sent.id && one.kind !== "collection" && !(one.trashed ?? false));
+        if (item === undefined) return refuse({ code: "core", kind: "not_found" });
+        // The folder is the target's own, by the engine's rule: one that is not in it, or is in its trash, is refused before anything is written.
+        if (sent.folder !== null && target.items?.find((one) => one.id === sent.folder && one.kind === "collection" && !(one.trashed ?? false)) === undefined) {
+          return refuse({ code: "core", kind: "invalid_input", what: "collection" });
+        }
+        const lacking = item.missingFiles ?? [];
+        if (lacking.length > 0 && !sent.skip_missing) {
+          return tagged(sent.to, sent.to_generation, { Confirm: { MissingFiles: { names: [...lacking] } } });
+        }
+        nextItem += 1;
+        const made: FakeItem = {
+          ...item,
+          id: itemId(nextItem),
+          collection: sent.folder,
+          attachments: (item.attachments ?? []).filter((file) => !lacking.includes(file.name)).map((file) => ({ ...file })),
+          missingFiles: undefined,
+          modified_at: nowText(),
+        };
+        target.items = [...(target.items ?? []), made];
+        copiedOut.push({ from: sent.from, to: sent.to, id: sent.id, folder: sent.folder, skipMissing: sent.skip_missing, newId: made.id });
+        return tagged(sent.to, sent.to_generation, { Done: { id: made.id, left_out: [...lacking] } });
+      }
+      case "restore_pick": {
+        const sent = exactly(args, ["choice", "vault"]);
+        if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
+        if (sent.vault !== null && typeof sent.vault !== "number") return refuse(MALFORMED);
+        // A vault that is not listed is refused, and nothing is picked.
+        if (typeof sent.vault === "number" && !vaults.some((v) => v.id === sent.vault)) return refuse({ code: "not_found" });
+        if (dismissFile) {
+          dismissFile = false;
+          return "Dismissed";
+        }
+        const file = nextBackupPick ?? { name: BACKUP_NAME, size: BACKUP_SIZE };
+        nextBackupPick = undefined;
+        // A new pick forgets the old one.
+        if (typeof sent.choice === "string") restoreHeld.delete(sent.choice);
+        nextToken += 1;
+        const token = nextToken.toString(16).padStart(32, "0");
+        restoreHeld.set(token, { ...file, checked: undefined, vault: sent.vault });
+        return { Done: { choice: token, file_name: file.name, size: file.size } };
+      }
+      case "restore_check": {
+        const sent = exactly(args, ["choice", "credential"]);
+        const credential = sent.credential;
+        if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
+        const text = (credential as { password_or_key?: unknown }).password_or_key;
+        if (typeof text !== "string" || typeof sent.choice !== "string") return refuse(MALFORMED);
+        const held = restoreHeld.get(sent.choice);
+        if (held === undefined) return refuse(CHOICE_EXPIRED);
+        // A wrong password keeps the pick, and what was checked before is left as it was.
+        if (text !== BACKUP_PASSWORD) return refuse(WRONG_PASSWORD);
+        if (damage !== undefined) {
+          const { what } = damage;
+          damage = undefined;
+          return refuse({ code: "core", kind: "damaged", ...(what === undefined ? {} : { what }) });
+        }
+        // A pick made for a vault goes in that vault's folder, which is not the usual one.
+        held.checked = { ...restoreFound, usual: held.vault === null ? (held.checked?.usual ?? true) : false };
+        return restoreViewOf(held);
+      }
+      case "restore_notice": {
+        exactly(args ?? {}, []);
+        return restoreNoticeNow ?? noticeOfLaunch();
+      }
+      case "retry_restore_recovery": {
+        exactly(args ?? {}, []);
+        const found = retryAnswers.shift() ?? restoreNoticeNow ?? noticeOfLaunch();
+        restoreNoticeNow = found;
+        return found;
+      }
+      case "dismiss_restore": {
+        const sent = exactly(args, ["confirm"]);
+        if (typeof sent.confirm !== "boolean") return refuse(MALFORMED);
+        if (!sent.confirm) return { Confirm: { Dismissal: { leaves: { staging: "C:\\Vaults\\demo.restore", before_restore: null } } } };
+        restoreNoticeNow = { state: "none" };
+        launchNotices = launchNotices.filter((notice) => (notice as { kind?: unknown }).kind !== "restore");
+        return { Done: null };
+      }
+      case "restore_choose_folder": {
+        const sent = exactly(args, ["choice"]);
+        if (typeof sent.choice !== "string") return refuse(MALFORMED);
+        const held = restoreHeld.get(sent.choice);
+        if (held?.checked === undefined) return refuse(CHOICE_EXPIRED);
+        if (dismissFile) {
+          dismissFile = false;
+          return "Dismissed";
+        }
+        held.checked.usual = false;
+        return { Done: restoreViewOf(held) };
+      }
+      case "forget_restore_pick": {
+        const sent = exactly(args, ["choice"]);
+        if (typeof sent.choice !== "string") return refuse(MALFORMED);
+        restoreHeld.delete(sent.choice);
+        return null;
+      }
+      case "restore_discard": {
+        const sent = exactly(args, ["restore"]);
+        if (typeof sent.restore !== "number") return refuse(MALFORMED);
+        restorePrepared.delete(sent.restore);
+        restoreDiscarded.push(sent.restore);
+        return null;
+      }
+      case "list_pre_restore": {
+        exactly(args ?? {}, []);
+        // Every listing replaces every ID.
+        olderListed.clear();
+        return olderHeld.map((copy) => {
+          nextOlderId += 1;
+          olderListed.set(nextOlderId, copy);
+          return {
+            id: nextOlderId,
+            vault: copy.vault,
+            name: copy.name === undefined ? (vaults.find((v) => v.id === copy.vault)?.name ?? null) : copy.name,
+            folder: copy.folder,
+            last_written: copy.last_written === undefined ? "2026-11-04" : copy.last_written,
+            size: copy.size === undefined ? 5 * 1024 * 1024 : copy.size,
+          };
+        });
+      }
+      case "open_pre_restore_read_only": {
+        const sent = exactly(args, ["id", "credential"]);
+        const credential = sent.credential;
+        const form = typeof credential === "object" && credential !== null ? Object.keys(credential) : [];
+        if (typeof sent.id !== "number" || form.length !== 1 || !["password", "recovery_key", "password_or_key"].includes(form[0] ?? "")) return refuse(MALFORMED);
+        const text = (credential as Record<string, unknown>)[form[0] ?? ""];
+        if (typeof text !== "string") return refuse(MALFORMED);
+        const copy = olderListed.get(sent.id);
+        if (copy === undefined) return refuse({ code: "not_found" });
+        if (text !== (copy.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        // A session open on the copy already is the one answered; else the copy is a read-only vault of its own, beside the live one and not on the list.
+        const open = [...olderSessions].find(([session, folder]) => folder === copy.folder && live.get(session)?.unlocked === true);
+        if (open !== undefined) {
+          const opened = live.get(open[0]);
+          if (opened !== undefined) {
+            return tagged(opened.session, opened.generation, {
+              ...infoOf(sessionVault.get(opened.session) as FakeVault, opened.session, opened.generation),
+              header_changed: false,
+            });
+          }
+        }
+        const vault: FakeVault = {
+          id: -nextOlderId,
+          name: copy.name === undefined ? (vaults.find((v) => v.id === copy.vault)?.name ?? "") : copy.name,
+          password: copy.password,
+          readOnly: true,
+          kind: "older_copy",
+          items: sampleItems(),
+        };
+        nextSession += 1;
+        const entry: Live = { session: nextSession, generation: 1, unlocked: true };
+        live.set(nextSession, entry);
+        sessionVault.set(nextSession, vault);
+        olderSessions.set(nextSession, copy.folder);
+        return tagged(nextSession, entry.generation, { ...infoOf(vault, nextSession, entry.generation), header_changed: copy.headerChanged ?? false });
+      }
+      case "delete_pre_restore": {
+        const sent = exactly(args, ["id", "confirm"]);
+        if (typeof sent.id !== "number" || typeof sent.confirm !== "boolean") return refuse(MALFORMED);
+        const copy = olderListed.get(sent.id);
+        if (copy === undefined) return refuse({ code: "not_found" });
+        // A session open on the copy (or an open under way) keeps it, before the question and again before the delete.
+        const inUse = olderOpenElsewhere.has(copy.folder) || [...olderSessions].some(([session, folder]) => folder === copy.folder && live.get(session)?.unlocked === true);
+        if (inUse) return refuse({ code: "busy", what: "folder is open" });
+        if (!sent.confirm) return { Confirm: "DeletePreRestore" };
+        olderHeld = olderHeld.filter((other) => other !== copy);
+        olderListed.delete(sent.id);
+        olderDeleted.push(copy.folder);
+        return { Done: null };
+      }
+      case "backup_vault": {
+        const sent = exactly(args, ["session", "generation", "request"]) as { session: number; generation: number };
+        requestOf(sent);
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The save dialog, closed without a choice: nothing is written and no date is kept.
+        if (dismissFile) {
+          dismissFile = false;
+          return tagged(sent.session, sent.generation, "Dismissed");
+        }
+        const live = (vault.items ?? []).filter((item) => item.kind !== "collection" && !(item.trashed ?? false));
+        const view = {
+          items: live.length,
+          files: live.reduce((total, item) => total + (item.attachments?.length ?? 0), 0),
+          damaged_items: 0,
+          damaged_files: 0,
+          missing_files: 0,
+          size_on_disk: 1_288_490_188,
+          ...vault.backupView,
+        };
+        fileOps.push({ cmd });
+        // The shell writes the vault's last backup date on success only.
+        vault.backupDays = undefined;
+        // And parks the backup it wrote for 22c's Test this backup, which opens it with this vault's password (the one it was made with).
+        nextToken += 1;
+        const token = nextToken.toString(16).padStart(32, "0");
+        const name = `${vault.name ?? "Vault"} ${BACKUP_DAY}.lockbox-backup`;
+        testHeld.set(token, { name, size: view.size_on_disk, password: vault.password ?? PASSWORD });
+        lastBackup = { name, choice: token };
+        return tagged(sent.session, sent.generation, { Done: { ...view, test: { choice: token, file_name: name, size: view.size_on_disk } } });
+      }
+      case "vault_backup_due": {
+        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const vault = vaultFor(session, generation);
+        const days = vault.backupDays;
+        // Never for a read-only copy; due from 30 whole days.
+        return tagged(session, generation, (vault.readOnly ?? false) || days === undefined || days < 30 ? null : { days });
+      }
+      case "pick_files_to_add": {
+        const sent = exactly(args, ["session", "generation", "choice"]) as { session: number; generation: number; choice: unknown };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if (sent.choice !== null && typeof sent.choice !== "string") return refuse(MALFORMED);
+        // A bad choice is refused before any dialog opens.
+        const held = sent.choice === null ? undefined : choiceOf(sent.choice, sent.session, sent.generation);
+        if (dismissFile) {
+          dismissFile = false;
+          // Nothing was picked: a new choice is not made, and Pick more keeps its list as it was.
+          return tagged(sent.session, sent.generation, held === undefined ? "Dismissed" : { Done: { choice: sent.choice, files: held.files.map((file) => ({ ...file })) } });
+        }
+        const picked = nextPick();
+        let token = sent.choice;
+        if (held === undefined) {
+          nextToken += 1;
+          token = nextToken.toString(16).padStart(32, "0");
+          choices.set(token, { session: sent.session, generation: sent.generation, files: picked });
+        } else {
+          held.files.push(...picked);
+        }
+        const now = choices.get(token as string)?.files ?? [];
+        return tagged(sent.session, sent.generation, { Done: { choice: token, files: now.map((file) => ({ ...file })) } });
+      }
+      case "remove_picked_file": {
+        const sent = exactly(args, ["session", "generation", "choice", "index"]) as { session: number; generation: number; choice: unknown; index: unknown };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const held = choiceOf(sent.choice, sent.session, sent.generation);
+        if (typeof sent.index !== "number" || !Number.isInteger(sent.index) || sent.index < 0 || sent.index >= held.files.length) return refuse(NO_SUCH_PICK);
+        held.files.splice(sent.index, 1);
+        return tagged(sent.session, sent.generation, { Done: { files: held.files.map((file) => ({ ...file })) } });
+      }
+      case "add_files": {
+        const request = (args as { request?: unknown } | null)?.request;
+        const taken = typeof request === "number" ? batches.get(request) : undefined;
+        const batch = taken ?? startBatch(args);
+        if (typeof request === "number") batches.delete(request);
+        // A lock between the job's start and its end leaves a refusal, and nothing is written.
+        vaultFor(batch.session, batch.generation);
+        return tagged(batch.session, batch.generation, { Done: finishBatch(batch) });
+      }
+      case "save_all_files": {
+        const sent = exactly(args, ["session", "generation", "folder"]) as { session: number; generation: number; folder: string };
+        // A read-only vault saves too (as Save a copy does): no refusal for it here.
+        const vault = vaultFor(sent.session, sent.generation);
+        if (vault.items?.find((item) => item.id === sent.folder && item.kind === "collection" && !(item.trashed ?? false)) === undefined) {
+          return refuse({ code: "core", kind: "not_found" });
+        }
+        // The count in the picker's title is the shell's own: a folder with no files is refused before any dialog opens.
+        if (filesOfFolder(vault, sent.folder).length === 0) return refuse({ code: "invalid_input", what: "no files" });
+        if (dismissFile) {
+          dismissFile = false;
+          return tagged(sent.session, sent.generation, "Dismissed");
+        }
+        // A cloud-synced folder asks first, before anything is checked further or written: the folder waits under a token.
+        if (cloudPdf > 0) {
+          cloudPdf -= 1;
+          nextToken += 1;
+          const token = `save-all-token-${String(nextToken)}`;
+          parkedSaves.set(token, { session: sent.session, generation: sent.generation, folder: sent.folder });
+          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token } } });
+        }
+        return planSave(sent.session, sent.generation, vault, sent.folder);
+      }
+      case "save_all_files_confirm": {
+        const { token } = exactly(args, ["token"]);
+        const parked = typeof token === "string" ? parkedSaves.get(token) : undefined;
+        // A token that is used, old, dropped by a lock or another kind's is the shell's `choice_expired`.
+        if (parked === undefined) return refuse(CHOICE_EXPIRED);
+        parkedSaves.delete(token as string);
+        // The checks run again on the yes.
+        return planSave(parked.session, parked.generation, vaultFor(parked.session, parked.generation), parked.folder);
+      }
+      case "save_all_start": {
+        const request = (args as { request?: unknown } | null)?.request;
+        const taken = typeof request === "number" ? saveRuns.get(request) : undefined;
+        const run = taken ?? startSave(args);
+        if (typeof request === "number") saveRuns.delete(request);
+        // A lock between the job's start and its end leaves a refusal, and nothing is written.
+        vaultFor(run.session, run.generation);
+        return tagged(run.session, run.generation, { Done: finishSave(run) });
+      }
+      case "show_output_in_explorer": {
+        const { output } = exactly(args, ["output"]);
+        const held = typeof output === "string" ? outputs.get(output) : undefined;
+        if (held === undefined) return refuse(CHOICE_EXPIRED);
+        if (explorerFails) {
+          explorerFails = false;
+          return refuse({ code: "io" });
+        }
+        openedFolders.push(held.shown);
+        return null;
+      }
+      case "close_output": {
+        const { output } = exactly(args, ["output"]);
+        if (typeof output === "string") outputs.delete(output);
+        return null;
+      }
+      case "cancel_operation": {
+        const sent = exactly(args, ["operation", "scope"]) as { operation: number; scope: RunningJob["scope"] };
+        const job = running.get(sent.operation);
+        // A scope the page names wrongly, a vault that has locked since, and a job that is over or was never here are each refused, and nothing is stopped.
+        if (job === undefined) return refuse({ code: "not_found" });
+        if (job.scope.type === "launch") {
+          // A launch's job (a test of a backup) is named by the lock epoch it began in.
+          if (sent.scope.type !== "launch" || sent.scope.epoch !== job.scope.epoch) return refuse({ code: "not_found" });
+          job.cancel();
+          return null;
+        }
+        if (sent.scope.type !== "session" || sent.scope.session !== job.scope.session || sent.scope.generation !== job.scope.generation) {
+          return refuse({ code: "not_found" });
+        }
+        vaultFor(job.scope.session, job.scope.generation);
+        job.cancel();
+        return null;
       }
       case "retry_open_cleanup": {
         exactly(args ?? {}, []);
@@ -1880,6 +2982,18 @@ export function installFakeShell(
         closeExplainedCalls += 1;
         explained();
         return null;
+      case "close_answer": {
+        const { go } = exactly(args, ["go"]);
+        if (typeof go !== "boolean") return refuse(MALFORMED);
+        // No question pending, or a second answer: refused, with nothing done.
+        if (pendingClose === undefined) return refuse({ code: "not_found" });
+        const reason = pendingClose;
+        pendingClose = undefined;
+        closeAnswers.push(go);
+        if (go && reason === "close") closeAsBefore();
+        if (go && reason === "quit") quits += 1;
+        return null;
+      }
       case "lock_vault": {
         const { session } = exactly(args, ["session"]) as { session: number };
         lock(session);
@@ -1888,12 +3002,348 @@ export function installFakeShell(
       case "lock_all":
         exactly(args ?? {}, []);
         for (const session of [...live.keys()]) lock(session);
-        // Every all-vault lock empties the slot, even with no vault open.
+        // Every all-vault lock empties the slot, even with no vault open, and moves the lock epoch (which drops what the launch holds).
         emptySlot();
+        bumpEpoch();
         return null;
       default:
         throw new Error(`the fake shell has no command ${cmd}`);
     }
+  };
+
+  /**
+   * Test a backup, as the shell does it: the arguments are checked and the credential read as one box's (`password_or_key`); a choice that is not held
+   * is `choice_expired`; only then does the job begin (launch-scoped, kind `test`, `lockbox://job-started` before the answer). It ends when the answer is
+   * decided (held until released with `holdTest`): a Cancel answers `cancelled`; a lock epoch that moved meanwhile refuses `locked`; a wrong password is
+   * `wrong_password`; a damaged backup is `damaged` with the first failing `what`; else the summary. The choice is kept by every one of these.
+   */
+  const testBackupCommand = (args: unknown): Promise<unknown> => {
+    const sent = exactly(args, ["choice", "credential", "request"]);
+    const request = requestOf(sent);
+    const credential = sent.credential;
+    if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
+    const text = (credential as { password_or_key?: unknown }).password_or_key;
+    if (typeof text !== "string" || typeof sent.choice !== "string") return refuse(MALFORMED);
+    const held = testHeld.get(sent.choice);
+    if (held === undefined) return refuse(CHOICE_EXPIRED);
+    const epoch = lockEpoch;
+    nextOperation += 1;
+    const job: RunningJob = {
+      request,
+      operation: nextOperation,
+      scope: { type: "launch", epoch },
+      kind: "test",
+      done: 0,
+      total: held.size,
+      cancel: () => undefined,
+    };
+    running.set(job.operation, job);
+    const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
+    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    else heldStarts.push(() => {
+      emit("lockbox://job-started", startedEvent);
+    });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const end = (cancelled: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (running.delete(job.operation)) {
+          if (!cancelled) job.done = job.total;
+          emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+        }
+        const found = ((): { refused: object } | { done: object } => {
+          if (cancelled) return { refused: { code: "cancelled" } };
+          if (lockEpoch !== epoch) return { refused: LOCKED };
+          if (text !== held.password) return { refused: WRONG_PASSWORD };
+          if (damage !== undefined) {
+            const { what } = damage;
+            damage = undefined;
+            return { refused: { code: "core", kind: "damaged", ...(what === undefined ? {} : { what }) } };
+          }
+          return { done: { created_at: "2026-10-02T12:00:00Z", items: 24, files: 6, missing_files: 0, size_on_disk: held.size, ...summaryMade } };
+        })();
+        if ("refused" in found) {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+          reject(found.refused);
+        } else {
+          resolve({ Done: found.done });
+        }
+      };
+      job.cancel = () => {
+        end(true);
+      };
+      if (heldTests === undefined) end(false);
+      else heldTests.push(() => {
+        end(false);
+      });
+    });
+  };
+
+  /**
+   * Open a backup read-only, as the shell does it: the arguments are checked and the credential read as one box's (`password_or_key`); a choice that is not
+   * held (or is a test's) is `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `open_backup`, `lockbox://job-started` before
+   * the answer). It ends when the answer is decided (held until released with `holdOpen`): a Cancel answers `cancelled`; a lock epoch that moved meanwhile
+   * refuses `locked` (the choice went with it); a wrong password is `wrong_password`; a damaged backup is `damaged`; else the backup is a read-only session whose
+   * name is the file's name without `.lockbox-backup`, and the choice is used up. A wrong password, damage and a Stop keep the choice. A backup that is open
+   * already is answered as it is (and its choice is used up too).
+   */
+  const openBackupCommand = (args: unknown): Promise<unknown> => {
+    const sent = exactly(args, ["choice", "credential", "request"]);
+    const request = requestOf(sent);
+    const credential = sent.credential;
+    if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
+    const text = (credential as { password_or_key?: unknown }).password_or_key;
+    if (typeof text !== "string" || typeof sent.choice !== "string") return refuse(MALFORMED);
+    const token = sent.choice;
+    const held = openHeld.get(token);
+    if (held === undefined) return refuse(CHOICE_EXPIRED);
+    const epoch = lockEpoch;
+    nextOperation += 1;
+    const job: RunningJob = {
+      request,
+      operation: nextOperation,
+      scope: { type: "launch", epoch },
+      kind: "open_backup",
+      done: 0,
+      total: held.size,
+      cancel: () => undefined,
+    };
+    running.set(job.operation, job);
+    const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
+    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    else heldStarts.push(() => {
+      emit("lockbox://job-started", startedEvent);
+    });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const end = (cancelled: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (running.delete(job.operation)) {
+          if (!cancelled) job.done = job.total;
+          emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+        }
+        if (cancelled) {
+          rejectPlain(reject, { code: "cancelled" });
+          return;
+        }
+        if (lockEpoch !== epoch) {
+          // The lock took the choice with it.
+          openHeld.delete(token);
+          rejectPlain(reject, LOCKED);
+          return;
+        }
+        if (text !== held.password) {
+          rejectPlain(reject, WRONG_PASSWORD);
+          return;
+        }
+        if (damage !== undefined) {
+          const { what } = damage;
+          damage = undefined;
+          rejectPlain(reject, { code: "core", kind: "damaged", ...(what === undefined ? {} : { what }) });
+          return;
+        }
+        // The choice is used up by a session opened, and by one that was open already.
+        openHeld.delete(token);
+        const already = [...backupSessions].find(([session, name]) => name === held.name && live.get(session)?.unlocked === true);
+        if (already !== undefined) {
+          const state = live.get(already[0]);
+          if (state !== undefined) {
+            resolve({ Done: tagged(state.session, state.generation, infoOf(sessionVault.get(state.session) as FakeVault, state.session, state.generation)) });
+            return;
+          }
+        }
+        const vault: FakeVault = {
+          id: -(nextSession + 1),
+          name: held.name.replace(/\.lockbox-backup$/, ""),
+          password: held.password,
+          readOnly: true,
+          kind: "backup",
+          items: (backupItems ?? sampleItems()).map((one) => ({ ...one, missingFiles: one.missingFiles === undefined ? undefined : [...one.missingFiles] })),
+        };
+        nextSession += 1;
+        const entry: Live = { session: nextSession, generation: 1, unlocked: true };
+        live.set(nextSession, entry);
+        sessionVault.set(nextSession, vault);
+        backupSessions.set(nextSession, held.name);
+        resolve({ Done: tagged(nextSession, entry.generation, infoOf(vault, nextSession, entry.generation)) });
+      };
+      job.cancel = () => {
+        end(true);
+      };
+      if (heldOpens === undefined) end(false);
+      else heldOpens.push(() => {
+        end(false);
+      });
+    });
+  };
+
+  /** Rejects as Tauri does, with the plain object the refusal was serialised to. */
+  const rejectPlain = (reject: (reason?: unknown) => void, error: object): void => {
+    reject(error);
+  };
+
+  /** One long step of a restore as a launch-scoped job of kind `restore`: `job-started` goes out as the command begins, as it does for a test. */
+  const restoreJob = (request: number, total: number, pastTheSwap: boolean): { job: RunningJob; epoch: number } => {
+    const epoch = lockEpoch;
+    nextOperation += 1;
+    const job: RunningJob = {
+      request,
+      operation: nextOperation,
+      scope: { type: "launch", epoch },
+      kind: "restore",
+      done: 0,
+      total,
+      cancel: () => undefined,
+      ...(pastTheSwap ? { pastTheSwap: true } : {}),
+    };
+    running.set(job.operation, job);
+    const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
+    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    else heldStarts.push(() => {
+      emit("lockbox://job-started", startedEvent);
+    });
+    return { job, epoch };
+  };
+
+  /** The copy, from the pick the shell holds: ends as a Cancel, a lock epoch, a refusal of its own or its finish decide, and forgets the pick unless refused. */
+  const restoreCopy = (choice: string, request: number): Promise<unknown> => {
+    const checked = restoreHeld.get(choice)?.checked;
+    if (checked === undefined) return refuse(CHOICE_EXPIRED);
+    const size = restoreHeld.get(choice)?.size ?? 0;
+    const { job, epoch } = restoreJob(request, size, false);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const end = (cancelled: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (running.delete(job.operation)) {
+          if (!cancelled) job.done = job.total;
+          emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+        }
+        if (cancelled) {
+          // A Stop lets the pick go.
+          restoreHeld.delete(choice);
+          rejectPlain(reject, { code: "cancelled" });
+        } else if (lockEpoch !== epoch) {
+          rejectPlain(reject, LOCKED);
+        } else if (restoreCopyRefusal !== undefined) {
+          const refusal = restoreCopyRefusal;
+          restoreCopyRefusal = undefined;
+          // The archive that was opened is not the one that was checked: nothing is copied, and the shell forgets the pick (and the credential with it).
+          const changed = (refusal as { what?: unknown }).what === "backup changed";
+          if (changed) restoreHeld.delete(choice);
+          rejectPlain(reject, refusal);
+        } else {
+          // The copy is made: the prepared restore holds what it needs, so the pick goes. Its name is the archive's the copy opened.
+          restoreHeld.delete(choice);
+          nextRestore += 1;
+          const name = restoreCopyName ?? checked.name;
+          restoreCopyName = undefined;
+          restorePrepared.set(nextRestore, { name, replaces: checked.replaces, keptAs: checked.keptAs, ended: false });
+          // The vault it replaces, as its place on the list (the swap's own find: the one with the archive's name, else the first).
+          const replaced = checked.replaces ? (vaults.find((v) => v.name === name) ?? vaults[0])?.id ?? null : null;
+          const view = {
+            Done: { restore: nextRestore, name, replaces_existing: checked.replaces, kept_as: checked.replaces ? checked.keptAs : null, replaces: replaced },
+          };
+          // The answer can be on its way when a lock lands: the copy is done and the shell has decided, but the page has not heard.
+          if (heldRestoreAnswers === undefined) resolve(view);
+          else heldRestoreAnswers.push(() => {
+            resolve(view);
+          });
+        }
+      };
+      job.cancel = () => {
+        end(true);
+      };
+      if (heldRestoreCopies === undefined) end(false);
+      else heldRestoreCopies.push(() => {
+        end(false);
+      });
+    });
+  };
+
+  /** `restore_prepare` and its confirm: the question first when one is set, else the copy. */
+  const restorePrepareCommand = (cmd: string, args: unknown): Promise<unknown> => {
+    if (cmd === "restore_prepare") {
+      const sent = exactly(args, ["choice", "request"]);
+      const request = requestOf(sent);
+      if (typeof sent.choice !== "string") return refuse(MALFORMED);
+      const checked = restoreHeld.get(sent.choice)?.checked;
+      if (checked === undefined) return refuse(CHOICE_EXPIRED);
+      if (restoreRecovery !== undefined) return recoveryAnswer();
+      if (restoreQuestion !== undefined) {
+        const kind = restoreQuestion;
+        restoreQuestion = undefined;
+        nextToken += 1;
+        const token = `restore-token-${String(nextToken)}`;
+        restoreAsked.set(token, sent.choice);
+        return Promise.resolve({
+          Confirm: kind === "cloud" ? { CloudFolder: { token } } : { NewFolder: { suggested: `${checked.name} (restored)`, token } },
+        });
+      }
+      return restoreCopy(sent.choice, request);
+    }
+    const sent = exactly(args, ["token", "name", "request"]);
+    const request = requestOf(sent);
+    if (typeof sent.token !== "string" || (sent.name !== null && typeof sent.name !== "string")) return refuse(MALFORMED);
+    const choice = restoreAsked.get(sent.token);
+    if (choice === undefined) return refuse(CHOICE_EXPIRED);
+    restoreAsked.delete(sent.token);
+    if (restoreRecovery !== undefined) return recoveryAnswer();
+    restoreNames.push(sent.name);
+    return restoreCopy(choice, request);
+  };
+
+  /** An unfinished restore's journal is still there: the shell ran its recovery and answers what it found, instead of a copy. */
+  const recoveryAnswer = (): Promise<unknown> => {
+    const notice = restoreRecovery;
+    restoreRecovery = undefined;
+    restoreNoticeNow = notice;
+    return Promise.resolve({ Confirm: { Recovery: { notice } } });
+  };
+
+  /** The swap: a job with progress and no Stop. It ends the vault it replaces (that vault locks, reason `restore`) or adds the restored one to the list. */
+  const restoreCommitCommand = (args: unknown): Promise<unknown> => {
+    const sent = exactly(args, ["restore", "request"]);
+    const request = requestOf(sent);
+    if (typeof sent.restore !== "number") return refuse(MALFORMED);
+    const copy = restorePrepared.get(sent.restore);
+    if (copy === undefined || copy.ended) return refuse({ code: "cancelled" });
+    const { job } = restoreJob(request, 1, true);
+    emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: 0, total: 1, finished: false });
+    return new Promise((resolve, reject) => {
+      const end = (): void => {
+        running.delete(job.operation);
+        job.done = 1;
+        emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: 1, total: 1, finished: true });
+        if (restoreCommitRefusal !== undefined) {
+          const refusal = restoreCommitRefusal;
+          restoreCommitRefusal = undefined;
+          rejectPlain(reject, refusal);
+          return;
+        }
+        restorePrepared.delete(sent.restore as number);
+        let vaultId: number;
+        if (copy.replaces) {
+          const target = vaults.find((v) => v.name === copy.name) ?? vaults[0];
+          if (target === undefined) {
+            rejectPlain(reject, { code: "cancelled" });
+            return;
+          }
+          target.password = BACKUP_PASSWORD;
+          vaultId = target.id;
+          for (const [session] of [...live.entries()]) if (sessionVault.get(session) === target) lock(session, "restore");
+        } else {
+          vaultId = Math.max(0, ...vaults.map((v) => v.id)) + 1;
+          vaults.push({ id: vaultId, name: copy.name, password: BACKUP_PASSWORD, items: [] });
+        }
+        resolve({ vault: vaultId, before_restore: copy.replaces });
+      };
+      if (heldRestoreSwaps === undefined) end();
+      else heldRestoreSwaps.push(end);
+    });
   };
 
   invoke.mockImplementation((cmd: string, args?: unknown) => {
@@ -1905,6 +3355,96 @@ export function installFakeShell(
       refusals.delete(cmd);
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
       return Promise.reject(refusal);
+    }
+    if (cmd === "test_backup") {
+      try {
+        return testBackupCommand(args);
+      } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+        return Promise.reject(error);
+      }
+    }
+    if (cmd === "copy_item_to" && heldCopies !== undefined) {
+      // Decided (and written) now, as the shell does; the answer comes when it is let go.
+      const waiting = heldCopies;
+      try {
+        const decided = answer(cmd, args);
+        return new Promise((resolve) => {
+          waiting.push(() => {
+            resolve(decided);
+          });
+        });
+      } catch (error) {
+        return new Promise((_, reject) => {
+          waiting.push(() => {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          });
+        });
+      }
+    }
+    if (cmd === "open_backup_read_only") {
+      try {
+        return openBackupCommand(args);
+      } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+        return Promise.reject(error);
+      }
+    }
+    if (cmd === "restore_prepare" || cmd === "restore_prepare_confirm" || cmd === "restore_commit") {
+      try {
+        return cmd === "restore_commit" ? restoreCommitCommand(args) : restorePrepareCommand(cmd, args);
+      } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+        return Promise.reject(error);
+      }
+    }
+    const heldOlder =
+      cmd === "list_pre_restore"
+        ? heldOlderListings
+        : cmd === "open_pre_restore_read_only"
+          ? heldOlderOpens
+          : cmd === "delete_pre_restore"
+            ? heldOlderDeletes
+            : undefined;
+    if (heldOlder !== undefined) {
+      // Decided when it is let go.
+      return new Promise((resolve, reject) => {
+        heldOlder.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            rejectPlain(reject, error as object);
+          }
+        });
+      });
+    }
+    if (cmd === "restore_check" && heldRestoreChecks !== undefined) {
+      // Unlocking the backup takes a moment: it is decided when it is let go.
+      const waiting = heldRestoreChecks;
+      return new Promise((resolve, reject) => {
+        waiting.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            rejectPlain(reject, error as object);
+          }
+        });
+      });
+    }
+    if ((cmd === "test_backup_pick" || cmd === "open_backup_pick" || cmd === "restore_pick") && heldPicker !== undefined) {
+      // The picker stays open: the pick is made when it closes.
+      const waiting = heldPicker;
+      return new Promise((resolve, reject) => {
+        waiting.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          }
+        });
+      });
     }
     if (
       heldPrint !== undefined &&
@@ -1942,11 +3482,50 @@ export function installFakeShell(
       const waiting = heldFiles;
       // A command that carries a session names it; the cloud question's yes names it by the copy it parked.
       const parkedFor = typeof args === "object" && args !== null && "token" in args ? pendingPdfs.get(args.token as string) : undefined;
-      const session = typeof args === "object" && args !== null && "session" in args ? (args.session as number) : (parkedFor?.session ?? null);
+      // A save's start carries only its choice and request: the session is the plan's, and it is checked, and the choice used up, before its job starts.
+      let run: SaveRun | undefined;
+      if (cmd === "save_all_start") {
+        try {
+          run = startSave(args);
+        } catch (error) {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+          return Promise.reject(error);
+        }
+        saveRuns.set((args as { request: number }).request, run);
+      }
+      const session = typeof args === "object" && args !== null && "session" in args ? (args.session as number) : (parkedFor?.session ?? run?.session ?? null);
+      // A command that takes a request becomes a job in the table once its work starts, and the page is told before the first progress and the answer.
+      const request = typeof args === "object" && args !== null && "request" in args && typeof args.request === "number" ? args.request : undefined;
+      const generation = typeof args === "object" && args !== null && "generation" in args ? (args.generation as number) : (parkedFor?.generation ?? run?.generation);
+      // A batch is checked, and its choice used up, before its job starts: a refusal then starts no job and sends no `job-started`.
+      let batch: Batch | undefined;
+      if (cmd === "add_files") {
+        try {
+          batch = startBatch(args);
+        } catch (error) {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+          return Promise.reject(error);
+        }
+        if (request !== undefined) batches.set(request, batch);
+      }
+      let job: RunningJob | undefined;
+      if (Object.hasOwn(JOB_KIND, cmd) && request !== undefined && session !== null && generation !== undefined) {
+        nextOperation += 1;
+        job = {
+          request,
+          operation: nextOperation,
+          scope: { type: "session", session, generation },
+          kind: JOB_KIND[cmd] ?? "import",
+          done: 0,
+          total: run?.total ?? batch?.total ?? 0,
+          cancel: () => undefined,
+        };
+        running.set(job.operation, job);
+        emit("lockbox://job-started", { request, operation: job.operation, scope: job.scope, kind: job.kind });
+      }
       emit("lockbox://busy", { session, operations: [OPERATION[cmd]] });
       return new Promise((resolve, reject) => {
-        waiting.push(() => {
-          emit("lockbox://busy", { session, operations: [] });
+        const settle = (): void => {
           const late = refusals.get(cmd);
           if (late !== undefined) {
             refusals.delete(cmd);
@@ -1960,6 +3539,55 @@ export function installFakeShell(
             // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
             reject(error);
           }
+        };
+        let settled = false;
+        const end = (cancelled: boolean): void => {
+          if (settled) return;
+          settled = true;
+          // The job's last event says it ended, with the whole of it done on success; a lock has already sent its own.
+          if (job !== undefined && running.delete(job.operation)) {
+            if (!cancelled) job.done = job.total;
+            emit("lockbox://progress", { operation: job.operation, scope: job.scope, kind: job.kind, done: job.done, total: job.total, finished: true });
+          }
+          emit("lockbox://busy", { session, operations: [] });
+          if (cancelled && batch !== undefined && request !== undefined) {
+            // A Stop on a batch is not a refusal: the files before it stay stored, and the answer says what went in and what did not.
+            batches.delete(request);
+            try {
+              vaultFor(batch.session, batch.generation);
+              resolve(tagged(batch.session, batch.generation, { Done: finishBatch(batch, job?.done ?? 0) }));
+            } catch (error) {
+              // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+              reject(error);
+            }
+            return;
+          }
+          if (cancelled && run !== undefined && request !== undefined) {
+            // A Stop on a save is a result too: the files before it stay written, and the answer names the one it caught and those not started.
+            saveRuns.delete(request);
+            try {
+              vaultFor(run.session, run.generation);
+              resolve(tagged(run.session, run.generation, { Done: finishSave(run, job?.done ?? 0) }));
+            } catch (error) {
+              // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+              reject(error);
+            }
+            return;
+          }
+          if (cancelled) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject({ code: "cancelled" });
+            return;
+          }
+          settle();
+        };
+        if (job !== undefined) {
+          job.cancel = () => {
+            end(true);
+          };
+        }
+        waiting.push(() => {
+          end(false);
         });
       });
     }
@@ -2082,6 +3710,10 @@ export function installFakeShell(
       entry.generation += 1;
       for (const [token, held] of envPastes) if (held.session === session) envPastes.delete(token);
       for (const [token, parked] of pendingPdfs) if (parked.session === session) pendingPdfs.delete(token);
+      for (const [token, held] of choices) if (held.session === session) choices.delete(token);
+      for (const [token, held] of savePlans) if (held.session === session) savePlans.delete(token);
+      for (const [token, held] of parkedSaves) if (held.session === session) parkedSaves.delete(token);
+      for (const [token, held] of outputs) if (held.session === session) outputs.delete(token);
     },
     sessionOf: (vaultId) => {
       const vault = vaults.find((v) => v.id === vaultId);
@@ -2156,6 +3788,10 @@ export function installFakeShell(
     },
     dropParkedChoices: () => {
       pendingPdfs.clear();
+      choices.clear();
+      parkedSaves.clear();
+      savePlans.clear();
+      outputs.clear();
     },
     printed,
     setPrinters: (names, preferred = null) => {
@@ -2178,17 +3814,17 @@ export function installFakeShell(
       emit("lockbox://notice", notice);
     },
     outputJournalResets: () => outputResets,
-    closeWindow: () => {
-      for (const session of [...live.keys()]) lock(session);
-      emptySlot();
-      if (explaining) {
-        explained();
-      } else if (closeExplained) {
-        hidden = true;
-      } else {
-        explaining = true;
-        emit("lockbox://notice", { kind: "first_close", explain: true });
-      }
+    closeWindow: closeAsBefore,
+    askClose: (reason, { running: kinds, pastSwap = false, restoreWaiting = false }) => {
+      pendingClose = reason;
+      emit("lockbox://close-asked", { reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting });
+    },
+    changeLockEpoch: bumpEpoch,
+    pendingClose: () => pendingClose !== undefined,
+    closeAnswers: () => [...closeAnswers],
+    quits: () => quits,
+    sendRaw: (channel, payload) => {
+      emit(channel, payload);
     },
     windowHidden: () => hidden,
     closeExplainedCalls: () => closeExplainedCalls,
@@ -2285,6 +3921,35 @@ export function installFakeShell(
     pickNext: (name, length = 2048) => {
       pickedFile = { name, length };
     },
+    pickFilesNext: (files) => {
+      nextPicks.push(files.map(({ name, size }) => ({ name, size })));
+    },
+    heldChoices: () => [...choices.values()].map((held) => held.files.map((file) => ({ ...file }))),
+    setFreeSpace: (bytes) => {
+      freeSpace = bytes;
+    },
+    unreadableFiles: (names) => {
+      unreadable = [...names];
+    },
+    batchEndsAfter: (count, refusal) => {
+      batchEnd = { count, refusal };
+    },
+    addedFiles,
+    savedToDisk,
+    savedNamesTaken: (names) => {
+      takenNames = [...names];
+    },
+    filesGoneDuringSave: (names) => {
+      goneNames = [...names];
+    },
+    changeFolderAfterPlanNext: () => {
+      changeAfterPlan = true;
+    },
+    openedFolders,
+    explorerFailsNext: () => {
+      explorerFails = true;
+    },
+    heldOutputs: () => outputs.size,
     holdFiles: () => {
       const waiting: (() => void)[] = [];
       heldFiles = waiting;
@@ -2292,6 +3957,189 @@ export function installFakeShell(
         heldFiles = undefined;
         for (const release of waiting) release();
       };
+    },
+    runningJobs: () =>
+      [...running.values()].flatMap(({ request, operation, scope, kind }) => (scope.type === "session" ? [{ request, operation, scope, kind }] : [])),
+    runningLaunchJobs: () =>
+      [...running.values()].flatMap(({ request, operation, scope, kind }) => (scope.type === "launch" ? [{ request, operation, scope, kind }] : [])),
+    testChoices: () => [...testHeld.values()].map(({ name, size }) => ({ name, size })),
+    testChoiceTokens: () => [...testHeld.keys()],
+    pickBackupNext: (name, size = BACKUP_SIZE) => {
+      nextBackupPick = { name, size };
+    },
+    expireTestChoices: () => {
+      testHeld.clear();
+    },
+    backupSummary: (summary) => {
+      summaryMade = { ...summaryMade, ...summary };
+    },
+    damageBackup: (what) => {
+      damage = { what };
+    },
+    holdPicker: () => {
+      const waiting: (() => void)[] = [];
+      heldPicker = waiting;
+      return () => {
+        heldPicker = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdTest: () => {
+      const waiting: (() => void)[] = [];
+      heldTests = waiting;
+      return () => {
+        heldTests = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdJobStarted: () => {
+      const waiting: (() => void)[] = [];
+      heldStarts = waiting;
+      return () => {
+        heldStarts = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    openChoices: () => [...openHeld.values()].map(({ name, size }) => ({ name, size })),
+    openChoiceTokens: () => [...openHeld.keys()],
+    expireOpenChoices: () => {
+      openHeld.clear();
+    },
+    holdOpen: () => {
+      const waiting: (() => void)[] = [];
+      heldOpens = waiting;
+      return () => {
+        heldOpens = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdCopy: () => {
+      const waiting: (() => void)[] = [];
+      heldCopies = waiting;
+      return () => {
+        heldCopies = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    backupHolds: (items) => {
+      backupItems = items;
+    },
+    backupsOpen: () => [...backupSessions].filter(([session]) => live.get(session)?.unlocked === true).map(([, name]) => name),
+    sessionOfBackup: (fileName) => {
+      const found = [...backupSessions].find(([session, name]) => name === fileName && live.get(session)?.unlocked === true);
+      return found === undefined ? undefined : live.get(found[0]);
+    },
+    copiedOut,
+    restorePicks: () => [...restoreHeld.values()].map(({ name, size, checked }) => ({ name, size, checked: checked !== undefined })),
+    restorePickTokens: () => [...restoreHeld.keys()],
+    restoreIs: (found) => {
+      restoreFound = { ...restoreFound, ...found };
+    },
+    expireRestorePicks: () => {
+      restoreHeld.clear();
+    },
+    holdRestoreCheck: () => {
+      const waiting: (() => void)[] = [];
+      heldRestoreChecks = waiting;
+      return () => {
+        heldRestoreChecks = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdRestoreCopy: () => {
+      const waiting: (() => void)[] = [];
+      heldRestoreCopies = waiting;
+      return () => {
+        heldRestoreCopies = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdRestoreSwap: () => {
+      const waiting: (() => void)[] = [];
+      heldRestoreSwaps = waiting;
+      return () => {
+        heldRestoreSwaps = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdRestoreAnswer: () => {
+      const waiting: (() => void)[] = [];
+      heldRestoreAnswers = waiting;
+      return () => {
+        heldRestoreAnswers = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    restoreCopyNames: (name) => {
+      restoreCopyName = name;
+    },
+    restoreAsksNext: (kind) => {
+      restoreQuestion = kind;
+    },
+    restoreCopyRefuses: (error) => {
+      restoreCopyRefusal = error;
+    },
+    restoreCommitRefuses: (error) => {
+      restoreCommitRefusal = error;
+    },
+    olderCopies: (copies) => {
+      olderHeld = [...copies];
+    },
+    olderIds: () => Object.fromEntries([...olderListed].map(([id, copy]) => [copy.folder, id])),
+    forgetOlderIds: () => {
+      olderListed.clear();
+    },
+    deletedOlderCopies: () => [...olderDeleted],
+    olderCopyIsOpen: (folder) => {
+      olderOpenElsewhere.add(folder);
+    },
+    olderCopiesOpen: () => [...olderSessions].filter(([session]) => live.get(session)?.unlocked === true).map(([, folder]) => folder),
+    holdOlderListing: () => {
+      const waiting: (() => void)[] = [];
+      heldOlderListings = waiting;
+      return () => {
+        heldOlderListings = undefined;
+        for (const release of waiting.reverse()) release();
+      };
+    },
+    holdOlderOpen: () => {
+      const waiting: (() => void)[] = [];
+      heldOlderOpens = waiting;
+      return () => {
+        heldOlderOpens = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdOlderDelete: () => {
+      const waiting: (() => void)[] = [];
+      heldOlderDeletes = waiting;
+      return () => {
+        heldOlderDeletes = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    preparedRestores: () => [...restorePrepared.keys()],
+    discardedRestores: () => [...restoreDiscarded],
+    confirmedNames: () => [...restoreNames],
+    retryRestoreGives: (...answers) => {
+      // The command answers the notice's own fields; the `kind` tag belongs to the event.
+      for (const answer of answers) {
+        const plain: Record<string, unknown> = { ...(answer as Record<string, unknown>) };
+        delete plain.kind;
+        retryAnswers.push(plain);
+      }
+    },
+    restoreRecoversNext: (notice) => {
+      restoreRecovery = notice;
+    },
+    lastBackupName: () => lastBackup?.name ?? "",
+    lastBackupChoice: () => lastBackup?.choice ?? "",
+    sendProgress: (operation, done, total) => {
+      const job = running.get(operation);
+      if (job === undefined) return;
+      job.done = done;
+      job.total = total;
+      emit("lockbox://progress", { operation, scope: job.scope, kind: job.kind, done, total, finished: false });
     },
     retryLeaves: (stillOpen) => {
       stillOpenAfterRetry = stillOpen;

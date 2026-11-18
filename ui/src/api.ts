@@ -4,33 +4,75 @@
 import {
   call,
   callMany,
+  callPair,
   callPlain,
   open,
   type CaptureEvent,
+  type JobScope,
+  type OperationId,
   type Opened,
   type Outcome,
   type PageNotice,
+  type RestoreNotice,
   type SearchResults,
   type SessionRef,
   type Tagged,
 } from "./bridge";
 
-export { onBusy, onCapture, onLocked, onNotice, StaleAnswer } from "./bridge";
-export type { BusyEvent, CaptureEvent, Confirm, Opened, Outcome, PageNotice, SessionRef, Tagged } from "./bridge";
+export {
+  isSessionCurrent,
+  onBusy,
+  onCapture,
+  onCloseAsked,
+  onJobStarted,
+  onLocked,
+  onLockEpoch,
+  onNotice,
+  onProgress,
+  StaleAnswer,
+} from "./bridge";
+export type {
+  BusyEvent,
+  CaptureEvent,
+  CloseAskedEvent,
+  CloseReason,
+  Confirm,
+  JobKind,
+  JobScope,
+  JobStartedEvent,
+  LockedEvent,
+  LockEpochEvent,
+  OperationId,
+  Opened,
+  Outcome,
+  PageNotice,
+  ProgressEvent,
+  RestoreNotice,
+  SessionRef,
+  Tagged,
+} from "./bridge";
 
 /** One vault on the list: no path, ever. `name` is null when its details cannot be read. */
 export interface VaultEntry {
   id: number;
   name: string | null;
   available: boolean;
+  /** True exactly when the folder holds the vault's header files but neither copy of its details can be read (Ask 8). Another `name: null` vault is `false`. */
+  details_damaged: boolean;
 }
+
+/** What a session is: a vault, an older copy a restore kept (opened read-only), or a backup opened read-only. */
+export type SessionKind = "vault" | "older_copy" | "backup";
 
 export interface SessionInfo {
   session: number;
   generation: number;
+  /** A backup's is the backup file's name without `.lockbox-backup`, not the vault's name inside it; an older copy keeps its vault's name. */
   name: string;
   read_only: boolean;
   state: "unlocked" | "locked" | "unavailable";
+  /** Says what a read-only session is: an older copy or a backup. A vault's is `vault`. */
+  kind: SessionKind;
 }
 
 /** What the cleanup at unlock did (spec 6.4), as counts: the shell's `CleanupView`, field by field. */
@@ -250,7 +292,7 @@ export function createVaultConfirm(token: string): Promise<Opened<CreatedView>> 
 }
 
 /**
- * Adds a vault folder the person already has (21a's "I already have a vault"): a folder picker, then the folder is
+ * Adds a vault folder the person already has (26a's "A vault folder", after 21a's "I already have a vault or a backup"): a folder picker, then the folder is
  * checked and listed. A cloud-synced folder asks first (`CloudFolder`), confirmed with `addExistingVaultConfirm`.
  */
 export function addExistingVault(): Promise<Outcome<VaultEntry>> {
@@ -321,6 +363,15 @@ export async function resetOutputJournal(): Promise<void> {
  */
 export async function closeExplainedOk(): Promise<void> {
   await callPlain<null>("close_explained_ok", {});
+}
+
+/**
+ * The answer to the question a close or a Quit asked while a job runs (`lockbox://close-asked`). `true` is Close anyway: the shell runs the old
+ * path for the reason it asked about (close locks every vault, which cancels the jobs; Quit quits). `false` is Keep it running: nothing
+ * changes. Either answer clears the question. Refused with `not_found` when none is pending (it was cleared by a lock, or answered already).
+ */
+export async function closeAnswer(go: boolean): Promise<null> {
+  return callPlain<null>("close_answer", { go });
 }
 
 /**
@@ -611,8 +662,8 @@ export function openFile(vault: SessionRef, id: string, fileId: string, confirme
  * closed). A cloud-synced folder answers `{ Confirm: { CloudFolder: { token } } }` first (`saveFileCopyConfirm` goes on with it). Allowed
  * in a vault opened from a backup. Refused as `damaged` for a file that does not decrypt.
  */
-export function saveFileCopy(vault: SessionRef, id: string, fileId: string): Promise<Tagged<Outcome<null>>> {
-  return call<Outcome<null>>("save_file_copy", { session: vault.session, generation: vault.generation, id, file_id: fileId });
+export function saveFileCopy(vault: SessionRef, id: string, fileId: string, request: number): Promise<Tagged<Outcome<null>>> {
+  return call<Outcome<null>>("save_file_copy", { session: vault.session, generation: vault.generation, id, file_id: fileId, request });
 }
 
 /**
@@ -620,23 +671,494 @@ export function saveFileCopy(vault: SessionRef, id: string, fileId: string): Pro
  * decrypting or writing anything, and the shell parked the copy under the token. It goes on only while the vault is unlocked as it was
  * when asked; a token that is used, old, or dropped by a lock is `not_found`.
  */
-export function saveFileCopyConfirm(token: string): Promise<Tagged<Outcome<null>>> {
-  return call<Outcome<null>>("save_file_copy_confirm", { token });
+export function saveFileCopyConfirm(token: string, request: number): Promise<Tagged<Outcome<null>>> {
+  return call<Outcome<null>>("save_file_copy_confirm", { token, request });
 }
 
 /** Adds a file item holding one file the person picks, in the folder `collection` (`null`: none): the new item's ID. Read-only refuses. */
-export function addFile(vault: SessionRef, collection: string | null): Promise<Tagged<Outcome<string>>> {
-  return call<Outcome<string>>("add_file", { session: vault.session, generation: vault.generation, collection });
+export function addFile(vault: SessionRef, collection: string | null, request: number): Promise<Tagged<Outcome<string>>> {
+  return call<Outcome<string>>("add_file", { session: vault.session, generation: vault.generation, collection, request });
 }
 
 /** Attaches one file the person picks to the login, key or note `id`: the new file's ID. Read-only refuses. */
-export function attachFile(vault: SessionRef, id: string): Promise<Tagged<Outcome<string>>> {
-  return call<Outcome<string>>("attach_file", { session: vault.session, generation: vault.generation, id });
+export function attachFile(vault: SessionRef, id: string, request: number): Promise<Tagged<Outcome<string>>> {
+  return call<Outcome<string>>("attach_file", { session: vault.session, generation: vault.generation, id, request });
+}
+
+// ---- Many files in (Task 10): one picker, the picked list held in Rust, then one job for the batch ----
+//
+// The page holds names and sizes for display, and a choice (a token). The paths stay in Rust; the page can send back the choice and an
+// index, never a path.
+
+/** One picked file, for display: its name (not its path) and its size in bytes. */
+export interface PickedFile {
+  name: string;
+  size: number;
+}
+
+/** What a pick answers: the choice the shell holds the paths under, and every file picked so far, in order. */
+export interface PickedFiles {
+  choice: string;
+  files: PickedFile[];
+}
+
+/** Where a batch goes: the folder on screen (`null`: no folder), or an item the files are attached to (a login, key or note; its hex id). */
+export type AddInto = { type: "folder"; collection: string | null } | { type: "item"; id: string };
+
+/** A refusal as the shell sends it: a plain object with a `code`, and the fields of that refusal. `messageFor` gives its words. */
+export type ShellRefusal = { code: string } & Record<string, unknown>;
+
+/**
+ * How a batch ended: how many files went in, the names of those that could not be read (the batch went on), the names never tried because
+ * the batch stopped (in the order picked), and what stopped it (`cancelled` for a Stop, `locked`, `busy`, or a full drive), or `null` when
+ * it ran to the end. A file that was being written when it stopped is in `not_added`.
+ */
+export interface AddFilesView {
+  added: number;
+  failed: string[];
+  not_added: string[];
+  stopped: ShellRefusal | null;
+}
+
+/**
+ * Opens the Windows picker for many files. With no `choice` it starts a pick (`"Dismissed"` when the picker is closed with nothing
+ * chosen). With the choice a pick answered, Pick more adds the new files to the same choice, and a closed picker leaves the list as it
+ * was. A choice that was used, dropped or has expired is refused as `choice_expired`.
+ */
+export function pickFilesToAdd(vault: SessionRef, choice: string | null): Promise<Tagged<Outcome<PickedFiles>>> {
+  return call<Outcome<PickedFiles>>("pick_files_to_add", { session: vault.session, generation: vault.generation, choice });
+}
+
+/** Leaves file number `index` (from 0) out of a pick: the list that is left. An index past the end is refused (`invalid_input`, `index`). */
+export function removePickedFile(vault: SessionRef, choice: string, index: number): Promise<Tagged<Outcome<{ files: PickedFile[] }>>> {
+  return call<Outcome<{ files: PickedFile[] }>>("remove_picked_file", { session: vault.session, generation: vault.generation, choice, index });
+}
+
+/**
+ * Stores every file of the pick, one after another, as one job with one progress over the batch's bytes (`request` names it for
+ * `lockbox://job-started`). The choice is used up when the job starts; one refused before that (no room for the whole batch, a file over
+ * 256 GiB) leaves it. Read-only refuses.
+ */
+export function addFiles(vault: SessionRef, choice: string, into: AddInto, request: number): Promise<Tagged<Outcome<AddFilesView>>> {
+  return call<Outcome<AddFilesView>>("add_files", { session: vault.session, generation: vault.generation, choice, into, request });
+}
+
+// ---- Save all of a folder's files (Task 11): two steps, then a summary whose handle is held in Rust ----
+//
+// `saveAllFiles` opens the Windows folder picker (titled with the number of files), runs the checks and answers a plan; `saveAllStart` runs the job
+// and answers how it ended. The destination is held in Rust under the plan's choice: the page sends the folder's id and a token, never a path, and
+// the names it is given back are for display only.
+
+/** One file of the plan: its name as it will be written (after the shell's name rule), its size, and the item it is attached to (`null` for a file item's own file). */
+export interface PlannedFile {
+  name: string;
+  size: number;
+  attached_to: string | null;
+}
+
+/** What `saveAllFiles` plans: the choice the start takes, where it goes (display text), every file in the order it will be saved, and their total bytes. */
+export interface SavePlan {
+  choice: string;
+  folder_shown: string;
+  files: PlannedFile[];
+  total: number;
+}
+
+/** A file that was saved: its name on disk, its size, and the item it is attached to (`null` for a file item's own file). */
+export interface SavedFile {
+  name: string;
+  size: number;
+  attached_to: string | null;
+}
+
+/** A name that changed on the way out: `from` as stored, `to` as on disk (a name Windows refuses, or a number added because the name was taken). */
+export interface Renamed {
+  from: string;
+  to: string;
+}
+
+/**
+ * How a save ended. `damaged` and `gone` name files left out (the batch went on); `unfinished` is the file being written when it ended (nothing of it
+ * is left) and `not_started` the names after it, in order; `stopped` is the refusal that ended it early (`cancelled` for a Stop, or a full drive), else
+ * `null`. `output` is the handle the shell holds for Show in Explorer, put away with `closeOutput`.
+ */
+export interface SaveAllView {
+  saved: SavedFile[];
+  renamed: Renamed[];
+  damaged: string[];
+  gone: string[];
+  unfinished: string | null;
+  not_started: string[];
+  stopped: ShellRefusal | null;
+  folder_shown: string;
+  output: string;
+}
+
+/**
+ * Picks where to save every stored file of the folder `folder` (its id) and checks it: `"Dismissed"` for a closed picker, `{ Confirm: { CloudFolder:
+ * { token } } }` for a cloud-synced folder (go on with `saveAllFilesConfirm`), or `{ Done: plan }`. Allowed in a vault opened from a backup. Refused
+ * as `invalid_input` (`no files`, `state folder`), `core` `not_enough_space` with its numbers, or for a damaged output journal.
+ */
+export function saveAllFiles(vault: SessionRef, folder: string): Promise<Tagged<Outcome<SavePlan>>> {
+  return call<Outcome<SavePlan>>("save_all_files", { session: vault.session, generation: vault.generation, folder });
+}
+
+/** The person's yes to the cloud question: the checks run again and the plan comes back, or a refusal. A token that is used, old or dropped is `choice_expired`. */
+export function saveAllFilesConfirm(token: string): Promise<Tagged<Outcome<SavePlan>>> {
+  return call<Outcome<SavePlan>>("save_all_files_confirm", { token });
+}
+
+/**
+ * Saves the files of a plan as one job with one progress over every file's bytes (`request` names it for `lockbox://job-started`, kind `save_all`).
+ * Every check runs again; the choice is used up when the job starts. Refused as `invalid_input` `folder changed` when the folder's files are no longer
+ * the planned ones. A Stop answers `Done` with `stopped` set; a lock answers `locked`.
+ */
+export function saveAllStart(choice: string, request: number): Promise<Tagged<Outcome<SaveAllView>>> {
+  return call<Outcome<SaveAllView>>("save_all_start", { choice, request });
+}
+
+/** Opens the saved folder in Windows' Explorer, by the summary's handle. A handle that was put away or let go is `choice_expired`; a failed open is `io`. */
+export function showOutputInExplorer(output: string): Promise<null> {
+  return callPlain<null>("show_output_in_explorer", { output });
+}
+
+/** Puts the summary's handle away when the summary closes. Safe to repeat. */
+export function closeOutput(output: string): Promise<null> {
+  return callPlain<null>("close_output", { output });
 }
 
 /** Replaces the stored file `fileId` of the item `id` with one the person picks: the new file's ID. Read-only refuses. */
 export function replaceFile(vault: SessionRef, id: string, fileId: string): Promise<Tagged<Outcome<string>>> {
   return call<Outcome<string>>("replace_file", { session: vault.session, generation: vault.generation, id, file_id: fileId });
+}
+
+/**
+ * Stops one running job: `operation` as `lockbox://job-started` gave it, with the scope that event named. The job ends with its own
+ * answer (`cancelled`). Refused (`locked`: the scope has gone; `not_found`: the job is over or was never there) when there is nothing to
+ * stop: the screens show nothing for either.
+ */
+export function cancelOperation(operation: OperationId, scope: JobScope): Promise<null> {
+  return callPlain<null>("cancel_operation", { operation, scope });
+}
+
+/**
+ * What a finished backup holds and left out, as counts (the shell's `BackupView`): never a name. `damaged_items` are items left out because their
+ * stored record is damaged; `damaged_files` and `missing_files` are attached files left out because they fail their check or are not in the vault.
+ * `size_on_disk` is the backup file's size in bytes.
+ */
+export interface BackupView {
+  items: number;
+  files: number;
+  damaged_items: number;
+  damaged_files: number;
+  missing_files: number;
+  size_on_disk: number;
+  /** The backup just written, held by the shell for Test a backup (22c's "Test this backup"): its choice, and the name and size to show. Never the path. */
+  test: TestPick;
+}
+
+/**
+ * A backup file the shell holds for Test a backup under `choice` (32 lowercase hex characters): the page only ever sees its name and size. The shell
+ * keeps the path to itself, and lets the choice go at a lock of every vault, after five minutes unused, when another is picked, and at `forgetTestBackup`.
+ */
+export interface TestPick {
+  choice: string;
+  file_name: string;
+  size: number;
+}
+
+/** What testing a backup found (the shell's `BackupSummaryView`): when it was made (RFC 3339, UTC), the counts of what it holds, and its size on disk. Never a name. */
+export interface BackupSummaryView {
+  created_at: string;
+  items: number;
+  files: number;
+  /** Attached files the backup does not hold. */
+  missing_files: number;
+  size_on_disk: number;
+}
+
+/**
+ * What is typed to open a backup: one box for a password or a recovery key (`password_or_key`). The shell tries the text as a recovery key when it
+ * is a well-formed one (then as a password, if that was not it) and as a password otherwise. `password` and `recovery_key` are the shell's other forms,
+ * for other screens.
+ */
+export type CredentialArg = { password: string } | { recovery_key: string } | { password_or_key: string };
+
+/** A backup is due: the vault's last one (else its making) is `days` whole days ago, and that is 30 or more. */
+export interface BackupDue {
+  days: number;
+}
+
+/**
+ * Backs up the open vault to a file the person picks in the Windows save dialog Rust opens (the path never comes to the page; the dialog
+ * suggests the vault's name and the day). A long job: `request` is the number the page chose, and `lockbox://job-started` says which operation it
+ * became (not sent for `"Dismissed"`, a closed dialog, or a refusal before anything is written). Cancel (`cancelOperation`) answers `cancelled`
+ * with nothing half-made left. Refused before writing with `invalid_input` and `what` `details changed`, `password copies disagree`,
+ * `recovery key copies disagree` or `details unchecked` (a backup made now might not open), `core` `not_enough_space` with its two numbers, or
+ * `read_only`. On success the shell keeps the date, which `vaultBackupDue` reads.
+ */
+export function backupVault(vault: SessionRef, request: number): Promise<Tagged<Outcome<BackupView>>> {
+  return call<Outcome<BackupView>>("backup_vault", { session: vault.session, generation: vault.generation, request });
+}
+
+/**
+ * Opens the Windows picker (titled "Test a backup") for a backup file and holds its path in the shell under a choice, launch-scoped (not one vault's). With
+ * `choice: null` it starts a pick; with the choice a pick answered, Pick another replaces that file with the new one and the shell forgets the old.
+ * `"Dismissed"` is a closed picker, which leaves the sent choice as it was. It needs no open vault, and is plain (not tagged with a session).
+ */
+export function testBackupPick(choice: string | null): Promise<Outcome<TestPick>> {
+  return callPlain<Outcome<TestPick>>("test_backup_pick", { choice });
+}
+
+/**
+ * Tests the picked backup without restoring it: opens it with the typed text, checks everything in it and writes nothing. A launch-scoped job (`request`
+ * names it for `lockbox://job-started` and `lockbox://progress`, kind `test`, scope `launch`; sent only once the job begins). Every answer keeps the
+ * choice: a wrong password (`core` `wrong_password`, also for a well-formed recovery key that is not the one), a damaged backup (`core` `damaged` with the
+ * first failing `what`), `core` `io`, `unsupported_version` or `params_out_of_bounds`, and a stop (`cancelled`). A choice that is gone (expired, used,
+ * dropped by a lock) is `choice_expired`; `locked` means every vault was locked while it ran.
+ */
+export function testBackup(choice: string, credential: CredentialArg, request: number): Promise<Outcome<BackupSummaryView>> {
+  return callPlain<Outcome<BackupSummaryView>>("test_backup", { choice, credential, request });
+}
+
+/** Lets the picked backup go (the panel closed, or another panel took its place). A choice that is unknown or already gone is no error. */
+export async function forgetTestBackup(choice: string): Promise<void> {
+  await callPlain<null>("forget_test_backup", { choice });
+}
+
+/**
+ * A backup file the shell holds for Open a backup under `choice` (32 lowercase hex characters, of its own kind: a Test a backup choice never answers for it):
+ * the page sees its name and size only. The shell keeps the path to itself, and lets the choice go at a lock of every vault, after five minutes unused,
+ * when another is picked, at `forgetOpenBackup`, and once a session has been opened with it.
+ */
+export interface OpenPick {
+  choice: string;
+  file_name: string;
+  size: number;
+}
+
+/**
+ * Opens the Windows picker (titled "Open a backup") for a backup file and holds its path in the shell under a choice, launch-scoped. With `choice: null` it starts
+ * a pick; with the choice a pick answered, Pick another replaces that file with the new one and the shell forgets the old. `"Dismissed"` is a closed picker, which
+ * leaves the sent choice as it was. It needs no open vault, and is plain (not tagged with a session).
+ */
+export function openBackupPick(choice: string | null): Promise<Outcome<OpenPick>> {
+  return callPlain<Outcome<OpenPick>>("open_backup_pick", { choice });
+}
+
+/** Lets the picked backup go (the panel closed, or another took its place). A choice that is unknown or already gone is no error; a Test a backup choice is not this kind. */
+export async function forgetOpenBackup(choice: string): Promise<void> {
+  await callPlain<null>("forget_open_backup", { choice });
+}
+
+/**
+ * Opens the picked backup read-only, with what was typed as one box's (`password_or_key`). A launch-scoped job (`request` names it for `lockbox://job-started`
+ * and `lockbox://progress`, kind `open_backup`, scope `launch`): it shows progress and a Stop (`cancelOperation`). The answer is the new session, tagged: a
+ * read-only session of `kind` `backup` whose name is the backup file's name without `.lockbox-backup`. A wrong password (`core` `wrong_password`), damage (`core`
+ * `damaged`), `core` `io` and a stop (`cancelled`) keep the choice; a session opened uses it up. A choice that is gone is `choice_expired`; `locked` means every
+ * vault was locked while it ran. A backup that is open already is answered as it is.
+ */
+export async function openBackupReadOnly(choice: string, credential: CredentialArg, request: number): Promise<Tagged<SessionInfo>> {
+  const answer = await open<SessionInfo>("open_backup_read_only", { choice, credential, request });
+  // The command answers a tagged session and never asks a question; there is no picker in it any more.
+  if (answer === "Dismissed" || "Confirm" in answer) throw new Error("unexpected answer to open_backup_read_only");
+  return answer;
+}
+
+/** The item a copy put in the target vault: its new id, and the names of the attached files the backup did not hold (so they were left out). */
+export interface CopiedItemView {
+  id: string;
+  left_out: string[];
+}
+
+/**
+ * Copies an item out of one open session (`from`, a backup or an older copy) into another (`to`, a vault in use), into the target's folder `folder` (its id, or
+ * `null` for none). The answer is tagged with `to`, and is dropped (`StaleAnswer`) unless both sessions are current. When the backup lacks files that are attached to
+ * the item and `skipMissing` is false, nothing is copied and the answer is the question (`Confirm` `MissingFiles` with their names); sent again with `skipMissing`
+ * it copies the item without them. A folder that is not in the target, or is in its Trash, is `invalid_input` (`what` `collection`); a read-only target is
+ * `read_only`; either session locked is `locked`.
+ */
+export function copyItemTo(
+  from: SessionRef,
+  id: string,
+  to: SessionRef,
+  folder: string | null,
+  skipMissing: boolean,
+): Promise<Tagged<Outcome<CopiedItemView>>> {
+  return callPair<Outcome<CopiedItemView>>(
+    "copy_item_to",
+    { from: from.session, from_generation: from.generation, id, to: to.session, to_generation: to.generation, folder, skip_missing: skipMissing },
+    from,
+  );
+}
+
+/**
+ * A backup file the shell holds for Restore a backup under `choice` (32 lowercase hex characters): the page sees its name and size only. The shell keeps
+ * the path, and the credential the person types once the backup is checked, to itself, and lets the pick go at every lock, after five minutes unused, when
+ * another is picked, and at `forgetRestorePick`.
+ */
+export interface RestorePick {
+  choice: string;
+  file_name: string;
+  size: number;
+}
+
+/**
+ * What a checked backup says about itself and where it would go (the shell's `RestoreChecked`): the vault's name inside it, the day it was made
+ * (`YYYY-MM-DD`, the PC's own, or `null`), the folder it would go in as display text (never sent back), whether that is the usual vaults folder, and
+ * whether a vault with this backup's own vault ID is already in that folder (a restore then replaces it, after asking).
+ */
+export interface RestoreChecked {
+  name: string;
+  made: string | null;
+  folder_shown: string;
+  usual: boolean;
+  replaces_existing: boolean;
+}
+
+/**
+ * A finished copy, waiting for its swap (the shell's `RestorePreparedView`): `kept_as` is the folder name the older copy will have, when one is replaced, and
+ * `replaces` is the vault the swap would replace, as its place on the vault list (the older copies of that vault are listed by `listPreRestore`); `null` when
+ * nothing is replaced, or the vault replaced is not on the list.
+ */
+export interface RestorePreparedView {
+  restore: number;
+  name: string;
+  replaces_existing: boolean;
+  kept_as: string | null;
+  replaces: number | null;
+}
+
+/** A finished swap (the shell's `RestoredView`): the vault to unlock, and whether the one it replaced was kept beside it. */
+export interface RestoredView {
+  vault: number;
+  before_restore: boolean;
+}
+
+/**
+ * Opens the Windows picker (titled "Restore a backup") for a backup file and holds its path in the shell under a choice, launch-scoped. With `choice: null`
+ * it starts a pick; with the choice a pick answered, the new file replaces that one. `"Dismissed"` is a closed picker. A lock while the picker is open is
+ * refused as `locked` and holds nothing; `busy` (`what: "restore"`) while another restore is going. Plain: it needs no open vault. `vault` is a listed
+ * vault's id, or `null`: with one, the restore goes in that vault's own parent folder instead of the usual one (a vault id that isn't listed is refused as
+ * `not_found`, and nothing is picked).
+ */
+export function restorePick(choice: string | null, vault: number | null): Promise<Outcome<RestorePick>> {
+  return callPlain<Outcome<RestorePick>>("restore_pick", { choice, vault });
+}
+
+/** What a restore that didn't finish left, as launch found it (also kept for `launch_notices`): `{ state: "none" }` when there is nothing. Plain. */
+export function restoreNotice(): Promise<RestoreNotice> {
+  return callPlain<RestoreNotice>("restore_notice", {});
+}
+
+/** Ask 7's and the pending notice's Try again: recovery runs again, and what it found is the answer. `busy` (`what: "restore"`) while a restore is running. */
+export function retryRestoreRecovery(): Promise<RestoreNotice> {
+  return callPlain<RestoreNotice>("retry_restore_recovery", {});
+}
+
+/**
+ * Dismisses an unfinished restore's journal, leaving the folders there as they are. Sent with `confirm: true` straight away: the notice's own words say what
+ * dismissing leaves. Without `confirm` the shell answers `Confirm` `Dismissal` with what it leaves. `busy` (`what: "restore"`) while a restore is running.
+ */
+export function dismissRestore(confirm: boolean): Promise<Outcome<null>> {
+  return callPlain<Outcome<null>>("dismiss_restore", { confirm });
+}
+
+/**
+ * Unlocks the picked backup read-only (nothing is unpacked) with the typed text, as one box's (`password_or_key`), and answers what it is and where it
+ * would go. The shell keeps the working credential beside the pick, so the page sends the text once. A wrong one is `core` `wrong_password` (or a recovery
+ * key kind) and keeps the pick; a damaged backup is `core` `damaged`; a pick that is gone is `choice_expired`.
+ */
+export function restoreCheck(choice: string, credential: CredentialArg): Promise<RestoreChecked> {
+  return callPlain<RestoreChecked>("restore_check", { choice, credential });
+}
+
+/** Opens the Windows picker (titled "Restore into this folder") for another parent folder; answers the new `RestoreChecked`, or `"Dismissed"` (the folder stays). Needs a checked pick, else `choice_expired`. */
+export function restoreChooseFolder(choice: string): Promise<Outcome<RestoreChecked>> {
+  return callPlain<Outcome<RestoreChecked>>("restore_choose_folder", { choice });
+}
+
+/**
+ * The copy: checks the folder, then unpacks the backup beside the vault it replaces, as a launch-scoped job (`request` names it for `lockbox://job-started`
+ * and `lockbox://progress`, kind `restore`) that Cancel (`cancelOperation`) stops, leaving the vault as it was. A cloud-synced folder asks first
+ * (`Confirm` `CloudFolder`), and a folder holding a vault it can't tell apart asks for a new folder's name (`Confirm` `NewFolder`); both are answered with
+ * `restorePrepareConfirm`. A refusal of the copy (not enough space, a drive a vault can't live on, a file system limit) keeps the pick.
+ */
+export function restorePrepare(choice: string, request: number): Promise<Outcome<RestorePreparedView>> {
+  return callPlain<Outcome<RestorePreparedView>>("restore_prepare", { choice, request });
+}
+
+/** The person's answer to the question `restorePrepare` asked: the same copy job. `name` is the new folder's name the person chose, or `null` for none (the cloud question's yes, or the suggestion). */
+export function restorePrepareConfirm(token: string, name: string | null, request: number): Promise<Outcome<RestorePreparedView>> {
+  return callPlain<Outcome<RestorePreparedView>>("restore_prepare_confirm", { token, name, request });
+}
+
+/**
+ * The swap: puts the copy in place and keeps the vault it replaces beside it. A launch-scoped job with progress (`total` 1) and no Stop. Refused as
+ * `cancelled` when Windows locking, sleep, Lock all or closing ended the finished restore; `core` `invalid_input` with `what` `too many before-restore copies`
+ * when all the older copies' names are taken.
+ */
+export function restoreCommit(restore: number, request: number): Promise<RestoredView> {
+  return callPlain<RestoredView>("restore_commit", { restore, request });
+}
+
+/** Lets a finished copy go without swapping it in (24d's Cancel). */
+export async function restoreDiscard(restore: number): Promise<void> {
+  await callPlain<null>("restore_discard", { restore });
+}
+
+/** Lets the picked backup go (the flow was cancelled). A pick that is unknown or already gone is no error. */
+export async function forgetRestorePick(choice: string): Promise<void> {
+  await callPlain<null>("forget_restore_pick", { choice });
+}
+
+/**
+ * An older copy a restore kept beside a vault (the shell's `PreRestoreEntry`), as `listPreRestore` lists it. `id` is valid until the next listing, which replaces
+ * every ID; `vault` is the vault's place on the vault list; `folder` is the folder's name (never a path); `last_written` is the local day (`YYYY-MM-DD`) that vault
+ * was last written and `size` is its bytes on disk, each `null` when the shell could not read it.
+ */
+export interface PreRestoreEntry {
+  id: number;
+  vault: number;
+  name: string | null;
+  folder: string;
+  last_written: string | null;
+  size: number | null;
+}
+
+/** What opening an older copy answers: the read-only session's details beside the flag that its details were changed outside Lockbox (the shell's `PreRestoreOpened`). */
+export interface PreRestoreOpened extends SessionInfo {
+  header_changed: boolean;
+}
+
+/** Every older copy beside every vault on the list, with new IDs (the last listing's are gone). Never refuses. */
+export function listPreRestore(): Promise<PreRestoreEntry[]> {
+  return callPlain<PreRestoreEntry[]>("list_pre_restore", {});
+}
+
+/**
+ * Opens an older copy of the last listing as a read-only session beside the live vault, with what was typed as one box's (`password_or_key`: a well-formed
+ * recovery key is tried as a key, then as a password). A wrong one is `core` `wrong_password`; an ID the last listing does not have, or a folder that is not what it
+ * was listed as, is `not_found`. The new session is read-only, and a lock of it (`lockVault`) closes it.
+ */
+export async function openPreRestoreReadOnly(id: number, passwordOrKey: string): Promise<Tagged<PreRestoreOpened>> {
+  const answer = await open<PreRestoreOpened>("open_pre_restore_read_only", { id, credential: { password_or_key: passwordOrKey } });
+  // The command answers a tagged session and never asks a question or opens a dialog.
+  if (answer === "Dismissed" || "Confirm" in answer) throw new Error("unexpected answer to open_pre_restore_read_only");
+  return answer;
+}
+
+/**
+ * Deletes an older copy of the last listing, for good. Without `confirm` nothing is touched and the answer is the question (`Confirm` `DeletePreRestore`);
+ * with it the folder is deleted. `busy` (`what` `folder is open`) while a session is open on it; `not_found` for an ID the last listing does not have.
+ */
+export function deletePreRestore(id: number, confirm: boolean): Promise<Outcome<null>> {
+  return callPlain<Outcome<null>>("delete_pre_restore", { id, confirm });
+}
+
+/** Whether the vault's last backup, or its making when it has none, is 30 or more days ago. `null` when it is not, and always for a read-only copy. */
+export function vaultBackupDue(vault: SessionRef): Promise<Tagged<BackupDue | null>> {
+  return call<BackupDue | null>("vault_backup_due", { session: vault.session, generation: vault.generation });
 }
 
 /** What a cleanup of opened copies did, as counts: the shell's `RemoveReport`. `still_open` counts every copy another program still holds. */

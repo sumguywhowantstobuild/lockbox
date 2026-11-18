@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ItemDetail, ItemKind, ItemSummary } from "../api";
 import { changedText, dayWords } from "../format";
 import { messageFor } from "../messages";
+import { fromWords } from "../openBackupWords";
 import { Button } from "../parts/Button";
 import { CopyIcon, EyeIcon, KindIcon } from "../parts/Icon";
 import { Menu, type MenuItem } from "../parts/Menu";
@@ -19,6 +20,7 @@ import {
 } from "../store";
 import { useValueGuard } from "../useValueGuard";
 import { AttachedFiles, FileRows } from "./FileActions";
+import { CopyToVault } from "./OpenBackup";
 import type { FolderEntry } from "./SideMenu";
 
 const KIND_WORD: Record<ItemKind, string> = { login: "Login", key: "Key", note: "Note", file: "File", collection: "Folder" };
@@ -452,7 +454,9 @@ export function ItemPanel({
   if (open === null || summary === undefined) return null;
 
   const folder = summary.collection === null ? undefined : folderNames.get(summary.collection);
-  const subtitle = [KIND_WORD[summary.kind], folder, changedText(summary.modified_at, openedAt)]
+  // A backup's item (or an older copy's) says where it is from in place of its folder and day: it is not a live vault's item.
+  const from = fromWords(data.kind);
+  const subtitle = (from === null ? [KIND_WORD[summary.kind], folder, changedText(summary.modified_at, openedAt)] : [KIND_WORD[summary.kind], from])
     .filter((part) => part !== undefined && part !== "")
     .join(" · ");
   const problem = open.error === null ? null : messageFor(open.error);
@@ -516,6 +520,8 @@ export function ItemPanel({
       {open.detail !== null && (summary.kind === "login" || summary.kind === "key" || summary.kind === "note") ? (
         <AttachedFiles data={data} summary={summary} />
       ) : null}
+      {/* In a backup or an older copy: the way to put the item back in a vault in use (25b). */}
+      {data.readOnly && summary.kind !== "collection" ? <CopyToVault data={data} summary={summary} folderNames={folderNames} /> : null}
       {data.readOnly ? null : (
         // At the foot of the details, as drawn (2b, 13a): a card's full-width row in red that goes at once, with no question,
         // and the words under it say where to find it.

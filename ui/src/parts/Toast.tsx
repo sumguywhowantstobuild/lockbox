@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FocusEvent } from "react";
 import { focusList } from "../focus";
+import { useJobAnnouncement, useJobAnnouncementKey } from "../jobs";
 import { messageFor } from "../messages";
 import { clearCopiedNow, clearToast, undoTrash, useToast, type Toast } from "../store";
 import { CloseIcon } from "./Icon";
@@ -68,6 +69,8 @@ function useHeld(toast: Toast | null) {
  */
 export function ToastStack() {
   const toast = useToast();
+  const announcement = useJobAnnouncement();
+  const announcementKey = useJobAnnouncementKey();
   const copied = toast?.kind === "copied" ? toast : null;
   const saved = toast?.kind === "saved" ? toast : null;
   const said = toast?.kind === "said" ? toast : null;
@@ -142,6 +145,11 @@ export function ToastStack() {
   return (
     <div className="tstack" ref={stack}>
       <div role="status" className="live">
+        {/* A long job's start ("Adding a file started."), said here because this place is always on the page; its end is the result below. */}
+        {/* Keyed by the job that started: two starts with the same words are two new elements, and so both are heard. */}
+        <span className="sr" key={announcementKey}>
+          {announcement}
+        </span>
         {copied !== null ? (
           <div className="toast">
             <span>{copied.text}</span>

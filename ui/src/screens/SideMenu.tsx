@@ -11,10 +11,12 @@ import {
   openSettings,
   openTrash,
   selectFolder,
+  showSession,
   useSessions,
   useVaults,
   type SessionData,
 } from "../store";
+import { kindRow, shownName } from "../openBackupWords";
 import { NewFolderBox } from "./forms/FolderForm";
 
 /** A folder of the open vault, with how many items are in it. */
@@ -28,8 +30,8 @@ export interface FolderEntry {
 const TILES = ["t0", "t1", "t2", "t3", "t4"];
 
 /**
- * The side menu: which vault is open (its name opens the vault menu: each vault and whether it is open, and Lock for this
- * one), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
+ * The side menu: which vault is open (its name opens the vault menu: each vault and whether it is open, a row for every open session that brings it to the front, and Lock for
+ * the one on screen; an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
  * its count, and Settings and Lock all side by side. It closes to a strip of icons; then each icon carries its name for a screen reader, and for a hint
  * when the pointer rests on it. The menu is only there while a vault is unlocked, so the Generator never shows on the lock screen.
  * A vault opened read-only has no "New folder".
@@ -54,10 +56,26 @@ export function SideMenu({
   const [naming, setNaming] = useState(false);
   // Each vault the list can reach, and whether it is open: the vault menu says it in words, as the list's line does.
   const vaults = useVaults();
-  const open = new Set(useSessions().map((session) => session.vaultId));
+  const sessions = useSessions();
+  const open = new Set(sessions.map((session) => session.vaultId));
+  // Each vault is in the menu once: an open one is a row below (the choice to bring it to the front), so the lines above are only the vaults that are not open, which say Locked.
   const notes = (vaults ?? [])
-    .filter((vault) => vault.available && vault.name !== null)
-    .map((vault) => ({ name: vault.name ?? "", state: open.has(vault.id) ? "Unlocked" : "Locked" }));
+    .filter((vault) => vault.available && vault.name !== null && !open.has(vault.id))
+    .map((vault) => ({ name: vault.name ?? "", state: "Locked" }));
+  // Every open session is a row that brings it to the front, in the order they were unlocked or opened (a switch does not reorder them); a read-only one says what it is
+  // under its name. A locked session is gone from the page, so it has no row, and a locked vault of the list stays a note above.
+  const rows = [...sessions]
+    .sort((a, b) => a.opened - b.opened)
+    .map((session) => ({
+      id: String(session.session),
+      label: session.name,
+      detail: kindRow(session.kind),
+      checked: session.session === data.session,
+      onSelect: () => {
+        showSession(session.session);
+      },
+    }));
+  const onScreen = shownName(data);
   // What a closed icon is called and said to be: the words it hides.
   const named = (name: string, count?: number) =>
     closed ? { "aria-label": count === undefined ? name : `${name}, ${String(count)} items`, title: name } : {};
@@ -65,22 +83,23 @@ export function SideMenu({
     <nav className={closed ? "rail closed" : "rail"} aria-label="Vault and folders">
       <div className="rtop">
         <Menu
-          label={`${data.name}${data.readOnly ? ", read-only" : ""}, vault menu`}
+          label={`${onScreen}${data.readOnly ? ", read-only" : ""}, vault menu`}
           triggerClassName="vhead vsw"
           icon={
             <>
               <VaultMark points={look.points} className="vprint" />
               <span className="vname">
-                <b>{data.name}</b>
+                <b>{onScreen}</b>
                 {data.readOnly ? <span className="chip">Read-only</span> : null}
               </span>
               <ChevronsIcon className="i vchev" />
             </>
           }
           notes={notes}
+          rows={rows}
           items={[
             {
-              label: `Lock ${data.name}`,
+              label: `Lock ${onScreen}`,
               onSelect: () => {
                 void lockOneVault(data.session);
               },

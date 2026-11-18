@@ -157,7 +157,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    use lockbox_core::blob::CancelToken;
+    use lockbox_core::blob::{CancelToken, NoProgress};
     use lockbox_core::{CoreError, Credential, ReadOnlyVault};
     use serde_json::json;
     use tauri::ipc::InvokeBody;
@@ -336,7 +336,12 @@ mod tests {
         let dir = ts.shell.registry.entries()[0].1.clone();
         ts.shell.sessions.lock(s, LockReason::Manual);
         let vault = heavy(|| {
-            ReadOnlyVault::open_folder(&dir, Credential::Password(PW), &CancelToken::new())
+            ReadOnlyVault::open_folder(
+                &dir,
+                Credential::Password(PW),
+                &CancelToken::new(),
+                &NoProgress,
+            )
         })
         .unwrap();
         let location = Location::folder(&dir).unwrap();

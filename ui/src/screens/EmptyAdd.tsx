@@ -1,11 +1,11 @@
 import { rememberOpener } from "../focus";
 import { Button } from "../parts/Button";
 import { KindIcon } from "../parts/Icon";
-import { addStoredFile, openNewKey, openNewLogin, openNewNote, openPasteEnv } from "../store";
+import { openNewKey, openNewLogin, openNewNote, openPasteEnv, startAddFiles } from "../store";
 
 /**
  * Add, right there in an empty vault or folder (3e), as drawn: a button for each kind that can be made (a login, a key, a note and a
- * file), then a whole .env set apart after "or". File picks one file and stores it in the folder on screen (`folder`, `null` for the
+ * file), then a whole .env set apart after "or". File picks one file or many and stores them in the folder on screen (`folder`, `null` for the
  * vault itself), as the toolbar's Add does. Closing the form a button opens gives focus back to that button.
  */
 export function EmptyAdd({ session, folder }: { session: number; folder: string | null }) {
@@ -29,7 +29,7 @@ export function EmptyAdd({ session, folder }: { session: number; folder: string 
       </Button>
       <Button
         onClick={() => {
-          void addStoredFile(session, folder);
+          void startAddFiles(session, { type: "folder", collection: folder });
         }}
       >
         <KindIcon kind="file" className="i" />

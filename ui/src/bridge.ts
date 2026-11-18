@@ -25,8 +25,10 @@ export interface JournalPaths {
  */
 export type RestoreNotice =
   | { state: "none" }
-  | { state: "recovered"; how: "staging_removed" | "rolled_back" | "finished" }
-  | { state: "drive_missing"; paths: JournalPaths }
+  /** `vault` is the listed vault at the journal's folder, once recovery is done: `null` when none is listed there or its name can't be read. */
+  | { state: "recovered"; how: "staging_removed" | "rolled_back" | "finished"; vault: { id: number; name: string } | null }
+  /** `folder` is the target's parent folder as text, what Ask 7 names. */
+  | { state: "drive_missing"; paths: JournalPaths; folder: string }
   | { state: "pending"; paths: JournalPaths }
   | { state: "unclear"; journal: string; paths: JournalPaths | null };
 
@@ -207,6 +209,101 @@ export function onBusy(handler: (event: BusyEvent) => void): Promise<UnlistenFn>
   return listen<BusyEvent>("lockbox://busy", ({ payload }) => {
     handler(payload);
   });
+}
+
+/** A long job's number, unique in one launch of the app: the shell's `OperationId`. It reaches the page by `lockbox://job-started` only. */
+export type OperationId = number;
+
+/**
+ * What a job belongs to, so the page can drop what has gone: a session at the generation the job began in (a lock moves it on), or the
+ * lock epoch of the launch for a job that has no session (testing or restoring a backup).
+ */
+export type JobScope = { type: "session"; session: number; generation: number } | { type: "launch"; epoch: number };
+
+/** What a job is, by the shell's fixed names. The last three have no progress of their own. */
+export type JobKind =
+  | "import"
+  | "save_copy"
+  | "save_all"
+  | "backup"
+  | "test"
+  | "restore"
+  | "open_backup"
+  | "open"
+  | "replace"
+  | "copy_item";
+
+/** `lockbox://job-started`: the operation the shell gave the command that took `request`, sent before its first progress and before its answer. */
+export interface JobStartedEvent {
+  request: number;
+  operation: OperationId;
+  scope: JobScope;
+  kind: JobKind;
+}
+
+/** `lockbox://progress`: bytes done of the total, at most about ten a second, and one last event with `finished` when the job ends for any reason. */
+export interface ProgressEvent {
+  operation: OperationId;
+  scope: JobScope;
+  kind: JobKind;
+  done: number;
+  total: number;
+  finished: boolean;
+}
+
+/** `lockbox://lock-epoch`: the lock epoch changed (Lock all, an idle lock, Windows locking or sleep, the app closing), even with no vault open. */
+export interface LockEpochEvent {
+  epoch: number;
+  reason: LockReason;
+}
+
+/** Listens for `lockbox://job-started`: each event is handed over as it came (ids only, so no generation of its own: its scope says what it belongs to). */
+export function onJobStarted(handler: (event: JobStartedEvent) => void): Promise<UnlistenFn> {
+  return listen<JobStartedEvent>("lockbox://job-started", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/** Listens for `lockbox://progress`: two numbers and ids, handed over as they came. */
+export function onProgress(handler: (event: ProgressEvent) => void): Promise<UnlistenFn> {
+  return listen<ProgressEvent>("lockbox://progress", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/** Listens for `lockbox://lock-epoch`: handed over as it came. */
+export function onLockEpoch(handler: (event: LockEpochEvent) => void): Promise<UnlistenFn> {
+  return listen<LockEpochEvent>("lockbox://lock-epoch", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/** Which way the app is going away: the window's close button, or Quit from the tray. */
+export type CloseReason = "close" | "quit";
+
+/**
+ * `lockbox://close-asked`: a close or a Quit arrived while a job runs or a restore waits, and nothing is locked, hidden or cancelled until the question is
+ * answered (`close_answer`). `running` is the kinds of jobs, each once, in the order they began; `past_swap` is a restore that can no longer be
+ * cancelled; `restore_waiting` is a finished restore waiting for its yes at 24d (nothing may run: closing ends it). Fixed names and flags only: no
+ * vault, path or item.
+ */
+export interface CloseAskedEvent {
+  reason: CloseReason;
+  running: JobKind[];
+  past_swap: boolean;
+  restore_waiting: boolean;
+}
+
+/** Listens for `lockbox://close-asked`: handed over as it came (it holds no vault data, so it has no generation). */
+export function onCloseAsked(handler: (event: CloseAskedEvent) => void): Promise<UnlistenFn> {
+  return listen<CloseAskedEvent>("lockbox://close-asked", ({ payload }) => {
+    handler(payload);
+  });
+}
+
+/** Whether the bridge still holds `generation` as the session's current one: false once the vault has locked, or for a session it has not seen opened. */
+export function isSessionCurrent(session: number, generation: number): boolean {
+  return generations.get(session) === generation;
 }
 
 /** Listens for `lockbox://capture`: each event is handed over as it came (it holds no vault data, so it has no generation). */

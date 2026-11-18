@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use lockbox_core::blob::CancelToken;
 
 use crate::clipboard::CloseDeadline;
+use crate::error::{ShellError, ShellResult};
+use crate::jobs::{JobKind, JobScope, JobStarted, OperationId, ReportTo, RunningJob};
 use crate::lock;
 use crate::open::OpenFolders;
 use crate::os::{Clock, IdleSource, Os, OsSignal, Power, Volumes};
@@ -89,7 +91,10 @@ struct Running {
 struct Operation {
     id: u64,
     session: Option<SessionId>,
-    what: &'static str,
+    kind: JobKind,
+    /// What a Stop of this operation must name ([`AutoLock::cancel_operation`]); `None` for one begun without a scope,
+    /// which no Stop reaches.
+    scope: Option<JobScope>,
     cancel: CancelToken,
 }
 
@@ -122,6 +127,13 @@ pub struct LongOp {
     operations: Arc<Operations>,
 }
 
+impl LongOp {
+    /// The operation's number, unique for the launch; `None` when the app was closing and nothing was registered.
+    pub(crate) fn id(&self) -> Option<OperationId> {
+        self.id.map(OperationId)
+    }
+}
+
 impl Drop for LongOp {
     fn drop(&mut self) {
         if let Some(id) = self.id {
@@ -134,7 +146,8 @@ impl Operations {
     fn begin(
         self: &Arc<Self>,
         session: Option<SessionId>,
-        what: &'static str,
+        kind: JobKind,
+        scope: Option<JobScope>,
         cancel: CancelToken,
     ) -> LongOp {
         let id = {
@@ -148,7 +161,8 @@ impl Operations {
                 running.operations.push(Operation {
                     id,
                     session,
-                    what,
+                    kind,
+                    scope,
                     cancel,
                 });
                 Some(id)
@@ -189,7 +203,7 @@ impl Operations {
                     .operations
                     .iter()
                     .filter(|operation| operation.session == session)
-                    .map(|operation| operation.what)
+                    .map(|operation| operation.kind.busy_name())
                     .collect(),
                 None => Vec::new(),
             };
@@ -332,17 +346,136 @@ impl AutoLock {
         }
     }
 
-    /// Starts a long operation the user asked for (an import, Save a copy, Open, a backup or a restore), shown to the
-    /// page as `what` under `session` (`None`: an operation without one, such as testing or restoring a backup).
-    /// Windows lock, sleep and app exit cancel `cancel`. Once the app is closing, `cancel` is cancelled at once and
-    /// nothing is registered.
-    pub fn begin(
+    /// Starts a long operation the user asked for (a backup, a restore, a copy of an item), shown to the page as
+    /// `kind` under `session` (`None`: an operation without one, such as testing or restoring a backup). Windows lock,
+    /// sleep and app exit cancel `cancel`, which is registered as it is. Once the app is closing, `cancel` is cancelled
+    /// at once and nothing is registered. No Stop of the page reaches it: [`begin_job`](Self::begin_job) makes the jobs
+    /// that have one.
+    pub fn begin(&self, session: Option<SessionId>, kind: JobKind, cancel: CancelToken) -> LongOp {
+        self.operations.begin(session, kind, None, cancel)
+    }
+
+    /// Starts a job in `scope`: an operation like [`begin`](Self::begin)'s, with a token of its own that is a child of
+    /// `parent` (the session's token, or the launch's), so a Stop of this job stops no other and a lock of the scope
+    /// stops every one. With a `request` (the page's number for the command), the page is sent `lockbox://job-started`
+    /// as the job registers, then its progress as the engine reports it and a last event when the job ends; without
+    /// one, nothing. Dropping the [`RunningJob`] ends the job.
+    pub fn begin_job(
         &self,
-        session: Option<SessionId>,
-        what: &'static str,
-        cancel: CancelToken,
-    ) -> LongOp {
-        self.operations.begin(session, what, cancel)
+        scope: JobScope,
+        kind: JobKind,
+        parent: &CancelToken,
+        request: Option<u32>,
+    ) -> RunningJob {
+        self.begin_job_as(scope, kind, parent, request, true)
+    }
+
+    /// Like [`begin_job`](Self::begin_job), for a job past the point of cancelling by the page's Stop (a restore's swap):
+    /// it is told to the page and counts as an operation, but no Stop reaches it ([`cancel_operation`](Self::cancel_operation)
+    /// finds nothing to stop). A lock of its scope, Windows locking, sleep and closing still cancel its token, as they
+    /// do every job's; what it guards decides whether that still counts.
+    pub fn begin_job_without_stop(
+        &self,
+        scope: JobScope,
+        kind: JobKind,
+        parent: &CancelToken,
+        request: Option<u32>,
+    ) -> RunningJob {
+        self.begin_job_as(scope, kind, parent, request, false)
+    }
+
+    fn begin_job_as(
+        &self,
+        scope: JobScope,
+        kind: JobKind,
+        parent: &CancelToken,
+        request: Option<u32>,
+        stoppable: bool,
+    ) -> RunningJob {
+        let session = match scope {
+            JobScope::Session { session, .. } => Some(session),
+            JobScope::Launch { .. } => None,
+        };
+        let token = parent.child();
+        let operation =
+            self.operations
+                .begin(session, kind, stoppable.then_some(scope), token.clone());
+        // Told as the job registers, before the engine reports anything. A closing app registers nothing: nothing is told.
+        if let (Some(request), Some(operation)) = (request, operation.id()) {
+            self.operations.notifier.job_started(&JobStarted {
+                request,
+                operation,
+                scope,
+                kind,
+            });
+        }
+        let report_to = request.map(|_| ReportTo {
+            clock: Arc::clone(&self.operations.clock),
+            notifier: Arc::clone(&self.operations.notifier),
+        });
+        RunningJob::new(scope, kind, token, operation, report_to)
+    }
+
+    /// The kinds of the jobs running now, for the question on closing: every operation this list counts (scoped or not,
+    /// with a session or without), each kind once, in the order the first of its kind began.
+    pub fn running_kinds(&self) -> Vec<JobKind> {
+        let running = lock(&self.operations.running);
+        let mut kinds = Vec::new();
+        for operation in &running.operations {
+            if !kinds.contains(&operation.kind) {
+                kinds.push(operation.kind);
+            }
+        }
+        kinds
+    }
+
+    /// Whether `scope` is still the one jobs may be stopped in and answer for: a session still unlocked in that
+    /// generation, or no lock of all vaults since the epoch.
+    pub fn scope_current(&self, scope: JobScope) -> bool {
+        match scope {
+            JobScope::Session {
+                session,
+                generation,
+            } => self
+                .sessions
+                .unlocked()
+                .into_iter()
+                .any(|(id, current, _)| (id, current) == (session, generation)),
+            JobScope::Launch { epoch } => self.sessions.epoch() == epoch,
+        }
+    }
+
+    /// The page's Stop: cancels the job `operation` running in `scope` and no other. `Locked` when the scope has gone (a
+    /// lock came since), `NotFound` when no such job runs in that scope (another scope's, one that has finished, one that
+    /// never existed). Nothing is cancelled in either case.
+    pub fn cancel_operation(&self, operation: OperationId, scope: JobScope) -> ShellResult<()> {
+        if !self.scope_current(scope) {
+            return Err(ShellError::Locked);
+        }
+        let running = lock(&self.operations.running);
+        match running
+            .operations
+            .iter()
+            .find(|job| job.id == operation.0 && job.scope == Some(scope))
+        {
+            Some(job) => {
+                job.cancel.cancel();
+                Ok(())
+            }
+            None => Err(ShellError::NotFound),
+        }
+    }
+
+    /// Ends `job` and gives `result` as its answer, unless its scope has gone (a lock since it began): then `Locked`, and
+    /// nothing it made is shown. A session's jobs are refused by the session's own checks already; this is the one check
+    /// for a job with no session.
+    pub fn answer_job<T>(&self, job: RunningJob, result: ShellResult<T>) -> ShellResult<T> {
+        let scope = job.scope();
+        drop(job);
+        match self.scope_current(scope) {
+            true => result,
+            false => Err(ShellError::Locked),
+        }
     }
 
     /// The timer's call, every [`TICK`]: drops the expired pending choices, starts a check for vanished folders, and
@@ -563,6 +696,7 @@ mod tests {
     use std::sync::mpsc;
 
     use lockbox_core::Vault;
+    use lockbox_core::blob::NoProgress;
     use lockbox_core::internals::fsio::failpoint;
     use lockbox_core::internals::lockfile::VaultLock;
     use zeroize::Zeroizing;
@@ -690,8 +824,8 @@ mod tests {
         let autolock = &ts.shell.autolock;
         let t0 = ts.clock.now();
 
-        let import = autolock.begin(Some(family), "import", CancelToken::new());
-        let restore = autolock.begin(None, "restore", CancelToken::new());
+        let import = autolock.begin(Some(family), JobKind::Import, CancelToken::new());
+        let restore = autolock.begin(None, JobKind::Restore, CancelToken::new());
         for minute in [5, 10, 30] {
             ts.idle.set(at(minute, 0));
             autolock.tick(t0 + at(minute, 0));
@@ -719,7 +853,7 @@ mod tests {
         let autolock = &ts.shell.autolock;
         let t0 = ts.clock.now();
 
-        let backup = autolock.begin(Some(family), "backup", CancelToken::new());
+        let backup = autolock.begin(Some(family), JobKind::Backup, CancelToken::new());
         ts.clock.set(t0 + at(30, 0));
         drop(backup);
         // No input since the start: only the time since the operation ended counts.
@@ -739,8 +873,8 @@ mod tests {
         let autolock = &ts.shell.autolock;
         // Tokens of their own, not the session's: only the auto-lock can cancel them.
         let (import, restore) = (CancelToken::new(), CancelToken::new());
-        let _import = autolock.begin(Some(family), "import", import.clone());
-        let _restore = autolock.begin(None, "restore", restore.clone());
+        let _import = autolock.begin(Some(family), JobKind::Import, import.clone());
+        let _restore = autolock.begin(None, JobKind::Restore, restore.clone());
 
         autolock.signal(OsSignal::SessionLocked);
         assert!(import.is_cancelled(), "the import's token is cancelled");
@@ -761,7 +895,7 @@ mod tests {
         let _backup = ts
             .shell
             .autolock
-            .begin(Some(work), "backup", backup.clone());
+            .begin(Some(work), JobKind::Backup, backup.clone());
 
         ts.shell.autolock.signal(OsSignal::Suspending);
         assert!(backup.is_cancelled());
@@ -839,14 +973,14 @@ mod tests {
     fn keep_awake_off_when_last_op_ends() {
         let ts = TestShell::new();
         let autolock = &ts.shell.autolock;
-        let first = autolock.begin(None, "backup", CancelToken::new());
-        let second = autolock.begin(None, "restore", CancelToken::new());
+        let first = autolock.begin(None, JobKind::Backup, CancelToken::new());
+        let second = autolock.begin(None, JobKind::Restore, CancelToken::new());
         assert_eq!(ts.power.calls(), [true]);
         drop(first);
         assert_eq!(ts.power.calls(), [true], "one operation still runs");
         drop(second);
         assert_eq!(ts.power.calls(), [true, false]);
-        drop(autolock.begin(None, "backup", CancelToken::new()));
+        drop(autolock.begin(None, JobKind::Backup, CancelToken::new()));
         assert_eq!(ts.power.calls(), [true, false, true, false]);
     }
 
@@ -875,10 +1009,54 @@ mod tests {
         let _running = ts
             .shell
             .autolock
-            .begin(None, "test_backup", test_backup.clone());
+            .begin(None, JobKind::Test, test_backup.clone());
         ts.shell.lock_all();
         assert!(test_backup.is_cancelled());
         assert_eq!(state(&ts, family), SessionState::Locked);
+    }
+
+    /// The kinds the close question names: every operation the auto-lock counts (scoped or not, with a session or
+    /// without), each kind once, in the order the first of its kind began, and none once they have ended.
+    #[test]
+    fn running_kinds_lists_each_kind_once_in_start_order() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let autolock = &ts.shell.autolock;
+        assert!(autolock.running_kinds().is_empty());
+
+        let generation = ts.shell.sessions.unlocked()[0].1;
+        let scope = JobScope::Session {
+            session: family,
+            generation,
+        };
+        let backup = autolock.begin(None, JobKind::Backup, CancelToken::new());
+        let import = autolock.begin_job(scope, JobKind::Import, &CancelToken::new(), Some(1));
+        let open = autolock.begin(Some(family), JobKind::Open, CancelToken::new());
+        let second_import = autolock.begin(Some(family), JobKind::Import, CancelToken::new());
+        let copy = autolock.begin(Some(family), JobKind::CopyItem, CancelToken::new());
+        let replace = autolock.begin(Some(family), JobKind::Replace, CancelToken::new());
+        assert_eq!(
+            autolock.running_kinds(),
+            [
+                JobKind::Backup,
+                JobKind::Import,
+                JobKind::Open,
+                JobKind::CopyItem,
+                JobKind::Replace
+            ]
+        );
+
+        // One import ends and the other still runs; the first kind to end leaves the list when its last job does.
+        drop(import);
+        assert!(autolock.running_kinds().contains(&JobKind::Import));
+        drop(second_import);
+        drop(backup);
+        assert_eq!(
+            autolock.running_kinds(),
+            [JobKind::Open, JobKind::CopyItem, JobKind::Replace]
+        );
+        drop((open, copy, replace));
+        assert!(autolock.running_kinds().is_empty());
     }
 
     #[test]
@@ -887,14 +1065,17 @@ mod tests {
         let ts = TestShell::new();
         let family = open_vault(&ts, "Family");
         let backup = CancelToken::new();
-        let _backup = ts.shell.autolock.begin(None, "backup", backup.clone());
+        let _backup = ts
+            .shell
+            .autolock
+            .begin(None, JobKind::Backup, backup.clone());
 
         ts.shell.autolock.signal(OsSignal::Ending);
         assert!(backup.is_cancelled());
         assert_eq!(state(&ts, family), SessionState::Locked);
         assert_eq!(locks(&ts), [(family, LockReason::AppClosing)]);
         let late = CancelToken::new();
-        let _late = ts.shell.autolock.begin(None, "backup", late.clone());
+        let _late = ts.shell.autolock.begin(None, JobKind::Backup, late.clone());
         assert!(late.is_cancelled());
     }
 
@@ -911,7 +1092,10 @@ mod tests {
             }));
         }
         let restore = CancelToken::new();
-        let _restore = ts.shell.autolock.begin(None, "restore", restore.clone());
+        let _restore = ts
+            .shell
+            .autolock
+            .begin(None, JobKind::Restore, restore.clone());
         let started = Instant::now();
         ts.shell.shutdown();
         assert!(started.elapsed() < SHUTDOWN_WAIT);
@@ -976,11 +1160,11 @@ mod tests {
             .shell
             .sessions
             .write_long(family, generation, |vault, cancel| {
-                let _import = ts
-                    .shell
-                    .autolock
-                    .begin(Some(family), "import", cancel.clone());
-                Ok(vault.new_file_item(None, &src, cancel)?)
+                let _import =
+                    ts.shell
+                        .autolock
+                        .begin(Some(family), JobKind::Import, cancel.clone());
+                Ok(vault.new_file_item(None, &src, cancel, &NoProgress)?)
             });
         failpoint::disarm_all();
 
@@ -1066,7 +1250,10 @@ mod tests {
         assert!(!ran.load(Ordering::SeqCst), "the open never ran");
 
         let restore = CancelToken::new();
-        let _restore = ts.shell.autolock.begin(None, "restore", restore.clone());
+        let _restore = ts
+            .shell
+            .autolock
+            .begin(None, JobKind::Restore, restore.clone());
         assert!(restore.is_cancelled(), "a late operation is cancelled");
         assert!(ts.power.calls().is_empty(), "nothing is kept awake");
         assert!(ts.events.busy().is_empty(), "nothing is shown as running");
@@ -1148,7 +1335,7 @@ mod tests {
                 drop(
                     ts.shell
                         .autolock
-                        .begin(Some(family), "import", import.clone()),
+                        .begin(Some(family), JobKind::Import, import.clone()),
                 );
             });
             notifier_entered.recv_timeout(GIVE_UP).unwrap();
@@ -1172,7 +1359,10 @@ mod tests {
         let family = open_vault(&ts, "Family");
         let hooks = count_hooks(&ts);
         let restore = CancelToken::new();
-        let _restore = ts.shell.autolock.begin(None, "restore", restore.clone());
+        let _restore = ts
+            .shell
+            .autolock
+            .begin(None, JobKind::Restore, restore.clone());
         ts.shell.autolock.fail_next_spawn();
         let started = Instant::now();
         ts.shell.shutdown();
@@ -1248,7 +1438,7 @@ mod tests {
         let running = Arc::new(Mutex::new(None));
         let (shell, kept, token) = (Arc::clone(&ts.shell), Arc::clone(&running), import.clone());
         ts.shell.autolock.during_next_tick(Box::new(move || {
-            *lock(&kept) = Some(shell.autolock.begin(Some(family), "import", token));
+            *lock(&kept) = Some(shell.autolock.begin(Some(family), JobKind::Import, token));
         }));
         ts.idle.set(at(5, 0));
         ts.shell.autolock.tick(t0 + at(5, 0));
@@ -1269,7 +1459,7 @@ mod tests {
             drop(
                 shell
                     .autolock
-                    .begin(Some(family), "backup", CancelToken::new()),
+                    .begin(Some(family), JobKind::Backup, CancelToken::new()),
             );
         }));
         ts.idle.set(at(5, 0));
@@ -1359,7 +1549,7 @@ mod tests {
         let begun = catch_unwind(AssertUnwindSafe(|| {
             ts.shell
                 .autolock
-                .begin(Some(family), "import", CancelToken::new())
+                .begin(Some(family), JobKind::Import, CancelToken::new())
         }));
         assert!(begun.is_err(), "the panic reached the caller");
         assert_eq!(ts.power.calls(), [true, false]);
@@ -1518,7 +1708,10 @@ mod tests {
                 Err(ShellError::InvalidInput { what: "folder" })
             });
             let restore = CancelToken::new();
-            let _restore = ts.shell.autolock.begin(None, "restore", restore.clone());
+            let _restore = ts
+                .shell
+                .autolock
+                .begin(None, JobKind::Restore, restore.clone());
             let late_cancelled = restore.is_cancelled();
             release.send(()).unwrap();
             (

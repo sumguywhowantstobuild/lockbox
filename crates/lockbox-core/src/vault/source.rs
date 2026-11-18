@@ -8,7 +8,7 @@ use super::files::{FILES_DIR, attachments, blob_in};
 use super::items::{ITEMS_DIR, item_file_in, item_id_from_file_name};
 use super::unlock::{Credential, HeaderFile, choose_header, load};
 use crate::archive::{BackupArchive, EntryKind};
-use crate::blob::{CancelToken, authenticate_copy};
+use crate::blob::{CancelToken, CountWrite, Meter, Progress, authenticate_copy};
 use crate::fsio::{open_shared_read, read_retry};
 use crate::header::{HEADER_BACKUP, HEADER_FILE, VaultHeader, verify_header_mac};
 use crate::ids::{FileId, ItemId, VaultId};
@@ -91,6 +91,8 @@ impl VaultSource {
     pub(super) fn item_ids(&self) -> Result<Vec<ItemId>> {
         match self {
             Self::Folder(dir) => {
+                #[cfg(any(test, feature = "test-internals"))]
+                crate::fsio::failpoint::check("source.list")?;
                 let items = dir.join(ITEMS_DIR);
                 check_folder(&items)?;
                 let entries = match fs::read_dir(&items) {
@@ -135,6 +137,47 @@ impl VaultSource {
         match self {
             Self::Folder(dir) => Ok(fs::metadata(item_file_in(dir, id))?.len()),
             Self::Archive(a) => a.entry(&item_name(id)).map(|e| e.size).ok_or(FILE_MISSING),
+        }
+    }
+
+    /// The size of the item files `ids` together, for progress. One that cannot be measured
+    /// counts as empty.
+    pub(super) fn items_len(&self, ids: &[ItemId]) -> u64 {
+        ids.iter()
+            .map(|id| self.item_len(id).unwrap_or(0))
+            .fold(0, u64::saturating_add)
+    }
+
+    /// [`items_len`](Self::items_len), stopping at the first item it would size once `cancel` is set (`Cancelled`).
+    pub(super) fn items_len_cancellable(
+        &self,
+        ids: &[ItemId],
+        cancel: &CancelToken,
+    ) -> Result<u64> {
+        let mut total = 0_u64;
+        for id in ids {
+            #[cfg(any(test, feature = "test-internals"))]
+            crate::fsio::failpoint::check("source.size")?;
+            cancel.check()?;
+            total = total.saturating_add(self.item_len(id).unwrap_or(0));
+        }
+        Ok(total)
+    }
+
+    /// Fails unless a folder source's root is a plain folder, as [`header`](Self::header) requires before it reads
+    /// the root's header: a link or junction could lead anywhere. An archive has no root folder.
+    pub(super) fn check_root(&self) -> Result<()> {
+        match self {
+            Self::Folder(dir) => check_folder(dir),
+            Self::Archive(_) => Ok(()),
+        }
+    }
+
+    /// The size of the stored blob `id`, as [`blob`](Self::blob) would report it.
+    fn blob_len(&self, id: &FileId) -> Result<u64> {
+        match self {
+            Self::Archive(a) => a.entry(&blob_name(id)).map(|e| e.size).ok_or(FILE_MISSING),
+            Self::Folder(_) => self.blob(id).map(|(_, size)| size),
         }
     }
 
@@ -238,11 +281,14 @@ pub(super) fn check_listed(
 /// is known and before any content is trusted: the manifest MAC, its vault ID, then each
 /// header and item hash against the manifest. Header MAC and damaged items are left to
 /// [`check_opened`]. An item that does not open is damaged; so is a folder's item file that
-/// cannot be read, while a read that fails inside an archive fails the whole open.
+/// cannot be read, while a read that fails inside an archive fails the whole open. With a `meter`,
+/// the bytes of the item files read are counted into it (its caller sets its total). A cancel
+/// that comes from the meter's report for the last item is seen before this returns.
 pub(super) fn unlock_source(
     src: &VaultSource,
     credential: &Credential,
     cancel: &CancelToken,
+    meter: Option<&Meter>,
 ) -> Result<Opened> {
     cancel.check()?;
     let (main, backup) = src.header();
@@ -287,6 +333,9 @@ pub(super) fn unlock_source(
             }
             Err(error) => return Err(error),
         };
+        if let Some(meter) = meter {
+            meter.add(bytes.len() as u64);
+        }
         check_listed(&listed, &item_name(&id), Sha256::digest(&bytes).into())?;
         match open_item(&bytes, &id, &vault_id, &key) {
             Ok(item) => {
@@ -295,6 +344,7 @@ pub(super) fn unlock_source(
             Err(_) => damaged.push(id),
         }
     }
+    cancel.check()?;
     Ok(Opened {
         header: used.header.clone(),
         key,
@@ -375,11 +425,14 @@ pub struct BackupSummary {
 
 /// The checks that need the blobs, in this order: [`check_opened`]; every blob present is
 /// attached by an item; every blob authenticates (and, for an archive, hashes to the manifest).
-/// Attachments with no blob are counted, not refused.
+/// Attachments with no blob are counted, not refused. The blobs' bytes are counted into `meter`, the
+/// same one that counted the item files when the vault was opened. A cancel that comes from the
+/// last report is seen before this returns.
 pub(super) fn verify_contents(
     src: &VaultSource,
     opened: &Opened,
     cancel: &CancelToken,
+    meter: &Meter,
 ) -> Result<BackupSummary> {
     check_opened(opened)?;
     let refs = attached_refs(opened);
@@ -393,10 +446,15 @@ pub(super) fn verify_contents(
     }
     for id in &blobs {
         cancel.check()?;
-        let sink = &mut io::sink();
-        let size = copy_blob(src, id, refs[id], vault_id, &listed, sink, cancel)?;
+        let mut sink = CountWrite {
+            inner: io::sink(),
+            meter,
+        };
+        let size = copy_blob(src, id, refs[id], vault_id, &listed, &mut sink, cancel)?;
         bytes = bytes.saturating_add(size);
     }
+    cancel.check()?;
+    meter.finish();
     Ok(BackupSummary {
         name: opened.header.name.clone(),
         vault_id: *vault_id,
@@ -414,15 +472,23 @@ pub(super) fn verify_contents(
 
 /// Checks a backup without restoring it (spec 6.7 "Test a backup"): the manifest MAC, every
 /// entry's SHA-256, every item and every file stream, and reports the files the items attach
-/// that the backup lacks. Writes nothing.
+/// that the backup lacks. Writes nothing. `progress` hears the bytes of the item files and blobs
+/// read, one count from the first item to the last blob, out of their size in the archive (known
+/// before the first is read).
 pub fn verify_backup(
     archive: &Path,
     credential: Credential,
     cancel: &CancelToken,
+    progress: &dyn Progress,
 ) -> Result<BackupSummary> {
     let src = VaultSource::Archive(BackupArchive::open(archive, cancel)?);
-    let opened = unlock_source(&src, &credential, cancel)?;
-    verify_contents(&src, &opened, cancel)
+    let mut total = src.items_len(&src.item_ids()?);
+    for id in src.blob_ids()? {
+        total = total.saturating_add(src.blob_len(&id).unwrap_or(0));
+    }
+    let meter = Meter::new(progress, cancel, total);
+    let opened = unlock_source(&src, &credential, cancel, Some(&meter))?;
+    verify_contents(&src, &opened, cancel, &meter)
 }
 
 #[cfg(test)]
@@ -430,7 +496,7 @@ pub fn verify_backup(
 pub(super) mod tests {
     use super::*;
     use crate::archive::testkit::{ManifestMode, build_backup, rewrite_backup};
-    use crate::blob::NoJournal;
+    use crate::blob::{NoJournal, NoProgress};
     use crate::fsio::failpoint;
     use crate::fsio::testutil::{TempDir, make_dir_link, names};
     use crate::item::ItemKind;
@@ -471,7 +537,7 @@ pub(super) mod tests {
             fs::write(&src, bytes).unwrap();
             let id = self
                 .vault
-                .new_file_item(None, &src, &CancelToken::new())
+                .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
                 .unwrap();
             (id, self.vault.get_item(&id).unwrap().attachments[0].file_id)
         }
@@ -480,7 +546,7 @@ pub(super) mod tests {
             let src = self.parent.path().join("attach.bin");
             fs::write(&src, bytes).unwrap();
             self.vault
-                .attach_file(item, &src, &CancelToken::new())
+                .attach_file(item, &src, &CancelToken::new(), &NoProgress)
                 .unwrap()
         }
 
@@ -495,7 +561,7 @@ pub(super) mod tests {
         pub(in crate::vault) fn backup(&self, name: &str) -> PathBuf {
             let dest = self.out().join(name);
             self.vault
-                .backup(&dest, &NoJournal, &CancelToken::new())
+                .backup(&dest, &NoJournal, &CancelToken::new(), &NoProgress)
                 .unwrap();
             dest
         }
@@ -506,7 +572,7 @@ pub(super) mod tests {
     }
 
     fn verify(path: &Path, credential: Credential) -> Result<BackupSummary> {
-        verify_backup(path, credential, &CancelToken::new())
+        verify_backup(path, credential, &CancelToken::new(), &NoProgress)
     }
 
     #[track_caller]
@@ -568,6 +634,89 @@ pub(super) mod tests {
             verify(&dest, Credential::Recovery(&f.recovery)).unwrap(),
             want
         );
+    }
+
+    #[test]
+    fn test_backup_reports_progress() {
+        use crate::blob::testkit::{CancelAtFirst, Recorder};
+
+        let mut f = Fixture::new();
+        f.vault.new_item(ItemKind::Note, "note", None).unwrap();
+        let (item, _) = f.file_item(b"hello");
+        f.attach(&item, &vec![7u8; 3 * MIB + 5]);
+        let dest = f.backup("a.lockbox-backup");
+
+        let recorder = Recorder::default();
+        let summary = verify_backup(
+            &dest,
+            Credential::Password(PW),
+            &CancelToken::new(),
+            &recorder,
+        )
+        .unwrap();
+        // Everything the test reads, which is what the summary counts.
+        assert_eq!(recorder.assert_a_clean_run(), summary.bytes);
+        assert!(recorder.calls().len() as u64 <= summary.bytes / MIB as u64 + 1);
+
+        // A stop is the last the listener hears.
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Recorder::default());
+        let result = verify_backup(&dest, Credential::Password(PW), &cancel, &listener);
+        assert!(matches!(result, Err(CoreError::Cancelled)));
+        assert_eq!(listener.1.calls().len(), 1);
+    }
+
+    /// Reading the items is most of the work of a backup with big items and few files: progress
+    /// arrives while they are read, not all at once afterwards.
+    #[test]
+    fn test_backup_reports_progress_while_reading_items() {
+        use crate::blob::testkit::Recorder;
+
+        let mut f = Fixture::new();
+        for n in 0..3 {
+            let notes = zeroize::Zeroizing::new("a".repeat(600_000));
+            let title = format!("note {n}");
+            f.vault
+                .new_item_with_notes(ItemKind::Note, &title, None, notes)
+                .unwrap();
+        }
+        let dest = f.backup("a.lockbox-backup");
+
+        let recorder = Recorder::default();
+        let summary = verify_backup(
+            &dest,
+            Credential::Password(PW),
+            &CancelToken::new(),
+            &recorder,
+        )
+        .unwrap();
+
+        let total = recorder.assert_a_clean_run();
+        assert_eq!(total, summary.bytes);
+        assert!(total > 3 * 600_000);
+        let calls = recorder.calls();
+        assert!(
+            calls.len() >= 2 && calls[0].0 < total,
+            "no report before the last item was read: {calls:?}"
+        );
+    }
+
+    /// A stop that comes from the last report of a job still stops it: the call does not return
+    /// success with the token cancelled.
+    #[test]
+    fn a_stop_from_the_last_report_still_stops_a_test_of_a_backup() {
+        use crate::blob::testkit::{CancelAtFirst, Recorder};
+
+        let mut f = Fixture::new();
+        f.file_item(&vec![5u8; MIB]);
+        let dest = f.backup("a.lockbox-backup");
+        let cancel = CancelToken::new();
+        let listener = CancelAtFirst(cancel.clone(), Recorder::default());
+
+        let result = verify_backup(&dest, Credential::Password(PW), &cancel, &listener);
+
+        assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
+        assert_eq!(listener.1.calls().len(), 1, "nothing after the stop");
     }
 
     #[test]
@@ -788,7 +937,7 @@ pub(super) mod tests {
                 }
             }),
         );
-        let result = verify_backup(&dest, Credential::Password(PW), &token);
+        let result = verify_backup(&dest, Credential::Password(PW), &token, &NoProgress);
         failpoint::disarm_all();
         assert!(matches!(result, Err(CoreError::Cancelled)), "{result:?}");
         assert_eq!(seen.get(), 2, "stopped at the second item");
@@ -813,7 +962,7 @@ pub(super) mod tests {
         let (used, _, used_backup) = choose_header(&main_copy, &backup_copy, &credential).unwrap();
         assert!(used_backup);
         assert_eq!(used.bytes, fs::read(dir.join(HEADER_BACKUP)).unwrap());
-        let opened = unlock_source(&src, &credential, &CancelToken::new()).unwrap();
+        let opened = unlock_source(&src, &credential, &CancelToken::new(), None).unwrap();
         assert_eq!(opened.items.len(), 1);
 
         // The same folder through the real unlock (which also repairs `vault.json`).
@@ -833,8 +982,9 @@ pub(super) mod tests {
 
         let src = VaultSource::Folder(f.vault.dir().to_path_buf());
         let token = CancelToken::new();
-        let opened = unlock_source(&src, &Credential::Password(PW), &token).unwrap();
-        let summary = verify_contents(&src, &opened, &token).unwrap();
+        let opened = unlock_source(&src, &Credential::Password(PW), &token, None).unwrap();
+        let meter = Meter::new(&NoProgress, &token, 0);
+        let summary = verify_contents(&src, &opened, &token, &meter).unwrap();
         // A folder has no manifest, so no creation time.
         assert_eq!(summary.created_at, "");
         let from_archive = verify(&dest, Credential::Password(PW)).unwrap();
@@ -868,7 +1018,7 @@ pub(super) mod tests {
         make_dir_link(&link, f.vault.dir());
         let src = VaultSource::Folder(link);
         let token = CancelToken::new();
-        not_plain(unlock_source(&src, &Credential::Password(PW), &token));
+        not_plain(unlock_source(&src, &Credential::Password(PW), &token, None));
     }
 
     #[test]
@@ -882,12 +1032,13 @@ pub(super) mod tests {
             make_dir_link(&dir.join(name), outside.path());
             let src = VaultSource::Folder(dir);
             let token = CancelToken::new();
-            let opened = unlock_source(&src, &Credential::Password(PW), &token);
+            let opened = unlock_source(&src, &Credential::Password(PW), &token, None);
             if name == "items" {
                 not_plain(opened);
             } else {
                 // Items load; the linked `files` folder stops the check that needs the blobs.
-                not_plain(verify_contents(&src, &opened.unwrap(), &token));
+                let meter = Meter::new(&NoProgress, &token, 0);
+                not_plain(verify_contents(&src, &opened.unwrap(), &token, &meter));
             }
         }
     }
@@ -938,10 +1089,14 @@ pub(super) mod tests {
             let src = parent.path().join(FILE_NAME);
             fs::write(&src, b"a few bytes of file").unwrap();
             let cancel = CancelToken::new();
-            let file_item = vault.new_file_item(None, &src, &cancel).unwrap();
+            let file_item = vault
+                .new_file_item(None, &src, &cancel, &NoProgress)
+                .unwrap();
             let file = vault.get_item(&file_item).unwrap().attachments[0].file_id;
             let dest = parent.path().join("tiny.lockbox-backup");
-            vault.backup(&dest, &NoJournal, &cancel).unwrap();
+            vault
+                .backup(&dest, &NoJournal, &cancel, &NoProgress)
+                .unwrap();
             let secrets = [
                 vault.id().to_hex(),
                 note.to_hex(),
@@ -1037,7 +1192,12 @@ pub(super) mod tests {
                 }
                 // The recovery key (HKDF), not the password (Argon2id at 64 MiB per case).
                 let recovery = RecoverySecret::parse(&TINY.recovery).unwrap();
-                if let Err(error) = verify_backup(&path, Credential::Recovery(&recovery), &cancel) {
+                if let Err(error) = verify_backup(
+                    &path,
+                    Credential::Recovery(&recovery),
+                    &cancel,
+                    &NoProgress,
+                ) {
                     check_text(&error, &input)?;
                 }
             }

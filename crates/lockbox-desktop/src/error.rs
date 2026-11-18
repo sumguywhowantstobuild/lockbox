@@ -32,6 +32,9 @@ pub enum ShellError {
         what: &'static str,
     },
     Cancelled,
+    /// The choice the command was given is no longer there: it was used, dropped by a lock, five minutes old, or it is
+    /// another session's. The page says to pick again.
+    ChoiceExpired,
     /// A print of the page did not happen: `"pdf"` when no PDF came (nothing is left on disk), `"print"` when the
     /// job could not be sent to the printer that was picked. A print already running is `Busy { what: "printer" }`
     /// instead.
@@ -219,6 +222,16 @@ pub enum Confirm {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A choice that was used, dropped, expired or is another session's answers its own code, which the page words as
+    /// "pick again".
+    #[test]
+    fn choice_expired_has_its_own_code() {
+        assert_eq!(
+            serde_json::to_value(ShellError::ChoiceExpired).unwrap(),
+            json!({ "code": "choice_expired" })
+        );
+    }
 
     #[test]
     fn core_errors_keep_their_numbers() {

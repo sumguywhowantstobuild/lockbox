@@ -26,14 +26,21 @@ Found a security problem? Don't open a public issue; follow [SECURITY.md](SECURI
 - **`main` changes only through a reviewed pull request** with every CI check green.
 
 ## Before you push
-Run the same checks CI runs:
+Run the same checks CI runs, in one command that runs them side by side where it can and reports each one (logs in
+`target/check-logs/`; add `--no-scan` to leave out the security scan):
+
+```
+node scripts/check.mjs
+```
+
+The same checks one by one:
 
 ```
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
 cargo test --locked
-cargo test -p lockbox-core --locked --features test-internals
+cargo test -p lockbox-core --locked --features test-internals --test '*'
 npm --prefix ui run lint
 npm --prefix ui run build
 npm --prefix ui test

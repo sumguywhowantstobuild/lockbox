@@ -50,9 +50,32 @@ export const MESSAGES: Record<string, Words> = {
     title: "A vault can't live on a removable, FAT32 or network drive.",
     body: "Choose a folder on this PC.",
   },
+  // The other drives the location check refuses (a network drive, a CD or RAM disk, and a file system that isn't NTFS) are the same sentence to the person.
+  "code:invalid_input:network drive": {
+    title: "A vault can't live on a removable, FAT32 or network drive.",
+    body: "Choose a folder on this PC.",
+  },
+  "code:invalid_input:drive type not supported": {
+    title: "A vault can't live on a removable, FAT32 or network drive.",
+    body: "Choose a folder on this PC.",
+  },
+  "code:invalid_input:file system not supported": {
+    title: "A vault can't live on a removable, FAT32 or network drive.",
+    body: "Choose a folder on this PC.",
+  },
+  // Lockbox's own settings folder, picked as the place for a vault: the words of `state folder`.
+  "code:invalid_input:app data folder": {
+    title: "Lockbox won't save that in its own settings folder.",
+    body: "Choose another folder.",
+  },
+  // A folder picked to add as a vault that has no vault in it (26a).
+  "code:invalid_input:not a vault folder": {
+    title: "That folder isn't a Lockbox vault.",
+    body: "Choose the vault's own folder.",
+  },
   "code:invalid_input:vault not listed": {
     title: "Your new vault is on disk but couldn't be added to the list.",
-    body: "Use “I already have a vault” on the first screen to add it.",
+    body: "Use “I already have a vault or a backup” on the first screen to add it.",
   },
   "code:invalid_input:password is empty": { title: "Type the password first.", body: "" },
   // The shell writes a "not confirmed" note before it makes a recovery key, and makes none when it can't.
@@ -66,6 +89,8 @@ export const MESSAGES: Record<string, Words> = {
   },
   // Printing: one print of Lockbox's own at a time, and a PDF that never came leaves nothing behind.
   "code:busy:printer": { title: "Lockbox is still printing.", body: "Wait for it to finish, then try again." },
+  // Older copies (Task 8): a copy open read-only (or being opened) can't be deleted. The words are the session's.
+  "code:busy:folder is open": { title: "Close this older copy first, then delete it.", body: "" },
   "code:print_failed": { title: "Lockbox couldn't print that.", body: "Try again." },
   "code:print_failed:pdf": { title: "Lockbox couldn't make the PDF.", body: "Nothing was saved. Try again." },
   "code:print_failed:print": {
@@ -96,7 +121,25 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:shortcut taken": { title: "Another app already uses {shortcut}.", body: "Press a different combination." },
   "code:invalid_input:shortcut not set": { title: "Windows didn't take that shortcut.", body: "Try again." },
   "core:io:startup": { title: "Lockbox couldn't change Start with Windows.", body: "Try again." },
+  // A backup refused before anything is written (Asks 2 and the three beside it): the design's words, without the vault's name, which the
+  // screen puts in its own heading ("Can't back up My vault yet").
+  "code:invalid_input:details changed": {
+    title: "Its details were changed outside Lockbox, so a backup made now might not open.",
+    body: "Look at that change and accept it first, then back up.",
+  },
+  "code:invalid_input:password copies disagree": { title: "Change this vault's password once more, then back up.", body: "" },
+  "code:invalid_input:recovery key copies disagree": { title: "Make a new recovery key for this vault, then back up.", body: "" },
+  "code:invalid_input:details unchecked": { title: "Lock this vault and open it again, then back up.", body: "" },
+  // Save all of a folder's files (Task 11): the folder had none by the time the shell counted, or its files are no longer the ones planned.
+  "code:invalid_input:no files": { title: "This folder has no files to save.", body: "" },
+  "code:invalid_input:folder changed": { title: "The files in this folder changed.", body: "Save them again." },
+  // Restore a backup (24): the archive the copy opened is not the one that was checked (the file was replaced in between). The shell has let the pick go.
+  "code:invalid_input:backup changed": { title: "This backup changed after it was checked.", body: "Pick it again." },
+  // Show in Explorer could not open the folder (the shell's own `io`, with no path): the same words as the engine's.
+  "code:io": { title: "Lockbox couldn't reach that folder or file.", body: "Check that the drive is connected, then try again." },
   "code:cancelled": { title: "That was stopped before it finished.", body: "" },
+  // A choice the shell was holding (the files picked, 9a) was used, dropped by a lock, or left too long: pick again.
+  "code:choice_expired": { title: "That choice has expired.", body: "Pick the files again." },
   "code:core": GENERIC,
 
   // The page's own refusal (code "page"): it never comes from the shell.
@@ -106,8 +149,18 @@ export const MESSAGES: Record<string, Words> = {
   },
   // A cloud question left open past the shell's five minutes: the shell let go of the save it had parked, so the yes finds nothing.
   "page:key_pdf_expired": { title: "That took too long, so nothing was saved. Press Save as PDF again.", body: "" },
+  // The backup picked for Test a backup was let go by the shell (left too long, or a lock): this screen's own words, since "Pick the files again."
+  // (`code:choice_expired`, Add files) is not what it asks.
+  "page:test_choice_expired": { title: "That choice has expired.", body: "Pick the backup again." },
+  // 26b: a vault folder on a removable drive, picked on the first screen's "What do you have?" (the page's own, since the create form says the drive rule instead).
+  "page:copy_it_first": { title: "That folder is on a removable drive.", body: "Copy it to this PC first, then choose the copy." },
+  // A restore whose copy was stopped (Cancel, Windows locking or sleeping, Lock all, closing): nothing was changed. Said on the first step of the restore.
+  "page:restore_cancelled": { title: "The restore was cancelled.", body: "Your vault is as it was." },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
+  // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
+  "page:save_all_expired": { title: "That took too long, so nothing was saved. Choose Save all files again.", body: "" },
+  "page:output_expired": { title: "Lockbox can't open that folder now.", body: "Open it from Windows." },
 
   "core:wrong_password": { title: "Wrong password.", body: "" },
   "core:recovery_key_typo": { title: "That recovery key has a typing mistake.", body: "Check it against the one you saved." },
@@ -145,6 +198,17 @@ export const MESSAGES: Record<string, Words> = {
     title: "This item changed while you were editing it.",
     body: "Nothing was saved. Cancel, then open it again to see the change.",
   },
+  // Restore a backup (24): all 99 names for the older copy are taken, so the swap is refused (the design's words, without its Older copies button).
+  "core:invalid_input:too many before-restore copies": {
+    title: "There are too many older copies of this vault.",
+    body: "Delete some, then restore again.",
+  },
+  // A restore into a folder holding two working copies of the same vault (a folder copied beside its original): the engine won't guess which to
+  // replace. The design has no row for it; the words are the session's (Plan 4B Task 5's hands-on, 2026-11-17).
+  "core:invalid_input:several copies of this vault": {
+    title: "That folder holds more than one copy of this vault, so Lockbox can't tell which one to replace.",
+    body: "Choose another folder, or move the extra copies out of it first.",
+  },
   "core:invalid_input:destination in a vault folder": {
     title: "Lockbox won't save that inside a vault's folder.",
     body: "Choose another folder.",
@@ -171,7 +235,9 @@ export const MESSAGES: Record<string, Words> = {
  */
 export const KNOWN_WHATS: readonly string[] = [
   "already restored",
+  "app data folder",
   "backup",
+  "backup changed",
   "backup entries",
   "backup extension",
   "backup: archive writer",
@@ -197,6 +263,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "collection",
   "collection has items",
   "collection inside a collection",
+  "credential",
   "damaged output journals",
   "damaged vault lists",
   "destination changed",
@@ -205,6 +272,9 @@ export const KNOWN_WHATS: readonly string[] = [
   "destination inside vault",
   "destination is the backup",
   "destination not writable",
+  "details changed",
+  "details unchecked",
+  "drive type not supported",
   "earlier password",
   "env keys",
   "env rows",
@@ -214,12 +284,15 @@ export const KNOWN_WHATS: readonly string[] = [
   "file missing",
   "file name",
   "file record",
+  "file system not supported",
   "folder",
+  "folder changed",
   "folder is open",
   "folder name",
   "header changed on disk",
   "id",
   "idle time",
+  "index",
   "item",
   "item cannot hold files",
   "journal full",
@@ -233,7 +306,9 @@ export const KNOWN_WHATS: readonly string[] = [
   "key slots",
   "link",
   "link type",
+  "network drive",
   "no character class selected",
+  "no files",
   "no keys",
   "not a collection",
   "not a file",
@@ -248,12 +323,14 @@ export const KNOWN_WHATS: readonly string[] = [
   "operation in progress",
   "output journal",
   "password",
+  "password copies disagree",
   "password is empty",
   "pdf",
   "print",
   "printer",
   "printer name",
   "recovery key",
+  "recovery key copies disagree",
   "removable drive",
   "request",
   "restore",
@@ -290,6 +367,20 @@ export const KNOWN_WHATS: readonly string[] = [
   "vault still finishing an operation",
   "website",
 ];
+
+/** What a backup that began and did not finish says first (the design's words, and what a stop says as well). */
+export const BACKUP_NOT_FINISHED = "The backup didn't finish. Nothing half-made was left.";
+
+/**
+ * What follows that sentence for a backup that began and did not finish: the table's own words for the refusal when it has some (a drive that
+ * went away), else `null`. A stop is the person's own press and says nothing more; a refusal the table does not know says nothing more either,
+ * never the generic words.
+ */
+export function backupNotFinishedMore(error: unknown): string | null {
+  const said = messageFor(error);
+  const stopped = isRecord(error) && error.code === "cancelled";
+  return stopped || said.title === GENERIC.title ? null : messageText(said);
+}
 
 /** A message as one line of text, for a screen that shows it in one place. */
 export function messageText(message: Pick<Message, "title" | "body">): string {

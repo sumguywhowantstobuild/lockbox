@@ -2,7 +2,7 @@
 //! replace, export, purge.
 //! Every vault creation runs a real ~1 s Argon2id derivation, so tests share vaults.
 
-use lockbox_core::blob::{CancelToken, NoJournal, OutputJournal};
+use lockbox_core::blob::{CancelToken, NoJournal, NoProgress, OutputJournal};
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::internals::item::file_key;
 use lockbox_core::item::ItemKind;
@@ -75,7 +75,9 @@ fn import_export_round_trip_across_unlock() {
     let data = pattern(2 * 1_048_576 + 5);
     let src = write(parent.path(), "photo.jpg", &data);
 
-    let id = vault.new_file_item(None, &src, &cancel).unwrap();
+    let id = vault
+        .new_file_item(None, &src, &cancel, &NoProgress)
+        .unwrap();
     let item = vault.get_item(&id).unwrap();
     assert!(matches!(item.kind, ItemKind::File));
     assert_eq!(item.title, "photo.jpg");
@@ -97,7 +99,7 @@ fn import_export_round_trip_across_unlock() {
     let vault = reopen(vault);
     let dest = parent.path().join("copy.jpg");
     vault
-        .export_file(&id, &file_id, &dest, &NoJournal, &cancel)
+        .export_file(&id, &file_id, &dest, &NoJournal, &cancel, &NoProgress)
         .unwrap();
     assert_eq!(fs::read(&dest).unwrap(), data);
 }
@@ -136,7 +138,9 @@ fn attach_file_adds_to_an_existing_item() {
     let mut vault = new_vault(parent.path());
     let note = vault.new_item(ItemKind::Note, "Tax", None).unwrap();
     let src = write(parent.path(), "a.txt", b"one");
-    let file = vault.attach_file(&note, &src, &cancel).unwrap();
+    let file = vault
+        .attach_file(&note, &src, &cancel, &NoProgress)
+        .unwrap();
     let item = vault.get_item(&note).unwrap();
     assert_eq!((item.revision, item.attachments.len()), (1, 1));
     assert_eq!(item.attachments[0].file_id, file);
@@ -145,17 +149,17 @@ fn attach_file_adds_to_an_existing_item() {
     // Not on a missing item, a collection, or a trashed item.
     let missing = ItemId::random();
     assert!(matches!(
-        vault.attach_file(&missing, &src, &cancel),
+        vault.attach_file(&missing, &src, &cancel, &NoProgress),
         Err(CoreError::NotFound)
     ));
     let collection = vault.new_item(ItemKind::Collection, "C", None).unwrap();
     assert!(matches!(
-        vault.attach_file(&collection, &src, &cancel),
+        vault.attach_file(&collection, &src, &cancel, &NoProgress),
         Err(CoreError::InvalidInput { .. })
     ));
     vault.trash_item(&note).unwrap();
     assert!(matches!(
-        vault.attach_file(&note, &src, &cancel),
+        vault.attach_file(&note, &src, &cancel, &NoProgress),
         Err(CoreError::InvalidInput { .. })
     ));
     // The refusals happen before any blob is written.
@@ -172,10 +176,15 @@ fn new_file_item_can_join_a_collection() {
     let collection = vault.new_item(ItemKind::Collection, "Taxes", None).unwrap();
     let src = write(parent.path(), "w2.pdf", b"pdf");
     let id = vault
-        .new_file_item(Some(collection), &src, &CancelToken::new())
+        .new_file_item(Some(collection), &src, &CancelToken::new(), &NoProgress)
         .unwrap();
     assert_eq!(vault.get_item(&id).unwrap().collection, Some(collection));
-    let bad = vault.new_file_item(Some(ItemId::random()), &src, &CancelToken::new());
+    let bad = vault.new_file_item(
+        Some(ItemId::random()),
+        &src,
+        &CancelToken::new(),
+        &NoProgress,
+    );
     assert!(matches!(bad, Err(CoreError::InvalidInput { .. })));
 }
 
@@ -189,7 +198,11 @@ fn odd_names_preserved() {
     let mut ids = Vec::new();
     for (i, name) in names.iter().enumerate() {
         let src = write(parent.path(), name, format!("content {i}").as_bytes());
-        ids.push(vault.new_file_item(None, &src, &cancel).unwrap());
+        ids.push(
+            vault
+                .new_file_item(None, &src, &cancel, &NoProgress)
+                .unwrap(),
+        );
     }
     let vault = reopen(vault);
     for (i, (id, name)) in ids.iter().zip(names).enumerate() {
@@ -198,7 +211,14 @@ fn odd_names_preserved() {
         assert_eq!(item.title, name);
         let dest = parent.path().join(format!("out{i}"));
         vault
-            .export_file(id, &item.attachments[0].file_id, &dest, &NoJournal, &cancel)
+            .export_file(
+                id,
+                &item.attachments[0].file_id,
+                &dest,
+                &NoJournal,
+                &cancel,
+                &NoProgress,
+            )
             .unwrap();
         assert_eq!(fs::read(&dest).unwrap(), format!("content {i}").as_bytes());
     }
@@ -211,14 +231,16 @@ fn replace_records_retired_blob() {
     let mut vault = new_vault(parent.path());
     let first = write(parent.path(), "v1.txt", b"version one");
     let second = write(parent.path(), "v2.txt", b"version two!");
-    let id = vault.new_file_item(None, &first, &cancel).unwrap();
+    let id = vault
+        .new_file_item(None, &first, &cancel, &NoProgress)
+        .unwrap();
     let old = first_file(&vault, &id);
     let old_key = file_key(&vault.get_item(&id).unwrap().attachments[0])
         .as_bytes()
         .to_owned();
 
     let new = vault
-        .replace_attachment(&id, &old, &second, &cancel)
+        .replace_attachment(&id, &old, &second, &cancel, &NoProgress)
         .unwrap();
     assert_ne!(new, old);
     let item = vault.get_item(&id).unwrap();
@@ -246,11 +268,11 @@ fn replace_records_retired_blob() {
     assert!(!blob_path(&vault, &old).exists());
     let dest = parent.path().join("out");
     assert!(matches!(
-        vault.export_file(&id, &old, &dest, &NoJournal, &cancel),
+        vault.export_file(&id, &old, &dest, &NoJournal, &cancel, &NoProgress),
         Err(CoreError::NotFound)
     ));
     vault
-        .export_file(&id, &new, &dest, &NoJournal, &cancel)
+        .export_file(&id, &new, &dest, &NoJournal, &cancel, &NoProgress)
         .unwrap();
     assert_eq!(fs::read(&dest).unwrap(), b"version two!");
 }
@@ -261,8 +283,10 @@ fn replace_of_an_unknown_file_is_refused() {
     let cancel = CancelToken::new();
     let mut vault = new_vault(parent.path());
     let src = write(parent.path(), "a.txt", b"a");
-    let id = vault.new_file_item(None, &src, &cancel).unwrap();
-    let result = vault.replace_attachment(&id, &FileId::random(), &src, &cancel);
+    let id = vault
+        .new_file_item(None, &src, &cancel, &NoProgress)
+        .unwrap();
+    let result = vault.replace_attachment(&id, &FileId::random(), &src, &cancel, &NoProgress);
     assert!(matches!(result, Err(CoreError::NotFound)));
     assert_eq!(
         names_in(&vault.dir().join("files")).len(),
@@ -278,7 +302,9 @@ fn export_verify_then_publish() {
     let mut vault = new_vault(parent.path());
     let data = pattern(1_048_576 + 100);
     let src = write(parent.path(), "report.pdf", &data);
-    let id = vault.new_file_item(None, &src, &cancel).unwrap();
+    let id = vault
+        .new_file_item(None, &src, &cancel, &NoProgress)
+        .unwrap();
     let file = first_file(&vault, &id);
 
     let out = tempfile::tempdir().unwrap();
@@ -291,7 +317,7 @@ fn export_verify_then_publish() {
     *bad.last_mut().unwrap() ^= 1;
     fs::write(&blob, &bad).unwrap();
     let journal = Recorder::default();
-    let result = vault.export_file(&id, &file, &dest, &journal, &cancel);
+    let result = vault.export_file(&id, &file, &dest, &journal, &cancel, &NoProgress);
     assert!(matches!(result, Err(CoreError::Damaged { .. })));
     assert_eq!(fs::read(&dest).unwrap(), b"OLD", "destination untouched");
     assert_eq!(names_in(out.path()), ["report.pdf"], "no temp file left");
@@ -314,7 +340,7 @@ fn export_verify_then_publish() {
     fs::write(&blob, &good).unwrap();
     let journal = Recorder::default();
     vault
-        .export_file(&id, &file, &dest, &journal, &cancel)
+        .export_file(&id, &file, &dest, &journal, &cancel, &NoProgress)
         .unwrap();
     assert_eq!(fs::read(&dest).unwrap(), data);
     assert_eq!(names_in(out.path()), ["report.pdf"]);
@@ -331,7 +357,7 @@ fn export_verify_then_publish() {
         use std::os::windows::fs::MetadataExt;
         let fresh = out.path().join("fresh.pdf");
         vault
-            .export_file(&id, &file, &fresh, &NoJournal, &cancel)
+            .export_file(&id, &file, &fresh, &NoJournal, &cancel, &NoProgress)
             .unwrap();
         for path in [&dest, &fresh] {
             assert_eq!(
@@ -349,7 +375,7 @@ fn export_refuses_a_cancelled_or_missing_blob_cleanly() {
     let mut vault = new_vault(parent.path());
     let src = write(parent.path(), "a.txt", b"hello");
     let id = vault
-        .new_file_item(None, &src, &CancelToken::new())
+        .new_file_item(None, &src, &CancelToken::new(), &NoProgress)
         .unwrap();
     let file = first_file(&vault, &id);
     let out = tempfile::tempdir().unwrap();
@@ -358,13 +384,20 @@ fn export_refuses_a_cancelled_or_missing_blob_cleanly() {
     let cancel = CancelToken::new();
     cancel.cancel();
     let journal = Recorder::default();
-    let result = vault.export_file(&id, &file, &dest, &journal, &cancel);
+    let result = vault.export_file(&id, &file, &dest, &journal, &cancel, &NoProgress);
     assert!(matches!(result, Err(CoreError::Cancelled)));
     assert!(names_in(out.path()).is_empty(), "no temp, no destination");
     assert_eq!(journal.0.borrow().len(), 2);
 
     fs::remove_file(blob_path(&vault, &file)).unwrap();
-    let result = vault.export_file(&id, &file, &dest, &NoJournal, &CancelToken::new());
+    let result = vault.export_file(
+        &id,
+        &file,
+        &dest,
+        &NoJournal,
+        &CancelToken::new(),
+        &NoProgress,
+    );
     assert!(matches!(result, Err(CoreError::Damaged { .. })));
     assert!(names_in(out.path()).is_empty());
 }
@@ -376,12 +409,16 @@ fn purge_needs_the_trash_and_removes_everything() {
     let mut vault = new_vault(parent.path());
     let first = write(parent.path(), "a.txt", b"a");
     let second = write(parent.path(), "b.txt", b"b");
-    let id = vault.new_file_item(None, &first, &cancel).unwrap();
+    let id = vault
+        .new_file_item(None, &first, &cancel, &NoProgress)
+        .unwrap();
     let old = first_file(&vault, &id);
     vault
-        .replace_attachment(&id, &old, &second, &cancel)
+        .replace_attachment(&id, &old, &second, &cancel, &NoProgress)
         .unwrap();
-    let kept = vault.new_file_item(None, &first, &cancel).unwrap();
+    let kept = vault
+        .new_file_item(None, &first, &cancel, &NoProgress)
+        .unwrap();
 
     assert!(matches!(
         vault.purge_item(&id),
@@ -414,7 +451,7 @@ fn source_open_for_writing_elsewhere_is_refused_and_leaves_nothing() {
     let src = write(parent.path(), "busy.txt", b"still being written");
     let writer = fs::OpenOptions::new().write(true).open(&src).unwrap();
 
-    let result = vault.new_file_item(None, &src, &CancelToken::new());
+    let result = vault.new_file_item(None, &src, &CancelToken::new(), &NoProgress);
     match result {
         Err(CoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(32), "{e:?}"),
         other => panic!("expected a sharing violation, got {other:?}"),

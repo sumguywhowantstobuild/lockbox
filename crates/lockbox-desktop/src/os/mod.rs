@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use lockbox_core::blob::CancelToken;
 use lockbox_core::item::MAX_ITEM_JSON;
@@ -61,6 +61,10 @@ pub trait MainWindow: Send + Sync {
     /// ([`window::set_capture_protection`](crate::window::set_capture_protection)): the request is made, and Windows
     /// does not say whether it holds. A window that is not there has nothing to protect.
     fn protect_from_capture(&self, on: bool);
+    /// Ends the app (the exit that follows a Quit's shutdown), the one way out the shell takes itself. Tauri's own call
+    /// ([`AppHandle::exit`](tauri::AppHandle::exit)): it queues the request for the event loop and does not wait, so it
+    /// is safe from any thread. The exit request that follows runs the shutdown again, which returns at once.
+    fn exit_app(&self);
 }
 
 /// The save shortcut as Windows holds it, behind a trait so `set_settings` is tested without a window.
@@ -742,24 +746,22 @@ pub trait Power: Send + Sync {
     fn keep_awake(&self, on: bool);
 }
 
-/// The time now, on the monotonic clock (when a long operation ended), and the waits between clipboard tries.
+/// The time now, on the monotonic clock (when a long operation ended), the wall clock beside it (the date a backup
+/// finished), and the waits between clipboard tries.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
+    /// The calendar time: what the person's PC says it is. It can jump (the user sets it, Windows corrects it), so it
+    /// only ever names a date, never times a wait.
+    fn wall(&self) -> SystemTime;
+    /// Today's date in the PC's own time zone, `YYYY-MM-DD`: what a person calls today (a backup file's suggested
+    /// name). Only Windows knows the zone, so the real one is in `os::win`.
+    fn local_date(&self) -> String;
+    /// How far the PC's time zone is east of UTC now, in seconds (negative: west): what turns a UTC moment (a backup's
+    /// date) into the day the person calls it. The offset in force now, not the one of the moment asked about, so a date
+    /// from the other side of a clock change can be an hour out: never more.
+    fn utc_offset_secs(&self) -> i64;
     /// Waits `time`: a test's fake clock just moves on by it.
     fn sleep(&self, time: Duration);
-}
-
-/// [`Instant::now`] and [`thread::sleep`].
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
-    fn sleep(&self, time: Duration) {
-        thread::sleep(time);
-    }
 }
 
 /// A folder Windows keeps for each user (`SHGetKnownFolderPath`).
@@ -815,6 +817,9 @@ pub trait Dialogs: Send + Sync {
     fn pick_folder(&self, title: &str, start: Option<&Path>) -> Option<PathBuf>;
     /// `filter`: a name and the extensions it shows, without dots.
     fn pick_file(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf>;
+    /// Like [`pick_file`](Self::pick_file), for one or more files, in the order Windows gives them. `None` when the
+    /// dialog is closed.
+    fn pick_files(&self, title: &str, filter: Option<(&str, &[&str])>) -> Option<Vec<PathBuf>>;
     fn save_file(
         &self,
         title: &str,
@@ -831,6 +836,9 @@ pub trait Launcher: Send + Sync {
     fn open_url(&self, url: &tauri::Url) -> io::Result<()>;
     /// Opens the decrypted copy `file` with its default app, the file's own folder as the working directory.
     fn open_file(&self, file: &Path) -> io::Result<()>;
+    /// Opens the folder `folder` in Explorer (Show in Explorer, after a folder's files were saved). The path is
+    /// the shell's own, never the page's.
+    fn open_folder(&self, folder: &Path) -> io::Result<()>;
 }
 
 /// Whether `a` and `b` name the same path as the file system compares names: component by component (so a trailing
