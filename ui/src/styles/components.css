@@ -1999,6 +1999,14 @@
   flex: none;
 }
 
+/* When the window leaves the menu short, the locked vaults' lines give up their room first, down to one line (they say only that a vault is
+   locked, and scroll); then the open rows scroll. The actions never shrink. Checked by measurement at 300 px of room: 19 locked and 1 open, 19
+   and 4, 3 and 12, 0 and 12 all keep Lock in view and every open row whole until the rows must scroll. */
+.menu.mwide > .mscroll:first-child {
+  flex-shrink: 1000;
+  min-height: 2.5em;
+}
+
 /* The group under the locked vaults' lines holds the open rows (in their own scroll area) and the actions: it may shrink, so the rows scroll and
    the actions stay. */
 .menu.mwide > .mgroup {

@@ -430,7 +430,13 @@ test("the_vault_menu_keeps_its_action_in_reach_with_many_open_vaults", async () 
   expect(lock.closest(".mscroll")).toBeNull();
   // With locked vaults listed too, the group that holds the rows may shrink inside the menu, so its own area is what scrolls (jsdom lays nothing out).
   const css = readBeside(import.meta.url, "../styles/components.css");
-  const at = css.indexOf("\n.menu.mwide > .mgroup {");
-  expect(at).toBeGreaterThan(-1);
-  expect(css.slice(at, css.indexOf("}", at))).toMatch(/min-height:\s*0/);
+  const rule = (selector: string) => {
+    const at = css.indexOf(`\n${selector} {`);
+    expect(at, `${selector} is in the style sheet`).toBeGreaterThan(-1);
+    return css.slice(at, css.indexOf("}", at));
+  };
+  expect(rule(".menu.mwide > .mgroup")).toMatch(/min-height:\s*0/);
+  // The locked vaults' lines give up their room before the open rows do (down to one line), so the vault on screen is always a whole row.
+  expect(rule(".menu.mwide > .mscroll:first-child")).toMatch(/flex-shrink:\s*1000/);
+  expect(rule(".menu.mwide > .mscroll:first-child")).toMatch(/min-height:\s*2\.5em/);
 });

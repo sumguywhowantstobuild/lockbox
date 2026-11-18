@@ -77,8 +77,8 @@ function hasNoQuestion(error: unknown): boolean {
 /**
  * Answers the question: `true` is Close anyway, `false` is Keep it running. One answer goes out at a time. The question goes quietly when the
  * answer is accepted, or refused with `not_found` (the shell had already dropped it). Any other failure (a bridge that can't be reached, another
- * refusal) leaves it showing, since the shell still holds the question and sends no second one until it is answered: the person presses again,
- * and nothing is said of why.
+ * refusal) leaves it showing, since the shell still holds the question (a second close or Quit only sends the same question again): the person
+ * presses again, and nothing is said of why.
  */
 export async function answerClose(go: boolean): Promise<void> {
   const asked = question;
