@@ -49,9 +49,13 @@ async function unlockOnScreen() {
   await screen.findByRole("heading", { level: 1, name: "All items" });
 }
 
-/** Opens the vault menu the way a click does, and gives the menu. */
+/**
+ * Opens the vault menu the way a click does, and gives the menu. A real click focuses the button first (jsdom's `click` does not), so focus
+ * starts there and not on the page heading an unlock gave it; the menu gives focus back to where it was when it opened.
+ */
 async function openVaultMenu(vault = "My vault") {
   const opener = screen.getByRole("button", { name: `${vault}, vault menu` });
+  opener.focus();
   fireEvent.pointerDown(opener, { button: 0 });
   fireEvent.click(opener);
   return screen.findByRole("menu");
