@@ -1,5 +1,5 @@
 // 9b's progress part: the bar, the bytes in words, and Cancel. The screens' own tests (FileActions) cover it inside a real window.
-import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { expectNoAxe } from "../testing/axe";
 import { readBeside } from "../testing/files";
@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen }));
 type Handler = (event: { payload: unknown }) => void;
 let jobs: typeof import("../jobs");
 let JobProgress: typeof import("./JobProgress").JobProgress;
+let JobStop: typeof import("./JobProgress").JobStop;
 const handlers = new Map<string, Handler[]>();
 
 function emit(event: string, payload: unknown): void {
@@ -50,7 +51,7 @@ beforeEach(async () => {
   });
   const bridge = await import("../bridge");
   jobs = await import("../jobs");
-  ({ JobProgress } = await import("./JobProgress"));
+  ({ JobProgress, JobStop } = await import("./JobProgress"));
   invoke.mockResolvedValueOnce({ session: 3, generation: 7, data: "info" });
   await bridge.open("unlock_vault", { id: 1, password: "x" });
   await jobs.startJobs();
@@ -73,6 +74,87 @@ test("progress_bar_can_say_the_per_cent_alone_as_the_restore_draws_it", () => {
   // Never rounded up to 100 before the work is done.
   move(1, 999, 1000, false, "restore");
   expect(screen.getByText("99%")).toBeTruthy();
+});
+
+test("progress_block_is_laid_out_as_drawn", async () => {
+  // 22b, 9b, 9f's progress and 33b behind its question: in a panel, the sentence sits above the card, the card holds only the name, the count
+  // or per cent and the bar with its figure, the line about the laptop sits under the card, and Cancel is the panel's own, in its foot.
+  start(1, "backup");
+  const { container } = render(
+    <>
+      <JobProgress operation={1} label="Backing up My vault" layout="panel" sentence="For My vault." warning="Keep the laptop open." />
+      <footer>
+        <JobStop operation={1} />
+      </footer>
+    </>,
+  );
+  move(1, 61, 100, false, "backup");
+  const card = screen.getByRole("region", { name: "Backing up My vault" });
+  const head = card.querySelector(".jhead");
+  expect(head?.textContent).toBe("Backing up My vault61%");
+  expect(card.contains(screen.getByRole("progressbar"))).toBe(true);
+  expect(card.textContent).not.toContain("For My vault.");
+  expect(card.textContent).not.toContain("Keep the laptop open.");
+  expect(card.querySelector("button")).toBeNull();
+  const sentence = screen.getByText("For My vault.");
+  const warning = screen.getByText("Keep the laptop open.");
+  expect(sentence.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(card.compareDocumentPosition(warning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // The foot's Cancel stops this one operation.
+  const stop = within(container.querySelector("footer") as HTMLElement).getByRole("button", { name: "Cancel" });
+  invoke.mockResolvedValueOnce(null);
+  fireEvent.click(stop);
+  expect(invoke).toHaveBeenLastCalledWith("cancel_operation", { operation: 1, scope: SESSION });
+  expect(await within(container.querySelector("footer") as HTMLElement).findByRole("button", { name: "Cancelling…" })).toBeTruthy();
+  // A batch names the file going in and its place, where a single job says its per cent.
+  cleanup();
+  start(2);
+  render(<JobProgress operation={2} label="Adding files" layout="panel" now={{ name: "design-files-demo.zip", place: "2 of 3" }} />);
+  move(2, 1.3 * GB, 3.2 * GB);
+  expect(screen.getByRole("region", { name: "Adding files" }).querySelector(".jhead")?.textContent).toBe("design-files-demo.zip2 of 3");
+  expect(screen.getByText("1.3 GB of 3.2 GB")).toBeTruthy();
+});
+
+test("backup_bar_shows_the_percent_and_the_backups_own_size", () => {
+  // The engine counts a backup's bytes twice (written, then read back to check them), so the figure is half of its numbers: the backup's own
+  // size, as 22b draws it. The per cent is of the whole job, and never passes it.
+  start(1, "backup");
+  render(<JobProgress operation={1} label="Backing up My vault" layout="panel" countsTwice />);
+  const MB = 1024 ** 2;
+  const size = Math.round(1.2 * GB);
+  move(1, 2 * 750 * MB, 2 * size, false, "backup");
+  expect(screen.getByText("750 MB of 1.2 GB")).toBeTruthy();
+  expect(screen.getByText("61%")).toBeTruthy();
+  expect(screen.getByRole("progressbar").getAttribute("aria-valuetext")).toBe("61%, 750 MB of 1.2 GB");
+  // The store keeps what is done within the whole, so the halved words never pass it either.
+  move(1, 3 * size, 2 * size, false, "backup");
+  expect(screen.getByText("1.2 GB of 1.2 GB")).toBeTruthy();
+  expect(screen.getByText("100%")).toBeTruthy();
+});
+
+test("restore_bar_keeps_its_percent_beside_the_name", () => {
+  // 24c, a full-window step: no card, the name and its per cent on one line over the bar, the line about the laptop, then Cancel.
+  start(1, "restore");
+  render(<JobProgress operation={1} label="Checking and unpacking" layout="step" figures="percent" warning="Keep the laptop open." />);
+  move(1, 48, 100, false, "restore");
+  const block = screen.getByRole("region", { name: "Checking and unpacking" });
+  expect(block.classList.contains("ask")).toBe(false);
+  expect(block.querySelector(".jhead")?.textContent).toBe("Checking and unpacking48%");
+  // The per cent is said once, beside the name, not again under the bar.
+  expect(screen.getAllByText("48%")).toHaveLength(1);
+  const parts = [block.querySelector(".jhead"), screen.getByRole("progressbar"), screen.getByText("Keep the laptop open."), screen.getByRole("button", { name: "Cancel" })];
+  for (let i = 1; i < parts.length; i += 1) {
+    expect((parts[i - 1] as Node).compareDocumentPosition(parts[i] as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+  // Under a heading that already names the job (Open a backup's step, "Opening …"), the first line keeps only its per cent and the figure.
+  cleanup();
+  start(2, "open_backup");
+  render(<JobProgress operation={2} label="Opening demo.lockbox-backup" heading={false} layout="step" stopWord="Stop" />);
+  move(2, 750 * 1024 ** 2, Math.round(1.2 * GB), false, "open_backup");
+  const opening = screen.getByRole("region", { name: "Opening demo.lockbox-backup" });
+  expect(opening.querySelector(".jhead")?.textContent).toBe("61%");
+  expect(screen.getByText("750 MB of 1.2 GB")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
 });
 
 test("progress_bar_shows_done_and_total_in_words", () => {

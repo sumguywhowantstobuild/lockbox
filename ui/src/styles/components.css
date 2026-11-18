@@ -324,6 +324,12 @@
   align-items: center;
 }
 
+/* A quiet link in a step's row (Pick another, Choose another, Back, Bring in another vault) pulls back by its own padding, so its words line
+   up with the heading and the sentence when it starts a line (a long name wraps it under the button), and sit beside a button as drawn. */
+.fu-row .lnk {
+  margin-left: -8px;
+}
+
 /* A quiet button on its own line under the sentence that offers it (18c's Choose another): its words line up with the
    sentence's, the hover tint reaching into the margin. */
 .fu-other {
@@ -2279,6 +2285,70 @@
   flex: none;
   color: var(--ink2);
   font-variant-numeric: tabular-nums;
+}
+
+/* The panel and step layouts (22b, 9b, 24c): the first line is the job's name (or the file going in) with its per cent (or "2 of 3") beside
+   it, then the bar and its figure. In a panel the card holds only those, with the sentence above it and the line about the laptop below it;
+   on a full-window step there is no card, and Cancel follows the line about the laptop. */
+.job .jhead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.job .jhead b {
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* The per cent (or the place in a batch) keeps to the right, even when the name is left out under a heading that already says it. */
+.job .jhead span {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+
+.jcard {
+  margin-top: 12px;
+}
+
+.psub + .jcard {
+  margin-top: 14px;
+}
+
+.jcard + .fwarn {
+  margin: 14px 12px 0;
+  font-weight: 400;
+}
+
+.job.jstep {
+  margin-top: 14px;
+}
+
+.job.jstep p {
+  margin: 0;
+}
+
+.job.jstep .pnum {
+  margin-top: 6px;
+}
+
+.job.jstep .prog {
+  margin-top: 16px;
+}
+
+.job.jstep .fwarn {
+  margin-top: 14px;
+  color: var(--ink2);
+  font-weight: 400;
+}
+
+.job.jstep .ask-acts {
+  margin-top: 14px;
 }
 
 /* The card that keeps a batch's end when the person has gone from its panel: a heading as the bar's card has, then the summary. */

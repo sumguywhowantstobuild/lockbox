@@ -410,7 +410,9 @@ test("progress_names_the_file_shows_the_bytes_and_stop_goes_back_to_the_file", a
   expect(within(card).getByText("750 MB of 1.2 GB")).toBeTruthy();
   // The box is gone while it works: nothing typed is on the page.
   expect(document.querySelectorAll("aside.panel input")).toHaveLength(0);
-  fireEvent.click(within(card).getByRole("button", { name: "Stop" }));
+  // As drawn: the bar's card, with Stop in the panel's foot.
+  expect(within(card).queryByRole("button")).toBeNull();
+  fireEvent.click(within(panel.querySelector(".pbar") as HTMLElement).getByRole("button", { name: "Stop" }));
   // A stop is the person's own: back to 25a, the file still picked, the box empty, nothing said.
   const again = await screen.findByLabelText(LABEL);
   expect((again as HTMLInputElement).value).toBe("");

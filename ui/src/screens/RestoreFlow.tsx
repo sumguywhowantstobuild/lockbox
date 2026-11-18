@@ -248,7 +248,7 @@ function Steps({ flow }: { flow: Flow }) {
             Starting…
           </p>
         ) : (
-          <JobProgress operation={job.operation} label="Checking and unpacking" warning={KEEP_OPEN} figures="percent" />
+          <JobProgress operation={job.operation} label="Checking and unpacking" warning={KEEP_OPEN} figures="percent" layout="step" />
         )}
       </div>
     );

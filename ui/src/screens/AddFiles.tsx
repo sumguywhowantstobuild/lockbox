@@ -5,8 +5,8 @@ import { focusBack } from "../focus";
 import { formatBytes } from "../format";
 import { useJob } from "../jobs";
 import { Button } from "../parts/Button";
-import { CloseIcon, KindIcon } from "../parts/Icon";
-import { JobProgress } from "../parts/JobProgress";
+import { CloseIcon, KindIcon, PlusIcon } from "../parts/Icon";
+import { JobProgress, JobStop } from "../parts/JobProgress";
 import { Panel } from "../parts/Panel";
 import { Select } from "../parts/Select";
 import { closeAddFiles, leaveOutPickedFile, pickMoreFiles, runAddFiles, type AddFilesFlow, type SessionData } from "../store";
@@ -194,7 +194,13 @@ function AddFilesPanel({ data, folders, flow }: { data: SessionData; folders: re
   if (phase === "adding") {
     const place = where === undefined ? data.name : `${where}, in ${data.name}`;
     return (
-      <Panel title={`${verb.doing} files`} titleRef={heading} onClose={close} onKeyDown={onKeyDown}>
+      <Panel
+        title={`${verb.doing} files`}
+        titleRef={heading}
+        onClose={close}
+        onKeyDown={onKeyDown}
+        footer={job === null ? undefined : <JobStop operation={job.operation} />}
+      >
         {job === null ? (
           <p className="note" aria-busy="true">
             Starting…
@@ -207,6 +213,7 @@ function AddFilesPanel({ data, folders, flow }: { data: SessionData; folders: re
             sentence={`${verb.doing} to ${place}.`}
             now={nowGoing(files, job.done)}
             warning={KEEP_OPEN}
+            layout="panel"
           />
         )}
       </Panel>
@@ -288,7 +295,14 @@ function AddFilesPanel({ data, folders, flow }: { data: SessionData; folders: re
             if (!flow.busy) void pickMoreFiles(session);
           }}
         >
-          {files.length === 0 ? "Pick files" : "Pick more"}
+          {files.length === 0 ? (
+            "Pick files"
+          ) : (
+            <>
+              <PlusIcon />
+              Pick more
+            </>
+          )}
         </Button>
       </div>
       {into.type === "folder" ? (

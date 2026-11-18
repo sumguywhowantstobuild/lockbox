@@ -6,7 +6,7 @@ import { backupNotFinishedMore, BACKUP_NOT_FINISHED, messageFor, messageText } f
 import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
 import { Figure } from "../parts/Figure";
-import { JobProgress } from "../parts/JobProgress";
+import { JobProgress, JobStop } from "../parts/JobProgress";
 import { Panel } from "../parts/Panel";
 import {
   closeBackup,
@@ -127,10 +127,10 @@ export function BackupPanel({ data }: { data: SessionData }) {
     );
   }
   if (job !== null) {
-    // 22b: the bar and its Cancel are Task 2's progress part, named for the vault.
+    // 22b: the bar is Task 2's progress part, named for the vault, with its Cancel in the panel's foot; the figure is the backup's own size.
     return (
-      <Panel title="Back up" titleRef={title} onClose={close} onKeyDown={onKeyDown}>
-        <JobProgress operation={job.operation} label={`Backing up ${data.name}`} warning={KEEP_OPEN} />
+      <Panel title="Back up" titleRef={title} onClose={close} onKeyDown={onKeyDown} footer={<JobStop operation={job.operation} />}>
+        <JobProgress operation={job.operation} label={`Backing up ${data.name}`} warning={KEEP_OPEN} layout="panel" countsTwice />
       </Panel>
     );
   }
