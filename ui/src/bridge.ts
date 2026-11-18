@@ -282,14 +282,16 @@ export function onLockEpoch(handler: (event: LockEpochEvent) => void): Promise<U
 export type CloseReason = "close" | "quit";
 
 /**
- * `lockbox://close-asked`: a close or a Quit arrived while a job runs, and nothing is locked, hidden or cancelled until the question is
+ * `lockbox://close-asked`: a close or a Quit arrived while a job runs or a restore waits, and nothing is locked, hidden or cancelled until the question is
  * answered (`close_answer`). `running` is the kinds of jobs, each once, in the order they began; `past_swap` is a restore that can no longer be
- * cancelled. Fixed names and a flag only: no vault, path or item.
+ * cancelled; `restore_waiting` is a finished restore waiting for its yes at 24d (nothing may run: closing ends it). Fixed names and flags only: no
+ * vault, path or item.
  */
 export interface CloseAskedEvent {
   reason: CloseReason;
   running: JobKind[];
   past_swap: boolean;
+  restore_waiting: boolean;
 }
 
 /** Listens for `lockbox://close-asked`: handed over as it came (it holds no vault data, so it has no generation). */

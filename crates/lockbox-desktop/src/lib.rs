@@ -421,7 +421,9 @@ mod tests {
         });
         assert_eq!(
             ts.events.close_asked(),
-            [serde_json::json!({ "reason": "close", "running": ["backup"], "past_swap": false })]
+            [serde_json::json!({
+                "reason": "close", "running": ["backup"], "past_swap": false, "restore_waiting": false
+            })]
         );
         wait_until("the close's thread never ended", || {
             Arc::strong_count(&ts.shell) == 2

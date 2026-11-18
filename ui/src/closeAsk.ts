@@ -1,7 +1,7 @@
 // The question a close or a Quit asks while a job runs (Plan 4B Task 12). The shell sends `lockbox://close-asked` and holds everything (nothing is
 // locked, hidden or cancelled) until `close_answer`. The page keeps the one question that is pending, answers it once, and drops it when the shell
 // has: a lock epoch change (Lock all, Windows locking or sleeping, an idle lock) clears the shell's side, so the page's goes with it.
-// Only fixed names of kinds and two flags pass through here: never a vault, a path or an item.
+// Only fixed names of kinds and two flags (a restore past its swap, a restore waiting at 24d) pass through here: never a vault, a path or an item.
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
 import type { CloseAskedEvent, JobKind } from "./api";
@@ -43,15 +43,23 @@ function isKind(name: unknown): name is JobKind {
 
 /**
  * Takes in one `lockbox://close-asked`. What is not a question is ignored: a reason that is not close or quit, a flag that is not a boolean, and
- * no known kind with nothing past its swap (there is nothing to say). Kinds the page does not know are left out, and each kind counts once.
+ * no known kind with nothing past its swap and no restore waiting (there is nothing to say). Kinds the page does not know are left out, and each
+ * kind counts once.
  */
 function take(event: unknown): void {
   if (typeof event !== "object" || event === null) return;
-  const { reason, running, past_swap: pastSwap } = event as Record<string, unknown>;
-  if ((reason !== "close" && reason !== "quit") || !Array.isArray(running) || typeof pastSwap !== "boolean") return;
+  const { reason, running, past_swap: pastSwap, restore_waiting: restoreWaiting } = event as Record<string, unknown>;
+  if (
+    (reason !== "close" && reason !== "quit") ||
+    !Array.isArray(running) ||
+    typeof pastSwap !== "boolean" ||
+    typeof restoreWaiting !== "boolean"
+  ) {
+    return;
+  }
   const kinds = [...new Set(running.filter(isKind))];
-  if (kinds.length === 0 && !pastSwap) return;
-  set({ reason, running: kinds, past_swap: pastSwap });
+  if (kinds.length === 0 && !pastSwap && !restoreWaiting) return;
+  set({ reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting });
 }
 
 /** The question the shell is waiting on, or `null`. */

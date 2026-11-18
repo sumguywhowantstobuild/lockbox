@@ -528,6 +528,7 @@ fn close_asked_goes_to_the_main_window_only() {
         reason: CloseReason::Quit,
         running: vec![JobKind::Import, JobKind::Restore],
         past_swap: true,
+        restore_waiting: false,
     });
 
     let heard: Vec<Value> = heard_main
@@ -538,7 +539,9 @@ fn close_asked_goes_to_the_main_window_only() {
         .collect();
     assert_eq!(
         heard,
-        [json!({ "reason": "quit", "running": ["import", "restore"], "past_swap": true })]
+        [json!({
+            "reason": "quit", "running": ["import", "restore"], "past_swap": true, "restore_waiting": false
+        })]
     );
     assert!(
         heard_other.lock().unwrap().is_empty(),

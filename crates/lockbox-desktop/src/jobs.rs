@@ -115,14 +115,16 @@ pub enum CloseReason {
     Quit,
 }
 
-/// `lockbox://close-asked`: a close or Quit arrived while at least one job runs. The kinds, each once, in the order the
-/// first of each began, and whether a restore is past its swap (a cancel no longer counts, so it finishes or is undone
-/// by recovery at the next launch). Nothing else: no path, no name, no count.
+/// `lockbox://close-asked`: a close or Quit arrived while at least one job runs, or while a finished restore waits for
+/// its yes at 24d. The kinds, each once, in the order the first of each began, whether a restore is past its swap (a
+/// cancel no longer counts, so it finishes or is undone by recovery at the next launch), and whether a restore is
+/// waiting for its yes (`RestoreState::Prepared`; closing ends it). Nothing else: no path, no name, no count.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CloseAsked {
     pub reason: CloseReason,
     pub running: Vec<JobKind>,
     pub past_swap: bool,
+    pub restore_waiting: bool,
 }
 
 /// A job under way: it holds its place in the auto-lock's list (so idle time does not count and the PC stays awake),
