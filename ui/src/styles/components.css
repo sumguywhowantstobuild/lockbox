@@ -2304,8 +2304,10 @@
   overflow-wrap: anywhere;
 }
 
+/* The per cent (or the place in a batch) keeps to the right, even when the name is left out under a heading that already says it. */
 .job .jhead span {
   flex: none;
+  margin-left: auto;
   color: var(--ink2);
   font-variant-numeric: tabular-nums;
 }
