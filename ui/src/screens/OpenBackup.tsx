@@ -17,7 +17,7 @@ import {
 import { Button } from "../parts/Button";
 import { CredentialField } from "../parts/CredentialField";
 import { Dialog } from "../parts/Dialog";
-import { JobProgress } from "../parts/JobProgress";
+import { JobProgress, JobStop } from "../parts/JobProgress";
 import { Panel } from "../parts/Panel";
 import { Select } from "../parts/Select";
 import { boxWords, fileWords, isAboutTheBox, KEEP_OPEN } from "../restoreWords";
@@ -114,13 +114,19 @@ function PanelSteps({ flow }: { flow: OpenFlow }) {
   };
   if (flow.phase === "opening") {
     return (
-      <Panel title={OPEN_A_BACKUP} titleRef={heading} onClose={close} onKeyDown={onKeyDown}>
+      <Panel
+        title={OPEN_A_BACKUP}
+        titleRef={heading}
+        onClose={close}
+        onKeyDown={onKeyDown}
+        footer={job === null ? undefined : <JobStop operation={job.operation} stopWord="Stop" />}
+      >
         {job === null ? (
           <p className="note" aria-busy="true">
             Starting…
           </p>
         ) : (
-          <JobProgress operation={job.operation} label={`Opening ${name}`} warning={KEEP_OPEN} stopWord="Stop" />
+          <JobProgress operation={job.operation} label={`Opening ${name}`} warning={KEEP_OPEN} layout="panel" />
         )}
       </Panel>
     );
@@ -207,7 +213,7 @@ function FullSteps({ flow }: { flow: OpenFlow }) {
             Starting…
           </p>
         ) : (
-          <JobProgress operation={job.operation} label={`Opening ${name}`} heading={false} warning={KEEP_OPEN} stopWord="Stop" />
+          <JobProgress operation={job.operation} label={`Opening ${name}`} heading={false} warning={KEEP_OPEN} stopWord="Stop" layout="step" />
         )}
       </div>
     );

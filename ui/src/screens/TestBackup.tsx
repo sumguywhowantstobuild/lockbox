@@ -6,7 +6,7 @@ import { messageFor, messageText } from "../messages";
 import { Button } from "../parts/Button";
 import { CredentialField } from "../parts/CredentialField";
 import { Figure } from "../parts/Figure";
-import { JobProgress } from "../parts/JobProgress";
+import { JobProgress, JobStop } from "../parts/JobProgress";
 import { Panel } from "../parts/Panel";
 import { clearTestProblem, closeTestBackup, pickAnotherBackup, runTestBackup, type SessionData, type TestFlow } from "../store";
 import { damagedWords, missingWords, WRONG_FOR_THIS_BACKUP } from "../testBackupWords";
@@ -127,13 +127,19 @@ function TestPanel({ data, flow }: { data: SessionData; flow: TestFlow }) {
   // ---- The bar: the test runs ----
   if (flow.phase === "testing") {
     return (
-      <Panel title="Test a backup" titleRef={heading} onClose={close} onKeyDown={onKeyDown}>
+      <Panel
+        title="Test a backup"
+        titleRef={heading}
+        onClose={close}
+        onKeyDown={onKeyDown}
+        footer={job === null ? undefined : <JobStop operation={job.operation} />}
+      >
         {job === null ? (
           <p className="note" aria-busy="true">
             Starting…
           </p>
         ) : (
-          <JobProgress operation={job.operation} label={`Testing ${name}`} />
+          <JobProgress operation={job.operation} label={`Testing ${name}`} layout="panel" />
         )}
       </Panel>
     );

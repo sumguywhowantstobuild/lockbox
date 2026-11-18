@@ -5,7 +5,7 @@ import { formatBytes } from "../format";
 import { useJob } from "../jobs";
 import { Button } from "../parts/Button";
 import { KindIcon } from "../parts/Icon";
-import { JobProgress } from "../parts/JobProgress";
+import { JobProgress, JobStop } from "../parts/JobProgress";
 import { Panel } from "../parts/Panel";
 import type { SaveAllView } from "../api";
 import { closeSaveAll, confirmSaveAll, leaveSaveAllQuestion, showSavedFolder, startOpenBackup, type SaveAllFlow, type SessionData } from "../store";
@@ -239,7 +239,13 @@ function SaveAllPanel({ data, flow }: { data: SessionData; flow: SaveAllFlow }) 
   }
 
   return (
-    <Panel title="Saving files" titleRef={heading} onClose={close} onKeyDown={onKeyDown}>
+    <Panel
+      title="Saving files"
+      titleRef={heading}
+      onClose={close}
+      onKeyDown={onKeyDown}
+      footer={job === null ? undefined : <JobStop operation={job.operation} stopWord="Stop" />}
+    >
       {job === null ? (
         <p className="note" aria-busy="true">
           Starting…
@@ -252,7 +258,7 @@ function SaveAllPanel({ data, flow }: { data: SessionData; flow: SaveAllFlow }) 
           sentence={`From ${flow.folder.name}, to ${plan.folder_shown}.`}
           now={nowGoing(plan.files, job.done)}
           warning={KEEP_OPEN}
-          stopWord="Stop"
+          layout="panel"
         />
       )}
     </Panel>

@@ -339,27 +339,27 @@ test("progress_shows_from_to_and_the_count", async () => {
   const release = shell.holdFiles();
   await pressSaveAll();
   const panel = await screen.findByRole("complementary", { name: "Saving files" });
-  const card = await within(panel).findByRole("region", { name: "Saving files" });
+  const place = (await within(panel).findByRole("region", { name: "Saving files" })).closest("aside") as HTMLElement;
   const job = theJob();
   expect(job.kind).toBe("save_all");
   expect(job.request).toBe(sent("save_all_start")[0]?.request);
   expect(within(panel).getByText(`From Agency support agent, to ${SAVE_ALL_FOLDER}.`)).toBeTruthy();
-  expect(within(card).getByText(KEEP_OPEN)).toBeTruthy();
+  expect(within(place).getByText(KEEP_OPEN)).toBeTruthy();
   // Part way into the third file: its name and "3 of 4", worked out from the bytes done against the sizes the plan holds.
   act(() => {
     shell.sendProgress(job.operation, HANDOVER.length + CONTRACT.length + 1.3 * GB, TOTAL);
   });
-  expect(within(card).getByText(ARCHIVE.name)).toBeTruthy();
-  expect(within(card).getByText("3 of 4")).toBeTruthy();
-  expect(within(card).getByText("1.3 GB of 3.2 GB")).toBeTruthy();
+  expect(within(place).getByText(ARCHIVE.name)).toBeTruthy();
+  expect(within(place).getByText("3 of 4")).toBeTruthy();
+  expect(within(place).getByText("1.3 GB of 3.2 GB")).toBeTruthy();
   expect(screen.getAllByRole("progressbar")).toHaveLength(1);
   act(() => {
     shell.sendProgress(job.operation, TOTAL - 1000, TOTAL);
   });
-  expect(within(card).getByText(RECORDING.name)).toBeTruthy();
-  expect(within(card).getByText("4 of 4")).toBeTruthy();
+  expect(within(place).getByText(RECORDING.name)).toBeTruthy();
+  expect(within(place).getByText("4 of 4")).toBeTruthy();
   // One job, one Stop (as drawn): no second bar in the list's column, and auto-lock's own words once.
-  expect(within(card).getByRole("button", { name: "Stop" })).toBeTruthy();
+  expect(within(place).getByRole("button", { name: "Stop" })).toBeTruthy();
   expect(screen.getAllByText(/^Auto-lock is waiting until this finishes\./)).toHaveLength(1);
   act(() => {
     release();
@@ -389,12 +389,12 @@ test("stop_ends_it_and_says_so_with_what_was_saved", async () => {
   await inAgency();
   const release = shell.holdFiles();
   await pressSaveAll();
-  const card = await screen.findByRole("region", { name: "Saving files" });
+  const place = (await screen.findByRole("region", { name: "Saving files" })).closest("aside") as HTMLElement;
   const job = theJob();
   act(() => {
     shell.sendProgress(job.operation, HANDOVER.length + CONTRACT.length + 1000, TOTAL);
   });
-  fireEvent.click(within(card).getByRole("button", { name: "Stop" }));
+  fireEvent.click(within(place).getByRole("button", { name: "Stop" }));
   expect(sent("cancel_operation")).toEqual([{ operation: job.operation, scope: job.scope }]);
   const ended = await screen.findByRole("complementary", { name: "Stopped after 2 of 4 files" });
   // A Stop is a result, not a refusal.
@@ -658,13 +658,13 @@ test("stopped_names_unfinished_and_not_started", async () => {
   await inAgency();
   const release = shell.holdFiles();
   await pressSaveAll();
-  const card = await screen.findByRole("region", { name: "Saving files" });
+  const place = (await screen.findByRole("region", { name: "Saving files" })).closest("aside") as HTMLElement;
   const job = theJob();
   // Two files are done and the third is part way when Stop is pressed.
   act(() => {
     shell.sendProgress(job.operation, HANDOVER.length + CONTRACT.length + 1000, TOTAL);
   });
-  fireEvent.click(within(card).getByRole("button", { name: "Stop" }));
+  fireEvent.click(within(place).getByRole("button", { name: "Stop" }));
   const ended = await screen.findByRole("complementary", { name: "Stopped after 2 of 4 files" });
   expect(within(ended).getByText(`In ${SAVE_ALL_FOLDER}.`)).toBeTruthy();
   expect(rows(ended)).toEqual([`PDF${HANDOVER.name}180 KB, attached to Bot admin console`, `PDF${CONTRACT.name}96 KB`]);
@@ -682,8 +682,8 @@ test("stopped_before_the_first_file_names_every_file_and_has_nothing_to_show", a
   await inAgency();
   const release = shell.holdFiles();
   await pressSaveAll();
-  const card = await screen.findByRole("region", { name: "Saving files" });
-  fireEvent.click(within(card).getByRole("button", { name: "Stop" }));
+  const place = (await screen.findByRole("region", { name: "Saving files" })).closest("aside") as HTMLElement;
+  fireEvent.click(within(place).getByRole("button", { name: "Stop" }));
   const ended = await screen.findByRole("complementary", { name: "Stopped after 0 of 4 files" });
   expect(within(ended).getByText(`${HANDOVER.name} wasn't finished, so nothing half-made was left.`)).toBeTruthy();
   const named = within(ended).getByText("These files weren't started:").parentElement as HTMLElement;

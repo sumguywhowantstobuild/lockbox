@@ -157,16 +157,22 @@ test("backup_shows_progress_and_cancel", async () => {
   const job = theJob();
   expect(job.kind).toBe("backup");
   expect(job.request).toBe(sent("backup_vault")[0]?.request);
+  // The engine counts each byte twice (written, then read back to check it): 22b shows the per cent of the whole and the backup's own size.
   act(() => {
-    shell.sendProgress(job.operation, 750 * MB, BIG);
+    shell.sendProgress(job.operation, 2 * 750 * MB, 2 * BIG);
   });
   expect(within(card).getByText("750 MB of 1.2 GB")).toBeTruthy();
+  expect(within(card).getByText("61%")).toBeTruthy();
   expect(within(card).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("61");
-  expect(within(card).getByText(KEEP_OPEN)).toBeTruthy();
+  // As drawn: the line about the laptop under the card, and Cancel in the panel's foot.
+  expect(within(card).queryByText(KEEP_OPEN)).toBeNull();
+  expect(within(panel).getByText(KEEP_OPEN)).toBeTruthy();
+  expect(within(card).queryByRole("button")).toBeNull();
+  const foot = panel.querySelector(".pbar") as HTMLElement;
   // The auto-lock note does not say the Windows part a second time beside the card.
   expect(document.body.textContent.match(/Windows locking or sleeping/g)).toHaveLength(1);
   // Cancel stops this one operation, and nothing is saved.
-  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(within(foot).getByRole("button", { name: "Cancel" }));
   expect(await screen.findByText(NOT_FINISHED)).toBeTruthy();
   expect(screen.queryByRole("region", { name: "Backing up My vault" })).toBeNull();
   expect(shell.fileOps.filter((op) => op.cmd === "backup_vault")).toEqual([]);
@@ -265,7 +271,7 @@ test("failed_or_cancelled_says_nothing_half_made_was_left", async () => {
   let release = shell.holdFiles();
   press(panel, "Back up");
   const card = await screen.findByRole("region", { name: "Backing up My vault" });
-  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(within(card.closest("aside")?.querySelector(".pbar") as HTMLElement).getByRole("button", { name: "Cancel" }));
   expect(await screen.findByText(NOT_FINISHED)).toBeTruthy();
   panel = screen.getByRole("complementary", { name: "Back up" });
   expect(buttonsIn(panel)).toEqual(["Close panel", "OK"]);

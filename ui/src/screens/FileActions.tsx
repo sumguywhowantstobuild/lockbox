@@ -198,8 +198,9 @@ function FileRow({ data, summary, file }: { data: SessionData; summary: ItemSumm
             <p className="err" role="alert">
               {messageText(messageFor(refused.error))}
             </p>
-            {/* As drawn (10d): a backup may hold a good copy, so the way to one is here, under the words. */}
+            {/* As drawn (10d): a backup may hold a good copy, so the way to one is here, under the words, and it is the filled button. */}
             <Button
+              look="pill-main"
               onClick={() => {
                 void startOpenBackup();
               }}

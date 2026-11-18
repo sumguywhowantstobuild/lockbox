@@ -58,7 +58,8 @@ function Notice({
   children,
 }: {
   text: string;
-  actions: { name: string; onPress: () => void; disabled?: boolean }[];
+  /** `main` is the way out the words point to, drawn filled. */
+  actions: { name: string; onPress: () => void; disabled?: boolean; main?: boolean }[];
   children?: ReactNode;
 }) {
   const words = useId();
@@ -69,7 +70,13 @@ function Notice({
       {actions.length === 0 ? null : (
         <div className="ask-acts">
           {actions.map((action) => (
-            <Button key={action.name} aria-describedby={words} disabled={action.disabled} onClick={action.onPress}>
+            <Button
+              key={action.name}
+              look={action.main === true ? "pill-main" : "pill"}
+              aria-describedby={words}
+              disabled={action.disabled}
+              onClick={action.onPress}
+            >
               {action.name}
             </Button>
           ))}
@@ -149,6 +156,8 @@ export function VaultBanners({ data }: { data: SessionData }) {
               : [
                   {
                     name: "Restore a backup",
+                    // As drawn (Ask 4): the way back is the filled button.
+                    main: true,
                     onPress: () => {
                       void startRestore({ vault: data.vaultId });
                     },
@@ -157,6 +166,8 @@ export function VaultBanners({ data }: { data: SessionData }) {
             // A backup can also be opened to look through and copy a good copy of an item out of: from any window, a read-only one too.
             {
               name: "Open a backup",
+              // With no restore offered (a read-only copy), this is the way out.
+              main: data.readOnly,
               onPress: () => {
                 void startOpenBackup();
               },

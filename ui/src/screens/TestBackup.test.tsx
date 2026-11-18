@@ -244,6 +244,8 @@ test("progress_names_the_file_shows_the_bytes_and_cancel_goes_back_to_the_file",
   const release = shell.holdTest();
   test_(panel, BACKUP_PASSWORD);
   const card = await screen.findByRole("region", { name: `Testing ${BACKUP_NAME}` });
+  // As drawn: the bar's card, with Cancel in the panel's foot.
+  const foot = panel.querySelector(".pbar") as HTMLElement;
   const job = theJob();
   // A launch-scoped job of kind "test", matched to the request the page sent.
   expect(job.kind).toBe("test");
@@ -255,7 +257,8 @@ test("progress_names_the_file_shows_the_bytes_and_cancel_goes_back_to_the_file",
   expect(within(card).getByText("750 MB of 1.2 GB")).toBeTruthy();
   // The box is gone while it works: nothing typed is on the page.
   expect(document.querySelectorAll("aside.panel input")).toHaveLength(0);
-  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  expect(within(card).queryByRole("button")).toBeNull();
+  fireEvent.click(within(foot).getByRole("button", { name: "Cancel" }));
   // A stop is the person's own: back to 23a, the file still picked, the box empty, nothing said.
   const again = await screen.findByLabelText(LABEL);
   expect((again as HTMLInputElement).value).toBe("");

@@ -216,6 +216,16 @@ test("program_file_asks_first", async () => {
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
+test("the_way_out_is_the_filled_button_on_10d", async () => {
+  await unlocked(mine({ damagedFiles: [CONTRACT.file_id] }));
+  const panel = await select("Client contract");
+  fireEvent.click(within(panel).getByRole("button", { name: "Open contract-demo.pdf" }));
+  await within(panel).findByRole("alert");
+  // As drawn (10d): Open a backup is the filled button, the one way the words point to; Replace file stays a quiet pill beside it.
+  expect(within(panel).getByRole("button", { name: "Open a backup" }).classList.contains("cp")).toBe(true);
+  expect(within(panel).getByRole("button", { name: "Replace file contract-demo.pdf" }).classList.contains("cp")).toBe(false);
+});
+
 test("damaged_file_10d_offers_open_a_backup", async () => {
   await unlocked(mine({ damagedFiles: [CONTRACT.file_id] }));
   const panel = await select("Client contract");
@@ -1387,20 +1397,20 @@ test("one_file_add_shows_progress_and_stop", async () => {
   shell.pickNext("big-demo.zip", 3 * GB);
   await addOneFile();
   // The shell says the job started (by `lockbox://job-started`, matched to the request the page sent) and the bar is on screen, as 9b draws it.
-  const card = await screen.findByRole("region", { name: "Adding files" });
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
   const job = theJob();
   expect(job.kind).toBe("import");
   expect(job.request).toBe(sent("add_files")[0]?.request);
-  expect(within(card).getByText("Adding to My vault.")).toBeTruthy();
-  expect(within(card).getByText(KEEP_OPEN)).toBeTruthy();
+  expect(within(place).getByText("Adding to My vault.")).toBeTruthy();
+  expect(within(place).getByText(KEEP_OPEN)).toBeTruthy();
   act(() => {
     shell.sendProgress(job.operation, 1.2 * GB, 3 * GB);
   });
-  expect(within(card).getByText("1.2 GB of 3 GB")).toBeTruthy();
-  expect(within(card).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("40");
+  expect(within(place).getByText("1.2 GB of 3 GB")).toBeTruthy();
+  expect(within(place).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("40");
   // Auto-lock's own words are still there (5d), once.
   expect(screen.getAllByText(PAUSE)).toHaveLength(1);
-  expect(within(card).getByRole("button", { name: "Cancel" })).toBeTruthy();
+  expect(within(place).getByRole("button", { name: "Cancel" })).toBeTruthy();
   act(() => {
     release();
   });
@@ -1414,15 +1424,15 @@ test("attach_shows_progress_and_stop", async () => {
   const release = shell.holdFiles();
   fireEvent.click(within(panel).getByRole("button", { name: "Attach files" }));
   fireEvent.click(within(await screen.findByRole("complementary", { name: "Attach files" })).getByRole("button", { name: "Attach 1 file" }));
-  const card = await screen.findByRole("region", { name: "Attaching files" });
+  const place = (await screen.findByRole("region", { name: "Attaching files" })).closest("aside") as HTMLElement;
   expect(theJob().kind).toBe("import");
   expect(sent("add_files")[0]?.request).toBe(theJob().request);
   act(() => {
     shell.sendProgress(theJob().operation, 1024, 4096);
   });
-  expect(within(card).getByText("1 KB of 4 KB")).toBeTruthy();
+  expect(within(place).getByText("1 KB of 4 KB")).toBeTruthy();
   await expectNoAxe(container);
-  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(within(place).getByRole("button", { name: "Cancel" }));
   await screen.findByRole("complementary", { name: "Nothing was attached" });
   act(() => {
     release();
@@ -1483,9 +1493,9 @@ test("stopped_add_says_nothing_was_added", async () => {
   const before = (await screen.findAllByRole("button", { name: /^(Login|Key|Note|File):/ })).length;
   const release = shell.holdFiles();
   await addOneFile();
-  const card = await screen.findByRole("region", { name: "Adding files" });
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
   const job = theJob();
-  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(within(place).getByRole("button", { name: "Cancel" }));
   // The shell is asked to stop that one operation, in the scope the page was told.
   expect(sent("cancel_operation")).toEqual([{ operation: job.operation, scope: job.scope }]);
   expect(job.scope).toEqual({ type: "session", session: session(), generation: shell.sessionOf(7)?.generation });
@@ -1694,8 +1704,8 @@ test("the_auto_lock_note_does_not_repeat_the_windows_warning_beside_a_card", asy
   await unlocked();
   const release = shell.holdFiles();
   await addOneFile();
-  const card = await screen.findByRole("region", { name: "Adding files" });
-  expect(within(card).getByText(KEEP_OPEN)).toBeTruthy();
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
+  expect(within(place).getByText(KEEP_OPEN)).toBeTruthy();
   const note = (await screen.findByText("Auto-lock is waiting until this finishes.")).closest("[role='status']") as HTMLElement;
   expect(note.textContent).not.toContain("Windows locking or sleeping");
   expect(screen.queryByText(PAUSE_FULL)).toBeNull();

@@ -258,6 +258,16 @@ test("ask4_counts_unreadable_items_and_closes", async () => {
   expect(await screen.findByText(words)).toBeTruthy();
 });
 
+test("the_way_out_is_the_filled_button_on_ask_4", async () => {
+  start([vault({ unreadable: 3 })]);
+  await unlockIt();
+  await screen.findByText(/^3 items in this vault can't be read/);
+  // As drawn (Ask 4): Restore a backup is filled, the way back; Open a backup and Close are quiet pills.
+  expect(screen.getByRole("button", { name: "Restore a backup" }).classList.contains("cp")).toBe(true);
+  expect(screen.getByRole("button", { name: "Open a backup" }).classList.contains("cp")).toBe(false);
+  expect(screen.getByRole("button", { name: "Close" }).classList.contains("cp")).toBe(false);
+});
+
 test("ask4_one_item_reads_as_one", async () => {
   start([vault({ unreadable: 1 })]);
   await unlockIt();
@@ -311,6 +321,9 @@ test("ask_4_offers_open_a_backup_in_a_read_only_session_too", async () => {
   const words = await screen.findByText(/^2 items in this vault can't be read/);
   const banner = words.closest(".ask") as HTMLElement;
   expect(within(banner).getAllByRole("button").map((button) => button.textContent)).toEqual(["Open a backup", "Close"]);
+  // With no restore offered, Open a backup is the way out, and it is the filled one.
+  expect(within(banner).getByRole("button", { name: "Open a backup" }).classList.contains("cp")).toBe(true);
+  expect(within(banner).getByRole("button", { name: "Close" }).classList.contains("cp")).toBe(false);
 });
 
 test("ask5_banner_closes_with_no_delete", async () => {

@@ -139,6 +139,8 @@ test("picked_files_listed_with_pick_more", async () => {
   for (const file of THREE) expect(within(panel).getByRole("button", { name: `Leave out ${file.name}` })).toBeTruthy();
   expect(within(panel).getByRole("button", { name: "Pick more" })).toBeTruthy();
   expect(within(panel).getByRole("combobox", { name: "Folder" }).textContent).toBe("No folder");
+  // As drawn (9a): Pick more carries its plus, as Attach files does.
+  expect(within(panel).getByRole("button", { name: "Pick more" }).querySelector("svg")).not.toBeNull();
   expect(within(panel).getByRole("button", { name: "Cancel" })).toBeTruthy();
   expect(within(panel).getByRole("button", { name: "Add 3 files" })).toBeTruthy();
   // The picker was asked for a new pick, with no choice; nothing of a path is sent, or shown.
@@ -292,30 +294,30 @@ test("one_bar_for_the_batch", async () => {
   fireEvent.click(addButton(panel, "Add 3 files"));
   // The shell says the job started; the panel becomes 9b, with one bar for the whole batch.
   const working = await screen.findByRole("complementary", { name: "Adding files" });
-  const card = await within(working).findByRole("region", { name: "Adding files" });
+  const place = (await within(working).findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
   const job = theJob();
   expect(job.kind).toBe("import");
   expect(job.request).toBe(sent("add_files")[0]?.request);
-  expect(within(card).getByText("Adding to Agency support agent, in My vault.")).toBeTruthy();
-  expect(within(card).getByText(KEEP_OPEN)).toBeTruthy();
+  expect(within(place).getByText("Adding to Agency support agent, in My vault.")).toBeTruthy();
+  expect(within(place).getByText(KEEP_OPEN)).toBeTruthy();
   // The first figures: the file now going in and "2 of 3", worked out from the bytes done against the sizes the page holds.
   act(() => {
     shell.sendProgress(job.operation, 1.3 * GB, 3.2 * GB + 2.1 * MB + 84 * 1024);
   });
-  expect(within(card).getByText(DESIGN.name)).toBeTruthy();
-  expect(within(card).getByText("2 of 3")).toBeTruthy();
-  expect(within(card).getByText("1.3 GB of 3.2 GB")).toBeTruthy();
+  expect(within(place).getByText(DESIGN.name)).toBeTruthy();
+  expect(within(place).getByText("2 of 3")).toBeTruthy();
+  expect(within(place).getByText("1.3 GB of 3.2 GB")).toBeTruthy();
   expect(screen.getAllByRole("progressbar")).toHaveLength(1);
   // Past the second file, the third.
   act(() => {
     shell.sendProgress(job.operation, 3.2 * GB + 2.1 * MB + 1, 3.2 * GB + 2.1 * MB + 84 * 1024);
   });
-  expect(within(card).getByText(NOTES.name)).toBeTruthy();
-  expect(within(card).getByText("3 of 3")).toBeTruthy();
+  expect(within(place).getByText(NOTES.name)).toBeTruthy();
+  expect(within(place).getByText("3 of 3")).toBeTruthy();
   // The list behind has no second bar, and auto-lock's own words are there once.
   expect(screen.getAllByRole("progressbar")).toHaveLength(1);
   expect(screen.getAllByText(/^Auto-lock is waiting until this finishes\./)).toHaveLength(1);
-  expect(within(card).getByRole("button", { name: "Cancel" })).toBeTruthy();
+  expect(within(place).getByRole("button", { name: "Cancel" })).toBeTruthy();
   act(() => {
     release();
   });
@@ -348,13 +350,13 @@ test("cancel_on_the_bar_stops_that_batch_and_names_what_did_not_go_in", async ()
   const release = shell.holdFiles();
   const panel = await pickFiles();
   fireEvent.click(addButton(panel, "Add 3 files"));
-  const card = await screen.findByRole("region", { name: "Adding files" });
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
   const job = theJob();
   // The first file is done and the second is part way when Cancel is pressed.
   act(() => {
     shell.sendProgress(job.operation, CONTRACT.size + 1000, CONTRACT.size + DESIGN.size + NOTES.size);
   });
-  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(within(place).getByRole("button", { name: "Cancel" }));
   expect(sent("cancel_operation")).toEqual([{ operation: job.operation, scope: job.scope }]);
   const ended = await screen.findByRole("complementary", { name: "1 of 3 files added" });
   // A Stop is a result, not a refusal: no alert, and the words say it was the person's.
@@ -374,8 +376,8 @@ test("stopped_with_nothing_added_says_so_and_has_no_originals_sentence", async (
   const release = shell.holdFiles();
   const panel = await pickFiles();
   fireEvent.click(addButton(panel, "Add 3 files"));
-  const card = await screen.findByRole("region", { name: "Adding files" });
-  fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
+  fireEvent.click(within(place).getByRole("button", { name: "Cancel" }));
   const ended = await screen.findByRole("complementary", { name: "Nothing was added" });
   expect(within(ended).getByText("You stopped it.")).toBeTruthy();
   expect(listed(ended, "These files were not added:")).toEqual(THREE.map((file) => file.name));
@@ -924,8 +926,8 @@ test("focus_goes_to_the_result_when_the_bar_with_focus_goes", async () => {
   const release = shell.holdFiles();
   const panel = await pickFiles();
   fireEvent.click(addButton(panel, "Add 3 files"));
-  const card = await screen.findByRole("region", { name: "Adding files" });
-  const cancel = within(card).getByRole("button", { name: "Cancel" });
+  const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
+  const cancel = within(place).getByRole("button", { name: "Cancel" });
   cancel.focus();
   fireEvent.click(cancel);
   const ended = await screen.findByRole("complementary", { name: "Nothing was added" });
