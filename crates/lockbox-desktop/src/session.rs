@@ -634,6 +634,9 @@ fn wait_for<G>(
 struct Inner {
     sessions: Vec<Entry>,
     opening: Vec<Opening>,
+    /// The locations a Remove from the vault list holds ([`Sessions::begin_removal`]): an open of one answers `Busy`
+    /// while it is there, so an unlock never lands on a vault that is being taken off the list.
+    removing: Vec<Location>,
     /// Bumped by every lock of all vaults: an open that started before one discards what it made.
     epoch: u64,
     /// The token the jobs with no session are children of: cancelled and replaced by every lock of all vaults, in the
@@ -675,10 +678,14 @@ impl Inner {
         })
     }
 
-    /// What an open of `location` answers without running: the session already unlocked there, or `Busy` while
-    /// another open of it is under way. `None`: it runs.
+    /// What an open of `location` answers without running: `Busy` while a Remove of it is under way (first, so it is
+    /// never the session the Remove is locking), the session already unlocked there, or `Busy` while another open of
+    /// it is under way. `None`: it runs.
     fn open_answer<X>(&self, location: Option<&Location>) -> Option<ShellResult<OpenAnswer<X>>> {
         let location = location?;
+        if self.removing.contains(location) {
+            return Some(Err(BUSY));
+        }
         if let Some(entry) = self.unlocked_at(location) {
             return Some(Ok(Outcome::Done(tag_info(entry.info(), None))));
         }
@@ -774,6 +781,34 @@ impl Drop for OpeningGuard<'_> {
         if !self.done {
             let mut inner = self.sessions.inner();
             self.finish(&mut inner);
+        }
+    }
+}
+
+/// A Remove from the vault list that holds its location ([`Sessions::begin_removal`]): takes the location out of
+/// `removing` when it is dropped, also when the Remove panicked.
+pub(crate) struct Removal<'a> {
+    sessions: &'a Sessions,
+    location: Location,
+    session: Option<SessionId>,
+}
+
+impl Removal<'_> {
+    /// The session that was unlocked at the location when the Remove began, if any.
+    pub(crate) fn session(&self) -> Option<SessionId> {
+        self.session
+    }
+}
+
+impl Drop for Removal<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.sessions.inner();
+        if let Some(at) = inner
+            .removing
+            .iter()
+            .position(|held| *held == self.location)
+        {
+            inner.removing.remove(at);
         }
     }
 }
@@ -1268,6 +1303,36 @@ impl Sessions {
             return Err(ShellError::Locked);
         }
         f()
+    }
+
+    /// Starts a Remove of the vault at `location` from the vault list, in one step under the sessions mutex: `Busy` when
+    /// an open of `location` is under way or a Remove of it already is; otherwise `location` is held in `removing` (an
+    /// open of it answers `Busy` from now on) until the [`Removal`] is dropped. `has_jobs` is asked of the session
+    /// unlocked at `location`, if there is one, and `Busy` when it says a job of that session runs. The caller holds
+    /// the auto-lock's list of running operations across this call, so no job begins in between.
+    pub(crate) fn begin_removal(
+        &self,
+        location: &Location,
+        has_jobs: impl FnOnce(SessionId) -> bool,
+    ) -> ShellResult<Removal<'_>> {
+        let mut inner = self.inner();
+        let opening = inner
+            .opening
+            .iter()
+            .any(|opening| opening.location.as_ref() == Some(location));
+        if opening || inner.removing.contains(location) {
+            return Err(BUSY);
+        }
+        let session = inner.unlocked_at(location).map(|entry| entry.id);
+        if session.is_some_and(has_jobs) {
+            return Err(BUSY);
+        }
+        inner.removing.push(location.clone());
+        Ok(Removal {
+            sessions: self,
+            location: location.clone(),
+            session,
+        })
     }
 
     /// Locks one session; nothing happens if it is not unlocked. Returns once its hooks ran (the page's lock command

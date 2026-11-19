@@ -7,6 +7,27 @@ export const LOCKED = "Locked";
 /** What a vault says when its folder can't be reached just now. */
 export const NOT_AVAILABLE = "Not available";
 
+/** What an unavailable vault says under its name on the lock screen (30b's words). */
+export const UNAVAILABLE_LINE = "Unavailable: its folder or drive isn't there";
+
+/** What Try again says when the folder or drive is still not there. The words are the session's, for Ariel to change. */
+export const STILL_UNAVAILABLE = "Still unavailable. Connect its drive or put its folder back, then try again.";
+
+/** The unavailable box's sentence (30b gives the line above; the box is the session's, for Ariel to change). */
+export function unavailableSentence(name: string): string {
+  return `${name} is unavailable: its folder or drive isn't there.`;
+}
+
+/**
+ * 18g's words: the design's own. When removing the vault would leave the first screen (it is the only one listed and no other window stays open), the last sentence points
+ * at the first screen's own way back instead, since Add existing vault folder is not there (the design's pointer for the same case, "Vault made but not listed"; the
+ * session's call, for Ariel to change).
+ */
+export function removeSentence(name: string, leavesFirstScreen: boolean): string {
+  const back = leavesFirstScreen ? `"I already have a vault or a backup" on the first screen` : "Add existing vault folder";
+  return `Remove ${name} from this list? Its folder and everything in it stay on your PC. You can bring it back with ${back}.`;
+}
+
 /** The name of a vault whose details can't be read (the list gives it none). */
 export const CANT_BE_READ = "A vault that can't be read";
 

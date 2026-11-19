@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import type { VaultEntry } from "../api";
 import { messageFor, messageText } from "../messages";
 import {
   damagedHeading,
@@ -16,6 +17,7 @@ import {
 } from "../restoreWords";
 import { closeRestoreNotice, dismissUnfinishedRestore, retryUnfinishedRestore, startRestore, useNotices, type RestoreAsk } from "../store";
 import { Frame } from "./setup/Frame";
+import { VaultLinks } from "./VaultLinks";
 
 // A restore that didn't finish (Ask 6, Ask 7 and the two states with no drawn screen) and a vault that can't be opened (Ask 8). All of them are full-screen
 // steps on the restore's two-sided frame, shown by the app above whatever it would show and below an open restore, and each has a polite place of its own that
@@ -155,16 +157,18 @@ function Notice({ ask }: { ask: Exclude<RestoreAsk, { ask: "finished" }> }) {
 
 /**
  * Ask 8: a vault listed with `details_damaged` (its two copies of its details are both unreadable), so no password can open it. Shown by the lock screen in place of its password box. Restore a
- * backup begins a restore for that vault (the backup unpacks in a new folder beside the damaged one, which is left alone); Back is the lock screen again.
+ * backup begins a restore for that vault (the backup unpacks in a new folder beside the damaged one, which is left alone); Back is the lock screen again. Beside Back are Show in Explorer
+ * and Remove from this list (Task 9): a refusal of Show is said in this screen's own error line, and `onRemoved` is what the screen's host does once the vault is off the list.
  */
-export function DamagedVaultAsk({ vault, name, onBack }: { vault: number; name: string | null; onBack: () => void }) {
+export function DamagedVaultAsk({ entry, onBack, onRemoved }: { entry: VaultEntry; onBack: () => void; onRemoved: () => void }) {
+  const [problem, setProblem] = useState<string | null>(null);
   return (
-    <Screen heading={damagedHeading(name)} words={DAMAGED_WORDS} said="" problem={null}>
+    <Screen heading={damagedHeading(entry.name)} words={DAMAGED_WORDS} said="" problem={problem}>
       <button
         type="button"
         className="prim"
         onClick={() => {
-          void startRestore({ vault });
+          void startRestore({ vault: entry.id });
         }}
       >
         Restore a backup
@@ -172,6 +176,7 @@ export function DamagedVaultAsk({ vault, name, onBack }: { vault: number; name: 
       <button type="button" className="lnk" onClick={onBack}>
         Back
       </button>
+      <VaultLinks vault={entry} onRemoved={onRemoved} onProblem={setProblem} />
     </Screen>
   );
 }

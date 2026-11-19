@@ -78,7 +78,7 @@ async function unlocked(list: FakeVault[] = [vaults()[0] as FakeVault], settings
 async function twoOpen() {
   const view = await unlocked(vaults());
   await act(async () => {
-    expect(await unlock(8, PASSWORD)).toBe("opened");
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
   });
   await screen.findByRole("button", { name: "Home, vault menu" });
   return view;

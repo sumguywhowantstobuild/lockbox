@@ -82,8 +82,16 @@ test("lock_this_vault_from_its_menu", async () => {
   if (live === undefined) throw new Error("not open");
   const menu = await openVaultMenu();
   // What the menu lets a person do: make a new vault, add an existing vault's folder (Task 7), lock this vault, and rename it (Task 8). Everything drawn on 5a that a later task builds is not shown.
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", "Lock My vault", "Rename My vault"]);
-  for (const later of [/explorer/i, /remove/i, /delete/i]) {
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "New vault",
+    "Add existing vault folder",
+    "Lock My vault",
+    "Rename My vault",
+    "Show My vault in Explorer",
+    "Remove My vault from this list",
+  ]);
+  // Delete a vault waits for a later version (18e); Show in Explorer and Remove from this list are Task 9's, above.
+  for (const later of [/delete/i]) {
     expect(within(menu).queryByText(later), String(later)).toBeNull();
   }
   // Each listed vault says whether it is open; the menu's own words say the same to a screen reader.
@@ -135,7 +143,7 @@ test("lock_all_returns_to_lock_screen", async () => {
   await unlocked();
   // A second vault is open as well (the person unlocked it earlier): both are listed as open.
   await act(async () => {
-    expect(await unlock(8, PASSWORD)).toBe("opened");
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
   });
   // The vault opened last is the one on screen.
   const menu = await openVaultMenu("Home");
@@ -158,7 +166,7 @@ test("lock_all_returns_to_lock_screen", async () => {
   // The tray's Lock all is the shell locking every vault itself: the page hears the same events and comes to the same screen.
   await unlockOnScreen();
   await act(async () => {
-    await unlock(8, PASSWORD);
+    await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD);
   });
   act(() => {
     for (const id of [7, 8]) shell.lock(shell.sessionOf(id)?.session ?? -1);
@@ -417,7 +425,7 @@ test("the_vault_menu_keeps_its_action_in_reach_with_many_open_vaults", async () 
   await unlocked([{ ...MINE }, { ...HOME }, { id: 9, name: "Work", items: [] }]);
   for (const id of [8, 9]) {
     await act(async () => {
-      expect(await unlock(id, PASSWORD)).toBe("opened");
+      expect(await unlock({ list: shell.listIdentity(), id }, PASSWORD)).toBe("opened");
     });
   }
   const menu = await openVaultMenu("Work");

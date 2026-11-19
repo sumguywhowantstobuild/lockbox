@@ -4,15 +4,21 @@ import { useLockEpoch } from "../jobs";
 import { messageFor, type Message } from "../messages";
 import { PasswordField } from "../parts/PasswordField";
 import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
+import { focusButton } from "../focus";
+import { folderWords } from "../moveInWords";
 import {
   cancelCapture,
   clearUnlockPick,
   leaveUnlockStep,
+  startAddFolder,
   startForgot,
   startOpenBackup,
   startRestore,
+  tryVaultAgain,
   unlock,
   unlockInStep,
+  useAddFolder,
+  useAddRefusal,
   useCapture,
   useOpenBackup,
   useRestore,
@@ -22,9 +28,11 @@ import {
   type UnlockStep as UnlockStepOf,
 } from "../store";
 import { useMode } from "../theme";
-import { listedName } from "../vaultWords";
+import { listedName, STILL_UNAVAILABLE, UNAVAILABLE_LINE } from "../vaultWords";
 import { LockNote, LockScreenAsks } from "./Asks";
 import { DamagedVaultAsk } from "./RestoreNotices";
+import { RemoveVaultBox } from "./VaultBoxes";
+import { VaultLinks } from "./VaultLinks";
 
 /** A refusal as one line of text. */
 function said(message: Message): string {
@@ -42,6 +50,8 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // What Show in Explorer was refused with, in words, under the form (its own line: the password box is not what was refused).
+  const [linkProblem, setLinkProblem] = useState<string | null>(null);
   // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping) wipes what is typed, even before the vaults' own locks are heard.
   const epoch = useLockEpoch();
   const [seenEpoch, setSeenEpoch] = useState(epoch);
@@ -65,7 +75,11 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
     setError(null);
     leaveUnlockStep();
   };
-  if (vault.details_damaged) return <DamagedVaultAsk vault={vault.id} name={vault.name} onBack={back} />;
+  // The vault is off the list: the step goes with it (the store closed it), and focus is on the vault button of the window that was on screen.
+  const removed = () => {
+    focusButton(".vhead");
+  };
+  if (vault.details_damaged) return <DamagedVaultAsk entry={vault} onBack={back} onRemoved={removed} />;
 
   const submit = async (event: SyntheticEvent) => {
     event.preventDefault();
@@ -75,6 +89,7 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
     setPassword("");
     setError(null);
     setBusy(true);
+    setLinkProblem(null);
     try {
       await unlockInStep(step.opening, text);
     } catch (refusal) {
@@ -121,8 +136,14 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
             <button type="button" className="lnk" onClick={back}>
               Back
             </button>
+            <VaultLinks vault={vault} onRemoved={removed} onProblem={setLinkProblem} />
           </div>
         </form>
+        {linkProblem === null ? null : (
+          <p className="err" role="alert">
+            {linkProblem}
+          </p>
+        )}
       </main>
     </div>
   );
@@ -155,6 +176,29 @@ export function LockScreen() {
   const [busy, setBusy] = useState(false);
   // The finished restore's Unlock draws the password box anew, so it takes the focus (a box that stayed would not: it is only focused as it is drawn).
   const [focusBox, setFocusBox] = useState(0);
+  // A vault asked for while this screen is up (Add existing vault folder from here added one) is chosen, and its box is drawn anew so it takes the focus.
+  const [takenPick, setTakenPick] = useState<number | null>(asked);
+  if (asked !== takenPick) {
+    setTakenPick(asked);
+    if (asked !== null) {
+      setChosenId(asked);
+      setPassword("");
+      setError(null);
+      setFocusBox((count) => count + 1);
+    }
+  }
+  // Add existing vault folder from this screen: a picker or a cloud question is out (a second press sends nothing), and a refusal is said in the plate until the next add or unlock.
+  const adding = useAddFolder() !== null;
+  const addRefusal = useAddRefusal();
+  // Try again on an unavailable vault's row: which rows were found still unavailable (said under them), and the rows with a read out (a second press sends nothing).
+  const [still, setStill] = useState<number[]>([]);
+  const trying = useRef(new Set<number>());
+  // Remove from list on an unavailable vault's row: 18g, anchored to that row's Remove from list button, and where focus goes once the vault is off the list.
+  const [removing, setRemoving] = useState<VaultEntry | null>(null);
+  const removeAnchor = useRef<HTMLElement | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const [focusHeading, setFocusHeading] = useState(0);
+  const headingFocused = useRef(0);
   // A vault that can't be opened and is the only one there is: Back from Ask 8 leaves the lock screen as it was, with its box.
   const [backFrom, setBackFrom] = useState<number | null>(null);
   // A second press before the first has an answer must not send a second unlock, and state changes too late for that.
@@ -184,6 +228,13 @@ export function LockScreen() {
     list.find((vault) => vault.id === chosenId && vault.available) ?? list.find((vault) => vault.available && !vault.details_damaged) ?? list.find((vault) => vault.available);
   const position = chosen === undefined ? 0 : list.indexOf(chosen);
   const name = (vault: VaultEntry) => vault.name ?? "A vault that can't be read";
+  // A vault was taken off the list and none is left to choose: focus goes to the heading (when one can be chosen, its password box is drawn anew and takes it).
+  const nothingToChoose = chosen === undefined;
+  useEffect(() => {
+    if (focusHeading === headingFocused.current) return;
+    headingFocused.current = focusHeading;
+    if (nothingToChoose) headingRef.current?.focus();
+  }, [focusHeading, nothingToChoose]);
 
   const submit = async (event: SyntheticEvent) => {
     event.preventDefault();
@@ -192,7 +243,7 @@ export function LockScreen() {
     setBusy(true);
     setError(null);
     try {
-      await unlock(chosen.id, password);
+      await unlock({ list: chosen.list, id: chosen.id }, password);
       // The vault is open (or locked again already): the password has done its work.
       setPassword("");
     } catch (refusal) {
@@ -203,19 +254,45 @@ export function LockScreen() {
     }
   };
 
+  // Try again on an unavailable vault's row: the list is read again. Back, the vault is chosen and its box takes the focus; still unavailable, the row says so; a list that can't be
+  // read is the list's own error line (the store keeps it), and a row that has gone just goes.
+  const tryAgain = async (id: number) => {
+    if (trying.current.has(id)) return;
+    trying.current.add(id);
+    setStill((ids) => ids.filter((one) => one !== id));
+    const found = await tryVaultAgain(id);
+    trying.current.delete(id);
+    if (found === "still") {
+      setStill((ids) => [...ids, id]);
+    } else if (found === "back") {
+      setChosenId(id);
+      setPassword("");
+      setError(null);
+      setFocusBox((count) => count + 1);
+    }
+  };
+
   let heading = "Unlock a vault";
   if (vaults !== null && list.length === 0) heading = "No vaults yet";
   else if (list.length === 1 && chosen !== undefined) heading = `Unlock ${name(chosen)}`;
   if (capture !== null) heading = "Save what you copied";
 
+  // Once a vault is off the list the lock screen shows what is left: the vault now chosen has its box focused, or the heading when none can be chosen.
+  const afterRemoval = () => {
+    setRemoving(null);
+    setPassword("");
+    setError(null);
+    setFocusBox((count) => count + 1);
+    setFocusHeading((count) => count + 1);
+  };
   // Ask 8: both copies of the vault's details are damaged (the list says so), so no password can open it. Its own screen takes the place of the box; Back is
   // another vault that can be opened when there is one, and the lock screen as it was when there is not. A vault with no name for another reason keeps the box.
   if (capture === null && chosen !== undefined && chosen.details_damaged && backFrom !== chosen.id) {
     const other = list.find((vault) => vault.available && !vault.details_damaged);
     return (
       <DamagedVaultAsk
-        vault={chosen.id}
-        name={chosen.name}
+        entry={chosen}
+        onRemoved={afterRemoval}
         onBack={() => {
           setPassword("");
           setError(null);
@@ -247,7 +324,9 @@ export function LockScreen() {
         </p>
       </header>
       <main className="plate">
-        <h1>{heading}</h1>
+        <h1 ref={headingRef} tabIndex={-1}>
+          {heading}
+        </h1>
         <LockScreenAsks
           chosen={chosen?.id ?? null}
           onUnlock={(vault) => {
@@ -268,40 +347,65 @@ export function LockScreen() {
           </p>
         ) : null}
         {vaults !== null && list.length === 0 ? <p className="note">There is no vault here yet.</p> : null}
-        {list.length > 1 ? (
+        {/* The rows show from two vaults on, and for any vault that can't be reached, even when it is the only one: its row is where Try again and Remove from list are (30b). */}
+        {list.length > 1 || list.some((vault) => !vault.available) ? (
           <fieldset className="vlist">
             <legend className="sr">Vault</legend>
-            {list.map((vault, index) => (
-              // Its own colour (the mode class beside it, so the variables resolve here) and its own shape.
-              <label
-                key={vault.id}
-                className={`${vault.id === chosen?.id ? "vbtn on" : vault.available ? "vbtn" : "vbtn off"} mode-${mode} v-${vaultLook(index, false).accent}`}
-              >
-                <input
-                  type="radio"
-                  className="vradio"
-                  name="vault"
-                  checked={vault.id === chosen?.id}
-                  disabled={!vault.available}
-                  onChange={() => {
-                    setChosenId(vault.id);
-                    setPassword("");
-                    setError(null);
-                  }}
-                />
-                <VaultMark points={vaultLook(index, false).points} className="vmini" />
-                <span>
-                  <b>{name(vault)}</b>
-                  {vault.available ? null : <small>Not available</small>}
-                </span>
-              </label>
-            ))}
+            {list.map((vault, index) =>
+              vault.available ? (
+                // Its own colour (the mode class beside it, so the variables resolve here) and its own shape.
+                <label key={vault.id} className={`${vault.id === chosen?.id ? "vbtn on" : "vbtn"} mode-${mode} v-${vaultLook(index, false).accent}`}>
+                  <input
+                    type="radio"
+                    className="vradio"
+                    name="vault"
+                    checked={vault.id === chosen?.id}
+                    onChange={() => {
+                      setChosenId(vault.id);
+                      setPassword("");
+                      setError(null);
+                    }}
+                  />
+                  <VaultMark points={vaultLook(index, false).points} className="vmini" />
+                  <span>
+                    <b>{name(vault)}</b>
+                  </span>
+                </label>
+              ) : (
+                // A vault whose folder or drive isn't there (30b) is no choice: it says so, and has its own Try again and Remove from list.
+                <div key={vault.id} role="group" aria-label={name(vault)} className={`vbtn off mode-${mode} v-${vaultLook(index, false).accent}`}>
+                  <VaultMark points={vaultLook(index, false).points} className="vmini" />
+                  <span className="vgrow">
+                    <b>{name(vault)}</b>
+                    <small>{UNAVAILABLE_LINE}</small>
+                  </span>
+                  <button
+                    type="button"
+                    className="lnk"
+                    onClick={() => {
+                      void tryAgain(vault.id);
+                    }}
+                  >
+                    Try again
+                  </button>
+                  <button
+                    type="button"
+                    className="lnk"
+                    onClick={(event) => {
+                      removeAnchor.current = event.currentTarget;
+                      setRemoving(vault);
+                    }}
+                  >
+                    Remove from list
+                  </button>
+                  {/* Always on the page, so a change in it is spoken. */}
+                  <p role="status" className="vstill">
+                    {still.includes(vault.id) ? STILL_UNAVAILABLE : ""}
+                  </p>
+                </div>
+              ),
+            )}
           </fieldset>
-        ) : null}
-        {chosen === undefined && list.length > 0 ? (
-          <p className="err" role="alert">
-            {said(messageFor({ code: "core", kind: "io" }))}
-          </p>
         ) : null}
         {chosen === undefined ? null : (
           <form onSubmit={(event) => void submit(event)}>
@@ -341,7 +445,13 @@ export function LockScreen() {
             </div>
           </form>
         )}
-        {/* A second line under the form: a backup can bring a vault back on this PC, or be opened to look through and copy items out of. Not while a saved copy waits for its vault. */}
+        {/* What Add existing vault folder was refused with (30a), right under the form, or above the links when there is none; the next add or unlock takes it away. */}
+        {addRefusal === null ? null : (
+          <p className="err" role="alert">
+            {folderWords(addRefusal)}
+          </p>
+        )}
+        {/* A second line under the form: a backup can bring a vault back on this PC, a vault folder be added to the list, or a backup be opened to look through and copy items out of. Not while a saved copy waits for its vault. */}
         {vaults !== null && capture === null ? (
           <p className="lalt">
             <button
@@ -357,6 +467,16 @@ export function LockScreen() {
             <button
               type="button"
               className="lnk"
+              aria-disabled={restoring || opening || adding ? true : undefined}
+              onClick={() => {
+                if (!restoring && !opening && !adding) startAddFolder("lock");
+              }}
+            >
+              Add existing vault folder
+            </button>
+            <button
+              type="button"
+              className="lnk"
               aria-disabled={restoring || opening ? true : undefined}
               onClick={() => {
                 if (!restoring && !opening) void startOpenBackup();
@@ -366,6 +486,17 @@ export function LockScreen() {
             </button>
           </p>
         ) : null}
+        {removing === null ? null : (
+          <RemoveVaultBox
+            vault={removing}
+            name={name(removing)}
+            anchor={removeAnchor}
+            onClose={() => {
+              setRemoving(null);
+            }}
+            onDone={afterRemoval}
+          />
+        )}
       </main>
     </div>
   );

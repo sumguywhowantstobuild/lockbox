@@ -14,6 +14,7 @@ pub const COMMANDS: &[&str] = &[
     "add_existing_vault",
     "add_existing_vault_confirm",
     "forget_vault",
+    "show_vault_in_explorer",
     "create_vault",
     "create_vault_confirm",
     "unlock_vault",

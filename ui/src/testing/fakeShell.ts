@@ -51,6 +51,8 @@ export interface FakeVault {
   available?: boolean;
   /** Both copies of the vault's details are unreadable (Ask 8): the list says `details_damaged: true`. False unless a test makes it so. */
   detailsDamaged?: boolean;
+  /** The vault's place on the list is a file, a link or a junction, not a plain folder: Show in Explorer is refused as `invalid_input` `folder`. */
+  notAFolder?: boolean;
   password?: string;
   /**
    * The recovery key that opens the vault's recovery slot (Forgot password): `fakeKey(40 + id)` when none is given and none was made. A key the fake makes
@@ -692,6 +694,23 @@ export interface FakeShell {
    */
   interruptChangeNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error" | { refused_before_write: object }): void;
   /**
+   * The vaults shown in Explorer by `show_vault_in_explorer`, by registry ID, in order (Plan 4C Task 9). A refusal puts nothing here.
+   */
+  openedVaults: number[];
+  /** The identity of the vault list now (what each `list_vaults` entry says in `list`): a new list (`start_new_vault_list`) has another. */
+  listIdentity(): number;
+  /** The vault's folder or drive is there again (`true`) or isn't (`false`): the list says `available` from then on. Nothing is sent to the page. */
+  setAvailable(vaultId: number, available: boolean): void;
+  /** The vault's drive goes while it is open: it is `available: false` from now, and its session (when open) locks alone with the reason `drive_gone`, with the event. */
+  driveGone(vaultId: number): void;
+  /**
+   * The next `forget_vault` that gets past the busy check locks the vault when it is open, keeps it listed and refuses with `error`, as the shell's can when the list write
+   * fails after the lock.
+   */
+  forgetFailsAfterLockNext(error: object): void;
+  /** Holds every `forget_vault` answer until `release` is called: the vault is locked and taken off the list as the command arrives, and the answer comes later. */
+  holdForget(): () => void;
+  /**
    * Holds every `rename_vault` answer until `release` is called (Plan 4C Task 8): the name is decided (and written, when it is good) as the command arrives, as the shell writes it,
    * and the answer comes later, so the person can switch vault or a lock can come in between.
    */
@@ -1188,6 +1207,27 @@ export function installFakeShell(
   let dismissPicker = false;
   let existing: FakeVault | undefined;
   let listDamaged = false;
+  // The vault list's identity and high-water mark (Task 9): an ID is never given twice within a list, and a row from another list is `not_found`.
+  let listId = 4242;
+  let lastId = Math.max(0, ...vaults.map((v) => v.id));
+  const nextVaultId = (): number => {
+    lastId += 1;
+    return lastId;
+  };
+  const openedVaults: number[] = [];
+  let heldForget: (() => void)[] | undefined;
+  let forgetFailsAfterLock: object | undefined;
+  /** A row as the page names it, `{ list, id }`: exactly those two whole numbers; another list's row or an ID not listed is `not_found`. */
+  const vaultRefOf = (raw: unknown): FakeVault => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return refuse(MALFORMED);
+    if (Object.keys(raw).sort().join() !== "id,list") return refuse(MALFORMED);
+    const { list, id } = raw as { list: unknown; id: unknown };
+    if (typeof list !== "number" || typeof id !== "number" || !Number.isSafeInteger(list) || !Number.isSafeInteger(id) || list <= 0 || id <= 0) return refuse(MALFORMED);
+    if (listDamaged || list !== listId) return refuse({ code: "not_found" });
+    const found = vaults.find((v) => v.id === id);
+    if (found === undefined) return refuse({ code: "not_found" });
+    return found;
+  };
   let heldStartList: (() => void)[] | undefined;
   let failAfterMove: object | undefined;
   let nextToken = 0;
@@ -1593,7 +1633,7 @@ export function installFakeShell(
       return refuse(LOCKED);
     }
     const vault: FakeVault = {
-      id: Math.max(0, ...vaults.map((v) => v.id)) + 1,
+      id: nextVaultId(),
       name,
       password,
       items: [],
@@ -1604,7 +1644,7 @@ export function installFakeShell(
     if (alongside !== undefined) {
       const other = alongside;
       alongside = undefined;
-      other.id = vault.id + 1;
+      other.id = nextVaultId();
       vaults.push(other);
     }
     if (cut === "lock_after_create_as_error") {
@@ -1634,8 +1674,10 @@ export function installFakeShell(
     const vault = existing;
     if (vault === undefined) return refuse({ code: "not_found" });
     existing = undefined;
+    // The list gives the new row the next ID of its own (as it does a created vault): the one the test offered is overwritten.
+    vault.id = nextVaultId();
     vaults.push(vault);
-    return { Done: { id: vault.id, name: vault.name, available: true, details_damaged: vault.detailsDamaged ?? false } };
+    return { Done: { list: listId, id: vault.id, name: vault.name, available: true, details_damaged: vault.detailsDamaged ?? false } };
   };
 
   /** The held choice of a pick session, when it is this session's at this generation; otherwise the shell's `choice_expired`. */
@@ -1861,13 +1903,15 @@ export function installFakeShell(
       case "list_vaults":
         exactly(args ?? {}, []);
         if (listDamaged) return refuse(VAULT_LIST_DAMAGED);
-        return vaults.map((v) => ({ id: v.id, name: v.name, available: v.available ?? true, details_damaged: v.detailsDamaged ?? false }));
+        return vaults.map((v) => ({ list: listId, id: v.id, name: v.name, available: v.available ?? true, details_damaged: v.detailsDamaged ?? false }));
       case "start_new_vault_list":
         exactly(args ?? {}, []);
         // Only a damaged list is started over: a good one is refused and left as it is.
         if (!listDamaged) return refuse({ code: "invalid_input", what: "vault list" });
-        // The damaged file is set aside and a new, empty list is made: no vault is on it until each is added back.
+        // The damaged file is set aside and a new, empty list is made: no vault is on it until each is added back. It has its own identity, and IDs start again at 1.
         listDamaged = false;
+        listId += 1;
+        lastId = 0;
         vaults.splice(0);
         if (failAfterMove !== undefined) {
           const failure = failAfterMove;
@@ -1921,9 +1965,8 @@ export function installFakeShell(
         exactly(args ?? {}, []);
         return { version: "1.2.3" };
       case "unlock_vault": {
-        const { id, password } = exactly(args, ["id", "password"]);
-        const vault = vaults.find((v) => v.id === id);
-        if (vault === undefined) return refuse({ code: "not_found" });
+        const { vault: row, password } = exactly(args, ["vault", "password"]);
+        const vault = vaultRefOf(row);
         if (password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
         if (vault.newer ?? false) return refuse(NEWER_VAULT);
         const [session, state] = openSession(vault);
@@ -1933,10 +1976,9 @@ export function installFakeShell(
         return tagged(session, state.generation, unlockView(vault, session, state.generation, vault.headerChanged ?? false));
       }
       case "recover_check": {
-        const sent = exactly(args, ["id", "recovery_key"]);
-        if (typeof sent.id !== "number" || !Number.isInteger(sent.id) || typeof sent.recovery_key !== "string") return refuse(MALFORMED);
-        const vault = vaults.find((v) => v.id === sent.id);
-        if (vault === undefined) return refuse({ code: "not_found" });
+        const sent = exactly(args, ["vault", "recovery_key"]);
+        if (typeof sent.recovery_key !== "string") return refuse(MALFORMED);
+        const vault = vaultRefOf(sent.vault);
         // A vault that is open has no need of its recovery key here.
         if ([...live.entries()].some(([session, entry]) => entry.unlocked && sessionVault.get(session) === vault)) {
           return refuse({ code: "invalid_input", what: "vault is unlocked" });
@@ -3349,6 +3391,36 @@ export function installFakeShell(
         if (go && reason === "quit") quits += 1;
         return null;
       }
+      case "forget_vault": {
+        const row = vaultRefOf(exactly(args, ["vault"]).vault);
+        const open = [...live.entries()].find(([session, entry]) => entry.unlocked && sessionVault.get(session) === row);
+        // A job of that vault's open session is running: the Remove is refused, and nothing changes.
+        if (open !== undefined && [...running.values()].some((job) => job.scope.type === "session" && job.scope.session === open[0])) {
+          return refuse({ code: "busy", what: "operation in progress" });
+        }
+        // The list write fails after the lock: the vault is locked, still listed, and the answer is the refusal.
+        if (forgetFailsAfterLock !== undefined) {
+          const error = forgetFailsAfterLock;
+          forgetFailsAfterLock = undefined;
+          if (open !== undefined) lock(open[0], "manual");
+          return refuse(error);
+        }
+        // An open vault is locked first (its lock event goes out), then it comes off the list. The high-water mark stays, so its ID is never given again.
+        if (open !== undefined) lock(open[0], "manual");
+        vaults.splice(vaults.indexOf(row), 1);
+        return null;
+      }
+      case "show_vault_in_explorer": {
+        const row = vaultRefOf(exactly(args, ["vault"]).vault);
+        if (!(row.available ?? true)) return refuse({ code: "not_found" });
+        if (row.notAFolder ?? false) return refuse({ code: "invalid_input", what: "folder" });
+        if (explorerFails) {
+          explorerFails = false;
+          return refuse({ code: "core", kind: "io" });
+        }
+        openedVaults.push(row.id);
+        return null;
+      }
       case "lock_vault": {
         const { session } = exactly(args, ["session"]) as { session: number };
         lock(session);
@@ -3691,7 +3763,7 @@ export function installFakeShell(
           vaultId = target.id;
           for (const [session] of [...live.entries()]) if (sessionVault.get(session) === target) lock(session, "restore");
         } else {
-          vaultId = Math.max(0, ...vaults.map((v) => v.id)) + 1;
+          vaultId = nextVaultId();
           vaults.push({ id: vaultId, name: copy.name, password: BACKUP_PASSWORD, items: [] });
         }
         resolve({ vault: vaultId, before_restore: copy.replaces });
@@ -3990,6 +4062,7 @@ export function installFakeShell(
         ["start_new_vault_list", heldStartList],
         ["change_password", heldChange],
         ["rename_vault", heldRename],
+        ["forget_vault", heldForget],
         ["unlock_vault", heldUnlock],
         ["create_vault", heldCreate],
         ["create_vault_confirm", heldCreate],
@@ -4311,6 +4384,30 @@ export function installFakeShell(
       heldChange = waiting;
       return () => {
         heldChange = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    openedVaults,
+    listIdentity: () => listId,
+    setAvailable: (vaultId, available) => {
+      const found = vaults.find((v) => v.id === vaultId);
+      if (found !== undefined) found.available = available;
+    },
+    driveGone: (vaultId) => {
+      const found = vaults.find((v) => v.id === vaultId);
+      if (found === undefined) return;
+      found.available = false;
+      const open = [...live.entries()].find(([session, entry]) => entry.unlocked && sessionVault.get(session) === found);
+      if (open !== undefined) lock(open[0], "drive_gone");
+    },
+    forgetFailsAfterLockNext: (error) => {
+      forgetFailsAfterLock = error;
+    },
+    holdForget: () => {
+      const waiting: (() => void)[] = [];
+      heldForget = waiting;
+      return () => {
+        heldForget = undefined;
         for (const release of waiting) release();
       };
     },

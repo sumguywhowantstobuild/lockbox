@@ -6,6 +6,7 @@
 
 use std::cell::Cell;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -27,7 +28,7 @@ use crate::locations::{CloudProvider, LocationCheck};
 use crate::os::same_path;
 use crate::paths::default_vault_parent;
 use crate::pending::{PendingChoice, RecoveryChoice, Token};
-use crate::registry::VaultEntry;
+use crate::registry::{VaultEntry, VaultRef};
 use crate::session::{
     Change, KeyState, Location, OpenAnswer, OpenStep, Opened, SessionId, SessionInfo, Tagged,
 };
@@ -215,6 +216,16 @@ const PASSWORD_SET: &str = "shell.recover.password_set";
 #[cfg(test)]
 const CHECKING: &str = "shell.open.checking";
 
+/// Tests only: the step an unlock reaches once it has looked its row up, before its open is registered: where a Remove
+/// that finishes in between is tested.
+#[cfg(test)]
+const LOOKED_UP: &str = "shell.unlock.looked_up";
+
+/// Tests only: the step a Remove reaches once its location is held and the vault is locked, right before the list is
+/// written.
+#[cfg(test)]
+const REMOVING: &str = "shell.remove.held";
+
 /// Tests only: a named step a test can watch or make fail (the engine's failpoints, which are per thread: an opening
 /// closure runs on the thread that called the command).
 #[cfg(test)]
@@ -338,9 +349,9 @@ impl Shell {
             let token = self.sessions.pending().put(PendingChoice::AddVault { dir });
             return Ok(Outcome::Confirm(Confirm::CloudFolder { token }));
         }
-        let id = self.registry.add(&dir)?;
+        let vault = self.registry.add(&dir)?;
         drop(creating);
-        Ok(Outcome::Done(self.registry.entry(id, &dir)))
+        Ok(Outcome::Done(self.registry.entry(vault, &dir)))
     }
 
     /// Creates a vault named `name` in the default vaults folder, or in a folder the user picks
@@ -455,8 +466,8 @@ impl Shell {
         let listed = fs::canonicalize(created.vault.dir())
             .map_err(ShellError::from)
             .and_then(|dir| {
-                self.registry.add(&dir).map(|id| {
-                    made.set(id);
+                self.registry.add(&dir).map(|vault| {
+                    made.set(vault.id);
                     dir
                 })
             });
@@ -552,24 +563,32 @@ impl Shell {
 }
 
 impl Shell {
-    /// The registered folder of the vault `id` and its session location. `NotFound` for an ID not on the list. The
-    /// folder is checked again (it may have moved drives since it was added) inside the open, where a lock of all
-    /// vaults during the check is seen.
-    fn registered(&self, id: u32) -> ShellResult<(PathBuf, Location)> {
-        let dir = self.registry.path(id).ok_or(ShellError::NotFound)?;
+    /// The registered folder of the row `vault` and its session location. `NotFound` for a row of another list or an
+    /// ID not on the list. The folder is checked again (it may have moved drives since it was added) inside the open,
+    /// where a lock of all vaults during the check is seen.
+    fn registered(&self, vault: VaultRef) -> ShellResult<(PathBuf, Location)> {
+        let dir = self.registry.path_of(vault).ok_or(ShellError::NotFound)?;
         let location = Location::folder(&dir)?;
         Ok((dir, location))
     }
 
-    /// Unlocks the vault `id` of the vault list with its password.
+    /// Unlocks the vault `vault` of the vault list with its password. The row is looked up again inside the open,
+    /// once the open is registered: a Remove that finished since the first look leaves nothing to unlock (`NotFound`),
+    /// and one that starts later finds the open under way (`Busy`).
     pub fn unlock_vault(
         &self,
-        id: u32,
+        vault: VaultRef,
         password: Zeroizing<String>,
     ) -> ShellResult<Tagged<UnlockView>> {
-        let (dir, location) = self.registered(id)?;
+        let (dir, location) = self.registered(vault)?;
+        #[cfg(test)]
+        test_step(LOOKED_UP)?;
         let again = location.clone();
         let answer = self.sessions.open(Some(location.clone()), None, |_| {
+            let listed = self.registry.path_of(vault).ok_or(ShellError::NotFound)?;
+            if Location::folder(&listed)? != location {
+                return Err(ShellError::NotFound);
+            }
             #[cfg(test)]
             test_step(CHECKING)?;
             let check = self.check_location(&dir)?;
@@ -617,7 +636,7 @@ impl Shell {
     }
 
     /// 28b's check of a forgotten password's way back (spec §5.3): whether the recovery key typed opens the recovery
-    /// slot of the vault `id`, without opening the vault. Not a job: the key's derivation is HKDF, no Argon2. The order:
+    /// slot of the vault `vault`, without opening the vault. Not a job: the key's derivation is HKDF, no Argon2. The order:
     /// the vault is on the list (`NotFound`), it is not unlocked (`"vault is unlocked"`: its password is changed from
     /// the open vault), the key's form (a word that is no word of the list, the wrong number of words, a failed 8-bit
     /// check: no derivation is spent on a typo), the vault's folder as the location check finds it, then the engine's
@@ -633,11 +652,11 @@ impl Shell {
     /// [`recover_forget`]: Self::recover_forget
     pub fn recover_check(
         &self,
-        id: u32,
+        vault: VaultRef,
         recovery_key: Zeroizing<String>,
     ) -> ShellResult<RecoveryCheckView> {
         let epoch = self.sessions.epoch();
-        let (dir, location) = self.registered(id)?;
+        let (dir, location) = self.registered(vault)?;
         if self.sessions.find(&location).is_some() {
             return Err(UNLOCKED);
         }
@@ -660,7 +679,7 @@ impl Shell {
         };
         let choice = self.sessions.pending().put_at(
             PendingChoice::Recovery(RecoveryChoice {
-                vault: id,
+                vault,
                 location,
                 epoch,
                 secret,
@@ -721,7 +740,7 @@ impl Shell {
             .sessions
             .open_choice(
                 choice,
-                Some(password_change(vault)),
+                Some(password_change(vault.id)),
                 pick,
                 |recovery, cancel| {
                     self.finish_in(recovery, new_password, accept_changed_header, cancel)
@@ -744,7 +763,7 @@ impl Shell {
         cancel: &CancelToken,
     ) -> ShellResult<OpenStep<Unlocked>> {
         let RecoveryChoice {
-            vault: id,
+            vault: row,
             location,
             epoch,
             secret,
@@ -756,8 +775,12 @@ impl Shell {
         if epoch != self.sessions.epoch() {
             return Err(ShellError::ChoiceExpired);
         }
-        // The registry entry is still the folder the check bound.
-        let dir = self.registry.path(id).ok_or(ShellError::ChoiceExpired)?;
+        // The registry entry is still the folder the check bound: the same row of the same list, so a Remove since the
+        // check (or a new list) leaves the choice expired.
+        let dir = self
+            .registry
+            .path_of(row)
+            .ok_or(ShellError::ChoiceExpired)?;
         if Location::folder(&dir)? != location {
             return Err(ShellError::ChoiceExpired);
         }
@@ -795,7 +818,7 @@ impl Shell {
             // the write came back as an error: say so, never "nothing changed".
             return Err(match vault.check_password(&new_password) {
                 Ok(()) => {
-                    let change = password_change(id);
+                    let change = password_change(row.id);
                     ShellError::LockedAfterChange {
                         what: change.what,
                         vault: change.vault,
@@ -1020,10 +1043,50 @@ impl Shell {
     }
 }
 
+impl Shell {
+    /// Takes the vault `vault` off the vault list (18g's Remove), leaving its folder and the shell's notes about it
+    /// as they are. The location's guard ([`AutoLock::remove_location`](crate::autolock::AutoLock::remove_location))
+    /// refuses (`Busy`) while an unlock of it is under way, another Remove is, or a job of it runs; an open vault is
+    /// locked first (the person's own lock, its event goes out before this answers), and only then is the list
+    /// written, with the location still held, so an unlock that arrives meanwhile is `Busy` and one that comes after
+    /// finds no row (`NotFound`). A list that cannot be written leaves the vault locked and listed, and says so.
+    /// `NotFound` for a row of another list, an ID not on the list, or a damaged list.
+    pub fn forget_vault(&self, vault: VaultRef) -> ShellResult<()> {
+        let dir = self.registry.path_of(vault).ok_or(ShellError::NotFound)?;
+        // Canonical when it can be (as an unlock's location is); a folder that is gone is compared as listed.
+        let location = Location::folder(&dir).unwrap_or(Location::Folder(dir));
+        self.autolock.remove_location(&location, || {
+            #[cfg(test)]
+            test_step(REMOVING)?;
+            self.registry.forget(vault)
+        })
+    }
+
+    /// Shows the folder of the row `vault` in Explorer (a vault's menu, its unlock step), and only a folder: the
+    /// listed path is checked to be a directory and not a link or junction (`InvalidInput { "folder" }`), and then
+    /// handed to the launcher, which starts Explorer by its full path with the folder as its one argument and never
+    /// runs it as a program. No session and no lock are involved: it works for an open, locked or unreadable vault.
+    /// `NotFound` for a row of another list, an ID not on the list, a damaged list, or a folder that is not there.
+    pub fn show_vault_in_explorer(&self, vault: VaultRef) -> ShellResult<()> {
+        let dir = self.registry.path_of(vault).ok_or(ShellError::NotFound)?;
+        let meta = match fs::symlink_metadata(&dir) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ShellError::NotFound),
+            Err(e) => return Err(e.into()),
+        };
+        // A file (`...\run.exe`), or a link or junction (`is_symlink` is true for both on Windows: name surrogates).
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return Err(ShellError::InvalidInput { what: "folder" });
+        }
+        self.os.launcher.open_folder(&dir)?;
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VaultArg {
-    id: u32,
+    vault: VaultRef,
 }
 
 #[derive(Deserialize)]
@@ -1043,14 +1106,14 @@ struct TokenArg {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UnlockVault {
-    id: u32,
+    vault: VaultRef,
     password: Zeroizing<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecoverCheck {
-    id: u32,
+    vault: VaultRef,
     recovery_key: Zeroizing<String>,
 }
 
@@ -1155,9 +1218,20 @@ pub(super) async fn forget_vault(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<()> {
-    let VaultArg { id } = args(&request)?;
+    let VaultArg { vault } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.registry.forget(id)).await
+    blocking(move || shell.forget_vault(vault)).await
+}
+
+/// Shows a vault's folder in Explorer. The page names the row (`{ list, id }`), never a path.
+#[tauri::command]
+pub(super) async fn show_vault_in_explorer(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let VaultArg { vault } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.show_vault_in_explorer(vault)).await
 }
 
 #[tauri::command]
@@ -1189,9 +1263,9 @@ pub(super) async fn unlock_vault(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Tagged<UnlockView>> {
-    let UnlockVault { id, password } = args(&request)?;
+    let UnlockVault { vault, password } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.unlock_vault(id, password)).await
+    blocking(move || shell.unlock_vault(vault, password)).await
 }
 
 #[tauri::command]
@@ -1199,9 +1273,12 @@ pub(super) async fn recover_check(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<RecoveryCheckView> {
-    let RecoverCheck { id, recovery_key } = args(&request)?;
+    let RecoverCheck {
+        vault,
+        recovery_key,
+    } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.recover_check(id, recovery_key)).await
+    blocking(move || shell.recover_check(vault, recovery_key)).await
 }
 
 #[tauri::command]
@@ -1321,7 +1398,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use lockbox_core::blob::NoProgress;
     use lockbox_core::internals::fsio::failpoint;
@@ -1337,6 +1414,7 @@ mod tests {
 
     use super::super::{MALFORMED, parse};
     use super::*;
+    use crate::jobs::JobKind;
     use crate::os::{DriveType, KnownFolder};
     use crate::paths::MAX_STATE_FILE;
     use crate::registry::MAX_VAULTS;
@@ -1364,7 +1442,7 @@ mod tests {
         let dir = fs::canonicalize(created.vault.dir()).unwrap();
         let recovery = created.recovery.to_display();
         drop(created);
-        (ts.shell.registry.add(&dir).unwrap(), dir, recovery)
+        (ts.shell.registry.add(&dir).unwrap().id, dir, recovery)
     }
 
     /// Whether nothing holds the vault in `dir`: its `.lock` is free.
@@ -1418,7 +1496,7 @@ mod tests {
 
     /// 28b's check: `key` for the vault `id`. A refused key holds nothing.
     fn check(ts: &TestShell, id: u32, key: &str) -> ShellResult<RecoveryCheckView> {
-        ts.shell.recover_check(id, secret(key))
+        ts.shell.recover_check(ts.vault(id), secret(key))
     }
 
     /// 28d's finish, on the pool's rules for a test (an Argon2 run is under way).
@@ -1577,7 +1655,11 @@ mod tests {
         ));
         // A token for another question is used up and refused, and its choice dropped.
         let (id, dir, recovery) = registered(&ts);
-        let token = ts.shell.recover_check(id, recovery).unwrap().choice;
+        let token = ts
+            .shell
+            .recover_check(ts.vault(id), recovery)
+            .unwrap()
+            .choice;
         assert!(matches!(
             ts.shell.create_vault_confirm(&token),
             Err(ShellError::NotFound)
@@ -1658,7 +1740,7 @@ mod tests {
         let (id, dir, recovery) = registered(&ts);
         change_header(&dir);
         let before = headers(&dir);
-        let checked = ts.shell.recover_check(id, recovery).unwrap();
+        let checked = ts.shell.recover_check(ts.vault(id), recovery).unwrap();
         assert_eq!(checked.kind, RecoveryCheckKind::HeaderChanged);
         let token = checked.choice;
         let locker = lock_once_taken(&ts);
@@ -2324,9 +2406,9 @@ mod tests {
         let listed_link = ts.vaults().join("listed-link");
         make_dir_link(&listed_link, &made[0]);
         let via_link = fs::canonicalize(ts.vaults()).unwrap().join("listed-link");
-        let link_id = ts.shell.registry.add(&via_link).unwrap();
+        let link_id = ts.shell.registry.add(&via_link).unwrap().id;
         move_during_check(&listed_link, &other_vault);
-        let view = heavy(|| ts.shell.unlock_vault(link_id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(link_id), secret(PW))).unwrap();
         assert_eq!(view.data.info.name, "Family");
         ts.shell.sessions.lock_all(LockReason::Manual);
 
@@ -2359,7 +2441,8 @@ mod tests {
             .shell
             .registry
             .add(&fs::canonicalize(ts.vaults()).unwrap().join("listed-link"))
-            .unwrap();
+            .unwrap()
+            .id;
         let move_once_open = || {
             retarget(&link, &family);
             let (link, work) = (link.clone(), work.clone());
@@ -2377,7 +2460,7 @@ mod tests {
         let refused = Some(ShellError::InvalidInput { what: "folder" });
 
         move_once_open();
-        let answer = heavy(|| ts.shell.unlock_vault(id, secret(NEW_PW)));
+        let answer = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(NEW_PW)));
         failpoint::disarm_all();
         assert_eq!(answer.err(), refused);
 
@@ -2411,15 +2494,18 @@ mod tests {
         let ts = TestShell::new();
         let (id, dir, _) = registered(&ts);
         assert_eq!(
-            ts.shell.unlock_vault(id + 1, secret(PW)).err(),
+            ts.shell.unlock_vault(ts.vault(id + 1), secret(PW)).err(),
             Some(ShellError::NotFound)
         );
         assert_eq!(
-            heavy(|| ts.shell.unlock_vault(id, secret("not the password"))).err(),
+            heavy(|| ts
+                .shell
+                .unlock_vault(ts.vault(id), secret("not the password")))
+            .err(),
             Some(wrong_password())
         );
         assert!(ts.shell.sessions.list().is_empty());
-        let tagged = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let tagged = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert_eq!(tagged.data.info.name, "Family");
         assert_eq!(state(&ts, tagged.session), Some(SessionState::Unlocked));
         assert!(!is_free(&dir));
@@ -2440,7 +2526,10 @@ mod tests {
         let refused = Some(ShellError::InvalidInput {
             what: "removable drive",
         });
-        assert_eq!(ts.shell.unlock_vault(id, secret(PW)).err(), refused);
+        assert_eq!(
+            ts.shell.unlock_vault(ts.vault(id), secret(PW)).err(),
+            refused
+        );
         assert_eq!(check(&ts, id, &recovery).err(), refused);
         assert!(ts.shell.sessions.list().is_empty());
         assert_eq!(ts.shell.sessions.pending().len(), 0, "no choice held");
@@ -2459,7 +2548,7 @@ mod tests {
         };
         lock_now();
         assert_eq!(
-            heavy(|| ts.shell.unlock_vault(id, secret(PW))).err(),
+            heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).err(),
             Some(ShellError::Locked)
         );
         assert!(ts.shell.sessions.list().is_empty());
@@ -2562,7 +2651,7 @@ mod tests {
         // opened from `.bak`, and the failed repair reported.
         fs::write(dir.join(HEADER_FILE), b"damaged").unwrap();
         failpoint::arm("unlock.repair_write");
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW)));
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW)));
         failpoint::disarm_all();
         let view = view.unwrap().data;
         assert!(view.used_backup_header && view.header_repair_failed && !view.header_mac_mismatch);
@@ -2579,7 +2668,7 @@ mod tests {
         .unwrap();
         let orphan = format!("{}.blob", "cd".repeat(16));
         fs::write(dir.join("files").join(&orphan), b"x").unwrap();
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW)))
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW)))
             .unwrap()
             .data;
         assert!(view.used_backup_header && !view.header_mac_mismatch && !view.header_repair_failed);
@@ -2588,7 +2677,7 @@ mod tests {
         assert!(dir.join("files").join("orphaned").join(&orphan).exists());
 
         // Unlocking it again while it is unlocked: the same session, no warnings, nothing cleaned.
-        let again = ts.shell.unlock_vault(id, secret(PW)).unwrap();
+        let again = ts.shell.unlock_vault(ts.vault(id), secret(PW)).unwrap();
         assert_eq!(again.session, view.info.session);
         assert!(!again.data.used_backup_header && !again.data.header_mac_mismatch);
         assert_eq!(again.data.cleanup, CleanupView::default());
@@ -2596,7 +2685,7 @@ mod tests {
         // The header changed outside Lockbox: reported, and accepted through the session.
         ts.shell.sessions.lock_all(LockReason::Manual);
         change_header(&dir);
-        let tagged = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let tagged = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(tagged.data.header_mac_mismatch && !tagged.data.used_backup_header);
         let json = serde_json::to_value(&tagged.data).unwrap();
         for flag in [
@@ -2611,7 +2700,7 @@ mod tests {
             .accept_header(tagged.session, tagged.generation)
             .unwrap();
         ts.shell.sessions.lock_all(LockReason::Manual);
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW)))
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW)))
             .unwrap()
             .data;
         assert!(!view.header_mac_mismatch);
@@ -2873,7 +2962,7 @@ mod tests {
         assert_eq!(check(&ts, 0, &recovery).err(), Some(ShellError::NotFound));
         // A vault the list forgot since the check: the choice answers `ChoiceExpired`.
         let held = check(&ts, id, &recovery).unwrap();
-        ts.shell.registry.forget(id).unwrap();
+        ts.shell.registry.forget(ts.vault(id)).unwrap();
         assert_eq!(
             finish(&ts, &held.choice, NEW_PW, true).err(),
             Some(ShellError::ChoiceExpired)
@@ -2883,10 +2972,10 @@ mod tests {
         // The check refuses the removed entry too, and holds nothing.
         assert_eq!(check(&ts, id, &recovery).err(), Some(ShellError::NotFound));
         assert_eq!(ts.shell.sessions.pending().len(), 0);
-        let id = ts.shell.registry.add(&dir).unwrap();
+        let id = ts.shell.registry.add(&dir).unwrap().id;
 
         // Unlocked: refused before the key is read (not a typo error for this one), and nothing is held.
-        let session = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let session = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         let unlocked = ShellError::InvalidInput {
             what: "vault is unlocked",
         };
@@ -2897,7 +2986,7 @@ mod tests {
 
         // Checked while locked, unlocked since: the finish refuses, drops the choice, and changes nothing.
         let checked = check(&ts, id, &recovery).unwrap();
-        let reopened = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let reopened = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert_ne!(reopened.generation, session.generation);
         let before = headers(&dir);
         assert_eq!(
@@ -3032,7 +3121,7 @@ mod tests {
         failpoint::disarm_all();
 
         // An unlocked vault is refused before that too.
-        heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         let reached = Rc::new(Cell::new(0));
         let count = Rc::clone(&reached);
         failpoint::observe(
@@ -3285,7 +3374,7 @@ mod tests {
         let copy = ts.vaults().join("interrupted-new");
         copy_folder(&dir, &copy);
         let copy = fs::canonicalize(&copy).unwrap();
-        let id = ts.shell.registry.add(&copy).unwrap();
+        let id = ts.shell.registry.add(&copy).unwrap().id;
 
         assert!(opens_read_only(&copy, Credential::Password(NEW_PW)));
         assert_eq!(
@@ -3293,7 +3382,7 @@ mod tests {
             (main.clone(), bak),
             "a read-only open writes nothing"
         );
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(NEW_PW)))
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(NEW_PW)))
             .unwrap()
             .data;
         assert!(!view.used_backup_header && !view.header_repair_failed);
@@ -3319,11 +3408,11 @@ mod tests {
         let copy = ts.vaults().join("interrupted-old");
         copy_folder(&dir, &copy);
         let copy = fs::canonicalize(&copy).unwrap();
-        let id = ts.shell.registry.add(&copy).unwrap();
+        let id = ts.shell.registry.add(&copy).unwrap().id;
 
         assert!(opens_read_only(&copy, Credential::Password(PW)));
         assert_eq!(headers(&copy), (main, bak.clone()));
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW)))
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW)))
             .unwrap()
             .data;
         assert!(view.used_backup_header, "Ask 9: the spare opened");
@@ -3347,7 +3436,7 @@ mod tests {
         let copy = ts.vaults().join("interrupted-key");
         copy_folder(&dir, &copy);
         let copy = fs::canonicalize(&copy).unwrap();
-        let id = ts.shell.registry.add(&copy).unwrap();
+        let id = ts.shell.registry.add(&copy).unwrap().id;
 
         assert!(opens_read_only(
             &copy,
@@ -3424,7 +3513,9 @@ mod tests {
     fn recover_json_shapes() {
         let token = FAKE_TOKEN;
         // The requests: every field named in snake_case, nothing more allowed.
-        refuses_a_path::<RecoverCheck>(json!({ "id": 1, "recovery_key": "x" }));
+        refuses_a_path::<RecoverCheck>(
+            json!({ "vault": { "list": 7, "id": 1 }, "recovery_key": "x" }),
+        );
         refuses_a_path::<RecoverFinish>(
             json!({ "choice": token, "new_password": NEW_PW, "accept_changed_header": false }),
         );
@@ -3432,11 +3523,12 @@ mod tests {
         // A missing, extra or wrongly typed field, and a choice that is not 32 lowercase hex, is no request.
         let malformed = |body: Value| InvokeBody::Json(body);
         for body in [
-            json!({ "id": 1 }),
+            json!({ "vault": { "list": 7, "id": 1 } }),
             json!({ "recovery_key": "x" }),
-            json!({ "id": "1", "recovery_key": "x" }),
-            json!({ "id": 1, "recovery_key": 7 }),
-            json!({ "id": 1, "recoveryKey": "x" }),
+            json!({ "id": 1, "recovery_key": "x" }),
+            json!({ "vault": { "list": 7, "id": "1" }, "recovery_key": "x" }),
+            json!({ "vault": { "list": 7, "id": 1 }, "recovery_key": 7 }),
+            json!({ "vault": { "list": 7, "id": 1 }, "recoveryKey": "x" }),
         ] {
             assert_eq!(
                 parse::<RecoverCheck>(&malformed(body)).err(),
@@ -3565,7 +3657,7 @@ mod tests {
     fn password_and_recovery_key_changed_from_the_session() {
         let ts = TestShell::new();
         let (id, dir, old_recovery) = registered(&ts);
-        let tagged = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let tagged = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         let (session, generation) = (tagged.session, tagged.generation);
         let changed = heavy(|| {
             ts.shell
@@ -3703,7 +3795,7 @@ mod tests {
     fn unlock_and_recover_in_a_cloud_folder_say_so() {
         let ts = TestShell::new();
         let (id, dir, recovery) = registered(&ts);
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW)))
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW)))
             .unwrap()
             .data;
         assert_eq!(view.cloud, None);
@@ -3711,7 +3803,7 @@ mod tests {
         ts.shell.sessions.lock_all(LockReason::Manual);
 
         ts.env.set_var("OneDrive", ts.vaults().into_os_string());
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW)))
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW)))
             .unwrap()
             .data;
         assert_eq!(view.cloud, Some(CloudProvider::OneDrive));
@@ -3823,7 +3915,7 @@ mod tests {
         // It stays until the key is confirmed: another unlock says so.
         ts.shell.sessions.lock_all(LockReason::Manual);
         let id = ts.shell.registry.entries()[0].0;
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(view.data.recovery_unconfirmed);
         assert_eq!(view.session, tagged.session);
     }
@@ -3950,7 +4042,7 @@ mod tests {
         ts.shell.recovery_confirmed(session, generation, 1).unwrap();
         let id = ts.shell.registry.entries()[0].0;
         ts.shell.sessions.lock_all(LockReason::Manual);
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(
             !view.data.recovery_unconfirmed,
             "a confirmed key shows nothing"
@@ -3960,12 +4052,12 @@ mod tests {
         // A folder where the file should be: opening it for reading fails, and it is not a damaged file.
         fs::remove_file(&ts.shell.paths.vault_state).unwrap();
         fs::create_dir(&ts.shell.paths.vault_state).unwrap();
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(view.data.recovery_unconfirmed);
         // Unlocking again while unlocked reads it again.
         assert!(
             ts.shell
-                .unlock_vault(id, secret(PW))
+                .unlock_vault(ts.vault(id), secret(PW))
                 .unwrap()
                 .data
                 .recovery_unconfirmed
@@ -3988,14 +4080,14 @@ mod tests {
         // The app closes at the key screen.
         ts.shell.sessions.lock_all(LockReason::AppClosing);
 
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(view.data.recovery_unconfirmed);
         assert_eq!(
             serde_json::to_value(&view.data).unwrap()["recovery_unconfirmed"],
             true
         );
         // Unlocking again while unlocked: no other warning, and the mark is read again.
-        let again = ts.shell.unlock_vault(id, secret(PW)).unwrap();
+        let again = ts.shell.unlock_vault(ts.vault(id), secret(PW)).unwrap();
         assert_eq!(again.session, view.session);
         assert!(!again.data.used_backup_header && again.data.cleanup == CleanupView::default());
         assert!(again.data.recovery_unconfirmed);
@@ -4005,7 +4097,7 @@ mod tests {
         let fresh = heavy(|| ts.shell.regenerate_recovery(session, generation)).unwrap();
         assert_ne!(fresh.data.words.as_str(), key.as_str());
         assert_eq!(fresh.data.issue, 1, "the first key this session made");
-        let after = ts.shell.unlock_vault(id, secret(PW)).unwrap();
+        let after = ts.shell.unlock_vault(ts.vault(id), secret(PW)).unwrap();
         assert!(after.data.recovery_unconfirmed, "still unconfirmed");
         let confirmed = ts
             .shell
@@ -4014,13 +4106,13 @@ mod tests {
         assert_eq!(confirmed.data, Confirmation::Confirmed);
         assert!(
             !ts.shell
-                .unlock_vault(id, secret(PW))
+                .unlock_vault(ts.vault(id), secret(PW))
                 .unwrap()
                 .data
                 .recovery_unconfirmed
         );
         ts.shell.sessions.lock_all(LockReason::Manual);
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(!view.data.recovery_unconfirmed);
         ts.shell.sessions.lock_all(LockReason::Manual);
 
@@ -4101,7 +4193,7 @@ mod tests {
         ts.shell.recovery_confirmed(other.0, other.1, 1).unwrap();
         ts.shell.sessions.lock_all(LockReason::Manual);
         let id = ts.shell.registry.entries()[0].0;
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(!view.data.recovery_unconfirmed);
     }
 
@@ -4229,11 +4321,14 @@ mod tests {
         );
         // `add_existing_vault`, `list_vaults` and `start_new_vault_list`.
         refuses_a_path::<NoArgs>(json!({}));
-        refuses_a_path::<VaultArg>(json!({ "id": 1 }));
+        // `forget_vault` and `show_vault_in_explorer`.
+        refuses_a_path::<VaultArg>(json!({ "vault": { "list": 7, "id": 1 } }));
         // `create_vault_confirm` and `add_existing_vault_confirm`.
         refuses_a_path::<TokenArg>(json!({ "token": token }));
-        refuses_a_path::<UnlockVault>(json!({ "id": 1, "password": PW }));
-        refuses_a_path::<RecoverCheck>(json!({ "id": 1, "recovery_key": "x" }));
+        refuses_a_path::<UnlockVault>(json!({ "vault": { "list": 7, "id": 1 }, "password": PW }));
+        refuses_a_path::<RecoverCheck>(
+            json!({ "vault": { "list": 7, "id": 1 }, "recovery_key": "x" }),
+        );
         refuses_a_path::<RecoverFinish>(
             json!({ "choice": token, "new_password": NEW_PW, "accept_changed_header": true }),
         );
@@ -4718,7 +4813,7 @@ mod tests {
             .unwrap()
             .0;
         assert_ne!(work_id, id);
-        let view = heavy(|| ts.shell.unlock_vault(work_id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(work_id), secret(PW))).unwrap();
         assert!(view.data.recovery_unconfirmed, "21f follows");
         // 21f's step may make the key it asks for without the password.
         let made = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation));
@@ -4730,7 +4825,7 @@ mod tests {
         let ts = TestShell::new();
         // An unlocked session with no mark: the vault's key was confirmed.
         let (id, dir, _) = registered(&ts);
-        let opened = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let opened = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(!opened.data.recovery_unconfirmed);
         let (session, generation) = (opened.session, opened.generation);
         let before = on_disk(&ts, &dir);
@@ -4776,7 +4871,7 @@ mod tests {
         // A folder where the file should be: reading it fails, and it is not a damaged file.
         fs::remove_file(&ts.shell.paths.vault_state).unwrap();
         fs::create_dir(&ts.shell.paths.vault_state).unwrap();
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(view.data.recovery_unconfirmed, "21f still shows");
         let before = headers(&dir);
         let refused = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation));
@@ -4811,7 +4906,9 @@ mod tests {
         let dir = folder_of(&ts, session);
         ts.shell.vault_state.mark_unconfirmed(&dir).unwrap();
         let before = on_disk(&ts, &dir);
-        let again = ts.shell.unlock_vault(id, secret("not the password at all"));
+        let again = ts
+            .shell
+            .unlock_vault(ts.vault(id), secret("not the password at all"));
         let again = again.expect("an unlock of an open vault answers with its session");
         assert_eq!((again.session, again.generation), (session, generation));
         assert!(again.data.recovery_unconfirmed, "21f shows");
@@ -4887,12 +4984,12 @@ mod tests {
             )
         });
         let (a_id, b_id) = (
-            ts.shell.registry.add(&a).unwrap(),
-            ts.shell.registry.add(&b).unwrap(),
+            ts.shell.registry.add(&a).unwrap().id,
+            ts.shell.registry.add(&b).unwrap().id,
         );
         ts.shell.vault_state.mark_unconfirmed(&a).unwrap();
 
-        let copy = heavy(|| ts.shell.unlock_vault(b_id, secret(PW))).unwrap();
+        let copy = heavy(|| ts.shell.unlock_vault(ts.vault(b_id), secret(PW))).unwrap();
         assert!(!copy.data.recovery_unconfirmed);
         let before = on_disk(&ts, &b);
         let refused = heavy(|| ts.shell.regenerate_recovery(copy.session, copy.generation));
@@ -4904,7 +5001,7 @@ mod tests {
         );
         assert_eq!(on_disk(&ts, &b), before);
 
-        let marked = heavy(|| ts.shell.unlock_vault(a_id, secret(PW))).unwrap();
+        let marked = heavy(|| ts.shell.unlock_vault(ts.vault(a_id), secret(PW))).unwrap();
         assert!(marked.data.recovery_unconfirmed);
         assert!(
             heavy(|| ts
@@ -4943,7 +5040,7 @@ mod tests {
         assert!(heavy(|| Vault::unlock_with_recovery(&dir, &oldest)).is_err());
 
         // A 21f unlock: the same, numbered from 1 in the new session.
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(view.data.recovery_unconfirmed);
         let key = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation)).unwrap();
         assert_eq!(key.data.issue, 1);
@@ -5006,7 +5103,7 @@ mod tests {
             .mark_unconfirmed(&folder_of(&ts, session))
             .unwrap();
         ts.shell.sessions.lock_all(LockReason::Manual);
-        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         assert!(view.data.recovery_unconfirmed);
         let key = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation)).unwrap();
         let answer = ts
@@ -5023,7 +5120,7 @@ mod tests {
     fn a_direct_regenerate_during_21c_is_allowed_only_for_the_new_vault() {
         let ts = TestShell::new();
         let (id, dir, _) = registered(&ts);
-        let existing = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let existing = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
         let (new_session, new_generation) = ts.open_vault("Work");
         let before = on_disk(&ts, &dir);
         let refused = heavy(|| {
@@ -5229,6 +5326,9 @@ mod tests {
             ("regenerate_recovery", "shell.regenerate_recovery("),
             ("recovery_confirmed", "shell.recovery_confirmed("),
             ("rename_vault", "shell.rename_vault("),
+            ("forget_vault", "shell.forget_vault("),
+            ("show_vault_in_explorer", "shell.show_vault_in_explorer("),
+            ("unlock_vault", "shell.unlock_vault("),
             ("recover_check", "shell.recover_check("),
             ("recover_finish", "shell.recover_finish("),
             ("recover_forget", "shell.recover_forget("),
@@ -5627,7 +5727,7 @@ mod tests {
             session_line(&ts, second),
             ("Work".to_owned(), SessionState::Locked)
         );
-        let again = heavy(|| ts.shell.unlock_vault(second_id, secret(PW))).unwrap();
+        let again = heavy(|| ts.shell.unlock_vault(ts.vault(second_id), secret(PW))).unwrap();
         assert_eq!(again.data.info.name, "Work");
     }
 
@@ -5823,5 +5923,851 @@ mod tests {
         );
         rename(&ts, session, generation, "Work").unwrap();
         assert_eq!(read_vault_name(&dir).unwrap(), "Work");
+    }
+
+    // ---- Remove, Show in Explorer and unavailable vaults (Plan 4C, Task 9) ----
+
+    fn busy() -> ShellError {
+        ShellError::Busy {
+            what: "operation in progress",
+        }
+    }
+
+    /// A new plain folder `name` in the test's temp folder, listed as a vault (no vault is made in it: Show in Explorer
+    /// and Remove look at the list and the folder only): its row and canonical folder.
+    fn listed_folder(ts: &TestShell, name: &str) -> (VaultRef, PathBuf) {
+        let dir = ts.folder(name);
+        (ts.shell.registry.add(&dir).unwrap(), dir)
+    }
+
+    /// The row the page would send for the vault an open session holds.
+    fn row_of(ts: &TestShell, session: SessionId) -> VaultRef {
+        ts.vault(registry_id(ts, session))
+    }
+
+    /// One entry of [`tree`]: the path under the folder, whether it is a folder, its bytes, and its two times.
+    type Node = (PathBuf, bool, Vec<u8>, SystemTime, SystemTime);
+
+    /// Every file and folder under `root`, with each file's bytes and each one's modified and created times.
+    fn tree(root: &Path) -> Vec<Node> {
+        fn walk(dir: &Path, root: &Path, out: &mut Vec<Node>) {
+            let mut paths: Vec<_> = fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            paths.sort();
+            for path in paths {
+                let meta = fs::symlink_metadata(&path).unwrap();
+                let (modified, created) = (meta.modified().unwrap(), meta.created().unwrap());
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                let bytes = match meta.is_dir() {
+                    true => Vec::new(),
+                    false => fs::read(&path).unwrap(),
+                };
+                out.push((relative, meta.is_dir(), bytes, modified, created));
+                if meta.is_dir() {
+                    walk(&path, root, out);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(root, root, &mut found);
+        found
+    }
+
+    /// An ID a Remove took off the list is never given to another vault, so a row the page still holds for the old
+    /// one can never act on the new one (Show in Explorer opening the wrong folder, Remove taking the wrong vault off).
+    #[test]
+    fn a_removed_vaults_id_is_never_given_to_another() {
+        let ts = TestShell::new();
+        let (first, first_dir) = listed_folder(&ts, "First");
+        let (second, _) = listed_folder(&ts, "Second");
+        assert_eq!((first.id, second.id), (1, 2));
+        ts.shell.forget_vault(second).unwrap();
+
+        let (third, third_dir) = listed_folder(&ts, "Third");
+        assert_eq!(third.list, second.list, "the same list");
+        assert_ne!(third.id, second.id, "the highest ID was not given again");
+        assert_eq!(third.id, 3);
+
+        // The row the page still holds for the removed vault names nothing: not Show, not Remove, not an unlock.
+        assert_eq!(
+            ts.shell.show_vault_in_explorer(second),
+            Err(ShellError::NotFound)
+        );
+        assert_eq!(ts.shell.forget_vault(second), Err(ShellError::NotFound));
+        assert_eq!(
+            ts.shell.unlock_vault(second, secret(PW)).err(),
+            Some(ShellError::NotFound)
+        );
+        assert!(ts.launcher.opened_folders().is_empty(), "nothing was shown");
+        assert_eq!(
+            ts.shell.registry.entries(),
+            vec![(1, first_dir), (3, third_dir.clone())],
+            "the stale Remove took nothing off"
+        );
+
+        // The new vault's own row works.
+        ts.shell.show_vault_in_explorer(third).unwrap();
+        assert_eq!(ts.launcher.opened_folders(), vec![third_dir]);
+    }
+
+    /// Ask 12's "Start a new list": IDs start at 1 again, so only the list's identity tells a row of the old list from
+    /// a vault added back on the new one in the same launch.
+    #[test]
+    fn a_row_from_before_a_new_list_is_refused() {
+        let ts = TestShell::new();
+        let (old, dir) = listed_folder(&ts, "Family");
+        assert_eq!(old.id, 1);
+        // The list is damaged, and started over.
+        fs::write(&ts.shell.paths.registry, b"{ damaged").unwrap();
+        assert!(ts.shell.registry.list().is_err());
+        ts.shell.registry.start_new_list().unwrap();
+        // The same folder is added back: ID 1 again, on a new list.
+        let new = ts.shell.registry.add(&dir).unwrap();
+        assert_eq!(new.id, old.id, "the new list starts at 1 again");
+        assert_ne!(new.list, old.list, "under a new identity");
+
+        assert_eq!(
+            ts.shell.show_vault_in_explorer(old),
+            Err(ShellError::NotFound)
+        );
+        assert_eq!(ts.shell.forget_vault(old), Err(ShellError::NotFound));
+        assert_eq!(
+            ts.shell.unlock_vault(old, secret(PW)).err(),
+            Some(ShellError::NotFound)
+        );
+        let check = ts.shell.recover_check(old, secret("x")).err();
+        assert_eq!(check, Some(ShellError::NotFound));
+        assert!(ts.launcher.opened_folders().is_empty());
+        assert_eq!(
+            ts.shell.registry.entries(),
+            vec![(1, dir.clone())],
+            "the vault on the new list is still there"
+        );
+
+        ts.shell.show_vault_in_explorer(new).unwrap();
+        assert_eq!(ts.launcher.opened_folders(), vec![dir]);
+        ts.shell.forget_vault(new).unwrap();
+        assert!(ts.shell.registry.entries().is_empty());
+    }
+
+    /// A listed path may be tampered with: one that names a program (a file), or a link or junction, is never handed to
+    /// the launcher; only a plain folder is.
+    #[test]
+    fn show_vault_in_explorer_opens_only_a_folder() {
+        let ts = TestShell::new();
+        let (folder, dir) = listed_folder(&ts, "Family");
+
+        // A listed path that names a program.
+        let program = dir.join("run.exe");
+        fs::write(&program, b"MU-not a program").unwrap();
+        let program_row = ts.shell.registry.add(&program).unwrap();
+        // A listed path that is a junction to a folder.
+        let link = ts.vaults().join("a-link");
+        make_dir_link(&link, &dir);
+        let via_link = fs::canonicalize(ts.vaults()).unwrap().join("a-link");
+        let link_row = ts.shell.registry.add(&via_link).unwrap();
+        assert!(
+            fs::symlink_metadata(&via_link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the junction is the kind of link the check must refuse"
+        );
+        let refused = Err(ShellError::InvalidInput { what: "folder" });
+        assert_eq!(ts.shell.show_vault_in_explorer(program_row), refused);
+        assert_eq!(ts.shell.show_vault_in_explorer(link_row), refused);
+        assert_eq!(
+            ts.launcher.opened_folders(),
+            Vec::<PathBuf>::new(),
+            "the launcher was never given either"
+        );
+
+        // A folder that is not there: not found, and nothing opened.
+        let (gone, gone_dir) = listed_folder(&ts, "Gone");
+        fs::remove_dir(&gone_dir).unwrap();
+        assert_eq!(
+            ts.shell.show_vault_in_explorer(gone),
+            Err(ShellError::NotFound)
+        );
+        assert!(ts.launcher.opened_folders().is_empty());
+
+        // A plain folder is handed over, once, as listed.
+        assert_eq!(ts.shell.show_vault_in_explorer(folder), Ok(()));
+        assert_eq!(ts.launcher.opened_folders(), vec![dir.clone()]);
+
+        // Explorer that cannot start: the engine's `io` answer, nothing else.
+        ts.launcher.fail_next_folder();
+        let failed = ts.shell.show_vault_in_explorer(folder).err().unwrap();
+        assert_eq!(
+            serde_json::to_value(failed).unwrap(),
+            json!({ "code": "core", "kind": "io" })
+        );
+    }
+
+    /// The request names a row, never a path: an old `{ id }` body, a path beside the row or inside it, and a list or
+    /// ID that is not a whole number are all the fixed refusal.
+    #[test]
+    fn show_vault_in_explorer_takes_an_id_never_a_path() {
+        refuses_a_path::<VaultArg>(json!({ "vault": { "list": 7, "id": 1 } }));
+        let bodies = [
+            json!({ "id": 1 }),
+            json!({ "vault": { "list": 7, "id": 1, "path": "SENTINEL-7f3a" } }),
+            json!({ "vault": { "list": 7, "id": 1 }, "path": "SENTINEL-7f3a" }),
+            json!({ "vault": { "list": "7", "id": 1 } }),
+            json!({ "vault": { "list": 7, "id": "1" } }),
+            json!({ "vault": { "list": 7.5, "id": 1 } }),
+            json!({ "vault": { "list": -7, "id": 1 } }),
+            json!({ "vault": { "list": 7, "id": 4294967296u64 } }),
+            json!({ "vault": { "list": 7 } }),
+            json!({ "vault": { "id": 1 } }),
+            json!({ "vault": 7 }),
+            json!({ "vault": null }),
+            json!({}),
+        ];
+        let mut refused = 0;
+        for body in &bodies {
+            assert_eq!(
+                parse::<VaultArg>(&InvokeBody::Json(body.clone())).err(),
+                Some(MALFORMED),
+                "{body}"
+            );
+            refused += 1;
+        }
+        assert_eq!(refused, bodies.len());
+        let Ok(VaultArg { vault }) = parse::<VaultArg>(&InvokeBody::Json(
+            json!({ "vault": { "list": 9007199254740991u64, "id": 4 } }),
+        )) else {
+            panic!("a whole row is read");
+        };
+        assert_eq!(
+            vault,
+            VaultRef {
+                list: 9_007_199_254_740_991,
+                id: 4
+            }
+        );
+    }
+
+    /// Two vaults with the same name: each row opens its own folder.
+    #[test]
+    fn show_vault_in_explorer_names_the_right_folder_for_two_vaults_named_alike() {
+        let ts = TestShell::new();
+        let (first, first_dir, _) = registered_as(&ts, "Family");
+        let (second, second_dir, _) = registered_as(&ts, "Family");
+        assert_ne!(first_dir, second_dir);
+        let names = ts.shell.registry.list().unwrap();
+        assert_eq!(names[0].name, names[1].name, "named alike");
+
+        ts.shell.show_vault_in_explorer(ts.vault(second)).unwrap();
+        ts.shell.show_vault_in_explorer(ts.vault(first)).unwrap();
+        assert_eq!(
+            ts.launcher.opened_folders(),
+            vec![second_dir, first_dir],
+            "the exact listed folder of each"
+        );
+    }
+
+    /// Remove writes only `vaults.json`: the folder's every file (bytes and times) and the shell's notes about the
+    /// vault are as they were, and the vault can be added back and opened.
+    #[test]
+    fn remove_leaves_the_folder_untouched() {
+        let ts = TestShell::new();
+        let (id, dir, _) = registered(&ts);
+        // An unlock writes in the folder (the cleanup, `.lock`), and a mark is noted: both are done before the snapshot.
+        let opened = heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).unwrap();
+        ts.shell
+            .vault_state
+            .mark_unconfirmed(&dir)
+            .expect("a note about the vault");
+        ts.shell.sessions.lock(opened.session, LockReason::Manual);
+        assert!(is_free(&dir));
+        let before = tree(&dir);
+        assert!(
+            before
+                .iter()
+                .any(|(path, folder, bytes, ..)| path == Path::new("vault.json")
+                    && !folder
+                    && !bytes.is_empty()),
+            "the snapshot holds the vault's files"
+        );
+        let state = fs::read(&ts.shell.paths.vault_state).unwrap();
+        let list_before = fs::read(&ts.shell.paths.registry).unwrap();
+
+        assert_eq!(ts.shell.forget_vault(ts.vault(id)), Ok(()));
+
+        assert_eq!(tree(&dir), before, "every file's bytes and times");
+        assert_eq!(fs::read(&ts.shell.paths.vault_state).unwrap(), state);
+        assert_ne!(fs::read(&ts.shell.paths.registry).unwrap(), list_before);
+        assert!(ts.shell.registry.entries().is_empty());
+        assert!(ts.shell.registry.list().unwrap().is_empty());
+
+        // Added back (as 26a does): a new ID on the same list, and it still opens with its password.
+        ts.dialogs.answer(Some(dir.clone()));
+        let entry = done(ts.shell.add_existing_vault().unwrap());
+        assert_eq!(entry.name.as_deref(), Some("Family"));
+        assert_ne!(entry.id, id, "an ID is not given twice");
+        let again = heavy(|| {
+            ts.shell.unlock_vault(
+                VaultRef {
+                    list: entry.list,
+                    id: entry.id,
+                },
+                secret(PW),
+            )
+        })
+        .unwrap();
+        assert_eq!(again.data.info.name, "Family");
+    }
+
+    /// Remove locks an open vault first (the person's own lock, its event before the list is written), changes no other
+    /// session, and takes the vault off the list.
+    #[test]
+    fn remove_an_open_vault_locks_it_first_and_leaves_the_others_open() {
+        let ts = TestShell::new();
+        let (family, family_generation) = confirmed_session(&ts, "Family");
+        let (work, work_generation) = confirmed_session(&ts, "Work");
+        let (family_dir, work_dir) = (folder_of(&ts, family), folder_of(&ts, work));
+        let row = row_of(&ts, family);
+        let family_headers = headers(&family_dir);
+
+        // What the world looks like at the moment the list is about to be written.
+        type Seen = (Option<SessionState>, Option<SessionState>, usize, usize);
+        let seen: Rc<RefCell<Option<Seen>>> = Rc::default();
+        {
+            let (shell, events, seen) =
+                (Arc::clone(&ts.shell), Arc::clone(&ts.events), seen.clone());
+            failpoint::observe(
+                REMOVING,
+                Box::new(move || {
+                    let state = |id: SessionId| {
+                        shell
+                            .sessions
+                            .list()
+                            .into_iter()
+                            .find(|info| info.session == id)
+                            .map(|info| info.state)
+                    };
+                    let locks = events.locked();
+                    *seen.borrow_mut() = Some((
+                        state(family),
+                        state(work),
+                        locks.len(),
+                        shell.registry.entries().len(),
+                    ));
+                    assert_eq!(locks, [(family, family_generation + 1, LockReason::Manual)]);
+                }),
+            );
+        }
+        let removed = ts.shell.forget_vault(row);
+        failpoint::disarm_all();
+        assert_eq!(removed, Ok(()));
+        assert_eq!(
+            *seen.borrow(),
+            Some((
+                Some(SessionState::Locked),
+                Some(SessionState::Unlocked),
+                1,
+                2
+            )),
+            "locked first, with its event out, the list not yet written, the other vault untouched"
+        );
+
+        // Afterwards: off the list, the folder and its header as they were, the lock released.
+        assert_eq!(ts.shell.registry.entries().len(), 1);
+        assert_eq!(registry_id(&ts, work), 2);
+        assert_eq!(headers(&family_dir), family_headers);
+        assert!(is_free(&family_dir));
+        // The vault that stays is open and working; the removed one answers `Locked` to its old generation.
+        assert!(!is_free(&work_dir));
+        assert!(
+            ts.shell
+                .sessions
+                .read(work, work_generation, |_, _| Ok(()))
+                .is_ok()
+        );
+        assert_eq!(
+            ts.shell
+                .sessions
+                .read(family, family_generation, |_, _| Ok(()))
+                .err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(ts.events.locked().len(), 1, "no other lock was sent");
+    }
+
+    /// A job of the vault's session running: Remove is `Busy` and changes nothing; once the job ends it goes through.
+    /// A job of another vault does not stand in its way.
+    #[test]
+    fn remove_refused_while_its_job_runs() {
+        let ts = TestShell::new();
+        let (family, family_generation) = confirmed_session(&ts, "Family");
+        let (work, _) = confirmed_session(&ts, "Work");
+        let row = row_of(&ts, family);
+        let list_before = fs::read(&ts.shell.paths.registry).unwrap();
+
+        let job = ts
+            .shell
+            .autolock
+            .begin(Some(family), JobKind::Import, CancelToken::new());
+        assert_eq!(ts.shell.forget_vault(row), Err(busy()));
+        assert_eq!(
+            serde_json::to_value(ts.shell.forget_vault(row).unwrap_err()).unwrap(),
+            json!({ "code": "busy", "what": "operation in progress" })
+        );
+        assert_eq!(fs::read(&ts.shell.paths.registry).unwrap(), list_before);
+        assert_eq!(ts.shell.registry.entries().len(), 2);
+        assert_eq!(state(&ts, family), Some(SessionState::Unlocked));
+        assert!(ts.events.locked().is_empty(), "nothing was locked");
+        assert!(
+            ts.shell
+                .sessions
+                .read(family, family_generation, |_, _| Ok(()))
+                .is_ok()
+        );
+        // The failed Remove holds nothing: an unlock of the vault is not told `Busy` by it afterwards.
+        assert!(
+            ts.shell
+                .unlock_vault(row, secret(PW))
+                .is_ok_and(|opened| opened.session == family)
+        );
+
+        // A job of the other vault is nothing to this one's Remove.
+        drop(job);
+        let other_job = ts
+            .shell
+            .autolock
+            .begin(Some(work), JobKind::Import, CancelToken::new());
+        assert_eq!(ts.shell.forget_vault(row), Ok(()));
+        drop(other_job);
+        assert_eq!(state(&ts, family), Some(SessionState::Locked));
+        assert_eq!(state(&ts, work), Some(SessionState::Unlocked));
+        assert_eq!(ts.shell.registry.entries().len(), 1);
+    }
+
+    /// A job begun after the vault was locked for its Remove is refused (the old generation answers `Locked`) and
+    /// registers nothing that runs: from inside the Remove, and after it.
+    #[test]
+    fn a_job_admitted_after_remove_is_refused() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let row = row_of(&ts, session);
+
+        type Inside = (Option<ShellError>, Vec<JobKind>);
+        let inside: Rc<RefCell<Option<Inside>>> = Rc::default();
+        {
+            let (shell, inside) = (Arc::clone(&ts.shell), inside.clone());
+            failpoint::observe(
+                REMOVING,
+                Box::new(move || {
+                    let refused = shell.backup_vault(session, generation, 1).err();
+                    *inside.borrow_mut() = Some((refused, shell.autolock.running_kinds()));
+                }),
+            );
+        }
+        assert_eq!(ts.shell.forget_vault(row), Ok(()));
+        failpoint::disarm_all();
+        assert_eq!(
+            *inside.borrow(),
+            Some((Some(ShellError::Locked), vec![])),
+            "from inside the Remove: refused, nothing registered"
+        );
+
+        let after = ts.shell.backup_vault(session, generation, 1).err();
+        assert_eq!(after, Some(ShellError::Locked));
+        assert!(ts.shell.autolock.running_kinds().is_empty());
+        assert_eq!(
+            ts.dialogs.opened(),
+            0,
+            "no save dialog was shown for either"
+        );
+    }
+
+    /// An unlock and a Remove of the same vault at the same moment: one of them wins and the other is refused, in
+    /// either order, and the vault is never left open and off the list, or listed and gone.
+    #[test]
+    fn remove_racing_an_unlock_one_wins_cleanly() {
+        // Order A: the Remove arrives while the unlock is under way (held at its location check): `Busy`, the unlock
+        // finishes, the vault stays listed.
+        let ts = TestShell::new();
+        let (id, dir, _) = registered(&ts);
+        let row = ts.vault(id);
+        let answer: Rc<RefCell<Option<ShellResult<()>>>> = Rc::default();
+        {
+            let (shell, answer) = (Arc::clone(&ts.shell), answer.clone());
+            failpoint::observe(
+                CHECKING,
+                Box::new(move || *answer.borrow_mut() = Some(shell.forget_vault(row))),
+            );
+        }
+        let unlocked = heavy(|| ts.shell.unlock_vault(row, secret(PW)));
+        failpoint::disarm_all();
+        let unlocked = unlocked.expect("the unlock won");
+        assert_eq!(*answer.borrow(), Some(Err(busy())));
+        assert_eq!(state(&ts, unlocked.session), Some(SessionState::Unlocked));
+        assert_eq!(ts.shell.registry.entries(), vec![(id, dir.clone())]);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // Order B: the unlock arrives while the Remove is under way (held where the list is about to be written):
+        // `Busy`, the Remove finishes, and a later unlock finds no row.
+        let answer: Rc<RefCell<Option<ShellResult<()>>>> = Rc::default();
+        {
+            let (shell, answer) = (Arc::clone(&ts.shell), answer.clone());
+            failpoint::observe(
+                REMOVING,
+                Box::new(move || {
+                    *answer.borrow_mut() = Some(shell.unlock_vault(row, secret(PW)).map(|_| ()))
+                }),
+            );
+        }
+        let removed = ts.shell.forget_vault(row);
+        failpoint::disarm_all();
+        assert_eq!(removed, Ok(()));
+        assert_eq!(*answer.borrow(), Some(Err(busy())));
+        assert!(ts.shell.registry.entries().is_empty());
+        assert!(is_free(&dir), "the unlock opened nothing");
+        assert_eq!(state(&ts, unlocked.session), Some(SessionState::Locked));
+        assert_eq!(
+            ts.shell.unlock_vault(row, secret(PW)).err(),
+            Some(ShellError::NotFound)
+        );
+
+        // Order B on a vault that is open: the unlock is `Busy`, never answered with the session the Remove locked.
+        let (session, _) = confirmed_session(&ts, "Work");
+        let row = row_of(&ts, session);
+        let answer: Rc<RefCell<Option<ShellResult<()>>>> = Rc::default();
+        {
+            let (shell, answer) = (Arc::clone(&ts.shell), answer.clone());
+            failpoint::observe(
+                REMOVING,
+                Box::new(move || {
+                    *answer.borrow_mut() = Some(shell.unlock_vault(row, secret(PW)).map(|_| ()))
+                }),
+            );
+        }
+        let removed = ts.shell.forget_vault(row);
+        failpoint::disarm_all();
+        assert_eq!(removed, Ok(()));
+        assert_eq!(*answer.borrow(), Some(Err(busy())));
+        assert_eq!(state(&ts, session), Some(SessionState::Locked));
+    }
+
+    /// A Remove that finishes between an unlock's lookup of its row and the registration of its open: the unlock looks
+    /// the row up again inside the open and finds nothing, so a vault off the list is never opened.
+    #[test]
+    fn an_unlock_that_lost_its_row_to_a_remove_is_refused() {
+        let ts = TestShell::new();
+        let (id, dir, _) = registered(&ts);
+        let row = ts.vault(id);
+        let removed: Rc<RefCell<Option<ShellResult<()>>>> = Rc::default();
+        {
+            let (shell, removed) = (Arc::clone(&ts.shell), removed.clone());
+            failpoint::observe(
+                LOOKED_UP,
+                Box::new(move || *removed.borrow_mut() = Some(shell.forget_vault(row))),
+            );
+        }
+        let answer = heavy(|| ts.shell.unlock_vault(row, secret(PW)));
+        failpoint::disarm_all();
+        assert_eq!(*removed.borrow(), Some(Ok(())), "the Remove finished");
+        assert_eq!(answer.err(), Some(ShellError::NotFound));
+        assert!(ts.shell.sessions.list().is_empty());
+        assert!(is_free(&dir), "nothing opened it");
+    }
+
+    /// The answers of Remove that need a state of their own: a list that cannot be written (row 4) leaves the open
+    /// vault locked and listed and says so, and each refusal is the JSON the page reads.
+    #[test]
+    fn remove_answers_as_the_table_says() {
+        let ts = TestShell::new();
+        let wire = |answer: ShellResult<()>| serde_json::to_value(answer.unwrap_err()).unwrap();
+
+        // Row 2: a row of another list, an ID that is not listed.
+        let (session, _) = confirmed_session(&ts, "Family");
+        let row = row_of(&ts, session);
+        let other_list = VaultRef {
+            list: row.list + 1,
+            id: row.id,
+        };
+        let unlisted = VaultRef {
+            list: row.list,
+            id: row.id + 40,
+        };
+        for stale in [other_list, unlisted] {
+            assert_eq!(
+                wire(ts.shell.forget_vault(stale)),
+                json!({ "code": "not_found" })
+            );
+            assert_eq!(
+                wire(ts.shell.show_vault_in_explorer(stale)),
+                json!({ "code": "not_found" })
+            );
+        }
+        assert_eq!(
+            state(&ts, session),
+            Some(SessionState::Unlocked),
+            "a stale row locks nothing"
+        );
+
+        // Row 4: the list's write fails after the lock: locked and still listed.
+        failpoint::arm("atomic_write.before_replace");
+        let failed = ts.shell.forget_vault(row);
+        failpoint::disarm_all();
+        assert_eq!(wire(failed), json!({ "code": "core", "kind": "io" }));
+        assert_eq!(state(&ts, session), Some(SessionState::Locked));
+        assert_eq!(ts.shell.registry.entries().len(), 1, "still listed");
+
+        // Row 4: the list went damaged between the lookup and the write.
+        let list_file = ts.shell.paths.registry.clone();
+        failpoint::observe(
+            REMOVING,
+            Box::new(move || fs::write(&list_file, b"{ damaged").unwrap()),
+        );
+        let damaged = ts.shell.forget_vault(row);
+        failpoint::disarm_all();
+        assert_eq!(
+            wire(damaged),
+            json!({ "code": "core", "kind": "damaged", "what": "vault list" })
+        );
+        assert_eq!(
+            fs::read(&ts.shell.paths.registry).unwrap(),
+            b"{ damaged",
+            "kept as it was"
+        );
+        // And a damaged list is a row that names nothing.
+        assert_eq!(
+            wire(ts.shell.forget_vault(row)),
+            json!({ "code": "not_found" })
+        );
+
+        // Row 5: done, `null`: the command's own answer, on a list started over.
+        ts.shell.registry.start_new_list().unwrap();
+        let (listed, _) = listed_folder(&ts, "Done");
+        let answer = ts.shell.forget_vault(listed);
+        assert_eq!(answer, Ok(()));
+        assert_eq!(serde_json::to_value(answer.ok()).unwrap(), Value::Null);
+        assert!(ts.shell.registry.entries().is_empty(), "it was removed");
+    }
+
+    /// The shapes of the vault list as the page reads them: an entry's whole JSON carries the list's identity as a number
+    /// JavaScript keeps exactly, and the two requests that name a row refuse a path and every other shape.
+    #[test]
+    fn vault_ref_json_shapes() {
+        let entry = VaultEntry {
+            list: 6_029_157_341_982_211,
+            id: 1,
+            name: Some("Family".to_owned()),
+            available: true,
+            details_damaged: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&entry).unwrap(),
+            r#"{"list":6029157341982211,"id":1,"name":"Family","available":true,"details_damaged":false}"#
+        );
+        assert_eq!(
+            serde_json::to_value(VaultRef { list: 7, id: 2 }).unwrap(),
+            json!({ "list": 7, "id": 2 })
+        );
+
+        // From a real list: exactly these five fields, the identity a safe whole number.
+        let ts = TestShell::new();
+        let (row, _) = listed_folder(&ts, "Family");
+        let listed = serde_json::to_value(ts.shell.registry.list().unwrap()).unwrap();
+        let entry = &listed[0];
+        assert_eq!(entry.as_object().unwrap().len(), 5, "{entry}");
+        assert_eq!(entry["list"], json!(row.list));
+        assert!(row.list >= 1 && row.list < (1 << 53));
+        assert_eq!(
+            (entry["id"].as_u64(), entry["available"].as_bool()),
+            (Some(1), Some(true))
+        );
+
+        // The requests that name a row (the unlock and the recovery check as well as the two of this task).
+        refuses_a_path::<VaultArg>(json!({ "vault": { "list": 7, "id": 1 } }));
+        refuses_a_path::<UnlockVault>(json!({ "vault": { "list": 7, "id": 1 }, "password": PW }));
+        refuses_a_path::<RecoverCheck>(
+            json!({ "vault": { "list": 7, "id": 1 }, "recovery_key": "x" }),
+        );
+        for body in [
+            json!({ "id": 1 }),
+            json!({ "vault": { "list": 7, "id": 1, "path": "SENTINEL-7f3a" } }),
+            json!({ "vault": { "list": "7", "id": 1 } }),
+        ] {
+            assert_eq!(
+                parse::<VaultArg>(&InvokeBody::Json(body.clone())).err(),
+                Some(MALFORMED),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            parse::<UnlockVault>(&InvokeBody::Json(json!({ "id": 1, "password": PW }))).err(),
+            Some(MALFORMED)
+        );
+
+        // The answers of Show in Explorer, rows 2 to 5, as exact JSON.
+        let wire = |answer: ShellResult<()>| serde_json::to_value(answer.unwrap_err()).unwrap();
+        let stale = VaultRef {
+            list: row.list + 1,
+            id: 1,
+        };
+        assert_eq!(
+            wire(ts.shell.show_vault_in_explorer(stale)),
+            json!({ "code": "not_found" })
+        );
+        let (gone, gone_dir) = listed_folder(&ts, "Gone");
+        fs::remove_dir(&gone_dir).unwrap();
+        assert_eq!(
+            wire(ts.shell.show_vault_in_explorer(gone)),
+            json!({ "code": "not_found" })
+        );
+        let file = ts.temp.path().join("a-file");
+        fs::write(&file, b"MU-text").unwrap();
+        let file_row = ts
+            .shell
+            .registry
+            .add(&fs::canonicalize(&file).unwrap())
+            .unwrap();
+        assert_eq!(
+            wire(ts.shell.show_vault_in_explorer(file_row)),
+            json!({ "code": "invalid_input", "what": "folder" })
+        );
+        ts.launcher.fail_next_folder();
+        assert_eq!(
+            wire(ts.shell.show_vault_in_explorer(row)),
+            json!({ "code": "core", "kind": "io" })
+        );
+        // Row 6: Explorer started, `null`: the command's own answer.
+        let answer = ts.shell.show_vault_in_explorer(row);
+        assert_eq!(answer, Ok(()));
+        assert_eq!(serde_json::to_value(answer.ok()).unwrap(), Value::Null);
+        assert_eq!(
+            ts.launcher.opened_folders().len(),
+            2,
+            "the failed try and this one"
+        );
+    }
+
+    /// 30a: a folder with no vault in it is refused with the words the page reads, and nothing is added or written there.
+    #[test]
+    fn add_existing_on_a_folder_that_is_not_a_vault_says_so() {
+        let ts = TestShell::new();
+        let plain = ts.folder("Not a vault");
+        fs::write(plain.join("notes.txt"), b"MU-notes").unwrap();
+        let before = tree(&plain);
+        ts.dialogs.answer(Some(plain.clone()));
+        let refused = ts.shell.add_existing_vault().err().unwrap();
+        assert_eq!(
+            serde_json::to_value(refused).unwrap(),
+            json!({ "code": "invalid_input", "what": "not a vault folder" })
+        );
+        assert!(ts.shell.registry.entries().is_empty(), "not added");
+        assert_eq!(tree(&plain), before, "nothing was written there");
+        assert_eq!(ts.dialogs.opened(), 1);
+    }
+
+    /// The location table (`locations_refused_table`), through Add existing vault folder: every drive and file system the
+    /// table refuses, the app-data folders, and a USB hard drive that Windows reports as fixed (accepted, spec 6.10).
+    /// The folders only hold a header file, which is all the add looks for.
+    #[test]
+    fn add_existing_follows_the_location_table() {
+        let ts = TestShell::new();
+        let vault_in = |parent: &Path, name: &str| {
+            let dir = parent.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("vault.json"), b"MU-header").unwrap();
+            dir
+        };
+        let table = [
+            (DriveType::Removable, "NTFS", "removable drive"),
+            (DriveType::Remote, "NTFS", "network drive"),
+            (DriveType::CdRom, "NTFS", "drive type not supported"),
+            (DriveType::RamDisk, "NTFS", "drive type not supported"),
+            (DriveType::Unknown, "NTFS", "drive type not supported"),
+            (DriveType::Fixed, "FAT32", "file system not supported"),
+            (DriveType::Fixed, "exFAT", "file system not supported"),
+            (DriveType::Fixed, "ReFS", "file system not supported"),
+        ];
+        let mut refused = 0;
+        for (at, (drive, file_system, what)) in table.into_iter().enumerate() {
+            let root = ts.folder(&format!("volume-{at}"));
+            ts.volumes.mount(
+                &root,
+                FakeVolume {
+                    drive,
+                    file_system,
+                    label: "Volume",
+                },
+            );
+            let dir = vault_in(&root, "Vault");
+            ts.dialogs.answer(Some(dir));
+            assert_eq!(
+                ts.shell.add_existing_vault().err(),
+                Some(ShellError::InvalidInput { what }),
+                "{what}"
+            );
+            refused += 1;
+        }
+        // Inside each forbidden folder.
+        let forbidden = [
+            ts.app_dirs[0].clone(),
+            ts.app_dirs[1].clone(),
+            ts.env.folder(KnownFolder::RoamingAppData),
+            ts.shell.paths.root.clone(),
+        ];
+        for root in &forbidden {
+            let dir = vault_in(root, "Vault");
+            ts.dialogs.answer(Some(dir));
+            assert_eq!(
+                ts.shell.add_existing_vault().err(),
+                Some(ShellError::InvalidInput {
+                    what: "app data folder"
+                })
+            );
+            refused += 1;
+        }
+        assert_eq!(refused, table.len() + forbidden.len(), "every row was run");
+        assert!(ts.shell.registry.entries().is_empty(), "none was added");
+        assert!(!ts.shell.paths.registry.exists(), "no list was written");
+
+        // A USB hard drive that Windows reports as a fixed NTFS disk is accepted.
+        let usb = ts.folder("usb");
+        ts.volumes.mount(
+            &usb,
+            FakeVolume {
+                drive: DriveType::Fixed,
+                file_system: "NTFS",
+                label: "USB disk",
+            },
+        );
+        ts.dialogs.answer(Some(vault_in(&usb, "Vault")));
+        let added = done(ts.shell.add_existing_vault().unwrap());
+        assert_eq!(added.id, 1);
+        assert!(added.available);
+    }
+
+    /// A vault that is unavailable can be taken off the list and added back once its folder is there again.
+    #[test]
+    fn an_unavailable_vault_can_be_removed_and_added_back() {
+        let ts = TestShell::new();
+        let (id, dir, _) = registered(&ts);
+        let moved = ts.temp.path().join("moved away");
+        fs::rename(&dir, &moved).unwrap();
+        let listed = ts.shell.registry.list().unwrap();
+        assert!(!listed[0].available, "its folder is not there");
+        // Show in Explorer: the folder is not there.
+        assert_eq!(
+            ts.shell.show_vault_in_explorer(ts.vault(id)),
+            Err(ShellError::NotFound)
+        );
+        assert!(ts.launcher.opened_folders().is_empty());
+        // Remove from list works on it.
+        assert_eq!(ts.shell.forget_vault(ts.vault(id)), Ok(()));
+        assert!(ts.shell.registry.list().unwrap().is_empty());
+        fs::rename(&moved, &dir).unwrap();
+        ts.dialogs.answer(Some(dir));
+        let entry = done(ts.shell.add_existing_vault().unwrap());
+        assert!(entry.available);
+        assert_ne!(entry.id, id);
     }
 }

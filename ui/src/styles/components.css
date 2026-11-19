@@ -140,9 +140,45 @@
   outline-offset: 2px;
 }
 
+/* A vault whose folder or drive isn't there (30b): no choice, so no pointer and no tint; it is quiet by its words and its mark (the muted ink, which reads as well as any),
+   not by fading, since Try again and Remove from list sit in it. It wraps so a narrow plate puts the two links under the name, and the line that says a Try again found
+   it still missing is the row's own last line. */
 .vbtn.off {
-  cursor: not-allowed;
-  opacity: 0.7;
+  flex-wrap: wrap;
+  row-gap: 0;
+  cursor: default;
+}
+
+.vbtn.off:hover,
+.vbtn.off:active {
+  background: var(--card);
+}
+
+.vbtn.off b {
+  color: var(--ink2);
+}
+
+.vbtn.off .vmini path {
+  stroke: var(--ink2);
+}
+
+.vgrow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.vstill {
+  flex: 1 0 100%;
+  margin: 0;
+  /* Lines up with the name: the mark's width and the gap after it. */
+  padding-left: 48px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ink2);
+}
+
+.vstill:not(:empty) {
+  margin-top: 6px;
 }
 
 .vradio {
@@ -2100,11 +2136,6 @@
   flex: none;
 }
 
-/* A row that can't be used now (a vault whose folder can't be reached) does nothing; it says why in words under its name, which stay as readable as any. */
-.mi[aria-disabled="true"] {
-  cursor: not-allowed;
-}
-
 .mline {
   margin: 5px 6px;
   border-top: 1px solid var(--line);
@@ -2985,6 +3016,41 @@
 
 .rnbox .dbtns {
   margin-top: 8px;
+  padding: 0 3px 3px;
+}
+
+/* Remove from list (18g) and the unavailable vault's box (Task 9): the same small box in the vault menu's place and width. The sentence is padded as the rename box's block is;
+   the line under it says how Try again went (a status, quiet) or why a Remove was refused (the error colour); the buttons sit at the foot, at the right, and wrap in a
+   narrow window. */
+.mbox {
+  flex: none;
+}
+
+.mwarn {
+  margin: 0;
+  padding: 8px 8px 2px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.mstill {
+  margin: 0;
+  padding: 0 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink2);
+}
+
+.mstill:not(:empty) {
+  padding-top: 6px;
+}
+
+.mbox .mproblem {
+  margin: 6px 8px 0;
+}
+
+.mbox .dbtns {
+  margin-top: 10px;
   padding: 0 3px 3px;
 }
 

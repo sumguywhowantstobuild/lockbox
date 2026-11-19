@@ -62,6 +62,11 @@ function sent(cmd: string): Record<string, unknown>[] {
   return invoke.mock.calls.filter(([name]) => name === cmd).map(([, args]) => args as Record<string, unknown>);
 }
 
+/** A row of the vault list as the shell gave it (Task 9): the list's identity and the vault's ID. */
+function ref(id: number): { list: number; id: number } {
+  return { list: shell.listIdentity(), id };
+}
+
 function sessionOfVault(id: number): { session: number; generation: number } {
   const live = shell.sessionOf(id);
   if (live === undefined) throw new Error(`vault ${String(id)} is not open`);
@@ -222,8 +227,8 @@ test("a_locked_vault_is_a_row_that_opens_its_unlock_step", async () => {
   // Choosing the locked row sends nothing: its own unlock step comes, for that vault alone.
   fireEvent.click(rows[1] as HTMLElement);
   await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
-  expect(sent("unlock_vault")).toEqual([{ id: 7, password: PASSWORD }]);
-  expect(debugState().unlockStep).toMatchObject({ vault: 8 });
+  expect(sent("unlock_vault")).toEqual([{ vault: ref(7), password: PASSWORD }]);
+  expect(debugState().unlockStep).toMatchObject({ vault: 8, list: shell.listIdentity() });
   expect(field().getAttribute("type")).toBe("password");
   expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Unlock" })).toBeTruthy();
@@ -244,7 +249,10 @@ test("unlocking_a_second_vault_keeps_the_first_open", async () => {
   typeAndSend(PASSWORD);
   await screen.findByRole("button", { name: "Home, vault menu" });
   // Home's password went for Home (its registry ID) and no other command touched the first vault.
-  expect(sent("unlock_vault")).toEqual([{ id: 7, password: PASSWORD }, { id: 8, password: PASSWORD }]);
+  expect(sent("unlock_vault")).toEqual([
+    { vault: ref(7), password: PASSWORD },
+    { vault: ref(8), password: PASSWORD },
+  ]);
   expect(sent("lock_vault")).toEqual([]);
   expect(sent("lock_all")).toEqual([]);
   expect(shell.sessionOf(7)?.unlocked).toBe(true);
@@ -270,7 +278,7 @@ test("back_from_the_unlock_step_returns_to_the_vault_on_screen", async () => {
   await screen.findByRole("button", { name: "My vault, vault menu" });
   expect(screen.getByRole("heading", { level: 1, name: "All items" })).toBeTruthy();
   expect(debugState().unlockStep).toBeNull();
-  expect(sent("unlock_vault")).toEqual([{ id: 7, password: PASSWORD }]);
+  expect(sent("unlock_vault")).toEqual([{ vault: ref(7), password: PASSWORD }]);
   expect(foundOnPage([TYPED])).toEqual([]);
   // Escape is Back too, and the step opened again starts empty.
   await chooseRow(/^Home/);
@@ -689,7 +697,7 @@ test("a_vault_with_unreadable_details_opens_ask_8_from_its_row", async () => {
   await screen.findByRole("heading", { level: 1, name: "This vault can't be opened" });
   expect(screen.queryByLabelText(/^Password for /)).toBeNull();
   expect(screen.getByRole("button", { name: "Restore a backup" })).toBeTruthy();
-  expect(sent("unlock_vault")).toEqual([{ id: 7, password: PASSWORD }]);
+  expect(sent("unlock_vault")).toEqual([{ vault: ref(7), password: PASSWORD }]);
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
   await screen.findByRole("button", { name: "My vault, vault menu" });
   expect(debugState().unlockStep).toBeNull();
@@ -700,14 +708,14 @@ test("an_unavailable_vault_stays_a_row_marked_so", async () => {
   const menu = await openVaultMenu();
   const rows = rowsOf(menu);
   expect(rows.map((row) => row.textContent)).toEqual(["My vault", "HomeNot available"]);
-  // Choosing it does nothing yet (its Try again and Remove from list come with the vault list's own menu): no step, and the menu stays.
+  // Choosing it opens its own box (Task 9: Try again, Remove from list) and closes the menu; it opens no unlock step, and nothing is sent.
+  expect(rows[1]?.getAttribute("aria-disabled")).toBeNull();
   fireEvent.click(rows[1] as HTMLElement);
+  await screen.findByRole("dialog", { name: "Home is unavailable" });
   expect(screen.queryByRole("heading", { level: 1, name: "Unlock Home" })).toBeNull();
   expect(debugState().unlockStep).toBeNull();
   expect(sent("unlock_vault")).toHaveLength(1);
-  expect(rows[1]?.getAttribute("aria-disabled")).toBe("true");
-  // The menu stays open (a choice that does nothing does not shut it).
-  expect(screen.queryByRole("menu")).not.toBeNull();
+  expect(screen.queryByRole("menu")).toBeNull();
 });
 
 // ---- The vault strip ----

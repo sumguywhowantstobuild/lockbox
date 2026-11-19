@@ -428,7 +428,7 @@ test("ask13_newer_vault_has_no_buttons", async () => {
   expect(alert.textContent).toBe("Update Lockbox to open this vault. A newer version made it.");
   expect(messageFor(NEWER_VAULT)).toEqual({ title: "Update Lockbox to open this vault.", body: "A newer version made it." });
   // The design gives it no button: the lock screen's own Unlock and its Forgot password?, Restore a backup and Open a backup links are the only ones.
-  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
+  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   await expectNoAxe(container);
 });
 
@@ -442,7 +442,7 @@ test("ask16_says_the_change_was_saved", async () => {
   });
   const words = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
   expect(await screen.findByText(words)).toBeTruthy();
-  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
+  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   await expectNoAxe(container);
   // Unlocking with the new password is what it asked for: the note goes.
   await unlockIt();
@@ -454,20 +454,22 @@ test("ask16_says_the_change_was_saved", async () => {
 
 test("unavailable_vault_says_so", async () => {
   const { container } = start([{ id: 7, name: null, available: false }]);
-  const words = messageText(messageFor({ code: "core", kind: "io" }));
-  const alert = await screen.findByRole("alert");
-  expect(alert.textContent).toBe(words);
-  expect(words).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
-  // Nothing to unlock; the ways on are the lock screen's Restore a backup (a backup can bring the vault back) and Open a backup (to look through one).
+  // 30b: the row says it (Task 9), not a red sentence for the whole screen: its words, and the row's own Try again and Remove from list.
+  expect(await screen.findByText("Unavailable: its folder or drive isn't there")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  // Nothing to unlock; the ways on are Try again and Remove from list on its row, then the lock screen's Restore a backup (a backup can bring the vault back), Add existing
+  // vault folder and Open a backup (to look through one).
   expect(screen.queryByLabelText(/^Password for /)).toBeNull();
-  expect(buttonNames()).toEqual(["Restore a backup", "Open a backup"]);
+  expect(buttonNames()).toEqual(["Try again", "Remove from list", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   await expectNoAxe(container);
 });
 
 test("an_unavailable_vault_in_the_list_is_marked", async () => {
   start([vault(), { id: 8, name: "Old laptop", available: false }]);
-  expect(await screen.findByText("Not available")).toBeTruthy();
-  expect(screen.getByRole<HTMLInputElement>("radio", { name: /Old laptop/ }).disabled).toBe(true);
+  expect(await screen.findByText("Unavailable: its folder or drive isn't there")).toBeTruthy();
+  // It is no choice (not a radio at all); its own row has Try again and Remove from list.
+  expect(screen.queryByRole("radio", { name: /Old laptop/ })).toBeNull();
+  expect(screen.getByRole("group", { name: "Old laptop" })).toBeTruthy();
 });
 
 test("restore_finished_at_launch_says_unlock_with_that_password", async () => {
@@ -475,7 +477,7 @@ test("restore_finished_at_launch_says_unlock_with_that_password", async () => {
   const words = "Lockbox finished restoring My vault. Unlock with the password from when that backup was made.";
   expect(await screen.findByText(words)).toBeTruthy();
   // The notice has its own Unlock, above the lock screen's (which stays off until a password is typed), beside Restore a backup.
-  expect(buttonNames()).toEqual(["Unlock", "Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
+  expect(buttonNames()).toEqual(["Unlock", "Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   await expectNoAxe(container);
   // Its Unlock closes the notice and leaves the password box for that vault, focused.
   fireEvent.click(screen.getAllByRole("button", { name: "Unlock" })[0] as HTMLElement);
@@ -516,7 +518,7 @@ test("a_restore_notice_that_needs_an_answer_shows_no_path_on_the_lock_screen", a
   fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
   await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
   expect(container.textContent).not.toContain("SENTINEL");
-  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
+  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
 });
 
 test("damaged_vault_list_shows_its_own_screen_with_the_way_out", async () => {
@@ -596,7 +598,7 @@ test("each_ask_passes_axe", async () => {
       name: "an unavailable vault",
       run: async () => {
         start([{ id: 7, name: null, available: false }]);
-        await screen.findByRole("alert");
+        await screen.findByText("Unavailable: its folder or drive isn't there");
       },
     },
   ];

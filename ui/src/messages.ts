@@ -193,6 +193,8 @@ export const MESSAGES: Record<string, Words> = {
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
   "page:save_all_expired": { title: "That took too long, so nothing was saved. Choose Save all files again.", body: "" },
   "page:output_expired": { title: "Lockbox can't open that folder now.", body: "Open it from Windows." },
+  // Show in Explorer on a vault whose place on the list is a file, a link or a junction, not a plain folder (Task 9). The words are the session's, for Ariel to change.
+  "page:show_not_a_folder": { title: "Lockbox won't open that in Explorer.", body: "That vault's place on the list isn't a plain folder." },
 
   "core:wrong_password": { title: "Wrong password.", body: "" },
   // The spec's words (5.2: "That recovery key has a typo"), on every screen that meets it.

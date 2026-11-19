@@ -515,7 +515,7 @@ test("finish_says_unlock_with_the_backups_password", async () => {
   fireEvent.change(screen.getByLabelText("Password from 2 October 2026"), { target: { value: BACKUP_PASSWORD } });
   press("Unlock");
   await heading("All items");
-  expect(sent("unlock_vault")[1]).toEqual({ id: 7, password: BACKUP_PASSWORD });
+  expect(sent("unlock_vault")[1]).toEqual({ vault: { list: shell.listIdentity(), id: 7 }, password: BACKUP_PASSWORD });
   expect(screen.queryByRole("heading", { level: 1, name: "My vault is restored" })).toBeNull();
 });
 
@@ -533,7 +533,7 @@ test("finish_without_a_date_and_a_vault_that_was_not_there_before", async () => 
   press("Unlock");
   await heading("All items");
   // The restored vault was added to the list, and it is the one unlocked.
-  expect(sent("unlock_vault")).toEqual([{ id: 8, password: BACKUP_PASSWORD }]);
+  expect(sent("unlock_vault")).toEqual([{ vault: { list: shell.listIdentity(), id: 8 }, password: BACKUP_PASSWORD }]);
   expect(sent("list_vaults").length).toBeGreaterThanOrEqual(2);
 });
 

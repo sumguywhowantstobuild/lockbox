@@ -52,8 +52,15 @@ export type {
   Tagged,
 } from "./bridge";
 
-/** One vault on the list: no path, ever. `name` is null when its details cannot be read. */
+/** A row of the vault list as the shell names it: the list's identity and the vault's ID on it. Sent back as it came, never built from a bare ID. */
+export interface VaultRef {
+  list: number;
+  id: number;
+}
+
+/** One vault on the list: no path, ever. `list` is the identity of the list it was read from. `name` is null when its details cannot be read. */
 export interface VaultEntry {
+  list: number;
   id: number;
   name: string | null;
   available: boolean;
@@ -286,8 +293,8 @@ export function appInfo(): Promise<AppInfo> {
  * Unlocks the vault with `password` (about a second). Rejects with the shell's refusal (`wrong_password` among them)
  * or `StaleAnswer` when the vault locked again before the answer was read.
  */
-export async function unlockVault(id: number, password: string): Promise<Tagged<UnlockView>> {
-  const answer = await open<UnlockView>("unlock_vault", { id, password });
+export async function unlockVault(vault: VaultRef, password: string): Promise<Tagged<UnlockView>> {
+  const answer = await open<UnlockView>("unlock_vault", { vault: { list: vault.list, id: vault.id }, password });
   // `unlock_vault` answers a tagged view and never asks a question or opens a dialog.
   if (answer === "Dismissed" || "Confirm" in answer) throw new Error("unexpected answer to unlock_vault");
   return answer;
@@ -305,8 +312,24 @@ export interface RecoveryCheckView {
  * answers `core` `recovery_key_typo`, `recovery_key_word` with its `position`, or `recovery_key_count` with `found`, and nothing is derived), then that it opens
  * this vault (`core` `wrong_password`: another vault's key or an old one). The key is held in the shell under `choice` for `recoverFinish`; nothing is written.
  */
-export function recoverCheck(id: number, recoveryKey: string): Promise<RecoveryCheckView> {
-  return callPlain<RecoveryCheckView>("recover_check", { id, recovery_key: recoveryKey });
+export function recoverCheck(vault: VaultRef, recoveryKey: string): Promise<RecoveryCheckView> {
+  return callPlain<RecoveryCheckView>("recover_check", { vault: { list: vault.list, id: vault.id }, recovery_key: recoveryKey });
+}
+
+/**
+ * Takes the vault off the list; its folder stays. An open one is locked first (its lock event comes as for any lock). `busy` while it unlocks or a job of it runs;
+ * `not_found` for a row the list no longer has.
+ */
+export function forgetVault(vault: VaultRef): Promise<null> {
+  return callPlain<null>("forget_vault", { vault: { list: vault.list, id: vault.id } });
+}
+
+/**
+ * Opens the vault's folder in Explorer (Rust has the path; the page never does). `not_found` when the row or the folder is gone; `invalid_input` `folder` when the list
+ * entry isn't a plain folder.
+ */
+export function showVaultInExplorer(vault: VaultRef): Promise<null> {
+  return callPlain<null>("show_vault_in_explorer", { vault: { list: vault.list, id: vault.id } });
 }
 
 /**

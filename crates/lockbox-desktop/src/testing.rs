@@ -1076,6 +1076,13 @@ impl FakeVolumes {
         lock(&self.vanished).push(canonical(dir));
     }
 
+    /// From now on, the folder `dir` that [`vanish`](Self::vanish) made go is there again, as if its drive were plugged
+    /// back in.
+    pub fn back(&self, dir: &Path) {
+        let dir = canonical(dir);
+        lock(&self.vanished).retain(|gone| !crate::os::same_path(gone, &dir));
+    }
+
     /// The innermost mounted volume `path` is inside.
     fn mounted_at(&self, path: &Path) -> Option<(PathBuf, FakeVolume)> {
         lock(&self.mounted)
@@ -1797,6 +1804,11 @@ impl TestShell {
         let journal: serde_json::Value = serde_json::from_slice(&text).unwrap();
         assert_eq!(journal["version"], 1);
         serde_json::from_value(journal["entries"].clone()).unwrap()
+    }
+
+    /// The row the page would send for the vault `id`, on the list as it is now (listed or not).
+    pub fn vault(&self, id: u32) -> crate::registry::VaultRef {
+        self.shell.registry.vault_ref(id)
     }
 
     /// A new folder `name` in the test's temp folder, canonical (as a dialog's answer is made before use).

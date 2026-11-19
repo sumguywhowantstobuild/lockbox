@@ -1206,7 +1206,7 @@ mod tests {
 
         let registry_id = ts.shell.registry.entries()[0].0;
         let password = zeroize::Zeroizing::new(TEST_PASSWORD.to_owned());
-        let unlocked = heavy(|| ts.shell.unlock_vault(registry_id, password)).unwrap();
+        let unlocked = heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), password)).unwrap();
         assert_eq!(unlocked.session, s, "the same session ID");
         let again = (s, unlocked.generation, id, file_id);
         open(&ts, &again).unwrap();

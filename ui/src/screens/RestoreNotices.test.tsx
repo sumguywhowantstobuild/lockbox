@@ -329,7 +329,8 @@ test("both_headers_unreadable_shows_ask_8", async () => {
       "Both copies of its details are damaged, so no password can open it. A backup can bring it back, in a new folder beside this one, and the damaged folder is left alone.",
     ),
   ).toBeTruthy();
-  expect(buttons()).toEqual(["Restore a backup", "Back"]);
+  // Back, then Show in Explorer and Remove from this list (Task 9), as quiet links.
+  expect(buttons()).toEqual(["Restore a backup", "Back", "Show A vault that can't be read in Explorer", "Remove A vault that can't be read from this list"]);
   // No password can open it, so there is no box.
   expect(screen.queryByLabelText(/^Password for /)).toBeNull();
   expect(container.querySelector("input")).toBeNull();

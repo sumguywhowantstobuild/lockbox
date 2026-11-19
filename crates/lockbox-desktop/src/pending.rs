@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 use crate::commands::readable::ReadableJob;
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
+use crate::registry::VaultRef;
 use crate::restore::Checked;
 use crate::session::{Location, SessionId};
 
@@ -200,12 +201,12 @@ pub enum PendingChoice {
     Marker(DropMarker),
 }
 
-/// What a checked recovery key holds (see [`PendingChoice::Recovery`]): the vault's registry ID and place as the check
-/// found them, the lock epoch it was held in, the key (wiped when dropped), the bytes of both header files as the
-/// check read them (`None`: the file was not there), and whether the header that opened failed its MAC. Internal to
-/// Rust: the page sees only the token. No `Debug`: it holds a secret.
+/// What a checked recovery key holds (see [`PendingChoice::Recovery`]): the vault's row on the list (the list's identity
+/// and its registry ID) and its place as the check found them, the lock epoch it was held in, the key (wiped when
+/// dropped), the bytes of both header files as the check read them (`None`: the file was not there), and whether the
+/// header that opened failed its MAC. Internal to Rust: the page sees only the token. No `Debug`: it holds a secret.
 pub struct RecoveryChoice {
-    pub vault: u32,
+    pub vault: VaultRef,
     pub location: Location,
     pub epoch: u64,
     pub secret: RecoverySecret,
@@ -876,13 +877,13 @@ impl Pending {
     }
 
     /// What the recovery choice held under `token` is for, without taking it or starting its five minutes again: the
-    /// registry ID of its vault and whether its header failed the MAC. `None` for a token that is not there, was
+    /// row of its vault on the list and whether its header failed the MAC. `None` for a token that is not there, was
     /// dropped, is five minutes old or holds another kind of choice, which is left alone.
-    pub fn recovery_of(&self, token: &Token) -> Option<(u32, bool)> {
+    pub fn recovery_of(&self, token: &Token) -> Option<(VaultRef, bool)> {
         self.recovery_of_at(token, Instant::now())
     }
 
-    fn recovery_of_at(&self, token: &Token, now: Instant) -> Option<(u32, bool)> {
+    fn recovery_of_at(&self, token: &Token, now: Instant) -> Option<(VaultRef, bool)> {
         let (found, expired) = {
             let mut parked = lock(&self.parked);
             let expired = take_expired(&mut parked, now);
@@ -1974,9 +1975,14 @@ mod tests {
         assert_eq!(pending.len(), 0, "an expired choice is dropped");
     }
 
+    /// The row `id` on a list whose identity is 5.
+    fn row(id: u32) -> VaultRef {
+        VaultRef { list: 5, id }
+    }
+
     fn recovery(vault: u32, header_changed: bool) -> PendingChoice {
         PendingChoice::Recovery(RecoveryChoice {
-            vault,
+            vault: row(vault),
             location: Location::Folder(PathBuf::from("a")),
             epoch: 1,
             secret: lockbox_core::internals::recovery::generate(),
@@ -1997,15 +2003,15 @@ mod tests {
         let plain = pending.put_at(recovery(8, false), now);
         let other = pending.put_at(held(1), now);
 
-        assert_eq!(pending.recovery_of_at(&token, now), Some((7, true)));
-        assert_eq!(pending.recovery_of_at(&plain, now), Some((8, false)));
+        assert_eq!(pending.recovery_of_at(&token, now), Some((row(7), true)));
+        assert_eq!(pending.recovery_of_at(&plain, now), Some((row(8), false)));
         assert_eq!(pending.recovery_of_at(&other, now), None, "another kind");
         assert_eq!(pending.recovery_of_at(&Token::random(), now), None);
         assert_eq!(pending.len(), 3, "a look takes nothing");
         // A look does not start the five minutes again.
         assert_eq!(
             pending.recovery_of_at(&token, now + LIFETIME - Duration::from_secs(1)),
-            Some((7, true))
+            Some((row(7), true))
         );
         assert_eq!(pending.recovery_of_at(&token, now + LIFETIME), None);
         assert_eq!(pending.len(), 0, "an expired choice is dropped by the look");

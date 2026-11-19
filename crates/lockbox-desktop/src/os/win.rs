@@ -12,7 +12,9 @@ use std::mem::offset_of;
 use std::num::NonZeroU32;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -81,7 +83,9 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
-use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime, GetTickCount};
+use windows_sys::Win32::System::SystemInformation::{
+    GetLocalTime, GetSystemTime, GetSystemWindowsDirectoryW, GetTickCount,
+};
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetLastInputInfo, LASTINPUTINFO, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey,
@@ -1161,15 +1165,75 @@ impl Launcher for WinLauncher {
         }
     }
 
+    /// Starts `explorer.exe` from the Windows folder by its full path with the folder as its one argument: never
+    /// `ShellExecuteW` with `open` on the path (which would run a program if the path named one), never a search of
+    /// `PATH`, never `cmd`. Explorer often exits with 1 while its window stays, so the child is not waited for.
     fn open_folder(&self, folder: &Path) -> io::Result<()> {
-        // Lockbox spells a drive path `\\?\C:\..`, which Explorer is not asked to open: the path as the user knows it.
-        let plain = crate::restore::shown(folder);
-        let folder = wide_text(OsStr::new(&plain))?;
-        match shell_open(&folder, None) {
-            true => Ok(()),
-            false => Err(io::Error::other("folder not opened")),
+        // A Windows name has no `"`, and one in the path would end the quoting early: refused, not opened.
+        if folder.to_string_lossy().contains('"') {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let windows = windows_folder()?;
+        let explorer = explorer_command(&windows, folder);
+        let mut command = Command::new(&explorer.program);
+        for argument in &explorer.args {
+            command.raw_arg(argument);
+        }
+        command
+            .current_dir(&windows)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(drop)
+    }
+}
+
+/// What `open_folder` starts: `<Windows folder>\explorer.exe` and exactly one argument, the folder as the person knows
+/// it (`\\?\C:\x` → `C:\x`, `\\?\UNC\srv\share\x` → `\\srv\share\x`, anything else as it is), with trailing `\` trimmed,
+/// in double quotes (a Windows name has no `"`). A drive root stays `C:\`, unquoted (a quote after `\` would be read as
+/// an escaped quote).
+pub(crate) struct ExplorerCommand {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+}
+
+/// The command that shows `folder` in Explorer, built without starting anything: see [`ExplorerCommand`]. `windows`
+/// is the Windows folder.
+pub(crate) fn explorer_command(windows: &Path, folder: &Path) -> ExplorerCommand {
+    // The same rule as the folder the person was shown (24b), so Explorer opens the spelling they saw.
+    let plain = crate::restore::shown(folder);
+    let trimmed = plain.trim_end_matches('\\');
+    let root = trimmed.len() == 2 && trimmed.ends_with(':');
+    let argument = match root {
+        true => format!(r"{trimmed}\"),
+        false => format!("\"{trimmed}\""),
+    };
+    ExplorerCommand {
+        program: windows.join("explorer.exe"),
+        args: vec![OsString::from(argument)],
+    }
+}
+
+/// The Windows folder (`GetSystemWindowsDirectoryW`), where `explorer.exe` is.
+fn windows_folder() -> io::Result<PathBuf> {
+    let mut buffer = vec![0u16; MAX_PATH as usize];
+    for _ in 0..3 {
+        let size = u32::try_from(buffer.len()).map_err(|_| io::ErrorKind::InvalidData)?;
+        // SAFETY: `buffer` is writable for `size` UTF-16 units, which the call does not exceed.
+        let written = unsafe { GetSystemWindowsDirectoryW(buffer.as_mut_ptr(), size) } as usize;
+        match written {
+            0 => return Err(io::Error::last_os_error()),
+            // Written, without its terminator.
+            written if written < buffer.len() => {
+                buffer.truncate(written);
+                return Ok(PathBuf::from(OsString::from_wide(&buffer)));
+            }
+            // Too small: the call says what it needs, terminator included.
+            needed => buffer.resize(needed, 0),
         }
     }
+    Err(io::Error::other("windows folder"))
 }
 
 /// `ShellExecuteW`, verb `open`, on `target`, with `directory` as the working directory if given (both NUL-terminated
@@ -2613,6 +2677,76 @@ mod tests {
 
     /// The deadline for every wait in these tests: a slow or stuck window fails a test instead of hanging it.
     const WAIT: Duration = Duration::from_secs(1);
+
+    /// What Show in Explorer starts: Explorer by its full path from the Windows folder (never a search of `PATH`,
+    /// never the listed path itself as the program), and exactly one argument, the folder as the person knows it,
+    /// quoted. The builder is pure, so nothing starts here.
+    #[test]
+    fn the_windows_opener_starts_explorer_by_its_full_path_with_one_argument() {
+        let windows = Path::new(r"C:\Windows");
+        let program = Path::new(r"C:\Windows\explorer.exe");
+
+        // A name with a comma and a space: one argument, which is why it is quoted.
+        let command = explorer_command(windows, Path::new(r"\\?\C:\Vaults\Family, home"));
+        assert_eq!(command.program, program);
+        assert_eq!(
+            command.args,
+            [OsString::from(r#""C:\Vaults\Family, home""#)]
+        );
+
+        let table = [
+            // A share, as the person knows it.
+            (r"\\?\UNC\srv\share\x", r#""\\srv\share\x""#),
+            // A plain path stays as it is; trailing separators go.
+            (r"D:\plain", r#""D:\plain""#),
+            (r"\\?\C:\Vaults\Family\", r#""C:\Vaults\Family""#),
+            (r"\\?\C:\Vaults\Family\\", r#""C:\Vaults\Family""#),
+            // A drive root stays `C:\`, unquoted: a quote after `\` would be read as an escaped quote.
+            (r"\\?\C:\", r"C:\"),
+            (r"C:\", r"C:\"),
+        ];
+        let mut seen = 0;
+        for (folder, argument) in table {
+            let command = explorer_command(windows, Path::new(folder));
+            assert_eq!(command.program, program, "{folder}");
+            assert_eq!(command.args, [OsString::from(argument)], "{folder}");
+            seen += 1;
+        }
+        assert_eq!(seen, table.len(), "every row was checked");
+
+        // A folder that names a program is still only an argument: the program is always Explorer's own path.
+        let command = explorer_command(windows, Path::new(r"\\?\C:\Vaults\run.exe"));
+        assert_eq!(command.program, program);
+        assert_eq!(command.args.len(), 1);
+
+        // The Windows folder is asked of Windows: absolute, and it holds Explorer.
+        let found = windows_folder().expect("Windows says where it is");
+        assert!(found.is_absolute(), "{found:?}");
+        assert!(found.join("explorer.exe").is_file(), "{found:?}");
+    }
+
+    /// The adapter itself starts what the builder built and nothing else: `open_folder` runs the builder's program with
+    /// its argument as raw text, and never reaches `ShellExecuteW` (which would run a program the listed path named).
+    /// (Starting Explorer cannot be done in a test, so this reads the adapter's own source.)
+    #[test]
+    fn the_windows_opener_never_hands_the_folder_to_shell_execute() {
+        let source = include_str!("win.rs");
+        let start = source
+            .find("    fn open_folder(&self, folder: &Path) -> io::Result<()> {")
+            .expect("the adapter's open_folder");
+        let body = &source[start..start + source[start..].find("\n    }\n").expect("it ends")];
+        for needed in [
+            "explorer_command(&windows, folder)",
+            "Command::new(&explorer.program)",
+            "command.raw_arg(argument)",
+            ".current_dir(&windows)",
+        ] {
+            assert!(body.contains(needed), "open_folder lacks {needed}");
+        }
+        for never in ["shell_open", "ShellExecute", "\"cmd\"", "\"start\""] {
+            assert!(!body.contains(never), "open_folder uses {never}");
+        }
+    }
 
     /// The hidden attribute is added to a file or a folder and nothing else changes (the read-only attribute and the
     /// content stay); a path that is not there is an error.

@@ -227,7 +227,14 @@ test("new_vault_from_the_menu_runs_setups_two_steps", async () => {
   await unlocked([vault(7, "My vault")]);
   // The vault menu has both actions, beside Lock and Rename (Task 8).
   const menu = await openVaultMenu();
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", "Lock My vault", "Rename My vault"]);
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "New vault",
+    "Add existing vault folder",
+    "Lock My vault",
+    "Rename My vault",
+    "Show My vault in Explorer",
+    "Remove My vault from this list",
+  ]);
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => {
     expect(screen.queryByRole("menu")).toBeNull();
@@ -292,7 +299,7 @@ test("the_new_session_carries_the_id_from_the_answer", async () => {
     expect(debugState().vaults?.map((entry) => entry.id)).toEqual([7, 8]);
   });
   expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7, 8]);
-  expect(debugState().vaults?.find((entry) => entry.id === 8)).toEqual({ id: 8, name: "Home", available: true, details_damaged: false });
+  expect(debugState().vaults?.find((entry) => entry.id === 8)).toEqual({ list: shell.listIdentity(), id: 8, name: "Home", available: true, details_damaged: false });
   await confirmKey(8);
   const menu = await openVaultMenu();
   expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "Home"]);
@@ -480,11 +487,12 @@ test("vault_made_but_not_listed_says_so_and_add_existing_is_reachable", async ()
   await chooseAction("Add existing vault folder");
   await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
   expect(sent("add_existing_vault")).toHaveLength(1);
-  expect(debugState().unlockStep).toMatchObject({ vault: 9 });
+  // The list gives the added row its own next ID (the vault that was made and not listed took none): 8, whatever the folder's old number was.
+  expect(debugState().unlockStep).toMatchObject({ vault: 8 });
   expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7]);
   typeAndSendUnlock(NEW);
   await screen.findByRole("heading", { level: 1, name: "Finish your recovery key" });
-  expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7, 9]);
+  expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7, 8]);
   expect(sent("lock_vault")).toEqual([]);
 });
 

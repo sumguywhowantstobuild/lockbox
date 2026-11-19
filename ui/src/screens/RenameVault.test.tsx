@@ -162,13 +162,15 @@ test("rename_from_the_vault_menu_saves_and_shows_the_new_name_everywhere", async
   await allOpen(list);
   await switchTo("My vault");
 
-  // The menu: Rename right after Lock, named for the vault on screen.
+  // The menu: Rename right after Lock, named for the vault on screen (Show and Remove follow it, Task 9).
   const menu = await openVaultMenu();
   expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
     "New vault",
     "Add existing vault folder",
     "Lock My vault",
     "Rename My vault",
+    "Show My vault in Explorer",
+    "Remove My vault from this list",
   ]);
   fireEvent.click(within(menu).getByRole("menuitem", { name: "Rename My vault" }));
   await waitFor(() => {
@@ -214,6 +216,8 @@ test("rename_from_the_vault_menu_saves_and_shows_the_new_name_everywhere", async
     "Add existing vault folder",
     "Lock Family",
     "Rename Family",
+    "Show Family in Explorer",
+    "Remove Family from this list",
   ]);
   fireEvent.keyDown(again, { key: "Escape" });
   await waitFor(() => {
@@ -533,13 +537,15 @@ test("rename_hidden_for_read_only_and_older_copies", async () => {
   fireEvent.change(lock, { target: { value: PASSWORD } });
   fireEvent.submit((lock as HTMLInputElement).form as HTMLFormElement);
   await screen.findByRole("heading", { level: 1, name: "All items", hidden: true });
-  // A writable listed vault offers Rename.
+  // A writable listed vault offers Rename (and Show in Explorer and Remove from list).
   let menu = await openVaultMenu();
   expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
     "New vault",
     "Add existing vault folder",
     "Lock My vault",
     "Rename My vault",
+    "Show My vault in Explorer",
+    "Remove My vault from this list",
   ]);
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => {

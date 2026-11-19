@@ -88,7 +88,7 @@ async function unlocked(list: FakeVault[] = [mine()]) {
 async function twoVaults() {
   const view = await unlocked([mine(), home()]);
   await act(async () => {
-    expect(await unlock(8, PASSWORD)).toBe("opened");
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
   });
   await screen.findByRole("button", { name: "Home, vault menu" });
   return view;
@@ -566,7 +566,7 @@ test("open_backup_from_the_lock_screen_shows_full_screen", async () => {
   await screen.findByLabelText(/^Password for /);
   // A link beside Restore a backup, under the form.
   const links = screen.getAllByRole("button").map((button) => button.textContent);
-  expect(links).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
+  expect(links).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   fireEvent.click(screen.getByRole("button", { name: "Open a backup" }));
   // The same steps, full-screen on the setup frame: no panel, no window, the page's banner and one heading.
   const heading = await screen.findByRole("heading", { level: 1, name: "Open a backup" });

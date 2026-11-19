@@ -596,7 +596,7 @@ test("a_save_that_ends_after_the_person_went_to_another_vault_does_not_take_focu
   // While the shell still has the save, the person unlocks another vault, which is the one on screen now; the first vault's panel
   // is gone from the screen, though its record keeps the tool.
   await act(async () => {
-    expect(await unlock(8, PASSWORD)).toBe("opened");
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
   });
   await waitFor(() => {
     expect(screen.queryByRole("complementary", { name: "Paste a .env" })).toBeNull();

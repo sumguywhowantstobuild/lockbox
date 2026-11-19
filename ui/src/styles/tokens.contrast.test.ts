@@ -483,6 +483,29 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
         check(`rename vault Cancel words, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
       }
       check("rename vault Rename words, waiting", c("--ink2"), over(c("--line"), card), 4.5);
+      // Remove from list (18g) and the unavailable vault's box (Task 9): small boxes on the vault menu's card. The sentence, the status line (Try again found it still missing, in the
+      // quiet words) and the refusal line; Cancel and Remove from list are the quiet pill and Try again and Remove the main pill, each at rest, hovered and pressed (the tints laid
+      // over the card), the main pill's fill against the card, and Remove which greys while an answer is out.
+      check("remove box sentence on the menu's card", c("--ink"), card, 4.5);
+      check("unavailable box status line on the menu's card", c("--ink2"), card, 4.5);
+      check("remove and unavailable box refusal line on the menu's card", c("--danger"), card, 4.5);
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`remove and unavailable box quiet pill words, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
+      }
+      for (const [state, fill] of [["rest", "--add"], ["hover", "--addh"], ["pressed", "--addp"]] as const) {
+        check(`remove and unavailable box main pill words, ${state}`, c("--addi"), c(fill), 4.5);
+        check(`remove and unavailable box main pill against the card, ${state}`, c(fill), card, 3);
+      }
+      check("remove box main pill words, waiting", c("--ink2"), over(c("--line"), card), 4.5);
+      // An unavailable vault's row on the lock screen (30b): it is quiet by its words and its mark (the quiet ink, not a fade), on the row's card. Its name, its mark (a line
+      // drawing), the line under the name, the status line under the row, and its two links at rest, hovered and pressed (the tints laid over the card).
+      check("unavailable row name on its card", c("--ink2"), card, 4.5);
+      check("unavailable row mark on its card", c("--ink2"), card, 3);
+      check("unavailable row line on its card", c("--ink2"), card, 4.5);
+      check("unavailable row status line on its card", c("--ink2"), card, 4.5);
+      for (const [state, fill] of [["rest", card], ["hover", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`unavailable row links words, ${state}`, c("--ink"), fill, 4.5);
+      }
 
       // Show one kind, and sort (Task 15). The two lists in the toolbar are on the list's ground: their words and their
       // arrow pair at rest, hovered or open, and pressed (the tints laid over the ground), and their focus ring.

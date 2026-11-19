@@ -1478,7 +1478,7 @@ mod tests {
         bytes[last] ^= 1;
         fs::write(&file, bytes).unwrap();
 
-        let unlocked = heavy(|| ts.shell.unlock_vault(registry_id, secret(PW))).unwrap();
+        let unlocked = heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), secret(PW))).unwrap();
         let list = ts
             .shell
             .list_items(unlocked.session, unlocked.generation)
@@ -1637,7 +1637,7 @@ mod tests {
         // Two vaults with a match each, Family searched first, then Work.
         let (registry_id, _) = ts.shell.registry.entries()[0].clone();
         let unlock_family = || {
-            heavy(|| ts.shell.unlock_vault(registry_id, secret(PW)))
+            heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), secret(PW)))
                 .unwrap()
                 .session
         };
@@ -2074,7 +2074,7 @@ mod tests {
         item.trashed_at = Some("2020-01-01T00:00:00Z".into());
         fs::write(&file, seal_item(&item, &vault_id, &key).unwrap()).unwrap();
 
-        let unlocked = heavy(|| ts.shell.unlock_vault(registry_id, secret(PW))).unwrap();
+        let unlocked = heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), secret(PW))).unwrap();
         let (s, g) = (unlocked.session, unlocked.generation);
         assert_eq!(ts.shell.old_trash(s, g, 30).unwrap().data, [old]);
         assert_eq!(ts.shell.list_items(s, g).unwrap().data.items.len(), 2);

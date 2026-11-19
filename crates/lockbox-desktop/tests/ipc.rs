@@ -237,6 +237,44 @@ fn rename_vault_is_granted_to_the_main_window_only() {
     assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
 }
 
+/// `show_vault_in_explorer` and `forget_vault` (Plan 4C, Task 9) are listed, granted to the main window and reach their
+/// handler from it; another window and a remote origin are refused by the ACL, before the handler. Each takes a row of the
+/// vault list (`{ vault: { list, id } }`), never a path; the refusals of a stale row or of a listed path that is not a
+/// folder are tested in `commands::vaults`.
+#[test]
+fn show_and_remove_vault_commands_are_granted_to_the_main_window_only() {
+    let commands = ["show_vault_in_explorer", "forget_vault"];
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({ "vault": { "list": 7, "id": 1 } }));
+    let mut checked = 0;
+    for cmd in commands {
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        assert!(
+            granted.contains(&format!("allow-{}", cmd.replace('_', "-")).as_str()),
+            "{cmd} is not granted"
+        );
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+        checked += 1;
+    }
+    assert_eq!(checked, commands.len());
+}
+
 /// The commands that write a readable file or print the recovery key (Task 7) are listed, granted to the main window and
 /// reach their handler from it; another window and a remote origin are refused by the ACL, before the handler. The page
 /// sends no path and no key to any of them: their bodies are a session and a generation (and a printer's name, for

@@ -18,6 +18,7 @@
     "allow-add-existing-vault",
     "allow-add-existing-vault-confirm",
     "allow-forget-vault",
+    "allow-show-vault-in-explorer",
     "allow-create-vault",
     "allow-create-vault-confirm",
     "allow-unlock-vault",

@@ -147,12 +147,14 @@ impl fmt::Debug for NoticeVault {
     }
 }
 
-/// A path as the user knows it: Lockbox spells a drive path `\\?\C:\..`, which Explorer does not.
+/// A path as the user knows it: Lockbox spells a drive path `\\?\C:\..` and a share `\\?\UNC\srv\share\..`, which
+/// Explorer does not (`C:\..`, `\\srv\share\..`). The one rule for what is shown and what Show in Explorer opens.
 pub(crate) fn shown(path: &Path) -> String {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
-        Some(plain) if !plain.starts_with(r"UNC\") => plain.to_owned(),
-        _ => text.into_owned(),
+        Some(share) if share.starts_with(r"UNC\") => format!(r"\\{}", &share[4..]),
+        Some(plain) => plain.to_owned(),
+        None => text.into_owned(),
     }
 }
 
@@ -1054,7 +1056,7 @@ impl Shell {
             (Some(found), _) => found,
             (None, Recovered::Finished) => {
                 let dir = fs::canonicalize(target).ok()?;
-                (self.registry.add(&dir).ok()?, dir)
+                (self.registry.add(&dir).ok()?.id, dir)
             }
             (None, _) => return None,
         };
@@ -1471,7 +1473,7 @@ impl Shell {
         let beside = dir
             .parent()
             .is_some_and(|beside| same_folder(beside, parent));
-        if !beside || !self.registry.entry(vault, &dir).details_damaged {
+        if !beside || !crate::registry::details_damaged(&dir) {
             return Ok(None);
         }
         // A readable copy of this vault is beside it already (a sibling an earlier restore made): the engine keeps one
@@ -1763,7 +1765,11 @@ impl Shell {
                 self.restore.end_commit(restore, false);
                 operation.progress().advance(1, 1);
                 let dir = fs::canonicalize(&outcome.dir).unwrap_or(outcome.dir);
-                let listed = self.registry.add(&dir).map_err(|_| VAULT_NOT_LISTED);
+                let listed = self
+                    .registry
+                    .add(&dir)
+                    .map(|vault| vault.id)
+                    .map_err(|_| VAULT_NOT_LISTED);
                 // The operation ends only now, listed or not: a Quit that waited for it (the close question's carry-on)
                 // must not exit before the restored vault is on the list.
                 drop(operation);
@@ -2379,7 +2385,7 @@ mod tests {
     fn unlock(ts: &TestShell, id: u32) -> (SessionId, u64) {
         let unlocked = heavy(|| {
             ts.shell
-                .unlock_vault(id, Zeroizing::new(TEST_PASSWORD.to_owned()))
+                .unlock_vault(ts.vault(id), Zeroizing::new(TEST_PASSWORD.to_owned()))
         })
         .unwrap();
         (unlocked.session, unlocked.generation)
@@ -6328,7 +6334,7 @@ mod tests {
         let source = ts.folder("Source");
         let folder = names(&source).remove(0);
         let dir = fs::canonicalize(source.join(folder)).unwrap();
-        let id = ts.shell.registry.add(&dir).unwrap();
+        let id = ts.shell.registry.add(&dir).unwrap().id;
         (s, g, id, dir)
     }
 
@@ -6450,7 +6456,7 @@ mod tests {
         assert_eq!(ts.shell.sessions.pending().len(), held, "nothing held");
 
         let first = pick_for(&ts, &backup, 1);
-        ts.shell.registry.forget(1).unwrap();
+        ts.shell.registry.forget(ts.vault(1)).unwrap();
         assert_eq!(
             heavy(|| ts.shell.restore_check(&first.choice, working())).err(),
             Some(ShellError::NotFound)
@@ -6482,7 +6488,7 @@ mod tests {
         assert!(listed.details_damaged);
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
-            json!({ "id": 1, "name": null, "available": true, "details_damaged": true })
+            json!({ "list": listed.list, "id": 1, "name": null, "available": true, "details_damaged": true })
         );
         // Header files that are there but unreadable count whichever copy is left, and a lost copy does not clear it.
         fs::remove_file(dir.join("vault.json")).unwrap();
@@ -6499,7 +6505,7 @@ mod tests {
         let ts = TestShell::new();
         let empty = ts.folder("Nothing here");
         fs::write(empty.join("notes.txt"), b"not a vault").unwrap();
-        let id = ts.shell.registry.add(&empty).unwrap();
+        let id = ts.shell.registry.add(&empty).unwrap().id;
         let listed = ts.shell.registry.list().unwrap();
         assert_eq!((listed[0].id, listed[0].name.as_deref()), (id, None));
         assert!(listed[0].available);
@@ -6677,7 +6683,8 @@ mod tests {
             .shell
             .registry
             .add(&fs::canonicalize(&old).unwrap())
-            .unwrap();
+            .unwrap()
+            .id;
         let before = snapshot(&old);
 
         let held = pick_for(&ts, &backup, id);

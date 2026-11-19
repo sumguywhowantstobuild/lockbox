@@ -26,8 +26,8 @@ export interface MenuItem {
 
 /**
  * A row of the vault menu: every vault of the list (open or locked) and every open backup or older copy, a menu item of a group of its own above the menu's actions, one
- * of which, `checked`, is the one that is on screen now. `detail` is the quiet line under the name that says what the row is (Locked, Backup, Not available). A row
- * that is `unavailable` can be reached and read but does nothing when it is chosen, and the menu stays open.
+ * of which, `checked`, is the one that is on screen now. `detail` is the quiet line under the name that says what the row is (Locked, Backup, Not available). Choosing a
+ * row closes the menu and does what it says: an unavailable vault's row opens its own box (Try again, Remove from list), so it is a row like any other.
  */
 export interface MenuRow {
   /** Tells the row apart from another with the same name. */
@@ -35,8 +35,6 @@ export interface MenuRow {
   label: string;
   detail?: string;
   checked: boolean;
-  /** Reached by the keys and read as unavailable (`aria-disabled`); choosing it does nothing. */
-  unavailable?: boolean;
   onSelect: () => void;
 }
 
@@ -104,12 +102,9 @@ export function Menu({
                 <BaseMenu.RadioItem
                   key={row.id}
                   value={row.id}
-                  closeOnClick={row.unavailable !== true}
+                  closeOnClick
                   className="mi"
-                  aria-disabled={row.unavailable === true ? true : undefined}
-                  onClick={() => {
-                    if (row.unavailable !== true) row.onSelect();
-                  }}
+                  onClick={row.onSelect}
                 >
                   <span className="mtwo">
                     <span className="mt">{row.label}</span>

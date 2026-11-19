@@ -37,10 +37,13 @@ beforeEach(() => {
   shell = installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: sampleItems() }]);
 });
 
+/** A row of the vault list as the shell gave it (Task 9): the list's identity and the vault's ID. */
+const ref = (id: number) => ({ list: shell.listIdentity(), id });
+
 /** Starts the store and opens vault 7: its session and generation. */
 async function opened(): Promise<{ session: number; generation: number }> {
   await startStore();
-  expect(await unlock(7, PASSWORD)).toBe("opened");
+  expect(await unlock(ref(7), PASSWORD)).toBe("opened");
   const live = shell.sessionOf(7);
   if (live === undefined) throw new Error("the fake shell opened no session");
   return { session: live.session, generation: live.generation };
@@ -108,8 +111,8 @@ test("a_lock_of_one_vault_leaves_the_other_alone", async () => {
     { id: 8, name: "Home", items: sampleItems() },
   ]);
   await startStore();
-  await unlock(7, PASSWORD);
-  await unlock(8, PASSWORD);
+  await unlock(ref(7), PASSWORD);
+  await unlock(ref(8), PASSWORD);
   const first = shell.sessionOf(7);
   const second = shell.sessionOf(8);
   if (first === undefined || second === undefined) throw new Error("not open");
@@ -128,7 +131,7 @@ test("stale_answer_shows_no_error", async () => {
 
   // A list in flight when the lock comes: its answer is from the old generation. Nothing is stored, nothing is thrown.
   const release = shell.holdListItems();
-  const unlocking = unlock(7, PASSWORD);
+  const unlocking = unlock(ref(7), PASSWORD);
   await vi.waitFor(() => {
     expect(shell.calls.some((call) => call.cmd === "list_items")).toBe(true);
   });
@@ -144,7 +147,7 @@ test("stale_answer_shows_no_error", async () => {
   expect(JSON.stringify(debugState())).not.toContain("Bot admin console");
 
   // The vault opens again afterwards, in the next generation.
-  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("opened");
   expect(openedItems(live.session)?.length).toBeGreaterThan(0);
 });
 
@@ -167,7 +170,7 @@ test("an_unlock_answer_older_than_its_lock_is_dropped", async () => {
         })
       : (real(cmd, args) as Promise<unknown>),
   );
-  const unlocking = unlock(7, PASSWORD);
+  const unlocking = unlock(ref(7), PASSWORD);
   const handler = (listen.mock.calls[0] as [string, (event: { payload: unknown }) => void])[1];
   act(() => {
     handler({ payload: { session: 9001, generation: 2, reason: "idle" } });
@@ -199,8 +202,8 @@ test("lock_all_drops_every_session_even_if_no_lock_event_comes", async () => {
     { id: 8, name: "Home", items: sampleItems() },
   ]);
   await startStore();
-  await unlock(7, PASSWORD);
-  await unlock(8, PASSWORD);
+  await unlock(ref(7), PASSWORD);
+  await unlock(ref(8), PASSWORD);
   const first = shell.sessionOf(7);
   if (first === undefined) throw new Error("not open");
   addReveal(first.session, "a", "first-secret");
@@ -228,7 +231,7 @@ test("a_locked_refusal_drops_the_session_and_shows_no_error", async () => {
 
   // A list refused as locked: the vault is not open, so no list and no error.
   answerWith("list_items", refusedAsLocked);
-  await expect(unlock(7, PASSWORD)).resolves.toBe("stale");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("stale");
   expect(debugState().sessions).toEqual([]);
 });
 
@@ -262,8 +265,8 @@ test("lock_one_vault_leaves_the_other_open", async () => {
     { id: 8, name: "Home", items: sampleItems() },
   ]);
   await startStore();
-  await unlock(7, PASSWORD);
-  await unlock(8, PASSWORD);
+  await unlock(ref(7), PASSWORD);
+  await unlock(ref(8), PASSWORD);
   const first = shell.sessionOf(7);
   const second = shell.sessionOf(8);
   if (first === undefined || second === undefined) throw new Error("not open");
@@ -292,7 +295,7 @@ test("an_old_lock_answer_does_not_close_the_vault_unlocked_again", async () => {
     shell.lock(session);
   });
   expect(debugState().sessions).toEqual([]);
-  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("opened");
   expect(debugState().sessions).toHaveLength(1);
   answerNow();
   await locking;
@@ -340,7 +343,7 @@ test("a_late_locked_refusal_does_not_drop_the_vault_unlocked_again", async () =>
   act(() => {
     shell.lock(session);
   });
-  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("opened");
   answer(refusedAsLocked);
   await copying;
   expect(debugState().sessions).toHaveLength(1);
@@ -374,7 +377,7 @@ test("an_unlock_overtaken_by_a_lock_is_stale_not_an_error", async () => {
   // Lock all, or the window's close, landed during the unlock: the shell refuses it as locked, and no session exists yet for
   // a lock event to clear. Nothing to show, as for a stale answer.
   answerWith("unlock_vault", refusedAsLocked);
-  await expect(unlock(7, PASSWORD)).resolves.toBe("stale");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("stale");
   expect(debugState().sessions).toEqual([]);
   expect(debugState().toast).toBeNull();
 });
@@ -388,7 +391,7 @@ test("a_late_lock_all_answer_does_not_drop_the_vault_unlocked_again", async () =
   act(() => {
     shell.lock(session);
   });
-  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("opened");
   answer(() => Promise.resolve(null));
   await locking;
   expect(debugState().sessions).toHaveLength(1);

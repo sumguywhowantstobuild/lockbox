@@ -25,7 +25,7 @@ use crate::jobs::{JobKind, JobScope, JobStarted, OperationId, ReportTo, RunningJ
 use crate::lock;
 use crate::open::OpenFolders;
 use crate::os::{Clock, IdleSource, Os, OsSignal, Power, Volumes};
-use crate::session::{LockReason, Notifier, SessionId, Sessions};
+use crate::session::{Location, LockReason, Notifier, SessionId, Sessions};
 use crate::settings::SettingsStore;
 
 /// How often the timer thread calls [`AutoLock::tick`]: also how late a vault on a drive that went away without a
@@ -594,6 +594,35 @@ impl AutoLock {
         lock(&self.operations.running).cancel_all();
     }
 
+    /// Takes the vault at `location` off the vault list (`forget` does the writing), under one guard for the location:
+    /// `Busy` while an open of it is under way, another Remove of it is, or a job of its session runs. Otherwise its
+    /// session, if unlocked, is locked as the person's own lock (while the list of running operations is still held, so
+    /// no job begins in between, as `lock_now` does), and once that lock's hooks have run, `forget` runs with the
+    /// location still held, so an unlock that arrives meanwhile answers `Busy` too. Either order of a Remove and a job
+    /// or an unlock ends with one of them refused. Every session at another location is untouched.
+    pub(crate) fn remove_location(
+        &self,
+        location: &Location,
+        forget: impl FnOnce() -> ShellResult<()>,
+    ) -> ShellResult<()> {
+        let running = lock(&self.operations.running);
+        let removal = self.sessions.begin_removal(location, |id| {
+            running
+                .operations
+                .iter()
+                .any(|operation| operation.session == Some(id))
+        })?;
+        let locked = removal
+            .session()
+            .and_then(|id| self.sessions.revoke_some(&[(id, None)], LockReason::Manual));
+        // Never held across a hook: the lock's hooks run on the hook thread, and are waited for here without it.
+        drop(running);
+        if let Some(done) = locked {
+            done.wait();
+        }
+        forget()
+    }
+
     /// Windows lock and sleep: cancels every long operation and revokes every vault in one step (no operation begins
     /// in between). The hooks are queued, not waited for: a blocked one must not stop the next signal.
     fn lock_now(&self, reason: LockReason) {
@@ -969,6 +998,73 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert!(!listed[0].available);
         assert!(listed[1].available);
+    }
+
+    /// Two vaults open and one's drive goes: that one alone locks (as unavailable, for its drive), the other stays open,
+    /// and the vault stays on the vault list, shown as not available: nothing takes it off.
+    #[test]
+    fn a_vault_whose_drive_goes_while_open_is_locked_alone_and_stays_listed() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let work = open_vault(&ts, "Work");
+        let family_dir = vault_dir(&ts, 0);
+        let before = ts.shell.registry.list().unwrap();
+        assert!(before.iter().all(|entry| entry.available));
+
+        ts.volumes.vanish(&family_dir);
+        ts.shell.autolock.tick(ts.clock.now());
+        ts.shell.autolock.wait_probe();
+        assert_eq!(state(&ts, family), SessionState::Unavailable);
+        assert_eq!(state(&ts, work), SessionState::Unlocked);
+        assert_eq!(locks(&ts), [(family, LockReason::DriveGone)]);
+
+        let listed = ts.shell.registry.list().unwrap();
+        assert_eq!(listed.len(), 2, "both are still listed");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| (entry.id, entry.available))
+                .collect::<Vec<_>>(),
+            [(1, false), (2, true)]
+        );
+        assert_eq!(
+            (listed[0].list, listed[0].name.as_deref()),
+            (before[0].list, Some("Family")),
+            "the same row, still named"
+        );
+    }
+
+    /// Try again is a new read of the list: once the folder is back the row says available and the same row unlocks it.
+    /// While the folder is not there the unlock is refused and nothing opens.
+    #[test]
+    fn a_vault_whose_drive_went_opens_after_try_again_once_back() {
+        let ts = TestShell::new();
+        let family = open_vault(&ts, "Family");
+        let dir = vault_dir(&ts, 0);
+        let row = ts.vault(1);
+        ts.volumes.vanish(&dir);
+        ts.shell.autolock.tick(ts.clock.now());
+        ts.shell.autolock.wait_probe();
+        assert_eq!(state(&ts, family), SessionState::Unavailable);
+        assert!(ts.shell.sessions.release_wait(family, GIVE_UP));
+
+        // The folder really is gone (moved away): still unavailable, and the unlock is refused.
+        let away = ts.temp.path().join("moved away");
+        fs::rename(&dir, &away).unwrap();
+        assert!(!ts.shell.registry.list().unwrap()[0].available);
+        let refused = heavy(|| ts.shell.unlock_vault(row, Zeroizing::new(PW.to_owned())));
+        assert!(refused.is_err(), "no folder, no unlock");
+        assert_eq!(state(&ts, family), SessionState::Unavailable);
+
+        // Back: the list says so, and the same row opens the vault, as the same session.
+        fs::rename(&away, &dir).unwrap();
+        ts.volumes.back(&dir);
+        let listed = ts.shell.registry.list().unwrap();
+        assert!(listed[0].available, "try again reads it as there");
+        assert_eq!((listed[0].list, listed[0].id), (row.list, row.id));
+        let reopened = heavy(|| ts.shell.unlock_vault(row, Zeroizing::new(PW.to_owned()))).unwrap();
+        assert_eq!(reopened.session, family);
+        assert_eq!(state(&ts, family), SessionState::Unlocked);
     }
 
     /// A `DriveRemoved` mask has bit 0 for A:; a location without a drive letter has no bit (the tick finds it).
@@ -1778,7 +1874,11 @@ mod tests {
         ts.shell.autolock.tick(ts.clock.now());
         probe_entered.recv_timeout(GIVE_UP).unwrap();
         ts.shell.sessions.lock(family, LockReason::Manual);
-        let reopened = heavy(|| ts.shell.unlock_vault(id, Zeroizing::new(PW.to_owned()))).unwrap();
+        let reopened = heavy(|| {
+            ts.shell
+                .unlock_vault(ts.vault(id), Zeroizing::new(PW.to_owned()))
+        })
+        .unwrap();
         ts.volumes.vanish(&dir);
         release.send(()).unwrap();
         ts.shell.autolock.wait_probe();

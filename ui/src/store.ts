@@ -210,6 +210,8 @@ export interface ForgotFlow {
   run: number;
   /** The listed vault it is for. */
   vault: number;
+  /** The identity of the list the vault was read from, with `vault` the row the key check names (Task 9). */
+  list: number;
   /**
    * `key`: 28a, and 28b when `problem` says what was wrong with the key; `no_key`: 28c; `changed`: the question about details changed outside Lockbox, over 28a,
    * asked before the new password; `password`: 28d; `done`: 28e, with the vault open under it.
@@ -242,6 +244,8 @@ export interface ForgotFlow {
 export interface UnlockStep {
   opening: number;
   vault: number;
+  /** The identity of the list the vault was read from when the step was opened: the unlock names the row as `{ list, id: vault }`. */
+  list: number;
   stay: boolean;
 }
 
@@ -255,10 +259,11 @@ export interface NewVault {
 }
 
 /**
- * Add existing vault folder begun from the vault menu (Task 7): `picking` while Windows' folder picker is open (nothing is on screen for it), `cloud` once the shell asked
- * about a cloud-synced folder first (the first screens' question, with the token the yes goes on with). It is the app's, and a lock epoch takes it.
+ * Add existing vault folder begun from the vault menu (Task 7) or from the lock screen (Task 9, `from` "lock"): `picking` while Windows' folder picker is open (nothing is on
+ * screen for it), `cloud` once the shell asked about a cloud-synced folder first (the first screens' question, with the token the yes goes on with). It is the app's, and a
+ * lock epoch takes it.
  */
-export type AddFolder = { opening: number; phase: "picking" } | { opening: number; phase: "cloud"; token: string };
+export type AddFolder = { opening: number; from: "window" | "lock"; phase: "picking" } | { opening: number; from: "window" | "lock"; phase: "cloud"; token: string };
 
 /**
  * Moving to a new computer (26a to 26c), the app's own like the restore: `what` is 26a ("What do you have?"), `here` is 26c, a vault has come in (`how`: its
@@ -673,8 +678,10 @@ export interface StoreState {
   unlockStep: UnlockStep | null;
   /** The form of a new vault begun from the vault menu, or `null`: see {@link NewVault}. */
   newVault: NewVault | null;
-  /** Add existing vault folder begun from the vault menu, or `null`: see {@link AddFolder}. */
+  /** Add existing vault folder begun from the vault menu or the lock screen, or `null`: see {@link AddFolder}. */
   addFolder: AddFolder | null;
+  /** The shell's refusal of the lock screen's Add existing vault folder, said in its plate until the next add or unlock; `null` for none. Nothing in it is secret. */
+  addRefusal: unknown;
   /**
    * The older copies the shell last listed, or `null` until a listing has come. The shell replaces every ID at each listing, so this is the page's one
    * listing: it is read again when Settings opens, when 24f opens and after each delete or open, and every button sends an ID from it as it is now.
@@ -725,6 +732,7 @@ const EMPTY: StoreState = {
   unlockStep: null,
   newVault: null,
   addFolder: null,
+  addRefusal: null,
   olderCopies: null,
   settings: null,
 };
@@ -805,6 +813,8 @@ export function startStore(): Promise<void> {
     try {
       await api.onLocked((event) => {
         dropSession(event.session);
+        // The drive went while the vault was open: its row reads unavailable at once, not at the next read of the list.
+        if (event.reason === "drive_gone") void refreshVaults();
       });
     } catch {
       // Without the lock listener the page could not hear a lock, so it asks the shell for nothing: no vault list, no
@@ -858,9 +868,10 @@ export function dropSession(session: number): void {
     forgot,
     // The unlock step is for a window with a vault in it to go back to: the last lock takes it, and the lock screen follows.
     unlockStep: sessions.length === 0 ? null : state.unlockStep,
-    // So are the new vault's form and Add existing vault folder: both are begun from a window, and the last lock leaves none to go back to.
+    // So are the new vault's form and Add existing vault folder: both are begun from a window, and the last lock leaves none to go back to. An add begun from
+    // the lock screen has no window to go back to in the first place, so a lock leaves it be (a lock epoch takes it, as it takes any step).
     newVault: sessions.length === 0 ? null : state.newVault,
-    addFolder: sessions.length === 0 ? null : state.addFolder,
+    addFolder: sessions.length === 0 && state.addFolder?.from !== "lock" ? null : state.addFolder,
     toast: keepToast ? toast : null,
     search:
       search === null || sessions.length === 0
@@ -880,17 +891,19 @@ export function dropSession(session: number): void {
  * Unlocks the vault and reads its list. `"opened"` when the list is on the page; `"stale"` when the vault locked again
  * before an answer was read, which is not an error. A refusal (a wrong password) is thrown for the lock screen to say.
  */
-export async function unlock(vaultId: number, password: string): Promise<"opened" | "stale"> {
+export async function unlock(vault: api.VaultRef, password: string): Promise<"opened" | "stale"> {
+  // The lock screen's add said its refusal until the next unlock: this is it.
+  if (state.addRefusal !== null) set({ ...state, addRefusal: null });
   let answer;
   try {
-    answer = await api.unlockVault(vaultId, password);
+    answer = await api.unlockVault(vault, password);
   } catch (error) {
     // A lock of every vault, or the window's close, that lands during the unlock is refused as locked: no session exists yet
     // for a lock event to clear, and it is no more an error to show than a stale answer (Review Focus 1).
     if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
     throw error;
   }
-  return publishUnlock(answer, vaultId);
+  return publishUnlock(answer, vault.id);
 }
 
 /**
@@ -1096,7 +1109,9 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
   const list = await refreshVaults();
   // The list could not be read again (the old one is kept): the vault that was made is put on it all the same, so the menu and the lock screen have it.
   if (list === null && vaultId > 0 && !(state.vaults ?? []).some((vault) => vault.id === vaultId)) {
-    set({ ...state, vaults: [...(state.vaults ?? []), { id: vaultId, name: info.name, available: true, details_damaged: false }] });
+    // Its list is the one the other entries came from; with none held there is no identity to give it, and `0` is one no list has (a send for it is `not_found`, never another vault).
+    const list = state.vaults?.[0]?.list ?? 0;
+    set({ ...state, vaults: [...(state.vaults ?? []), { list, id: vaultId, name: info.name, available: true, details_damaged: false }] });
   }
   return "done";
 }
@@ -2863,7 +2878,7 @@ export function startUnlockStep(vault: number, stay = false): void {
     return;
   }
   unlockOpenings += 1;
-  set({ ...state, unlockStep: { opening: unlockOpenings, vault, stay } });
+  set({ ...state, unlockStep: { opening: unlockOpenings, vault, list: listed.list, stay } });
 }
 
 /** Back, on the unlock step: the step goes and the window that was on screen is back. A password still out is not taken back: its answer is held behind that window. */
@@ -2882,7 +2897,7 @@ export async function unlockInStep(opening: number, password: string): Promise<"
   const { vault } = step;
   let answer: api.Tagged<api.UnlockView>;
   try {
-    answer = await api.unlockVault(vault, password);
+    answer = await api.unlockVault({ list: step.list, id: vault }, password);
   } catch (error) {
     // A lock of every vault, or the window's close, that lands during the unlock is refused as locked: no session exists yet for a lock event to clear.
     if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
@@ -2939,7 +2954,7 @@ export function leaveNewVault(): void {
 
 /** A lock epoch (Lock all, an idle lock, Windows locking or sleeping): every vault is about to lock, so these steps have no window to go back to. */
 function takeNewVaultEpoch(): void {
-  if (state.newVault !== null || state.addFolder !== null) set({ ...state, newVault: null, addFolder: null });
+  if (state.newVault !== null || state.addFolder !== null || state.addRefusal !== null) set({ ...state, newVault: null, addFolder: null, addRefusal: null });
 }
 
 /** The new vault's form as the screens read it: `null` while none is up. */
@@ -2959,12 +2974,19 @@ let addFolderOpenings = 0;
  * Add existing vault folder, from the vault menu: Windows' folder picker opens at once (nothing is drawn for it, the window stays), and what comes of it is one of: the
  * picker closed (nothing), a refusal (said in words on the window, where nothing was changed), a cloud-synced folder (the first screens' question, `cloud`), or the folder
  * added, which opens that vault's unlock step. Nothing is sent when a step is already up or no vault is open.
+ *
+ * From the lock screen (`"lock"`, 01a's second row) it needs no open session: the cloud question is drawn in the lock screen's place, a refusal is kept (`addRefusal`) for
+ * the lock screen's own line instead of a toast, and a folder that was added is the vault the lock screen chooses next (`unlockPick`), its password box focused.
  */
-export function startAddFolder(): void {
-  if (state.sessions.length === 0 || state.addFolder !== null || state.newVault !== null) return;
+export function startAddFolder(from: "window" | "lock" = "window"): void {
+  // A menu item hands its click to whatever it calls: anything but "lock" is the window's own add.
+  const where = from === "lock" ? "lock" : "window";
+  if (state.addFolder !== null) return;
+  if (where === "window" && (state.sessions.length === 0 || state.newVault !== null)) return;
+  if (where === "lock" && state.sessions.length > 0) return;
   addFolderOpenings += 1;
   const opening = addFolderOpenings;
-  set({ ...state, addFolder: { opening, phase: "picking" } });
+  set({ ...state, addFolder: { opening, from: where, phase: "picking" }, addRefusal: null });
   void runAddFolder(opening, () => api.addExistingVault());
 }
 
@@ -3001,18 +3023,114 @@ async function runAddFolder(opening: number, run: () => Promise<api.Outcome<Vaul
     });
   } catch (error) {
     if (!stillUp()) return;
-    const front = state.sessions.at(-1);
     // A lock the page had not heard of is no refusal to say.
+    if (state.addFolder?.from === "lock") {
+      set({ ...state, addFolder: null, addRefusal: refusedAsLocked(error) ? null : error });
+      return;
+    }
+    const front = state.sessions.at(-1);
     set({ ...state, addFolder: null, toast: refusedAsLocked(error) ? state.toast : { kind: "failed", session: front?.session ?? null, error } });
     return;
   }
-  if (!stillUp()) return;
+  const from = state.addFolder?.from;
+  if (!stillUp() || from === undefined) return;
   if (typeof result === "object") {
-    set({ ...state, addFolder: { opening, phase: "cloud", token: result.confirm } });
+    set({ ...state, addFolder: { opening, from, phase: "cloud", token: result.confirm } });
     return;
   }
-  set({ ...state, addFolder: null });
-  if (result === "done" && got.id !== null) startUnlockStep(got.id);
+  // From the lock screen the vault added is the one it chooses next; from a window it opens its unlock step.
+  set({ ...state, addFolder: null, unlockPick: from === "lock" && result === "done" && got.id !== null ? got.id : state.unlockPick });
+  if (from === "window" && result === "done" && got.id !== null) startUnlockStep(got.id);
+}
+
+// ---- Remove, Show in Explorer and Try again (Plan 4C Task 9) ----
+//
+// A vault of the list can be taken off it (its folder stays), shown in Explorer, and, when its folder or drive isn't there, tried again. Every one names the row as the list
+// gave it (`{ list, id }`, taken from a `VaultEntry` the page holds), never an ID made up from a number, and the page never sends or holds a path.
+
+/**
+ * Remove from list: the shell locks the vault when it is open, then takes it off the list, and the folder and everything in it stay. Done, the page lets go of everything
+ * it held for that vault (its session record if the lock event has not come yet, its unlock step or recovery flow with the checked key, what the lock screen was
+ * saying about it) and reads the list again; when that read fails, the row is taken out of the held list all the same. A refusal (it is busy, the row has gone, the list
+ * can't be written) reads the list again and comes back as `{ failed }`, for the box to say in words, and the vault stays as it was.
+ */
+export async function removeVault(vault: api.VaultRef): Promise<"done" | { failed: unknown }> {
+  const wasOpen = state.sessions.some((entry) => entry.vaultId === vault.id);
+  try {
+    await api.forgetVault(vault);
+  } catch (error) {
+    await refreshVaults();
+    // The shell locks an open vault before it writes the list, so a write that failed afterwards leaves the vault locked and listed, and the window the box was in has gone with
+    // the lock: the refusal is said on the window that is left, since the box can't say it.
+    const front = state.sessions.at(-1);
+    if (wasOpen && front !== undefined && !state.sessions.some((entry) => entry.vaultId === vault.id)) {
+      set({ ...state, toast: { kind: "failed", session: front.session, error } });
+    }
+    return { failed: error };
+  }
+  for (const entry of state.sessions.filter((one) => one.vaultId === vault.id)) dropSession(entry.session);
+  const flow = state.forgot;
+  const leavesForgot = flow !== null && flow.vault === vault.id;
+  set({
+    ...state,
+    unlockStep: state.unlockStep?.vault === vault.id ? null : state.unlockStep,
+    forgot: leavesForgot ? null : state.forgot,
+    lockNotes: state.lockNotes.filter((note) => note.vault !== vault.id),
+    unlockPick: state.unlockPick === vault.id ? null : state.unlockPick,
+  });
+  // A key that was checked for this vault waits in the shell for a new password nobody will set: it is let go.
+  if (flow !== null && leavesForgot && flow.choice !== null) forgetRecovery(flow.choice);
+  const list = await refreshVaults();
+  if (list === null) set({ ...state, vaults: (state.vaults ?? []).filter((entry) => entry.id !== vault.id) });
+  return "done";
+}
+
+/**
+ * Asks the shell to show the vault's folder in Explorer; gives `null` when it did, or the refusal as the page says it (`{ failed }`). A refusal that says the row or its folder
+ * is gone reads the list again first, so the row then reads unavailable or goes. A list entry that is not a plain folder is the page's own words (`show_not_a_folder`).
+ */
+async function showFolder(vault: api.VaultRef): Promise<{ failed: unknown } | null> {
+  try {
+    await api.showVaultInExplorer(vault);
+    return null;
+  } catch (error) {
+    if (refusedWith(error, "not_found")) await refreshVaults();
+    const folder = refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "folder";
+    return { failed: folder ? SHOW_NOT_A_FOLDER : error };
+  }
+}
+
+/** The page's own refusal for a list entry that is not a plain folder; `messages.ts` has its words. */
+const SHOW_NOT_A_FOLDER = { code: "page", kind: "show_not_a_folder" };
+
+/** The vault menu's Show in Explorer: a refusal is the message bar's, on the window that is on screen. Nothing is drawn when the folder opens. */
+export async function showVaultInExplorer(vault: api.VaultRef): Promise<void> {
+  const outcome = await showFolder(vault);
+  if (outcome === null) return;
+  const front = state.sessions.at(-1);
+  set({ ...state, toast: { kind: "failed", session: front?.session ?? null, error: outcome.failed } });
+}
+
+/** Show in Explorer on the unlock step and Ask 8 (no message bar there): `"done"`, or the refusal for the screen's own line. */
+export async function showVaultFolder(vault: api.VaultRef): Promise<"done" | { failed: unknown }> {
+  return (await showFolder(vault)) ?? "done";
+}
+
+/**
+ * Try again on an unavailable vault: the list is read again. `"back"` when the vault's row is available now, `"still"` when it is not, `"gone"` when the list has no such row
+ * any more, `{ failed }` when the list could not be read (the refusal the page keeps for the lock screen's line).
+ */
+export async function tryVaultAgain(id: number): Promise<"back" | "still" | "gone" | { failed: unknown }> {
+  const list = await refreshVaults();
+  if (list === null) return { failed: state.startError };
+  const row = list.find((entry) => entry.id === id);
+  if (row === undefined) return "gone";
+  return row.available ? "back" : "still";
+}
+
+/** The lock screen's add: its refusal, as the shell sent it, or `null` (see {@link StoreState.addRefusal}). */
+export function useAddRefusal(): unknown {
+  return useSelect((current) => current.addRefusal);
 }
 
 /**
@@ -3459,7 +3577,13 @@ export async function unlockRestored(password: string): Promise<"opened" | "stal
   const flow = state.restore;
   if (flow === null || flow.phase !== "done" || flow.restored === null) return "stale";
   const { opening } = flow;
-  const result = await unlock(flow.restored.vault, password);
+  // The row is the one the list gave, read again after the restore: no row, nothing is sent.
+  const row = state.vaults?.find((entry) => entry.id === flow.restored?.vault);
+  if (row === undefined) {
+    // eslint-disable-next-line @typescript-eslint/only-throw-error -- a refusal is a plain object, as the shell's are
+    throw { code: "not_found" };
+  }
+  const result = await unlock({ list: row.list, id: row.id }, password);
   if (result === "opened" && state.restore?.opening === opening) set({ ...state, restore: null });
   return result;
 }
@@ -3563,10 +3687,11 @@ function forgetRecovery(choice: string): void {
  * opens nothing, and one flow is open at a time.
  */
 export function startForgot(vault: number): void {
-  if (state.forgot !== null || state.vaults?.some((entry) => entry.id === vault) !== true) return;
+  const listed = state.vaults?.find((entry) => entry.id === vault);
+  if (state.forgot !== null || listed === undefined) return;
   forgotOpenings += 1;
   forgotRuns += 1;
-  set({ ...state, forgot: { opening: forgotOpenings, run: forgotRuns, vault, ...AT_THE_KEY, session: null } });
+  set({ ...state, forgot: { opening: forgotOpenings, run: forgotRuns, vault, list: listed.list, ...AT_THE_KEY, session: null } });
 }
 
 /**
@@ -3613,12 +3738,12 @@ export function clearForgotProblem(): void {
 export async function checkRecoveryKey(key: string): Promise<void> {
   const flow = state.forgot;
   if (flow === null || flow.phase !== "key" || flow.checking || key === "") return;
-  const { opening, vault } = flow;
+  const { opening, vault, list } = flow;
   const run = moveForgot(opening, flow.run, () => ({ checking: true, problem: null }));
   if (run === null) return;
   let answer: api.RecoveryCheckView;
   try {
-    answer = await api.recoverCheck(vault, key);
+    answer = await api.recoverCheck({ list, id: vault }, key);
   } catch (error) {
     if (!forgotStill(opening, run)) return;
     // A lock that overtook the check leaves nothing to say: the key is typed again.

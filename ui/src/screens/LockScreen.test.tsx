@@ -72,7 +72,7 @@ test("two_vaults_list_with_the_first_chosen", async () => {
   type("wrong for home");
   submit();
   expect(await screen.findByRole("alert")).toBeTruthy();
-  expect(invoke).toHaveBeenCalledWith("unlock_vault", { id: 8, password: "wrong for home" });
+  expect(invoke).toHaveBeenCalledWith("unlock_vault", { vault: { list: shell.listIdentity(), id: 8 }, password: "wrong for home" });
   await expectNoAxe(container);
 });
 
@@ -96,9 +96,10 @@ test("a_vault_that_is_not_there_cannot_be_chosen", async () => {
     { id: 7, name: "My vault", items: sampleItems() },
     { id: 8, name: "Old laptop", available: false },
   ]);
-  const old = screen.getByRole<HTMLInputElement>("radio", { name: /Old laptop/ });
-  expect(old.disabled).toBe(true);
-  expect(screen.getByText("Not available")).toBeTruthy();
+  // Not a radio at all (Task 9, 30b): its row says so in 30b's words, and has Try again and Remove from list.
+  expect(screen.queryByRole("radio", { name: /Old laptop/ })).toBeNull();
+  expect(screen.getByText("Unavailable: its folder or drive isn't there")).toBeTruthy();
+  expect(screen.queryByText("Not available")).toBeNull();
 });
 
 test("wrong_password_says_so_and_stays", async () => {
@@ -165,7 +166,7 @@ test("enter_unlocks", async () => {
   expect(button.form).toBe(passwordField().form);
   submit();
   await vi.waitFor(() => {
-    expect(invoke).toHaveBeenCalledWith("unlock_vault", { id: 7, password: PASSWORD });
+    expect(invoke).toHaveBeenCalledWith("unlock_vault", { vault: { list: shell.listIdentity(), id: 7 }, password: PASSWORD });
   });
   await vi.waitFor(() => {
     expect(shell.sessionOf(7)).toBeDefined();
@@ -265,13 +266,13 @@ test("forgot_password_link_opens_28a", async () => {
     { id: 7, name: "My vault", items: sampleItems() },
     { id: 8, name: "Home", items: sampleItems() },
   ]);
-  // Nothing on the lock screen leads to a screen a later plan builds: no adding a vault folder, no generator. Forgot password? (Task 28) sits beside Unlock;
-  // Restore a backup (4B's Task 5) and Open a backup (Task 7) are the two links under the form; the rest are the vaults, the password and Unlock.
-  for (const words of [/add existing/i, /generate/i]) {
+  // Nothing on the lock screen leads to a screen a later plan builds: no generator. Forgot password? (Task 28) sits beside Unlock; Restore a backup (4B's Task 5), Add existing
+  // vault folder (Task 9) and Open a backup (Task 7) are the links under the form; the rest are the vaults, the password and Unlock.
+  for (const words of [/generate/i]) {
     expect(screen.queryByText(words)).toBeNull();
   }
   expect(screen.queryAllByRole("link")).toEqual([]);
-  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   expect(container.querySelectorAll("[style]")).toHaveLength(0);
   // It is a button of the form's own line, not a submit: pressed, it opens 28a for the vault chosen (the second one here), and sends nothing yet.
   const link = screen.getByRole<HTMLButtonElement>("button", { name: "Forgot password?" });

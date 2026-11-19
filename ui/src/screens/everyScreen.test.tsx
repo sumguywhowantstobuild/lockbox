@@ -1089,6 +1089,43 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Remove a vault from the list, asked in the vault menu's place (18g, Task 9)",
+    shows: ["VaultBoxes#RemoveVaultBox"],
+    reach: async () => {
+      await unlocked();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Remove My vault from this list" }));
+      return screen.findByRole("alertdialog", { name: "Remove vault from this list" });
+    },
+  },
+  {
+    name: "An unavailable vault's box in the vault menu's place, with its status line (Task 9)",
+    shows: ["VaultBoxes#UnavailableVaultBox"],
+    reach: async () => {
+      start([vault(), { id: 8, name: "Home", available: false }]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitemradio", { name: "HomeNot available" }));
+      const box = await screen.findByRole("dialog", { name: "Home is unavailable" });
+      fireEvent.click(within(box).getByRole("button", { name: "Try again" }));
+      await within(box).findByText("Still unavailable. Connect its drive or put its folder back, then try again.");
+      return box;
+    },
+  },
+  {
+    name: "Show in Explorer and Remove from this list on a locked vault's unlock step (Task 9)",
+    shows: ["VaultLinks#VaultLinks"],
+    reach: async () => {
+      start([vault(), { id: 8, name: "Home", items: items() }]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitemradio", { name: "HomeLocked" }));
+      await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
+      await screen.findByRole("button", { name: "Show Home in Explorer" });
+      await screen.findByRole("button", { name: "Remove Home from this list" });
+    },
+  },
+  {
     name: "Delete a folder (14c)",
     shows: ["forms/FolderForm#DeleteFolderDialog"],
     reach: async () => {

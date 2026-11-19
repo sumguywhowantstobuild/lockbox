@@ -178,7 +178,7 @@ test("the_flow_belongs_to_the_vault_chosen_on_the_lock_screen", async () => {
   sendKey(shell.recoveryKeyOf(8));
   await screen.findByRole("heading", { level: 1, name: NEW_HEADING });
   // The check named the second vault by its registry ID, and only it changes.
-  expect(sent("recover_check")).toEqual([{ id: 8, recovery_key: shell.recoveryKeyOf(8) }]);
+  expect(sent("recover_check")).toEqual([{ vault: { list: shell.listIdentity(), id: 8 }, recovery_key: shell.recoveryKeyOf(8) }]);
   typeNew(NEW);
   setPassword();
   await screen.findByRole("heading", { level: 1, name: OFFER_TITLE });
@@ -208,7 +208,7 @@ test("a_typo_says_so", async () => {
   expect(keyBox().value).toBe("");
   expect(keyBox().getAttribute("aria-invalid")).toBe("true");
   // One command, with the key as typed in snake_case, and no choice was made.
-  expect(sent("recover_check")).toEqual([{ id: 7, recovery_key: typo }]);
+  expect(sent("recover_check")).toEqual([{ vault: { list: shell.listIdentity(), id: 7 }, recovery_key: typo }]);
   expect(shell.recoveryChoiceTokens()).toEqual([]);
   expect(foundOnPage([typo])).toEqual([]);
   // Typing again takes the line away.
@@ -269,7 +269,7 @@ test("another_or_old_key_says_it_doesnt_open_this_vault", async () => {
   await waitFor(() => {
     expect(alerts()).toEqual(["This key doesn't open Home."]);
   });
-  expect(sent("recover_check").map((one) => one.id)).toEqual([7, 7, 8]);
+  expect(sent("recover_check").map((one) => one.vault)).toEqual([7, 7, 8].map((id) => ({ list: shell.listIdentity(), id })));
 });
 
 test("a_refusal_the_shell_gives_for_the_check_is_said_in_its_own_words", async () => {

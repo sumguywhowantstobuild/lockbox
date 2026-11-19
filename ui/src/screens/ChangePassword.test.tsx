@@ -82,7 +82,7 @@ async function allOpen(list: FakeVault[]) {
   const view = await unlocked(list);
   for (const one of list.slice(1)) {
     await act(async () => {
-      expect(await unlock(one.id, PASSWORD)).toBe("opened");
+      expect(await unlock({ list: shell.listIdentity(), id: one.id }, PASSWORD)).toBe("opened");
     });
   }
   return view;
@@ -661,7 +661,7 @@ test("an_existing_vault_with_a_shorter_password_still_unlocks", async () => {
   render(<App />);
   await unlockWith("MU-short");
   await screen.findByRole("heading", { level: 1, name: "All items", hidden: true });
-  expect(sent("unlock_vault")).toEqual([{ id: 7, password: "MU-short" }]);
+  expect(sent("unlock_vault")).toEqual([{ vault: { list: shell.listIdentity(), id: 7 }, password: "MU-short" }]);
   // Changing it asks for the current one as it is (short), and the new one must be long enough.
   const panel = await openForm();
   fill(panel, "MU-short", NEW);

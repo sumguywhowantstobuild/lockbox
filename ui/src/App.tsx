@@ -102,6 +102,9 @@ export default function App() {
   } else if (vaults !== null && vaults.length === 0 && startError === null) {
     // No vault at all: first-time setup (21a).
     screen = <FirstRun />;
+  } else if (addFolder?.phase === "cloud") {
+    // The lock screen's Add existing vault folder met a cloud-synced folder: the first screens' question takes the lock screen's place, and its Cancel gives the lock screen back.
+    screen = <AddFolderStep key={String(addFolder.opening)} step={addFolder} />;
   } else {
     screen = <LockScreen />;
   }

@@ -94,7 +94,7 @@ async function allOpen(list: FakeVault[]) {
   const view = await unlocked(list);
   for (const one of list.slice(1)) {
     await act(async () => {
-      expect(await unlock(one.id, PASSWORD)).toBe("opened");
+      expect(await unlock({ list: shell.listIdentity(), id: one.id }, PASSWORD)).toBe("opened");
     });
   }
   return view;
@@ -871,7 +871,7 @@ test("a_new_foreground_session_drops_another_vaults_shown_key_and_picks", async 
   const shown = await toTheKey(8);
   expect(foundOnPage([], shown).length).toBeGreaterThan(10);
   await act(async () => {
-    expect(await unlock(7, PASSWORD)).toBe("opened");
+    expect(await unlock({ list: shell.listIdentity(), id: 7 }, PASSWORD)).toBe("opened");
   });
   await screen.findByRole("heading", { level: 1, name: "All items", hidden: true });
   expect(debugState().sessions.find((one) => one.vaultId === 8)?.recovery).toBeNull();
