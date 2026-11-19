@@ -247,7 +247,7 @@ impl Vault {
         })
     }
 
-    fn refuse_backup(&self) -> Result<()> {
+    pub(super) fn refuse_backup(&self) -> Result<()> {
         let refuse = |what| Err(CoreError::InvalidInput { what });
         if self.guard.consent_pending {
             return refuse("accept the header change first");

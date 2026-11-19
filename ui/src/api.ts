@@ -416,6 +416,17 @@ export function acceptHeader(vault: SessionRef): Promise<Tagged<null>> {
 }
 
 /**
+ * Renames the vault (18d): the name in its details changes, signed again; its folder keeps its old name. Refused as a backup is
+ * (`invalid_input`, what `"details changed"`, `"details unchecked"`, `"password copies disagree"` or `"recovery key copies disagree"`),
+ * for a name the engine won't keep (`core` `invalid_input`, what `"vault name"`: nothing but spaces, or over 200 characters), on a
+ * read-only copy (`read_only`) and a stale generation (`locked`). A rename that landed but whose answer a lock overtook answers
+ * `locked_after_change` with what `"vault name"` and the vault's registry ID.
+ */
+export function renameVault(vault: SessionRef, name: string): Promise<Tagged<null>> {
+  return call<null>("rename_vault", { session: vault.session, generation: vault.generation, name });
+}
+
+/**
  * Locks one vault (Ask 3's "Lock this vault"): the same lock as Lock all, for this session alone. The shell sends the lock
  * event before it answers; the vault asks its question again at the next unlock.
  */

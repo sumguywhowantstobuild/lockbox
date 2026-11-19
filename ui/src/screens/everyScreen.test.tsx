@@ -1079,6 +1079,16 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Rename a vault, a small box in the vault menu's place (18d, Task 8)",
+    shows: ["RenameVault#RenameVaultBox"],
+    reach: async () => {
+      await unlocked();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Rename My vault" }));
+      return screen.findByRole("dialog", { name: "Rename vault" });
+    },
+  },
+  {
     name: "Delete a folder (14c)",
     shows: ["forms/FolderForm#DeleteFolderDialog"],
     reach: async () => {

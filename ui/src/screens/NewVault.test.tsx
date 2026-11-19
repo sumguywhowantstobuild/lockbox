@@ -1,5 +1,5 @@
 // Plan 4C Task 7's screens: New vault and Add existing vault folder in the vault menu. New vault is setup's two steps (the form, then the key and its three questions) with
-// Back, begun while other vaults stay open; the new session's vault is the one the create answered with, never one found by comparing lists. Every case runs through the
+// Cancel, begun while other vaults stay open; the new session's vault is the one the create answered with, never one found by comparing lists. Every case runs through the
 // real App against the pretend shell, as a person reaches it. Typed passwords are made up (`MU-`), and a test of a wipe looks for them in the fields, the page and the store.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -225,9 +225,9 @@ async function confirmKey(vaultId: number): Promise<void> {
 
 test("new_vault_from_the_menu_runs_setups_two_steps", async () => {
   await unlocked([vault(7, "My vault")]);
-  // The vault menu has both actions, beside Lock.
+  // The vault menu has both actions, beside Lock and Rename (Task 8).
   const menu = await openVaultMenu();
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", "Lock My vault"]);
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", "Lock My vault", "Rename My vault"]);
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => {
     expect(screen.queryByRole("menu")).toBeNull();
@@ -425,6 +425,42 @@ test("a_cloud_folder_that_is_confirmed_makes_the_vault_with_the_token", async ()
   expect(foundOnPage([NEW])).toEqual([]);
 });
 
+// The warning replaces the form on the same screen, so the button that was pressed is gone: focus goes to Continue anyway (the screen reader reads its name, and the
+// warning, which the button is described by), and back to the password box on the way back, which is where the person types again.
+test("the_cloud_warning_takes_focus_to_continue_anyway_and_is_read_with_it", async () => {
+  await unlocked([vault(7, "My vault")]);
+  await toTheForm();
+  fill("Home", NEW);
+  shell.cloudNext();
+  create();
+  await cloudWarning();
+  const go = screen.getByRole("button", { name: "Continue anyway" });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(go);
+  });
+  // The warning is read with the button: it is the button's description.
+  const described = go.getAttribute("aria-describedby") ?? "";
+  expect(described).not.toBe("");
+  expect(document.getElementById(described)?.textContent).toBe(CLOUD_WARNING);
+});
+
+test("cancel_and_choose_another_on_the_cloud_warning_give_focus_to_the_password_box", async () => {
+  await unlocked([vault(7, "My vault")]);
+  await toTheForm();
+  for (const way of ["Cancel", "Choose another"]) {
+    fill("Home", NEW);
+    shell.cloudNext();
+    create();
+    await cloudWarning();
+    fireEvent.click(screen.getByRole("button", { name: way }));
+    await screen.findByRole("button", { name: "Continue" });
+    await waitFor(() => {
+      expect(document.activeElement, way).toBe(passwordBox());
+    });
+    expect(passwordBox().value).toBe("");
+  }
+});
+
 test("vault_made_but_not_listed_says_so_and_add_existing_is_reachable", async () => {
   await unlocked([vault(7, "My vault")]);
   await toTheForm();
@@ -530,7 +566,7 @@ test("a_lock_epoch_takes_the_cloud_question_of_an_add", async () => {
   expect(debugState().unlockStep).toBeNull();
 });
 
-// ---- Back ----
+// ---- Cancel ----
 
 test("back_from_new_vault_returns_to_the_vault_on_screen", async () => {
   await allOpen([vault(7, "My vault"), vault(8, "Home")]);
@@ -546,7 +582,7 @@ test("back_from_new_vault_returns_to_the_vault_on_screen", async () => {
   expect(foundOnPage(SECRETS)).toEqual([]);
   expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7, 8]);
 
-  // Escape is Back too, and the form opened again starts empty.
+  // Escape is Cancel too, and the form opened again starts empty.
   await toTheForm();
   expect(passwordBox().value).toBe("");
   expect(againBox().value).toBe("");
@@ -689,7 +725,7 @@ test("new_vault_wipes_the_typed_passwords_pending_refused_back_and_locked", asyn
   create();
   await screen.findByRole("heading", { level: 1, name: "Save your recovery key" });
 
-  // Back: typed and not sent, then Back, and nothing is left.
+  // Cancel: typed and not sent, then Cancel, and nothing is left.
   cleanup();
   resetStoreForTests();
   invoke.mockReset();

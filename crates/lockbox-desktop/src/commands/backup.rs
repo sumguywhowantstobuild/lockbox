@@ -157,7 +157,7 @@ const CHANGED_ON_DISK: &str = "header changed on disk";
 /// disagreeing on the password, or on the recovery key (which one is asked of the open vault); and "details couldn't be
 /// checked", which a header state left unknown by a failed write and a `vault.json` that is no longer the header that
 /// was opened both mean (lock and open the vault again). Every other refusal, and a stop, is passed on as it is.
-fn backup_refusal(vault: &Vault, refusal: ShellError) -> ShellError {
+pub(super) fn backup_refusal(vault: &Vault, refusal: ShellError) -> ShellError {
     let ShellError::Core(view) = refusal else {
         return refusal;
     };

@@ -1530,6 +1530,21 @@ impl Sessions {
             .map(|entry| entry.location.clone())
     }
 
+    /// Lists the vault session `id` under `name`, locked or not: a rename made inside the vault, so that
+    /// [`list`](Self::list) says the new name (an unlock reads it from the header anyway). A backup keeps the name of
+    /// its file, and a session that is not there is left alone. Holds the sessions mutex only for the change, never
+    /// while waiting for a vault.
+    pub(crate) fn set_name(&self, id: SessionId, name: &str) {
+        let mut inner = self.inner();
+        let entry = inner
+            .sessions
+            .iter_mut()
+            .find(|entry| entry.id == id && matches!(entry.location, Location::Folder(_)));
+        if let Some(entry) = entry {
+            entry.name = name.to_owned();
+        }
+    }
+
     /// Whether a session is unlocked at `location` or an open of it is under way, both read under the one sessions
     /// mutex: a folder deleted behind a check that missed an open in flight would pull it away from under it.
     pub(crate) fn in_use(&self, location: &Location) -> bool {
@@ -2195,6 +2210,58 @@ mod tests {
             Location::Folder(canonical.clone())
         );
         assert_ne!(Location::Backup(shouted), Location::Folder(canonical));
+    }
+
+    fn name_of(sessions: &Sessions, id: SessionId) -> String {
+        sessions
+            .list()
+            .into_iter()
+            .find(|info| info.session == id)
+            .expect("the session is listed")
+            .name
+    }
+
+    /// A rename changes the name a vault's session is listed under, locked or not, and nothing else's: not another
+    /// session's, not a backup's (called what its file is called), and a session that is not there is left alone.
+    #[test]
+    fn set_name_changes_a_vault_sessions_listed_name_locked_or_not() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let (first, first_generation, _) = open_writable(&sessions, parent.path());
+        let (second, ..) = open_writable(&sessions, parent.path());
+        let backup = Location::Backup(parent.path().join("Spare.lockbox-backup"));
+        let vault = open_read_only_vault(&create_closed(parent.path()));
+        let (copy, _) = open_as(&sessions, backup, Opened::ReadOnly(vault));
+        assert_eq!(name_of(&sessions, copy), "Spare");
+
+        sessions.set_name(first, "Work");
+        assert_eq!(name_of(&sessions, first), "Work");
+        assert_eq!(name_of(&sessions, second), "Family");
+        let info = sessions
+            .list()
+            .into_iter()
+            .find(|i| i.session == first)
+            .unwrap();
+        assert_eq!(
+            (info.generation, info.state),
+            (first_generation, SessionState::Unlocked),
+            "only the name changes"
+        );
+
+        // A lock keeps the new name; so does a second change of it.
+        sessions.lock_all(LockReason::Manual);
+        assert_eq!(state(&sessions, first), SessionState::Locked);
+        assert_eq!(name_of(&sessions, first), "Work");
+        sessions.set_name(first, "Work again");
+        assert_eq!(name_of(&sessions, first), "Work again");
+        assert_eq!(state(&sessions, first), SessionState::Locked);
+
+        // A backup keeps its file's name; a session that is not there changes nothing.
+        sessions.set_name(copy, "Not a vault name");
+        assert_eq!(name_of(&sessions, copy), "Spare");
+        let before = sessions.list().len();
+        sessions.set_name(SessionId(first.0 + 100), "Nobody");
+        assert_eq!(sessions.list().len(), before);
     }
 
     #[test]

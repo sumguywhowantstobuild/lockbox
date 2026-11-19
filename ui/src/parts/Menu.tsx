@@ -1,5 +1,5 @@
 import { Menu as BaseMenu } from "@base-ui/react/menu";
-import { Fragment, type ReactNode } from "react";
+import { Fragment, type ReactNode, type Ref } from "react";
 import { CheckIcon } from "./Icon";
 import { usePortalContainer } from "./Portal";
 
@@ -58,6 +58,7 @@ export function Menu({
   rowsLabel = "Vaults",
   popupLabel,
   triggerClassName = "pill",
+  triggerRef,
 }: {
   label: string;
   icon?: ReactNode;
@@ -66,6 +67,8 @@ export function Menu({
   rowsLabel?: string;
   popupLabel?: string;
   triggerClassName?: string;
+  /** The button that opens the menu, for a box that opens where the menu was and gives focus back to it (Rename vault). */
+  triggerRef?: Ref<HTMLButtonElement>;
 }) {
   const container = usePortalContainer();
   const chosen = items.find((item) => item.checked === true);
@@ -135,7 +138,7 @@ export function Menu({
   );
   return (
     <BaseMenu.Root>
-      <BaseMenu.Trigger className={triggerClassName} aria-label={icon === undefined ? undefined : label}>
+      <BaseMenu.Trigger ref={triggerRef} className={triggerClassName} aria-label={icon === undefined ? undefined : label}>
         {icon ?? label}
       </BaseMenu.Trigger>
       <BaseMenu.Portal container={container}>

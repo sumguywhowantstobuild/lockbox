@@ -2056,6 +2056,72 @@ export async function changePassword(session: number, currentPassword: string, n
   }));
 }
 
+// ---- Rename a vault (Plan 4C Task 8: 18d) ----
+//
+// The small box in the vault menu's place is opened for one session and sends the session and the generation it was opened in, never whatever is on screen (the box goes with
+// its vault, so an answer for a vault that is no longer on screen still lands in that vault's record). What is typed is the vault's name, which is not a secret: the shell keeps
+// it in the vault's details and the list reads it from there, so the page takes the new name from what it sent and reads the list again.
+
+/** The four reasons a backup is refused, which Rename is refused for as well, and the page's own kind for each: its words end "then rename it" (`messages.ts`). */
+const RENAME_REFUSALS: Readonly<Record<string, string>> = {
+  "details changed": "rename_details_changed",
+  "details unchecked": "rename_details_unchecked",
+  "password copies disagree": "rename_password_copies_disagree",
+  "recovery key copies disagree": "rename_recovery_key_copies_disagree",
+};
+
+/** A refusal of a rename as the box says it: one of the four backup reasons becomes the page's own kind, any other is passed as it is. */
+function asRenameRefusal(error: unknown): unknown {
+  if (!refusedWith(error, "invalid_input")) return error;
+  const what = (error as { what?: unknown }).what;
+  const kind = typeof what === "string" && Object.hasOwn(RENAME_REFUSALS, what) ? RENAME_REFUSALS[what] : undefined;
+  return kind === undefined ? error : { code: "page", kind };
+}
+
+/**
+ * Reads the vault list again after a rename that landed. The list reads each name from the vault's details, so this is what the lock screen and the vault menu's rows
+ * say; when it can't be read, the entry of the vault the record held (by its registry ID, never by name) is given the new name instead.
+ */
+async function readListAfterRename(vaultId: number, name: string): Promise<void> {
+  const list = await refreshVaults();
+  if (list !== null || vaultId <= 0 || state.vaults === null) return;
+  set({ ...state, vaults: state.vaults.map((entry) => (entry.id === vaultId ? { ...entry, name } : entry)) });
+}
+
+/**
+ * Gives the vault a new name (18d). `name` is sent exactly as given (the box has trimmed it). The session and generation are those the box was opened in.
+ *
+ * - **`"done"`:** the vault's record takes the name (so the side menu's head, the vault menu's row and its Lock and Rename items, and the vault strip change at once) and the
+ *   list is read again for the lock screen.
+ * - **A lock after the name landed** (`locked_after_change`, or the shell's good answer dropped by the bridge as from before the lock): the list is read again, the record
+ *   goes if it is still that generation, and nothing is said: the lock screen shows the new name. `"stale"`.
+ * - **A lock before it was written** (`locked`): nothing changed; the record goes if still that generation. `"stale"`.
+ * - **Any other refusal:** the list is read again (it says what is really on disk), and the refusal comes back as `{ failed }` for the box to say, the four backup reasons
+ *   as the page's own kinds.
+ */
+export async function renameVault(vault: api.SessionRef, name: string): Promise<"done" | "stale" | { failed: unknown }> {
+  const { session, generation } = vault;
+  const vaultId = sessionOf(session)?.vaultId ?? NOT_ON_THE_LIST;
+  try {
+    await api.renameVault(vault, name);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) {
+      await readListAfterRename(vaultId, name);
+      dropIfStillOpen(session, generation);
+      return "stale";
+    }
+    if (refusedAsLocked(error)) {
+      dropIfStillOpen(session, generation);
+      return "stale";
+    }
+    await refreshVaults();
+    return { failed: asRenameRefusal(error) };
+  }
+  if (stillOpen(session, generation)) update(session, (current) => ({ ...current, name }));
+  await readListAfterRename(vaultId, name);
+  return "done";
+}
+
 // ---- A new recovery key (Plan 4C Task 5: 29a to 29c) ----
 //
 // Asked for from inside an open vault, with the current password checked in the same call. The form (29a) is the vault's own, as the change-password form is: what is

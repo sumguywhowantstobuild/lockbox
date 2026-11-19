@@ -2964,6 +2964,30 @@
   margin: 6px 4px 0;
 }
 
+/* Rename vault (18d): the vault menu's own box turned into a small form, in the menu's place and width (the popup is `menu mwide`). The label and the name box sit in a block
+   padded as drawn (8px 8px 2px); the label has no space above it here, the box's own edge says it is a field (as every field's does), and the buttons sit at the foot, at
+   the right, as a dialog's do. The refusal goes under the box. */
+.rnbox {
+  flex: none;
+}
+
+.rnname {
+  padding: 8px 8px 2px;
+}
+
+.rnname .flab {
+  margin-top: 0;
+}
+
+.rnname .err {
+  margin: 6px 4px 0;
+}
+
+.rnbox .dbtns {
+  margin-top: 8px;
+  padding: 0 3px 3px;
+}
+
 /* The generator: the value, what changes it, and its two buttons. Inside the form it sits under the password; on its own
    page it is the page. */
 .gen {

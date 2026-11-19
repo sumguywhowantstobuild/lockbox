@@ -29,6 +29,7 @@
     "allow-regenerate-recovery",
     "allow-recovery-confirmed",
     "allow-accept-header",
+    "allow-rename-vault",
     "allow-list-items",
     "allow-get-item",
     "allow-reveal-password",

@@ -475,6 +475,25 @@ impl Vault {
         Ok(())
     }
 
+    /// Gives the vault a new name (18d): checked as `create` checks it, refused exactly when a backup is (a changed header
+    /// not accepted, a header MAC that does not verify, a header state left unknown, a key slot the copies disagree on),
+    /// then the header is signed again and written `vault.json` first, then `vault.json.bak`. Slots, ID, creation time and
+    /// the folder's name stay. An `Err` after `vault.json` landed leaves the new name live (`commit` reads it back); the
+    /// next writable unlock repairs `.bak`.
+    ///
+    /// Not through [`HeaderGuard::check`]: it has no argument that refuses all of these (`check(None)` lets a pending
+    /// consent through, and `check(Some(_))` lets a disagreeing slot of that type through). When the refusal passes the
+    /// guard is all clear, so it is neither read nor reset here; a failed write sets `uncertain` in `commit`.
+    pub fn rename(&mut self, name: &str) -> Result<()> {
+        validate_name(name)?;
+        self.refuse_backup()?;
+        let mut header = self.header.clone();
+        header.name = name.to_owned();
+        header.header_mac = Some(header_mac(&header, &self.vault_key));
+        let primary = header.clone();
+        self.commit(header, &primary, |dir| write_headers(dir, &primary))
+    }
+
     /// Runs `write` (which saves `header`, or the pair of headers whose `vault.json` half is
     /// `primary`) and makes `header` the live one. If it fails part-way, `vault.json` is read
     /// back: it is accepted only when it holds `primary` (the write landed) or the header
@@ -1385,5 +1404,353 @@ mod tests {
         drop(vault);
         // The spare's recovery slot was never delivered: the old key does not open it.
         assert!(Vault::unlock_with_recovery(&lost, &old_key).is_err());
+    }
+
+    // ---- Rename (Plan 4C, Task 8) ----
+
+    /// Disarms every failpoint when a test ends, also when it fails part-way.
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            failpoint::disarm_all();
+        }
+    }
+
+    fn header_on_disk(dir: &Path, file: &str) -> crate::header::VaultHeader {
+        parse_header(&fs::read(dir.join(file)).unwrap()).unwrap()
+    }
+
+    /// The renamed vault's header is whole: both slots exactly as they were, the same ID and creation time, a new MAC
+    /// that verifies (the MAC covers the name), the same bytes in both files, and no Ask 3 at the next unlock with
+    /// either credential. Skipping the new MAC fails this.
+    #[test]
+    fn rename_keeps_both_slots_and_rewrites_the_mac() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let recovery = created.recovery;
+        let mut vault = created.vault;
+        let dir = vault.dir().to_path_buf();
+        let before = header_on_disk(&dir, HEADER_FILE);
+        assert_eq!(before.slots.len(), 2);
+
+        vault.rename("Work and home").unwrap();
+        assert_eq!(vault.name(), "Work and home");
+        drop(vault);
+
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, bak, "both files hold the same header");
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            let after = header_on_disk(&dir, file);
+            assert_eq!(after.name, "Work and home", "{file}");
+            assert_eq!(after.slots, before.slots, "{file}: both slots, unchanged");
+            assert_eq!(after.vault_id, before.vault_id, "{file}");
+            assert_eq!(after.created_at, before.created_at, "{file}");
+            assert!(after.header_mac.is_some(), "{file}");
+            assert_ne!(after.header_mac, before.header_mac, "{file}: signed again");
+        }
+
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(!report.header_mac_mismatch, "no Ask 3");
+        assert!(!report.used_backup_header && !report.header_repair_failed);
+        assert_eq!(vault.name(), "Work and home");
+        assert_eq!(vault.unverified_slot(), None);
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            assert!(
+                crate::header::verify_header_mac(&header_on_disk(&dir, file), &vault.vault_key),
+                "{file}: the MAC verifies with the vault's key"
+            );
+        }
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert!(
+            !report.header_mac_mismatch,
+            "no Ask 3 with the recovery key"
+        );
+        assert_eq!(vault.name(), "Work and home");
+    }
+
+    /// The name is changed in `vault.json` only, outside Lockbox, and the vault opened with its password: Ask 3 is
+    /// pending.
+    fn unlocked_after_an_outside_name_change(dir: &Path) -> Vault {
+        let mut header = header_on_disk(dir, HEADER_FILE);
+        header.name = "Renamed".to_owned();
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        let (vault, report) = Vault::unlock_with_password(dir, PW).unwrap();
+        assert!(report.header_mac_mismatch);
+        vault
+    }
+
+    /// A rename is refused exactly as a backup is, and the words are the backup's. Whatever the refusal, both
+    /// header files, the folder's listing and the open name are as they were.
+    fn assert_rename_refused(vault: &mut Vault, expected: &str) {
+        let before = (read_pair(vault.dir()), names(vault.dir()));
+        let name = vault.name().to_owned();
+        assert_eq!(what(vault.rename("Another name")), expected);
+        assert_eq!(vault.name(), name);
+        assert_eq!((read_pair(vault.dir()), names(vault.dir())), before);
+        // The backup's own check says the same thing: one rule, shared.
+        assert_eq!(what(vault.refuse_backup()), expected);
+    }
+
+    #[test]
+    fn rename_refused_as_a_backup_is_with_both_files_unchanged() {
+        let _cleanup = Cleanup;
+        let parent = TempDir::new();
+
+        // An unaccepted header change. Accepting it lifts the refusal.
+        let dir = Vault::create(parent.path(), "Accept", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        let mut vault = unlocked_after_an_outside_name_change(&dir);
+        assert!(vault.guard.consent_pending);
+        assert_rename_refused(&mut vault, "accept the header change first");
+        vault.accept_header().unwrap();
+        vault.rename("After accepting").unwrap();
+        drop(vault);
+
+        // A header whose MAC does not verify, with no consent pending (the MAC test alone).
+        let dir = Vault::create(parent.path(), "Mac", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        let mut vault = unlocked_after_an_outside_name_change(&dir);
+        vault.guard.consent_pending = false;
+        assert_rename_refused(&mut vault, "accept the header change first");
+        drop(vault);
+
+        // A header state left unknown by a failed write.
+        let dir = Vault::create(parent.path(), "Unknown", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        let mut header = header_on_disk(&dir, HEADER_FILE);
+        header.slots[0].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        failpoint::arm("unlock.repair_write");
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        failpoint::disarm_all();
+        failpoint::arm("write_headers.before_first");
+        assert!(vault.change_password(NEW).is_err());
+        failpoint::disarm_all();
+        assert!(vault.guard.uncertain);
+        assert_rename_refused(&mut vault, "header state unknown; reopen the vault");
+        drop(vault);
+
+        // The copies disagree on a key slot. Replacing that credential lifts the refusal.
+        let dir = Vault::create(parent.path(), "Disagree", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        let mut header = header_on_disk(&dir, HEADER_FILE);
+        header.slots[1].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Recovery));
+        assert_rename_refused(
+            &mut vault,
+            "header copies disagree; replace the unchecked credential first",
+        );
+        vault.regenerate_recovery().unwrap();
+        vault.rename("After the new key").unwrap();
+    }
+
+    /// A name is checked as `create` checks it: nothing but spaces, or over 200 characters, is refused with the same
+    /// words, before anything else is looked at; any other name is kept exactly as given, spaces and all.
+    #[test]
+    fn rename_checks_the_name_as_create_does() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        let before = (read_pair(&dir), names(&dir));
+
+        let too_long = "x".repeat(201);
+        let too_long_wide = "é".repeat(201);
+        for bad in ["", " ", "\t\r\n", "   \u{a0}  ", &too_long, &too_long_wide] {
+            assert_eq!(what(vault.rename(bad)), "vault name", "{bad:?}");
+            assert_eq!(
+                what(Vault::create(parent.path(), bad, PW).map(|_| ())),
+                "vault name",
+                "create says the same for {bad:?}"
+            );
+            assert_eq!(vault.name(), "Family");
+            assert_eq!((read_pair(&dir), names(&dir)), before, "{bad:?}");
+        }
+
+        // The name is looked at first: a refused backup state does not hide it.
+        let other = Vault::create(parent.path(), "Other", PW).unwrap().vault;
+        let other_dir = other.dir().to_path_buf();
+        drop(other);
+        let mut pending = unlocked_after_an_outside_name_change(&other_dir);
+        assert_eq!(what(pending.rename("   ")), "vault name");
+        assert_eq!(
+            what(pending.rename("Fine")),
+            "accept the header change first"
+        );
+        drop(pending);
+
+        // 200 characters (of any width) are kept, as is a name with spaces round it.
+        let longest = "é".repeat(200);
+        for good in [
+            "x".repeat(200),
+            longest,
+            "  Padded  ".to_owned(),
+            "AC/DC: a \"name\"".to_owned(),
+        ] {
+            assert!(validate_name(&good).is_ok());
+            vault.rename(&good).unwrap();
+            assert_eq!(vault.name(), good);
+            assert_eq!(header_on_disk(&dir, HEADER_FILE).name, good);
+            assert_eq!(header_on_disk(&dir, HEADER_BACKUP).name, good);
+        }
+    }
+
+    /// The folder keeps the name it was made with, whatever the vault is called now.
+    #[test]
+    fn rename_leaves_the_folder_name() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        let id = vault.id();
+        let listing = names(parent.path());
+        assert_eq!(listing.len(), 1);
+
+        vault.rename("Something else entirely").unwrap();
+        assert_eq!(vault.dir(), dir);
+        assert!(
+            !parent
+                .path()
+                .join(folder_name("Something else entirely", &id))
+                .exists()
+        );
+        drop(vault);
+        assert_eq!(names(parent.path()), listing, "no folder made or renamed");
+        assert_eq!(read_vault_name(&dir).unwrap(), "Something else entirely");
+        assert!(Vault::unlock_with_password(&dir, PW).is_ok());
+    }
+
+    /// The MAC still covers the name after a rename: a name changed outside Lockbox, on a vault Lockbox renamed, is
+    /// still Ask 3 at the next unlock (so the rename did not weaken what the MAC checks).
+    #[test]
+    fn a_name_changed_outside_lockbox_still_shows_ask_3() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        vault.rename("Renamed in Lockbox").unwrap();
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(!report.header_mac_mismatch);
+        assert_eq!(vault.name(), "Renamed in Lockbox");
+        drop(vault);
+
+        // Outside Lockbox, in both files, the name is changed again.
+        let mut header = header_on_disk(&dir, HEADER_FILE);
+        header.name = "Changed outside".to_owned();
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            fs::write(dir.join(file), serialize_header(&header)).unwrap();
+        }
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(report.header_mac_mismatch, "Ask 3");
+        assert_eq!(vault.name(), "Changed outside");
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(
+            report.header_mac_mismatch,
+            "still pending: nothing accepted"
+        );
+        drop(vault);
+    }
+
+    /// A rename that dies between the two files (the write hook between `vault.json` and `.bak`): `vault.json` is
+    /// ahead, with the new name, and the vault in the session already says so. Each credential is tried on its own
+    /// copy of the interrupted folder: a read-only open writes nothing, a writable unlock opens `vault.json` (no
+    /// Ask 9) and repairs the spare, and both credentials still work. A third copy that lost `vault.json` opens the
+    /// spare (Ask 9) with the old name.
+    #[test]
+    fn rename_interrupted_is_repaired_at_the_next_writable_unlock() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let recovery = created.recovery;
+        let mut vault = created.vault;
+        let dir = vault.dir().to_path_buf();
+        let (old_main, old_bak) = read_pair(&dir);
+        assert_eq!(old_main, old_bak);
+
+        failpoint::arm("write_headers.before_second");
+        let result = vault.rename("Renamed");
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert_eq!(
+            vault.name(),
+            "Renamed",
+            "vault.json landed: the name is live"
+        );
+        assert_eq!(vault.unverified_slot(), None);
+        assert!(!vault.guard.uncertain);
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_ne!(main, bak, "interrupted: vault.json is ahead of .bak");
+        assert_eq!(bak, old_bak);
+        assert_eq!(header_on_disk(&dir, HEADER_FILE).name, "Renamed");
+
+        let by_password = parent.path().join("by-password");
+        copy_folder(&dir, &by_password);
+        assert!(opens_read_only(&by_password, Credential::Password(PW)));
+        assert_eq!(read_pair(&by_password), (main.clone(), bak.clone()));
+        let (vault, report) = Vault::unlock_with_password(&by_password, PW).unwrap();
+        assert!(!report.used_backup_header, "no Ask 9");
+        assert!(!report.header_mac_mismatch, "no Ask 3");
+        assert!(!report.header_repair_failed);
+        assert_eq!(vault.name(), "Renamed");
+        drop(vault);
+        assert_eq!(read_pair(&by_password), (main.clone(), main.clone()));
+        assert!(Vault::unlock_with_recovery(&by_password, &recovery).is_ok());
+
+        let by_key = parent.path().join("by-recovery-key");
+        copy_folder(&dir, &by_key);
+        assert!(opens_read_only(&by_key, Credential::Recovery(&recovery)));
+        assert_eq!(read_pair(&by_key), (main.clone(), bak.clone()));
+        let (vault, report) = Vault::unlock_with_recovery(&by_key, &recovery).unwrap();
+        assert!(!report.used_backup_header && !report.header_mac_mismatch);
+        assert_eq!(vault.name(), "Renamed");
+        drop(vault);
+        assert_eq!(read_pair(&by_key), (main.clone(), main.clone()));
+        assert!(Vault::unlock_with_password(&by_key, PW).is_ok());
+
+        // vault.json lost before any repair: the spare opens, with the old name (Ask 9), and the new name is gone
+        // with the file; nothing else is lost.
+        let lost = parent.path().join("main-lost");
+        copy_folder(&dir, &lost);
+        fs::remove_file(lost.join(HEADER_FILE)).unwrap();
+        let (vault, report) = Vault::unlock_with_password(&lost, PW).unwrap();
+        assert!(report.used_backup_header, "Ask 9: the spare opened");
+        assert!(!report.header_mac_mismatch);
+        assert_eq!(vault.name(), "Family");
+        drop(vault);
+        assert!(Vault::unlock_with_recovery(&lost, &recovery).is_ok());
+    }
+
+    /// A write that dies before `vault.json` is touched changes nothing: the old name stays live, both files are as
+    /// they were, and a retry goes through.
+    #[test]
+    fn rename_failed_before_vault_json_changes_nothing() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        let before = read_pair(&dir);
+        failpoint::arm("write_headers.before_first");
+        let result = vault.rename("Renamed");
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert_eq!(vault.name(), "Family");
+        assert_eq!(read_pair(&dir), before);
+        vault.rename("Renamed").unwrap();
+        assert_eq!(read_vault_name(&dir).unwrap(), "Renamed");
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, bak);
     }
 }

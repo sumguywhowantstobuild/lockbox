@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ItemSummary } from "../api";
 import { ChevronsIcon, GeneratorIcon, ListIcon, LockIcon, PlusIcon, SearchIcon, SettingsIcon, SideMenuIcon, TrashIcon } from "../parts/Icon";
 import { Menu, type MenuRow } from "../parts/Menu";
@@ -22,6 +22,7 @@ import {
 import { kindRow, shownName } from "../openBackupWords";
 import { listedName, LOCKED, NOT_AVAILABLE } from "../vaultWords";
 import { NewFolderBox } from "./forms/FolderForm";
+import { RenameVaultBox } from "./RenameVault";
 
 /** A folder of the open vault, with how many items are in it. */
 export interface FolderEntry {
@@ -35,7 +36,7 @@ const TILES = ["t0", "t1", "t2", "t3", "t4"];
 
 /**
  * The side menu: which vault is open (its name opens the vault menu: a row for every vault of the list, which brings an open one to the front and opens a locked one's unlock
- * step, a row for every open backup and older copy, then New vault (setup's two steps, with Back) and Add existing vault folder, and Lock for the one on screen; an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
+ * step, a row for every open backup and older copy, then New vault (setup's two steps, with Back) and Add existing vault folder, Lock for the one on screen, and Rename for an open, writable, listed vault (18d: the menu closes and a small box opens in its place); an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
  * its count, and Settings and Lock all side by side. It closes to a strip of icons; then each icon carries its name for a screen reader, and for a hint
  * when the pointer rests on it. The menu is only there while a vault is unlocked, so the Generator never shows on the lock screen.
  * A vault opened read-only has no "New folder".
@@ -58,6 +59,9 @@ export function SideMenu({
   const [closed, setClosed] = useState(false);
   // The name box "New folder" becomes. A lock takes the whole side menu, and the box with it.
   const [naming, setNaming] = useState(false);
+  // 18d: the small box Rename becomes, in the vault menu's place. It is this vault's own: a switch or a lock takes the side menu, and the box with it.
+  const [renaming, setRenaming] = useState(false);
+  const vaultButton = useRef<HTMLButtonElement>(null);
   // Every vault of the list is one row of the vault menu, in the list's order (each once): an open one brings its window to the front, a locked one opens its own unlock
   // step, an unavailable one says so and does nothing yet, and one whose details can't be read opens Ask 8 from the same step. Then the sessions that are not on the list
   // (a backup, an older copy), in the order they were opened (a switch does not reorder them); a read-only one says what it is under its name.
@@ -122,6 +126,7 @@ export function SideMenu({
               <ChevronsIcon className="i vchev" />
             </>
           }
+          triggerRef={vaultButton}
           rows={rows}
           items={[
             {
@@ -139,8 +144,28 @@ export function SideMenu({
                 void lockOneVault(data.session);
               },
             },
+            // Only an open, writable vault of the list: a read-only copy, an older copy and a session that is not on the list get switch and Lock only.
+            ...(!data.readOnly && data.kind === "vault" && data.vaultId > 0
+              ? [
+                  {
+                    label: `Rename ${onScreen}`,
+                    onSelect: () => {
+                      setRenaming(true);
+                    },
+                  },
+                ]
+              : []),
           ]}
         />
+        {renaming ? (
+          <RenameVaultBox
+            data={data}
+            anchor={vaultButton}
+            onClose={() => {
+              setRenaming(false);
+            }}
+          />
+        ) : null}
         <button
           type="button"
           className="rside"

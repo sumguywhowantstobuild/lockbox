@@ -20,6 +20,7 @@ use tauri::State;
 use tauri::ipc::Request;
 use zeroize::Zeroizing;
 
+use super::backup::backup_refusal;
 use super::{NoArgs, args, blocking};
 use crate::error::{Confirm, Outcome, ShellError, ShellResult, VAULT_NOT_LISTED};
 use crate::locations::{CloudProvider, LocationCheck};
@@ -980,6 +981,43 @@ impl Shell {
         self.sessions
             .write(session, generation, |vault, _| Ok(vault.accept_header()?))
     }
+
+    /// Gives the vault a new name (18d), signed again and written to both header files; the folder keeps its name. It
+    /// asks for no password. Refused as a backup is (`details changed`, `details unchecked`, `password copies disagree`
+    /// or `recovery key copies disagree`, from the engine's words), and for a name the engine will not keep (nothing but
+    /// spaces, or over 200 characters). A lock that came first changes nothing (`Locked`); one that came during the
+    /// writes answers `LockedAfterChange { what: "vault name", vault }`. A write that came back as an error after
+    /// `vault.json` landed (the engine's `commit` read it back and made the new name live) is a success: the name is in
+    /// effect and not secret, and the next writable unlock repairs `.bak`. Whenever the name is in effect, the session
+    /// is listed under it.
+    pub fn rename_vault(
+        &self,
+        session: SessionId,
+        generation: u64,
+        name: String,
+    ) -> ShellResult<Tagged<()>> {
+        let change = Change {
+            what: "vault name",
+            vault: self.registry_id_of(session),
+        };
+        let answer = self
+            .sessions
+            .write_change(session, generation, change, |vault, cancel| {
+                // A lock that came first changes nothing.
+                before_header_writes(cancel).map_err(stopped_by_a_lock)?;
+                let before = vault.name().to_owned();
+                match vault.rename(&name) {
+                    Ok(()) => Ok(()),
+                    // The write came back as an error after `vault.json` landed: the new name is live.
+                    Err(_) if before != name && vault.name() == name => Ok(()),
+                    Err(error) => Err(backup_refusal(vault, error.into())),
+                }
+            });
+        if matches!(answer, Ok(_) | Err(ShellError::LockedAfterChange { .. })) {
+            self.sessions.set_name(session, &name);
+        }
+        answer
+    }
 }
 
 #[derive(Deserialize)]
@@ -1060,6 +1098,14 @@ struct RecoveryConfirmed {
     session: SessionId,
     generation: u64,
     issue: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameVault {
+    session: SessionId,
+    generation: u64,
+    name: String,
 }
 
 #[tauri::command]
@@ -1250,6 +1296,20 @@ pub(super) async fn accept_header(
     } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.accept_header(session, generation)).await
+}
+
+#[tauri::command]
+pub(super) async fn rename_vault(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<()>> {
+    let RenameVault {
+        session,
+        generation,
+        name,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.rename_vault(session, generation, name)).await
 }
 
 #[cfg(test)]
@@ -5168,6 +5228,7 @@ mod tests {
             ("new_recovery_key", "shell.new_recovery_key("),
             ("regenerate_recovery", "shell.regenerate_recovery("),
             ("recovery_confirmed", "shell.recovery_confirmed("),
+            ("rename_vault", "shell.rename_vault("),
             ("recover_check", "shell.recover_check("),
             ("recover_finish", "shell.recover_finish("),
             ("recover_forget", "shell.recover_forget("),
@@ -5307,5 +5368,460 @@ mod tests {
             .unwrap(),
             json!({ "code": "locked_after_change", "what": "vault created", "vault": 4 })
         );
+    }
+
+    // ---- Rename a vault (Plan 4C, Task 8) ----
+
+    /// `vault`, opened through the engine, as the shell's writable session at its folder (listed or not).
+    fn session_over(ts: &TestShell, vault: Vault) -> (SessionId, u64) {
+        let location = Location::folder(vault.dir()).unwrap();
+        let opened = ts.shell.sessions.open(Some(location.clone()), None, |_| {
+            Ok(OpenStep::Session(location, Opened::Writable(vault), ()))
+        });
+        let Ok(Outcome::Done(tagged)) = opened else {
+            panic!("the session did not open");
+        };
+        (tagged.session, tagged.generation)
+    }
+
+    /// Edits `vault.json` alone, outside Lockbox.
+    fn edit_main(dir: &Path, edit: impl FnOnce(&mut lockbox_core::internals::header::VaultHeader)) {
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        edit(&mut header);
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+    }
+
+    fn rename(
+        ts: &TestShell,
+        session: SessionId,
+        generation: u64,
+        name: &str,
+    ) -> ShellResult<Tagged<()>> {
+        ts.shell.rename_vault(session, generation, name.to_owned())
+    }
+
+    /// The name the vault list shows for the vault `id` (read from its header).
+    fn listed_name(ts: &TestShell, id: u32) -> Option<String> {
+        let entries = ts.shell.registry.list().unwrap();
+        entries.into_iter().find(|e| e.id == id).unwrap().name
+    }
+
+    /// The name the session list shows for `session`, and its state.
+    fn session_line(ts: &TestShell, session: SessionId) -> (String, SessionState) {
+        let info = ts
+            .shell
+            .sessions
+            .list()
+            .into_iter()
+            .find(|info| info.session == session)
+            .expect("the session is listed");
+        (info.name, info.state)
+    }
+
+    /// A stale generation, a foreign session and a read-only copy: no rename, and no header written. The session's
+    /// gate comes before the name is looked at, so a refused session is never told about a bad name.
+    #[test]
+    fn rename_vault_refused_stale_foreign_and_read_only() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = on_disk(&ts, &dir);
+        for name in ["Renamed", "   "] {
+            assert_eq!(
+                rename(&ts, session, generation + 1, name).err(),
+                Some(ShellError::Locked),
+                "{name:?}"
+            );
+            assert_eq!(
+                rename(&ts, SessionId(session.0 + 100), generation, name).err(),
+                Some(ShellError::NotFound),
+                "{name:?}"
+            );
+            assert_eq!(on_disk(&ts, &dir), before, "{name:?}");
+        }
+        assert_eq!(session_line(&ts, session).0, "Family");
+
+        // A read-only copy: refused, and nothing is written for it or anything else.
+        let backup = ts.folder("Backups").join("Family.lockbox-backup");
+        ts.dialogs.answer(Some(backup.clone()));
+        done(
+            heavy(|| ts.shell.backup_vault(session, generation, 1))
+                .unwrap()
+                .data,
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let credential = super::super::backup::CredentialArg::Password(secret(PW));
+        let copy = ts.open_backup_read_only(&backup, credential);
+        assert!(copy.data.read_only);
+        // (The backup noted its date in the state file: what a refused rename must leave alone is what is there now.)
+        let before = on_disk(&ts, &dir);
+        for name in ["Renamed", "   "] {
+            assert_eq!(
+                rename(&ts, copy.session, copy.generation, name).err(),
+                Some(ShellError::ReadOnly),
+                "{name:?}"
+            );
+        }
+        assert_eq!(on_disk(&ts, &dir), before);
+
+        // A session that has locked since.
+        assert_eq!(
+            rename(&ts, session, generation, "Renamed").err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(on_disk(&ts, &dir), before);
+        assert_eq!(read_vault_name(&dir).unwrap(), "Family");
+    }
+
+    /// Each request's fields (and nothing else), and each answer and refusal as the page reads it.
+    #[test]
+    fn rename_json_shapes() {
+        refuses_a_path::<RenameVault>(json!({ "session": 7, "generation": 3, "name": "Family" }));
+        // No name, a name that is not text, a missing session or generation, or an extra field: no request.
+        for body in [
+            json!({ "session": 7, "generation": 3 }),
+            json!({ "session": 7, "generation": 3, "name": 5 }),
+            json!({ "session": 7, "generation": 3, "name": null }),
+            json!({ "generation": 3, "name": "Family" }),
+            json!({ "session": 7, "name": "Family" }),
+            json!({ "session": "7", "generation": 3, "name": "Family" }),
+            json!({ "session": 7, "generation": 3, "name": "Family", "password": PW }),
+        ] {
+            assert_eq!(
+                parse::<RenameVault>(&InvokeBody::Json(body.clone())).err(),
+                Some(MALFORMED),
+                "{body}"
+            );
+        }
+        let Ok(RenameVault {
+            session,
+            generation,
+            name,
+        }) = parse::<RenameVault>(&InvokeBody::Json(
+            json!({ "session": 7, "generation": 3, "name": "Family" }),
+        ))
+        else {
+            panic!("a whole request is read");
+        };
+        assert_eq!(
+            (session, generation, name.as_str()),
+            (SessionId(7), 3, "Family")
+        );
+
+        // Row 16: success.
+        let renamed = Tagged {
+            session: SessionId(7),
+            generation: 3,
+            data: (),
+        };
+        assert_eq!(
+            serde_json::to_string(&renamed).unwrap(),
+            r#"{"session":7,"generation":3,"data":null}"#
+        );
+        // Rows 2 to 5: the session gate.
+        for (error, wire) in [
+            (ShellError::NotFound, json!({ "code": "not_found" })),
+            (ShellError::Locked, json!({ "code": "locked" })),
+            (ShellError::ReadOnly, json!({ "code": "read_only" })),
+            (
+                ShellError::Busy {
+                    what: "operation in progress",
+                },
+                json!({ "code": "busy", "what": "operation in progress" }),
+            ),
+            // Row 7: a name the engine won't keep.
+            (
+                CoreError::InvalidInput { what: "vault name" }.into(),
+                json!({ "code": "core", "kind": "invalid_input", "what": "vault name" }),
+            ),
+            // Rows 8 to 11: the backup's four refusals.
+            (
+                ShellError::InvalidInput {
+                    what: "details changed",
+                },
+                json!({ "code": "invalid_input", "what": "details changed" }),
+            ),
+            (
+                ShellError::InvalidInput {
+                    what: "details unchecked",
+                },
+                json!({ "code": "invalid_input", "what": "details unchecked" }),
+            ),
+            (
+                ShellError::InvalidInput {
+                    what: "password copies disagree",
+                },
+                json!({ "code": "invalid_input", "what": "password copies disagree" }),
+            ),
+            (
+                ShellError::InvalidInput {
+                    what: "recovery key copies disagree",
+                },
+                json!({ "code": "invalid_input", "what": "recovery key copies disagree" }),
+            ),
+            // Row 12: a header too big to write.
+            (
+                CoreError::TooLarge {
+                    what: "vault header",
+                }
+                .into(),
+                json!({ "code": "core", "kind": "too_large", "what": "vault header" }),
+            ),
+            // Row 14: a lock overtook a rename that landed.
+            (
+                ShellError::LockedAfterChange {
+                    what: "vault name",
+                    vault: 2,
+                },
+                json!({ "code": "locked_after_change", "what": "vault name", "vault": 2 }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(error).unwrap(), wire);
+        }
+    }
+
+    /// A rename shows in the vault's header (both files), the vault list, the session list (locked or not), and
+    /// nowhere else: the folder keeps its name and a second vault of the same name keeps its.
+    #[test]
+    fn rename_vault_changes_the_vault_it_was_asked_for() {
+        let ts = TestShell::new();
+        let (first, _) = confirmed_session(&ts, "Family");
+        let (second, second_generation) = confirmed_session(&ts, "Family");
+        let (first_dir, second_dir) = (folder_of(&ts, first), folder_of(&ts, second));
+        assert_ne!(first_dir, second_dir);
+        let (first_id, second_id) = (registry_id(&ts, first), registry_id(&ts, second));
+        let first_before = headers(&first_dir);
+
+        let answer = rename(&ts, second, second_generation, "Work").unwrap();
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            json!({ "session": second.0, "generation": second_generation, "data": null })
+        );
+        let (main, bak) = headers(&second_dir);
+        assert_eq!(main, bak, "both header files");
+        assert_eq!(read_vault_name(&second_dir).unwrap(), "Work");
+        assert_eq!(parse_header(&bak).unwrap().name, "Work", "the spare too");
+        assert_eq!(listed_name(&ts, second_id).as_deref(), Some("Work"));
+        assert_eq!(
+            session_line(&ts, second),
+            ("Work".to_owned(), SessionState::Unlocked)
+        );
+        assert_eq!(
+            folder_of(&ts, second),
+            second_dir,
+            "the folder keeps its name"
+        );
+        assert!(second_dir.is_dir());
+
+        // The other vault, called the same before, is untouched everywhere.
+        assert_eq!(headers(&first_dir), first_before);
+        assert_eq!(listed_name(&ts, first_id).as_deref(), Some("Family"));
+        assert_eq!(
+            session_line(&ts, first),
+            ("Family".to_owned(), SessionState::Unlocked)
+        );
+
+        // A lock keeps the name; so does an unlock (it reads the header).
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert_eq!(
+            session_line(&ts, second),
+            ("Work".to_owned(), SessionState::Locked)
+        );
+        let again = heavy(|| ts.shell.unlock_vault(second_id, secret(PW))).unwrap();
+        assert_eq!(again.data.info.name, "Work");
+    }
+
+    /// Rows 7 to 11, each from a real engine state: nothing is written, the session keeps its name, and the answer is
+    /// the page's key. The name's own refusal comes first.
+    #[test]
+    fn rename_vault_says_which_case_for_each_engine_refusal() {
+        let ts = TestShell::new();
+        let wire = |error: ShellError| serde_json::to_value(error).unwrap();
+        let refused = |ts: &TestShell, session, generation, name: &str, dir: &Path| {
+            let before = headers(dir);
+            let error = rename(ts, session, generation, name)
+                .err()
+                .expect("refused");
+            assert_eq!(headers(dir), before, "nothing was written");
+            assert_eq!(session_line(ts, session).0, "Family");
+            error
+        };
+
+        // A header changed outside Lockbox, not yet accepted.
+        let (_, dir, _) = registered(&ts);
+        edit_main(&dir, |h| h.name = "Changed".to_owned());
+        let vault = heavy(|| Vault::unlock_with_password(&dir, PW)).unwrap().0;
+        let (session, generation) = session_over(&ts, vault);
+        // (the session says what it opened with: the changed header's name)
+        let name_on_screen = session_line(&ts, session).0;
+        assert_eq!(name_on_screen, "Changed");
+        let before = headers(&dir);
+        let error = rename(&ts, session, generation, "Another")
+            .err()
+            .expect("refused");
+        assert_eq!(
+            wire(error),
+            json!({ "code": "invalid_input", "what": "details changed" })
+        );
+        assert_eq!(headers(&dir), before);
+        assert_eq!(session_line(&ts, session).0, "Changed");
+        let error = rename(&ts, session, generation, "  ")
+            .err()
+            .expect("refused");
+        assert_eq!(
+            wire(error),
+            json!({ "code": "core", "kind": "invalid_input", "what": "vault name" })
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // The copies disagree on the recovery key: a password unlock cannot check that slot.
+        let (_, dir, _) = registered(&ts);
+        edit_main(&dir, |h| h.slots[1].ciphertext[0] ^= 1);
+        let vault = heavy(|| Vault::unlock_with_password(&dir, PW)).unwrap().0;
+        let (session, generation) = session_over(&ts, vault);
+        let error = refused(&ts, session, generation, "Another", &dir);
+        assert_eq!(
+            wire(error),
+            json!({ "code": "invalid_input", "what": "recovery key copies disagree" })
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // The copies disagree on the password: a recovery unlock cannot check that slot.
+        let (_, dir, recovery) = registered(&ts);
+        edit_main(&dir, |h| h.slots[0].ciphertext[0] ^= 1);
+        let key = RecoverySecret::parse(&recovery).unwrap();
+        let vault = heavy(|| Vault::unlock_with_recovery(&dir, &key)).unwrap().0;
+        let (session, generation) = session_over(&ts, vault);
+        let error = refused(&ts, session, generation, "Another", &dir);
+        assert_eq!(
+            wire(error),
+            json!({ "code": "invalid_input", "what": "password copies disagree" })
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // A failed header write left the state unknown: "details couldn't be checked".
+        let (_, dir, _) = registered(&ts);
+        edit_main(&dir, |h| h.slots[0].ciphertext[0] ^= 1);
+        failpoint::arm("unlock.repair_write");
+        let mut vault = heavy(|| Vault::unlock_with_password(&dir, PW)).unwrap().0;
+        failpoint::disarm_all();
+        failpoint::arm("write_headers.before_first");
+        assert!(vault.change_password(NEW_PW).is_err());
+        failpoint::disarm_all();
+        let (session, generation) = session_over(&ts, vault);
+        let error = refused(&ts, session, generation, "Another", &dir);
+        assert_eq!(
+            wire(error),
+            json!({ "code": "invalid_input", "what": "details unchecked" })
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+    }
+
+    /// A lock that comes after everything else is checked, just before the header writes: nothing is written, the
+    /// answer is `Locked`, and the session list says the old name.
+    #[test]
+    fn a_lock_before_the_rename_writes_changes_nothing_and_answers_locked() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = headers(&dir);
+        lock_at(&ts, BEFORE_HEADER_WRITES);
+        let answer = rename(&ts, session, generation, "Work");
+        failpoint::disarm_all();
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert_eq!(headers(&dir), before, "nothing was written");
+        assert_eq!(
+            session_line(&ts, session),
+            ("Family".to_owned(), SessionState::Locked)
+        );
+        assert_eq!(read_vault_name(&dir).unwrap(), "Family");
+    }
+
+    /// A lock that comes between the two header writes: the rename is whole on disk, so the answer says it landed, for
+    /// the vault it landed in, and the session list (which a lock does not empty) already says the new name.
+    #[test]
+    fn a_lock_after_the_rename_landed_answers_locked_after_change_with_the_vault() {
+        let ts = TestShell::new();
+        let (other, _) = confirmed_session(&ts, "Other");
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let (id, other_id) = (registry_id(&ts, session), registry_id(&ts, other));
+        assert_ne!(id, other_id);
+        let dir = folder_of(&ts, session);
+        lock_at(&ts, "write_headers.before_second");
+        let answer = rename(&ts, session, generation, "Work");
+        failpoint::disarm_all();
+        let Err(error) = answer else {
+            panic!("overtaken by the lock");
+        };
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            format!(r#"{{"code":"locked_after_change","what":"vault name","vault":{id}}}"#)
+        );
+        let (main, bak) = headers(&dir);
+        assert_eq!(main, bak, "whole on disk");
+        assert_eq!(read_vault_name(&dir).unwrap(), "Work");
+        assert_eq!(
+            session_line(&ts, session),
+            ("Work".to_owned(), SessionState::Locked)
+        );
+        assert_eq!(listed_name(&ts, id).as_deref(), Some("Work"));
+        // The other vault was locked by the same lock and keeps its own name.
+        assert_eq!(session_line(&ts, other).0, "Other");
+    }
+
+    /// A write that came back as an error after `vault.json` landed: the name is in effect (the engine made it live),
+    /// so it is a success, the session is still open, and a second rename goes through. `.bak` is a version behind
+    /// until the next writable unlock.
+    #[test]
+    fn a_rename_whose_write_failed_after_vault_json_landed_is_a_success() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let (_, old_bak) = headers(&dir);
+        failpoint::arm("write_headers.before_second");
+        let answer = rename(&ts, session, generation, "Work");
+        failpoint::disarm_all();
+        let answer = answer.expect("the name is in effect");
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            json!({ "session": session.0, "generation": generation, "data": null })
+        );
+        let (main, bak) = headers(&dir);
+        assert_eq!(bak, old_bak, "the spare is one version behind");
+        assert_eq!(parse_header(&main).unwrap().name, "Work");
+        assert_eq!(
+            session_line(&ts, session),
+            ("Work".to_owned(), SessionState::Unlocked)
+        );
+
+        rename(&ts, session, generation, "Work again").unwrap();
+        let (main, bak) = headers(&dir);
+        assert_eq!(main, bak);
+        assert_eq!(read_vault_name(&dir).unwrap(), "Work again");
+    }
+
+    /// A write that died before `vault.json` was touched: the old name is still the vault's, in the files and in the
+    /// session list, and the refusal is the engine's own.
+    #[test]
+    fn a_rename_that_failed_before_vault_json_leaves_the_old_name() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = headers(&dir);
+        failpoint::arm("write_headers.before_first");
+        let answer = rename(&ts, session, generation, "Work");
+        failpoint::disarm_all();
+        let error = answer.err().expect("the write failed");
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({ "code": "core", "kind": "io" })
+        );
+        assert_eq!(headers(&dir), before);
+        assert_eq!(
+            session_line(&ts, session),
+            ("Family".to_owned(), SessionState::Unlocked)
+        );
+        rename(&ts, session, generation, "Work").unwrap();
+        assert_eq!(read_vault_name(&dir).unwrap(), "Work");
     }
 }

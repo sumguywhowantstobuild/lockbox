@@ -397,3 +397,25 @@ test("the_four_backup_refusals_have_the_designs_words", () => {
     expect(KNOWN_WHATS).toContain(what);
   }
 });
+
+// Plan 4C Task 8: Rename is refused as a backup is, with the same four reasons in words that end "then rename it" (the backup words end "then back up"), and a
+// name the engine won't keep. The words are the session's, for Ariel to change.
+test("the_rename_refusals_have_words_of_their_own", () => {
+  const said = (error: object) => messageText(messageFor(error));
+  expect(said({ code: "core", kind: "invalid_input", what: "vault name" })).toBe("That name is too long. A vault name can have up to 200 characters.");
+  expect(said({ code: "page", kind: "rename_details_changed" })).toBe(
+    "Its details were changed outside Lockbox. Look at that change and accept it first, then rename it.",
+  );
+  expect(said({ code: "page", kind: "rename_password_copies_disagree" })).toBe("Change this vault's password once more, then rename it.");
+  expect(said({ code: "page", kind: "rename_recovery_key_copies_disagree" })).toBe("Make a new recovery key for this vault, then rename it.");
+  expect(said({ code: "page", kind: "rename_details_unchecked" })).toBe("Lock this vault and open it again, then rename it.");
+  // Not the backup's words, and not the generic ones.
+  for (const kind of ["rename_details_changed", "rename_password_copies_disagree", "rename_recovery_key_copies_disagree", "rename_details_unchecked"]) {
+    expect(said({ code: "page", kind })).not.toMatch(/back up/);
+    expect(messageFor({ code: "page", kind }).title, kind).not.toBe(GENERIC.title);
+  }
+  // The engine's `core:invalid_input` for a name is no longer the generic sentence; every other `invalid_input` still is.
+  expect(messageFor({ code: "core", kind: "invalid_input", what: "vault name" }).title).not.toBe(MESSAGES["core:invalid_input"]?.title);
+  expect(messageFor({ code: "core", kind: "invalid_input", what: "something else" }).title).toBe(MESSAGES["core:invalid_input"]?.title);
+  expect(KNOWN_WHATS).toContain("vault name");
+});

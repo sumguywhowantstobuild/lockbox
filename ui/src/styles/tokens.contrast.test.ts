@@ -471,6 +471,18 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("new folder box words on its card", c("--ink"), card, 4.5);
       check("new folder box error edge on the side menu", c("--danger"), rail, 3);
       check("new folder box focus ring on the side menu", c("--v"), rail, 3);
+      // Rename vault (18d, Task 8): a small box on the vault menu's card. Its label, the name box (edge, words, focus ring, and the error edge once the name was refused), the
+      // refusal line under it, Cancel (the quiet pill over the card, at rest, hovered and pressed) and Rename, which greys while an answer is out (the shade of a disabled button).
+      check("rename vault label on the menu's card", c("--ink2"), card, 4.5);
+      check("rename vault box edge on the menu's card", c("--edge"), card, 3);
+      check("rename vault box words on its card", c("--ink"), card, 4.5);
+      check("rename vault box focus ring on the menu's card", c("--v"), card, 3);
+      check("rename vault box error edge on the menu's card", c("--danger"), card, 3);
+      check("rename vault refusal line on the menu's card", c("--danger"), card, 4.5);
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`rename vault Cancel words, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
+      }
+      check("rename vault Rename words, waiting", c("--ink2"), over(c("--line"), card), 4.5);
 
       // Show one kind, and sort (Task 15). The two lists in the toolbar are on the list's ground: their words and their
       // arrow pair at rest, hovered or open, and pressed (the tints laid over the ground), and their focus ring.

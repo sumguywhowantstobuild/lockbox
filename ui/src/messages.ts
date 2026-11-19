@@ -138,6 +138,13 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:password copies disagree": { title: "Change this vault's password once more, then back up.", body: "" },
   "code:invalid_input:recovery key copies disagree": { title: "Make a new recovery key for this vault, then back up.", body: "" },
   "code:invalid_input:details unchecked": { title: "Lock this vault and open it again, then back up.", body: "" },
+  // Rename a vault (Task 8): refused as a backup is, with the same four reasons ending "then rename it" (the page's own kinds, since the backup words end "then back up"), and a
+  // name the engine won't keep (the page asks for a name itself, so in practice this is a name over 200 characters; create says it too). The words are the session's, for Ariel to change.
+  "core:invalid_input:vault name": { title: "That name is too long.", body: "A vault name can have up to 200 characters." },
+  "page:rename_details_changed": { title: "Its details were changed outside Lockbox.", body: "Look at that change and accept it first, then rename it." },
+  "page:rename_password_copies_disagree": { title: "Change this vault's password once more, then rename it.", body: "" },
+  "page:rename_recovery_key_copies_disagree": { title: "Make a new recovery key for this vault, then rename it.", body: "" },
+  "page:rename_details_unchecked": { title: "Lock this vault and open it again, then rename it.", body: "" },
   // Save all of a folder's files (Task 11): the folder had none by the time the shell counted, or its files are no longer the ones planned.
   "code:invalid_input:no files": { title: "This folder has no files to save.", body: "" },
   "code:invalid_input:folder changed": { title: "The files in this folder changed.", body: "Save them again." },

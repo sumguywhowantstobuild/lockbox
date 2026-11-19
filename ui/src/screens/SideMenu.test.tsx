@@ -48,6 +48,16 @@ function declarationsFor(selector: string): string {
   throw new Error(`${selector} has no rule in components.css`);
 }
 
+test("the_rename_box_has_the_pictures_padding_and_its_buttons_at_the_right", () => {
+  // 18d: the label and the name box sit in a block padded 8px 8px 2px, with no space above the label; the buttons are the dialogs' own row (at the right), under it.
+  expect(declarationsFor(".rnname")).toMatch(/(^| )padding: 8px 8px 2px;/);
+  expect(declarationsFor(".rnname .flab")).toMatch(/(^| )margin-top: 0;/);
+  expect(declarationsFor(".dbtns")).toMatch(/justify-content: flex-end/);
+  expect(declarationsFor(".rnbox .dbtns")).toMatch(/margin-top: 8px/);
+  // The box is drawn in the vault menu's own place and width: its popup is the menu's class, so the menu's rule gives the width.
+  expect(declarationsFor(".menu.mwide")).toMatch(/(^| )width: 292px/);
+});
+
 test("the_vault_name_shows_the_up_down_mark_of_its_menu", async () => {
   // Found at stage 7: the name opened the vault menu with nothing to say it would. Drawn: "My vault ⌃⌄".
   await unlocked();

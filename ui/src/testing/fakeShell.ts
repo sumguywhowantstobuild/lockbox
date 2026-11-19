@@ -116,6 +116,15 @@ export const VAULT_LIST_DAMAGED = { code: "core", kind: "damaged", what: "vault 
 export const NEWER_VAULT = { code: "core", kind: "unsupported_version" };
 /** What the engine refuses a new recovery key with while a changed header waits to be accepted (`HeaderGuard::check`). */
 const ACCEPT_FIRST = { code: "core", kind: "invalid_input", what: "accept the header change first" };
+/**
+ * What Rename is refused with, as a backup is (`backup_refusal`): the shell's own `what`s for the four reasons, and the engine's refusal of a name it won't keep (`validate_name`).
+ * The fake models the first (`headerChanged`) and the last; `refuseNext("rename_vault", …)` gives it the other three.
+ */
+export const DETAILS_CHANGED = { code: "invalid_input", what: "details changed" };
+export const DETAILS_UNCHECKED = { code: "invalid_input", what: "details unchecked" };
+export const PASSWORD_COPIES_DISAGREE = { code: "invalid_input", what: "password copies disagree" };
+export const RECOVERY_KEY_COPIES_DISAGREE = { code: "invalid_input", what: "recovery key copies disagree" };
+export const VAULT_NAME_REFUSED = { code: "core", kind: "invalid_input", what: "vault name" };
 /** What the shell sends when it cannot write the mark first (`write_state(…, "vault state")`, `TooLarge`). */
 export const VAULT_STATE_REFUSED = { code: "too_large", what: "vault state" };
 /** What a create answers when the vault was made but the list refused it and the folder could not be removed again (`VAULT_NOT_LISTED`, `error.rs`). */
@@ -683,6 +692,18 @@ export interface FakeShell {
    */
   interruptChangeNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error" | { refused_before_write: object }): void;
   /**
+   * Holds every `rename_vault` answer until `release` is called (Plan 4C Task 8): the name is decided (and written, when it is good) as the command arrives, as the shell writes it,
+   * and the answer comes later, so the person can switch vault or a lock can come in between.
+   */
+  holdRename(): () => void;
+  /**
+   * The next `rename_vault` that gets as far as the write is cut short as a lock can cut it, as `interruptChangeNext` does for a change. `lock_before_write`: the lock came first,
+   * so nothing changes and the answer is `locked`. `lock_after_write`: the name is set, then the lock event reaches the page before the good answer, so the answer is tagged with
+   * the generation from before (the bridge drops it as stale). `lock_after_write_as_error`: the name is set, the vault locks, and the answer is `locked_after_change` with
+   * what `"vault name"` and the vault's registry ID.
+   */
+  interruptRenameNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error"): void;
+  /**
    * Forgot password (Plan 4C Task 4). The recovery key that opens the vault now: its `recoveryKey`, or the key the fake last made for it, or `fakeKey(40 + id)`.
    * `keyOf` stays as it is (what a setup test expects: `undefined` until a key was made).
    */
@@ -1137,6 +1158,8 @@ export function installFakeShell(
   let interruptCreate: Parameters<FakeShell["interruptCreateNext"]>[0] | undefined;
   let alongside: FakeVault | undefined;
   let interruptChange: Parameters<FakeShell["interruptChangeNext"]>[0] | undefined;
+  let heldRename: (() => void)[] | undefined;
+  let interruptRename: Parameters<FakeShell["interruptRenameNext"]>[0] | undefined;
   // Forgot password (Task 4): the checked keys the shell holds under their choices (32 hex characters, launch-scoped: every lock epoch and the five minutes drop
   // them), what the vault's details were as checked, the holds a test can put on the two steps, and how the next finish is cut short.
   const recoveryHeld = new Map<string, { vault: FakeVault; key: string; headerChanged: boolean }>();
@@ -2090,6 +2113,33 @@ export function installFakeShell(
         const vault = vaultFor(session, generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         vault.headerChanged = false;
+        return tagged(session, generation, null);
+      }
+      case "rename_vault": {
+        const sent = exactly(args, ["session", "generation", "name"]);
+        const { session, generation, name } = sent;
+        if (typeof session !== "number" || typeof generation !== "number" || typeof name !== "string") return refuse(MALFORMED);
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The engine's own check of the name first (`validate_name`: nothing but spaces, or over 200 characters), then the backup's refusals.
+        if (name.trim() === "" || Array.from(name).length > 200) return refuse(VAULT_NAME_REFUSED);
+        if (vault.headerChanged ?? false) return refuse(DETAILS_CHANGED);
+        // A lock that cuts the rename short: before the headers are written nothing changes; after, the new name stays.
+        const cut = interruptRename;
+        interruptRename = undefined;
+        if (cut === "lock_before_write") {
+          lock(session);
+          return refuse(LOCKED);
+        }
+        vault.name = name;
+        if (cut === "lock_after_write") {
+          lock(session);
+          return tagged(session, generation, null);
+        }
+        if (cut === "lock_after_write_as_error") {
+          lock(session);
+          return refuse({ code: "locked_after_change", what: "vault name", vault: vault.id });
+        }
         return tagged(session, generation, null);
       }
       case "launch_notices":
@@ -3939,6 +3989,7 @@ export function installFakeShell(
         ["set_settings", heldSettings],
         ["start_new_vault_list", heldStartList],
         ["change_password", heldChange],
+        ["rename_vault", heldRename],
         ["unlock_vault", heldUnlock],
         ["create_vault", heldCreate],
         ["create_vault_confirm", heldCreate],
@@ -4262,6 +4313,17 @@ export function installFakeShell(
         heldChange = undefined;
         for (const release of waiting) release();
       };
+    },
+    holdRename: () => {
+      const waiting: (() => void)[] = [];
+      heldRename = waiting;
+      return () => {
+        heldRename = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    interruptRenameNext: (how) => {
+      interruptRename = how;
     },
     holdUnlock: () => {
       const waiting: (() => void)[] = [];

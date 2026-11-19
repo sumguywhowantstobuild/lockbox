@@ -72,6 +72,16 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
   useEffect(() => {
     if (inside) nameBox.current?.focus();
   }, [inside]);
+  // 18c replaces the form on the same screen (inside), so the button that was pressed is gone and focus would drop to the page: it goes to Continue anyway, which is
+  // described by the warning so a screen reader reads both, and back to the password box on the way back, where the person types again.
+  const warningId = useId();
+  const continueAnyway = useRef<HTMLButtonElement>(null);
+  const warning = inside && token !== null;
+  // Set when the person leaves the warning (any of its three buttons): the form that comes back focuses its password box as it appears.
+  const [leftWarning, setLeftWarning] = useState(false);
+  useEffect(() => {
+    if (warning && !busy) continueAnyway.current?.focus();
+  }, [warning, busy]);
   const back = () => {
     if (busy) return;
     setPassword("");
@@ -165,6 +175,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
               className="lnk"
               disabled={busy}
               onClick={() => {
+                setLeftWarning(true);
                 setChooseFolder(true);
                 setToken(null);
               }}
@@ -172,10 +183,22 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
               Choose another
             </button>
           </div>
-          <p className="fu-sub strong">{CLOUD_WARNING}</p>
+          <p className="fu-sub strong" id={warningId}>
+            {CLOUD_WARNING}
+          </p>
         </div>
         <div className="fu-row">
-          <button type="button" className="prim" disabled={busy} onClick={() => void go(() => confirmCreateVault(token))}>
+          <button
+            ref={continueAnyway}
+            type="button"
+            className="prim"
+            disabled={busy}
+            aria-describedby={warningId}
+            onClick={() => {
+              setLeftWarning(true);
+              void go(() => confirmCreateVault(token));
+            }}
+          >
             Continue anyway
           </button>
           <button
@@ -183,6 +206,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
             className="lnk"
             disabled={busy}
             onClick={() => {
+              setLeftWarning(true);
               setToken(null);
             }}
           >
@@ -244,6 +268,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
         <PasswordField
           label="Password"
           autoComplete="new-password"
+          autoFocus={inside && leftWarning}
           value={password}
           rule="At least 12 characters."
           minimum={MIN_PASSWORD}
