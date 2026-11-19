@@ -346,12 +346,11 @@ test("ask5_banner_closes_with_no_delete", async () => {
 test("ask9_later_closes_it", async () => {
   const { container } = start([vault({ usedBackupHeader: true })]);
   await unlockIt();
+  // The design's words in full, now that the screen the last sentence sends the person to exists (4C Task 3), and its two buttons in the design's order.
   const words =
-    "Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password.";
+    "Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
   expect(await screen.findByText(words)).toBeTruthy();
-  // The sentence that sends the person to Change password waits for the screen that does it (4C).
-  expect(container.textContent).not.toContain("Change the password again");
-  expect(screen.queryByRole("button", { name: "Change password" })).toBeNull();
+  expect(buttonNames().filter((name) => name === "Later" || name === "Change password")).toEqual(["Later", "Change password"]);
   await expectNoAxe(container);
   fireEvent.click(screen.getByRole("button", { name: "Later" }));
   expect(screen.queryByText(words)).toBeNull();
@@ -436,10 +435,10 @@ test("ask13_newer_vault_has_no_buttons", async () => {
 test("ask16_says_the_change_was_saved", async () => {
   const { container } = start([vault()]);
   await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
-  // What the change-password screen of 4C hands over when its refusal says the vault locked after the change; nothing
-  // in 4A can send it.
+  // What the change-password screen hands over when its refusal says the vault locked after the change, with the vault's registry ID
+  // (`ChangePassword.test.tsx` has it through the real screen). It shows for that vault only.
   act(() => {
-    sayOnLockScreen({ code: "locked_after_change", what: "password" });
+    sayOnLockScreen({ code: "locked_after_change", what: "password", vault: 7 }, 7);
   });
   const words = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
   expect(await screen.findByText(words)).toBeTruthy();
@@ -588,7 +587,7 @@ test("each_ask_passes_axe", async () => {
         start([vault()]);
         await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
         act(() => {
-          sayOnLockScreen({ code: "locked_after_change", what: "password" });
+          sayOnLockScreen({ code: "locked_after_change", what: "password", vault: 7 }, 7);
         });
         await screen.findByText(/^Your new password was saved/);
       },

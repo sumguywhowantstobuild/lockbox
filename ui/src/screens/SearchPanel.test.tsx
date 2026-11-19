@@ -640,10 +640,21 @@ test("lock_during_search_drops_results", async () => {
     release();
     await Promise.resolve();
   });
-  await result(dialog, /admin@example\.com · support\.example\.com · My vault/);
-  expect(within(dialog).queryByText(/Home/)).toBeNull();
-  expect(within(dialog).queryByText(/me@example\.com|home@example\.com/)).toBeNull();
-  expect(rowsOf(dialog)).toHaveLength(1);
+  // Home was the vault in front, so the window is My vault's now, drawn anew (a window is keyed by its session: a form left behind by a switch sends
+  // nothing): the search is the same one, in a dialog of the new window.
+  const shown = await screen.findByRole("dialog", { name: SEARCH });
+  expect(dialog.isConnected).toBe(false);
+  // The person's place is kept: the new box holds what was typed, and focus is in it.
+  const again = within(shown).getByRole<HTMLInputElement>("textbox", { name: SEARCH });
+  expect(again).not.toBe(box);
+  expect(again.value).toBe("console");
+  await waitFor(() => {
+    expect(document.activeElement).toBe(again);
+  });
+  await result(shown, /admin@example\.com · support\.example\.com · My vault/);
+  expect(within(shown).queryByText(/Home/)).toBeNull();
+  expect(within(shown).queryByText(/me@example\.com|home@example\.com/)).toBeNull();
+  expect(rowsOf(shown)).toHaveLength(1);
   expect(screen.queryByRole("alert")).toBeNull();
   // Nor does the page hold what Home found.
   expect(JSON.stringify(debugState().search)).not.toContain("me@example.com");

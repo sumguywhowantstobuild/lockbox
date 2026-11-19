@@ -29,6 +29,16 @@ test("the_recovery_key_sits_in_a_soft_grey_box_as_drawn", () => {
   expect(box).not.toMatch(/border: /);
 });
 
+test("a_password_rule_that_is_met_in_a_panel_shows_its_check_mark_in_the_vaults_colour", () => {
+  // The change-password form (27a) is in the side panel, whose hint is `.fhint`: once the 12 characters are typed, a check mark in the vault's
+  // colour and the words in the ordinary text colour, as the setup form's rule does on its plate (`.fu-hint.ok`); the colour pair is measured in
+  // `tokens.contrast.test.ts`.
+  const met = declarationsFor(".fhint.ok");
+  expect(met).toMatch(/color: var\(--ink\);/);
+  expect(met).toMatch(/display: flex;/);
+  expect(declarationsFor(".fhint.ok .i")).toMatch(/color: var\(--v\);/);
+});
+
 test("a_list_in_a_settings_row_is_filled_with_no_edge_at_its_own_width_as_drawn", () => {
   // As 31a draws it: filled with the quiet pill's shade, no edge, as wide as its words. The review found the older outlined
   // rule for the row's wrapper still reaching the list and winning, so that rule is gone and the list has its own class.

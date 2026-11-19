@@ -117,6 +117,7 @@ export function CreateVault({ onBack }: { onBack: () => void }) {
         </div>
         <PasswordField
           label="Password"
+          autoComplete="new-password"
           value={password}
           rule="At least 12 characters."
           minimum={MIN_PASSWORD}
@@ -128,6 +129,7 @@ export function CreateVault({ onBack }: { onBack: () => void }) {
         />
         <PasswordField
           label="Password again"
+          autoComplete="new-password"
           value={again}
           error={problems.again}
           onChange={(next) => {

@@ -362,6 +362,10 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       // Add, the new-login form and the generator. Add is the main button on the toolbar's ground (its words in each state
       // and its fill against the ground are the main button's pairs above). In the form: its fields are the panel's card
       // (words, edge and error edge measured above), and its hint and the folder list's words are the ordinary text.
+      // Change password (27a): its password rule once met has a check mark in the vault's colour on the panel (the words are the ordinary text colour,
+      // measured above), a hint that is the form hint, the limit's sentence in the text colour, and a field in error with its edge and line (above).
+      check("change password rule's met check mark on the panel", c("--v"), paper, 3);
+      check("change password limit sentence on the panel", c("--ink"), paper, 4.5);
       check("form hint on the panel", c("--ink2"), paper, 4.5);
       check("form error line on the panel", c("--danger"), paper, 4.5);
       check("form field in error, edge on the panel", c("--danger"), paper, 3);

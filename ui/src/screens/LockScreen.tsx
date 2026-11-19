@@ -146,6 +146,7 @@ export function LockScreen() {
       <main className="plate">
         <h1>{heading}</h1>
         <LockScreenAsks
+          chosen={chosen?.id ?? null}
           onUnlock={(vault) => {
             if (vault !== null) setChosenId(vault);
             setPassword("");
@@ -204,6 +205,7 @@ export function LockScreen() {
             <PasswordField
               key={focusBox}
               label={`Password for ${name(chosen)}`}
+              autoComplete="current-password"
               value={password}
               onChange={(next) => {
                 setPassword(next);

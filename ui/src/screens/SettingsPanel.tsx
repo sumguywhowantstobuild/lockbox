@@ -14,6 +14,7 @@ import {
   loadSettings,
   NOT_ON_THE_LIST,
   openBackup,
+  openChangePassword,
   openOlderCopies,
   saveSettings,
   startOpenBackup,
@@ -136,8 +137,8 @@ function said(error: unknown, names?: { shortcut?: string }): string {
  * Settings (31a, 31b), from the side menu: the app's settings, for every vault, saved at once as each one changes. A change shows as it is
  * made and goes back to what is saved if the shell refuses it, with the refusal in words under its row. Saves go one after another (the store
  * sees to that), each as the whole settings. Start with Windows is not one of the settings the file keeps: it is the shell's own entry, read
- * when the panel opens and changed by its own command. "This vault" has Back up (a writable vault only) and Test a backup (any vault, a read-only
- * one too); the vault's other rows (password, export) and Help are not here until the plans that build them.
+ * when the panel opens and changed by its own command. "This vault" has Back up and Change password (a writable vault only) and Test a backup (any
+ * vault, a read-only one too); the vault's other rows (a new recovery key, export) and Help are not here until the plans that build them.
  */
 export function SettingsPanel({ data }: { data: SessionData }) {
   const id = useId();
@@ -490,6 +491,19 @@ export function SettingsPanel({ data }: { data: SessionData }) {
                 }}
               >
                 {`Older copies (${String(olderCount)})`}
+              </Button>
+            </SettingsRow>
+          )}
+          {data.readOnly ? null : (
+            // This vault's own password: not in a copy opened from a backup or an older copy, which nothing can be written to.
+            <SettingsRow label="Change password" hint={`Set a new password for ${data.name}.`} hintId={`${id}-password-hint`}>
+              <Button
+                aria-describedby={`${id}-password-hint`}
+                onClick={() => {
+                  openChangePassword(data.session);
+                }}
+              >
+                Change password
               </Button>
             </SettingsRow>
           )}

@@ -636,6 +636,20 @@ export interface FakeShell {
    * command arrives, so an older answer comes after a newer one, as it can on a busy shell.
    */
   holdGetItem(): () => void;
+  /**
+   * Holds every `change_password` answer until `release` is called: the change is decided (and written, when it is good) as the command arrives,
+   * as the shell writes it, and the answer comes later, so the person can switch vault or a lock can come in between.
+   */
+  holdChangePassword(): () => void;
+  /**
+   * The next `change_password` is cut short as a lock can cut it (Plan 4C Task 3, Ask 16's cases). `lock_before_write`: the lock came before the
+   * headers were written, so nothing changed and the answer is `locked`. `lock_after_write`: the change landed, then the lock event reached the
+   * page before the good answer did, so the answer is tagged with the generation from before. `lock_after_write_as_error`: the change landed and the
+   * shell answered `locked_after_change` with the vault's registry ID: this is also what the shell answers when `vault.json` landed though the
+   * write came back as an error (`commit` read it back and made the new header live), after locking that vault. `refused_before_write`: the write
+   * failed before `vault.json` was touched, so nothing changed, the old password still opens and the answer is this plain refusal.
+   */
+  interruptChangeNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error" | { refused_before_write: object }): void;
   /** The settings the shell holds now (what the last accepted `set_settings` sent), and every one it accepted, in order. */
   settings(): FakeSettings;
   settingsSaved: FakeSettings[];
@@ -1066,6 +1080,8 @@ export function installFakeShell(
   let heldNewItem: (() => void)[] | undefined;
   let heldReveal: (() => void)[] | undefined;
   let heldUpdate: (() => void)[] | undefined;
+  let heldChange: (() => void)[] | undefined;
+  let interruptChange: Parameters<FakeShell["interruptChangeNext"]>[0] | undefined;
   let heldTrash: (() => void)[] | undefined;
   const refusals = new Map<string, object>();
   const edited: FakeShell["edited"] = [];
@@ -1861,7 +1877,23 @@ export function installFakeShell(
         if (Array.from(new_password.normalize("NFC")).length < 12) return refuse({ code: "core", kind: "password_too_short", min: 12 });
         if (current_password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
         if (vault.headerChanged ?? false) return refuse(ACCEPT_FIRST);
+        // A lock that cuts the change short: before the headers are written nothing changes; after, the change stays.
+        const cut = interruptChange;
+        interruptChange = undefined;
+        if (cut === "lock_before_write") {
+          lock(session);
+          return refuse(LOCKED);
+        }
+        if (typeof cut === "object") return refuse(cut.refused_before_write);
         vault.password = new_password;
+        if (cut === "lock_after_write") {
+          lock(session);
+          return tagged(session, generation, null);
+        }
+        if (cut === "lock_after_write_as_error") {
+          lock(session);
+          return refuse({ code: "locked_after_change", what: "password", vault: vault.id });
+        }
         return tagged(session, generation, null);
       }
       case "accept_header": {
@@ -3699,6 +3731,7 @@ export function installFakeShell(
         ["get_item", heldGetItem],
         ["set_settings", heldSettings],
         ["start_new_vault_list", heldStartList],
+        ["change_password", heldChange],
       ] as const) {
         if (cmd === name && waiting !== undefined) {
           return new Promise((resolve) => {
@@ -3983,6 +4016,17 @@ export function installFakeShell(
     },
     refuseNext: (cmd, error) => {
       refusals.set(cmd, error);
+    },
+    holdChangePassword: () => {
+      const waiting: (() => void)[] = [];
+      heldChange = waiting;
+      return () => {
+        heldChange = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    interruptChangeNext: (how) => {
+      interruptChange = how;
     },
     settings: () => ({ ...settings, shortcut: { ...settings.shortcut } }),
     settingsSaved: saved,

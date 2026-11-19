@@ -240,6 +240,8 @@ export function EditForm({
                 type="text"
                 autoComplete="off"
                 spellCheck={false}
+                autoCorrect="off"
+                autoCapitalize="off"
                 value={secret.value}
                 disabled={!ready}
                 aria-busy={stored.phase === "loading" ? true : undefined}

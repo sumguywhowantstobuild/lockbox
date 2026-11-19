@@ -2770,6 +2770,18 @@
   color: var(--ink2);
 }
 
+/* A rule that is met, in the side panel (the change-password form): a check mark in the vault's colour, and the words in the ordinary text colour. */
+.fhint.ok {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--ink);
+}
+
+.fhint.ok .i {
+  color: var(--v);
+}
+
 .finp.m {
   font-family: "Geist Mono Variable", ui-monospace, monospace;
 }

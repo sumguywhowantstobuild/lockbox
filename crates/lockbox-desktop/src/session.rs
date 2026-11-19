@@ -587,6 +587,8 @@ impl Lease {
 fn overtaken<T>(result: &ShellResult<T>, change: Option<Change>) -> ShellError {
     match (result, change) {
         (Ok(_), Some(Change { what, vault })) => ShellError::LockedAfterChange { what, vault },
+        // A change the closure itself found had landed though its write came back as an error: a lock does not take that back.
+        (Err(landed @ ShellError::LockedAfterChange { .. }), _) => *landed,
         _ => ShellError::Locked,
     }
 }

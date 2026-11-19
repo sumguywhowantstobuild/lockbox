@@ -82,6 +82,8 @@ export function ValueField({
         type={shown ? "text" : "password"}
         autoComplete="off"
         spellCheck={false}
+        autoCorrect="off"
+        autoCapitalize="off"
         placeholder="Paste the key"
         value={value}
         disabled={disabled}

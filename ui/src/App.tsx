@@ -71,7 +71,8 @@ export default function App() {
   let screen;
   if (active !== undefined) {
     // A vault whose recovery key was not typed back yet shows that step and nothing of the vault (21c, 21d, 21f).
-    if (active.recovery === null) screen = <MainWindow data={active} look={look} />;
+    // Keyed by session: switching to another vault unmounts this one's window, so a form left behind sends nothing and its typed text is gone.
+    if (active.recovery === null) screen = <MainWindow key={String(active.session)} data={active} look={look} />;
     else if (active.recovery.phase === "pick") screen = <PickWords data={active} />;
     else screen = <RecoveryKey data={active} />;
   } else if (listDamaged) {

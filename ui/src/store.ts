@@ -85,7 +85,26 @@ export type Tool =
   /** Open a backup (25a), begun from this window: where it is, is `StoreState.openBackup` (its `host` is this session), which goes with the panel. */
   | { kind: "open_backup" }
   /** Older copies (24f), from Settings: the copies a restore kept of this vault, opened read-only or deleted. What it lists is `StoreState.olderCopies`. */
-  | { kind: "older_copies" };
+  | { kind: "older_copies" }
+  /** Change password (27a, 27b), for this vault, from Settings, Ask 9 or Ask 2. Where it is, is `SessionData.passwordChange`; what is typed is the form's own state. */
+  | { kind: "change_password" };
+
+/**
+ * Where a change of this vault's password is (27a to 27c), or `null` when none is begun. It lives in the session's record, so it belongs to its
+ * vault: a switch leaves it as it is, a lock takes it, and an answer that comes for one vault lands in that vault's record and shows when it is
+ * on screen. No password is ever in it: what is typed is the form's own state, wiped as it is sent.
+ */
+export type PasswordChange =
+  /** The form. `sending`: a change is out and has no answer yet, so a second press does nothing. `problem`: what the last try was refused with, and which field says it. */
+  | { phase: "ask"; sending: boolean; problem: PasswordProblem | null }
+  /** The change landed and the page heard: 27c, the offer of a fresh backup. */
+  | { phase: "done" };
+
+/** A refusal of a change of password, and the field of the form that says it (`form` for the form as a whole). */
+export interface PasswordProblem {
+  field: "current" | "new" | "form";
+  error: unknown;
+}
 
 /**
  * Where a backup of this vault is (22a to 22d, and Ask 2), or `null` when none is begun. It lives in the session's record, so a lock takes it with
@@ -430,6 +449,8 @@ export interface SessionData {
   saveAll: SaveAllFlow | null;
   /** The long operations the shell says are running for this vault (`lockbox://busy`): while there are any, auto-lock waits and the window says so. */
   operations: string[];
+  /** Change password, begun from Settings, Ask 9 or Ask 2 and not put away: see {@link PasswordChange}. */
+  passwordChange: PasswordChange | null;
 }
 
 /** One batch of files, from the pick to its end. The paths stay in Rust: the page holds names and sizes for display, and the choice (a token). */
@@ -549,8 +570,11 @@ export interface StoreState {
   sessions: SessionData[];
   toast: Toast | null;
   notices: Notices;
-  /** A refusal to say on the lock screen, since the vault it was about has locked (Ask 16); `null` for none. */
-  lockNote: unknown;
+  /**
+   * What to say on the lock screen about a vault that locked after its change landed (Ask 16), each for one vault by its registry ID: it shows when that
+   * vault is the one chosen to unlock, and only that vault's unlock uses it up. A refusal as the shell sent it, or the page's own of the same shape.
+   */
+  lockNotes: { vault: number; refusal: unknown }[];
   /** The search, or `null` while it is closed. */
   search: SearchState | null;
   /** The copy the shortcut left waiting, or `null` for none. */
@@ -602,7 +626,7 @@ const EMPTY: StoreState = {
   sessions: [],
   toast: null,
   notices: { lostOutputs: false, restore: null, firstClose: false, shortcut: null, openFiles: 0 },
-  lockNote: null,
+  lockNotes: [],
   search: null,
   capture: null,
   restore: null,
@@ -779,12 +803,13 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
     spareDetails: answer.data.used_backup_header,
     cloud: answer.data.cloud,
   });
-  // The vault is open: what the lock screen was still saying (a restore finished, a change saved before a lock) has been read.
+  // The vault is open: what the lock screen was still saying about it (a restore finished, a change saved before a lock) has been read. What it said
+  // about another vault waits for that vault's own unlock.
   set({
     ...state,
     sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record],
     notices: { ...state.notices, restore: state.notices.restore?.ask === "finished" ? null : state.notices.restore },
-    lockNote: null,
+    lockNotes: state.lockNotes.filter((note) => note.vault !== vaultId),
   });
   if (unfinished && !details) void makeNewKey(record.session);
   // The 30-day reminder (Ask 1) is read beside the list, never ahead of it. A read-only copy has none to make.
@@ -830,6 +855,7 @@ function newRecord(
     addFiles: null,
     saveAll: null,
     operations: [],
+    passwordChange: null,
   };
 }
 
@@ -1557,12 +1583,12 @@ export async function setOutputRecordAside(): Promise<void> {
 }
 
 /**
- * Puts a refusal on the lock screen for the person to read, when the vault it was about is locked already (Ask 16: a new
- * password was saved but the vault locked before the page could say so). It goes when a vault is unlocked. The change-
- * password screen (4C) is what calls this; nothing in 4A does.
+ * Keeps a refusal for the lock screen to say, for the vault it was about (by its registry ID), which is locked already (Ask 16: a new password was
+ * saved but the vault locked before the page could say so). It shows when that vault is the one chosen to unlock, and goes when that vault is
+ * unlocked: another vault's unlock leaves it, and a second one for the same vault takes the first's place. Nothing in it is secret.
  */
-export function sayOnLockScreen(refusal: unknown): void {
-  set({ ...state, lockNote: refusal });
+export function sayOnLockScreen(refusal: unknown, vault: number): void {
+  set({ ...state, lockNotes: [...state.lockNotes.filter((note) => note.vault !== vault), { vault, refusal }] });
 }
 
 /** How an item comes to the panel, beyond which one: from where it was opened. */
@@ -1776,6 +1802,115 @@ export function loadSettings(): void {
 /** Closes the form or tool in the panel; what was typed in it is gone. */
 export function closeTool(session: number): void {
   update(session, (current) => ({ ...current, tool: null }));
+}
+
+// ---- Change password (Plan 4C Task 3: 27a to 27c, and Ask 16) ----
+//
+// The form is opened for one session (from Settings, Ask 9 or Ask 2) and what is typed lives in the form alone: it is wiped from the fields as it is sent and
+// comes here only as the two arguments of `changePassword`, which hand them to the shell once and keep them nowhere. Every step names its session and the
+// generation it was opened in, never whatever is on screen: a form is its vault's, an answer lands in that vault's record and shows when that vault is on
+// screen, and a lock drops the lot. A change that landed before a lock is the one thing kept (a registry ID and fixed words, no secret), for that vault's next
+// unlock to say (`sayOnLockScreen`, Ask 16).
+
+/** The page's own refusal for a current password the shell refused as wrong: the form's words for it (`messages.ts`). */
+const WRONG_CURRENT = { code: "page", kind: "wrong_current_password" };
+
+/** What the lock screen says about a change that landed before the lock (Ask 16): the shell's own refusal's shape, which `messages.ts` has the design's words for. */
+function landedBeforeLock(vault: number): { code: string; what: string; vault: number } {
+  return { code: "locked_after_change", what: "password", vault };
+}
+
+/** Opens Change password (27a) in the vault's panel. Not in a read-only copy, which has nothing to change. A change that is out keeps its place. */
+export function openChangePassword(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const out = entry.passwordChange?.phase === "ask" && entry.passwordChange.sending;
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "change_password" },
+    passwordChange: out ? current.passwordChange : { phase: "ask", sending: false, problem: null },
+  }));
+}
+
+/** Closes the form (Cancel, Close panel, Escape). What was typed goes with it. A change that is out goes on, and is answered where its vault is on screen. */
+export function closeChangePassword(session: number): void {
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "change_password" ? null : current.tool,
+    passwordChange: current.passwordChange?.phase === "ask" && current.passwordChange.sending ? current.passwordChange : null,
+  }));
+}
+
+/** The person has begun to mend the form: what the last refusal said goes. */
+export function clearPasswordProblem(session: number): void {
+  update(session, (current) =>
+    current.passwordChange?.phase === "ask" && current.passwordChange.problem !== null
+      ? { ...current, passwordChange: { ...current.passwordChange, problem: null } }
+      : current,
+  );
+}
+
+/** 27c's answer: "Back up now" opens 22a for this vault, "Not now" only closes the offer. Either way the change is finished. */
+export function finishPasswordChange(session: number, backUp: boolean): void {
+  update(session, (current) => (current.passwordChange?.phase === "done" ? { ...current, passwordChange: null } : current));
+  if (backUp) openBackup(session);
+}
+
+/**
+ * Sets the vault's new password, with the current one checked in the same call. The passwords are the form's, already gone from its fields: they go
+ * to the shell once and are not kept here. The session and generation are those the form was opened in. A second press while a change is out sends
+ * nothing.
+ *
+ * - **Done:** the form closes and 27c's offer of a fresh backup waits in this vault's record, shown when it is on screen. Ask 9's question about the
+ *   spare details is answered by it, so it goes.
+ * - **A wrong current password, a new one the shell calls too short, or any other refusal:** said on the form (its own field for the first two), with
+ *   the form's fields empty. Nothing changed (see the last point).
+ * - **A lock before the headers were written (`locked`):** nothing changed and nothing is said; the old password still opens.
+ * - **A lock after the change landed:** the shell's `locked_after_change` (with the vault's registry ID), or its good answer dropped by the bridge as
+ *   from before the lock, which the shell only gives a change that was written. Either way Ask 16 is kept for that vault's unlock. The shell answers
+ *   the same way (locking the vault first) for a write that came back as an error after `vault.json` landed and the new password is live, so a
+ *   disk error that left the new password in effect never reaches the form as a plain refusal.
+ * - Any other refusal (a disk error included) is the shell saying the write failed before anything landed: the old password still opens, so it is
+ *   said on the form, and no Ask 16 is kept for it.
+ */
+export async function changePassword(session: number, currentPassword: string, newPassword: string): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.passwordChange;
+  if (entry === undefined || entry.readOnly || flow?.phase !== "ask" || flow.sending) return;
+  const { generation, vaultId } = entry;
+  update(session, (current) => ({ ...current, passwordChange: { phase: "ask", sending: true, problem: null } }));
+  try {
+    await api.changePassword({ session, generation }, currentPassword, newPassword);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) {
+      const named = refusedWith(error, "locked_after_change") ? (error as { vault?: unknown }).vault : undefined;
+      const vault = typeof named === "number" && Number.isInteger(named) && named > 0 ? named : vaultId;
+      if (vault > 0) sayOnLockScreen(landedBeforeLock(vault), vault);
+      dropIfStillOpen(session, generation);
+      return;
+    }
+    if (refusedAsLocked(error)) {
+      dropIfStillOpen(session, generation);
+      return;
+    }
+    if (!stillOpen(session, generation)) return;
+    const wrong = refusedWith(error, "core") && (error as { kind?: unknown }).kind === "wrong_password";
+    const short = refusedWith(error, "core") && (error as { kind?: unknown }).kind === "password_too_short";
+    const problem: PasswordProblem = wrong
+      ? { field: "current", error: WRONG_CURRENT }
+      : { field: short ? "new" : "form", error };
+    update(session, (current) => ({ ...current, passwordChange: { phase: "ask", sending: false, problem } }));
+    return;
+  }
+  if (!stillOpen(session, generation)) return;
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "change_password" ? null : current.tool,
+    passwordChange: { phase: "done" },
+    asks: current.asks.closed.includes("spare") ? current.asks : { ...current.asks, closed: [...current.asks.closed, "spare"] },
+  }));
 }
 
 // ---- Back up a vault (Plan 4B Task 3: 22a to 22d, Ask 1 and Ask 2) ----
@@ -4942,8 +5077,9 @@ export function useNotices(): Notices {
   return useSelect((current) => current.notices);
 }
 
-export function useLockNote(): unknown {
-  return useSelect((current) => current.lockNote);
+/** What the lock screen says about the vault with this registry ID (Ask 16), or `null` for nothing (and for no vault chosen). */
+export function useLockNote(vault: number | null): unknown {
+  return useSelect((current) => (vault === null ? null : (current.lockNotes.find((note) => note.vault === vault)?.refusal ?? null)));
 }
 
 /** The search, or `null` while it is closed. */

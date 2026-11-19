@@ -715,6 +715,39 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Change password: the form, with the lines that say what is wrong with it (27a, 27b)",
+    shows: ["ChangePassword#ChangePasswordPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Change password", settings);
+      const panel = await screen.findByRole("complementary", { name: "Change password" });
+      // The view with the most on it: a short new password and a second one that differs, said on the form.
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: "MU-not the one" } });
+      fireEvent.change(within(panel).getByLabelText("New password"), { target: { value: "MU-short" } });
+      fireEvent.change(within(panel).getByLabelText("New password again"), { target: { value: "MU-other" } });
+      click("Change password", panel);
+      await within(panel).findAllByRole("alert");
+    },
+  },
+  {
+    name: "Change password: the offer of a fresh backup once it is changed (27c)",
+    shows: ["ChangePassword#ChangePasswordDone"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Change password", settings);
+      const panel = await screen.findByRole("complementary", { name: "Change password" });
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: PASSWORD } });
+      fireEvent.change(within(panel).getByLabelText("New password"), { target: { value: "MU-a new passphrase" } });
+      fireEvent.change(within(panel).getByLabelText("New password again"), { target: { value: "MU-a new passphrase" } });
+      click("Change password", panel);
+      await screen.findByRole("dialog", { name: "Make a fresh backup now?" });
+    },
+  },
+  {
     name: "A backup open: Copy to a vault and the question about the files it lacks (25b to 25d)",
     shows: ["OpenBackup#CopyToVault"],
     reach: async () => {

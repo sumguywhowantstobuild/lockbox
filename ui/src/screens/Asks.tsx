@@ -9,6 +9,7 @@ import {
   closeRestoreNotice,
   dismissShortcutNotice,
   lockThisVault,
+  openChangePassword,
   retryOpenFiles,
   setOutputRecordAside,
   startOpenBackup,
@@ -41,6 +42,11 @@ const DETAILS_CHANGED =
 
 /** What Ask 3 says is wrong, in the design's words: also the first sentences of an older copy's warning. */
 const DETAILS_DIFFER = "Its name, or other details kept beside your items, don't match what Lockbox last saved.";
+
+/** Ask 9's words: what an unlock from the spare copy of the details means, and what to do about it (the design's, word for word). */
+const SPARE_DETAILS =
+  "Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password.";
+const CHANGE_AGAIN = "Change the password again now that it's open.";
 
 /** The one word that fits one or many. */
 function count(n: number, one: string, many: string): string {
@@ -134,7 +140,7 @@ export function DetailsChangedAsk({ data }: { data: SessionData }) {
 /**
  * The banners an unlock raises over the list: Ask 4 (items that can't be read), Ask 5 (leftover files, the count only: the
  * sentences about "these files" and their date and size need the list, which 4B builds, and so does Delete them all),
- * Ask 9 (opened from the spare details; its last sentence sends the person to Change password, a 4C screen, so it waits)
+ * Ask 9 (opened from the spare details; its Change password opens the form for this vault, and the change answers it)
  * and Ask 10 (a cloud folder). Each closes with its button and comes back at the next unlock.
  */
 export function VaultBanners({ data }: { data: SessionData }) {
@@ -183,9 +189,24 @@ export function VaultBanners({ data }: { data: SessionData }) {
         />
       ) : null}
       {asks.spareDetails && open("spare") ? (
+        // The design's words in full, with Later and Change password. A vault that can't be changed (opened read-only) can't be told to change its password.
         <Notice
-          text="Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password."
-          actions={[{ name: "Later", onPress: close("spare") }]}
+          text={`${SPARE_DETAILS}${data.readOnly ? "" : ` ${CHANGE_AGAIN}`}`}
+          actions={[
+            { name: "Later", onPress: close("spare") },
+            ...(data.readOnly
+              ? []
+              : [
+                  {
+                    name: "Change password",
+                    // As drawn (Ask 9): the way on is the filled button.
+                    main: true,
+                    onPress: () => {
+                      openChangePassword(session);
+                    },
+                  },
+                ]),
+          ]}
         />
       ) : null}
       {asks.headerChanged && open("details") ? (
@@ -319,12 +340,13 @@ export function ShortcutAsk() {
 /**
  * What the lock screen says beside the password: a restore that Lockbox finished at launch (the vault's name as the notice gave it, and an Unlock
  * button that closes the notice and leaves that vault chosen with its password box focused; unlocking clears it too), and a refusal that the vault
- * it was about has locked before (Ask 16, "Locked before it could say"; words, no button). `onUnlock` is the lock screen's: it gets the vault the notice names, or
- * `null` when it names none.
+ * it was about has locked before (Ask 16, "Locked before it could say"; words, no button): kept for one vault, shown while that vault is the one chosen
+ * (`chosen`, its registry ID, or `null` for none) and used up by that vault's unlock alone. `onUnlock` is the lock screen's: it gets the vault the notice
+ * names, or `null` when it names none.
  */
-export function LockScreenAsks({ onUnlock }: { onUnlock: (vault: number | null) => void }) {
+export function LockScreenAsks({ chosen, onUnlock }: { chosen: number | null; onUnlock: (vault: number | null) => void }) {
   const { restore } = useNotices();
-  const note = useLockNote();
+  const note = useLockNote(chosen);
   const finished = restore?.ask === "finished" ? restore : null;
   return (
     <div className="asks">

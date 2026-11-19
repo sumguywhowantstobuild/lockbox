@@ -156,6 +156,8 @@ export const MESSAGES: Record<string, Words> = {
   "page:copy_it_first": { title: "That folder is on a removable drive.", body: "Copy it to this PC first, then choose the copy." },
   // A restore whose copy was stopped (Cancel, Windows locking or sleeping, Lock all, closing): nothing was changed. Said on the first step of the restore.
   "page:restore_cancelled": { title: "The restore was cancelled.", body: "Your vault is as it was." },
+  // Change password (27b): the shell's wrong password, said on the form's own first field. The words are the drawn screen's; the design gives none, so they are the session's.
+  "page:wrong_current_password": { title: "That isn't the current password.", body: "" },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.

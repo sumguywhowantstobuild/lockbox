@@ -652,7 +652,7 @@ test("a_read_only_vault_can_open_a_backup_too", async () => {
 test("restore_a_backup_follows_test_a_backup_in_this_vault_and_opens_the_first_step", async () => {
   const { panel } = await opened();
   const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
-  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup"]);
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup", "Change password"]);
   const button = within(group).getByRole("button", { name: "Restore a backup" });
   expect(button.getAttribute("aria-describedby")).not.toBeNull();
   fireEvent.click(button);
@@ -701,7 +701,7 @@ test("older_copies_follows_restore_a_backup_with_the_count_of_this_vaults", asyn
   });
   const group = within(panel).getByRole("heading", { level: 3, name: "This vault" }).closest("section") as HTMLElement;
   const button = await within(group).findByRole("button", { name: "Older copies (2)" });
-  expect(within(group).getAllByRole("button").map((each) => each.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup", "Older copies (2)"]);
+  expect(within(group).getAllByRole("button").map((each) => each.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup", "Older copies (2)", "Change password"]);
   expect(button.getAttribute("aria-describedby")).not.toBeNull();
   fireEvent.click(button);
   await screen.findByRole("complementary", { name: "Older copies" });
@@ -721,12 +721,11 @@ test("a_read_only_vault_with_older_copies_offers_them_too", async () => {
 test("no_password_links_until_their_plans", async () => {
   const { panel } = await opened();
   // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`), Test a backup with Task 4 (`TestBackup.test.tsx`), Restore a backup with Task 5
-  // (`RestoreFlow.test.tsx`), Older copies with Task 8 (`OlderCopies.test.tsx`, hidden here while none are kept) and Open a backup with Task 7
-  // (`OpenBackup.test.tsx`); the rest of the vault's rows wait for their own plans.
+  // (`RestoreFlow.test.tsx`), Older copies with Task 8 (`OlderCopies.test.tsx`, hidden here while none are kept), Open a backup with Task 7
+  // (`OpenBackup.test.tsx`) and Change password with 4C's Task 3 (`ChangePassword.test.tsx`); the rest of the vault's rows wait for their own plans.
   for (const name of [
     /older copies/i,
     /export/i,
-    /change password/i,
     /recovery key/i,
   ]) {
     expect(within(panel).queryByRole("button", { name }), String(name)).toBeNull();
@@ -743,6 +742,7 @@ test("no_password_links_until_their_plans", async () => {
     "Test a backup",
     "Open a backup",
     "Restore a backup",
+    "Change password",
   ]);
 });
 

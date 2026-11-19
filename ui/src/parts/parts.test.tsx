@@ -399,14 +399,16 @@ test("a_panel_with_no_picture_or_tools_has_its_heading_beside_close", () => {
 test("a_password_field_is_hidden_named_and_never_remembered", async () => {
   function Typed() {
     const [value, setValue] = useState("");
-    return <PasswordField label="Password for My vault" value={value} onChange={setValue} />;
+    return <PasswordField label="Password for My vault" autoComplete="current-password" value={value} onChange={setValue} />;
   }
   const { container } = render(<Typed />);
   const field = screen.getByLabelText<HTMLInputElement>("Password for My vault");
   expect(field.type).toBe("password");
-  // The browser is told not to keep, fill or correct what is typed.
-  expect(field.getAttribute("autocomplete")).toBe("off");
+  // The browser is told what it is, and not to correct or capitalise what is typed (`secretFields.test.tsx` checks every field in the app).
+  expect(field.getAttribute("autocomplete")).toBe("current-password");
   expect(field.getAttribute("spellcheck")).toBe("false");
+  expect(field.getAttribute("autocorrect")).toBe("off");
+  expect(field.getAttribute("autocapitalize")).toBe("off");
   fireEvent.change(field, { target: { value: "typed" } });
   expect(field.value).toBe("typed");
   await expectNoAxe(container);

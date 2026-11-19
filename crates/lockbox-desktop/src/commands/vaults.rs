@@ -698,7 +698,9 @@ impl Shell {
     /// derivation, then the stop check right before the header writes (`before_header_writes`), then the writes. A
     /// wrong current password changes nothing. A lock that came before the writes answers `Locked`, with nothing
     /// written; one that came during them answers `LockedAfterChange { what: "password", vault }` and no word of
-    /// anything else (the lease's generation check on the answer).
+    /// anything else (the lease's generation check on the answer). A write that came back as an error after
+    /// `vault.json` landed (the engine's `commit` read it back and made the new header live) is the same change: the
+    /// vault is locked and the answer is `LockedAfterChange`; one that failed before it stays the plain error.
     pub fn change_password(
         &self,
         session: SessionId,
@@ -710,16 +712,44 @@ impl Shell {
             what: "password",
             vault: self.registry_id_of(session),
         };
-        self.sessions
+        let answer = self
+            .sessions
             .write_change(session, generation, change, |vault, cancel| {
                 check_new_password(&new_password)?;
                 vault.check_password(&current_password)?;
                 #[cfg(test)]
                 test_step(PASSWORD_CHECKED)?;
-                vault
-                    .change_password_with(&new_password, || before_header_writes(cancel))
-                    .map_err(stopped_by_a_lock)
-            })
+                match vault.change_password_with(&new_password, || before_header_writes(cancel)) {
+                    Ok(()) => Ok(()),
+                    // A lock before the writes: nothing was written.
+                    Err(lockbox_core::CoreError::Cancelled) => Err(ShellError::Locked),
+                    Err(error) => {
+                        // The engine's `commit` reads `vault.json` back after a failed write and makes the new
+                        // header live when it landed. If the live header now holds the new password, the change
+                        // happened though the write came back as an error: say so (below), never "nothing changed".
+                        if vault.check_password(&new_password).is_ok() {
+                            Err(ShellError::LockedAfterChange {
+                                what: change.what,
+                                vault: change.vault,
+                            })
+                        } else {
+                            Err(error.into())
+                        }
+                    }
+                }
+            });
+        if let Err(ShellError::LockedAfterChange { .. }) = &answer {
+            // The page is told what a lock that overtakes a change is told: this vault is locked (its lock event
+            // goes out before this answer), so its Ask 16 says the new password is in effect and is then true. A
+            // lock that already came leaves nothing to lock.
+            if let Some(done) = self.sessions.revoke_some(
+                &[(session, Some(generation))],
+                crate::session::LockReason::Manual,
+            ) {
+                done.wait();
+            }
+        }
+        answer
     }
 
     /// A new recovery key the person asks for from inside the vault, with the current password checked in the same
@@ -3177,6 +3207,92 @@ mod tests {
         let after = headers(&dir);
         assert_ne!(after, before, "the new key's header landed");
         assert_eq!(after.0, after.1, "in both files");
+    }
+
+    /// The engine's `commit` reads `vault.json` back after a failed write and makes the new header live when it landed (the
+    /// partial-write hook of `vault_stays_usable_after_a_partial_header_write`: after `vault.json`, before `.bak`). The
+    /// change did happen, so the person must not be told it didn't: the vault is locked and the answer is
+    /// `LockedAfterChange` with its registry ID and nothing else, which the page shows as "Your new password was saved, but
+    /// the vault locked before Lockbox could say so." (true). Another vault stays open.
+    #[test]
+    fn a_change_that_landed_though_its_write_failed_locks_the_vault_and_says_so() {
+        let ts = TestShell::new();
+        let (other, other_generation) = confirmed_session(&ts, "Other");
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let id = registry_id(&ts, session);
+        let dir = folder_of(&ts, session);
+        let before = headers(&dir);
+        failpoint::arm("write_headers.before_second");
+        let answer = heavy(|| {
+            ts.shell
+                .change_password(session, generation, secret(PW), secret(NEW_PW))
+                .map(|_| ())
+        });
+        failpoint::disarm_all();
+        let error = answer.expect_err("the write failed");
+        assert_eq!(
+            error,
+            ShellError::LockedAfterChange {
+                what: "password",
+                vault: id
+            }
+        );
+        let said = serde_json::to_string(&error).unwrap();
+        assert_eq!(
+            said,
+            format!(r#"{{"code":"locked_after_change","what":"password","vault":{id}}}"#)
+        );
+        assert!(!said.contains(PW) && !said.contains(NEW_PW));
+        // `vault.json` is ahead of `.bak`: the new password's header landed in one file only.
+        let (main, spare) = headers(&dir);
+        assert_ne!(main, before.0);
+        assert_eq!(spare, before.1);
+        // The vault's session is locked (a command in its generation is refused as locked); the other one is not.
+        let after = ts.shell.sessions.write(session, generation, |_, _| Ok(()));
+        assert_eq!(after.err(), Some(ShellError::Locked));
+        assert!(
+            ts.shell
+                .sessions
+                .write(other, other_generation, |_, _| Ok(()))
+                .is_ok()
+        );
+        assert!(password_works(&dir, NEW_PW), "the new password opens it");
+    }
+
+    /// The same failure before `vault.json` was touched: nothing landed, so the answer stays the plain error, the
+    /// session stays open, and the old password still opens.
+    #[test]
+    fn a_change_whose_write_failed_before_vault_json_changes_nothing_and_stays_open() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = headers(&dir);
+        failpoint::arm("write_headers.before_first");
+        let answer = heavy(|| {
+            ts.shell
+                .change_password(session, generation, secret(PW), secret(NEW_PW))
+                .map(|_| ())
+        });
+        failpoint::disarm_all();
+        let error = answer.expect_err("the write failed");
+        assert!(
+            !matches!(
+                error,
+                ShellError::Locked | ShellError::LockedAfterChange { .. }
+            ),
+            "a plain refusal: {error:?}"
+        );
+        assert_eq!(headers(&dir), before, "nothing was written");
+        assert!(
+            ts.shell
+                .sessions
+                .write(session, generation, |_, _| Ok(()))
+                .is_ok(),
+            "the session is still open"
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(password_works(&dir, PW));
+        assert!(!password_works(&dir, NEW_PW));
     }
 
     /// Two changes that hold the same current password: the vault's write lock keeps them apart, so one wins and the
