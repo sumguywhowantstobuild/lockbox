@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import App from "../App";
 import { LockboxParts } from "../parts/LockboxParts";
-import { resetStoreForTests, startStore } from "../store";
+import { debugState, resetStoreForTests, startStore } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { installFakeShell, PASSWORD, sampleItems, type FakeShell } from "../testing/fakeShell";
 import { LockScreen } from "./LockScreen";
@@ -259,19 +260,41 @@ test("a_typed_password_does_not_survive_leaving_the_window", async () => {
   expect(passwordField().value).toBe("kept");
 });
 
-test("no_forgot_password_link_until_4c", async () => {
+test("forgot_password_link_opens_28a", async () => {
   const { container } = await show([
     { id: 7, name: "My vault", items: sampleItems() },
     { id: 8, name: "Home", items: sampleItems() },
   ]);
-  // Nothing on the lock screen leads to a screen a later plan builds: no forgotten password, no adding a vault folder, no generator. Restore a backup
-  // (4B's Task 5) and Open a backup (Task 7) are the two links under the form; the rest are the vaults, the password and Unlock.
-  for (const words of [/forgot/i, /add existing/i, /generate/i, /recovery/i]) {
+  // Nothing on the lock screen leads to a screen a later plan builds: no adding a vault folder, no generator. Forgot password? (Task 28) sits beside Unlock;
+  // Restore a backup (4B's Task 5) and Open a backup (Task 7) are the two links under the form; the rest are the vaults, the password and Unlock.
+  for (const words of [/add existing/i, /generate/i]) {
     expect(screen.queryByText(words)).toBeNull();
   }
   expect(screen.queryAllByRole("link")).toEqual([]);
-  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
   expect(container.querySelectorAll("[style]")).toHaveLength(0);
+  // It is a button of the form's own line, not a submit: pressed, it opens 28a for the vault chosen (the second one here), and sends nothing yet.
+  const link = screen.getByRole<HTMLButtonElement>("button", { name: "Forgot password?" });
+  expect(link.type).toBe("button");
+  fireEvent.click(screen.getByRole("radio", { name: /Home/ }));
+  fireEvent.click(link);
+  expect(debugState().forgot).toMatchObject({ vault: 8, phase: "key" });
+  expect(invoke.mock.calls.filter(([name]) => String(name).startsWith("recover_"))).toEqual([]);
+});
+
+test("forgot_password_is_not_offered_while_a_copy_waits_for_its_vault", async () => {
+  // The save step (8b) is the same screen with its own words and a Cancel: its way out is the copy's, not the password's.
+  shell = installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: sampleItems() }]);
+  render(<App />);
+  await vi.waitFor(() => {
+    expect(shell.calls.some((call) => call.cmd === "capture_state")).toBe(true);
+  });
+  await act(async () => {
+    shell.press({ text: "MU-copied value" });
+    await Promise.resolve();
+  });
+  await screen.findByRole("heading", { level: 1, name: "Save what you copied" });
+  expect(screen.queryByRole("button", { name: "Forgot password?" })).toBeNull();
 });
 
 test("restore_a_backup_is_a_second_line_under_the_form_and_opens_the_first_step", async () => {

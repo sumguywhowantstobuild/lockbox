@@ -1,6 +1,6 @@
 //! Opening a vault (spec 6.3): `vault.json` first, `.bak` as the fallback, then a careful repair.
 
-use super::{HeaderGuard, UnlockReport, Unverified, Vault, items};
+use super::{HeaderGuard, RecoveryCheck, UnlockReport, Unverified, Vault, items};
 use crate::fsio::{atomic_write, read_retry};
 use crate::header::{
     HEADER_BACKUP, HEADER_FILE, MAX_HEADER_BYTES, VaultHeader, parse_header, verify_header_mac,
@@ -280,6 +280,37 @@ pub(super) fn open(dir: &Path, credential: Credential) -> Result<(Vault, UnlockR
     Ok((vault, report))
 }
 
+/// One header file as a read-only look sees it: its bytes when they could be read (`None`: not there, or not readable),
+/// and what they parse to (or why they did not).
+fn look(path: &Path) -> (Option<Vec<u8>>, Result<HeaderFile>) {
+    match read_retry(path, MAX_HEADER_BYTES) {
+        Ok(bytes) => {
+            let seen = bytes.clone();
+            (Some(seen), HeaderFile::from_bytes(bytes))
+        }
+        Err(e) => (None, Err(e)),
+    }
+}
+
+/// [`Vault::check_recovery_key`]: the header choice and the MAC check of [`open`], with none of its writes, its lock or
+/// its cleanup, and with the two files' bytes kept for the caller.
+pub(super) fn check_recovery(dir: &Path, secret: &RecoverySecret) -> Result<RecoveryCheck> {
+    #[cfg(any(test, feature = "test-internals"))]
+    crate::fsio::failpoint::check("recovery_check.start")?;
+    if !dir.join(HEADER_FILE).try_exists()? && !dir.join(HEADER_BACKUP).try_exists()? {
+        return Err(CoreError::NotFound);
+    }
+    let (main_bytes, main) = look(&dir.join(HEADER_FILE));
+    let (backup_bytes, backup) = look(&dir.join(HEADER_BACKUP));
+    let (used, key, _) = choose_header(&main, &backup, &Credential::Recovery(secret))?;
+    Ok(RecoveryCheck {
+        header_mac_mismatch: !verify_header_mac(&used.header, &key),
+        name: used.header.name.clone(),
+        main: main_bytes,
+        backup: backup_bytes,
+    })
+}
+
 /// The header in `dir`, read without the key and so not authenticated: `vault.json`, else
 /// `.bak` as unlocking falls back; if both fail, the `vault.json` error is returned.
 fn read_unverified_header(dir: &Path) -> Result<VaultHeader> {
@@ -407,6 +438,160 @@ mod tests {
         assert_eq!(read_vault_id(&dir).unwrap(), id);
         std::fs::write(dir.join(HEADER_BACKUP), b"damaged in place").unwrap();
         assert!(read_vault_id(&dir).is_err());
+    }
+
+    // ---- The read-only recovery check (Plan 4C, Task 4) ----
+
+    const PW: &str = "correct horse battery";
+
+    /// A closed vault named "Family": its folder and recovery key.
+    fn closed_vault(parent: &Path) -> (std::path::PathBuf, RecoverySecret) {
+        let created = Vault::create(parent, "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let recovery = created.recovery;
+        drop(created.vault);
+        (dir, recovery)
+    }
+
+    /// Every file under `dir` with its bytes, in a fixed order: what a check must leave exactly as it was.
+    fn snapshot(dir: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        fn walk(dir: &Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                match entry.file_type().unwrap().is_dir() {
+                    true => walk(&entry.path(), out),
+                    // A live vault's `.lock` cannot be read: only that it is there counts.
+                    false if entry.file_name() == ".lock" => {
+                        out.push((entry.path(), Vec::new()));
+                    }
+                    false => out.push((entry.path(), std::fs::read(entry.path()).unwrap())),
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, &mut out);
+        assert!(out.len() >= 2, "a vault folder holds its two headers");
+        out.sort();
+        out
+    }
+
+    fn is_wrong_password<T>(result: Result<T>) -> bool {
+        matches!(result, Err(CoreError::WrongPassword))
+    }
+
+    /// The key opens the vault's recovery slot: the answer names the vault and holds both header files as they are, and
+    /// nothing is written or taken: not the `.lock`, even while another holder has the vault open.
+    #[test]
+    fn check_recovery_opens_with_the_key_and_writes_nothing() {
+        let parent = TempDir::new();
+        let (dir, recovery) = closed_vault(parent.path());
+        let before = snapshot(&dir);
+        let checked = Vault::check_recovery_key(&dir, &recovery).unwrap();
+        assert_eq!(checked.name, "Family");
+        assert!(!checked.header_mac_mismatch);
+        assert_eq!(
+            checked.main.as_deref(),
+            Some(std::fs::read(dir.join(HEADER_FILE)).unwrap().as_slice())
+        );
+        assert_eq!(
+            checked.backup.as_deref(),
+            Some(std::fs::read(dir.join(HEADER_BACKUP)).unwrap().as_slice())
+        );
+        assert_eq!(snapshot(&dir), before, "nothing written");
+
+        // Another holder has the vault open (its `.lock` is taken): the check neither waits nor fails, nor touches it.
+        let (open, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        let before = snapshot(&dir);
+        let again = Vault::check_recovery_key(&dir, &recovery).unwrap();
+        assert_eq!(again.main, checked.main);
+        assert_eq!(snapshot(&dir), before);
+        drop(open);
+    }
+
+    /// A header changed outside Lockbox (its name, which the MAC covers) opens with the key and says so.
+    #[test]
+    fn check_recovery_reports_a_changed_header() {
+        let parent = TempDir::new();
+        let (dir, recovery) = closed_vault(parent.path());
+        let mut header = parse_header(&std::fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        header.name = "Renamed".to_owned();
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            std::fs::write(dir.join(file), crate::header::serialize_header(&header)).unwrap();
+        }
+        let before = snapshot(&dir);
+        let checked = Vault::check_recovery_key(&dir, &recovery).unwrap();
+        assert!(checked.header_mac_mismatch);
+        assert_eq!(checked.name, "Renamed");
+        assert_eq!(snapshot(&dir), before);
+    }
+
+    /// Another vault's key and a key replaced since open no slot: the cipher cannot tell them apart.
+    #[test]
+    fn check_recovery_refuses_another_vaults_key_and_an_old_key() {
+        let parent = TempDir::new();
+        let (dir, recovery) = closed_vault(parent.path());
+        let (_, others_key) = {
+            let other = Vault::create(parent.path(), "Work", PW).unwrap();
+            (other.vault.dir().to_path_buf(), other.recovery)
+        };
+        let before = snapshot(&dir);
+        assert!(is_wrong_password(Vault::check_recovery_key(
+            &dir,
+            &others_key
+        )));
+        assert_eq!(snapshot(&dir), before);
+
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        let fresh = vault.regenerate_recovery().unwrap();
+        drop(vault);
+        assert!(is_wrong_password(Vault::check_recovery_key(
+            &dir, &recovery
+        )));
+        assert!(Vault::check_recovery_key(&dir, &fresh).is_ok());
+    }
+
+    /// `vault.json` damaged and `.bak` good: opens through the spare as an unlock does, and unlike an unlock repairs
+    /// nothing, so the damaged file is reported as it is.
+    #[test]
+    fn check_recovery_falls_back_to_the_spare_and_repairs_nothing() {
+        let parent = TempDir::new();
+        let (dir, recovery) = closed_vault(parent.path());
+        std::fs::write(dir.join(HEADER_FILE), b"damaged").unwrap();
+        let before = snapshot(&dir);
+        let checked = Vault::check_recovery_key(&dir, &recovery).unwrap();
+        assert_eq!(checked.name, "Family");
+        assert!(!checked.header_mac_mismatch);
+        assert_eq!(checked.main.as_deref(), Some(&b"damaged"[..]));
+        assert_eq!(snapshot(&dir), before, "the damaged file is not repaired");
+
+        // A missing file is `None`, and the other one still opens.
+        std::fs::remove_file(dir.join(HEADER_FILE)).unwrap();
+        let checked = Vault::check_recovery_key(&dir, &recovery).unwrap();
+        assert!(checked.main.is_none() && checked.backup.is_some());
+        assert!(!dir.join(HEADER_FILE).exists(), "still not repaired");
+    }
+
+    /// No header files is `NotFound`; both damaged is `Damaged`; neither is a wrong key.
+    #[test]
+    fn check_recovery_with_no_readable_header_refuses() {
+        let parent = TempDir::new();
+        let (dir, recovery) = closed_vault(parent.path());
+        std::fs::write(dir.join(HEADER_FILE), b"damaged").unwrap();
+        std::fs::write(dir.join(HEADER_BACKUP), b"damaged too").unwrap();
+        assert!(matches!(
+            Vault::check_recovery_key(&dir, &recovery),
+            Err(CoreError::Damaged { .. })
+        ));
+        std::fs::remove_file(dir.join(HEADER_FILE)).unwrap();
+        std::fs::remove_file(dir.join(HEADER_BACKUP)).unwrap();
+        assert!(matches!(
+            Vault::check_recovery_key(&dir, &recovery),
+            Err(CoreError::NotFound)
+        ));
+        assert!(matches!(
+            Vault::check_recovery_key(&dir.join("not here"), &recovery),
+            Err(CoreError::NotFound)
+        ));
     }
 
     #[test]

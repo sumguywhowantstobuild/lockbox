@@ -427,8 +427,8 @@ test("ask13_newer_vault_has_no_buttons", async () => {
   const alert = await screen.findByRole("alert");
   expect(alert.textContent).toBe("Update Lockbox to open this vault. A newer version made it.");
   expect(messageFor(NEWER_VAULT)).toEqual({ title: "Update Lockbox to open this vault.", body: "A newer version made it." });
-  // The design gives it no button: the lock screen's own Unlock and its Restore a backup and Open a backup links are the only ones.
-  expect(buttonNames()).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
+  // The design gives it no button: the lock screen's own Unlock and its Forgot password?, Restore a backup and Open a backup links are the only ones.
+  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
   await expectNoAxe(container);
 });
 
@@ -442,7 +442,7 @@ test("ask16_says_the_change_was_saved", async () => {
   });
   const words = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
   expect(await screen.findByText(words)).toBeTruthy();
-  expect(buttonNames()).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
+  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
   await expectNoAxe(container);
   // Unlocking with the new password is what it asked for: the note goes.
   await unlockIt();
@@ -475,7 +475,7 @@ test("restore_finished_at_launch_says_unlock_with_that_password", async () => {
   const words = "Lockbox finished restoring My vault. Unlock with the password from when that backup was made.";
   expect(await screen.findByText(words)).toBeTruthy();
   // The notice has its own Unlock, above the lock screen's (which stays off until a password is typed), beside Restore a backup.
-  expect(buttonNames()).toEqual(["Unlock", "Unlock", "Restore a backup", "Open a backup"]);
+  expect(buttonNames()).toEqual(["Unlock", "Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
   await expectNoAxe(container);
   // Its Unlock closes the notice and leaves the password box for that vault, focused.
   fireEvent.click(screen.getAllByRole("button", { name: "Unlock" })[0] as HTMLElement);
@@ -516,7 +516,7 @@ test("a_restore_notice_that_needs_an_answer_shows_no_path_on_the_lock_screen", a
   fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
   await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
   expect(container.textContent).not.toContain("SENTINEL");
-  expect(buttonNames()).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
+  expect(buttonNames()).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Open a backup"]);
 });
 
 test("damaged_vault_list_shows_its_own_screen_with_the_way_out", async () => {

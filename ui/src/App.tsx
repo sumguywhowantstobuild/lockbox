@@ -6,6 +6,7 @@ import { PortalContainerProvider } from "./parts/Portal";
 import { vaultLook } from "./parts/Pattern";
 import { CloseQuestion } from "./screens/CloseQuestion";
 import { FirstClose } from "./screens/FirstClose";
+import { ForgotPassword } from "./screens/ForgotPassword";
 import { LockScreen } from "./screens/LockScreen";
 import { MainWindow } from "./screens/MainWindow";
 import { OpenBackupSteps } from "./screens/OpenBackup";
@@ -20,6 +21,7 @@ import {
   startCapture,
   startNotices,
   startStore,
+  useForgot,
   useMoveIn,
   useNotices,
   useOpenBackup,
@@ -42,7 +44,7 @@ import "./styles/print.css";
  * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. A restore
  * (24a to 24e) takes the whole window above any of these while it is open, and gives it back when it ends; so does the notice of a restore that didn't
  * finish, below an open restore; Open a backup begun from the lock screen (25a) does the same below those; moving to a new computer (26a to 26c) takes the place of the
- * first screen and the lock screen in the same way. The
+ * first screen and the lock screen in the same way, and so does Forgot password (28a to 28e), which also stays over the vault its new password opens until 28e is answered. The
  * store starts listening for locks before anything asks the shell for anything. The first close of the window is explained
  * over whichever of these is up (5b). Light or dark follows the theme chosen in Settings, and Windows' own setting for System.
  */
@@ -99,6 +101,9 @@ export default function App() {
   // Open a backup (25a) begun from the lock screen takes the window the same way, below a restore and its notices; begun from a window it is that window's panel.
   const openFlow = useOpenBackup();
   const openingFromLock = openFlow !== null && openFlow.host === null && openFlow.phase !== "picking";
+  // Forgot password (28a to 28e) is the app's too, begun from the lock screen: it takes the window above the lock screen and, at 28e, above the vault the new
+  // password just opened, until its offer is answered.
+  const forgetting = useForgot() !== null;
 
   return (
     <LockboxParts>
@@ -112,6 +117,8 @@ export default function App() {
             <OpenBackupSteps />
           ) : movingIn ? (
             <MoveIn />
+          ) : forgetting ? (
+            <ForgotPassword />
           ) : (
             screen
           )}

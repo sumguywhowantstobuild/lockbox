@@ -202,6 +202,27 @@ const PLACES: Place[] = [
       await screen.findByRole("complementary", { name: "Change password" });
     },
   },
+  {
+    screen: "Forgot password, the recovery key (28a)",
+    fields: ["off"],
+    reach: async () => {
+      start();
+      fireEvent.click(await screen.findByRole("button", { name: "Forgot password?" }));
+      await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
+    },
+  },
+  {
+    screen: "Forgot password, the new password (28d)",
+    fields: ["new-password", "new-password"],
+    reach: async () => {
+      start();
+      fireEvent.click(await screen.findByRole("button", { name: "Forgot password?" }));
+      await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
+      fireEvent.change(screen.getByLabelText("Recovery key"), { target: { value: shell.recoveryKeyOf(7) } });
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+      await screen.findByRole("heading", { level: 1, name: "Choose a new password" });
+    },
+  },
 ];
 
 /** Every box where a vault's password or a recovery key is typed, shown or hidden: hidden ones by type, and any other by what its label says. */
@@ -235,7 +256,8 @@ test("every_secret_field_has_the_four_attributes", async () => {
   }
   // The number of fields looked at is the number the list promises.
   expect(checked).toBe(PLACES.reduce((sum, place) => sum + place.fields.length, 0));
-});
+  // It reaches every screen in the list from a fresh page, one after another, so its time grows with the list: it gets room for the screens still to be listed.
+}, 30_000);
 
 test("every_file_that_draws_a_secret_field_is_on_the_list", () => {
   // A field typed into in a file nobody listed would go unchecked: the parts that draw one are the two named here, and the two item forms that draw a

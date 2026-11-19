@@ -89,6 +89,19 @@ pub struct UnlockReport {
     pub cleanup: CleanupReport,
 }
 
+/// What a read-only look at a vault's headers with a recovery key found ([`Vault::check_recovery_key`]). No `Debug`: the
+/// name is the user's own.
+pub struct RecoveryCheck {
+    /// The header that opened failed its MAC: it was changed outside Lockbox (see [`UnlockReport`]).
+    pub header_mac_mismatch: bool,
+    /// The vault's name, from the header that opened.
+    pub name: String,
+    /// `vault.json` exactly as read; `None` when the file is not there or could not be read.
+    pub main: Option<Vec<u8>>,
+    /// `vault.json.bak` exactly as read; `None` when the file is not there or could not be read.
+    pub backup: Option<Vec<u8>>,
+}
+
 /// A new vault, open, with the recovery secret to show the user once.
 #[derive(Debug)]
 pub struct CreatedVault {
@@ -265,6 +278,16 @@ impl Vault {
         secret: &RecoverySecret,
     ) -> Result<(Vault, UnlockReport)> {
         unlock::open(dir, Credential::Recovery(secret))
+    }
+
+    /// Whether `secret` opens the recovery slot of the vault in `dir`, and whether the header that opened passes its
+    /// MAC, without opening the vault: no `.lock` is taken, nothing is cleaned or repaired, nothing is written, and no
+    /// Argon2 runs (the recovery key's derivation is HKDF). Picks the header as unlocking does (`vault.json`, else
+    /// `.bak` of the same vault) and answers with both files' bytes as read, so the caller can tell later whether
+    /// either changed. A key that opens no slot is [`CoreError::WrongPassword`]: another vault's key and an old key
+    /// look alike to the cipher.
+    pub fn check_recovery_key(dir: &Path, secret: &RecoverySecret) -> Result<RecoveryCheck> {
+        unlock::check_recovery(dir, secret)
     }
 
     /// Sets a new password (checked against the minimum length) with a fresh salt. The

@@ -790,6 +790,23 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Forgot password: the recovery key, the new password and the offer of a fresh backup (28a to 28e)",
+    shows: ["ForgotPassword#ForgotPassword"],
+    reach: async () => {
+      start([vault()]);
+      fireEvent.click(await screen.findByRole("button", { name: "Forgot password?" }));
+      await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
+      fireEvent.change(screen.getByLabelText("Recovery key"), { target: { value: shell.recoveryKeyOf(7) } });
+      click("Continue");
+      await screen.findByRole("heading", { level: 1, name: "Choose a new password" });
+      fireEvent.change(screen.getByLabelText("New password"), { target: { value: "MU-new passphrase 2026" } });
+      fireEvent.change(screen.getByLabelText("New password again"), { target: { value: "MU-new passphrase 2026" } });
+      click("Set new password");
+      // The last of its views.
+      await screen.findByRole("heading", { level: 1, name: "Make a fresh backup now?" });
+    },
+  },
+  {
     name: "A restore that didn't finish: Ask 6, Ask 7 and the two states with no drawn screen",
     shows: ["RestoreNotices#RestoreNotices"],
     reach: async () => {

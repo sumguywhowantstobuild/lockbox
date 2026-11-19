@@ -158,6 +158,15 @@ export const MESSAGES: Record<string, Words> = {
   "page:restore_cancelled": { title: "The restore was cancelled.", body: "Your vault is as it was." },
   // Change password (27b): the shell's wrong password, said on the form's own first field. The words are the drawn screen's; the design gives none, so they are the session's.
   "page:wrong_current_password": { title: "That isn't the current password.", body: "" },
+  // Forgot password (28b): a key the shell read as a key but that does not open this vault (another vault's, or an old one: the cipher can't tell them apart).
+  // The shell sends `wrong_password`; the design's words, with the vault's name from the list put in by the page.
+  "page:recovery_key_does_not_open": { title: "This key doesn't open {vault}.", body: "" },
+  // Forgot password: the shell let go of the checked key (five minutes, a lock) or the vault changed on disk since it was checked, so the key is typed again.
+  // The design gives no words for it; they are the session's.
+  "page:recovery_choice_expired": {
+    title: "Type the recovery key again.",
+    body: "It waited too long, or the vault changed since it was checked. Nothing was changed.",
+  },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
@@ -165,7 +174,8 @@ export const MESSAGES: Record<string, Words> = {
   "page:output_expired": { title: "Lockbox can't open that folder now.", body: "Open it from Windows." },
 
   "core:wrong_password": { title: "Wrong password.", body: "" },
-  "core:recovery_key_typo": { title: "That recovery key has a typing mistake.", body: "Check it against the one you saved." },
+  // The spec's words (5.2: "That recovery key has a typo"), on every screen that meets it.
+  "core:recovery_key_typo": { title: "That recovery key has a typo.", body: "Check it against the one you saved." },
   "core:invalid_recovery_key": { title: "That isn't a recovery key for Lockbox.", body: "" },
   // These two say a number of their own, filled in from the refusal's: `{position}` and `{found}`, and `{s}`, which is
   // an "s" unless `found` is 1.
@@ -422,7 +432,7 @@ function lookup(key: string): Words | undefined {
  * The words for a refusal, from the fixed table. Anything that is not a refusal the table knows gets
  * {@link GENERIC}. The refusal's own text is never part of the answer, whatever it holds.
  */
-export function messageFor(error: unknown, names: { shortcut?: string } = {}): Message {
+export function messageFor(error: unknown, names: { shortcut?: string; vault?: string } = {}): Message {
   if (!isRecord(error)) return { ...GENERIC };
   const { code, kind, what } = error;
   if (typeof code !== "string") return { ...GENERIC };
@@ -444,8 +454,10 @@ export function messageFor(error: unknown, names: { shortcut?: string } = {}): M
   // A message with a number's place in it needs that number as a whole number: without it, it is the generic message.
   const counted = filled(words, numbers);
   if (counted === undefined) return { ...GENERIC };
-  // The shortcut the page tried is the page's own text (never the shell's); a message that names one says "that shortcut" without it.
-  const named = (part: string) => part.replace("{shortcut}", () => names.shortcut ?? "that shortcut");
+  // The shortcut the page tried and the vault's name on the list are the page's own text (never the shell's); a message that names one says "that
+  // shortcut" or "this vault" without it. Both are put in in one pass, so what is put in is never read as a place to fill.
+  const named = (part: string) =>
+    part.replace(/\{(shortcut|vault)\}/g, (_, place: string) => (place === "shortcut" ? (names.shortcut ?? "that shortcut") : (names.vault ?? "this vault")));
   const said = { title: named(counted.title), body: named(counted.body) };
   return Object.keys(numbers).length > 0 ? { ...said, numbers } : { ...said };
 }

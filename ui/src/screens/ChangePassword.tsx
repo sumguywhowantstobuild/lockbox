@@ -6,6 +6,7 @@ import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
 import { Panel } from "../parts/Panel";
 import { PasswordField } from "../parts/PasswordField";
+import { BACKUPS_NEED_OLD_DETAILS, LIMIT, MIN_PASSWORD, MISMATCH, OFFER, OFFER_TITLE, TOO_SHORT } from "../passwordWords";
 import {
   changePassword,
   clearPasswordProblem,
@@ -18,28 +19,6 @@ import {
 // Change password (27a to 27c), on the session whose Settings, Ask 9 or Ask 2 opened it. The form asks for the current password, then the new one twice,
 // says what existing backups still need and the limit of spec 5.3, and says what is wrong with the form on the form itself, before anything is sent. What is
 // typed is the form's own state and is wiped from it the moment it is sent. Every refusal goes through `messageFor`.
-
-/** The shortest password the engine takes: 12 characters, counted after Unicode normalisation (spec 5.2). */
-const MIN_PASSWORD = 12;
-
-/** Backups made before the change open with the details they were made with (the design: "existing backups still need the old details"). */
-const BACKUPS_NEED_OLD_DETAILS = "Backups you already made still need the old details.";
-
-/**
- * The limit in spec 5.3, in full: a password change doesn't change the vault key, so an old copy of the vault's details with its old password or recovery
- * key still opens it, and what it opens includes current and future data when its holder gets copies of the newer items and files. The design gives no
- * sentence for it; these are the session's words.
- */
-const LIMIT =
-  "Changing the password doesn't lock out an old copy. Anyone who has an old copy of this vault's details (an earlier copy of its folder, or an old backup) and its old password or recovery key can read your current and future items and files, if they get copies of them.";
-
-/** 27b's lines for what the page can see wrong before it sends anything (the drawn screen's words). */
-const TOO_SHORT = "At least 12 characters.";
-const MISMATCH = "The two new passwords don't match.";
-
-/** 27c's question: the design's backup offer, in the words the drawn screen has. */
-const OFFER_TITLE = "Make a fresh backup now?";
-const OFFER = "Backups you already made still need the old details. A fresh one opens with what you use today.";
 
 interface Problems {
   current: string | null;

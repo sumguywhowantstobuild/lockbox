@@ -185,6 +185,42 @@ export type RestoreOrigin = "first_screen";
 export type RestoreStart = { vault?: number; origin?: RestoreOrigin };
 
 /**
+ * Where Forgot password is (28a to 28e), or `null` when it is not begun. It is the app's, not a vault's, like the restore: it belongs to the listed vault it
+ * was opened for (`vault`, its registry ID) and is shown full-screen above the lock screen, and above the vault it opens, so 28e still shows once the session
+ * is there. The typed key and the typed passwords are never here: they are the screen's own state, wiped as they are sent. The shell holds the checked key
+ * under `choice`; the page holds only that token.
+ */
+export interface ForgotFlow {
+  /** Counts the times the flow was begun: an answer meant for an earlier one is dropped (and the choice it brought is let go). */
+  opening: number;
+  /** Moves on at every step: an answer meant for an earlier step of this flow is dropped. */
+  run: number;
+  /** The listed vault it is for. */
+  vault: number;
+  /**
+   * `key`: 28a, and 28b when `problem` says what was wrong with the key; `no_key`: 28c; `changed`: the question about details changed outside Lockbox, over 28a,
+   * asked before the new password; `password`: 28d; `done`: 28e, with the vault open under it.
+   */
+  phase: "key" | "no_key" | "changed" | "password" | "done";
+  /** The key is out to be checked: its box can't be typed in meanwhile. */
+  checking: boolean;
+  /** The new password is out: its boxes can't be typed in, and the flow can't be left, meanwhile. */
+  sending: boolean;
+  /** What 28b says under the key's box: the shell's refusal, or the page's own of the same shape. `null` for none. */
+  problem: unknown;
+  /** What 28d says about the new password when the shell refused it and kept the key's choice (too short, or the changed details not accepted). */
+  passwordProblem: { field: "new" | "form"; error: unknown } | null;
+  /** The shell's choice for the checked key, while one is held. */
+  choice: string | null;
+  /** The vault's name from the details the key opened, once checked. */
+  name: string | null;
+  /** The person said yes to details changed outside Lockbox: it goes with the new password. */
+  accepted: boolean;
+  /** The session the new password opened, once it has: 28e's Back up now is for it. */
+  session: number | null;
+}
+
+/**
  * Moving to a new computer (26a to 26c), the app's own like the restore: `what` is 26a ("What do you have?"), `here` is 26c, a vault has come in (`how`: its
  * backup was restored, or its folder was added). The vault list stops being empty after the first vault comes in, so these steps are held here and not in the
  * first screen's own state, or the app would switch to the lock screen under 26c.
@@ -583,6 +619,8 @@ export interface StoreState {
   restore: RestoreFlow | null;
   /** Open a backup, or `null` while none is begun. It is the app's own, shown in one window's panel or full-screen from the lock screen: see {@link OpenFlow}. */
   openBackup: OpenFlow | null;
+  /** Forgot password (28a to 28e), or `null` while it is not open. It is the app's own, shown full-screen above the lock screen and the vault it opens: see {@link ForgotFlow}. */
+  forgot: ForgotFlow | null;
   /** Moving to a new computer (26a to 26c), or `null` while it is not open. */
   moveIn: MoveIn | null;
   /** The vault the lock screen chooses when it next opens (26c's Unlock after a folder came in), or `null`; the lock screen takes it once. */
@@ -631,6 +669,7 @@ const EMPTY: StoreState = {
   capture: null,
   restore: null,
   openBackup: null,
+  forgot: null,
   moveIn: null,
   unlockPick: null,
   olderCopies: null,
@@ -756,9 +795,12 @@ export function dropSession(session: number): void {
     searchRun += 1;
     searchOpening += 1;
   }
+  // 28e's offer is for the vault the new password opened: when that vault locks, the offer has nothing to back up and goes.
+  const forgot = state.forgot?.phase === "done" && state.forgot.session === session ? null : state.forgot;
   set({
     ...state,
     sessions,
+    forgot,
     toast: keepToast ? toast : null,
     search:
       search === null || sessions.length === 0
@@ -788,6 +830,16 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
     if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
     throw error;
   }
+  return publishUnlock(answer, vaultId);
+}
+
+/**
+ * What the page does with a vault that has just opened, whether a password opened it (`unlock`) or a recovery key did (`finishRecovery`): the session's
+ * record is made, the asks are set from what the unlock found, what the lock screen was saying about this vault is let go, a new recovery key is begun when the
+ * old one was never confirmed (21f), the backup reminder is read, a copy that waited is seated, and the list is read. `vaultId` is the registry ID the
+ * flow was opened for. Gives `"opened"` when the list is on the page, `"stale"` when the vault locked again before it was read.
+ */
+function publishUnlock(answer: api.Tagged<api.UnlockView>, vaultId: number): Promise<"opened" | "stale"> {
   const { info } = answer.data;
   // The recovery key of this vault was made and never confirmed by picking: the page goes straight to a new one (21f), before it
   // shows anything of the vault. A read-only copy never does (the shell says false for it).
@@ -1558,6 +1610,7 @@ export function startNotices(): Promise<void> {
       await api.onLockEpoch((event) => {
         takeRestoreEpoch(event);
         takeOpenEpoch();
+        takeForgotEpoch();
       });
     } catch {
       // Without it a restore's or an open's steps stay up after a lock, and the shell's answers to what they send say it has gone.
@@ -2970,6 +3023,224 @@ function takeRestoreEpoch(event: LockEpochEvent): void {
 /** Restore a backup as the screens read it: `null` while none is begun. */
 export function useRestore(): RestoreFlow | null {
   return useSelect((current) => current.restore);
+}
+
+// ---- Forgot password (Plan 4C Task 4: 28a to 28e) ----
+//
+// Two steps, as the shell has them. The recovery key is typed once and sent with the listed vault's registry ID (`recoverCheck`): the shell reads its form, checks
+// that it opens this vault's recovery slot, and holds it under a choice. The new password is typed once and sent with the choice (`recoverFinish`): the shell
+// sets it, and only then opens the vault. What is typed is the screen's own state and is wiped as it is sent, so nothing here holds a key or a password: only the
+// choice's token, which the shell gave. Every answer is matched to the step it was asked in (`opening` and `run`): one that comes after the flow was left or moved
+// on comes to nothing, and a choice it brings is let go at once. A lock epoch drops the shell's choice, so the flow goes back to the key with nothing typed.
+
+/** The number of the last time Forgot password was begun, and of the last step taken in any of them. */
+let forgotOpenings = 0;
+let forgotRuns = 0;
+
+/** The page's own refusal for a key the shell read as a key that doesn't open the vault (`wrong_password`); `messages.ts` has the design's words for it. */
+const KEY_DOES_NOT_OPEN = { code: "page", kind: "recovery_key_does_not_open" };
+
+/** The page's own refusal for a choice the shell no longer holds, or details that changed since the check; `messages.ts` has its words. */
+const RECOVERY_CHOICE_EXPIRED = { code: "page", kind: "recovery_choice_expired" };
+
+/** The flow at its first step, with nothing checked and nothing said: where a lock, a refused finish or Back leaves it. */
+const AT_THE_KEY: Pick<ForgotFlow, "phase" | "checking" | "sending" | "problem" | "passwordProblem" | "choice" | "name" | "accepted"> = {
+  phase: "key",
+  checking: false,
+  sending: false,
+  problem: null,
+  passwordProblem: null,
+  choice: null,
+  name: null,
+  accepted: false,
+};
+
+/** Whether the flow the caller began is still at the step it was in. */
+function forgotStill(opening: number, run: number): boolean {
+  return state.forgot?.opening === opening && state.forgot.run === run;
+}
+
+/**
+ * Takes the flow to its next step while it is still at `run`: the changes are made and the run number moves on, so an answer to the step before is dropped.
+ * Returns the new run, or `null` when the flow had been left or had moved on.
+ */
+function moveForgot(opening: number, run: number, change: (flow: ForgotFlow) => Partial<ForgotFlow>): number | null {
+  const flow = state.forgot;
+  if (flow?.opening !== opening || flow.run !== run) return null;
+  forgotRuns += 1;
+  set({ ...state, forgot: { ...flow, ...change(flow), run: forgotRuns } });
+  return forgotRuns;
+}
+
+/** Lets a checked key go: the shell drops the choice (a choice already gone is no error, and nothing is said of a failure to ask). */
+function forgetRecovery(choice: string): void {
+  void api.recoverForget(choice).catch(() => undefined);
+}
+
+/**
+ * The lock screen's "Forgot password?": 28a for the vault chosen there, by its registry ID. Nothing is sent by opening it. A vault that is not on the list
+ * opens nothing, and one flow is open at a time.
+ */
+export function startForgot(vault: number): void {
+  if (state.forgot !== null || state.vaults?.some((entry) => entry.id === vault) !== true) return;
+  forgotOpenings += 1;
+  forgotRuns += 1;
+  set({ ...state, forgot: { opening: forgotOpenings, run: forgotRuns, vault, ...AT_THE_KEY, session: null } });
+}
+
+/**
+ * Back on 28a, Cancel's way out of the flow: it goes, and the lock screen shows with this vault chosen. A key still out is let go by its answer (the flow it
+ * was for is gone), and a choice already held is let go now. The flow can't be left while the new password is out, whose answer is the flow's own. On 28e it
+ * is "Not now" (see `finishForgot`).
+ */
+export function closeForgot(): void {
+  const flow = state.forgot;
+  if (flow === null || flow.sending || flow.phase === "done") return;
+  set({ ...state, forgot: null, unlockPick: flow.vault });
+  if (flow.choice !== null) forgetRecovery(flow.choice);
+}
+
+/** 28a's "I don't have my recovery key": 28c. Not while a key is out. */
+export function noRecoveryKey(): void {
+  const flow = state.forgot;
+  if (flow === null || flow.phase !== "key" || flow.checking) return;
+  moveForgot(flow.opening, flow.run, () => ({ phase: "no_key", problem: null }));
+}
+
+/** Back, on 28c and 28d (and No to the changed details): 28a with nothing typed, and the checked key, if one is held, let go. */
+export function backToForgotKey(): void {
+  const flow = state.forgot;
+  if (flow === null || flow.sending || flow.checking || (flow.phase !== "no_key" && flow.phase !== "password" && flow.phase !== "changed")) return;
+  const { choice } = flow;
+  moveForgot(flow.opening, flow.run, () => ({ ...AT_THE_KEY }));
+  if (choice !== null) forgetRecovery(choice);
+}
+
+/** The person has begun to mend what 28b or 28d said was wrong: the line goes. */
+export function clearForgotProblem(): void {
+  const flow = state.forgot;
+  if (flow === null || (flow.problem === null && flow.passwordProblem === null)) return;
+  set({ ...state, forgot: { ...flow, problem: null, passwordProblem: null } });
+}
+
+/**
+ * 28a's Continue, with the key typed: sends the vault's registry ID and the text, once, and nothing else. The screen wipes its box as it calls this. The key's own
+ * refusals (a typo, a word that is no listed word, a wrong count) and every other refusal come back to 28a with their words, the box empty; the shell's
+ * `wrong_password` is the page's "doesn't open this vault", since it is the same to the person for another vault's key and an old one. A key that opens
+ * the vault goes to 28d, or to the question about details changed outside Lockbox first when the shell says so.
+ */
+export async function checkRecoveryKey(key: string): Promise<void> {
+  const flow = state.forgot;
+  if (flow === null || flow.phase !== "key" || flow.checking || key === "") return;
+  const { opening, vault } = flow;
+  const run = moveForgot(opening, flow.run, () => ({ checking: true, problem: null }));
+  if (run === null) return;
+  let answer: api.RecoveryCheckView;
+  try {
+    answer = await api.recoverCheck(vault, key);
+  } catch (error) {
+    if (!forgotStill(opening, run)) return;
+    // A lock that overtook the check leaves nothing to say: the key is typed again.
+    const wrong = refusedWith(error, "core") && (error as { kind?: unknown }).kind === "wrong_password";
+    moveForgot(opening, run, () => ({ ...AT_THE_KEY, problem: refusedAsLocked(error) ? null : wrong ? KEY_DOES_NOT_OPEN : error }));
+    return;
+  }
+  if (!forgotStill(opening, run)) {
+    // The flow was left (Back, a lock) while the key was out: the shell holds a choice nobody will use.
+    forgetRecovery(answer.choice);
+    return;
+  }
+  moveForgot(opening, run, () => ({
+    checking: false,
+    choice: answer.choice,
+    name: answer.vault_name,
+    phase: answer.kind === "header_changed" ? "changed" : "password",
+  }));
+}
+
+/**
+ * The question about details changed outside Lockbox (Ask 3's words), asked before the new password. Yes goes to 28d, and the yes goes to the shell with the
+ * password; No lets the key go and is 28a again, with nothing changed.
+ */
+export function answerChangedDetails(yes: boolean): void {
+  const flow = state.forgot;
+  if (flow === null || flow.phase !== "changed") return;
+  if (yes) moveForgot(flow.opening, flow.run, () => ({ phase: "password", accepted: true }));
+  else backToForgotKey();
+}
+
+/**
+ * 28d's Set new password, with the password typed (once: the screen has checked it is long enough and that the two match, and wipes its boxes as it calls this).
+ * The choice and the password go to the shell, and the shell sets it and opens the vault. A second press while it is out sends nothing.
+ *
+ * - **Done:** the vault is published as an unlock publishes it (`publishUnlock`) and 28e's offer of a fresh backup shows over it.
+ * - **A new password the shell calls too short, or the changed details not accepted:** said on 28d; the shell kept the choice.
+ * - **The choice gone (`choice_expired`), or any other refusal:** the shell used the choice up, so the key is typed again on 28a, with the refusal said there.
+ * - **A lock before the password was written (`locked`):** nothing changed and nothing is said; 28a, empty.
+ * - **A lock after it was written** (`locked_after_change` with the vault's registry ID, or the shell's good answer dropped by the bridge as from before the lock):
+ *   the new password is in effect, so Ask 16 is kept for that vault's unlock and the flow ends at the lock screen.
+ */
+export async function finishRecovery(newPassword: string): Promise<void> {
+  const flow = state.forgot;
+  if (flow === null || flow.phase !== "password" || flow.sending || flow.choice === null) return;
+  const { opening, vault, choice, accepted } = flow;
+  const run = moveForgot(opening, flow.run, () => ({ sending: true, passwordProblem: null }));
+  if (run === null) return;
+  let answer: api.Tagged<api.UnlockView>;
+  try {
+    answer = await api.recoverFinish(choice, newPassword, accepted);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) {
+      const named = refusedWith(error, "locked_after_change") ? (error as { vault?: unknown }).vault : undefined;
+      const landed = typeof named === "number" && Number.isInteger(named) && named > 0 ? named : vault;
+      sayOnLockScreen(landedBeforeLock(landed), landed);
+      if (state.forgot?.opening === opening) set({ ...state, forgot: null, unlockPick: vault });
+      return;
+    }
+    if (!forgotStill(opening, run)) return;
+    const kind = refusedWith(error, "core") ? (error as { kind?: unknown }).kind : undefined;
+    const keptShort = kind === "password_too_short";
+    const keptHeader = refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "header changed on disk";
+    if (keptShort || keptHeader) {
+      moveForgot(opening, run, () => ({ sending: false, passwordProblem: { field: keptShort ? "new" : "form", error } }));
+      return;
+    }
+    // The page lets go of its handle on the key here, so it tells the shell too: usually the shell already dropped it (a harmless success), but a refusal that
+    // came before the shell took the choice (an IPC failure) would leave the key held for five minutes.
+    forgetRecovery(choice);
+    moveForgot(opening, run, () => ({
+      ...AT_THE_KEY,
+      problem: refusedAsLocked(error) ? null : refusedWith(error, "choice_expired") ? RECOVERY_CHOICE_EXPIRED : error,
+    }));
+    return;
+  }
+  // The password is set and the vault is open: published as an unlock publishes it, and 28e shows over it.
+  void publishUnlock(answer, vault);
+  moveForgot(opening, run, () => ({ phase: "done", sending: false, choice: null, session: answer.session }));
+}
+
+/** 28e's answer: Back up now opens 22a for the vault that was opened, Not now only closes the offer. Either way the flow is over. */
+export function finishForgot(backUp: boolean): void {
+  const flow = state.forgot;
+  if (flow?.phase !== "done") return;
+  set({ ...state, forgot: null });
+  if (backUp && flow.session !== null) openBackup(flow.session);
+}
+
+/**
+ * A lock epoch (Lock all, an idle lock, Windows locking or sleeping, the app closing): the shell dropped the checked key, so the steps that hold or wait for
+ * one are 28a again, with nothing said, and the answer of a key still out is let go when it comes. A new password that is out is the flow's own: its answer says
+ * whether the lock came before or after the password was written. 28c and 28e hold nothing the lock took.
+ */
+function takeForgotEpoch(): void {
+  const flow = state.forgot;
+  if (flow === null || flow.sending) return;
+  if (flow.phase === "key" || flow.phase === "changed" || flow.phase === "password") moveForgot(flow.opening, flow.run, () => ({ ...AT_THE_KEY }));
+}
+
+/** Forgot password as the screens read it: `null` while it is not begun. */
+export function useForgot(): ForgotFlow | null {
+  return useSelect((current) => current.forgot);
 }
 
 // ---- Moving to a new computer (26a to 26c) ----
@@ -5132,6 +5403,8 @@ export function resetStoreForTests(): void {
   retryingOpen = false;
   retryingRestore = false;
   dismissingRestore = false;
+  forgotOpenings = 0;
+  forgotRuns = 0;
   settingsLine = Promise.resolve();
   shortcutNoticeVoid = false;
   listRuns.clear();

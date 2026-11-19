@@ -52,6 +52,11 @@ export interface FakeVault {
   /** Both copies of the vault's details are unreadable (Ask 8): the list says `details_damaged: true`. False unless a test makes it so. */
   detailsDamaged?: boolean;
   password?: string;
+  /**
+   * The recovery key that opens the vault's recovery slot (Forgot password): `fakeKey(40 + id)` when none is given and none was made. A key the fake makes
+   * (create, `regenerate_recovery`, `new_recovery_key`) replaces it, as a new key replaces the old one in the vault's details.
+   */
+  recoveryKey?: string;
   readOnly?: boolean;
   items?: FakeItem[];
   /** The "recovery key not confirmed" mark the shell keeps for the vault's folder. */
@@ -650,6 +655,25 @@ export interface FakeShell {
    * failed before `vault.json` was touched, so nothing changed, the old password still opens and the answer is this plain refusal.
    */
   interruptChangeNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error" | { refused_before_write: object }): void;
+  /**
+   * Forgot password (Plan 4C Task 4). The recovery key that opens the vault now: its `recoveryKey`, or the key the fake last made for it, or `fakeKey(40 + id)`.
+   * `keyOf` stays as it is (what a setup test expects: `undefined` until a key was made).
+   */
+  recoveryKeyOf(vaultId: number): string;
+  /** Holds every `recover_check` until `release` is called: it is decided, and its choice parked, as the command arrives; the answer comes at release. */
+  holdRecoverCheck(): () => void;
+  /** Holds every `recover_finish` until `release` is called: it is decided, and the password written, as the command arrives; the answer comes at release. */
+  holdRecoverFinish(): () => void;
+  /**
+   * The next `recover_finish` is cut short as a lock can cut it, as `interruptChangeNext` does for a change. `lock_before_write`: the lock epoch moves on, nothing
+   * changes and the answer is `locked`. `lock_after_write`: the password is set and the session opened, then it locks, and the answer is tagged with the
+   * generation from before (the bridge drops it as stale). `lock_after_write_as_error`: the same, and the answer is `locked_after_change` with the vault's ID.
+   */
+  interruptRecoverNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error"): void;
+  /** The tokens of the recovery choices the shell holds now (a checked key waits for its new password), in order. */
+  recoveryChoiceTokens(): string[];
+  /** Lets the shell forget every held recovery choice at once, as five minutes do: a `recover_finish` for one is then `choice_expired`. */
+  expireRecoveryChoices(): void;
   /** The settings the shell holds now (what the last accepted `set_settings` sent), and every one it accepted, in order. */
   settings(): FakeSettings;
   settingsSaved: FakeSettings[];
@@ -1082,6 +1106,13 @@ export function installFakeShell(
   let heldUpdate: (() => void)[] | undefined;
   let heldChange: (() => void)[] | undefined;
   let interruptChange: Parameters<FakeShell["interruptChangeNext"]>[0] | undefined;
+  // Forgot password (Task 4): the checked keys the shell holds under their choices (32 hex characters, launch-scoped: every lock epoch and the five minutes drop
+  // them), what the vault's details were as checked, the holds a test can put on the two steps, and how the next finish is cut short.
+  const recoveryHeld = new Map<string, { vault: FakeVault; key: string; headerChanged: boolean }>();
+  let recoveriesMade = 0;
+  let heldRecoverChecks: (() => void)[] | undefined;
+  let heldRecoverFinishes: (() => void)[] | undefined;
+  let interruptRecover: Parameters<FakeShell["interruptRecoverNext"]>[0] | undefined;
   let heldTrash: (() => void)[] | undefined;
   const refusals = new Map<string, object>();
   const edited: FakeShell["edited"] = [];
@@ -1091,6 +1122,8 @@ export function installFakeShell(
   const random = randomSource(7);
   let nextItem = 0x1000;
   const keys = new Map<FakeVault, string>();
+  /** Every key the fake issued or was told to issue (`makeKey`, `nextKeyIs`): a key that reads as a key but is none of these (or a `fakeKey`) has a typo. */
+  const issuedKeys = new Set<string>();
   let keysMade = 0;
   let chosenKey: string | undefined;
   let chosenIssue: number | undefined;
@@ -1304,6 +1337,8 @@ export function installFakeShell(
     // Every lock drops the picks and the questions; a finished copy waits through an idle lock and is ended by every other reason.
     restoreHeld.clear();
     restoreAsked.clear();
+    // The checked recovery keys go the same way: a lock epoch of any reason drops them.
+    recoveryHeld.clear();
     if (reason !== "idle") for (const copy of restorePrepared.values()) copy.ended = true;
     for (const job of [...running.values()]) {
       if (job.scope.type !== "launch" || (job.pastTheSwap ?? false)) continue;
@@ -1430,8 +1465,59 @@ export function installFakeShell(
     const key = chosenKey ?? fakeKey(keysMade);
     chosenKey = undefined;
     keys.set(vault, key);
+    issuedKeys.add(key);
     return key;
   };
+
+  /** The recovery key that opens the vault now: the last one made for it, else the one it was given, else `fakeKey(40 + id)`. */
+  const recoveryKeyOf = (vault: FakeVault): string => keys.get(vault) ?? vault.recoveryKey ?? fakeKey(40 + vault.id);
+
+  /**
+   * The shell's reading of a typed recovery key (`RecoverySecret::parse`), in its order: the text is lowercased and split at white space, commas and
+   * dots; list numbers ("3", "3)") are dropped; the first token that is no listed word is `recovery_key_word` with its place among the words kept; any
+   * count but 24 is `recovery_key_count`; a key that is no key anyone made (a word swapped for another) is `recovery_key_typo`. Gives the key in its display form.
+   */
+  const readRecoveryKey = (text: string): string => {
+    const tokens = text
+      .toLowerCase()
+      .split(/[\s,.]+/)
+      .filter((token) => token !== "" && !/^\d+\)?$/.test(token));
+    const place = tokens.findIndex((token) => !FAKE_WORDS.includes(token));
+    if (place >= 0) return refuse({ code: "core", kind: "recovery_key_word", position: place + 1 });
+    if (tokens.length !== 24) return refuse({ code: "core", kind: "recovery_key_count", found: tokens.length });
+    const key = tokens.join(" ");
+    const known =
+      Array.from({ length: 64 }, (_, n) => fakeKey(n)).includes(key) || issuedKeys.has(key) || vaults.some((one) => one.recoveryKey === key);
+    if (!known) return refuse({ code: "core", kind: "recovery_key_typo" });
+    return key;
+  };
+
+  /** One token for a held recovery choice: 32 lowercase hex characters, a new one for every check. */
+  const recoveryToken = (): string => {
+    recoveriesMade += 1;
+    return `${(0xec0).toString(16)}${recoveriesMade.toString(16).padStart(29, "0")}`;
+  };
+
+  /** What an unlock found and answers (`UnlockView`), for the vault just opened in `session`. */
+  const unlockView = (vault: FakeVault, session: number, generation: number, headerMacMismatch: boolean) => ({
+    info: infoOf(vault, session, generation),
+    used_backup_header: vault.usedBackupHeader ?? false,
+    header_mac_mismatch: headerMacMismatch,
+    header_repair_failed: false,
+    cleanup: {
+      partials_removed: 0,
+      temps_removed: 0,
+      retired_deleted: 0,
+      purges_finished: 0,
+      orphans_quarantined: vault.leftover ?? 0,
+      orphans_restored: 0,
+      skipped_damaged: vault.unreadable ?? 0,
+      failed: 0,
+    },
+    cloud: vault.cloud ?? null,
+    // Worked out on every answer, as the shell does: a writable vault with the mark, never a read-only copy.
+    recovery_unconfirmed: (vault.unconfirmed ?? false) && !(vault.readOnly ?? false),
+  });
 
   /** A create that goes through: the mark is written first, then the vault is made, listed and unlocked. */
   const created = (name: string, password: string): unknown => {
@@ -1760,25 +1846,67 @@ export function installFakeShell(
         // A writable unlock that enters 21f from a mark read without error may make a key without the password; a mark the shell
         // could not read shows 21f all the same, and grants nothing.
         keyStateOf(session).may = (vault.unconfirmed ?? false) && !(vault.markUnreadable ?? false) && !(vault.readOnly ?? false);
-        return tagged(session, state.generation, {
-          info: infoOf(vault, session, state.generation),
-          used_backup_header: vault.usedBackupHeader ?? false,
-          header_mac_mismatch: vault.headerChanged ?? false,
-          header_repair_failed: false,
-          cleanup: {
-            partials_removed: 0,
-            temps_removed: 0,
-            retired_deleted: 0,
-            purges_finished: 0,
-            orphans_quarantined: vault.leftover ?? 0,
-            orphans_restored: 0,
-            skipped_damaged: vault.unreadable ?? 0,
-            failed: 0,
-          },
-          cloud: vault.cloud ?? null,
-          // Worked out on every answer, as the shell does: a writable vault with the mark, never a read-only copy.
-          recovery_unconfirmed: (vault.unconfirmed ?? false) && !(vault.readOnly ?? false),
-        });
+        return tagged(session, state.generation, unlockView(vault, session, state.generation, vault.headerChanged ?? false));
+      }
+      case "recover_check": {
+        const sent = exactly(args, ["id", "recovery_key"]);
+        if (typeof sent.id !== "number" || !Number.isInteger(sent.id) || typeof sent.recovery_key !== "string") return refuse(MALFORMED);
+        const vault = vaults.find((v) => v.id === sent.id);
+        if (vault === undefined) return refuse({ code: "not_found" });
+        // A vault that is open has no need of its recovery key here.
+        if ([...live.entries()].some(([session, entry]) => entry.unlocked && sessionVault.get(session) === vault)) {
+          return refuse({ code: "invalid_input", what: "vault is unlocked" });
+        }
+        // The key is read first (no derivation is spent on a typo), then tried against this vault's recovery slot alone.
+        const key = readRecoveryKey(sent.recovery_key);
+        if (key !== recoveryKeyOf(vault)) return refuse(WRONG_PASSWORD);
+        const choice = recoveryToken();
+        recoveryHeld.set(choice, { vault, key, headerChanged: vault.headerChanged ?? false });
+        return { kind: (vault.headerChanged ?? false) ? "header_changed" : "checked", choice, vault_name: vault.name ?? "" };
+      }
+      case "recover_finish": {
+        const sent = exactly(args, ["choice", "new_password", "accept_changed_header"]);
+        if (typeof sent.choice !== "string" || typeof sent.new_password !== "string" || typeof sent.accept_changed_header !== "boolean") return refuse(MALFORMED);
+        // The new password's length first, before anything is looked up: the choice is kept.
+        if (Array.from(sent.new_password.normalize("NFC")).length < 12) return refuse({ code: "core", kind: "password_too_short", min: 12 });
+        const held = recoveryHeld.get(sent.choice);
+        if (held === undefined) return refuse(CHOICE_EXPIRED);
+        // The changed details are accepted by a yes, never by a silence: refused, with the choice kept.
+        if (held.headerChanged && !sent.accept_changed_header) return refuse({ code: "invalid_input", what: "header changed on disk" });
+        // From here the choice is used up, whatever comes.
+        recoveryHeld.delete(sent.choice);
+        const { vault } = held;
+        if ([...live.entries()].some(([session, entry]) => entry.unlocked && sessionVault.get(session) === vault)) {
+          return refuse({ code: "invalid_input", what: "vault is unlocked" });
+        }
+        // The key must still open it and the details be as they were checked: otherwise it is checked again.
+        if (recoveryKeyOf(vault) !== held.key || (vault.headerChanged ?? false) !== held.headerChanged) return refuse(CHOICE_EXPIRED);
+        const cut = interruptRecover;
+        interruptRecover = undefined;
+        if (cut === "lock_before_write") {
+          bumpEpoch();
+          return refuse(LOCKED);
+        }
+        vault.password = sent.new_password;
+        if (held.headerChanged) vault.headerChanged = false;
+        const [session, state] = openSession(vault);
+        keyStateOf(session).may = (vault.unconfirmed ?? false) && !(vault.markUnreadable ?? false) && !(vault.readOnly ?? false);
+        const before = state.generation;
+        if (cut === "lock_after_write") {
+          lock(session);
+          return { Done: tagged(session, before, unlockView(vault, session, before, false)) };
+        }
+        if (cut === "lock_after_write_as_error") {
+          lock(session);
+          return refuse({ code: "locked_after_change", what: "password", vault: vault.id });
+        }
+        return { Done: tagged(session, before, unlockView(vault, session, before, false)) };
+      }
+      case "recover_forget": {
+        const sent = exactly(args, ["choice"]);
+        if (typeof sent.choice !== "string") return refuse(MALFORMED);
+        recoveryHeld.delete(sent.choice);
+        return null;
       }
       case "create_vault": {
         const { name, password, choose_folder } = exactly(args, ["name", "password", "choose_folder"]) as {
@@ -3535,6 +3663,24 @@ export function installFakeShell(
         });
       });
     }
+    const heldRecover = cmd === "recover_check" ? heldRecoverChecks : cmd === "recover_finish" ? heldRecoverFinishes : undefined;
+    if (heldRecover !== undefined) {
+      // Decided as the command arrives (a choice parked, a password written, a lock that came with it); the answer reaches the page at release.
+      try {
+        const decided = answer(cmd, args);
+        return new Promise((resolve) => {
+          heldRecover.push(() => {
+            resolve(decided);
+          });
+        });
+      } catch (error) {
+        return new Promise((_, reject) => {
+          heldRecover.push(() => {
+            rejectPlain(reject, error as object);
+          });
+        });
+      }
+    }
     if (cmd === "restore_check" && heldRestoreChecks !== undefined) {
       // Unlocking the backup takes a moment: it is decided when it is let go.
       const waiting = heldRestoreChecks;
@@ -3861,6 +4007,34 @@ export function installFakeShell(
     },
     nextKeyIs: (key) => {
       chosenKey = key;
+      issuedKeys.add(key);
+    },
+    recoveryKeyOf: (vaultId) => {
+      const vault = vaults.find((v) => v.id === vaultId);
+      return vault === undefined ? "" : recoveryKeyOf(vault);
+    },
+    holdRecoverCheck: () => {
+      const waiting: (() => void)[] = [];
+      heldRecoverChecks = waiting;
+      return () => {
+        heldRecoverChecks = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdRecoverFinish: () => {
+      const waiting: (() => void)[] = [];
+      heldRecoverFinishes = waiting;
+      return () => {
+        heldRecoverFinishes = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    interruptRecoverNext: (how) => {
+      interruptRecover = how;
+    },
+    recoveryChoiceTokens: () => [...recoveryHeld.keys()],
+    expireRecoveryChoices: () => {
+      recoveryHeld.clear();
     },
     nextIssueIs: (issue) => {
       chosenIssue = issue;

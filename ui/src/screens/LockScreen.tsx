@@ -6,6 +6,7 @@ import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
 import {
   cancelCapture,
   clearUnlockPick,
+  startForgot,
   startOpenBackup,
   startRestore,
   unlock,
@@ -26,8 +27,8 @@ function said(message: Message): string {
 }
 
 /**
- * The lock screen: the vaults to pick from (with one, it is already chosen), the password, Unlock. Nothing here leads to
- * a screen a later plan builds. A wrong password says so and keeps what was typed, so a typo can be mended; once a vault
+ * The lock screen: the vaults to pick from (with one, it is already chosen), the password, Unlock, and Forgot password? (28a, for the vault chosen). Nothing here
+ * leads to a screen a later plan builds. A wrong password says so and keeps what was typed, so a typo can be mended; once a vault
  * opens the field is emptied, and if the vault locked again before the answer came there is nothing to say.
  *
  * While a copy from the save shortcut waits (8b), it is the same screen with the save step's words: the heading says what the unlock is for,
@@ -219,7 +220,18 @@ export function LockScreen() {
               <button type="submit" className="prim" disabled={busy || password === ""}>
                 {capture === null ? "Unlock" : "Unlock and continue"}
               </button>
-              {capture === null ? null : (
+              {capture === null ? (
+                // The recovery key opens the vault again (28a). Not while a copy waits for its vault: that step's own way out is Cancel.
+                <button
+                  type="button"
+                  className="lnk"
+                  onClick={() => {
+                    startForgot(chosen.id);
+                  }}
+                >
+                  Forgot password?
+                </button>
+              ) : (
                 <button type="button" className="lnk" onClick={cancelCapture}>
                   Cancel
                 </button>

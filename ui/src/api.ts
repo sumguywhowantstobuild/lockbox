@@ -291,6 +291,43 @@ export async function unlockVault(id: number, password: string): Promise<Tagged<
   return answer;
 }
 
+/** What `recover_check` answers: the key opens this vault's recovery slot and is held in Rust under `choice`; `header_changed` asks first (Ask 3's words), then `recoverFinish(.., true)`. */
+export interface RecoveryCheckView {
+  kind: "checked" | "header_changed";
+  choice: string;
+  vault_name: string;
+}
+
+/**
+ * Checks a typed recovery key against the vault's recovery slot (Forgot password, 28a): the key's form first (a typo or a word that is no listed word
+ * answers `core` `recovery_key_typo`, `recovery_key_word` with its `position`, or `recovery_key_count` with `found`, and nothing is derived), then that it opens
+ * this vault (`core` `wrong_password`: another vault's key or an old one). The key is held in the shell under `choice` for `recoverFinish`; nothing is written.
+ */
+export function recoverCheck(id: number, recoveryKey: string): Promise<RecoveryCheckView> {
+  return callPlain<RecoveryCheckView>("recover_check", { id, recovery_key: recoveryKey });
+}
+
+/**
+ * Sets the new password for the checked key's vault and opens it (28d): a new password under 12 characters is `password_too_short` (the choice is kept), a choice
+ * the shell no longer holds, or details that changed since the check, is `choice_expired` (check the key again), and a `header_changed` choice needs
+ * `acceptChangedHeader`. A lock after the password was written answers `locked_after_change` with the vault's registry ID, or is a stale answer.
+ */
+export async function recoverFinish(choice: string, newPassword: string, acceptChangedHeader: boolean): Promise<Tagged<UnlockView>> {
+  const answer = await open<UnlockView>("recover_finish", {
+    choice,
+    new_password: newPassword,
+    accept_changed_header: acceptChangedHeader,
+  });
+  // `recover_finish` answers `Done` only; it never asks or opens a dialog.
+  if (answer === "Dismissed" || "Confirm" in answer) throw new Error("unexpected answer to recover_finish");
+  return answer;
+}
+
+/** Lets the checked key go (Back, No to the changed header, leaving). A choice that is unknown or already gone is no error. */
+export async function recoverForget(choice: string): Promise<void> {
+  await callPlain<null>("recover_forget", { choice });
+}
+
 /**
  * Creates a vault named `name` with `password` in the default vaults folder, or in one the person picks
  * (`chooseFolder`), adds it to the list and unlocks it. The shell writes the "not confirmed" mark before the vault

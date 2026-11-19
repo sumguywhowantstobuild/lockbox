@@ -13,7 +13,7 @@ use lockbox_core::fsio::remove_dir_all_retry;
 use lockbox_core::ids::VaultId;
 use lockbox_core::kdf::check_new_password;
 use lockbox_core::recovery::RecoverySecret;
-use lockbox_core::{CleanupReport, UnlockReport, Vault, folder_name};
+use lockbox_core::{CleanupReport, CoreError, RecoveryCheck, UnlockReport, Vault, folder_name};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Request;
@@ -24,13 +24,13 @@ use crate::error::{Confirm, Outcome, ShellError, ShellResult, VAULT_NOT_LISTED};
 use crate::locations::{CloudProvider, LocationCheck};
 use crate::os::same_path;
 use crate::paths::default_vault_parent;
-use crate::pending::{PendingChoice, Token};
+use crate::pending::{PendingChoice, RecoveryChoice, Token};
 use crate::registry::VaultEntry;
 use crate::session::{
     Change, KeyState, Location, OpenAnswer, OpenStep, Opened, SessionId, SessionInfo, Tagged,
 };
 use crate::shell::Shell;
-use crate::views::{Confirmation, NewKeyView};
+use crate::views::{Confirmation, NewKeyView, RecoveryCheckKind, RecoveryCheckView};
 
 /// A new vault, open, with its recovery key: the one time the key crosses to the page (spec §4.1). No `Debug`.
 #[derive(Serialize)]
@@ -69,7 +69,7 @@ pub struct UnlockView {
 /// and whether the folder has the "recovery key not confirmed" mark.
 type Unlocked = (UnlockReport, Option<CloudProvider>, bool);
 
-/// The view of an unlock (`unlock_vault`, `recover_vault`, `recover_vault_confirm`).
+/// The view of an unlock (`unlock_vault`, `recover_finish`).
 fn unlock_view(info: SessionInfo, unlocked: Unlocked) -> UnlockView {
     let (report, cloud, recovery_unconfirmed) = unlocked;
     let UnlockReport {
@@ -216,10 +216,23 @@ fn test_step(name: &'static str) -> ShellResult<()> {
     Ok(lockbox_core::internals::fsio::failpoint::check(name)?)
 }
 
-/// `recover_vault` sets a new password on a closed vault only; an unlocked one changes it from its session.
+/// A recovery sets a new password on a closed vault only; an unlocked one changes it from its session.
 const UNLOCKED: ShellError = ShellError::InvalidInput {
     what: "vault is unlocked",
 };
+
+/// `recover_finish` for a changed header, without the person's yes: refused with the choice kept, so the page asks.
+const CHANGED_HEADER_NOT_ACCEPTED: ShellError = ShellError::InvalidInput {
+    what: "header changed on disk",
+};
+
+/// The change a recovery makes, for a lock that overtakes it to report: a new password, for the vault the choice holds.
+fn password_change(vault: u32) -> Change {
+    Change {
+        what: "password",
+        vault,
+    }
+}
 
 /// The new session an open gave back. An opening closure that cannot ask gives back nothing else.
 fn opened<X>(answer: OpenAnswer<X>) -> ShellResult<Tagged<(SessionInfo, Option<X>)>> {
@@ -230,26 +243,23 @@ fn opened<X>(answer: OpenAnswer<X>) -> ShellResult<Tagged<(SessionInfo, Option<X
 }
 
 impl Shell {
-    /// `recover_vault`'s answer: the session and what its recovery unlock found, once the closure that sets the new
-    /// password ran, or its question. A session already unlocked there (the closure skipped, the password not set) is
-    /// refused. A recovery that enters 21f is given 21f's permission, as an unlock is (`enter_21f`).
-    fn recovered(&self, answer: OpenAnswer<Unlocked>) -> ShellResult<Outcome<Tagged<UnlockView>>> {
-        Ok(match answer {
-            Outcome::Done(Tagged {
-                session,
-                generation,
-                data: (info, Some(unlocked)),
-            }) => {
-                self.enter_21f(session, generation, info.read_only);
-                Outcome::Done(Tagged {
-                    session,
-                    generation,
-                    data: unlock_view(info, unlocked),
-                })
-            }
-            Outcome::Done(_) => return Err(UNLOCKED),
-            Outcome::Confirm(question) => Outcome::Confirm(question),
-            Outcome::Dismissed => Outcome::Dismissed,
+    /// `recover_finish`'s answer: the session and what its recovery unlock found, once the closure that sets the new
+    /// password ran. A session already unlocked there (the closure skipped, the password not set) is refused. A
+    /// recovery that enters 21f is given 21f's permission, as an unlock is (`enter_21f`).
+    fn recovered(&self, answer: OpenAnswer<Unlocked>) -> ShellResult<Tagged<UnlockView>> {
+        let Tagged {
+            session,
+            generation,
+            data: (info, unlocked),
+        } = opened(answer)?;
+        let Some(unlocked) = unlocked else {
+            return Err(UNLOCKED);
+        };
+        self.enter_21f(session, generation, info.read_only);
+        Ok(Tagged {
+            session,
+            generation,
+            data: unlock_view(info, unlocked),
         })
     }
 
@@ -573,123 +583,212 @@ impl Shell {
             && self.vault_state.is_unconfirmed(location.path())
     }
 
-    /// Unlocks the vault `id` with its recovery key and sets `new_password` before the session can be used (spec
-    /// §5.3), and answers with what that unlock found, as [`unlock_vault`](Self::unlock_vault) does. A header changed
-    /// outside Lockbox asks first (`Confirm::HeaderChanged`): the engine refuses a password change until it is
-    /// accepted. A vault already unlocked is refused: its password is changed from the open vault.
-    pub fn recover_vault(
+    /// 28b's check of a forgotten password's way back (spec §5.3): whether the recovery key typed opens the recovery
+    /// slot of the vault `id`, without opening the vault. Not a job: the key's derivation is HKDF, no Argon2. The order:
+    /// the vault is on the list (`NotFound`), it is not unlocked (`"vault is unlocked"`: its password is changed from
+    /// the open vault), the key's form (a word that is no word of the list, the wrong number of words, a failed 8-bit
+    /// check: no derivation is spent on a typo), the vault's folder as the location check finds it, then the engine's
+    /// read-only check ([`Vault::check_recovery_key`]: no `.lock`, no cleanup, no repair, nothing written). A key that
+    /// opens no slot (another vault's, or one replaced since) is `WrongPassword`: the cipher cannot tell them apart.
+    ///
+    /// On success the key waits in Rust as a recovery choice ([`PendingChoice::Recovery`]), bound to the vault's
+    /// registered place and to both header files' bytes as read, with the launch's lock epoch: the answer carries the
+    /// token (`choice`), the name in the header that opened, and `header_changed` when that header failed its MAC (the
+    /// page asks before it goes on). A lock of all vaults while the check ran holds nothing (`Locked`). A refusal holds
+    /// nothing. An earlier choice is never replaced: the page forgets its old one ([`recover_forget`]).
+    ///
+    /// [`recover_forget`]: Self::recover_forget
+    pub fn recover_check(
         &self,
         id: u32,
         recovery_key: Zeroizing<String>,
-        new_password: Zeroizing<String>,
-    ) -> ShellResult<Outcome<Tagged<UnlockView>>> {
-        // Before the recovery unlock and the changed-header question, whose yes rewrites the header.
-        check_new_password(&new_password)?;
+    ) -> ShellResult<RecoveryCheckView> {
+        let epoch = self.sessions.epoch();
         let (dir, location) = self.registered(id)?;
         if self.sessions.find(&location).is_some() {
             return Err(UNLOCKED);
         }
         let secret = RecoverySecret::parse(&recovery_key)?;
-        let change = Change {
-            what: "password",
-            vault: id,
+        drop(recovery_key);
+        #[cfg(test)]
+        test_step(CHECKING)?;
+        let check = self.check_location(&dir)?;
+        same_place(&check, &location)?;
+        let found = Vault::check_recovery_key(&check.path, &secret)?;
+        let RecoveryCheck {
+            header_mac_mismatch,
+            name,
+            main,
+            backup,
+        } = found;
+        let kind = match header_mac_mismatch {
+            true => RecoveryCheckKind::HeaderChanged,
+            false => RecoveryCheckKind::Checked,
+        };
+        let choice = self.sessions.pending().put_at(
+            PendingChoice::Recovery(RecoveryChoice {
+                vault: id,
+                location,
+                epoch,
+                secret,
+                main,
+                backup,
+                header_changed: header_mac_mismatch,
+            }),
+            self.os.clock.now(),
+        );
+        // A lock of all vaults came while the check ran (or the app is closing): what was just held is no one's.
+        if self.locked_since(epoch) {
+            self.sessions.pending().forget_recovery(&choice);
+            return Err(ShellError::Locked);
+        }
+        Ok(RecoveryCheckView {
+            kind,
+            choice,
+            vault_name: name,
+        })
+    }
+
+    /// 28d's finish: sets `new_password` on the vault whose recovery key `choice` holds, and opens it, as
+    /// [`unlock_vault`](Self::unlock_vault) answers. The refusals, in order: a new password under 12 characters after NFC
+    /// first, with no lookup and the choice kept; a choice that is not there (used, forgotten, dropped by a lock, five
+    /// minutes old, never made, or another kind's, which is left alone) is `ChoiceExpired`; `accept_changed_header:
+    /// false` on a choice whose header failed its MAC is refused with the choice kept (the yes comes first). Then the
+    /// choice is taken, and under the opening guard (`Sessions::open_choice`, so a lock either comes first or sees the
+    /// open under way and discards what it makes): a vault unlocked since is refused; the registry entry must still be
+    /// the folder the check bound, both header files must be byte for byte as the check read them, and the key must
+    /// still open, else the choice is gone: `ChoiceExpired`, the key is checked again, and a changed header gets a
+    /// fresh decision. Then the vault is unlocked with the key, the changed header is accepted when asked, the new
+    /// password is set, and only then is a usable session published. A lock before the password was written is
+    /// `Locked`, one after it `LockedAfterChange { "password", vault }`, with the registry ID the choice holds.
+    pub fn recover_finish(
+        &self,
+        choice: &Token,
+        new_password: Zeroizing<String>,
+        accept_changed_header: bool,
+    ) -> ShellResult<Outcome<Tagged<UnlockView>>> {
+        // Before anything is looked up, and with the choice kept.
+        check_new_password(&new_password)?;
+        let (vault, header_changed) = self
+            .sessions
+            .pending()
+            .recovery_of(choice)
+            .ok_or(ShellError::ChoiceExpired)?;
+        if header_changed && !accept_changed_header {
+            return Err(CHANGED_HEADER_NOT_ACCEPTED);
+        }
+        // Another kind's choice is handed back as it is, to be dropped with nothing else changed (the look above found
+        // a recovery choice; one that has gone since is `NotFound`, answered as expired below).
+        #[allow(clippy::result_large_err)]
+        let pick = |held| match held {
+            PendingChoice::Recovery(recovery) => Ok((Some(recovery.location.clone()), recovery)),
+            other => Err(other),
         };
         let answer = self
             .sessions
-            .open(Some(location.clone()), Some(change), |cancel| {
-                #[cfg(test)]
-                test_step(CHECKING)?;
-                let check = self.check_location(&dir)?;
-                same_place(&check, &location)?;
-                let (mut vault, report) = Vault::unlock_with_recovery(&check.path, &secret)?;
-                if report.header_mac_mismatch {
-                    let choice = PendingChoice::RecoverVault {
-                        location,
-                        vault: Box::new(vault),
-                        new_password,
-                        report,
-                    };
-                    return Ok(OpenStep::Ask(choice, |token| Confirm::HeaderChanged {
-                        token,
-                    }));
-                }
-                not_cancelled(cancel)?;
-                vault.change_password(&new_password)?;
-                #[cfg(test)]
-                test_step(PASSWORD_SET)?;
-                let unconfirmed = self.recovery_unconfirmed(&location, false);
-                let unlocked = (report, check.cloud, unconfirmed);
-                Ok(OpenStep::Session(
-                    location,
-                    Opened::Writable(vault),
-                    unlocked,
-                ))
+            .open_choice(
+                choice,
+                Some(password_change(vault)),
+                pick,
+                |recovery, cancel| {
+                    self.finish_in(recovery, new_password, accept_changed_header, cancel)
+                },
+            )
+            .map_err(|refusal| match refusal {
+                ShellError::NotFound => ShellError::ChoiceExpired,
+                other => other,
             })?;
-        self.recovered(answer)
+        self.recovered(answer).map(Outcome::Done)
     }
 
-    /// The user's answer about the changed header: yes accepts it, sets the new password and opens the session; no
-    /// closes the vault with nothing changed (`Dismissed`).
-    pub fn recover_vault_confirm(
+    /// The opening closure of [`recover_finish`](Self::recover_finish): everything the choice bound is checked again
+    /// before a byte is written.
+    fn finish_in(
         &self,
-        token: &Token,
-        accept: bool,
-    ) -> ShellResult<Outcome<Tagged<UnlockView>>> {
-        if !accept {
-            // Taken and dropped, outside every lock: the vault closes with nothing changed.
-            return match self.sessions.pending().take(token)? {
-                PendingChoice::RecoverVault { .. } => Ok(Outcome::Dismissed),
-                // A token for another question: used up, and its choice dropped.
-                _ => Err(ShellError::NotFound),
-            };
+        recovery: RecoveryChoice,
+        new_password: Zeroizing<String>,
+        accept_changed_header: bool,
+        cancel: &CancelToken,
+    ) -> ShellResult<OpenStep<Unlocked>> {
+        let RecoveryChoice {
+            vault: id,
+            location,
+            epoch,
+            secret,
+            main,
+            backup,
+            header_changed,
+        } = recovery;
+        // A choice of another lock epoch is no one's (a lock of all vaults drops it, so this is a race's leftover).
+        if epoch != self.sessions.epoch() {
+            return Err(ShellError::ChoiceExpired);
         }
-        // As in `create_vault_confirm`: another question's choice is handed back unboxed.
-        #[allow(clippy::result_large_err)]
-        let pick = |choice| match choice {
-            PendingChoice::RecoverVault {
-                location,
-                vault,
-                new_password,
-                report,
-            } => {
-                let opening = Some(location.clone());
-                Ok((opening, (location, vault, new_password, report)))
-            }
-            other => Err(other),
+        // The registry entry is still the folder the check bound.
+        let dir = self.registry.path(id).ok_or(ShellError::ChoiceExpired)?;
+        if Location::folder(&dir)? != location {
+            return Err(ShellError::ChoiceExpired);
+        }
+        #[cfg(test)]
+        test_step(CHECKING)?;
+        let check = self.check_location(&dir)?;
+        same_place(&check, &location)?;
+        not_cancelled(cancel)?;
+        // Both header files and the key, as they were checked: anything else is a new decision.
+        let now = match Vault::check_recovery_key(&check.path, &secret) {
+            Ok(now) => now,
+            Err(
+                CoreError::WrongPassword
+                | CoreError::Damaged { .. }
+                | CoreError::NotFound
+                | CoreError::UnsupportedVersion,
+            ) => return Err(ShellError::ChoiceExpired),
+            Err(other) => return Err(other.into()),
         };
-        // The choice holds the vault's place, not its registry ID, and the change is named before the choice is taken:
-        // a lock that overtakes this answer says no vault (0), as a create's does. Task 4 replaces this step.
-        let change = Change {
-            what: "password",
-            vault: 0,
-        };
-        let answer = self.sessions.open_choice(
-            token,
-            Some(change),
-            pick,
-            |(location, vault, new_password, mut report), cancel| {
-                // Before `accept_header` writes anything.
-                check_new_password(&new_password)?;
-                // Checked again: the folder may have moved drives while the question waited.
-                let check = self.check_location(location.path())?;
-                not_cancelled(cancel)?;
-                let mut vault = *vault;
-                vault.accept_header()?;
-                vault.change_password(&new_password)?;
-                #[cfg(test)]
-                test_step(PASSWORD_SET)?;
-                // The changed header the report found is accepted now.
-                report.header_mac_mismatch = false;
-                let unconfirmed = self.recovery_unconfirmed(&location, false);
-                let unlocked = (report, check.cloud, unconfirmed);
-                Ok(OpenStep::Session(
-                    location,
-                    Opened::Writable(vault),
-                    unlocked,
-                ))
-            },
-        )?;
-        self.recovered(answer)
+        if now.main != main || now.backup != backup || now.header_mac_mismatch != header_changed {
+            return Err(ShellError::ChoiceExpired);
+        }
+        let (mut vault, mut report) = Vault::unlock_with_recovery(&check.path, &secret)?;
+        // A header changed in the moments between the look above and the unlock is a new decision too.
+        if report.header_mac_mismatch != header_changed {
+            return Err(ShellError::ChoiceExpired);
+        }
+        not_cancelled(cancel)?;
+        if header_changed && accept_changed_header {
+            vault.accept_header()?;
+        }
+        if let Err(error) = vault.change_password(&new_password) {
+            // As a change from an open vault: the engine's `commit` reads `vault.json` back after a failed write and
+            // makes the new header live when it landed. If it holds the new password, the change happened though
+            // the write came back as an error: say so, never "nothing changed".
+            return Err(match vault.check_password(&new_password) {
+                Ok(()) => {
+                    let change = password_change(id);
+                    ShellError::LockedAfterChange {
+                        what: change.what,
+                        vault: change.vault,
+                    }
+                }
+                Err(_) => error.into(),
+            });
+        }
+        #[cfg(test)]
+        test_step(PASSWORD_SET)?;
+        // The changed header the report found is accepted now.
+        report.header_mac_mismatch = false;
+        let unconfirmed = self.recovery_unconfirmed(&location, false);
+        let unlocked = (report, check.cloud, unconfirmed);
+        Ok(OpenStep::Session(
+            location,
+            Opened::Writable(vault),
+            unlocked,
+        ))
+    }
+
+    /// Back, No to a changed header, or leaving: drops the recovery choice `choice`. A choice that is already gone (used,
+    /// forgotten, dropped by a lock, expired), never made, or another kind's, is nothing to forget: success.
+    pub fn recover_forget(&self, choice: &Token) -> ShellResult<()> {
+        self.sessions.pending().forget_recovery(choice);
+        Ok(())
     }
 
     /// Sets a new password, checking the current one in the same call. All inside one `write_change` closure, which
@@ -880,17 +979,23 @@ struct UnlockVault {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RecoverVault {
+struct RecoverCheck {
     id: u32,
     recovery_key: Zeroizing<String>,
-    new_password: Zeroizing<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RecoverConfirm {
-    token: Token,
-    accept: bool,
+struct RecoverFinish {
+    choice: Token,
+    new_password: Zeroizing<String>,
+    accept_changed_header: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoverForget {
+    choice: Token,
 }
 
 #[derive(Deserialize)]
@@ -1012,27 +1117,37 @@ pub(super) async fn unlock_vault(
 }
 
 #[tauri::command]
-pub(super) async fn recover_vault(
+pub(super) async fn recover_check(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
-) -> ShellResult<Outcome<Tagged<UnlockView>>> {
-    let RecoverVault {
-        id,
-        recovery_key,
-        new_password,
-    } = args(&request)?;
+) -> ShellResult<RecoveryCheckView> {
+    let RecoverCheck { id, recovery_key } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.recover_vault(id, recovery_key, new_password)).await
+    blocking(move || shell.recover_check(id, recovery_key)).await
 }
 
 #[tauri::command]
-pub(super) async fn recover_vault_confirm(
+pub(super) async fn recover_finish(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Outcome<Tagged<UnlockView>>> {
-    let RecoverConfirm { token, accept } = args(&request)?;
+    let RecoverFinish {
+        choice,
+        new_password,
+        accept_changed_header,
+    } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.recover_vault_confirm(&token, accept)).await
+    blocking(move || shell.recover_finish(&choice, new_password, accept_changed_header)).await
+}
+
+#[tauri::command]
+pub(super) async fn recover_forget(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let RecoverForget { choice } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.recover_forget(&choice)).await
 }
 
 #[tauri::command]
@@ -1116,13 +1231,14 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use lockbox_core::blob::NoProgress;
     use lockbox_core::internals::fsio::failpoint;
     use lockbox_core::internals::fsio::testutil::make_dir_link;
     use lockbox_core::internals::header::{
         HEADER_BACKUP, HEADER_FILE, parse_header, serialize_header,
     };
     use lockbox_core::internals::lockfile::VaultLock;
-    use lockbox_core::{CoreError, read_vault_name};
+    use lockbox_core::{CoreError, Credential, ReadOnlyVault, read_vault_name};
     use serde_json::{Value, json};
     use tauri::ipc::InvokeBody;
     use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
@@ -1147,7 +1263,12 @@ mod tests {
     /// A new vault named "Family" in the test's vaults folder, closed, and on the vault list: its ID, canonical
     /// folder and recovery key.
     fn registered(ts: &TestShell) -> (u32, PathBuf, Zeroizing<String>) {
-        let created = heavy(|| Vault::create(&ts.vaults(), "Family", PW)).unwrap();
+        registered_as(ts, "Family")
+    }
+
+    /// [`registered`] for a vault named `name`.
+    fn registered_as(ts: &TestShell, name: &str) -> (u32, PathBuf, Zeroizing<String>) {
+        let created = heavy(|| Vault::create(&ts.vaults(), name, PW)).unwrap();
         let dir = fs::canonicalize(created.vault.dir()).unwrap();
         let recovery = created.recovery.to_display();
         drop(created);
@@ -1201,6 +1322,45 @@ mod tests {
             .into_iter()
             .find(|info| info.session == session)
             .map(|info| info.state)
+    }
+
+    /// 28b's check: `key` for the vault `id`. A refused key holds nothing.
+    fn check(ts: &TestShell, id: u32, key: &str) -> ShellResult<RecoveryCheckView> {
+        ts.shell.recover_check(id, secret(key))
+    }
+
+    /// 28d's finish, on the pool's rules for a test (an Argon2 run is under way).
+    fn finish(
+        ts: &TestShell,
+        choice: &Token,
+        new_password: &str,
+        accept: bool,
+    ) -> ShellResult<Outcome<Tagged<UnlockView>>> {
+        heavy(|| {
+            ts.shell
+                .recover_finish(choice, secret(new_password), accept)
+        })
+    }
+
+    /// The whole recovery as the page does it: the check, then the finish (accepting a changed header).
+    fn recover(
+        ts: &TestShell,
+        id: u32,
+        key: &str,
+        new_password: &str,
+    ) -> ShellResult<Tagged<UnlockView>> {
+        let checked = check(ts, id, key)?;
+        Ok(done(finish(ts, &checked.choice, new_password, true)?))
+    }
+
+    /// The token under which a choice is held, as the page would send it back.
+    fn token_of(text: &str) -> Token {
+        serde_json::from_value(json!(text)).unwrap()
+    }
+
+    /// Whether a recovery choice is held under `choice` now.
+    fn is_held(ts: &TestShell, choice: &Token) -> bool {
+        ts.shell.sessions.pending().recovery_of(choice).is_some()
     }
 
     #[test]
@@ -1325,20 +1485,17 @@ mod tests {
         ));
         // A token for another question is used up and refused, and its choice dropped.
         let (id, dir, recovery) = registered(&ts);
-        change_header(&dir);
-        let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))).unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
+        let token = ts.shell.recover_check(id, recovery).unwrap().choice;
         assert!(matches!(
             ts.shell.create_vault_confirm(&token),
             Err(ShellError::NotFound)
         ));
-        assert!(is_free(&dir), "the vault that waited is dropped");
-        assert!(matches!(
-            ts.shell.recover_vault_confirm(&token, true),
-            Err(ShellError::NotFound)
-        ));
+        assert!(!is_held(&ts, &token), "the choice that waited is dropped");
+        assert_eq!(
+            finish(&ts, &token, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert!(password_works(&dir, PW), "nothing changed");
     }
 
     #[test]
@@ -1407,18 +1564,19 @@ mod tests {
         let (id, dir, recovery) = registered(&ts);
         change_header(&dir);
         let before = headers(&dir);
-        let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))).unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
+        let checked = ts.shell.recover_check(id, recovery).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::HeaderChanged);
+        let token = checked.choice;
         let locker = lock_once_taken(&ts);
-        let answer = heavy(|| ts.shell.recover_vault_confirm(&token, true));
+        let answer = finish(&ts, &token, NEW_PW, true);
         join(&locker);
         match answer.err() {
             Some(ShellError::Locked) => assert_eq!(headers(&dir), before, "nothing changed"),
             Some(ShellError::LockedAfterChange {
-                what: "password", ..
+                what: "password",
+                vault,
             }) => {
+                assert_eq!(vault, id, "the vault the change was made to");
                 assert!(password_works(&dir, NEW_PW))
             }
             other => panic!("not overtaken by the lock: {other:?}"),
@@ -1800,11 +1958,15 @@ mod tests {
         assert_eq!(view.data.info.name, "Family");
         ts.shell.sessions.lock_all(LockReason::Manual);
 
+        // Recover: the check and the finish each look at the folder their own check found.
         retarget(&listed_link, &made[0]);
         move_during_check(&listed_link, &other_vault);
-        let key = created.data.recovery_key.clone();
-        let recovered = heavy(|| ts.shell.recover_vault(link_id, key, secret(NEW_PW)));
-        assert_eq!(done(recovered.unwrap()).data.info.name, "Family");
+        let checked = check(&ts, link_id, &created.data.recovery_key).unwrap();
+        assert_eq!(checked.vault_name, "Family");
+        retarget(&listed_link, &made[0]);
+        move_during_check(&listed_link, &other_vault);
+        let recovered = done(finish(&ts, &checked.choice, NEW_PW, true).unwrap());
+        assert_eq!(recovered.data.info.name, "Family");
     }
 
     /// Fix round 3 (H2): a listed folder that leads elsewhere by the time it is checked (a junction moved after the
@@ -1813,7 +1975,7 @@ mod tests {
     #[test]
     fn session_is_named_by_the_checked_folder() {
         let ts = TestShell::new();
-        let (_, family, _) = registered(&ts);
+        let (_, family, family_key) = registered(&ts);
         let elsewhere = ts.temp.path().join("elsewhere");
         fs::create_dir(&elsewhere).unwrap();
         let other = heavy(|| Vault::create(&elsewhere, "Work", NEW_PW)).unwrap();
@@ -1847,10 +2009,22 @@ mod tests {
         failpoint::disarm_all();
         assert_eq!(answer.err(), refused);
 
+        // The recovery check: the other vault's own key would open it, but the check looked at the folder it was
+        // given, so nothing is held.
         move_once_open();
-        let answer = heavy(|| ts.shell.recover_vault(id, work_key, secret(PW)));
+        let answer = check(&ts, id, &work_key);
         failpoint::disarm_all();
         assert_eq!(answer.err(), refused);
+        assert_eq!(ts.shell.sessions.pending().len(), 0, "no choice held");
+
+        // The finish: a vault checked at its own folder, then the junction moved before the finish's check.
+        retarget(&link, &family);
+        let checked = check(&ts, id, &family_key).unwrap();
+        move_once_open();
+        let answer = finish(&ts, &checked.choice, PW, true);
+        failpoint::disarm_all();
+        assert_eq!(answer.err(), refused);
+        assert!(!is_held(&ts, &checked.choice), "the choice is gone");
 
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&family) && is_free(&work));
@@ -1895,11 +2069,9 @@ mod tests {
             what: "removable drive",
         });
         assert_eq!(ts.shell.unlock_vault(id, secret(PW)).err(), refused);
-        assert_eq!(
-            ts.shell.recover_vault(id, recovery, secret(NEW_PW)).err(),
-            refused
-        );
+        assert_eq!(check(&ts, id, &recovery).err(), refused);
         assert!(ts.shell.sessions.list().is_empty());
+        assert_eq!(ts.shell.sessions.pending().len(), 0, "no choice held");
     }
 
     /// Fix round 1 (F2): the location check runs inside the open, so a lock of all vaults during it is seen.
@@ -1923,9 +2095,16 @@ mod tests {
 
         // Fix round 2 (G6): the open checks its cancel before the step it cannot undo, so a lock seen during the
         // check changes nothing: no new password, no accepted header, no new vault.
+        // The recovery check: a lock seen during its location check keeps nothing.
+        lock_now();
+        assert_eq!(check(&ts, id, &recovery).err(), Some(ShellError::Locked));
+        assert_eq!(ts.shell.sessions.pending().len(), 0, "no choice held");
+
+        // The finish: the same lock changes nothing, and the choice is gone with it.
+        let checked = check(&ts, id, &recovery).unwrap();
         lock_now();
         assert_eq!(
-            heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW))).err(),
+            finish(&ts, &checked.choice, NEW_PW, true).err(),
             Some(ShellError::Locked)
         );
         assert!(ts.shell.sessions.list().is_empty());
@@ -1934,13 +2113,11 @@ mod tests {
 
         change_header(&dir);
         let before = headers(&dir);
-        let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))).unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
+        let checked = check(&ts, id, &recovery).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::HeaderChanged);
         lock_now();
         assert_eq!(
-            heavy(|| ts.shell.recover_vault_confirm(&token, true)).err(),
+            finish(&ts, &checked.choice, NEW_PW, true).err(),
             Some(ShellError::Locked)
         );
         assert_eq!(headers(&dir), before, "nothing accepted");
@@ -1979,15 +2156,12 @@ mod tests {
     /// Fix round 1 (F3): the yes to a changed header checks the folder again: it may have moved drives while the
     /// question waited.
     #[test]
-    fn recover_confirm_rechecks_location() {
+    fn recover_finish_rechecks_location() {
         let ts = TestShell::new();
         let (id, dir, recovery) = registered(&ts);
         change_header(&dir);
         let before = headers(&dir);
-        let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))).unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
+        let checked = check(&ts, id, &recovery).unwrap();
         ts.volumes.mount(
             &ts.vaults(),
             FakeVolume {
@@ -1996,7 +2170,7 @@ mod tests {
             },
         );
         assert_eq!(
-            heavy(|| ts.shell.recover_vault_confirm(&token, true)).err(),
+            finish(&ts, &checked.choice, NEW_PW, true).err(),
             Some(ShellError::InvalidInput {
                 what: "removable drive"
             })
@@ -2004,6 +2178,7 @@ mod tests {
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&dir));
         assert_eq!(headers(&dir), before, "nothing accepted");
+        assert!(!is_held(&ts, &checked.choice), "the choice is gone");
     }
 
     #[test]
@@ -2071,21 +2246,26 @@ mod tests {
     }
 
     #[test]
-    fn recover_sets_new_password_before_use() {
+    fn recover_finish_sets_the_password_before_the_session_is_usable() {
         let ts = TestShell::new();
         let (id, dir, recovery) = registered(&ts);
 
         // Fix round 1 (F13): the new password cannot be written: no session ever opens, the vault is closed again,
-        // and the old password still works.
+        // and the old password still works. The choice was used up: the key is checked again.
+        let checked = check(&ts, id, &recovery).unwrap();
         failpoint::arm("write_headers.before_first");
-        let answer = heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW)));
+        let answer = finish(&ts, &checked.choice, NEW_PW, true);
         failpoint::disarm_all();
         assert!(matches!(answer, Err(ShellError::Core(_))));
         assert!(ts.shell.sessions.list().is_empty(), "no session");
         assert!(is_free(&dir));
         assert!(password_works(&dir, PW));
+        assert_eq!(
+            finish(&ts, &checked.choice, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
 
-        let tagged = done(heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))).unwrap());
+        let tagged = recover(&ts, id, &recovery, NEW_PW).unwrap();
         assert_eq!(tagged.data.info.name, "Family");
         assert!(
             ts.shell
@@ -2099,37 +2279,48 @@ mod tests {
         assert!(password_works(&dir, NEW_PW));
     }
 
+    /// A new password under 12 is refused first, before the choice is looked up (a made-up token gets the same
+    /// answer) and before a changed header is accepted, and the choice is kept: the person types another one.
     #[test]
-    fn recover_with_a_typo_or_short_password_refused() {
+    fn recover_finish_refuses_a_short_password_and_keeps_the_choice() {
         let ts = TestShell::new();
         let (id, dir, recovery) = registered(&ts);
-        assert!(matches!(
-            ts.shell
-                .recover_vault(id, secret("not a recovery key"), secret(NEW_PW)),
-            Err(ShellError::Core(_))
-        ));
+        let short: ShellError = CoreError::PasswordTooShort { min: 12 }.into();
+        let checked = check(&ts, id, &recovery).unwrap();
+        for password in ["short", ""] {
+            assert_eq!(
+                finish(&ts, &checked.choice, password, true).err(),
+                Some(short)
+            );
+            assert!(is_held(&ts, &checked.choice), "kept: {password:?}");
+        }
         assert_eq!(
-            heavy(|| ts
-                .shell
-                .recover_vault(id, recovery.clone(), secret("short")))
-            .err(),
-            Some(CoreError::PasswordTooShort { min: 12 }.into())
+            finish(&ts, &token_of(FAKE_TOKEN), "short", true).err(),
+            Some(short),
+            "refused before any lookup"
         );
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&dir));
         assert!(password_works(&dir, PW));
 
-        // Fix round 1 (F11): refused before anything else, so a changed header is not asked about (and accepted)
-        // first: both header files stay as they were.
+        // Fix round 1 (F11): refused before anything else, so a changed header is not accepted first: both header
+        // files stay as they were.
         change_header(&dir);
         let before = headers(&dir);
+        let changed = check(&ts, id, &recovery).unwrap();
+        assert_eq!(changed.kind, RecoveryCheckKind::HeaderChanged);
         assert_eq!(
-            heavy(|| ts.shell.recover_vault(id, recovery, secret("short"))).err(),
-            Some(CoreError::PasswordTooShort { min: 12 }.into())
+            finish(&ts, &changed.choice, "short", true).err(),
+            Some(short)
         );
         assert_eq!(headers(&dir), before);
+        assert!(is_held(&ts, &changed.choice));
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&dir));
+
+        // The kept choice still finishes, with a password that is long enough.
+        let tagged = done(finish(&ts, &changed.choice, NEW_PW, true).unwrap());
+        assert_eq!(tagged.data.info.name, "Renamed");
     }
 
     /// Fix round 1 (F11): a password too short is refused before the folder dialog opens.
@@ -2147,75 +2338,127 @@ mod tests {
         assert_eq!(fs::read_dir(ts.vaults()).unwrap().count(), 0);
     }
 
+    /// The changed header is asked about first (the check's `header_changed`), and the answer is `accept_changed_header`:
+    /// a finish without it is refused with the choice kept, a lock before the answer drops the choice, and a yes accepts
+    /// the header, sets the new password and opens the session.
     #[test]
-    fn recover_after_changed_header_asks_first() {
+    fn recover_finish_after_a_changed_header_yes_accepts_then_sets() {
         let ts = TestShell::new();
         let (id, dir, recovery) = registered(&ts);
         change_header(&dir);
         let before = headers(&dir);
         let ask = || {
-            let answer = heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW)));
-            let Ok(Outcome::Confirm(Confirm::HeaderChanged { token })) = answer else {
-                panic!("the changed header asks first");
-            };
+            let checked = check(&ts, id, &recovery).expect("a changed header still opens the key");
+            assert_eq!(checked.kind, RecoveryCheckKind::HeaderChanged);
+            assert_eq!(
+                checked.vault_name, "Renamed",
+                "the name in the header that opened"
+            );
             assert!(ts.shell.sessions.list().is_empty(), "no session yet");
-            assert!(!is_free(&dir), "the unlocked vault waits for the answer");
-            token
+            assert!(
+                is_free(&dir),
+                "no vault is held open while the question waits"
+            );
+            assert_eq!(headers(&dir), before, "the check wrote nothing");
+            checked.choice
         };
 
-        // No: dismissed, the vault closed, nothing changed on disk.
+        // No yes, only the finish: refused, the choice kept, nothing changed.
         let token = ask();
-        assert!(matches!(
-            ts.shell.recover_vault_confirm(&token, false),
-            Ok(Outcome::Dismissed)
-        ));
-        assert!(is_free(&dir));
+        let no_yes = ShellError::InvalidInput {
+            what: "header changed on disk",
+        };
+        assert_eq!(finish(&ts, &token, NEW_PW, false).err(), Some(no_yes));
+        assert!(is_held(&ts, &token));
         assert_eq!(headers(&dir), before);
-
-        // Every vault locks before the answer: the choice is gone, and so is the vault's `.lock`.
-        let token = ask();
-        ts.shell.sessions.lock_all(LockReason::WindowsLocked);
         assert!(is_free(&dir));
-        assert!(matches!(
-            ts.shell.recover_vault_confirm(&token, true),
-            Err(ShellError::NotFound)
-        ));
+
+        // Every vault locks before the yes: the choice is gone.
+        ts.shell.sessions.lock_all(LockReason::WindowsLocked);
+        assert!(!is_held(&ts, &token));
+        assert_eq!(
+            finish(&ts, &token, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
         assert_eq!(headers(&dir), before);
 
         // Yes: the header is accepted and the new password set, then the session opens.
         let token = ask();
-        let tagged = done(heavy(|| ts.shell.recover_vault_confirm(&token, true)).unwrap());
+        let tagged = done(finish(&ts, &token, NEW_PW, true).unwrap());
         assert_eq!(tagged.data.info.name, "Renamed");
+        assert!(!tagged.data.header_mac_mismatch, "accepted by the yes");
         assert_eq!(state(&ts, tagged.session), Some(SessionState::Unlocked));
+        assert!(!is_held(&ts, &token), "used up");
         ts.shell.sessions.lock_all(LockReason::Manual);
         let (_, report) = heavy(|| Vault::unlock_with_password(&dir, NEW_PW)).unwrap();
         assert!(!report.header_mac_mismatch);
+        assert!(!password_works(&dir, PW), "the old password is refused");
     }
 
-    /// Fix round 1 (F13): a lock that lands after the yes accepted the header and set the new password, before the
-    /// session opens: the change is reported (`LockedAfterChange`), and nothing stays open.
+    /// "No" to the changed header is `recover_forget`: the key is dropped and nothing was ever written. Forgetting is
+    /// idempotent, and only a recovery choice answers to it.
     #[test]
-    fn lock_after_the_recovery_yes_set_the_password() {
+    fn recover_forget_after_no_changes_nothing() {
         let ts = TestShell::new();
         let (id, dir, recovery) = registered(&ts);
         change_header(&dir);
-        let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(NEW_PW))).unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
+        let before = headers(&dir);
+        let checked = check(&ts, id, &recovery).unwrap();
+        let token = checked.choice;
+        assert!(is_held(&ts, &token));
+        let other = ts.shell.sessions.pending().put(PendingChoice::Test(None));
+        // Another kind's token and one never made are nothing to forget, and the choice stays.
+        ts.shell.recover_forget(&other).unwrap();
+        ts.shell.recover_forget(&token_of(FAKE_TOKEN)).unwrap();
+        assert!(is_held(&ts, &token));
+        assert!(
+            ts.shell.sessions.pending().take(&other).is_ok(),
+            "the other kind's choice is left alone"
+        );
+
+        ts.shell.recover_forget(&token).unwrap();
+        assert!(!is_held(&ts, &token));
+        assert_eq!(ts.shell.sessions.pending().len(), 0);
+        assert_eq!(headers(&dir), before, "nothing changed on disk");
+        assert!(is_free(&dir));
+        assert!(ts.shell.sessions.list().is_empty());
+        assert_eq!(
+            finish(&ts, &token, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        // A choice already gone is a success, as is a second forget.
+        ts.shell.recover_forget(&token).unwrap();
+        assert!(password_works(&dir, PW));
+    }
+
+    /// Fix round 1 (F13): a lock that lands after the finish set the new password and accepted the header, before the
+    /// session opens: the change is reported (`LockedAfterChange`) with the vault it was made to, and nothing stays open.
+    #[test]
+    fn a_lock_after_finish_landed_answers_locked_after_change_with_the_vault() {
+        let ts = TestShell::new();
+        let (other_id, ..) = registered_as(&ts, "Other");
+        let (id, dir, recovery) = registered(&ts);
+        assert_ne!(id, other_id);
+        change_header(&dir);
+        let checked = check(&ts, id, &recovery).unwrap();
         let shell = Arc::clone(&ts.shell);
         failpoint::observe(
             PASSWORD_SET,
             Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
         );
-        let answer = heavy(|| ts.shell.recover_vault_confirm(&token, true));
+        let answer = finish(&ts, &checked.choice, NEW_PW, true);
         failpoint::disarm_all();
+        let error = answer.err().expect("overtaken by the lock");
         assert_eq!(
-            answer.err(),
-            Some(ShellError::LockedAfterChange {
+            error,
+            ShellError::LockedAfterChange {
                 what: "password",
-                vault: 0
-            })
+                vault: id
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            format!(r#"{{"code":"locked_after_change","what":"password","vault":{id}}}"#)
         );
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&dir));
@@ -2224,22 +2467,726 @@ mod tests {
         assert!(!report.header_mac_mismatch, "and the header was accepted");
     }
 
+    /// A lock before the new password was written answers `Locked` (nothing was written), not a change that landed.
     #[test]
-    fn recover_unlocked_vault_refused() {
+    fn a_lock_before_finish_wrote_anything_answers_locked() {
         let ts = TestShell::new();
-        let (id, dir, _) = registered(&ts);
-        heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
-        // Refused before the key is even read: not a typo error for this one.
-        assert_eq!(
-            ts.shell
-                .recover_vault(id, secret("not a recovery key"), secret(NEW_PW))
-                .err(),
-            Some(ShellError::InvalidInput {
-                what: "vault is unlocked"
-            })
+        let (id, dir, recovery) = registered(&ts);
+        let before = headers(&dir);
+        let checked = check(&ts, id, &recovery).unwrap();
+        let shell = Arc::clone(&ts.shell);
+        failpoint::observe(
+            CHECKING,
+            Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
         );
+        let answer = finish(&ts, &checked.choice, NEW_PW, true);
+        failpoint::disarm_all();
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert_eq!(headers(&dir), before);
+        assert!(ts.shell.sessions.list().is_empty());
+        assert!(password_works(&dir, PW));
+    }
+
+    /// The check and the finish are refused for a vault that is not on the list and for one that is unlocked, the
+    /// unlocked one before the key is even read; an unlocked vault found by the finish is refused and its choice gone.
+    #[test]
+    fn recover_check_and_finish_refused_for_an_unknown_or_unlocked_vault() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        // An ID the list never had.
+        assert_eq!(
+            check(&ts, id + 1, &recovery).err(),
+            Some(ShellError::NotFound)
+        );
+        assert_eq!(check(&ts, 0, &recovery).err(), Some(ShellError::NotFound));
+        // A vault the list forgot since the check: the choice answers `ChoiceExpired`.
+        let held = check(&ts, id, &recovery).unwrap();
+        ts.shell.registry.forget(id).unwrap();
+        assert_eq!(
+            finish(&ts, &held.choice, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert!(!is_held(&ts, &held.choice));
+        assert!(password_works(&dir, PW));
+        // The check refuses the removed entry too, and holds nothing.
+        assert_eq!(check(&ts, id, &recovery).err(), Some(ShellError::NotFound));
+        assert_eq!(ts.shell.sessions.pending().len(), 0);
+        let id = ts.shell.registry.add(&dir).unwrap();
+
+        // Unlocked: refused before the key is read (not a typo error for this one), and nothing is held.
+        let session = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let unlocked = ShellError::InvalidInput {
+            what: "vault is unlocked",
+        };
+        assert_eq!(check(&ts, id, "not a recovery key").err(), Some(unlocked));
+        assert_eq!(check(&ts, id, &recovery).err(), Some(unlocked));
+        assert_eq!(ts.shell.sessions.pending().len(), 0);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // Checked while locked, unlocked since: the finish refuses, drops the choice, and changes nothing.
+        let checked = check(&ts, id, &recovery).unwrap();
+        let reopened = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert_ne!(reopened.generation, session.generation);
+        let before = headers(&dir);
+        assert_eq!(
+            finish(&ts, &checked.choice, NEW_PW, true).err(),
+            Some(unlocked)
+        );
+        assert!(!is_held(&ts, &checked.choice), "gone");
+        assert_eq!(headers(&dir), before);
         ts.shell.sessions.lock_all(LockReason::Manual);
         assert!(password_works(&dir, PW));
+    }
+
+    // ---- Forgot password, in two steps (Plan 4C, Task 4) ----
+
+    /// `key` with its first word swapped for another listed word, so it fails the 8-bit check.
+    fn with_a_typo(key: &str) -> String {
+        let words: Vec<&str> = key.split(' ').collect();
+        for other in ["abandon", "ability", "able", "about", "above"] {
+            let mut changed = words.clone();
+            changed[0] = other;
+            let text = changed.join(" ");
+            if matches!(
+                RecoverySecret::parse(&text),
+                Err(CoreError::RecoveryKeyTypo)
+            ) {
+                return text;
+            }
+        }
+        panic!("no swapped word failed the check");
+    }
+
+    /// The answer's JSON, for a refusal.
+    fn said(error: Option<ShellError>) -> Value {
+        serde_json::to_value(error.expect("refused")).unwrap()
+    }
+
+    /// 28b's refusals, each its own fixed kind with its number, and nothing held after any of them. The cipher cannot
+    /// tell another vault's key from an old key: both are `wrong_password`, which the page words as "doesn't open".
+    #[test]
+    fn recover_check_says_which_refusal() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let (_, _, others_key) = registered_as(&ts, "Work");
+        let before = headers(&dir);
+
+        // A word swapped for another listed word: the 8-bit check fails.
+        assert_eq!(
+            said(check(&ts, id, &with_a_typo(&recovery)).err()),
+            json!({ "code": "core", "kind": "recovery_key_typo" })
+        );
+        // Word 7 is not in the list.
+        let mut words: Vec<&str> = recovery.split(' ').collect();
+        words[6] = "zzzz";
+        assert_eq!(
+            said(check(&ts, id, &words.join(" ")).err()),
+            json!({ "code": "core", "kind": "recovery_key_word", "position": 7 })
+        );
+        // Not 24 words: one short, and one too many.
+        let short = recovery.split(' ').take(23).collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            said(check(&ts, id, &short).err()),
+            json!({ "code": "core", "kind": "recovery_key_count", "found": 23 })
+        );
+        let long = format!("{} {}", recovery.as_str(), "abandon");
+        assert_eq!(
+            said(check(&ts, id, &long).err()),
+            json!({ "code": "core", "kind": "recovery_key_count", "found": 25 })
+        );
+        // Another vault's key.
+        assert_eq!(
+            said(check(&ts, id, &others_key).err()),
+            json!({ "code": "core", "kind": "wrong_password" })
+        );
+        // An old key: the vault has a new one since.
+        let (mut vault, _) = heavy(|| Vault::unlock_with_password(&dir, PW)).unwrap();
+        let fresh = vault.regenerate_recovery().unwrap().to_display();
+        drop(vault);
+        let before_fresh = headers(&dir);
+        assert_eq!(
+            said(check(&ts, id, &recovery).err()),
+            json!({ "code": "core", "kind": "wrong_password" })
+        );
+        assert_eq!(
+            ts.shell.sessions.pending().len(),
+            0,
+            "no refusal holds a choice"
+        );
+        assert_ne!(before, before_fresh, "the new key was written");
+        assert_eq!(headers(&dir), before_fresh, "no check wrote anything");
+
+        // The current key opens, and is held.
+        let checked = check(&ts, id, &fresh).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::Checked);
+        assert_eq!(checked.vault_name, "Family");
+        assert!(is_held(&ts, &checked.choice));
+        assert_eq!(headers(&dir), before_fresh);
+    }
+
+    /// A key typed wrongly never reaches the derivation: no typo, unlisted word or wrong count opens a header, and no
+    /// unknown or unlocked vault does either. The engine's check is reached once, by the key that is well formed.
+    #[test]
+    fn recover_check_spends_no_derivation_on_a_typo() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let reached = Rc::new(Cell::new(0));
+        let count = Rc::clone(&reached);
+        failpoint::observe(
+            "recovery_check.start",
+            Box::new(move || count.set(count.get() + 1)),
+        );
+        let mut unlisted: Vec<&str> = recovery.split(' ').collect();
+        unlisted[6] = "zzzz";
+        let short = recovery.split(' ').take(23).collect::<Vec<_>>().join(" ");
+        for key in [
+            with_a_typo(&recovery),
+            unlisted.join(" "),
+            short,
+            String::new(),
+            "not a recovery key".to_owned(),
+        ] {
+            assert!(check(&ts, id, &key).is_err());
+        }
+        assert!(check(&ts, id + 1, &recovery).is_err(), "an unknown vault");
+        assert_eq!(reached.get(), 0, "nothing was derived");
+
+        // A well formed key that opens nothing does reach it (the hook is live), and a good key too.
+        let (_, _, others_key) = registered_as(&ts, "Work");
+        assert!(check(&ts, id, &others_key).is_err());
+        assert_eq!(reached.get(), 1);
+        assert!(check(&ts, id, &recovery).is_ok());
+        assert_eq!(reached.get(), 2);
+        failpoint::disarm_all();
+
+        // An unlocked vault is refused before that too.
+        heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let reached = Rc::new(Cell::new(0));
+        let count = Rc::clone(&reached);
+        failpoint::observe(
+            "recovery_check.start",
+            Box::new(move || count.set(count.get() + 1)),
+        );
+        assert!(check(&ts, id, &recovery).is_err());
+        failpoint::disarm_all();
+        assert_eq!(reached.get(), 0);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(password_works(&dir, PW));
+    }
+
+    /// The checked key waits in Rust, not on the page. It is dropped by Back (`recover_forget`), by every lock of all
+    /// vaults (an idle one, Windows locking and sleeping too), by its five minutes and by the app closing, and used up
+    /// by the finish: but not by a finish that was refused for a short password, or for lacking the yes.
+    #[test]
+    fn recover_check_holds_the_key_until_finish_and_drops_it_on_back_lock_all_expiry_and_close() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let pending = ts.shell.sessions.pending();
+        let held = || check(&ts, id, &recovery).unwrap().choice;
+
+        // Held: a refused finish (short, or no yes to a changed header) keeps it.
+        let token = held();
+        assert!(is_held(&ts, &token));
+        assert_eq!(pending.len(), 1);
+        assert!(finish(&ts, &token, "short", true).is_err());
+        assert!(is_held(&ts, &token));
+        // Back.
+        ts.shell.recover_forget(&token).unwrap();
+        assert!(!is_held(&ts, &token));
+        assert_eq!(pending.len(), 0);
+
+        // Every lock of all vaults, whatever its reason: the key is gone, and the finish says to check again.
+        for reason in [
+            LockReason::Manual,
+            LockReason::Idle,
+            LockReason::WindowsLocked,
+            LockReason::Sleep,
+        ] {
+            let token = held();
+            ts.shell.sessions.lock_all(reason);
+            assert!(!is_held(&ts, &token), "{reason:?}");
+            assert_eq!(pending.len(), 0, "{reason:?}");
+            assert_eq!(
+                finish(&ts, &token, NEW_PW, true).err(),
+                Some(ShellError::ChoiceExpired),
+                "{reason:?}"
+            );
+        }
+
+        // Five minutes: the sweep drops it, and so does the lookup.
+        let token = held();
+        pending.sweep_at(Instant::now() + Duration::from_secs(10 * 60));
+        assert!(!is_held(&ts, &token));
+        assert_eq!(
+            finish(&ts, &token, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert_eq!(pending.len(), 0);
+
+        // Used up by a finish that opens the vault (the yes is ignored on a key that needs none).
+        let token = held();
+        let tagged = done(finish(&ts, &token, NEW_PW, false).unwrap());
+        assert_eq!(tagged.data.info.name, "Family");
+        assert!(!is_held(&ts, &token));
+        assert_eq!(pending.len(), 0);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(password_works(&dir, NEW_PW));
+
+        // The app closing.
+        let token = held();
+        if let Some(done) = ts.shell.sessions.close() {
+            done.wait();
+        }
+        assert!(!is_held(&ts, &token));
+        assert_eq!(pending.len(), 0);
+    }
+
+    /// A check that a lock overtakes holds nothing: the lock is seen at the end, where the choice would be parked.
+    #[test]
+    fn a_lock_during_the_check_holds_nothing() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let shell = Arc::clone(&ts.shell);
+        failpoint::observe(
+            "recovery_check.start",
+            Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
+        );
+        assert_eq!(check(&ts, id, &recovery).err(), Some(ShellError::Locked));
+        failpoint::disarm_all();
+        assert_eq!(ts.shell.sessions.pending().len(), 0);
+        assert!(password_works(&dir, PW));
+    }
+
+    /// Two vaults of the same name, a made-up token, and another kind's token: the finish answers `ChoiceExpired` for
+    /// each and leaves another kind's choice where it was.
+    #[test]
+    fn recover_finish_answers_only_to_its_own_choice() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let (other_id, other_dir, other_key) = registered_as(&ts, "Family");
+        assert_ne!(id, other_id);
+        let mine = check(&ts, id, &recovery).unwrap().choice;
+        let theirs = check(&ts, other_id, &other_key).unwrap().choice;
+        let foreign = ts.shell.sessions.pending().put(PendingChoice::Test(None));
+        for token in [token_of(FAKE_TOKEN), foreign.clone()] {
+            assert_eq!(
+                finish(&ts, &token, NEW_PW, true).err(),
+                Some(ShellError::ChoiceExpired)
+            );
+        }
+        assert!(
+            ts.shell.sessions.pending().take(&foreign).is_ok(),
+            "another kind's choice is left alone"
+        );
+        assert!(is_held(&ts, &mine) && is_held(&ts, &theirs));
+
+        // Each choice sets its own vault's password, and the other vault is untouched.
+        let (before_other, before_mine) = (headers(&other_dir), headers(&dir));
+        let tagged = done(finish(&ts, &mine, NEW_PW, true).unwrap());
+        assert_eq!(tagged.data.info.name, "Family");
+        assert_eq!(headers(&other_dir), before_other);
+        assert_ne!(headers(&dir), before_mine);
+        assert!(is_held(&ts, &theirs), "a finish takes only its own choice");
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(password_works(&dir, NEW_PW));
+        assert!(password_works(&other_dir, PW));
+    }
+
+    /// A header file replaced between the check and the finish (changed, one file only, or one gone) is never written
+    /// over: the finish says `ChoiceExpired`, nothing changes on disk, and the key is checked again, so a header that
+    /// changed gets a fresh decision. With nothing replaced the same finish succeeds.
+    #[test]
+    fn a_header_replaced_between_check_and_finish_needs_the_key_again() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let original = headers(&dir);
+
+        // The header changed outside Lockbox after a clean check: the person has not been asked about it.
+        let checked = check(&ts, id, &recovery).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::Checked);
+        change_header(&dir);
+        let changed = headers(&dir);
+        assert_ne!(changed, original);
+        assert_eq!(
+            finish(&ts, &checked.choice, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert_eq!(headers(&dir), changed, "nothing accepted, nothing set");
+        assert!(!is_held(&ts, &checked.choice), "the choice is gone");
+        assert!(ts.shell.sessions.list().is_empty());
+        assert!(is_free(&dir));
+
+        // Checked again, it is a changed header, asked about, and the yes goes through.
+        let again = check(&ts, id, &recovery).unwrap();
+        assert_eq!(again.kind, RecoveryCheckKind::HeaderChanged);
+
+        // The spare alone replaced (a different name under the same vault).
+        let mut header = parse_header(&changed.0).unwrap();
+        header.name = "Spare".to_owned();
+        fs::write(dir.join(HEADER_BACKUP), serialize_header(&header)).unwrap();
+        let spare_changed = headers(&dir);
+        assert_eq!(
+            finish(&ts, &again.choice, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert_eq!(headers(&dir), spare_changed);
+
+        // The spare gone.
+        let again = check(&ts, id, &recovery).unwrap();
+        fs::remove_file(dir.join(HEADER_BACKUP)).unwrap();
+        assert_eq!(
+            finish(&ts, &again.choice, NEW_PW, true).err(),
+            Some(ShellError::ChoiceExpired)
+        );
+        assert!(
+            !dir.join(HEADER_BACKUP).exists(),
+            "not repaired by a refused finish"
+        );
+
+        // The header changed back to what the check saw: the same bytes are as bound.
+        fs::write(dir.join(HEADER_BACKUP), &changed.1).unwrap();
+        let again = check(&ts, id, &recovery).unwrap();
+        assert_eq!(again.kind, RecoveryCheckKind::HeaderChanged);
+        let tagged = done(finish(&ts, &again.choice, NEW_PW, true).unwrap());
+        assert_eq!(tagged.data.info.name, "Renamed");
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(
+            password_works(&dir, NEW_PW),
+            "with nothing replaced it goes through"
+        );
+        assert!(!password_works(&dir, PW));
+    }
+
+    /// Copies a folder, leaving out the `.lock` a live vault holds.
+    fn copy_folder(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_folder(&entry.path(), &target);
+            } else if entry.file_name() != ".lock" {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// Opens `dir` read-only with `credential`: whether it opened. A read-only open writes nothing.
+    fn opens_read_only(dir: &Path, credential: Credential) -> bool {
+        ReadOnlyVault::open_folder(dir, credential, &CancelToken::new(), &NoProgress).is_ok()
+    }
+
+    /// What [`interrupted_finish`] leaves: the folder, its registry ID, the recovery key and the two header files.
+    type Interrupted = (PathBuf, u32, Zeroizing<String>, (Vec<u8>, Vec<u8>));
+
+    /// A finish that died after `vault.json` and before `.bak` (the engine's partial-write hook): the change landed,
+    /// so the answer is `LockedAfterChange` with the vault, never "nothing changed". Returns the folder, its registry
+    /// ID, the recovery key and the two header files as the interruption left them, which differ.
+    fn interrupted_finish(ts: &TestShell) -> Interrupted {
+        let (id, dir, recovery) = registered(ts);
+        let before = headers(&dir);
+        let checked = check(ts, id, &recovery).unwrap();
+        failpoint::arm("write_headers.before_second");
+        let answer = finish(ts, &checked.choice, NEW_PW, true);
+        failpoint::disarm_all();
+        assert_eq!(
+            answer.err(),
+            Some(ShellError::LockedAfterChange {
+                what: "password",
+                vault: id
+            })
+        );
+        assert!(ts.shell.sessions.list().is_empty(), "no session");
+        assert!(is_free(&dir));
+        let left = headers(&dir);
+        assert_ne!(left.0, before.0, "vault.json holds the new password");
+        assert_eq!(left.1, before.1, ".bak is one version behind");
+        (dir, id, recovery, left)
+    }
+
+    /// That interrupted folder opened with the new password on its own copy: `vault.json` opens (no Ask 9), a read-only
+    /// open writes nothing, a writable unlock repairs the spare, and the old password is then refused.
+    #[test]
+    fn recover_finish_interrupted_opens_with_the_new_password_on_its_own_copy() {
+        let ts = TestShell::new();
+        let (dir, _, _, (main, bak)) = interrupted_finish(&ts);
+        let copy = ts.vaults().join("interrupted-new");
+        copy_folder(&dir, &copy);
+        let copy = fs::canonicalize(&copy).unwrap();
+        let id = ts.shell.registry.add(&copy).unwrap();
+
+        assert!(opens_read_only(&copy, Credential::Password(NEW_PW)));
+        assert_eq!(
+            headers(&copy),
+            (main.clone(), bak),
+            "a read-only open writes nothing"
+        );
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(NEW_PW)))
+            .unwrap()
+            .data;
+        assert!(!view.used_backup_header && !view.header_repair_failed);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert_eq!(
+            headers(&copy),
+            (main.clone(), main),
+            "the spare is repaired"
+        );
+        assert!(
+            !password_works(&copy, PW),
+            "once the pair agrees, the old password is refused"
+        );
+        assert!(password_works(&copy, NEW_PW));
+    }
+
+    /// The same folder opened with the old password on its own copy: it opens through the spare (Ask 9), and the new
+    /// password is refused until the change is made again.
+    #[test]
+    fn recover_finish_interrupted_opens_with_the_old_password_through_the_spare_on_its_own_copy() {
+        let ts = TestShell::new();
+        let (dir, _, _, (main, bak)) = interrupted_finish(&ts);
+        let copy = ts.vaults().join("interrupted-old");
+        copy_folder(&dir, &copy);
+        let copy = fs::canonicalize(&copy).unwrap();
+        let id = ts.shell.registry.add(&copy).unwrap();
+
+        assert!(opens_read_only(&copy, Credential::Password(PW)));
+        assert_eq!(headers(&copy), (main, bak.clone()));
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW)))
+            .unwrap()
+            .data;
+        assert!(view.used_backup_header, "Ask 9: the spare opened");
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert_eq!(
+            headers(&copy),
+            (bak.clone(), bak),
+            "vault.json repaired from the spare"
+        );
+        assert!(!password_works(&copy, NEW_PW));
+        assert!(password_works(&copy, PW));
+    }
+
+    /// The same folder opened with the recovery key on its own copy: the key's slot is the same in both files, so the
+    /// check opens `vault.json` and writes nothing; the finish that follows completes the change in both files, and
+    /// only the password it set opens the vault afterwards.
+    #[test]
+    fn recover_finish_interrupted_opens_with_the_key_on_its_own_copy() {
+        let ts = TestShell::new();
+        let (dir, _, recovery, (main, bak)) = interrupted_finish(&ts);
+        let copy = ts.vaults().join("interrupted-key");
+        copy_folder(&dir, &copy);
+        let copy = fs::canonicalize(&copy).unwrap();
+        let id = ts.shell.registry.add(&copy).unwrap();
+
+        assert!(opens_read_only(
+            &copy,
+            Credential::Recovery(&RecoverySecret::parse(&recovery).unwrap())
+        ));
+        let checked = check(&ts, id, &recovery).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::Checked, "its MAC verifies");
+        assert_eq!(
+            headers(&copy),
+            (main.clone(), bak),
+            "the check writes nothing"
+        );
+        assert!(is_free(&copy));
+        let later = "another long password";
+        let view = done(finish(&ts, &checked.choice, later, true).unwrap()).data;
+        assert!(!view.used_backup_header, "vault.json opened, not the spare");
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let after = headers(&copy);
+        assert_eq!(after.0, after.1, "the change is whole in both files");
+        assert_ne!(after.0, main);
+        assert!(password_works(&copy, later));
+        assert!(
+            !password_works(&copy, NEW_PW),
+            "the interrupted password is replaced"
+        );
+        assert!(!password_works(&copy, PW));
+    }
+
+    /// The minimum counts Unicode characters after NFC, as 21b's count does: a letter and its combining accent are
+    /// one, and an emoji outside the Basic Multilingual Plane is one (not two). Eleven are refused with the choice
+    /// kept; twelve set the password.
+    #[test]
+    fn the_minimum_after_nfc_at_recovery() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let short: ShellError = CoreError::PasswordTooShort { min: 12 }.into();
+        let accent = "e\u{301}";
+        let emoji = "\u{1F600}";
+        let eleven = [
+            format!("abcdefghij{accent}"),
+            format!("abcdefghij{emoji}"),
+            format!("abcdefghi{accent}{emoji}"),
+        ];
+        let twelve = [
+            format!("abcdefghi{accent}{emoji}x"),
+            format!("abcdefghij{emoji}{emoji}"),
+        ];
+        for password in &eleven {
+            // The boundary: counted by code points (or UTF-16 units) it is twelve, counted after NFC it is eleven.
+            assert!(
+                password.chars().count() == 12 || password.encode_utf16().count() == 12,
+                "{password:?}"
+            );
+            let checked = check(&ts, id, &recovery).unwrap();
+            assert_eq!(
+                finish(&ts, &checked.choice, password, true).err(),
+                Some(short)
+            );
+            assert!(is_held(&ts, &checked.choice), "kept");
+            ts.shell.recover_forget(&checked.choice).unwrap();
+        }
+        assert!(password_works(&dir, PW), "nothing was set by a refused one");
+        for password in &twelve {
+            let tagged = recover(&ts, id, &recovery, password).unwrap();
+            assert_eq!(tagged.data.info.name, "Family");
+            ts.shell.sessions.lock_all(LockReason::Manual);
+            assert!(password_works(&dir, password));
+        }
+    }
+
+    /// Through the bridge: each request's fields (and nothing else), a choice that is not a token, and each answer's
+    /// JSON, with the refusals the page maps.
+    #[test]
+    fn recover_json_shapes() {
+        let token = FAKE_TOKEN;
+        // The requests: every field named in snake_case, nothing more allowed.
+        refuses_a_path::<RecoverCheck>(json!({ "id": 1, "recovery_key": "x" }));
+        refuses_a_path::<RecoverFinish>(
+            json!({ "choice": token, "new_password": NEW_PW, "accept_changed_header": false }),
+        );
+        refuses_a_path::<RecoverForget>(json!({ "choice": token }));
+        // A missing, extra or wrongly typed field, and a choice that is not 32 lowercase hex, is no request.
+        let malformed = |body: Value| InvokeBody::Json(body);
+        for body in [
+            json!({ "id": 1 }),
+            json!({ "recovery_key": "x" }),
+            json!({ "id": "1", "recovery_key": "x" }),
+            json!({ "id": 1, "recovery_key": 7 }),
+            json!({ "id": 1, "recoveryKey": "x" }),
+        ] {
+            assert_eq!(
+                parse::<RecoverCheck>(&malformed(body)).err(),
+                Some(MALFORMED)
+            );
+        }
+        for body in [
+            json!({ "choice": token, "new_password": NEW_PW }),
+            json!({ "choice": token, "accept_changed_header": true }),
+            json!({ "new_password": NEW_PW, "accept_changed_header": true }),
+            json!({ "choice": token, "new_password": NEW_PW, "accept_changed_header": "yes" }),
+            json!({ "choice": token, "new_password": 5, "accept_changed_header": true }),
+            json!({ "choice": 7, "new_password": NEW_PW, "accept_changed_header": true }),
+            json!({ "choice": "ABABABABABABABABABABABABABABABAB", "new_password": NEW_PW, "accept_changed_header": true }),
+            json!({ "choice": "abab", "new_password": NEW_PW, "accept_changed_header": true }),
+            json!({ "token": token, "new_password": NEW_PW, "accept_changed_header": true }),
+        ] {
+            assert_eq!(
+                parse::<RecoverFinish>(&malformed(body)).err(),
+                Some(MALFORMED)
+            );
+        }
+        for body in [
+            json!({}),
+            json!({ "choice": "abab" }),
+            json!({ "token": token }),
+        ] {
+            assert_eq!(
+                parse::<RecoverForget>(&malformed(body)).err(),
+                Some(MALFORMED)
+            );
+        }
+
+        // The answers, from the real commands.
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let clean = check(&ts, id, &recovery).unwrap();
+        let json = serde_json::to_value(&clean).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 3);
+        assert_eq!(json["kind"], "checked");
+        assert_eq!(json["vault_name"], "Family");
+        let text = json["choice"].as_str().unwrap();
+        assert!(
+            text.len() == 32
+                && text
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        ts.shell.recover_forget(&clean.choice).unwrap();
+        // A choice already gone answers `null` too.
+        assert_eq!(ts.shell.recover_forget(&clean.choice), Ok(()));
+        assert_eq!(serde_json::to_value(()).unwrap(), Value::Null);
+
+        change_header(&dir);
+        let changed = check(&ts, id, &recovery).unwrap();
+        let json = serde_json::to_value(&changed).unwrap();
+        assert_eq!(json["kind"], "header_changed");
+        assert_eq!(json["vault_name"], "Renamed");
+
+        let answer = finish(&ts, &changed.choice, NEW_PW, true).unwrap();
+        let json = serde_json::to_value(&answer).unwrap();
+        let tagged = &json["Done"];
+        assert_eq!(json.as_object().unwrap().len(), 1, "Done and nothing else");
+        assert!(tagged["session"].is_u64() && tagged["generation"].is_u64());
+        let data = &tagged["data"];
+        assert_eq!(data["info"]["name"], "Renamed");
+        for flag in [
+            "used_backup_header",
+            "header_mac_mismatch",
+            "header_repair_failed",
+        ] {
+            assert!(data[flag].is_boolean(), "{flag}");
+        }
+        assert_eq!(data["header_mac_mismatch"], false, "accepted");
+        assert!(data["recovery_unconfirmed"].is_boolean() && data["cleanup"].is_object());
+        assert!(data.get("cloud").is_some());
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // The refusals, each the exact fixed JSON.
+        let refused = |error: ShellError, expected: Value| {
+            assert_eq!(serde_json::to_value(error).unwrap(), expected)
+        };
+        refused(ShellError::NotFound, json!({ "code": "not_found" }));
+        refused(
+            UNLOCKED,
+            json!({ "code": "invalid_input", "what": "vault is unlocked" }),
+        );
+        refused(
+            CoreError::PasswordTooShort { min: 12 }.into(),
+            json!({ "code": "core", "kind": "password_too_short", "min": 12 }),
+        );
+        refused(
+            ShellError::ChoiceExpired,
+            json!({ "code": "choice_expired" }),
+        );
+        refused(
+            ShellError::InvalidInput {
+                what: "header changed on disk",
+            },
+            json!({ "code": "invalid_input", "what": "header changed on disk" }),
+        );
+        refused(ShellError::Locked, json!({ "code": "locked" }));
+        refused(
+            ShellError::LockedAfterChange {
+                what: "password",
+                vault: 3,
+            },
+            json!({ "code": "locked_after_change", "what": "password", "vault": 3 }),
+        );
+        // A finish and a check of the real commands answer with those.
+        assert_eq!(
+            said(check(&ts, id + 1, &recovery).err()),
+            json!({ "code": "not_found" })
+        );
+        assert_eq!(
+            said(finish(&ts, &changed.choice, NEW_PW, true).err()),
+            json!({ "code": "choice_expired" })
+        );
+        assert_eq!(
+            said(finish(&ts, &changed.choice, "short", true).err()),
+            json!({ "code": "core", "kind": "password_too_short", "min": 12 })
+        );
     }
 
     #[test]
@@ -2399,18 +3346,15 @@ mod tests {
         assert_eq!(serde_json::to_value(&view).unwrap()["cloud"], "OneDrive");
         ts.shell.sessions.lock_all(LockReason::Manual);
 
-        let recovered = heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW)));
-        let view = done(recovered.unwrap()).data;
+        let view = recover(&ts, id, &recovery, NEW_PW).unwrap().data;
         assert_eq!(view.cloud, Some(CloudProvider::OneDrive));
 
         // After a changed header, the yes says so too.
         ts.shell.sessions.lock_all(LockReason::Manual);
         change_header(&dir);
-        let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(PW))).unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
-        let view = done(heavy(|| ts.shell.recover_vault_confirm(&token, true)).unwrap()).data;
+        let checked = check(&ts, id, &recovery).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::HeaderChanged);
+        let view = done(finish(&ts, &checked.choice, PW, true).unwrap()).data;
         assert_eq!(view.cloud, Some(CloudProvider::OneDrive));
     }
 
@@ -2423,8 +3367,7 @@ mod tests {
         fs::write(dir.join(HEADER_FILE), b"damaged").unwrap();
         let orphan = dir.join("files").join(format!("{}.blob", "ab".repeat(16)));
         fs::write(&orphan, b"x").unwrap();
-        let recovered = heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW)));
-        let tagged = done(recovered.unwrap());
+        let tagged = recover(&ts, id, &recovery, NEW_PW).unwrap();
         let view = tagged.data;
         assert_eq!(view.info.name, "Family");
         assert_eq!(view.info.session, tagged.session);
@@ -2439,11 +3382,8 @@ mod tests {
             b"x",
         )
         .unwrap();
-        let asked = heavy(|| ts.shell.recover_vault(id, recovery, secret(PW))).unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
-        let view = done(heavy(|| ts.shell.recover_vault_confirm(&token, true)).unwrap()).data;
+        let checked = check(&ts, id, &recovery).unwrap();
+        let view = done(finish(&ts, &checked.choice, PW, true).unwrap()).data;
         assert_eq!(view.info.name, "Renamed");
         assert!(!view.header_mac_mismatch, "accepted by the yes");
         assert_eq!(view.cleanup.partials_removed, 1);
@@ -2714,24 +3654,15 @@ mod tests {
 
         // A mark again (a vault the person made a new key for and never confirmed): by the recovery key.
         ts.shell.vault_state.mark_unconfirmed(&dir).unwrap();
-        let recovered = heavy(|| {
-            ts.shell
-                .recover_vault(id, fresh.data.words.clone(), secret(NEW_PW))
-        });
-        assert!(done(recovered.unwrap()).data.recovery_unconfirmed);
+        let recovered = recover(&ts, id, &fresh.data.words, NEW_PW);
+        assert!(recovered.unwrap().data.recovery_unconfirmed);
         ts.shell.sessions.lock_all(LockReason::Manual);
 
         // And through the changed header's yes.
         change_header(&dir);
-        let asked = heavy(|| {
-            ts.shell
-                .recover_vault(id, fresh.data.words.clone(), secret(PW))
-        })
-        .unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
-        let view = done(heavy(|| ts.shell.recover_vault_confirm(&token, true)).unwrap());
+        let checked = check(&ts, id, &fresh.data.words).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::HeaderChanged);
+        let view = done(finish(&ts, &checked.choice, PW, true).unwrap());
         assert!(view.data.recovery_unconfirmed);
     }
 
@@ -2930,10 +3861,11 @@ mod tests {
         // `create_vault_confirm` and `add_existing_vault_confirm`.
         refuses_a_path::<TokenArg>(json!({ "token": token }));
         refuses_a_path::<UnlockVault>(json!({ "id": 1, "password": PW }));
-        refuses_a_path::<RecoverVault>(
-            json!({ "id": 1, "recovery_key": "x", "new_password": NEW_PW }),
+        refuses_a_path::<RecoverCheck>(json!({ "id": 1, "recovery_key": "x" }));
+        refuses_a_path::<RecoverFinish>(
+            json!({ "choice": token, "new_password": NEW_PW, "accept_changed_header": true }),
         );
-        refuses_a_path::<RecoverConfirm>(json!({ "token": token, "accept": true }));
+        refuses_a_path::<RecoverForget>(json!({ "choice": token }));
         refuses_a_path::<SessionArg>(json!({ "session": 1, "generation": 1 }));
         refuses_a_path::<ChangePassword>(
             json!({ "session": 1, "generation": 1, "current_password": PW, "new_password": NEW_PW }),
@@ -3532,8 +4464,7 @@ mod tests {
         };
 
         // No mark: the recovery opens the vault, and no key may be made without the password.
-        let plain =
-            done(heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW))).unwrap());
+        let plain = recover(&ts, id, &recovery, NEW_PW).unwrap();
         assert!(!plain.data.recovery_unconfirmed);
         let none = heavy(|| {
             ts.shell
@@ -3544,8 +4475,7 @@ mod tests {
 
         // A mark: the recovery enters 21f, and the key it asks for is made without the password.
         ts.shell.vault_state.mark_unconfirmed(&dir).unwrap();
-        let marked =
-            done(heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW))).unwrap());
+        let marked = recover(&ts, id, &recovery, NEW_PW).unwrap();
         assert!(marked.data.recovery_unconfirmed);
         let made = heavy(|| {
             ts.shell
@@ -3558,11 +4488,9 @@ mod tests {
         // The same through the changed header's yes (with the key that was just made: the first one stopped working).
         let current = made.data.words.clone();
         change_header(&dir);
-        let asked = heavy(|| ts.shell.recover_vault(id, current.clone(), secret(NEW_PW))).unwrap();
-        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
-            panic!("the changed header asks first");
-        };
-        let accepted = done(heavy(|| ts.shell.recover_vault_confirm(&token, true)).unwrap());
+        let checked = check(&ts, id, &current).unwrap();
+        assert_eq!(checked.kind, RecoveryCheckKind::HeaderChanged);
+        let accepted = done(finish(&ts, &checked.choice, NEW_PW, true).unwrap());
         assert!(accepted.data.recovery_unconfirmed);
         let key = heavy(|| {
             ts.shell
@@ -3928,6 +4856,9 @@ mod tests {
             ("new_recovery_key", "shell.new_recovery_key("),
             ("regenerate_recovery", "shell.regenerate_recovery("),
             ("recovery_confirmed", "shell.recovery_confirmed("),
+            ("recover_check", "shell.recover_check("),
+            ("recover_finish", "shell.recover_finish("),
+            ("recover_forget", "shell.recover_forget("),
         ] {
             let start = source
                 .find(&format!("pub(super) async fn {name}("))
