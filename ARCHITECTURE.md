@@ -405,7 +405,17 @@ quit, the kinds, `past_swap` and `restore_waiting`; the page shows a job's quest
 one pending question, with the lock epoch it was asked in and what was sent. A Quit comes from the tray, so the window is shown first. A
 second close or Quit while it is pending sends the same event again (the first one's reason and payload; a Quit shows the window again), so a
 question the page never showed cannot leave Close and Quit dead; the page keeps one question, so a repeat changes nothing there
-(`a_second_close_sends_the_same_question_again`). A lock of all vaults (a new epoch) clears it. The page
+(`a_second_close_sends_the_same_question_again`). A lock of all vaults (a new epoch) clears it. **When the last
+running operation ends while the question is pending in the current epoch, and no restore waits at 24d or is past its swap,
+the shell answers it as Close anyway itself** (`Shell::carry_on_close`): there is nothing left to cancel, so the close or
+Quit the person asked for goes ahead with no second press, and the page's own answer, if it comes after, is `NotFound`
+(`last_job_ending_carries_on_with_the_close`, `last_job_ending_carries_on_with_the_quit`). The auto-lock tells the shell through a
+hook (`AutoLock::on_last_end`) that `Operations::end` calls with no lock of its own held; the hook only starts a thread
+(`lockbox-carry-on`, holding a `Weak` to the shell, which is why `Shell::new` returns an `Arc`), because the end can come from
+`LongOp`'s drop inside a lock's cancel or a lock hook and the go path waits for the lock hooks
+(`the_carry_on_does_not_run_on_the_ending_jobs_thread`). A thread that cannot start leaves the question pending. With anything
+still running or waiting the question stays as asked (`a_job_ending_with_another_running_keeps_the_question`,
+`a_restore_waiting_at_24d_keeps_the_question_when_its_copy_ends`). The page
 answers with `close_answer(go)`: `false` changes nothing, `true` runs the old path for the question's reason (a close:
 `close_window`, whose lock cancels the jobs, ends a waiting restore and which still shows 5b on a first close; a Quit: the shutdown within 2 s,
 which also waits, inside that bound, for the waiting restore's clean-up so its staging folder and journal are gone before the exit
@@ -596,7 +606,9 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
     asks first and nothing is locked or cancelled until the answer; Windows ending the session never asks:
     `close_with_a_job_running_asks_first`, `close_anyway_cancels_the_jobs_then_hides_and_locks`, `keep_it_running_changes_nothing`,
     `quit_with_a_job_running_asks_first`, `close_past_the_swap_says_it_finishes_next_time`, `a_lock_epoch_change_clears_the_question`,
-    `windows_ending_the_session_does_not_wait_for_an_answer`. A restore waiting for its yes asks too:
+    `windows_ending_the_session_does_not_wait_for_an_answer`. When the last job ends the shell carries the question on:
+    `last_job_ending_carries_on_with_the_close`, `last_job_ending_carries_on_with_the_quit`,
+    `keep_it_running_then_the_job_ends_closes_nothing`. A restore waiting for its yes asks too:
     `close_with_a_restore_waiting_asks_first`, `quit_with_a_restore_waiting_asks_first`,
     `close_anyway_with_a_restore_waiting_ends_it_then_hides_and_locks`, `keep_it_open_leaves_the_restore_waiting`.
 12. **A vanished drive locks its vault as unavailable, never deleted.** `drive_gone_lock_marks_unavailable`,

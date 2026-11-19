@@ -620,7 +620,9 @@ combination, among them Bitwarden's browser extension, which fills a login with 
   person's answer (24d), both ask first**, and until the
   person answers nothing is cancelled, locked or hidden: the operations go on and the vaults stay unlocked. Only **Close
   anyway** runs the close or Quit as above, which cancels the operations, ends a waiting restore (the vault stays as it
-  is) and locks; **Keep it running** (**Keep it open** for a waiting restore) changes nothing.
+  is) and locks; **Keep it running** (**Keep it open** for a waiting restore) changes nothing. **Once the last running
+  operation has ended** while the question shows, and no finished restore waits for its answer (24d), there is nothing
+  left to cancel: the close or Quit goes ahead by itself, as if Close anyway had been pressed, with no second press.
   The question is one at a time, is dropped by any lock of all vaults (Lock all, Windows lock or sleep, an idle lock), and
   is never kept across a restart. A restore already past its swap cannot be cancelled: the question says it finishes, or
   is undone by recovery at the next launch, and nothing is lost either way. **Windows ending the session** (signing out,

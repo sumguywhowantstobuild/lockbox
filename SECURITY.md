@@ -180,7 +180,9 @@ trusted than Rust.
   idle timer counts, including Open, Replace and copying an item, or a restore waiting at "Replace your vault with
   this?"). Until you answer, the operations keep running, a waiting restore keeps waiting, and the vaults stay unlocked;
   the question is dropped by any lock of all vaults (Lock all, Windows lock or sleep, an idle lock), and it is never kept
-  across a restart.
+  across a restart. When the last operation ends while the question shows (and no finished restore waits for your
+  answer), nothing is left to cancel, so the close or Quit you asked for goes ahead by itself: the same lock and hide, or
+  lock and exit, that "Close anyway" runs.
   "Close anyway" is the only answer that cancels the operations, ends a waiting restore (the vault stays as it is) and locks (a close locks, then hides once the first-close explanation has been seen; a Quit locks and
   exits, waiting at most 2 seconds for the lock to finish); "Keep it running" (or "Keep it open" for a waiting restore) changes nothing. A restore past its swap
   cannot be cancelled and finishes, or is undone at the next launch. Windows ending the session (signing out, shutdown)

@@ -12,6 +12,14 @@ export function filesWords(count: number): string {
   return `${String(count)} ${count === 1 ? "file" : "files"}`;
 }
 
+/** 9a's sentence after "N files picked, size.": where they go, " They go into My vault." or " They're attached to Bot admin console." (one file: "It"). */
+export function placeWords(count: number, itemTitle: string | null, vaultName: string): string {
+  const one = count === 1;
+  return itemTitle !== null
+    ? ` ${one ? "It's" : "They're"} attached to ${itemTitle}.`
+    : ` ${one ? "It goes" : "They go"} into ${vaultName}.`;
+}
+
 /** The words that differ between adding to a folder and attaching to an item. */
 export function verbs(into: AddInto): { action: string; doing: string; done: string; none: string } {
   return into.type === "item"
@@ -26,8 +34,22 @@ export function originalsStay(count: number): string {
     : "The originals are still unprotected on your PC. Lockbox didn't change or delete them, so remove them yourself if you no longer need them.";
 }
 
-/** What a batch left out says about the originals that were never stored: keep them. */
-export const KEEP_THE_LISTED = "Keep the files listed above. They aren't in your vault, and their originals are all that is left of them.";
+/** What a batch left out says about the originals that were never stored, `count` of them: keep them (one: "Keep the file … It isn't … its original … it"). */
+export function keepTheListed(count: number): string {
+  return count === 1
+    ? "Keep the file listed above. It isn't in your vault, and its original is all that is left of it."
+    : "Keep the files listed above. They aren't in your vault, and their originals are all that is left of them.";
+}
+
+/** The heading over the names a batch couldn't read, `count` of them. */
+export function unreadHeading(count: number): string {
+  return count === 1 ? "This file couldn't be read:" : "These files couldn't be read:";
+}
+
+/** The heading over the names a batch never tried, `count` of them: "These files were not added:" (one: "This file was not added:"). */
+export function notDoneHeading(count: number, done: string): string {
+  return count === 1 ? `This file was not ${done}:` : `These files were not ${done}:`;
+}
 
 /** How a batch ended, as its heading says it: "3 files added", "1 of 3 files added", "Nothing was added". */
 export function endTitle(view: AddFilesView, total: number, into: AddInto): string {
@@ -67,7 +89,7 @@ export function partialWords(view: AddFilesView, total: number, into: AddInto): 
 
 /**
  * 9e's refusal before a batch starts, in words with the numbers: no room for the whole batch ("Not enough space. These files need 3.2 GB, and
- * this drive has 1.1 GB free."), or a file over 256 GB named with its size, from the list the page holds. Any other refusal is the page's own
+ * this drive has 1.1 GB free."; one file: "This file needs"), or a file over 256 GB named with its size, from the list the page holds. Any other refusal is the page's own
  * words for it. A refusal that is about the size of the batch is also what turns Add off until the list changes.
  */
 export function refusalWords(error: unknown, files: readonly PickedFile[]): { text: string; size: boolean } {
@@ -75,7 +97,8 @@ export function refusalWords(error: unknown, files: readonly PickedFile[]): { te
   const code = typeof error === "object" && error !== null ? (error as { code?: unknown; kind?: unknown }) : {};
   if (code.code === "core" && code.kind === "not_enough_space" && message.numbers?.needed !== undefined && message.numbers.available !== undefined) {
     return {
-      text: `Not enough space. These files need ${formatBytes(message.numbers.needed)}, and this drive has ${formatBytes(message.numbers.available)} free.`,
+      // One picked file is "This file"; a batch, or a refusal said with no list (Save all's, before its files are counted), is "These files".
+      text: `Not enough space. ${files.length === 1 ? "This file needs" : "These files need"} ${formatBytes(message.numbers.needed)}, and this drive has ${formatBytes(message.numbers.available)} free.`,
       size: true,
     };
   }

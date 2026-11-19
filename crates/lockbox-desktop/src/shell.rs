@@ -8,7 +8,7 @@ use std::sync::TryLockError;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::Instant;
 
@@ -61,6 +61,29 @@ pub struct PendingClose {
     epoch: u64,
     /// What the page was sent, kept so that a repeat request sends the same again.
     asked: CloseAsked,
+}
+
+/// What the auto-lock does when the last running operation ends ([`AutoLock::on_last_end`]): hands the carry-on of a
+/// pending close question ([`Shell::carry_on_close`]) to a thread of its own and returns at once. The ending thread may
+/// be inside a lock's cancel or a lock hook, or just past the release of the operations' list, and the carry-on waits
+/// for lock hooks; the shell is taken from its `Weak` on the new thread, so the ending thread never holds the last
+/// reference to it. A thread that cannot start leaves the question as it is, still there for the person to answer:
+/// unlike [`Shell::run_in_background`] this never falls back to running the work here.
+fn carry_on_off_this_thread(shell: &Weak<Shell>) {
+    #[cfg(test)]
+    if let Some(shell) = shell.upgrade() {
+        shell.carry_on_asks.fetch_add(1, Ordering::SeqCst);
+    }
+    let shell = Weak::clone(shell);
+    let _ = thread::Builder::new()
+        .name("lockbox-carry-on".into())
+        .spawn(move || {
+            if let Some(shell) = shell.upgrade() {
+                shell.carry_on_close();
+                #[cfg(test)]
+                shell.carry_on_looks.fetch_add(1, Ordering::SeqCst);
+            }
+        });
 }
 
 /// What [`Shell::checked_output`] found: a destination that may be written now, or one in a cloud-synced folder that
@@ -121,12 +144,25 @@ pub struct Shell {
     /// [`PRINT_ANSWER_WAIT`](crate::commands::readable::PRINT_ANSWER_WAIT).
     #[cfg(test)]
     pub(crate) print_wait: Mutex<Option<std::time::Duration>>,
+    /// Tests only: how many times the end of the last operation asked for a carry-on (counted on the ending thread,
+    /// before it returns), and how many of those the carry-on's own thread has finished
+    /// ([`carry_on_settled`](Self::carry_on_settled)).
+    #[cfg(test)]
+    carry_on_asks: AtomicUsize,
+    #[cfg(test)]
+    carry_on_looks: AtomicUsize,
 }
 
 impl Shell {
     /// `app_dirs`: Tauri's `app_data_dir` and `app_local_data_dir`, which an uninstaller may delete. Reads only the
-    /// known folders and the settings: nothing is written until a command saves state.
-    pub fn new(notifier: Arc<dyn Notifier>, os: Os, app_dirs: Vec<PathBuf>) -> io::Result<Self> {
+    /// known folders and the settings: nothing is written until a command saves state. The shell is made shared here
+    /// because the auto-lock reports the end of the last operation to it ([`carry_on_close`](Self::carry_on_close)),
+    /// through a `Weak` the auto-lock keeps: it is wired to hear that from the moment it exists.
+    pub fn new(
+        notifier: Arc<dyn Notifier>,
+        os: Os,
+        app_dirs: Vec<PathBuf>,
+    ) -> io::Result<Arc<Self>> {
         let paths = state_paths(os.env.as_ref())?;
         let mut forbidden = app_dirs;
         forbidden.push(os.env.known_folder(KnownFolder::RoamingAppData)?);
@@ -161,7 +197,7 @@ impl Shell {
         // Then the capture slot's: every lock of all vaults empties it, and a lock of the vault it was handed to does.
         let capture = Arc::new(Capture::default());
         sessions.on_lock(capture.lock_hook(Arc::downgrade(&sessions), Arc::clone(&notifier)));
-        Ok(Shell {
+        let shell = Shell {
             sessions,
             settings,
             clipboard,
@@ -187,7 +223,18 @@ impl Shell {
             creating_waited: AtomicUsize::new(0),
             #[cfg(test)]
             print_wait: Mutex::default(),
-        })
+            #[cfg(test)]
+            carry_on_asks: AtomicUsize::new(0),
+            #[cfg(test)]
+            carry_on_looks: AtomicUsize::new(0),
+        };
+        Ok(Arc::new_cyclic(|weak| {
+            let weak = Weak::clone(weak);
+            shell
+                .autolock
+                .on_last_end(move || carry_on_off_this_thread(&weak));
+            shell
+        }))
     }
 
     /// The save shortcut was pressed: reads the clipboard once, into the one capture slot (a text with something in it, or
@@ -321,7 +368,9 @@ impl Shell {
     /// again: a page that never showed the first, because the event was lost or the page reloaded, would otherwise leave
     /// Close and Quit dead until a lock. The page keeps one question, so a repeat changes nothing there. A change of the
     /// epoch (Lock all, Windows locking or sleeping, an idle lock) clears the pending question, so a request after it is
-    /// judged afresh. Jobs that end meanwhile change nothing: the question stays until it is answered.
+    /// judged afresh. Jobs that end meanwhile change nothing while any still runs or a restore still waits for its yes;
+    /// once the last one ends the shell answers the question as Close anyway itself, since nothing is left to cancel
+    /// ([`carry_on_close`](Self::carry_on_close)).
     pub fn ask_before_closing(&self, reason: CloseReason) -> bool {
         let asked = {
             let mut pending = lock(&self.close_question);
@@ -394,6 +443,48 @@ impl Shell {
             }
         }
         Ok(())
+    }
+
+    /// The last running operation ended ([`AutoLock::on_last_end`]): with a close or Quit question pending in the
+    /// current lock epoch and nothing left to cancel (no operation running, no restore waiting for its yes at 24d, none
+    /// past its swap), the shell answers the question as Close anyway itself, so the close or Quit the person asked for
+    /// goes ahead without a second press. The pending question is claimed exactly as an answer claims it (so the page's
+    /// own answer, if it comes after, is `NotFound`) and run by [`answer_claimed`](Self::answer_claimed), which checks
+    /// the epoch again. With anything still running or waiting, no question, or one a lock of all vaults has dropped,
+    /// nothing changes: the question stays as asked, or is gone.
+    ///
+    /// Waits for the lock hooks when it closes, so it never runs on the ending job's thread
+    /// ([`carry_on_off_this_thread`] hands it to a thread of its own). It takes the question's lock only to read and
+    /// claim, in the order [`ask_before_closing`](Self::ask_before_closing) does, and releases it before the go path.
+    pub(crate) fn carry_on_close(&self) {
+        let question = {
+            let mut pending = lock(&self.close_question);
+            let nothing_left = pending.as_ref().is_some_and(|question| {
+                question.epoch == self.sessions.epoch()
+                    && self.autolock.running_kinds().is_empty()
+                    && !self.restore.waiting()
+                    && !self.restore.past_swap()
+            });
+            if nothing_left { pending.take() } else { None }
+        };
+        if let Some(question) = question {
+            // The same epoch check as an answer's. `NotFound` here only means a lock came in between: nothing to do.
+            let _ = self.answer_claimed(question, true);
+        }
+    }
+
+    /// Tests only: how many times the end of the last operation has asked for a carry-on.
+    #[cfg(test)]
+    pub(crate) fn carry_on_asked(&self) -> usize {
+        self.carry_on_asks.load(Ordering::SeqCst)
+    }
+
+    /// Tests only: whether every carry-on the end of an operation asked for has finished. An end asks before it
+    /// returns, so a test that has dropped its job and then finds this true has seen the carry-on done, however late a
+    /// thread of an earlier end ran.
+    #[cfg(test)]
+    pub(crate) fn carry_on_settled(&self) -> bool {
+        self.carry_on_looks.load(Ordering::SeqCst) == self.carry_on_asks.load(Ordering::SeqCst)
     }
 
     /// The window's close button (design, "The window"): it never ends the app. Locks every vault, exactly as the page's
@@ -1353,7 +1444,7 @@ mod tests {
         let ts = TestShell::new();
         ts.shell.settings.mark_close_explained().unwrap();
         let (session, _) = ts.open_vault("Family");
-        let import = ts
+        let _import = ts
             .shell
             .autolock
             .begin(Some(session), JobKind::Import, CancelToken::new());
@@ -1382,13 +1473,6 @@ mod tests {
             1,
             "the Quit brings the window forward"
         );
-        // The job ends meanwhile: the question stays as it was asked, so does its repeat.
-        drop(import);
-        ts.shell.close_or_ask();
-        assert_eq!(
-            ts.events.close_asked(),
-            vec![asked("close", &["import"], false); 4]
-        );
         assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
         assert_eq!(ts.shell.close_answer(true), Ok(()));
         assert_eq!(
@@ -1398,27 +1482,6 @@ mod tests {
         );
         assert_eq!(ts.window.hides(), 1, "the close's own answer ran");
         assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
-    }
-
-    /// Jobs that end while the question shows change nothing: the question stays, and Close anyway then just closes.
-    #[test]
-    fn jobs_finishing_meanwhile_leave_the_question_and_close_anyway_just_closes() {
-        let ts = TestShell::new();
-        ts.shell.settings.mark_close_explained().unwrap();
-        let (session, _) = ts.open_vault("Family");
-        let import = ts
-            .shell
-            .autolock
-            .begin(Some(session), JobKind::Import, CancelToken::new());
-        ts.shell.close_or_ask();
-
-        drop(import);
-        assert_eq!(ts.events.close_asked().len(), 1);
-        assert_eq!(ts.window.hides(), 0);
-        assert_eq!(ts.shell.close_answer(true), Ok(()));
-
-        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
-        assert_eq!(ts.window.hides(), 1);
     }
 
     /// A change of the lock epoch (Lock all, Windows locking or sleeping, an idle lock) clears the question: an answer
@@ -1617,6 +1680,8 @@ mod tests {
             assert_eq!(ts.events.close_asked(), [asked("close", &[name], false)]);
             assert_eq!(ts.window.hides(), 0, "{name}");
             assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
+            // Answered first: the job's end would otherwise carry the close on (Task 14).
+            assert_eq!(ts.shell.close_answer(false), Ok(()));
             drop(job);
             ts.shell.lock_all();
         }
@@ -1644,6 +1709,7 @@ mod tests {
             ts.events.close_asked(),
             [asked("close", &["open", "backup", "copy_item"], false)]
         );
+        assert_eq!(ts.shell.close_answer(false), Ok(()));
     }
 
     /// An answer with no question pending is refused as not found, on a shell that was never asked, and after a
@@ -1686,6 +1752,250 @@ mod tests {
         assert_eq!(ts.shell.close_answer(true), Ok(()));
         assert_eq!(ts.window.exits(), 1, "the newer question was a Quit");
         assert_eq!(ts.window.hides(), 0, "the older close ran");
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Task 14: the question carries on when the jobs it asked about have ended.
+    // -----------------------------------------------------------------------------------------------------------
+
+    /// A close question pending, its only job ends: nothing is left to cancel, so the close the person asked for goes
+    /// ahead by itself, once (every vault locked as a person's own lock, the copy cleared, the window hidden), and the
+    /// page's later answer finds no question.
+    #[test]
+    fn last_job_ending_carries_on_with_the_close() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let vaults = two_vaults_and_a_copy(&ts);
+        let import =
+            ts.shell
+                .autolock
+                .begin(Some(vaults[0].0), JobKind::Import, CancelToken::new());
+        ts.shell.close_or_ask();
+        assert_eq!(ts.window.hides(), 0);
+        let before = ts.shell.carry_on_asked();
+
+        drop(import);
+        ts.wait_for_carry_on(before);
+
+        assert_all_locked_by_a_manual_lock(&ts, &vaults);
+        assert_eq!(ts.window.hides(), 1, "the window hides once");
+        assert_eq!(ts.window.exits(), 0);
+        assert_eq!(ts.events.close_asked().len(), 1, "no second question");
+        assert_eq!(
+            ts.shell.close_answer(true),
+            Err(ShellError::NotFound),
+            "the page's answer came after the shell's own"
+        );
+        assert_eq!(ts.shell.close_answer(false), Err(ShellError::NotFound));
+        assert_eq!(ts.window.hides(), 1);
+    }
+
+    /// The same for the tray's Quit: the shutdown runs (every vault locked as an app close) and the app exits, once.
+    #[test]
+    fn last_job_ending_carries_on_with_the_quit() {
+        let ts = TestShell::new();
+        let vaults = two_vaults_and_a_copy(&ts);
+        let backup =
+            ts.shell
+                .autolock
+                .begin(Some(vaults[0].0), JobKind::Backup, CancelToken::new());
+        assert!(ts.shell.ask_before_closing(CloseReason::Quit));
+        assert_eq!(ts.window.exits(), 0);
+        let before = ts.shell.carry_on_asked();
+
+        drop(backup);
+        ts.wait_for_carry_on(before);
+
+        assert_eq!(ts.window.exits(), 1, "the app exits once");
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        let locked = ts.events.locked();
+        assert_eq!(locked.len(), 2);
+        assert!(
+            locked
+                .iter()
+                .all(|(_, _, reason)| *reason == LockReason::AppClosing)
+        );
+        assert_eq!(ts.window.hides(), 0, "a Quit hides nothing, it exits");
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.window.exits(), 1);
+    }
+
+    /// While another job still runs there is something left to cancel: the question stays as it was asked (the
+    /// carry-on itself refuses, too, when it is asked), and the last one's end then carries on.
+    #[test]
+    fn a_job_ending_with_another_running_keeps_the_question() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let vaults = two_vaults_and_a_copy(&ts);
+        let import =
+            ts.shell
+                .autolock
+                .begin(Some(vaults[0].0), JobKind::Import, CancelToken::new());
+        let backup = ts
+            .shell
+            .autolock
+            .begin(None, JobKind::Backup, CancelToken::new());
+        ts.shell.close_or_ask();
+
+        drop(import);
+        // What the end of a job asks for, asked now with the backup still running.
+        ts.shell.carry_on_close();
+        assert_eq!(ts.window.hides(), 0);
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Unlocked));
+        assert!(ts.events.locked().is_empty());
+        ts.shell.close_or_ask();
+        assert_eq!(
+            ts.events.close_asked().len(),
+            2,
+            "the question is still the one pending"
+        );
+
+        let before = ts.shell.carry_on_asked();
+        drop(backup);
+        ts.wait_for_carry_on(before);
+        assert_all_locked_by_a_manual_lock(&ts, &vaults);
+        assert_eq!(ts.window.hides(), 1);
+    }
+
+    /// Keep it running used the question up: the job ending afterwards closes nothing, for a close and for a Quit.
+    #[test]
+    fn keep_it_running_then_the_job_ends_closes_nothing() {
+        for reason in [CloseReason::Close, CloseReason::Quit] {
+            let ts = TestShell::new();
+            ts.shell.settings.mark_close_explained().unwrap();
+            let vaults = two_vaults_and_a_copy(&ts);
+            let import =
+                ts.shell
+                    .autolock
+                    .begin(Some(vaults[0].0), JobKind::Import, CancelToken::new());
+            assert!(ts.shell.ask_before_closing(reason));
+            assert_eq!(ts.shell.close_answer(false), Ok(()));
+            let before = ts.shell.carry_on_asked();
+
+            drop(import);
+            ts.wait_for_carry_on(before);
+
+            assert!(
+                states(&ts).iter().all(|s| *s == SessionState::Unlocked),
+                "{reason:?}"
+            );
+            assert!(ts.events.locked().is_empty());
+            assert_eq!(ts.window.hides(), 0);
+            assert_eq!(ts.window.exits(), 0);
+            assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+        }
+    }
+
+    /// A lock of all vaults changed the epoch the question was asked in, so it was dropped with it: the job ending
+    /// afterwards (it was told to stop and took a while) carries on with nothing, for a close and for a Quit.
+    #[test]
+    fn a_lock_of_all_vaults_before_the_job_ends_carries_on_with_nothing() {
+        for reason in [CloseReason::Close, CloseReason::Quit] {
+            let ts = TestShell::new();
+            ts.shell.settings.mark_close_explained().unwrap();
+            let (session, _) = ts.open_vault("Family");
+            let import =
+                ts.shell
+                    .autolock
+                    .begin(Some(session), JobKind::Import, CancelToken::new());
+            assert!(ts.shell.ask_before_closing(reason));
+            ts.shell.lock_all();
+            let locks = ts.events.locked().len();
+            let before = ts.shell.carry_on_asked();
+
+            drop(import);
+            ts.wait_for_carry_on(before);
+
+            assert_eq!(ts.window.hides(), 0, "{reason:?}");
+            assert_eq!(ts.window.exits(), 0, "{reason:?}");
+            assert_eq!(ts.events.locked().len(), locks, "no second lock");
+            assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        }
+    }
+
+    /// The carry-on never runs on the thread of the job that ended: a job ends from `LongOp`'s drop, which can be
+    /// inside a lock hook, and the close waits for the lock hooks. Here the person's lock of one vault (which leaves the
+    /// epoch, so the question stays) runs a hook that ends the only job; a carry-on run inline would wait for the hook
+    /// thread it is running on, and the lock would never return.
+    #[test]
+    fn the_carry_on_does_not_run_on_the_ending_jobs_thread() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (session, _) = ts.open_vault("Family");
+        let held = Arc::new(Mutex::new(Some(ts.shell.autolock.begin(
+            Some(session),
+            JobKind::Import,
+            CancelToken::new(),
+        ))));
+        let ending = Arc::clone(&held);
+        // The epoch is read inside the hook, before it ends the job: after the job ends the carry-on's own lock of all
+        // vaults may advance it at any moment, so a read by the test after the lock returns would race with it.
+        let epochs = Arc::new(Mutex::new(None));
+        let (seen, sessions) = (Arc::clone(&epochs), Arc::clone(&ts.shell.sessions));
+        ts.shell.sessions.on_lock(Box::new(move |_, _| {
+            // Only the first run, the one lock of one vault: the carry-on's lock runs this hook again.
+            lock(&seen).get_or_insert_with(|| sessions.epoch());
+            drop(lock(&ending).take());
+        }));
+        ts.shell.close_or_ask();
+        let (epoch, before) = (ts.shell.sessions.epoch(), ts.shell.carry_on_asked());
+
+        let (done, finished) = mpsc::channel();
+        let sessions = Arc::clone(&ts.shell.sessions);
+        thread::spawn(move || {
+            sessions.lock(session, LockReason::Manual);
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the lock never returned: the carry-on ran on the ending job's thread");
+        assert!(lock(&held).is_none(), "the hook ended the job");
+        assert_eq!(
+            *lock(&epochs),
+            Some(epoch),
+            "the person's lock of one vault changed the epoch"
+        );
+        ts.wait_for_carry_on(before);
+
+        assert_eq!(ts.window.hides(), 1, "the carry-on closed");
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+    }
+
+    /// Close anyway cancels the jobs inside its own lock, and each job ends as it sees the cancel: the ends come
+    /// during the close, finish, and carry nothing on (the answer already used the question up), so the window hides
+    /// once.
+    #[test]
+    fn a_job_ending_inside_close_anyways_own_lock_finishes_and_closes_once() {
+        let ts = TestShell::new();
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (session, _) = ts.open_vault("Family");
+        let token = CancelToken::new();
+        let (running, running_now) = mpsc::channel();
+        let job = {
+            let (shell, token) = (Arc::clone(&ts.shell), token.clone());
+            thread::spawn(move || {
+                let op = shell
+                    .autolock
+                    .begin(Some(session), JobKind::Import, token.clone());
+                running.send(()).unwrap();
+                while !token.is_cancelled() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                // The job ends as it sees the cancel, while the close is still locking.
+                drop(op);
+            })
+        };
+        running_now.recv_timeout(Duration::from_secs(10)).unwrap();
+        ts.shell.close_or_ask();
+        let before = ts.shell.carry_on_asked();
+
+        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        job.join().unwrap();
+        ts.wait_for_carry_on(before);
+
+        assert_eq!(ts.window.hides(), 1, "the window hid more than once");
+        assert!(states(&ts).iter().all(|s| *s == SessionState::Locked));
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
     }
 
     /// A queued hide with no reopen before it runs: it hides, and the gate stays sealed.

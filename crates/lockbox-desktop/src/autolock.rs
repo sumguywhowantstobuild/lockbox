@@ -76,7 +76,13 @@ struct Operations {
     power: Arc<dyn Power>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn Notifier>,
+    /// Told when an operation's end leaves none running ([`AutoLock::on_last_end`]). Held only to copy it out.
+    last_end_hook: Mutex<Option<LastEndHook>>,
 }
+
+/// What the shell does when the last running operation ends: called from [`LongOp`]'s drop, on whatever thread and
+/// under whatever locks that drop came from, so it must return at once and take no lock of the shell's.
+type LastEndHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Default)]
 struct Running {
@@ -182,14 +188,22 @@ impl Operations {
     }
 
     fn end(&self, id: u64, session: Option<SessionId>) {
-        {
+        let none_left = {
             let mut running = lock(&self.running);
             running.operations.retain(|operation| operation.id != id);
             running.last_end = Some(self.clock.now());
             running.idle_locked = false;
-        }
+            running.operations.is_empty()
+        };
         // While unwinding, only the keep-awake request is put right: a second panic would abort the process.
         self.announce((!thread::panicking()).then_some(session));
+        if none_left && !thread::panicking() {
+            // With no lock of this module held, and a copy taken out first, so the hook runs under none at all.
+            let hook = lock(&self.last_end_hook).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
     }
 
     /// Asks Windows to keep the PC awake while any operation runs, and with `Some(session)`, sends `lockbox://busy`:
@@ -304,6 +318,7 @@ impl AutoLock {
                 power: Arc::clone(&os.power),
                 clock: Arc::clone(&os.clock),
                 notifier,
+                last_end_hook: Mutex::default(),
             }),
             closing: Arc::default(),
             open_folders,
@@ -317,6 +332,15 @@ impl AutoLock {
             #[cfg(test)]
             on_helper: Arc::default(),
         }
+    }
+
+    /// Sets what runs each time an operation's end leaves none running (the shell's carry-on of a pending close
+    /// question). The hook is called from [`LongOp`]'s drop, which can be inside a lock's cancel or a lock hook, or just
+    /// after the list of operations was released, so it must only hand its work to another thread and return: it never
+    /// closes, locks or waits itself. Not called while the thread is unwinding from a panic. One hook; a second call
+    /// replaces it.
+    pub fn on_last_end(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *lock(&self.operations.last_end_hook) = Some(Arc::new(hook));
     }
 
     /// Tests only: runs `hook` once, first thing on the next shutdown's helper thread.

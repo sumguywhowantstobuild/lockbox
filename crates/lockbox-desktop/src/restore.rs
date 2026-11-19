@@ -1762,9 +1762,12 @@ impl Shell {
             Ok(outcome) => {
                 self.restore.end_commit(restore, false);
                 operation.progress().advance(1, 1);
-                drop(operation);
                 let dir = fs::canonicalize(&outcome.dir).unwrap_or(outcome.dir);
-                let vault = self.registry.add(&dir).map_err(|_| VAULT_NOT_LISTED)?;
+                let listed = self.registry.add(&dir).map_err(|_| VAULT_NOT_LISTED);
+                // The operation ends only now, listed or not: a Quit that waited for it (the close question's carry-on)
+                // must not exit before the restored vault is on the list.
+                drop(operation);
+                let vault = listed?;
                 Ok(RestoredView {
                     vault,
                     before_restore: outcome.before_restore.is_some(),
@@ -1798,10 +1801,11 @@ impl Shell {
                 // Settled by the engine, or left for recovery (`RestorePending`): `Committing` goes straight to
                 // `Recovering`, held until the recovery is over.
                 let _recovering = self.restore.recovering_after_commit(restore);
-                drop(operation);
                 drop(prepared);
                 let notice = self.recover();
                 self.announce_restore(&notice);
+                // Ended after the recovery (review finding 1): a pending Quit does not exit in the middle of it.
+                drop(operation);
                 Err(error.into())
             }
         }
@@ -4410,6 +4414,8 @@ mod tests {
             Box::new(move || {
                 assert!(shell.restore.past_swap());
                 assert!(shell.ask_before_closing(CloseReason::Quit));
+                // Answered: a question left pending would be carried on when the commit ends (Task 14).
+                assert_eq!(shell.close_answer(false), Ok(()));
             }),
         );
         let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
@@ -4423,7 +4429,7 @@ mod tests {
                 json!({ "reason": "quit", "running": ["restore"], "past_swap": true, "restore_waiting": false }),
             ]
         );
-        // The swap went through whatever was asked; nothing was lost, and the question outlived the commit.
+        // The swap went through whatever was asked, and nothing was lost.
         assert!(restored.before_restore);
         assert!(dir.is_dir() && !ts.shell.paths.journal.exists());
         assert!(staging_in(&parent).is_empty());
@@ -4431,6 +4437,101 @@ mod tests {
         assert_eq!(ts.window.exits(), 0, "asking exited");
         let (s2, g2) = unlock(&ts, restored.vault);
         assert_eq!(titles(&ts, s2, g2), ["report.pdf"]);
+    }
+
+    /// A Quit asked past the swap and left pending (Task 14): the swap finishes whatever was asked, and once the restore
+    /// has ended there is nothing left to cancel, so the Quit goes ahead by itself and the page's answer finds no
+    /// question. The restored vault is whole and the journal is gone when it does.
+    #[test]
+    fn a_quit_asked_past_the_swap_carries_on_when_the_restore_ends() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let (dir, parent) = (vault_dir(&ts), vaults_folder(&ts));
+        let view = prepared(&ts, &backup, &parent);
+        let shell = Arc::clone(&ts.shell);
+        failpoint::observe(
+            "restore.after_journal",
+            Box::new(move || {
+                assert!(shell.restore.past_swap());
+                assert!(shell.ask_before_closing(CloseReason::Quit));
+            }),
+        );
+        let asked = ts.shell.carry_on_asked();
+
+        let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        failpoint::disarm_all();
+        ts.wait_for_carry_on(asked);
+
+        assert!(restored.before_restore);
+        assert!(dir.is_dir() && !ts.shell.paths.journal.exists());
+        assert!(staging_in(&parent).is_empty());
+        assert_eq!(ts.window.exits(), 1, "the Quit did not go ahead");
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.window.exits(), 1);
+    }
+
+    /// A restore into a NEW folder with a Quit pending past the swap (Task 14, review finding 1): the Quit carries on
+    /// only once the restored vault is on the vault list, so the exit can never leave a restored vault off it. Every
+    /// write of the list after the swap is slowed, so a Quit that went ahead at the end of the swap would run first.
+    #[test]
+    fn a_quit_asked_past_the_swap_waits_for_the_new_vault_to_be_listed() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (s, g) = ts.open_vault("Family");
+        let backup = backup_of(&ts, s, g, "family.lockbox-backup");
+        let fresh = ts.folder("Fresh");
+        let view = prepared(&ts, &backup, &fresh);
+        assert!(!view.replaces_existing, "a new folder");
+        assert_eq!(ts.shell.registry.entries().len(), 1);
+
+        let past_swap = Arc::new(AtomicBool::new(false));
+        let (shell, past) = (Arc::clone(&ts.shell), Arc::clone(&past_swap));
+        failpoint::observe(
+            "restore.after_journal",
+            Box::new(move || {
+                assert!(shell.restore.past_swap());
+                assert!(shell.ask_before_closing(CloseReason::Quit));
+                past.store(true, Ordering::SeqCst);
+            }),
+        );
+        let (slowed, past) = (Arc::new(AtomicUsize::new(0)), Arc::clone(&past_swap));
+        let slow = Arc::clone(&slowed);
+        failpoint::observe(
+            "atomic_write.before_replace",
+            Box::new(move || {
+                if past.load(Ordering::SeqCst) {
+                    slow.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(400));
+                }
+            }),
+        );
+        let listed_at_exit = Arc::new(Mutex::new(None));
+        let (seen, shell) = (Arc::clone(&listed_at_exit), Arc::clone(&ts.shell));
+        ts.window
+            .during_next_exit(move || *lock(&seen) = Some(shell.registry.entries()));
+        let asked = ts.shell.carry_on_asked();
+
+        let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
+        failpoint::disarm_all();
+        ts.wait_for_carry_on(asked);
+
+        assert!(
+            slowed.load(Ordering::SeqCst) > 0,
+            "the list was never written after the swap"
+        );
+        assert_eq!(ts.window.exits(), 1, "the Quit did not go ahead");
+        let listed = lock(&listed_at_exit).take().expect("the app exited");
+        assert!(
+            listed.iter().any(|(id, _)| *id == restored.vault),
+            "the app exited before the restored vault was on the list"
+        );
+        assert_eq!(listed.len(), 2);
+        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
     }
 
     // -----------------------------------------------------------------------------------------------------------
@@ -4728,6 +4829,35 @@ mod tests {
         ended(&ts);
         assert!(token.is_cancelled());
         assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
+    }
+
+    /// A job and a waiting restore asked about together (Task 14): the job ends and the restore still waits for its
+    /// yes, which only Close anyway may end, so the question stays as asked. The restore is still waiting, its
+    /// staging folder and journal are still there, and the page's answer still reaches the same question.
+    #[test]
+    fn a_restore_waiting_at_24d_keeps_the_question_when_its_copy_ends() {
+        let Waiting { ts, parent, .. } = a_restore_waiting();
+        let copy = ts.shell.autolock.begin(
+            Some(ts.shell.sessions.list()[0].session),
+            crate::jobs::JobKind::CopyItem,
+            CancelToken::new(),
+        );
+        ts.shell.close_or_ask();
+        let asked = ts.shell.carry_on_asked();
+
+        drop(copy);
+        ts.wait_for_carry_on(asked);
+
+        assert_eq!(ts.window.hides(), 0, "the close went ahead");
+        assert!(ts.events.locked().is_empty());
+        assert!(ts.shell.restore.waiting(), "the waiting restore ended");
+        assert_eq!(staging_in(&parent).len(), 1);
+        assert!(ts.shell.paths.journal.exists());
+        assert_eq!(
+            ts.shell.close_answer(false),
+            Ok(()),
+            "the question was gone"
+        );
     }
 
     /// The destination is locked with the restore's reason before the first rename.

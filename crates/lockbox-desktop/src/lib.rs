@@ -100,11 +100,11 @@ pub fn run() {
             // Before the window, so every command finds it. No vault may live in the folders Tauri keeps for the
             // app, which an uninstaller may delete (spec §6.10).
             let app_dirs = vec![app.path().app_data_dir()?, app.path().app_local_data_dir()?];
-            let shell = Arc::new(Shell::new(
+            let shell = Shell::new(
                 Arc::new(Events(app.handle().clone())),
                 os::Os::windows(app.handle().clone()),
                 app_dirs,
-            )?);
+            )?;
             // Launch work, here only: a second copy of the app exits before setup, so it never recovers or sweeps the
             // first copy's folders. It comes before the shell is managed and before the window exists, so no command
             // can answer before it has run: a half-done restore is settled first (spec §6.8), then the output journal's
