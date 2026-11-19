@@ -221,7 +221,8 @@ Tray icon, save shortcut and close button arrive at the shell, not the page.
   not a Windows notification, which Focus settings can hide. **Quit** is in the tray menu. Today closing goes straight to
   shutdown (`lib.rs`), so this is a real change, and spec 7.4's "closing the app locks all vaults" still holds.
 - **During a long job,** close and Quit ask first (33b). Past a restore's swap the wording changes, because closing no
-  longer cancels it (Ask 15).
+  longer cancels it (Ask 15). If the jobs end while the question shows (and no restore waits for its answer), the close
+  or Quit goes ahead by itself: there is nothing left to cancel, and the person doesn't have to press it a second time.
 - **Tray:** the Tauri `tray-icon` feature (in Tauri 2.12.5, read in its manifest). Menu: Open Lockbox, Lock all, Quit.
 - **Started by Windows,** the window stays hidden until asked for. Launch work runs as usual, and its notices wait for the
   window. An argument on the `Run` value does this; it only ever affects visibility.

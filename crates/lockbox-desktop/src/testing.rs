@@ -219,9 +219,15 @@ pub struct FakeWindow {
     protections: Mutex<Vec<bool>>,
     /// How many times the shell ended the app.
     exits: AtomicUsize,
+    on_exit: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeWindow {
+    /// Runs `hook` once, inside the next exit, before it is counted: what it sees is what the shell had done by then.
+    pub fn during_next_exit(&self, hook: impl FnOnce() + Send + 'static) {
+        *lock(&self.on_exit) = Some(Box::new(hook));
+    }
+
     /// How many times the shell ended the app (a Quit's exit).
     pub fn exits(&self) -> usize {
         self.exits.load(Ordering::SeqCst)
@@ -307,6 +313,10 @@ impl MainWindow for FakeWindow {
     }
 
     fn exit_app(&self) {
+        let hook = lock(&self.on_exit).take();
+        if let Some(hook) = hook {
+            hook();
+        }
         self.exits.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -1653,7 +1663,7 @@ impl TestShell {
             hotkey: hotkey.clone(),
             startup: startup.clone(),
         };
-        let shell = Arc::new(Shell::new(events.clone(), os, app_dirs.clone())?);
+        let shell = Shell::new(events.clone(), os, app_dirs.clone())?;
         Ok(TestShell {
             shell,
             env,
@@ -1697,7 +1707,25 @@ impl TestShell {
             hotkey: self.hotkey.clone(),
             startup: self.startup.clone(),
         };
-        Arc::new(Shell::new(self.events.clone(), os, self.app_dirs.clone()).unwrap())
+        Shell::new(self.events.clone(), os, self.app_dirs.clone()).unwrap()
+    }
+
+    /// Waits for the carry-on of a pending close question ([`Shell::carry_on_close`]) after the last job ended: the
+    /// end must have asked for one since `asked_before` ([`Shell::carry_on_asked`], read before the job ended, so a
+    /// hook that never fires fails here instead of passing for nothing), and every carry-on asked for must have
+    /// finished, its thread done with the shell.
+    pub fn wait_for_carry_on(&self, asked_before: usize) {
+        let began = Instant::now();
+        while self.shell.carry_on_asked() <= asked_before
+            || !self.shell.carry_on_settled()
+            || Arc::strong_count(&self.shell) > 1
+        {
+            assert!(
+                began.elapsed() < Duration::from_secs(10),
+                "the end of the last job never carried on"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// The folder for the test's own vaults.
