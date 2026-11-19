@@ -748,6 +748,59 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "New recovery key: the form, with the line a wrong password puts on it (29a)",
+    shows: ["NewRecoveryKey#NewRecoveryKeyPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("New recovery key", settings);
+      const panel = await screen.findByRole("complementary", { name: "New recovery key" });
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: "MU-not the one" } });
+      click("Make a new key", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "New recovery key: the key shown, then picked back (29b)",
+    shows: ["setup/RecoveryKey#RecoveryKey", "setup/PickWords#PickWords"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("New recovery key", settings);
+      const panel = await screen.findByRole("complementary", { name: "New recovery key" });
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: PASSWORD } });
+      click("Make a new key", panel);
+      await screen.findByRole("heading", { level: 1, name: "Your new recovery key" });
+    },
+  },
+  {
+    name: "New recovery key: the offer of a fresh backup once it is picked back (29c)",
+    shows: ["NewRecoveryKey#NewRecoveryKeyDone"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("New recovery key", settings);
+      const panel = await screen.findByRole("complementary", { name: "New recovery key" });
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: PASSWORD } });
+      click("Make a new key", panel);
+      await screen.findByRole("heading", { level: 1, name: "Your new recovery key" });
+      const key = shell.keyOf(7) ?? "";
+      click("Continue");
+      await screen.findByRole("heading", { level: 1, name: "Check your new recovery key" });
+      for (let n = 0; n < 3; n += 1) {
+        const label = screen.getByText(/^Which word is number \d+\?$/);
+        const position = Number.parseInt(/(\d+)/.exec(label.textContent)?.[1] ?? "0", 10);
+        const group = screen.getByRole("group", { name: label.textContent });
+        const right = key.split(/\s+/)[position - 1];
+        fireEvent.click(within(group).getByRole("button", { name: right }));
+      }
+      await screen.findByRole("dialog", { name: "Make a fresh backup now?" });
+    },
+  },
+  {
     name: "A backup open: Copy to a vault and the question about the files it lacks (25b to 25d)",
     shows: ["OpenBackup#CopyToVault"],
     reach: async () => {

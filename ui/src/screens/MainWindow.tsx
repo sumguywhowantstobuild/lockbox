@@ -28,6 +28,7 @@ import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, OpenFilesAsk, ShortcutAsk, VaultBanners } from "./Asks";
 import { BackupPanel, BackupRefusedAsk } from "./BackupFlow";
 import { ChangePasswordDone, ChangePasswordPanel } from "./ChangePassword";
+import { NewRecoveryKeyDone, NewRecoveryKeyPanel } from "./NewRecoveryKey";
 import { TestBackupPanel } from "./TestBackup";
 import { BackupReminder } from "./BackupReminder";
 import { EmptyAdd } from "./EmptyAdd";
@@ -306,6 +307,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             <DetailsChangedAsk data={data} />
             <BackupRefusedAsk data={data} />
             <ChangePasswordDone data={data} />
+            <NewRecoveryKeyDone data={data} />
             <BackupReminder data={data} />
             {/* How the list is narrowed, on screen at once. */}
             {narrowed ? (
@@ -474,6 +476,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
         ) : null}
         {data.tool?.kind === "open_backup" ? <OpenBackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
         {data.tool?.kind === "change_password" ? <ChangePasswordPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+        {data.tool?.kind === "new_recovery_key" ? <NewRecoveryKeyPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
       </div>
       {/* The window's own: messages sit at the foot of the whole window, whatever is open beside the side menu. */}
       <ToastStack />

@@ -12,6 +12,7 @@ import {
   closeBackup,
   lockOneVault,
   openChangePassword,
+  openNewRecoveryKey,
   putBackupAside,
   seeTheChange,
   startBackup,
@@ -172,8 +173,8 @@ export function BackupPanel({ data }: { data: SessionData }) {
 /**
  * Ask 2, and the three beside it: a backup refused before anything was written because one made now might not open. A dialog over the window, named for
  * the vault, with the design's words for which of the four it is. "Not now" puts it away; the safe answer has focus. Ask 2's "See the change" opens Ask
- * 3 for this vault, "Change password" (when the copies of the details disagree on the password) opens that form for this vault, and "Lock this vault"
- * locks it. "New recovery key" is not drawn until its screen exists (4C Task 5), so the key's refusal asks only "Not now".
+ * 3 for this vault, "Change password" (when the copies of the details disagree on the password) opens that form for this vault, "New recovery key" (when they
+ * disagree on the recovery key) opens that one, and "Lock this vault" locks it.
  */
 export function BackupRefusedAsk({ data }: { data: SessionData }) {
   const step = data.backup;
@@ -218,6 +219,18 @@ export function BackupRefusedAsk({ data }: { data: SessionData }) {
           }}
         >
           Change password
+        </Button>
+      ) : null}
+      {what === "recovery key copies disagree" ? (
+        // Make a new recovery key for this vault: the form for it, and the question goes.
+        <Button
+          look="pill-main"
+          onClick={() => {
+            putBackupAside(data.session);
+            openNewRecoveryKey(data.session);
+          }}
+        >
+          New recovery key
         </Button>
       ) : null}
       {what === "details unchecked" ? (

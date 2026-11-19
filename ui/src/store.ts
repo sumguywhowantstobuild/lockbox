@@ -13,7 +13,7 @@ import { batchHasFocus, focusList, takeJobFocus } from "./focus";
 import { resetCloseAskForTests, startCloseAsk } from "./closeAsk";
 import { awayMessage, partialWords, refusalWords, wasClean } from "./addFilesWords";
 import { spokenEnd } from "./saveAllWords";
-import { announceJob, cancelRequest, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
+import { announceJob, cancelRequest, currentLockEpoch, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
 import { leftOutWords } from "./format";
 import { backupNotFinishedMore, BACKUP_NOT_FINISHED } from "./messages";
 import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, LockEpochEvent, SearchHit, VaultEntry } from "./api";
@@ -87,7 +87,20 @@ export type Tool =
   /** Older copies (24f), from Settings: the copies a restore kept of this vault, opened read-only or deleted. What it lists is `StoreState.olderCopies`. */
   | { kind: "older_copies" }
   /** Change password (27a, 27b), for this vault, from Settings, Ask 9 or Ask 2. Where it is, is `SessionData.passwordChange`; what is typed is the form's own state. */
-  | { kind: "change_password" };
+  | { kind: "change_password" }
+  /** A new recovery key (29a), for this vault, from Settings or Ask 2. Where it is, is `SessionData.newKey`; what is typed is the form's own state. */
+  | { kind: "new_recovery_key" };
+
+/**
+ * Where a new recovery key the person asked for is (29a, and 29c after it), or `null` when none is begun. Like `PasswordChange` it lives in the session's
+ * record, so it belongs to its vault: a switch leaves it as it is, a lock takes it, and an answer that comes for one vault lands in that vault's record. The
+ * key itself is never here: once it is made it is the session's `recovery` step (29b), and what is typed is the form's own state, wiped as it is sent.
+ */
+export type NewKeyFlow =
+  /** The form. `sending`: a key is asked for and has no answer yet, so a second press does nothing. `problem`: what the last try was refused with, and which field says it. */
+  | { phase: "ask"; sending: boolean; problem: PasswordProblem | null }
+  /** The key was picked back and the shell heard it: 29c, the offer of a fresh backup. */
+  | { phase: "done" };
 
 /**
  * Where a change of this vault's password is (27a to 27c), or `null` when none is begun. It lives in the session's record, so it belongs to its
@@ -316,11 +329,13 @@ export type RecoveryStep =
    * The key on screen, to be saved. `unfinished` is the key of an earlier step that never finished (21f); `missed` is
    * that a wrong pick brought the person back here; `back` is that the questions did (a wrong pick or "Show the key again"),
    * so focus goes to the heading. `issue` is the number the shell gave the key: the page confirms it by that number, and acts
-   * on a confirmation or on a newer key only when it belongs to the step's current one.
+   * on a confirmation or on a newer key only when it belongs to the step's current one. `voluntary` is the key the person asked for
+   * from inside the vault (29b): it has its own headings, its confirmation is followed by 29c's offer, and the key and the questions are
+   * dropped when the person leaves the vault for another or a lock epoch comes, as well as on a lock.
    */
-  | { phase: "show"; key: string; issue: number; unfinished: boolean; missed: boolean; back?: boolean }
+  | { phase: "show"; key: string; issue: number; unfinished: boolean; voluntary: boolean; missed: boolean; back?: boolean }
   /** The key hidden, and three words to pick, one question at a time: `at` (from 0) is the one now asked. */
-  | { phase: "pick"; key: string; issue: number; unfinished: boolean; asks: readonly Ask[]; at: number };
+  | { phase: "pick"; key: string; issue: number; unfinished: boolean; voluntary: boolean; asks: readonly Ask[]; at: number };
 
 /** The banners an unlock can raise, each closed with its own button (Asks 4, 5, 9 and 10). */
 export type Banner = "unreadable" | "leftover" | "spare" | "cloud" | "backup" | "details";
@@ -487,6 +502,8 @@ export interface SessionData {
   operations: string[];
   /** Change password, begun from Settings, Ask 9 or Ask 2 and not put away: see {@link PasswordChange}. */
   passwordChange: PasswordChange | null;
+  /** A new recovery key, begun from Settings or Ask 2 and not put away: see {@link NewKeyFlow}. The key it makes is `recovery`. */
+  newKey: NewKeyFlow | null;
 }
 
 /** One batch of files, from the pick to its end. The paths stay in Rust: the page holds names and sizes for display, and the choice (a token). */
@@ -777,6 +794,8 @@ export function startStore(): Promise<void> {
 
 /** Forgets everything the page holds of the vault: the list, the open item, revealed values and typed text. */
 export function dropSession(session: number): void {
+  // A new recovery key that reached this vault while another was on screen was never shown: its unlock says so.
+  sayOfUnseenKeys(state.sessions, session);
   // A test running for this vault is stopped and its backup let go: the vault's lock ends the panel the test lived in.
   const leaving = sessionOf(session)?.test ?? null;
   if (leaving !== null) letGoOfTest(leaving);
@@ -859,7 +878,7 @@ function publishUnlock(answer: api.Tagged<api.UnlockView>, vaultId: number): Pro
   // about another vault waits for that vault's own unlock.
   set({
     ...state,
-    sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record],
+    sessions: withFront(state.sessions, record),
     notices: { ...state.notices, restore: state.notices.restore?.ask === "finished" ? null : state.notices.restore },
     lockNotes: state.lockNotes.filter((note) => note.vault !== vaultId),
   });
@@ -908,6 +927,7 @@ function newRecord(
     saveAll: null,
     operations: [],
     passwordChange: null,
+    newKey: null,
   };
 }
 
@@ -1011,9 +1031,10 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
     key: recovery_key,
     issue,
     unfinished: false,
+    voluntary: false,
     missed: false,
   });
-  set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+  set({ ...state, sessions: withFront(state.sessions, record) });
   void loadItems(record);
   const list = await refreshVaults();
   const added = (list ?? []).filter((vault) => !before.has(vault.id));
@@ -1075,7 +1096,7 @@ export async function makeNewKey(session: number): Promise<void> {
     const { words, issue } = answer.data;
     update(session, (current) => {
       if ((issueOf(current.recovery) ?? 0) >= issue) return current;
-      return { ...current, recovery: { phase: "show", key: words, issue, unfinished: true, missed: false } };
+      return { ...current, recovery: { phase: "show", key: words, issue, unfinished: true, voluntary: false, missed: false } };
     });
   } catch (error) {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
@@ -1092,8 +1113,8 @@ export async function makeNewKey(session: number): Promise<void> {
 export function startPicking(session: number, asks: readonly Ask[]): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "show") return entry;
-    const { key, issue, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "pick", key, issue, unfinished, asks, at: 0 } };
+    const { key, issue, unfinished, voluntary } = entry.recovery;
+    return { ...entry, recovery: { phase: "pick", key, issue, unfinished, voluntary, asks, at: 0 } };
   });
 }
 
@@ -1109,8 +1130,8 @@ export function nextQuestion(session: number, at: number): void {
 export function missedPick(session: number, at: number): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "pick" || entry.recovery.at !== at) return entry;
-    const { key, issue, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "show", key, issue, unfinished, missed: true, back: true } };
+    const { key, issue, unfinished, voluntary } = entry.recovery;
+    return { ...entry, recovery: { phase: "show", key, issue, unfinished, voluntary, missed: true, back: true } };
   });
 }
 
@@ -1121,8 +1142,8 @@ export function missedPick(session: number, at: number): void {
 export function showKeyAgain(session: number): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "pick") return entry;
-    const { key, issue, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "show", key, issue, unfinished, missed: false, back: true } };
+    const { key, issue, unfinished, voluntary } = entry.recovery;
+    return { ...entry, recovery: { phase: "show", key, issue, unfinished, voluntary, missed: false, back: true } };
   });
 }
 
@@ -1130,7 +1151,8 @@ export function showKeyAgain(session: number): void {
  * The three words were right: tells the shell, by the key's number, which clears its mark only when that is the latest key
  * it made, and only then lets the key go. The key and the questions are dropped on `Confirmed`, and only while the step
  * still holds that same key. `Superseded` (a newer key was made, and its step is on the page or on its way) changes nothing
- * here. A refusal is thrown for the screen to say, and the step stays.
+ * here. A refusal is thrown for the screen to say, and the step stays. The key the person asked for from inside the vault (`voluntary`) is
+ * followed by 29c's offer of a fresh backup, and only while the step still held that key: a person who left, or a lock, gets no offer.
  */
 export async function confirmRecovery(session: number): Promise<void> {
   const entry = sessionOf(session);
@@ -1146,7 +1168,11 @@ export async function confirmRecovery(session: number): Promise<void> {
     throw error;
   }
   if (!stillOpen(session, generation) || answer.data !== "Confirmed") return;
-  update(session, (current) => (issueOf(current.recovery) === issue ? { ...current, recovery: null } : current));
+  update(session, (current) => {
+    if (issueOf(current.recovery) !== issue) return current;
+    const asked = current.recovery?.phase === "show" || current.recovery?.phase === "pick" ? current.recovery.voluntary : false;
+    return { ...current, recovery: null, newKey: asked ? { phase: "done" } : current.newKey };
+  });
 }
 
 /**
@@ -1611,6 +1637,7 @@ export function startNotices(): Promise<void> {
         takeRestoreEpoch(event);
         takeOpenEpoch();
         takeForgotEpoch();
+        takeKeyEpoch();
       });
     } catch {
       // Without it a restore's or an open's steps stay up after a lock, and the shell's answers to what they send say it has gone.
@@ -1868,9 +1895,12 @@ export function closeTool(session: number): void {
 /** The page's own refusal for a current password the shell refused as wrong: the form's words for it (`messages.ts`). */
 const WRONG_CURRENT = { code: "page", kind: "wrong_current_password" };
 
-/** What the lock screen says about a change that landed before the lock (Ask 16): the shell's own refusal's shape, which `messages.ts` has the design's words for. */
-function landedBeforeLock(vault: number): { code: string; what: string; vault: number } {
-  return { code: "locked_after_change", what: "password", vault };
+/**
+ * What the lock screen says about a change that landed before the lock (Ask 16, and the new recovery key that was made and never seen): the shell's own refusal's
+ * shape, which `messages.ts` has the words for.
+ */
+function landedBeforeLock(vault: number, what: "password" | "recovery key" = "password"): { code: string; what: string; vault: number } {
+  return { code: "locked_after_change", what, vault };
 }
 
 /** Opens Change password (27a) in the vault's panel. Not in a read-only copy, which has nothing to change. A change that is out keeps its place. */
@@ -1964,6 +1994,107 @@ export async function changePassword(session: number, currentPassword: string, n
     passwordChange: { phase: "done" },
     asks: current.asks.closed.includes("spare") ? current.asks : { ...current.asks, closed: [...current.asks.closed, "spare"] },
   }));
+}
+
+// ---- A new recovery key (Plan 4C Task 5: 29a to 29c) ----
+//
+// Asked for from inside an open vault, with the current password checked in the same call. The form (29a) is the vault's own, as the change-password form is: what is
+// typed lives in the form and is wiped as it is sent. The key that comes back is the session's `recovery` step (shown by 29b, picked back as 21d does), marked
+// `voluntary`, and it is held only in that record: a lock, a lock epoch or leaving the vault for another takes it, and the shell's mark makes the vault's next
+// unlock say so (21f). An answer that comes for another vault than the one on screen waits in its own vault's record and shows when that vault is on screen.
+
+/** Opens the New recovery key form (29a) in the vault's panel. Not in a read-only copy, which has no key to replace. A key that is asked for keeps its place. */
+export function openNewRecoveryKey(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const out = entry.newKey?.phase === "ask" && entry.newKey.sending;
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "new_recovery_key" },
+    newKey: out ? current.newKey : { phase: "ask", sending: false, problem: null },
+  }));
+}
+
+/** Closes the form (Cancel, Close panel, Escape). What was typed goes with it. A key that is asked for goes on, and is answered where its vault is on screen. */
+export function closeNewRecoveryKey(session: number): void {
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "new_recovery_key" ? null : current.tool,
+    newKey: current.newKey?.phase === "ask" && current.newKey.sending ? current.newKey : null,
+  }));
+}
+
+/** The person has begun to mend the form: what the last refusal said goes. */
+export function clearNewKeyProblem(session: number): void {
+  update(session, (current) =>
+    current.newKey?.phase === "ask" && current.newKey.problem !== null ? { ...current, newKey: { ...current.newKey, problem: null } } : current,
+  );
+}
+
+/** 29c's answer: "Back up now" opens 22a for this vault, "Not now" only closes the offer. Either way the new key is finished. */
+export function finishNewKey(session: number, backUp: boolean): void {
+  update(session, (current) => (current.newKey?.phase === "done" ? { ...current, newKey: null } : current));
+  if (backUp) openBackup(session);
+}
+
+/**
+ * Asks the shell for a new recovery key for the vault, with the current password checked in the same call. The password is the form's, already gone from its
+ * field: it goes to the shell once and is kept nowhere here. The session and generation are those the form was opened in. A second press while a key is asked for
+ * sends nothing.
+ *
+ * - **Made:** the key is the session's `recovery` step (29b) and the form is gone. An answer for a key older than the one the step holds changes nothing.
+ * - **A wrong current password, or any other refusal (the shell could not write its mark first, say):** said on the form (its own field for the first), with the field
+ *   empty. Nothing was made, and no mark was written.
+ * - **A lock before anything was written (`locked`):** nothing changed and nothing is said.
+ * - **A lock after the key was made** (`locked_after_change` with the vault's registry ID, or the shell's good answer dropped by the bridge as from before the lock,
+ *   which the shell only gives a key that was made): the key was never seen, so that vault's next unlock says so (the session's words), and 21f follows it by the mark.
+ */
+export async function makeNewRecoveryKey(session: number, currentPassword: string): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.newKey;
+  if (entry === undefined || entry.readOnly || flow?.phase !== "ask" || flow.sending) return;
+  const { generation, vaultId } = entry;
+  // The lock epoch the key was asked for in: a lock that starts before the reply lands (Windows locking, an idle lock) can reach the page before this vault's own
+  // `locked` event, and the reply must not put the words back.
+  const epoch = currentLockEpoch();
+  update(session, (current) => ({ ...current, newKey: { phase: "ask", sending: true, problem: null } }));
+  let answer;
+  try {
+    answer = await api.newRecoveryKey({ session, generation }, currentPassword);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) {
+      const named = refusedWith(error, "locked_after_change") ? (error as { vault?: unknown }).vault : undefined;
+      const vault = typeof named === "number" && Number.isInteger(named) && named > 0 ? named : vaultId;
+      if (vault > 0) sayOnLockScreen(landedBeforeLock(vault, "recovery key"), vault);
+      dropIfStillOpen(session, generation);
+      return;
+    }
+    if (refusedAsLocked(error)) {
+      dropIfStillOpen(session, generation);
+      return;
+    }
+    if (!stillOpen(session, generation)) return;
+    const wrong = refusedWith(error, "core") && (error as { kind?: unknown }).kind === "wrong_password";
+    const problem: PasswordProblem = wrong ? { field: "current", error: WRONG_CURRENT } : { field: "form", error };
+    update(session, (current) => ({ ...current, newKey: { phase: "ask", sending: false, problem } }));
+    return;
+  }
+  if (!stillOpen(session, generation)) return;
+  if (currentLockEpoch() !== epoch) {
+    // The key was made and a lock has started: its words are dropped unread, and that vault's unlock says so (the mark makes 21f follow).
+    if (vaultId > 0) sayOnLockScreen(landedBeforeLock(vaultId, "recovery key"), vaultId);
+    dropSession(session);
+    return;
+  }
+  const { words, issue } = answer.data;
+  update(session, (current) => {
+    const closed = { ...current, tool: current.tool?.kind === "new_recovery_key" ? null : current.tool, newKey: null };
+    // A key whose number is not newer than the one the step holds (its reply came after a newer key's) is not the step's: the page acts only on the current one.
+    if ((issueOf(current.recovery) ?? 0) >= issue) return closed;
+    return { ...closed, recovery: { phase: "show", key: words, issue, unfinished: false, voluntary: true, missed: false } };
+  });
 }
 
 // ---- Back up a vault (Plan 4B Task 3: 22a to 22d, Ask 1 and Ask 2) ----
@@ -2489,7 +2620,7 @@ export async function runOpenBackup(credential: string): Promise<void> {
       showSession(opened.session);
     } else {
       const record = newRecord(opened, NOT_ON_THE_LIST, opened.data, null);
-      set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+      set({ ...state, sessions: withFront(state.sessions, record) });
       void loadItems(record);
     }
     focusList();
@@ -2534,6 +2665,47 @@ export function useOpenBackup(): OpenFlow | null {
   return useSelect((current) => current.openBackup);
 }
 
+/** A session's record without the key of a new recovery key that was asked for (29b), shown or being picked: the key and its questions are gone. Any other step stays. */
+function withoutVoluntaryKey(entry: SessionData): SessionData {
+  const step = entry.recovery;
+  return (step?.phase === "show" || step?.phase === "pick") && step.voluntary ? { ...entry, recovery: null } : entry;
+}
+
+/**
+ * A lock epoch (Lock all, an idle lock, Windows locking or sleeping): every vault is about to lock, and the key of a new recovery key on screen goes from the page
+ * now, without waiting for its vault's own `locked` event. The shell's mark stays, so the vault's next unlock makes another key (21f).
+ */
+function takeKeyEpoch(): void {
+  if (!state.sessions.some((entry) => withoutVoluntaryKey(entry) !== entry)) return;
+  sayOfUnseenKeys(state.sessions);
+  set({ ...state, sessions: state.sessions.map((entry) => withoutVoluntaryKey(entry)) });
+}
+
+/**
+ * A new recovery key that reached a vault in the background (another vault was on screen) was never shown. When the record that holds it goes (a lock, a lock
+ * epoch), that vault's next unlock says so, as it does for a key whose reply came after the lock. Only the front session's key was ever on screen. `only` limits
+ * it to one session (the one that is being dropped).
+ */
+function sayOfUnseenKeys(sessions: readonly SessionData[], only?: number): void {
+  const front = sessions.at(-1);
+  for (const entry of sessions) {
+    if (only !== undefined && entry.session !== only) continue;
+    if (entry.session === front?.session || entry.vaultId <= 0 || withoutVoluntaryKey(entry) === entry) continue;
+    sayOnLockScreen(landedBeforeLock(entry.vaultId, "recovery key"), entry.vaultId);
+  }
+}
+
+/**
+ * The sessions with `entry` last, which is the one the window shows. The session that was on screen before it loses a new recovery key it was showing (29b), with
+ * its questions: the person is leaving it unsaved, and the shell's mark makes that vault's next unlock say so (21f). Every path that changes the foreground session
+ * goes through here.
+ */
+function withFront(sessions: readonly SessionData[], entry: SessionData): SessionData[] {
+  const before = sessions.at(-1);
+  const rest = sessions.filter((one) => one.session !== entry.session).map((one) => (one.session === before?.session ? withoutVoluntaryKey(one) : one));
+  return [...rest, entry];
+}
+
 /**
  * Brings an open session to the front: the window shows the last of the sessions, so it goes last. Nothing else about any session changes. An Open a backup panel that was
  * waiting for a password in the window that is left goes with it (its choice is let go); one that is opening carries on, and its backup comes to the front when it is open.
@@ -2544,7 +2716,7 @@ export function showSession(session: number): void {
   if (entry === undefined || current === undefined || current.session === session) return;
   const flow = state.openBackup;
   const leaving = flow !== null && flow.host === current.session && flow.phase === "ask";
-  set({ ...state, sessions: [...state.sessions.filter((one) => one.session !== session), entry], openBackup: leaving ? null : state.openBackup });
+  set({ ...state, sessions: withFront(state.sessions, entry), openBackup: leaving ? null : state.openBackup });
   if (leaving) {
     letGoOfOpen(flow);
     closeOpenPanel(flow.host);
@@ -3402,7 +3574,7 @@ export async function openOlderCopy(vault: number, folder: string, passwordOrKey
       return "stale";
     }
     const record = newRecord(answer, NOT_ON_THE_LIST, answer.data, null, { ...NO_ASKS, headerChanged: answer.data.header_changed });
-    set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+    set({ ...state, sessions: withFront(state.sessions, record) });
     void loadOlderCopies();
     return await loadItems(record);
   } finally {
@@ -5252,7 +5424,7 @@ function sayInSearch(error: unknown): void {
 export function showResult(session: number, id: string): void {
   const entry = sessionOf(session);
   if (entry === undefined) return;
-  set({ ...state, sessions: [...state.sessions.filter((other) => other.session !== session), entry] });
+  set({ ...state, sessions: withFront(state.sessions, entry) });
   closeSearch();
   void selectItem(session, id);
 }

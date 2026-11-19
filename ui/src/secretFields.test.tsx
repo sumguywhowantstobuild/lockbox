@@ -203,6 +203,15 @@ const PLACES: Place[] = [
     },
   },
   {
+    screen: "New recovery key, the current password (29a)",
+    fields: ["current-password"],
+    reach: async () => {
+      await unlocked();
+      fireEvent.click(within(await settings()).getByRole("button", { name: "New recovery key" }));
+      await screen.findByRole("complementary", { name: "New recovery key" });
+    },
+  },
+  {
     screen: "Forgot password, the recovery key (28a)",
     fields: ["off"],
     reach: async () => {
