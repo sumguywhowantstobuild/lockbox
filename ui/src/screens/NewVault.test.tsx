@@ -4,6 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
+import { Pattern } from "../parts/Pattern";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import {
@@ -15,6 +16,7 @@ import {
   type FakeShell,
   type FakeVault,
 } from "../testing/fakeShell";
+import { CreateVault } from "./setup/CreateVault";
 import { wordsOf } from "./setup/keyWords";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
@@ -793,4 +795,29 @@ test("new_vault_screens_have_no_axe_violations", async () => {
   await screen.findByRole("heading", { level: 1, name: "Check your recovery key" });
   await expectNoAxe(document.body);
   expect(container.querySelectorAll("style, [style]")).toHaveLength(0);
+});
+
+test("the_inside_new_vault_form_draws_its_places_pattern", async () => {
+  // 18b draws the new vault's own pattern, by the place it will take at the end of the list: with two listed, the third
+  // place's six points (as the unlock step draws a vault's), on the form and on its cloud warning; the first-use screens
+  // keep the setup screens' nine.
+  const drawn = () => document.querySelector("svg.rose path")?.getAttribute("d");
+  const pattern = (points: number) => {
+    const { container, unmount } = render(<Pattern points={points} />);
+    const d = container.querySelector("path")?.getAttribute("d");
+    unmount();
+    return d;
+  };
+  await unlocked([vault(7, "My vault"), vault(8, "Home")]);
+  await toTheForm();
+  expect(drawn()).toBe(pattern(6));
+  fill("Work", NEW);
+  shell.cloudNext();
+  create();
+  await cloudWarning();
+  expect(drawn()).toBe(pattern(6));
+  cleanup();
+  resetStoreForTests();
+  render(<CreateVault onBack={() => undefined} />);
+  expect(drawn()).toBe(pattern(9));
 });

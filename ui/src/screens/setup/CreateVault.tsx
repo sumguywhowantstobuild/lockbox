@@ -11,7 +11,8 @@ import {
   WHERE_IT_LIVES,
 } from "../../newVaultWords";
 import { PasswordField } from "../../parts/PasswordField";
-import { confirmCreateVault, createVault, type SetupResult } from "../../store";
+import { vaultLook } from "../../parts/Pattern";
+import { confirmCreateVault, createVault, useVaults, type SetupResult } from "../../store";
 import { CloudQuestion } from "./CloudQuestion";
 import { Frame, SAY_FIRST } from "./Frame";
 
@@ -50,6 +51,10 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
   // What the last refusal said, and whether it is about the folder (18c says that under "Where it lives").
   const [failure, setFailure] = useState<{ text: string; place: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
+  // 18b draws the new vault's own pattern, by the place it will take at the end of the list (the window wears that
+  // place's colour too); the first-use screens keep the setup screens' nine points.
+  const vaults = useVaults();
+  const placePoints = vaultLook((vaults ?? []).length, false).points;
   const [token, setToken] = useState<string | null>(null);
   // A second press before the first has an answer must not create a second vault.
   const running = useRef(false);
@@ -149,7 +154,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
     // 18c: a folder that a cloud service syncs, on the New vault screen itself. The password went with the send and is kept nowhere to send again, so Choose another
     // goes back to the form, set to pick the folder, to type it once more; so does Cancel.
     return (
-      <Frame say={SAY_NEW_VAULT}>
+      <Frame say={SAY_NEW_VAULT} points={placePoints}>
         <p className="fu-step">Step 1 of 2</p>
         <h1>{NEW_VAULT_HEADING}</h1>
         <div>
@@ -198,7 +203,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
     );
 
   return (
-    <Frame say={inside ? SAY_NEW_VAULT : SAY_FIRST}>
+    <Frame say={inside ? SAY_NEW_VAULT : SAY_FIRST} points={inside ? placePoints : undefined}>
       <form
         className="fu"
         onSubmit={submit}

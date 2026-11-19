@@ -23,7 +23,8 @@ export function vaultLook(position: number, readOnly: boolean): VaultLook {
 const cache = new Map<string, string>();
 
 // `lines` closed curves of 360 degrees round a centre, each radius swelling `points` times; the lines differ a little
-// in size and in turn. The numbers are those of the approved drawings.
+// in size and in turn. The numbers are those of the approved drawings, drawn a point every degree so no petal shows
+// corners at any number of points (at three degrees, nine points showed them at the lock screen's size).
 function lines(points: number, count: number, step: number, size: (index: number) => number, turn: (index: number) => number): string {
   const key = `${String(points)}/${String(count)}`;
   const known = cache.get(key);
@@ -51,7 +52,7 @@ interface DrawingProps {
 
 /** The fourteen-line pattern, for the lock screen. */
 export function Pattern({ points, className }: DrawingProps) {
-  const d = lines(points, 14, 3, (index) => 0.16 + index * 0.012, (index) => (index * Math.PI) / 14);
+  const d = lines(points, 14, 1, (index) => 0.16 + index * 0.012, (index) => (index * Math.PI) / 14);
   return (
     <svg className={className} viewBox="0 0 200 200" aria-hidden="true">
       <path d={d} />
@@ -61,7 +62,7 @@ export function Pattern({ points, className }: DrawingProps) {
 
 /** The two-line mark beside a vault's name. Its petals are shallow, so up to nine points stay clear at 36 pixels. */
 export function VaultMark({ points, className }: DrawingProps) {
-  const d = lines(points, 2, 2, () => 0.17, (index) => index * Math.PI);
+  const d = lines(points, 2, 1, () => 0.17, (index) => index * Math.PI);
   return (
     <svg className={className} viewBox="0 0 200 200" aria-hidden="true">
       <path d={d} />

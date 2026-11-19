@@ -73,3 +73,16 @@ test("different_points_draw_different_lines", () => {
   expect(draw(3)).not.toBe(draw(5));
   expect(draw(3)).toBe(draw(3));
 });
+
+test("patterns_are_drawn_finely_enough_to_look_smooth", () => {
+  // At nine points a petal spans 40 degrees; drawn a point every 3 degrees its corners showed at the lock screen's size
+  // (Ariel, 2026-11-19). Every line now has a point at least every degree, for the pattern and the small mark alike.
+  for (const element of [<Pattern key="p" points={9} />, <VaultMark key="m" points={9} />]) {
+    const { container, unmount } = render(element);
+    const d = container.querySelector("path")?.getAttribute("d") ?? "";
+    unmount();
+    const lines = d.split("M").slice(1);
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) expect(line.split("L").length).toBeGreaterThanOrEqual(361);
+  }
+});
