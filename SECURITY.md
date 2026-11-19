@@ -307,10 +307,12 @@ in the code with a `shortcut:` comment.
   gives the defaults), turn capture protection off or change the save shortcut (`settings.json`; a shortcut the
   Settings screen would refuse, or any other value out of range, gives the defaults), remove a vault's "recovery key not
   confirmed" note (a damaged `vault-state.json` also reads as having none), or empty the output journal so a leftover
-  stays. They hold no secrets. A listed place can't be used to start a program: Show in Explorer checks it is a plain
-  folder (not a file, a link or a junction), then starts `explorer.exe` from the Windows folder by its full path with
-  that folder as its one argument, never through the shell's "open". *Accepted:* the same reasoning as the restore
-  journal (see "Someone who can already write inside your vault folder").
+  stays. They hold no secrets. Show in Explorer never runs a listed place through the shell's "open": it checks the
+  listed place is a plain folder (not a file, a link or a junction), then starts `explorer.exe` from the Windows folder
+  by its full path with that folder as its one argument. Explorer looks the argument up again itself, after the check,
+  so a program running as you could swap the folder for something else in between, or list a spelling that Windows
+  reads differently once the `\\?\` prefix is dropped. *Accepted:* the same reasoning as the restore journal (see
+  "Someone who can already write inside your vault folder").
 - **Cloud folders.** A vault in a OneDrive, Google Drive or Dropbox folder is not refused. The shell asks first when one is
   created or added, and reports it at each unlock, where the screen warns. They are found by asking Windows about sync
   roots, then by each provider's known location,
