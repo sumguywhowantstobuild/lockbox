@@ -425,6 +425,33 @@ test("one_file_goes_through_the_same_panel_with_the_single_sentence", async () =
   expect(sent("add_file")).toEqual([]);
 });
 
+// Stage 7 (Task 15): one file picked is spoken of as "it"; two or more keep "they" (picked_files_listed_with_pick_more, attach_many_on_an_item).
+test("one_file_picked_says_it_goes_into", async () => {
+  await unlocked();
+  const panel = await pickFiles([{ name: "tax-demo.pdf", size: 5120 }]);
+  expect(within(panel).getByText("1 file picked, 5 KB. It goes into My vault.")).toBeTruthy();
+  expect(panel.textContent).not.toContain("They go into");
+});
+
+test("one_file_attached_says_its_attached", async () => {
+  await unlocked();
+  const item = await select("Bot admin console");
+  shell.pickFilesNext([CONTRACT]);
+  fireEvent.click(within(item).getByRole("button", { name: "Attach files" }));
+  const panel = await screen.findByRole("complementary", { name: "Attach files" });
+  expect(within(panel).getByText(/^1 file picked, 2\.\d MB\. It's attached to Bot admin console\.$/)).toBeTruthy();
+  expect(panel.textContent).not.toContain("They're attached");
+});
+
+test("no_room_for_one_file_says_this_file_needs", async () => {
+  await unlocked();
+  shell.setFreeSpace(Math.round(1.1 * GB));
+  const panel = await pickFiles([DESIGN]);
+  fireEvent.click(addButton(panel, "Add 1 file"));
+  const alert = await within(panel).findByRole("alert");
+  expect(alert.textContent).toBe("Not enough space. This file needs 3.2 GB, and this drive has 1.1 GB free.");
+});
+
 test("partial_batch_names_what_was_not_added", async () => {
   await unlocked();
   shell.unreadableFiles(["broken-demo.pdf"]);
@@ -440,7 +467,7 @@ test("partial_batch_names_what_was_not_added", async () => {
   fireEvent.click(addButton(panel, "Add 5 files"));
   const ended = await screen.findByRole("complementary", { name: "2 of 5 files added" });
   // Every file that did not go in is named, in two lists, so nobody deletes an original that was never stored.
-  expect(listed(ended, "These files couldn't be read:")).toEqual(["broken-demo.pdf"]);
+  expect(listed(ended, "This file couldn't be read:")).toEqual(["broken-demo.pdf"]);
   expect(listed(ended, "These files were not added:")).toEqual(["fourth-demo.txt", "fifth-demo.txt"]);
   expect(within(ended).getByText(/Keep the files listed above/)).toBeTruthy();
   // What ended it is said in the shell's words for it, not the shell's own text.
@@ -458,8 +485,13 @@ test("a_file_that_cannot_be_read_is_named_when_the_rest_all_went_in", async () =
   ]);
   fireEvent.click(addButton(panel, "Add 2 files"));
   const ended = await screen.findByRole("complementary", { name: "1 of 2 files added" });
-  expect(listed(ended, "These files couldn't be read:")).toEqual(["gone-demo.pdf"]);
-  expect(within(ended).queryByText("These files were not added:")).toBeNull();
+  // One name under a heading is "This file" (Task 15), and the sentence that keeps its original speaks of it alone.
+  expect(listed(ended, "This file couldn't be read:")).toEqual(["gone-demo.pdf"]);
+  expect(within(ended).queryByText("These files couldn't be read:")).toBeNull();
+  expect(within(ended).queryByText(/were not added:|was not added:/)).toBeNull();
+  expect(
+    within(ended).getByText("Keep the file listed above. It isn't in your vault, and its original is all that is left of it."),
+  ).toBeTruthy();
   expect(within(ended).queryByText("You stopped it.")).toBeNull();
 });
 
@@ -617,7 +649,7 @@ test("moving_on_while_the_batch_works_still_names_what_did_not_go_in", async () 
   });
   // The names are not lost with the panel: they are in a card in the list column, which Dismiss puts away.
   const card = await screen.findByRole("region", { name: "1 of 2 files added" });
-  expect(listed(card, "These files were not added:")).toEqual(["two-demo.pdf"]);
+  expect(listed(card, "This file was not added:")).toEqual(["two-demo.pdf"]);
   expect(within(card).getByText("There isn't enough room on that drive.")).toBeTruthy();
   fireEvent.click(within(card).getByRole("button", { name: "Dismiss" }));
   await waitFor(() => {
@@ -729,7 +761,7 @@ test("a_partial_batch_ending_with_focus_in_the_filter_leaves_focus_there_and_say
     release();
   });
   const ended = await screen.findByRole("complementary", { name: "1 of 2 files added" });
-  expect(listed(ended, "These files were not added:")).toEqual(["two-demo.pdf"]);
+  expect(listed(ended, "This file was not added:")).toEqual(["two-demo.pdf"]);
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
   });

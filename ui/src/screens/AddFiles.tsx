@@ -1,6 +1,18 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { AddFilesView, AddInto, PickedFile } from "../api";
-import { endTitle, filesWords, KEEP_THE_LISTED, originalsStay, refusalWords, stoppedWords, verbs, wasClean } from "../addFilesWords";
+import {
+  endTitle,
+  filesWords,
+  keepTheListed,
+  notDoneHeading,
+  originalsStay,
+  placeWords,
+  refusalWords,
+  stoppedWords,
+  unreadHeading,
+  verbs,
+  wasClean,
+} from "../addFilesWords";
 import { focusBack } from "../focus";
 import { formatBytes } from "../format";
 import { useJob } from "../jobs";
@@ -45,7 +57,7 @@ function AddFilesSummary({ view, into }: { view: AddFilesView; into: AddInto }) 
       {reason === null ? null : <p className={view.stopped?.code === "cancelled" ? "psub" : "ferr"}>{reason}</p>}
       {view.failed.length === 0 ? null : (
         <div className="sumlist">
-          <p className="gh">These files couldn&apos;t be read:</p>
+          <p className="gh">{unreadHeading(view.failed.length)}</p>
           <ul className="names">
             {view.failed.map((name, at) => (
               <li key={`${String(at)}:${name}`}>{name}</li>
@@ -55,7 +67,7 @@ function AddFilesSummary({ view, into }: { view: AddFilesView; into: AddInto }) 
       )}
       {view.not_added.length === 0 ? null : (
         <div className="sumlist">
-          <p className="gh">{`These files were not ${done}:`}</p>
+          <p className="gh">{notDoneHeading(view.not_added.length, done)}</p>
           <ul className="names">
             {view.not_added.map((name, at) => (
               <li key={`${String(at)}:${name}`}>{name}</li>
@@ -63,7 +75,7 @@ function AddFilesSummary({ view, into }: { view: AddFilesView; into: AddInto }) 
           </ul>
         </div>
       )}
-      {left && view.added > 0 ? <p className="fwarn">{KEEP_THE_LISTED}</p> : null}
+      {left && view.added > 0 ? <p className="fwarn">{keepTheListed(view.failed.length + view.not_added.length)}</p> : null}
       {view.added > 0 ? <p className="fwarn">{originalsStay(view.added)}</p> : null}
     </>
   );
@@ -226,7 +238,7 @@ function AddFilesPanel({ data, folders, flow }: { data: SessionData; folders: re
   const sub =
     files.length === 0
       ? "No files picked."
-      : `${filesWords(files.length)} picked, ${formatBytes(total)}.${itemTitle !== null ? ` They're attached to ${itemTitle}.` : ` They go into ${data.name}.`}`;
+      : `${filesWords(files.length)} picked, ${formatBytes(total)}.${placeWords(files.length, itemTitle, data.name)}`;
   const off = files.length === 0 || flow.busy || flow.choice === null || refusal?.size === true;
   return (
     <Panel
