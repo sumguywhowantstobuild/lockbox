@@ -109,7 +109,8 @@ the account's email setting, so turn on "Keep my email addresses private" in Git
   entry must expire: when the date passes the scan fails again, and the entry is fixed or renewed after a fresh
   look. Today's entries are Linux-only crates and one compile-time-only crate in Tauri's tree. An npm finding goes
   in `ui/osv-scanner.toml` instead (osv-scanner reads the file next to each lockfile); today's entry is a lint-time
-  dev tool.
+  dev tool. `node scripts/shipped-page-check.mjs` (run by `scripts/check.mjs` and CI's UI job) builds the page in
+  memory and fails if any chunk holds picomatch, minimatch or tinyglobby, so "never shipped" stays true.
 - CI job "Security scan" (Windows) installs pinned versions: gitleaks 8.30.1 and osv-scanner 2.7.0 downloaded from their
   GitHub releases and checked against SHA-256 values copied from the releases (the job fails on a mismatch), and
   `pip install semgrep==1.179.0`, then runs the scanner's own tests before the scan. Bumping a version means getting the new SHA-256 from the release's checksum file (osv-scanner: `osv-scanner_SHA256SUMS`).

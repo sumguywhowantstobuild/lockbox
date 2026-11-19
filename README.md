@@ -19,7 +19,7 @@ folder's `.env` in and out, a shortcut that saves a copied key, and settings. Yo
 backup, restore one (the vault it replaces is kept as an older copy you can open or delete), open a backup read-only and
 copy single items out of it, bring vaults onto a new computer, add many files at once and save all of a folder's files,
 each with progress and a Stop or Cancel, and closing during a long job asks first. The forgotten-password screens come
-in the last part (4C). Together the five plans make up Phase 1, the Windows app (see the
+in the next part (4C). Together the five plans make up Phase 1, the Windows app (see the
 [phases](docs/PRD.md#phases)).
 
 | Plan | What it delivers | State |
@@ -27,7 +27,7 @@ in the last part (4C). Together the five plans make up Phase 1, the Windows app 
 | 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
 | 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built |
 | 3 | Desktop shell (built with Tauri, a toolkit for desktop apps), `crates/lockbox-desktop`: sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Built |
-| 4 | The user interface, from clickable design mockups, in three parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C the rest | 4A and 4B built; 4C to come |
+| 4 | The user interface, from clickable design mockups, in four parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C vaults and passwords, 4D the rest | 4A and 4B built; 4C and 4D to come |
 | 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
 
 The core can already create and unlock vaults (with the password, or with the recovery key: a long code shown once that

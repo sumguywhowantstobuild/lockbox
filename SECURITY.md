@@ -66,7 +66,7 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 ## Where each requirement stands today
 
 The Rust core (Plans 1 and 2), the desktop shell (Plan 3), the daily-use screens (4A) and the backup, restore, files and
-long-job screens (4B) exist. The forgotten-password screens, changing the password and export come in 4C, so a vault
+long-job screens (4B) exist. The forgotten-password screens and changing the password come in 4C, and export in 4D, so a vault
 whose password is lost cannot be recovered in place yet; restoring a backup you can still open, with its password or the
 recovery key, is the way back.
 
@@ -75,7 +75,7 @@ recovery key, is the way back.
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the last screens (4C) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the last screens (4D) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box at its lock event |
 | R7 Documented limits | This file |
@@ -636,9 +636,9 @@ Lockbox defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plan 4C
-(changing the password, "forgot password", a new recovery key from Settings, emptying the trash, export, and unlocking a
-second vault from inside the window; switching between vaults that are already open works from the side menu), the
+These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plans 4C
+and 4D (changing the password, "forgot password", a new recovery key from Settings, and unlocking a second vault from
+inside the window in 4C; emptying the trash and export in 4D; switching between vaults that are already open works from the side menu), the
 end-to-end tests on the running app, and the installer. Until "forgot password" has a screen, a lost password means the
 vault is reachable only through a backup you can still open (its password or your recovery key opens it), so test your
 backups. Plans 4A and 4B are built

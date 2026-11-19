@@ -155,7 +155,7 @@ each screen that links to them loses that link.
 | D | The save shortcut | Plugin, or `RegisterHotKey` directly | **Directly**: no new dependency, the hidden window already exists, and the failure Windows returns is exactly what 31b needs to say |
 | E | Start with Windows | Plugin, or the `Run` value directly | **Directly**: a few lines, and no new dependency for it |
 | F | The default shortcut | Ctrl+Shift+L, as drawn, or another | **Ctrl+Shift+L for now.** Bitwarden's browser extension uses it too, as far as the author recalls. A Windows-wide shortcut would take it from them, so check this at build and change it if so. **Checked, and kept (Ariel, 2026-11-05: "seems easier for me").** It is taken: Bitwarden's extension manifest sets its login fill to Ctrl+Shift+L, and Lockbox got the press with Chrome in front. While Lockbox runs, Bitwarden's fill, Word's bulleted list, VS Code's select all occurrences and Edge's paste and go lose it; Settings can change it (31a) |
-| G | How Plan 4 is split | See [Building it in order](#building-it-in-order) | **Three plans** |
+| G | How Plan 4 is split | See [Building it in order](#building-it-in-order) | **Three plans**, then **four** (Ariel, 2026-11-19): the last part became 4C, vaults and passwords, and 4D, the rest |
 
 ### Decided without needing a question
 
@@ -523,9 +523,12 @@ This is too much for one plan. Proposed split, for the build plans to size prope
 |---|---|---|
 | **4A, daily use** | The risky-part checks, styles and fonts, window and tray, parts, error table; key items and earlier passwords; tasks 1 to 8, 10 to 17, 21 and 31 | Someone can set up, keep logins, keys, notes and `.env`s, and use them every day. Real progress isn't in yet, so big files show as busy |
 | **4B, files and long jobs** | Progress and stop, many files, close and Quit questions; tasks 9, 22 to 26 and 33 | Big files and backups work with progress, and a person can move PCs |
-| **4C, the rest** | Tasks 18, 27 to 30, 32, 34, 36, every remaining question, end-to-end coverage, and the accessibility pass | Everything in this design |
+| **4C, vaults and passwords** | Task 8 step 3 (the save box's vault choice), 18 (more than one vault: unlock, switch, new, rename, remove), and 27 to 30 (change password, forgot password, a new recovery key, an unavailable vault) | Every vault and password task works from inside the app |
+| **4D, the rest** | Tasks 32, 34 and 36, every remaining question, end-to-end coverage, and the accessibility pass | Everything in this design |
 
-The installer stays Plan 5, as the PRD says. Plan numbers there may shift, and the PRD follows when plans are written.
+The last part was split in two on 2026-11-19 (Ariel: "As recommended"): the method builds the riskiest part first in a
+plan of two to three weeks, and the password and vault tasks are the riskiest left. The installer stays Plan 5, as the
+PRD says. Plan numbers there may shift, and the PRD follows when plans are written.
 
 ## Out of scope
 

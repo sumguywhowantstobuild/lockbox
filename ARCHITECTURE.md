@@ -2,11 +2,11 @@
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
 restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
-The real screens come in Plan 4, in three parts; the first two, daily use (4A) and files and long jobs (4B), are built: `ui/` has the bridge to Rust, first-time
+The real screens come in Plan 4, in four parts; the first two, daily use (4A) and files and long jobs (4B), are built: `ui/` has the bridge to Rust, first-time
 setup with the recovery key, the lock screen, and the main window with search, the item panel, the forms, the Trash, folders,
 `.env` in and out, the save shortcut's box and settings ([the UI design](docs/design/2026-11-05-user-interface-design.md)),
 and the backup, restore, older-copy, open-a-backup, move-in, add-files and Save all screens with progress and a Stop.
-The rest comes in 4C: changing the password, "forgot password", a new recovery key, emptying the trash and export. The target design and the
+Changing the password, "forgot password", a new recovery key and more than one vault come in 4C; emptying the trash and export in 4D. The target design and the
 reasons behind it are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as
 "spec 5.2" and so on.
 
