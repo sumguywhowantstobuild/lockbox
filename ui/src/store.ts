@@ -246,6 +246,21 @@ export interface UnlockStep {
 }
 
 /**
+ * The form of a new vault begun from the vault menu (Task 7), shown while other vaults are open: setup's step 1 of 2 with Back. It is the app's, not a vault's, and holds
+ * no password: what is typed is the form's own state, wiped as it is sent, by Back and on every lock epoch. `opening` counts the forms begun, so a form opened again starts
+ * empty. The new vault's key and questions are the new session's own `recovery` step, as at first setup.
+ */
+export interface NewVault {
+  opening: number;
+}
+
+/**
+ * Add existing vault folder begun from the vault menu (Task 7): `picking` while Windows' folder picker is open (nothing is on screen for it), `cloud` once the shell asked
+ * about a cloud-synced folder first (the first screens' question, with the token the yes goes on with). It is the app's, and a lock epoch takes it.
+ */
+export type AddFolder = { opening: number; phase: "picking" } | { opening: number; phase: "cloud"; token: string };
+
+/**
  * Moving to a new computer (26a to 26c), the app's own like the restore: `what` is 26a ("What do you have?"), `here` is 26c, a vault has come in (`how`: its
  * backup was restored, or its folder was added). The vault list stops being empty after the first vault comes in, so these steps are held here and not in the
  * first screen's own state, or the app would switch to the lock screen under 26c.
@@ -656,6 +671,10 @@ export interface StoreState {
   unlockPick: number | null;
   /** The unlock step of one more vault, shown while another vault is open (the vault menu, the vault strip, Copy to a vault), or `null`: see {@link UnlockStep}. */
   unlockStep: UnlockStep | null;
+  /** The form of a new vault begun from the vault menu, or `null`: see {@link NewVault}. */
+  newVault: NewVault | null;
+  /** Add existing vault folder begun from the vault menu, or `null`: see {@link AddFolder}. */
+  addFolder: AddFolder | null;
   /**
    * The older copies the shell last listed, or `null` until a listing has come. The shell replaces every ID at each listing, so this is the page's one
    * listing: it is read again when Settings opens, when 24f opens and after each delete or open, and every button sends an ID from it as it is now.
@@ -704,6 +723,8 @@ const EMPTY: StoreState = {
   moveIn: null,
   unlockPick: null,
   unlockStep: null,
+  newVault: null,
+  addFolder: null,
   olderCopies: null,
   settings: null,
 };
@@ -837,6 +858,9 @@ export function dropSession(session: number): void {
     forgot,
     // The unlock step is for a window with a vault in it to go back to: the last lock takes it, and the lock screen follows.
     unlockStep: sessions.length === 0 ? null : state.unlockStep,
+    // So are the new vault's form and Add existing vault folder: both are begun from a window, and the last lock leaves none to go back to.
+    newVault: sessions.length === 0 ? null : state.newVault,
+    addFolder: sessions.length === 0 ? null : state.addFolder,
     toast: keepToast ? toast : null,
     search:
       search === null || sessions.length === 0
@@ -1039,6 +1063,12 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
   } catch (error) {
     // The vault may have been made all the same (a lock after it, or a list that wouldn't take it): read the list again.
     if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) await refreshVaults();
+    // A lock overtook a vault that was made and listed: its key was never seen, and the shell says which vault it is (its registry ID). The words are kept for that
+    // vault's own unlock (the lock screen, or its unlock step in the vault menu), where 21f follows by the shell's mark.
+    if (refusedWith(error, "locked_after_change")) {
+      const named = (error as { vault?: unknown }).vault;
+      if (typeof named === "number" && Number.isSafeInteger(named) && named > 0) sayOnLockScreen(landedBeforeLock(named, "vault created"), named);
+    }
     if (error instanceof api.StaleAnswer) return "stale";
     // A lock that ended the create before anything was made (the picker was open when Windows locked): no vault exists
     // and the person did nothing wrong, so there is nothing to say.
@@ -1047,11 +1077,12 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
   }
   if (answer === "Dismissed") return "dismissed";
   if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
-  const before = new Set((state.vaults ?? []).map((vault) => vault.id));
-  const { info, recovery_key, issue } = answer.data;
-  // The vault's place on the list is not known until the list is read again; the record stands in the meantime. The
-  // creation key keeps the number the shell gave it, to confirm it by.
-  const record = newRecord(answer, -1, info, {
+  const { info, recovery_key, issue, vault_id } = answer.data;
+  // The vault's place on the list is the registry ID the shell gave it, from the answer itself, never found by comparing lists: another vault may have been
+  // listed at the same moment (an add in another window). An answer without a whole number above 0 leaves the record with the stand-in `-1`.
+  const vaultId = Number.isSafeInteger(vault_id) && vault_id > 0 ? vault_id : -1;
+  // The creation key keeps the number the shell gave it, to confirm it by.
+  const record = newRecord(answer, vaultId, info, {
     phase: "show",
     key: recovery_key,
     issue,
@@ -1059,12 +1090,14 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
     voluntary: false,
     missed: false,
   });
-  set({ ...state, sessions: withFront(state.sessions, record) });
+  // The window of the new vault takes the place of the form that made it (when one was up), with the vaults that were open still open behind it.
+  set({ ...state, sessions: withFront(state.sessions, record), newVault: null });
   void loadItems(record);
   const list = await refreshVaults();
-  const added = (list ?? []).filter((vault) => !before.has(vault.id));
-  const made = added.at(-1);
-  if (made !== undefined) update(record.session, (entry) => ({ ...entry, vaultId: made.id }));
+  // The list could not be read again (the old one is kept): the vault that was made is put on it all the same, so the menu and the lock screen have it.
+  if (list === null && vaultId > 0 && !(state.vaults ?? []).some((vault) => vault.id === vaultId)) {
+    set({ ...state, vaults: [...(state.vaults ?? []), { id: vaultId, name: info.name, available: true, details_damaged: false }] });
+  }
   return "done";
 }
 
@@ -1664,6 +1697,7 @@ export function startNotices(): Promise<void> {
         takeForgotEpoch();
         takeKeyEpoch();
         takeUnlockEpoch();
+        takeNewVaultEpoch();
       });
     } catch {
       // Without it a restore's or an open's steps stay up after a lock, and the shell's answers to what they send say it has gone.
@@ -1925,7 +1959,7 @@ const WRONG_CURRENT = { code: "page", kind: "wrong_current_password" };
  * What the lock screen says about a change that landed before the lock (Ask 16, and the new recovery key that was made and never seen): the shell's own refusal's
  * shape, which `messages.ts` has the words for.
  */
-function landedBeforeLock(vault: number, what: "password" | "recovery key" = "password"): { code: string; what: string; vault: number } {
+function landedBeforeLock(vault: number, what: "password" | "recovery key" | "vault created" = "password"): { code: string; what: string; vault: number } {
   return { code: "locked_after_change", what, vault };
 }
 
@@ -2810,6 +2844,109 @@ function takeUnlockEpoch(): void {
 /** The unlock step as the screens read it: `null` while none is up. */
 export function useUnlockStep(): UnlockStep | null {
   return useSelect((current) => current.unlockStep);
+}
+
+// ---- Make another vault, or add one, from inside (Plan 4C Task 7) ----
+//
+// New vault and Add existing vault folder are actions of the vault menu, with other vaults open. New vault is setup's two steps again: its form (step 1 of 2, with Back)
+// takes the window until it is left, and the vault it makes comes up on its own recovery key (step 2 of 2) as a first vault's does, with the vaults that were open still
+// open behind it (`finishCreate`). Add existing vault folder runs the same add as 26a's "A vault folder", with the same cloud question, and opens the added vault's unlock
+// step. Neither holds a password: the form's is its own state, wiped as it is sent. A lock epoch takes both, and the last lock does too.
+
+/** The number of the last new-vault form begun. */
+let newVaultOpenings = 0;
+
+/**
+ * Opens the new vault's form, over the window on screen: nothing is sent. A page with no vault open (the first screen has its own form), a form already up and an add
+ * that is under way open nothing. An unlock step that was up is replaced by it.
+ */
+export function startNewVault(): void {
+  if (state.sessions.length === 0 || state.newVault !== null || state.addFolder !== null) return;
+  newVaultOpenings += 1;
+  set({ ...state, newVault: { opening: newVaultOpenings }, unlockStep: null });
+}
+
+/** Back, on the new vault's form: the form goes and the window that was on screen is back. Nothing was sent, and the form's own state goes with it. */
+export function leaveNewVault(): void {
+  if (state.newVault !== null) set({ ...state, newVault: null });
+}
+
+/** A lock epoch (Lock all, an idle lock, Windows locking or sleeping): every vault is about to lock, so these steps have no window to go back to. */
+function takeNewVaultEpoch(): void {
+  if (state.newVault !== null || state.addFolder !== null) set({ ...state, newVault: null, addFolder: null });
+}
+
+/** The new vault's form as the screens read it: `null` while none is up. */
+export function useNewVault(): NewVault | null {
+  return useSelect((current) => current.newVault);
+}
+
+/** Add existing vault folder's step as the screens read it: `null` while none is up. */
+export function useAddFolder(): AddFolder | null {
+  return useSelect((current) => current.addFolder);
+}
+
+/** The number of the last Add existing vault folder begun. */
+let addFolderOpenings = 0;
+
+/**
+ * Add existing vault folder, from the vault menu: Windows' folder picker opens at once (nothing is drawn for it, the window stays), and what comes of it is one of: the
+ * picker closed (nothing), a refusal (said in words on the window, where nothing was changed), a cloud-synced folder (the first screens' question, `cloud`), or the folder
+ * added, which opens that vault's unlock step. Nothing is sent when a step is already up or no vault is open.
+ */
+export function startAddFolder(): void {
+  if (state.sessions.length === 0 || state.addFolder !== null || state.newVault !== null) return;
+  addFolderOpenings += 1;
+  const opening = addFolderOpenings;
+  set({ ...state, addFolder: { opening, phase: "picking" } });
+  void runAddFolder(opening, () => api.addExistingVault());
+}
+
+/** The cloud question's yes: the token it was given goes back, and the add goes on. */
+export function confirmAddFolder(opening: number, token: string): Promise<void> {
+  return runAddFolder(opening, () => api.addExistingVaultConfirm(token));
+}
+
+/** The cloud question's "Choose another": the picker opens again. */
+export function chooseAnotherFolder(opening: number): Promise<void> {
+  return runAddFolder(opening, () => api.addExistingVault());
+}
+
+/** The cloud question's Cancel: nothing was done, and the window that was on screen is back. */
+export function leaveAddFolder(opening: number): void {
+  if (state.addFolder?.opening === opening) set({ ...state, addFolder: null });
+}
+
+/**
+ * What one asking of the shell for an add came to. An answer that comes after a lock epoch took the step does nothing here (the list is read again all the same, so the
+ * vault that was added is on it).
+ */
+async function runAddFolder(opening: number, run: () => Promise<api.Outcome<VaultEntry>>): Promise<void> {
+  // Read again after each wait: the page's state moves on meanwhile (a lock epoch takes the step).
+  const stillUp = (): boolean => state.addFolder?.opening === opening;
+  if (!stillUp()) return;
+  const got: { id: number | null } = { id: null };
+  let result: SetupResult;
+  try {
+    result = await finishAdd(async () => {
+      const answer = await run();
+      if (answer !== "Dismissed" && "Done" in answer) got.id = answer.Done.id;
+      return answer;
+    });
+  } catch (error) {
+    if (!stillUp()) return;
+    const front = state.sessions.at(-1);
+    // A lock the page had not heard of is no refusal to say.
+    set({ ...state, addFolder: null, toast: refusedAsLocked(error) ? state.toast : { kind: "failed", session: front?.session ?? null, error } });
+    return;
+  }
+  if (!stillUp()) return;
+  if (typeof result === "object") {
+    set({ ...state, addFolder: { opening, phase: "cloud", token: result.confirm } });
+    return;
+  }
+  set({ ...state, addFolder: null });
+  if (result === "done" && got.id !== null) startUnlockStep(got.id);
 }
 
 /**
@@ -5684,6 +5821,8 @@ export function resetStoreForTests(): void {
   forgotOpenings = 0;
   forgotRuns = 0;
   unlockOpenings = 0;
+  newVaultOpenings = 0;
+  addFolderOpenings = 0;
   settingsLine = Promise.resolve();
   shortcutNoticeVoid = false;
   listRuns.clear();

@@ -4,6 +4,7 @@
 //! Each command is a thin wrapper that parses its request and runs a [`Shell`] method below on the blocking pool:
 //! a key derivation takes about a second, and a dialog waits for the user.
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,6 +41,9 @@ pub struct CreatedView {
     /// The creation key's number, as a key made later is numbered: the page sends it back to confirm this key
     /// (`recovery_confirmed`), and a confirmation of any other number is for an older key.
     pub issue: u64,
+    /// The registry ID the vault list gave the new vault (`registry.add`, from 1): the page's `vaultId` for this
+    /// session from the start, whatever a later read of the list brings.
+    pub vault_id: u32,
 }
 
 /// An unlocked vault, with every warning the unlock raised (spec §6.3, §6.4). All false, and nothing cleaned, when
@@ -147,7 +151,8 @@ impl From<CleanupReport> for CleanupView {
 const HEADER_FILES: [&str; 2] = ["vault.json", "vault.json.bak"];
 
 /// What a create that a lock overtook made: the vault exists and is on the vault list, but is not open. Its registry ID
-/// is not known where the create begins (0: Task 7 gives the page the ID the list assigned).
+/// is not known where the create begins (0 here): the create's closure notes the ID the list gave it, and `created`
+/// puts it in the answer, so no create ever answers `vault: 0`.
 const VAULT_CREATED: Change = Change {
     what: "vault created",
     vault: 0,
@@ -362,12 +367,13 @@ impl Shell {
             },
             false => default_vault_parent(self.os.env.as_ref())?,
         };
+        let made = Cell::new(0);
         let answer = self
             .sessions
             .open_since(epoch, None, Some(VAULT_CREATED), |cancel| {
-                self.create_in(parent, name, password, false, cancel)
-            })?;
-        self.created(answer)
+                self.create_in(parent, name, password, false, &made, cancel)
+            });
+        self.created(&made, answer)
     }
 
     /// The user's yes to creating the vault in a cloud folder: goes on with the folder chosen before.
@@ -383,13 +389,16 @@ impl Shell {
             // A token for another question: used up, and its choice dropped.
             other => Err(other),
         };
+        let made = Cell::new(0);
         let answer = self.sessions.open_choice(
             token,
             Some(VAULT_CREATED),
             pick,
-            |(parent, name, password), cancel| self.create_in(parent, name, password, true, cancel),
-        )?;
-        self.created(answer)
+            |(parent, name, password), cancel| {
+                self.create_in(parent, name, password, true, &made, cancel)
+            },
+        );
+        self.created(&made, answer)
     }
 
     /// The opening closure of a create: checks `parent` (again, after a yes: it may have changed since), asks first
@@ -398,12 +407,15 @@ impl Shell {
     /// nothing made; one that lands after it leaves the vault on disk and on the vault list:
     /// `LockedAfterChange { what: "vault created" }`. If the list refuses the vault and it is removed again, a lock
     /// answers `Locked` (nothing is left); if the removal fails too, `"vault not listed"`, with or without a lock.
+    /// `made` is set to the registry ID the list gave the vault, the moment it is listed: the open's answer cannot
+    /// carry it when a lock discards the new session, so [`created`](Self::created) reads it from there.
     fn create_in(
         &self,
         parent: PathBuf,
         name: String,
         password: Zeroizing<String>,
         cloud_confirmed: bool,
+        made: &Cell<u32>,
         cancel: &CancelToken,
     ) -> ShellResult<OpenStep<Zeroizing<String>>> {
         let check = self.check_location(&parent)?;
@@ -441,7 +453,12 @@ impl Shell {
         };
         let listed = fs::canonicalize(created.vault.dir())
             .map_err(ShellError::from)
-            .and_then(|dir| self.registry.add(&dir).map(|_| dir));
+            .and_then(|dir| {
+                self.registry.add(&dir).map(|id| {
+                    made.set(id);
+                    dir
+                })
+            });
         drop(creating);
         let dir = match listed {
             Ok(dir) => dir,
@@ -482,15 +499,29 @@ impl Shell {
 }
 
 impl Shell {
-    /// What a create's open answers: the new session with its recovery key and the key's `issue` number, or the
-    /// question. The new session may make a recovery key without the password while 21c's step lasts (for its
-    /// retries), until the creation key is confirmed. A lock that came between the vault's opening and this grant
-    /// leaves the vault made and its key never shown: `LockedAfterChange`, as for a lock during the create.
+    /// What a create's open answers: the new session with its recovery key, the key's `issue` number and the vault's
+    /// registry ID (`made`, set by `create_in`), or the question. The new session may make a recovery key without the
+    /// password while 21c's step lasts (for its retries), until the creation key is confirmed. A lock that came
+    /// between the vault's opening and this grant leaves the vault made and its key never shown:
+    /// `LockedAfterChange`, as for a lock during the create. Either way it names the vault by the ID `made` holds,
+    /// never the newest on the list: another window may have listed one since.
     fn created(
         &self,
-        answer: OpenAnswer<Zeroizing<String>>,
+        made: &Cell<u32>,
+        answer: ShellResult<OpenAnswer<Zeroizing<String>>>,
     ) -> ShellResult<Outcome<Tagged<CreatedView>>> {
-        Ok(match answer {
+        let vault_id = made.get();
+        let named = |e| match e {
+            // `made` is 0 only while no vault was listed, and then no lock can have reported one made.
+            ShellError::LockedAfterChange { what, vault: 0 } if vault_id != 0 => {
+                ShellError::LockedAfterChange {
+                    what,
+                    vault: vault_id,
+                }
+            }
+            other => other,
+        };
+        Ok(match answer.map_err(named)? {
             Outcome::Done(tagged) => {
                 let (info, recovery_key) = tagged.data;
                 // Never `None`: an open without a location always runs its closure.
@@ -500,7 +531,7 @@ impl Shell {
                     .start_creation_key(tagged.session, tagged.generation)
                     .map_err(|_| ShellError::LockedAfterChange {
                         what: VAULT_CREATED.what,
-                        vault: VAULT_CREATED.vault,
+                        vault: vault_id,
                     })?;
                 Outcome::Done(Tagged {
                     session: tagged.session,
@@ -509,6 +540,7 @@ impl Shell {
                         info,
                         recovery_key,
                         issue,
+                        vault_id,
                     },
                 })
             }
@@ -1508,15 +1540,17 @@ mod tests {
         );
         let answer = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
         failpoint::disarm_all();
+        let entries = ts.shell.registry.entries();
+        assert_eq!(entries.len(), 1, "the new vault is on the list");
+        assert_ne!(entries[0].0, 0, "a registry ID is never 0");
         assert_eq!(
             answer.err(),
             Some(ShellError::LockedAfterChange {
                 what: "vault created",
-                vault: 0
-            })
+                vault: entries[0].0
+            }),
+            "the answer names the vault the list gave"
         );
-        let entries = ts.shell.registry.entries();
-        assert_eq!(entries.len(), 1, "the new vault is on the list");
         assert!(ts.shell.sessions.list().is_empty(), "but not open");
         assert!(is_free(&entries[0].1));
     }
@@ -1609,9 +1643,10 @@ mod tests {
             }
             Some(ShellError::LockedAfterChange {
                 what: "vault created",
-                ..
+                vault,
             }) => {
                 assert_eq!(entries.len(), 2, "the new vault is on the list");
+                assert_eq!(vault, entries[1].0, "the vault the create made");
                 assert!(is_free(&entries[1].1));
             }
             other => panic!("not overtaken by the lock: {other:?}"),
@@ -1636,15 +1671,17 @@ mod tests {
         );
         let answer = heavy(|| ts.shell.create_vault_confirm(&token));
         failpoint::disarm_all();
+        let entries = ts.shell.registry.entries();
+        assert_eq!(entries.len(), listed + 1);
         assert_eq!(
             answer.err(),
             Some(ShellError::LockedAfterChange {
                 what: "vault created",
-                vault: 0
-            })
+                vault: entries[listed].0
+            }),
+            "the vault this confirm made, the newest on the list here"
         );
         assert!(ts.shell.sessions.list().is_empty());
-        assert_eq!(ts.shell.registry.entries().len(), listed + 1);
     }
 
     /// When this thread's next create reaches its staging folder, runs `second` on another thread and lets this create
@@ -1874,6 +1911,281 @@ mod tests {
         assert!(ts.shell.sessions.list().is_empty());
         assert!(ts.shell.registry.entries().is_empty());
         drop(held.borrow_mut().take());
+    }
+
+    /// A vault folder made by the engine in the test's vaults folder, closed and not on the list: its canonical folder.
+    fn unlisted_vault(ts: &TestShell, name: &str) -> PathBuf {
+        let made = heavy(|| Vault::create(&ts.vaults(), name, PW)).unwrap();
+        let dir = fs::canonicalize(made.vault.dir()).unwrap();
+        drop(made);
+        dir
+    }
+
+    /// Task 7: the create's answer carries the ID the vault list gave the new vault (on both ways to create), so the
+    /// page knows its vault without reading the list again.
+    #[test]
+    fn create_answers_the_registry_id_it_registered() {
+        let ts = TestShell::new();
+        // Two vaults listed first, so the new vault's ID is not simply 1.
+        registered_as(&ts, "One");
+        registered_as(&ts, "Two");
+        let tagged =
+            done(heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false)).unwrap());
+        // The ID the list holds for the session's own folder, found by path, not taken from the answer.
+        let listed = ts.shell.registry_id_of(tagged.session);
+        assert_eq!(listed, 3, "the next ID on the list");
+        assert_eq!(tagged.data.vault_id, listed);
+        let json = serde_json::to_value(&tagged).unwrap();
+        assert_eq!(json["data"]["vault_id"], 3);
+
+        // After a yes to the cloud question, the same.
+        let synced = ts.temp.path().join("synced");
+        fs::create_dir(&synced).unwrap();
+        ts.volumes.add_sync_root(&synced);
+        ts.dialogs.answer(Some(synced));
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) =
+            ts.shell.create_vault("Work".into(), secret(PW), true)
+        else {
+            panic!("a cloud folder asks first");
+        };
+        let confirmed = done(heavy(|| ts.shell.create_vault_confirm(&token)).unwrap());
+        assert_eq!(
+            confirmed.data.vault_id,
+            ts.shell.registry_id_of(confirmed.session)
+        );
+        assert_eq!(confirmed.data.vault_id, 4);
+        assert_ne!(confirmed.data.vault_id, tagged.data.vault_id);
+    }
+
+    /// Task 7: making a vault while another is open leaves the other open, with its own generation.
+    #[test]
+    fn creating_a_vault_while_another_is_open_leaves_it_open() {
+        let ts = TestShell::new();
+        let (first, generation) = ts.open_vault("First");
+        let first_id = ts.shell.registry_id_of(first);
+        let second =
+            done(heavy(|| ts.shell.create_vault("Second".into(), secret(PW), false)).unwrap());
+        assert_ne!(second.session, first);
+        assert_ne!(second.data.vault_id, first_id);
+        assert_eq!(state(&ts, first), Some(SessionState::Unlocked));
+        assert_eq!(state(&ts, second.session), Some(SessionState::Unlocked));
+        let still = ts
+            .shell
+            .sessions
+            .list()
+            .into_iter()
+            .find(|info| info.session == first)
+            .unwrap();
+        assert_eq!(still.generation, generation, "the same unlock");
+        ts.shell
+            .sessions
+            .read(first, generation, |_, _| Ok(()))
+            .expect("the first vault still answers with its generation");
+        assert_eq!(ts.shell.registry.entries().len(), 2);
+    }
+
+    /// Task 7: a create and an add at once (as in two windows) each get their own ID, and the create's answer names
+    /// its own vault, not the newest on the list.
+    #[test]
+    fn a_create_and_an_add_at_once_each_get_their_own_id() {
+        let ts = TestShell::new();
+        let work = unlisted_vault(&ts, "Work");
+        ts.dialogs.answer(Some(work.clone()));
+        // The add reaches the creation lock while the create holds it, and takes the next place after the create.
+        let add = second_at_staging(&ts, |shell| shell.add_existing_vault());
+        let (created, added) = heavy(|| {
+            let created = ts.shell.create_vault("Family".into(), secret(PW), false);
+            (created, joined(&add))
+        });
+        failpoint::disarm_all();
+        let created = done(created.unwrap());
+        let added = done(added.unwrap());
+        assert_ne!(created.data.vault_id, added.id);
+        assert_eq!(
+            created.data.vault_id,
+            ts.shell.registry_id_of(created.session),
+            "the create's own ID"
+        );
+        assert_eq!(ts.shell.registry.path(added.id), Some(work));
+        assert_eq!(added.id, created.data.vault_id + 1, "the add came after");
+        assert_eq!(ts.shell.registry.entries().len(), 2);
+    }
+
+    /// Task 7: a create a lock overtook after the vault was made and listed answers the ID it was listed under: when
+    /// the lock lands in the open (the epoch's path), and when it lands after the open, before the answer is built
+    /// (the good answer delayed). In both, an add listed the next ID in between, so the newest on the list is wrong.
+    #[test]
+    fn a_create_overtaken_by_a_lock_answers_its_vault_id() {
+        // The lock lands while the create runs; the add (after the lock) takes the next place.
+        let ts = TestShell::new();
+        let work = unlisted_vault(&ts, "Work");
+        ts.dialogs.answer(Some(work.clone()));
+        let add = second_at_staging(&ts, |shell| {
+            shell.sessions.lock_all(LockReason::WindowsLocked);
+            shell.add_existing_vault()
+        });
+        let (answer, added) = heavy(|| {
+            let answer = ts.shell.create_vault("Family".into(), secret(PW), false);
+            (answer, joined(&add))
+        });
+        failpoint::disarm_all();
+        let added = done(added.unwrap());
+        let entries = ts.shell.registry.entries();
+        assert_eq!(entries.len(), 2);
+        let (made, _) = entries.iter().find(|(_, dir)| *dir != work).unwrap();
+        assert_ne!(*made, 0);
+        assert_ne!(*made, added.id, "not the add's, the newest on the list");
+        assert_eq!(
+            answer.err(),
+            Some(ShellError::LockedAfterChange {
+                what: "vault created",
+                vault: *made
+            })
+        );
+        assert!(ts.shell.sessions.list().is_empty(), "not open");
+
+        // The open went well and a lock came before the answer was built: the same ID.
+        let ts = TestShell::new();
+        let work = unlisted_vault(&ts, "Work");
+        ts.dialogs.answer(Some(work.clone()));
+        let add = second_at_staging(&ts, |shell| shell.add_existing_vault());
+        let made = Cell::new(0);
+        let epoch = ts.shell.sessions.epoch();
+        let (opened, added) = heavy(|| {
+            let opened = ts
+                .shell
+                .sessions
+                .open_since(epoch, None, Some(VAULT_CREATED), |cancel| {
+                    ts.shell.create_in(
+                        ts.vaults(),
+                        "Family".into(),
+                        secret(PW),
+                        false,
+                        &made,
+                        cancel,
+                    )
+                })
+                .unwrap();
+            (opened, joined(&add))
+        });
+        failpoint::disarm_all();
+        let added = done(added.unwrap());
+        assert!(matches!(opened, Outcome::Done(_)), "a good answer");
+        ts.shell.sessions.lock_all(LockReason::WindowsLocked);
+        let answer = ts.shell.created(&made, Ok(opened));
+        let entries = ts.shell.registry.entries();
+        let (listed, _) = entries.iter().find(|(_, dir)| *dir != work).unwrap();
+        assert_ne!(*listed, added.id, "not the add's, the newest on the list");
+        assert_eq!(
+            answer.err(),
+            Some(ShellError::LockedAfterChange {
+                what: "vault created",
+                vault: *listed
+            })
+        );
+        assert!(
+            ts.shell
+                .sessions
+                .list()
+                .iter()
+                .all(|info| info.state != SessionState::Unlocked),
+            "the new session is locked with the rest"
+        );
+    }
+
+    /// Task 7, the design's "Vault made but not listed": the list refused the vault and it could not be removed
+    /// again. The answer says so, as the first run has always said it: the vault stays on disk, off the list, with
+    /// its "not confirmed" mark, and nothing is open.
+    #[test]
+    fn a_vault_written_but_not_registered_answers_so() {
+        let ts = TestShell::new();
+        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+        let held: Rc<RefCell<Option<fs::File>>> = Rc::default();
+        let hold = Rc::clone(&held);
+        let parent = default.clone();
+        // Once the vault is published: the list's write fails, and the vault's header is held open without delete
+        // sharing, so the removal fails too.
+        failpoint::observe(
+            "create.before_rename",
+            Box::new(move || {
+                failpoint::arm("atomic_write.before_replace");
+                let (hold, parent) = (Rc::clone(&hold), parent.clone());
+                failpoint::observe(
+                    "atomic_write.before_replace",
+                    Box::new(move || {
+                        if hold.borrow().is_some() {
+                            return;
+                        }
+                        let vault = vault_folders(&parent).pop().expect("the vault is made");
+                        let file = fs::OpenOptions::new()
+                            .read(true)
+                            .share_mode(FILE_SHARE_READ)
+                            .open(vault.join(HEADER_FILE))
+                            .unwrap();
+                        *hold.borrow_mut() = Some(file);
+                    }),
+                );
+            }),
+        );
+        let answer = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
+        failpoint::disarm_all();
+        assert!(held.borrow().is_some(), "the header was held");
+        let refused = answer.err().expect("refused");
+        assert_eq!(
+            serde_json::to_value(refused).unwrap(),
+            json!({ "code": "invalid_input", "what": "vault not listed" })
+        );
+        let left = vault_folders(&default);
+        assert_eq!(left.len(), 1, "still on disk");
+        let left = fs::canonicalize(&left[0]).unwrap();
+        assert!(ts.shell.vault_state.is_unconfirmed(&left), "the mark stays");
+        assert!(ts.shell.sessions.list().is_empty());
+        assert!(ts.shell.registry.entries().is_empty(), "not listed");
+        drop(held.borrow_mut().take());
+    }
+
+    /// Task 7: a full list refuses a create before anything is written, with the list's own refusal, on both ways to
+    /// create (the cloud question comes first, and the refusal after the yes).
+    #[test]
+    fn create_refused_when_the_list_is_full_says_so() {
+        let ts = TestShell::new();
+        let base = fs::canonicalize(ts.temp.path()).unwrap();
+        let listed: Vec<_> = (1..=MAX_VAULTS as u32)
+            .map(|id| json!({ "id": id, "path": base.join(format!("v{id}")) }))
+            .collect();
+        fs::create_dir_all(&ts.shell.paths.root).unwrap();
+        fs::write(
+            &ts.shell.paths.registry,
+            json!({ "version": 1, "vaults": listed }).to_string(),
+        )
+        .unwrap();
+        let full = json!({ "code": "too_large", "what": "vault list" });
+        let default = ts.env.folder(KnownFolder::Profile).join("Lockbox Vaults");
+
+        let answer = heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false));
+        assert_eq!(
+            serde_json::to_value(answer.err().expect("refused")).unwrap(),
+            full
+        );
+        assert!(!default.exists(), "nothing written, not even the folder");
+
+        let synced = ts.temp.path().join("synced");
+        fs::create_dir(&synced).unwrap();
+        ts.volumes.add_sync_root(&synced);
+        ts.dialogs.answer(Some(synced.clone()));
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) =
+            ts.shell.create_vault("Work".into(), secret(PW), true)
+        else {
+            panic!("a cloud folder asks first");
+        };
+        let answer = heavy(|| ts.shell.create_vault_confirm(&token));
+        assert_eq!(
+            serde_json::to_value(answer.err().expect("refused")).unwrap(),
+            full
+        );
+        assert_eq!(fs::read_dir(&synced).unwrap().count(), 0, "nothing written");
+        assert!(ts.shell.sessions.list().is_empty());
+        assert_eq!(ts.shell.registry.entries().len(), MAX_VAULTS);
     }
 
     /// Fix round 2 (G2): adding a folder the list already holds finds its entry, however the folder is spelled
@@ -3561,7 +3873,7 @@ mod tests {
             answer.err(),
             Some(ShellError::LockedAfterChange {
                 what: "vault created",
-                vault: 0
+                vault: ts.shell.registry.entries()[0].0
             })
         );
         assert!(ts.shell.vault_state.is_unconfirmed(&listed_dir(&ts)));
@@ -4951,7 +5263,7 @@ mod tests {
             .unwrap(),
             json!({ "code": "locked_after_change", "what": "recovery key", "vault": 2 })
         );
-        // The creation answer carries the key's number beside the key.
+        // The creation answer carries the key's number beside the key, and the registry ID the vault was listed under.
         let info = SessionInfo {
             session: SessionId(7),
             generation: 3,
@@ -4960,13 +5272,40 @@ mod tests {
             state: SessionState::Unlocked,
             kind: SessionKind::Vault,
         };
-        let created = CreatedView {
-            info,
-            recovery_key: secret(words),
-            issue: 1,
-        };
-        let json = serde_json::to_value(&created).unwrap();
-        assert_eq!(json["recovery_key"], words);
-        assert_eq!(json["issue"], 1);
+        let created = Outcome::Done(Tagged {
+            session: SessionId(7),
+            generation: 3,
+            data: CreatedView {
+                info,
+                recovery_key: secret(words),
+                issue: 1,
+                vault_id: 4,
+            },
+        });
+        assert_eq!(
+            serde_json::to_value(&created).unwrap(),
+            json!({ "Done": { "session": 7, "generation": 3, "data": {
+                "info": {
+                    "session": 7,
+                    "generation": 3,
+                    "name": "Family",
+                    "read_only": false,
+                    "state": "unlocked",
+                    "kind": "vault"
+                },
+                "recovery_key": words,
+                "issue": 1,
+                "vault_id": 4
+            } } })
+        );
+        // A create a lock overtook names the vault it made.
+        assert_eq!(
+            serde_json::to_value(ShellError::LockedAfterChange {
+                what: "vault created",
+                vault: 4
+            })
+            .unwrap(),
+            json!({ "code": "locked_after_change", "what": "vault created", "vault": 4 })
+        );
     }
 }

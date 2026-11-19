@@ -289,6 +289,47 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "New vault from the vault menu, step 1 of 2 (18b, Task 7)",
+    shows: ["setup/CreateVault#CreateVault"],
+    reach: async () => {
+      start([vault()]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "New vault" }));
+      await screen.findByRole("heading", { level: 1, name: "New vault" });
+      await screen.findByRole("button", { name: "Cancel" });
+    },
+  },
+  {
+    name: "New vault from the vault menu, a cloud folder warns (18c, Task 7)",
+    shows: ["setup/CreateVault#CreateVault"],
+    reach: async () => {
+      start([vault()]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "New vault" }));
+      await screen.findByRole("heading", { level: 1, name: "New vault" });
+      fireEvent.change(screen.getByLabelText("Password"), { target: { value: "a long enough password" } });
+      fireEvent.change(screen.getByLabelText("Repeat the password"), { target: { value: "a long enough password" } });
+      shell.cloudNext();
+      click("Continue");
+      await screen.findByRole("button", { name: "Continue anyway" });
+    },
+  },
+  {
+    name: "Add existing vault folder from the vault menu, the cloud question (18c, Task 7)",
+    shows: ["setup/AddFolderStep#AddFolderStep", "setup/CloudQuestion#CloudQuestion"],
+    reach: async () => {
+      start([vault()]);
+      await unlockIt();
+      shell.offerExisting({ id: 9, name: "Old vault", items: [] });
+      shell.cloudNext();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Add existing vault folder" }));
+      await screen.findByRole("heading", { level: 1, name: "This folder is synced to the cloud" });
+    },
+  },
+  {
     name: "Lock screen with launch's notices (Ask 11, 10e, the shortcut taken, a finished restore)",
     shows: ["Asks#LockScreenAsks", "Asks#LostOutputsAsk", "Asks#OpenFilesAsk", "Asks#ShortcutAsk"],
     reach: async () => {

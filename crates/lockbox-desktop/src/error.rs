@@ -17,7 +17,7 @@ pub enum ShellError {
     Locked,
     /// The change was made, but the session locked before the answer could be shown (spec §7.4). `vault` is the
     /// registry ID of the vault the change was made to, so the page keeps the outcome for that vault; 0 when the
-    /// vault is not on the list, or its ID is not known where the change began (a vault just created).
+    /// vault is not on the list. A create carries the ID the list gave the new vault (never 0).
     LockedAfterChange {
         what: &'static str,
         vault: u32,

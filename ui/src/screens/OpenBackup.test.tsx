@@ -1153,8 +1153,8 @@ test("vault_menu_lists_open_read_only_sessions", async () => {
   expect(menu.textContent).not.toContain("Unlocked");
   expect(rows.map((row) => row.textContent)).toEqual(["My vault", `${BACKUP}Backup`]);
   expect(rows.map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
-  // Lock stays the menu's action, for the session on screen.
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([`Lock ${BACKUP}`]);
+  // Lock stays the menu's action for the session on screen, after New vault and Add existing vault folder (Task 7), which belong to no session.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", `Lock ${BACKUP}`]);
   await expectNoAxe(menu);
   // Choosing the live vault's row brings it to the front: the window is the vault's, and the menu is shut.
   fireEvent.click(within(menu).getByRole("menuitemradio", { name: "My vault" }));

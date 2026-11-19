@@ -81,9 +81,9 @@ test("lock_this_vault_from_its_menu", async () => {
   const live = shell.sessionOf(7);
   if (live === undefined) throw new Error("not open");
   const menu = await openVaultMenu();
-  // What the menu lets a person do in 4A: lock this vault. Everything drawn on 5a that a later plan builds is not shown.
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Lock My vault"]);
-  for (const later of [/new vault/i, /add existing/i, /rename/i, /explorer/i, /remove/i, /delete/i]) {
+  // What the menu lets a person do: make a new vault, add an existing vault's folder (Task 7), and lock this vault. Everything drawn on 5a that a later plan builds is not shown.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", "Lock My vault"]);
+  for (const later of [/rename/i, /explorer/i, /remove/i, /delete/i]) {
     expect(within(menu).queryByText(later), String(later)).toBeNull();
   }
   // Each listed vault says whether it is open; the menu's own words say the same to a screen reader.

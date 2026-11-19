@@ -12,17 +12,22 @@ import { MainWindow } from "./screens/MainWindow";
 import { OpenBackupSteps } from "./screens/OpenBackup";
 import { RestoreFlow } from "./screens/RestoreFlow";
 import { RestoreNotices } from "./screens/RestoreNotices";
+import { AddFolderStep } from "./screens/setup/AddFolderStep";
+import { CreateVault } from "./screens/setup/CreateVault";
 import { FirstRun } from "./screens/setup/FirstRun";
 import { LostList } from "./screens/setup/LostList";
 import { MoveIn } from "./screens/setup/MoveIn";
 import { PickWords } from "./screens/setup/PickWords";
 import { RecoveryKey } from "./screens/setup/RecoveryKey";
 import {
+  leaveNewVault,
   startCapture,
   startNotices,
   startStore,
+  useAddFolder,
   useForgot,
   useMoveIn,
+  useNewVault,
   useNotices,
   useOpenBackup,
   useRestore,
@@ -42,7 +47,7 @@ import "./styles/print.css";
 
 /**
  * The whole app: first-time setup while there is no vault, the lost-list screen while the list of vaults is damaged, the lock screen while none is open, the main window of the
- * vault on screen when one is open (and the unlock step of another vault above it, while one is up), and its recovery key step instead of that while the key has not been confirmed by picking its words. A restore
+ * vault on screen when one is open (and the unlock step of another vault, the form of a new vault, or the cloud question of an added folder above it, while one is up), and its recovery key step instead of that while the key has not been confirmed by picking its words. A restore
  * (24a to 24e) takes the whole window above any of these while it is open, and gives it back when it ends; so does the notice of a restore that didn't
  * finish, below an open restore; Open a backup begun from the lock screen (25a) does the same below those; moving to a new computer (26a to 26c) takes the place of the
  * first screen and the lock screen in the same way, and so does Forgot password (28a to 28e), which also stays over the vault its new password opens until 28e is answered. The
@@ -70,17 +75,24 @@ export default function App() {
   const active = sessions.at(-1);
   // The unlock step of another vault (the vault menu, the vault strip, Copy to a vault) takes the window while a vault is open: it wears the colour of the vault it unlocks.
   const unlockStep = useUnlockStep();
+  // The form of a new vault (the vault menu's New vault) and the cloud question of Add existing vault folder take the window the same way, while a vault is open.
+  const newVault = useNewVault();
+  const addFolder = useAddFolder();
   const stepping = active !== undefined && unlockStep !== null;
+  const making = active !== undefined && newVault !== null;
   const place = stepping ? unlockStep.vault : active?.vaultId;
-  const position = place === undefined ? 0 : Math.max(0, (vaults ?? []).findIndex((vault) => vault.id === place));
-  const look = vaultLook(position, stepping ? false : (active?.readOnly ?? false));
+  // A new vault will be the last of the list, and wears the colour of that place from its form on.
+  const position = making ? (vaults ?? []).length : place === undefined ? 0 : Math.max(0, (vaults ?? []).findIndex((vault) => vault.id === place));
+  const look = vaultLook(position, stepping || making ? false : (active?.readOnly ?? false));
 
   let screen;
   if (active !== undefined) {
     // A vault whose recovery key was not typed back yet shows that step and nothing of the vault (21c, 21d, 21f, and 29b for a key asked for from Settings).
     // Keyed by session: switching to another vault unmounts this one's window, so a form left behind sends nothing and its typed text is gone. The unlock step of
-    // another vault is keyed by its opening, so a step opened again starts empty.
-    if (unlockStep !== null) screen = <UnlockStep key={String(unlockStep.opening)} step={unlockStep} />;
+    // another vault, and the form of a new vault, are keyed by their opening, so a step opened again starts empty.
+    if (newVault !== null) screen = <CreateVault key={`new-${String(newVault.opening)}`} inside onBack={leaveNewVault} />;
+    else if (addFolder?.phase === "cloud") screen = <AddFolderStep key={String(addFolder.opening)} step={addFolder} />;
+    else if (unlockStep !== null) screen = <UnlockStep key={String(unlockStep.opening)} step={unlockStep} />;
     else if (active.recovery === null) screen = <MainWindow key={String(active.session)} data={active} look={look} />;
     else if (active.recovery.phase === "pick") screen = <PickWords data={active} />;
     else screen = <RecoveryKey data={active} />;

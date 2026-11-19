@@ -432,7 +432,8 @@ test("a_lock_of_one_vault_leaves_the_others_forms_alone", async () => {
 
 // ---- Forms belong to their vault ----
 
-test("a_form_left_by_a_switch_sends_nothing", async () => {
+// Five forms in one test (about 1.7 s alone); timed out at 5 s twice in the full parallel run.
+test("a_form_left_by_a_switch_sends_nothing", { timeout: 20_000 }, async () => {
   const vaults = [vault(7, "My vault"), vault(8, "Home", { usedBackupHeader: true })];
   await allOpen(vaults);
   // Add: a login typed in Home's form, and Home left by a switch. Nothing is sent, nothing is kept, and Home's form is empty when it is back.
@@ -668,13 +669,13 @@ test("rows_for_read_only_older_copies_and_sessions_not_on_the_list_offer_switch_
   let menu = await openVaultMenu();
   expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "HomeLocked", "My vaultOlder copy", `${BACKUP}Backup`]);
   expect(rowsOf(menu).map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "false", "false", "true"]);
-  // The menu's own actions are Lock, for the session on screen, and nothing else.
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([`Lock ${BACKUP}`]);
-  // The older copy's row switches to it, and its menu is Lock alone as well.
+  // The menu's own actions are New vault and Add existing vault folder (Task 7), which belong to no session, and Lock for the session on screen.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", `Lock ${BACKUP}`]);
+  // The older copy's row switches to it, and its menu has the same two actions and its own Lock.
   fireEvent.click(rowsOf(menu)[2] as HTMLElement);
   await screen.findByRole("button", { name: "My vault, older copy, read-only, vault menu" });
   menu = await openVaultMenu();
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Lock My vault, older copy"]);
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", "Lock My vault, older copy"]);
   expect(rowsOf(menu).map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "false", "true", "false"]);
   expect(sent("lock_vault")).toEqual([]);
 });

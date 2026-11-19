@@ -12,6 +12,8 @@ import {
   openTrash,
   selectFolder,
   showSession,
+  startAddFolder,
+  startNewVault,
   startUnlockStep,
   useSessions,
   useVaults,
@@ -33,7 +35,7 @@ const TILES = ["t0", "t1", "t2", "t3", "t4"];
 
 /**
  * The side menu: which vault is open (its name opens the vault menu: a row for every vault of the list, which brings an open one to the front and opens a locked one's unlock
- * step, a row for every open backup and older copy, and Lock for the one on screen; an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
+ * step, a row for every open backup and older copy, then New vault (setup's two steps, with Back) and Add existing vault folder, and Lock for the one on screen; an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
  * its count, and Settings and Lock all side by side. It closes to a strip of icons; then each icon carries its name for a screen reader, and for a hint
  * when the pointer rests on it. The menu is only there while a vault is unlocked, so the Generator never shows on the lock screen.
  * A vault opened read-only has no "New folder".
@@ -123,7 +125,16 @@ export function SideMenu({
           rows={rows}
           items={[
             {
+              label: "New vault",
+              onSelect: startNewVault,
+            },
+            {
+              label: "Add existing vault folder",
+              onSelect: startAddFolder,
+            },
+            {
               label: `Lock ${onScreen}`,
+              apart: true,
               onSelect: () => {
                 void lockOneVault(data.session);
               },

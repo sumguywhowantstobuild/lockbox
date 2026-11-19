@@ -118,6 +118,10 @@ export const NEWER_VAULT = { code: "core", kind: "unsupported_version" };
 const ACCEPT_FIRST = { code: "core", kind: "invalid_input", what: "accept the header change first" };
 /** What the shell sends when it cannot write the mark first (`write_state(…, "vault state")`, `TooLarge`). */
 export const VAULT_STATE_REFUSED = { code: "too_large", what: "vault state" };
+/** What a create answers when the vault was made but the list refused it and the folder could not be removed again (`VAULT_NOT_LISTED`, `error.rs`). */
+export const VAULT_NOT_LISTED = { code: "invalid_input", what: "vault not listed" };
+/** What a create or an add answers when the list holds its most (`registry.check_room`: `TooLarge { what: "vault list" }`); nothing is written. */
+export const VAULT_LIST_FULL = { code: "too_large", what: "vault list" };
 /** What the shell sends when a session asks for a key without the password but never entered 21f the way that grants it. */
 const NO_KEY_PERMISSION = { code: "invalid_input", what: "recovery key" };
 /** What the shell sends while a print of its own runs, and when no PDF came (`error.rs`: `PRINTER_BUSY`, `PDF_NOT_MADE`). */
@@ -652,6 +656,24 @@ export interface FakeShell {
    */
   holdUnlock(): () => void;
   /**
+   * Holds every `create_vault` and `create_vault_confirm` answer until `release` is called (Plan 4C Task 7): the vault is decided, made and listed as the command
+   * arrives, as the shell does it, and the answer comes later, so the typed text can be looked for, or a lock can come in between.
+   */
+  holdCreate(): () => void;
+  /**
+   * The next `create_vault` or `create_vault_confirm` that would make a vault (not one that asks, is dismissed or is refused first) is cut short as a lock of all
+   * vaults can cut it: every unlocked session locks, and the lock epoch moves on. `lock_before_create`: nothing was made, and the answer is `locked`.
+   * `lock_after_create`: the vault is made and listed (with its "not confirmed" mark and a key nobody saw) and its session opened, then the lock; the answer is
+   * tagged with the generation from before (the bridge drops it as stale). `lock_after_create_as_error`: the vault is made and listed (mark and key as above),
+   * no session is opened, then the lock, and the answer is `locked_after_change` with the new vault's registry ID.
+   */
+  interruptCreateNext(how: "lock_before_create" | "lock_after_create" | "lock_after_create_as_error"): void;
+  /**
+   * The next create that makes a vault also puts `vault` on the list right after its own, with the next higher ID, as an add in another window would. `vault.id`
+   * is overwritten with that ID. A page that took the newest vault of the list for its own would take this one.
+   */
+  listAlongsideNextCreate(vault: FakeVault): void;
+  /**
    * The next `change_password` is cut short as a lock can cut it (Plan 4C Task 3, Ask 16's cases). `lock_before_write`: the lock came before the
    * headers were written, so nothing changed and the answer is `locked`. `lock_after_write`: the change landed, then the lock event reached the
    * page before the good answer did, so the answer is tagged with the generation from before. `lock_after_write_as_error`: the change landed and the
@@ -1111,6 +1133,9 @@ export function installFakeShell(
   let heldUpdate: (() => void)[] | undefined;
   let heldChange: (() => void)[] | undefined;
   let heldUnlock: (() => void)[] | undefined;
+  let heldCreate: (() => void)[] | undefined;
+  let interruptCreate: Parameters<FakeShell["interruptCreateNext"]>[0] | undefined;
+  let alongside: FakeVault | undefined;
   let interruptChange: Parameters<FakeShell["interruptChangeNext"]>[0] | undefined;
   // Forgot password (Task 4): the checked keys the shell holds under their choices (32 hex characters, launch-scoped: every lock epoch and the five minutes drop
   // them), what the vault's details were as checked, the holds a test can put on the two steps, and how the next finish is cut short.
@@ -1525,11 +1550,24 @@ export function installFakeShell(
     recovery_unconfirmed: (vault.unconfirmed ?? false) && !(vault.readOnly ?? false),
   });
 
+  /** A lock of all vaults, as Lock all, an idle lock or the app closing do it: every unlocked session locks, then the lock epoch moves on. */
+  const lockEveryVault = (): void => {
+    for (const session of [...live.keys()]) lock(session);
+    bumpEpoch();
+  };
+
   /** A create that goes through: the mark is written first, then the vault is made, listed and unlocked. */
   const created = (name: string, password: string): unknown => {
     if (refuseMark) {
       refuseMark = false;
       return refuse(VAULT_STATE_REFUSED);
+    }
+    // A cut (`interruptCreateNext`) is used by the create that makes a vault, and only that one.
+    const cut = interruptCreate;
+    interruptCreate = undefined;
+    if (cut === "lock_before_create") {
+      lockEveryVault();
+      return refuse(LOCKED);
     }
     const vault: FakeVault = {
       id: Math.max(0, ...vaults.map((v) => v.id)) + 1,
@@ -1539,17 +1577,34 @@ export function installFakeShell(
       unconfirmed: true,
     };
     vaults.push(vault);
+    // An add in another window lands on the list right after this vault: the next ID is its.
+    if (alongside !== undefined) {
+      const other = alongside;
+      alongside = undefined;
+      other.id = vault.id + 1;
+      vaults.push(other);
+    }
+    if (cut === "lock_after_create_as_error") {
+      // Made and listed, with a key nobody saw, then the lock: no session, and the answer names the vault.
+      makeKey(vault);
+      lockEveryVault();
+      return refuse({ code: "locked_after_change", what: "vault created", vault: vault.id });
+    }
     const [session, state] = openSession(vault);
     // A new vault's session may make its key again without the password (21c's retries) until the key is confirmed.
     keyStateOf(session).may = true;
     const recoveryKey = makeKey(vault);
-    return {
+    const done = {
       Done: tagged(session, state.generation, {
         info: infoOf(vault, session, state.generation),
         recovery_key: recoveryKey,
         issue: numberKey(session),
+        vault_id: vault.id,
       }),
     };
+    // The lock came after the vault was made and opened: the good answer is from before it, and the bridge drops it as stale.
+    if (cut === "lock_after_create") lockEveryVault();
+    return done;
   };
 
   const added = (): unknown => {
@@ -1557,7 +1612,7 @@ export function installFakeShell(
     if (vault === undefined) return refuse({ code: "not_found" });
     existing = undefined;
     vaults.push(vault);
-    return { Done: { id: vault.id, name: vault.name, available: true } };
+    return { Done: { id: vault.id, name: vault.name, available: true, details_damaged: vault.detailsDamaged ?? false } };
   };
 
   /** The held choice of a pick session, when it is this session's at this generation; otherwise the shell's `choice_expired`. */
@@ -3885,6 +3940,8 @@ export function installFakeShell(
         ["start_new_vault_list", heldStartList],
         ["change_password", heldChange],
         ["unlock_vault", heldUnlock],
+        ["create_vault", heldCreate],
+        ["create_vault_confirm", heldCreate],
       ] as const) {
         if (cmd === name && waiting !== undefined) {
           return new Promise((resolve) => {
@@ -4213,6 +4270,20 @@ export function installFakeShell(
         heldUnlock = undefined;
         for (const release of waiting) release();
       };
+    },
+    holdCreate: () => {
+      const waiting: (() => void)[] = [];
+      heldCreate = waiting;
+      return () => {
+        heldCreate = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    interruptCreateNext: (how) => {
+      interruptCreate = how;
+    },
+    listAlongsideNextCreate: (vault) => {
+      alongside = vault;
     },
     interruptChangeNext: (how) => {
       interruptChange = how;

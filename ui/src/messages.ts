@@ -41,10 +41,18 @@ export const MESSAGES: Record<string, Words> = {
     title: "The vault locked before Lockbox could show your new recovery key.",
     body: "Unlock the vault, and Lockbox will make another one to write down.",
   },
+  // A new vault was made and listed, then a lock came before Lockbox could show its recovery key (Task 7): it is kept for that vault's unlock, and 21f makes the key.
+  // The words are the session's, for Ariel to change.
+  "code:locked_after_change:vault created": {
+    title: "Your new vault was made, but it locked before Lockbox could show its recovery key.",
+    body: "Unlock it with its password, and Lockbox will make a recovery key to write down.",
+  },
   "code:not_found": { title: "Lockbox can't find that.", body: "It may have been moved or deleted." },
   "code:busy": { title: "That vault is busy.", body: "Wait for what it's doing to finish, then try again." },
   "code:read_only": { title: "This vault is read-only.", body: "It was opened from a backup, so nothing in it can change." },
   "code:too_large": { title: "That is too big for Lockbox to keep.", body: "" },
+  // The list of vaults is full (a create or an add; nothing was changed). The words are the session's, for Ariel to change.
+  "code:too_large:vault list": { title: "Lockbox's list of vaults is full.", body: "It holds up to 1,000 vaults. Nothing was changed." },
   "code:invalid_input": { title: "Lockbox can't use that.", body: "Check what you entered and try again." },
   "code:invalid_input:removable drive": {
     title: "A vault can't live on a removable, FAT32 or network drive.",
@@ -157,6 +165,12 @@ export const MESSAGES: Record<string, Words> = {
   // A restore whose copy was stopped (Cancel, Windows locking or sleeping, Lock all, closing): nothing was changed. Said on the first step of the restore.
   "page:restore_cancelled": { title: "The restore was cancelled.", body: "Your vault is as it was." },
   // Change password (27b): the shell's wrong password, said on the form's own first field. The words are the drawn screen's; the design gives none, so they are the session's.
+  // A vault made from inside the window (Task 7) that the list refused: the shell's `vault not listed`, said with a control the person can see (the vault menu's Add existing
+  // vault folder), since the first screen's words name a button that is not there. The words are the screen map's draft, for Ariel to change.
+  "page:vault_not_listed_inside": {
+    title: "Your new vault is on disk but couldn't be added to the list.",
+    body: "Use Add existing vault folder, then make a new recovery key.",
+  },
   "page:wrong_current_password": { title: "That isn't the current password.", body: "" },
   // Forgot password (28b): a key the shell read as a key but that does not open this vault (another vault's, or an old one: the cipher can't tell them apart).
   // The shell sends `wrong_password`; the design's words, with the vault's name from the list put in by the page.

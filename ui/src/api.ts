@@ -117,11 +117,13 @@ export interface UnlockView {
 /**
  * A vault just created and unlocked, with its recovery key, shown once. The vault is marked "not confirmed" already.
  * `issue` is the key's number (always 1, as a session's first), which `recoveryConfirmed` sends back to confirm this key.
+ * `vault_id` is the registry ID the shell gave the new vault on the list (1 or more): the session's vault from the start.
  */
 export interface CreatedView {
   info: SessionInfo;
   recovery_key: string;
   issue: number;
+  vault_id: number;
 }
 
 /** A new recovery key, shown once: its 24 words, and the number that names it for `recoveryConfirmed`. */
@@ -333,7 +335,9 @@ export async function recoverForget(choice: string): Promise<void> {
  * (`chooseFolder`), adds it to the list and unlocks it. The shell writes the "not confirmed" mark before the vault
  * exists; if the mark can't be written, no vault is made and this rejects (a state-file refusal, `what: "vault state"`).
  * A cloud-synced folder answers `{ Confirm: { CloudFolder: { token } } }` before anything is written: go on with
- * `createVaultConfirm(token)`. A closed folder picker answers `"Dismissed"`.
+ * `createVaultConfirm(token)`. A closed folder picker answers `"Dismissed"`. Other refusals: `too_large` (`what: "vault list"`) when the list is full, with
+ * nothing written; `invalid_input` (`what: "vault not listed"`) when the vault was made but the list refused it and the folder could not be removed again; and
+ * `locked_after_change` (`what: "vault created"`, with the new vault's registry ID in `vault`) when a lock overtook a vault that was made and listed.
  */
 export function createVault(name: string, password: string, chooseFolder: boolean): Promise<Opened<CreatedView>> {
   return open<CreatedView>("create_vault", { name, password, choose_folder: chooseFolder });

@@ -620,7 +620,8 @@ test("locked_before_the_key_could_show_says_so_on_that_vaults_unlock", async () 
   expect(screen.queryByText(LOCKED_KEY)).toBeNull();
 });
 
-test("the_shown_key_and_picks_are_dropped_on_confirm_leave_and_lock_even_after_a_late_answer", async () => {
+// Many steps (about 1.5 s alone); timed out at 5 s twice in the full parallel run.
+test("the_shown_key_and_picks_are_dropped_on_confirm_leave_and_lock_even_after_a_late_answer", { timeout: 20_000 }, async () => {
   // Confirm: the key and the questions are gone from the page and the store, and a second answer of the same confirmation changes nothing.
   await unlocked();
   let key = await toTheKey();
