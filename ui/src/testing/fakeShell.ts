@@ -647,6 +647,11 @@ export interface FakeShell {
    */
   holdChangePassword(): () => void;
   /**
+   * Holds every `unlock_vault` answer until `release` is called (Plan 4C Task 6): the password is checked and the session is opened as the command arrives, as the
+   * shell does it, and the answer comes later, so the person can go Back, or lock the vault, in between.
+   */
+  holdUnlock(): () => void;
+  /**
    * The next `change_password` is cut short as a lock can cut it (Plan 4C Task 3, Ask 16's cases). `lock_before_write`: the lock came before the
    * headers were written, so nothing changed and the answer is `locked`. `lock_after_write`: the change landed, then the lock event reached the
    * page before the good answer did, so the answer is tagged with the generation from before. `lock_after_write_as_error`: the change landed and the
@@ -1105,6 +1110,7 @@ export function installFakeShell(
   let heldReveal: (() => void)[] | undefined;
   let heldUpdate: (() => void)[] | undefined;
   let heldChange: (() => void)[] | undefined;
+  let heldUnlock: (() => void)[] | undefined;
   let interruptChange: Parameters<FakeShell["interruptChangeNext"]>[0] | undefined;
   // Forgot password (Task 4): the checked keys the shell holds under their choices (32 hex characters, launch-scoped: every lock epoch and the five minutes drop
   // them), what the vault's details were as checked, the holds a test can put on the two steps, and how the next finish is cut short.
@@ -3878,6 +3884,7 @@ export function installFakeShell(
         ["set_settings", heldSettings],
         ["start_new_vault_list", heldStartList],
         ["change_password", heldChange],
+        ["unlock_vault", heldUnlock],
       ] as const) {
         if (cmd === name && waiting !== undefined) {
           return new Promise((resolve) => {
@@ -4196,6 +4203,14 @@ export function installFakeShell(
       heldChange = waiting;
       return () => {
         heldChange = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdUnlock: () => {
+      const waiting: (() => void)[] = [];
+      heldUnlock = waiting;
+      return () => {
+        heldUnlock = undefined;
         for (const release of waiting) release();
       };
     },

@@ -7,7 +7,7 @@ import { vaultLook } from "./parts/Pattern";
 import { CloseQuestion } from "./screens/CloseQuestion";
 import { FirstClose } from "./screens/FirstClose";
 import { ForgotPassword } from "./screens/ForgotPassword";
-import { LockScreen } from "./screens/LockScreen";
+import { LockScreen, UnlockStep } from "./screens/LockScreen";
 import { MainWindow } from "./screens/MainWindow";
 import { OpenBackupSteps } from "./screens/OpenBackup";
 import { RestoreFlow } from "./screens/RestoreFlow";
@@ -28,6 +28,7 @@ import {
   useRestore,
   useSessions,
   useStartError,
+  useUnlockStep,
   useVaultListDamaged,
   useVaults,
 } from "./store";
@@ -41,7 +42,7 @@ import "./styles/print.css";
 
 /**
  * The whole app: first-time setup while there is no vault, the lost-list screen while the list of vaults is damaged, the lock screen while none is open, the main window of the
- * vault opened last when one is, and its recovery key step instead of that while the key has not been confirmed by picking its words. A restore
+ * vault on screen when one is open (and the unlock step of another vault above it, while one is up), and its recovery key step instead of that while the key has not been confirmed by picking its words. A restore
  * (24a to 24e) takes the whole window above any of these while it is open, and gives it back when it ends; so does the notice of a restore that didn't
  * finish, below an open restore; Open a backup begun from the lock screen (25a) does the same below those; moving to a new computer (26a to 26c) takes the place of the
  * first screen and the lock screen in the same way, and so does Forgot password (28a to 28e), which also stays over the vault its new password opens until 28e is answered. The
@@ -67,14 +68,20 @@ export default function App() {
   }, []);
 
   const active = sessions.at(-1);
-  const position = active === undefined ? 0 : Math.max(0, (vaults ?? []).findIndex((vault) => vault.id === active.vaultId));
-  const look = vaultLook(position, active?.readOnly ?? false);
+  // The unlock step of another vault (the vault menu, the vault strip, Copy to a vault) takes the window while a vault is open: it wears the colour of the vault it unlocks.
+  const unlockStep = useUnlockStep();
+  const stepping = active !== undefined && unlockStep !== null;
+  const place = stepping ? unlockStep.vault : active?.vaultId;
+  const position = place === undefined ? 0 : Math.max(0, (vaults ?? []).findIndex((vault) => vault.id === place));
+  const look = vaultLook(position, stepping ? false : (active?.readOnly ?? false));
 
   let screen;
   if (active !== undefined) {
     // A vault whose recovery key was not typed back yet shows that step and nothing of the vault (21c, 21d, 21f, and 29b for a key asked for from Settings).
-    // Keyed by session: switching to another vault unmounts this one's window, so a form left behind sends nothing and its typed text is gone.
-    if (active.recovery === null) screen = <MainWindow key={String(active.session)} data={active} look={look} />;
+    // Keyed by session: switching to another vault unmounts this one's window, so a form left behind sends nothing and its typed text is gone. The unlock step of
+    // another vault is keyed by its opening, so a step opened again starts empty.
+    if (unlockStep !== null) screen = <UnlockStep key={String(unlockStep.opening)} step={unlockStep} />;
+    else if (active.recovery === null) screen = <MainWindow key={String(active.session)} data={active} look={look} />;
     else if (active.recovery.phase === "pick") screen = <PickWords data={active} />;
     else screen = <RecoveryKey data={active} />;
   } else if (listDamaged) {

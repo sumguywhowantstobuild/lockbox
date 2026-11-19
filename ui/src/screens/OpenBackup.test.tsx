@@ -1069,11 +1069,11 @@ test("nowhere_to_copy_to_says_unlock_a_vault_first", async () => {
   await screen.findByRole("button", { name: BACKUP_MENU });
   const panel = await select("Bot admin console");
   fireEvent.click(within(panel).getByRole("button", { name: "Copy to a vault" }));
-  // The form shows only the sentence and Cancel: no lists, no Copy.
+  // The form shows the sentence, the locked vault to unlock (Task 6) and Cancel: no lists, no Copy.
   expect(within(panel).getByText(NOWHERE)).toBeTruthy();
   expect(within(panel).queryByRole("combobox")).toBeNull();
   expect(within(panel).queryByRole("button", { name: "Copy" })).toBeNull();
-  expect(buttonsIn(panel).slice(-1)).toEqual(["Cancel"]);
+  expect(buttonsIn(panel).slice(-2)).toEqual(["Unlock My vault", "Cancel"]);
   press(panel, "Cancel");
   expect(within(panel).queryByText(NOWHERE)).toBeNull();
   expect(sent("copy_item_to")).toEqual([]);
@@ -1146,7 +1146,7 @@ test("vault_menu_lists_open_read_only_sessions", async () => {
   await openTheBackup();
   const menu = await openMenu(screen.getByRole("button", { name: BACKUP_MENU }));
   // A row for each open session, in a group of their own: the live vault, then the backup (the one on screen), each a menu item that says whether it is the current one.
-  const group = within(menu).getByRole("group", { name: "Open now" });
+  const group = within(menu).getByRole("group", { name: "Vaults" });
   const rows = within(group).getAllByRole("menuitemradio");
   // Each vault is there once: an open one is a row only, with no "Unlocked" note beside it.
   expect(menu.querySelectorAll(".mnote")).toHaveLength(0);
@@ -1182,10 +1182,10 @@ test("vault_menu_lists_open_read_only_sessions", async () => {
   expect(within(last).queryAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vault"]);
 });
 
-test("a_locked_backup_has_no_row_and_a_locked_vault_stays_a_note", async () => {
+test("a_locked_backup_has_no_row_and_a_locked_vault_is_a_row", async () => {
   await unlocked([mine(), home()]);
   await openTheBackup();
-  // Home was never unlocked: it is a note, not a row. Locking the live vault from outside leaves the backup, the only row.
+  // Home was never unlocked: it is a row that says Locked (it opens its unlock step). Locking the live vault from outside leaves the backup open, and My vault is a locked row too.
   act(() => {
     shell.lock(shell.sessionOf(7)?.session ?? 0);
   });
@@ -1193,8 +1193,8 @@ test("a_locked_backup_has_no_row_and_a_locked_vault_stays_a_note", async () => {
     expect(debugState().sessions.map((one) => one.kind)).toEqual(["backup"]);
   });
   const menu = await openMenu(screen.getByRole("button", { name: BACKUP_MENU }));
-  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual([`${BACKUP}Backup`]);
-  expect([...menu.querySelectorAll(".mnote")].map((row) => row.textContent)).toEqual(["My vaultLocked", "HomeLocked"]);
+  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultLocked", "HomeLocked", `${BACKUP}Backup`]);
+  expect(menu.querySelectorAll(".mnote")).toHaveLength(0);
   // The backup is closed by its own lock; the live vault is not in the list now, so the lock screen follows.
   fireEvent.click(within(menu).getByRole("menuitem", { name: `Lock ${BACKUP}` }));
   await screen.findByLabelText(/^Password for /);

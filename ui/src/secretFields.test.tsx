@@ -232,6 +232,24 @@ const PLACES: Place[] = [
       await screen.findByRole("heading", { level: 1, name: "Choose a new password" });
     },
   },
+  {
+    screen: "The unlock step of another vault, with one open (Task 6)",
+    fields: ["current-password"],
+    reach: async () => {
+      start([...mine(), { id: 8, name: "Home", items: sampleItems() }]);
+      const field = await screen.findByLabelText(/^Password for /);
+      fireEvent.change(field, { target: { value: PASSWORD } });
+      fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+      await screen.findByRole("heading", { level: 1, name: "All items", hidden: true });
+      const opener = screen.getByRole("button", { name: /, vault menu$/ });
+      opener.focus();
+      fireEvent.pointerDown(opener, { button: 0 });
+      fireEvent.click(opener);
+      const menu = await screen.findByRole("menu");
+      fireEvent.click(within(menu).getByRole("menuitemradio", { name: /^Home/ }));
+      await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
+    },
+  },
 ];
 
 /** Every box where a vault's password or a recovery key is typed, shown or hidden: hidden ones by type, and any other by what its label says. */

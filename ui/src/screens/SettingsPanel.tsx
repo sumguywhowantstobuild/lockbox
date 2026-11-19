@@ -7,7 +7,7 @@ import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
 import { SETTINGS_HINT } from "../olderCopiesWords";
-import { SETTINGS_OPEN_HINT } from "../openBackupWords";
+import { SETTINGS_OPEN_HINT, shownName } from "../openBackupWords";
 import {
   closeTool,
   loadOlderCopies,
@@ -24,6 +24,7 @@ import {
   useOlderCopies,
   useOpenBackup,
   useRestore,
+  useSessions,
   useSettings,
   type SaveTicket,
   type SessionData,
@@ -144,6 +145,8 @@ function said(error: unknown, names?: { shortcut?: string }): string {
 export function SettingsPanel({ data }: { data: SessionData }) {
   const id = useId();
   const saved = useSettings();
+  // With more than one vault (or backup) open, the section that is for the window's own vault says which it is (the design: "With two open, Add and Settings say which vault").
+  const several = useSessions().length > 1;
   // The picker of Restore a backup is open (or its steps are): a second press sends nothing.
   const restoring = useRestore() !== null;
   // The same for Open a backup: its picker is open (or its panel is, in this panel's place).
@@ -428,7 +431,7 @@ export function SettingsPanel({ data }: { data: SessionData }) {
       </section>
 
       <section className="gp">
-        <h3 className="gh">This vault</h3>
+        <h3 className="gh">{several ? `This vault: ${shownName(data)}` : "This vault"}</h3>
         <div className="grp">
           {data.readOnly ? null : (
             // A copy kept on another drive. Not in a vault opened from a backup, which has nothing of its own to back up.

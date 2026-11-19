@@ -1,29 +1,131 @@
 import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import type { VaultEntry } from "../api";
+import { useLockEpoch } from "../jobs";
 import { messageFor, type Message } from "../messages";
 import { PasswordField } from "../parts/PasswordField";
 import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
 import {
   cancelCapture,
   clearUnlockPick,
+  leaveUnlockStep,
   startForgot,
   startOpenBackup,
   startRestore,
   unlock,
+  unlockInStep,
   useCapture,
   useOpenBackup,
   useRestore,
   useStartError,
   useUnlockPick,
   useVaults,
+  type UnlockStep as UnlockStepOf,
 } from "../store";
 import { useMode } from "../theme";
-import { LockScreenAsks } from "./Asks";
+import { listedName } from "../vaultWords";
+import { LockNote, LockScreenAsks } from "./Asks";
 import { DamagedVaultAsk } from "./RestoreNotices";
 
 /** A refusal as one line of text. */
 function said(message: Message): string {
   return message.body === "" ? message.title : `${message.title} ${message.body}`;
+}
+
+/**
+ * The unlock step of one more vault while another is open (the vault menu, the vault strip and Copy to a vault bring it): the lock screen's own look and form, for the one
+ * vault the step was opened for, with Back (and Escape) to the window that was on screen. The password is typed once and goes with the vault's registry ID; it is wiped from
+ * the box as it is sent (so a refusal, "Wrong password.", shows an empty box), by Back, and by every lock epoch, and Ask 16 (kept for that vault alone) is said above the box.
+ * A vault whose details can't be read has Ask 8 here instead of a box, as on the lock screen. The vaults that are open are not touched by anything here.
+ */
+export function UnlockStep({ step }: { step: UnlockStepOf }) {
+  const vaults = useVaults();
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping) wipes what is typed, even before the vaults' own locks are heard.
+  const epoch = useLockEpoch();
+  const [seenEpoch, setSeenEpoch] = useState(epoch);
+  if (seenEpoch !== epoch) {
+    setSeenEpoch(epoch);
+    setPassword("");
+  }
+  const list = vaults ?? [];
+  const vault = list.find((entry) => entry.id === step.vault);
+  const position = vault === undefined ? 0 : list.indexOf(vault);
+  // A vault that has left the list, or can't be reached now, has nothing to unlock: the step goes.
+  const gone = vault?.available !== true;
+  useEffect(() => {
+    if (gone) leaveUnlockStep();
+  }, [gone]);
+  if (vault === undefined || gone) return null;
+  const name = listedName(vault);
+
+  const back = () => {
+    setPassword("");
+    setError(null);
+    leaveUnlockStep();
+  };
+  if (vault.details_damaged) return <DamagedVaultAsk vault={vault.id} name={vault.name} onBack={back} />;
+
+  const submit = async (event: SyntheticEvent) => {
+    event.preventDefault();
+    if (password === "" || busy) return;
+    // The text goes once, and is gone from here as it goes: the box is empty whatever comes back.
+    const text = password;
+    setPassword("");
+    setError(null);
+    setBusy(true);
+    try {
+      await unlockInStep(step.opening, text);
+    } catch (refusal) {
+      setError(said(messageFor(refusal)));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="lock"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && !event.defaultPrevented) back();
+      }}
+    >
+      <header className="field">
+        <Pattern points={vaultLook(position, false).points} className="rose" />
+        <p className="mark">Lockbox</p>
+        <p className="say">Your items stay encrypted until you enter the password.</p>
+      </header>
+      <main className="plate">
+        <h1>{`Unlock ${name}`}</h1>
+        <div className="asks">
+          <LockNote vault={vault.id} />
+        </div>
+        <form onSubmit={(event) => void submit(event)}>
+          <PasswordField
+            label={`Password for ${name}`}
+            autoComplete="current-password"
+            value={password}
+            onChange={(next) => {
+              setPassword(next);
+              setError(null);
+            }}
+            error={error}
+            readOnly={busy}
+            autoFocus
+          />
+          <div className="lacts">
+            <button type="submit" className="prim" disabled={busy || password === ""}>
+              Unlock
+            </button>
+            <button type="button" className="lnk" onClick={back}>
+              Back
+            </button>
+          </div>
+        </form>
+      </main>
+    </div>
+  );
 }
 
 /**

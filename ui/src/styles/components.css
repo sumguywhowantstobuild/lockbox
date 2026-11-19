@@ -589,6 +589,96 @@
   box-shadow: inset 0 0 0 1px rgba(var(--sh), 0.34);
 }
 
+/* The vault strip, beside the side menu from two vaults on the list (approved 2026-11-04): a button for each vault, in its own colour and shape. */
+
+.dock {
+  position: relative;
+  z-index: 3;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 60px;
+  min-height: 0;
+  padding: 12px 0;
+  overflow-y: auto;
+  background: var(--rail);
+  border-right: 1px solid var(--line);
+}
+
+.dvault {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: var(--card);
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.dvault:hover {
+  background: var(--hov);
+}
+
+.dvault:active {
+  background: var(--prs);
+}
+
+/* The vault on screen: a ring in the vault's colour (not a tint alone), and `aria-current` says it in words. */
+.dvault.on {
+  box-shadow: 0 0 0 2px var(--add);
+}
+
+/* A vault whose folder can't be reached: greyed, and it does nothing yet. */
+.dvault.off {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* 26px for 200 units: 6.6 units is a line of about a pixel and a half. */
+.dvault .dmark {
+  width: 26px;
+  height: 26px;
+}
+
+.dvault .dmark path {
+  fill: none;
+  stroke: var(--v);
+  stroke-width: 6.6;
+}
+
+/* A locked vault: a small lock on the corner of its button, drawn in the card's colour on a disc of the text colour, so it shows against the button and the strip. */
+.dvault .dlock {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--card);
+}
+
+.dvault .dlock .i {
+  width: 10px;
+  height: 10px;
+  stroke-width: 2;
+}
+
+/* The strip carries each vault's mark, so the side menu does not draw its own beside the name. */
+.dock ~ .rail .vprint {
+  display: none;
+}
+
 /* The side menu: which vault, its folders, and Lock all. */
 
 .rail {
@@ -1995,54 +2085,24 @@
   overflow-y: auto;
 }
 
-.menu.mwide > :is(.mline, [role="group"]) {
+.menu.mwide > .mline {
   flex: none;
 }
 
-/* When the window leaves the menu short, the locked vaults' lines give up their room first, down to one line (they say only that a vault is
-   locked, and scroll); then the open rows scroll. The actions never shrink. Checked by measurement at 300 px of room: 19 locked and 1 open, 19
-   and 4, 3 and 12, 0 and 12 all keep Lock in view and every open row whole until the rows must scroll. */
-.menu.mwide > .mscroll:first-child {
-  flex-shrink: 1000;
-  min-height: 2.5em;
-}
-
-/* The group under the locked vaults' lines holds the open rows (in their own scroll area) and the actions: it may shrink, so the rows scroll and
-   the actions stay. */
-.menu.mwide > .mgroup {
+/* When the window leaves the menu short, the rows (every vault, backup and older copy, in their own scroll area) give up their room, down to a row and a
+   half, and scroll; the arrow keys reach every row and bring it into view. The actions never shrink. */
+.menu.mwide > .mscroll {
   flex: 0 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
+  min-height: 4.5em;
 }
 
-.menu.mwide > [role="menuitem"],
-.menu.mwide > .mgroup > [role="menuitem"] {
+.menu.mwide > [role="menuitem"] {
   flex: none;
 }
 
-.mnote {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
-  min-height: 34px;
-  padding: 6px 10px;
-  font-size: 14px;
-}
-
-.mnote .mt {
-  min-width: 0;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.mnote .ms {
-  flex: none;
-  font-size: 12.5px;
-  color: var(--ink2);
+/* A row that can't be used now (a vault whose folder can't be reached) does nothing; it says why in words under its name, which stay as readable as any. */
+.mi[aria-disabled="true"] {
+  cursor: not-allowed;
 }
 
 .mline {

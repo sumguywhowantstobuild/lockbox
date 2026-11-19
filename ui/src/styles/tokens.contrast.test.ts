@@ -317,6 +317,23 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("vault button focus ring on the side menu", c("--ink"), rail, 3);
       check("vault menu name words on the card", c("--ink"), card, 4.5);
       check("vault menu state words on the card", c("--ink2"), card, 4.5);
+      // Every vault is a row of that menu (Task 6): the quiet words under its name (Locked, Not available, Backup) on the row at rest, highlighted and pressed, and a
+      // row that can't be used keeps them as readable as any (it is greyed by its cursor and its words, not by fading).
+      for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`vault menu row's quiet words, ${state}`, c("--ink2"), fill, 4.5);
+      }
+      // The vault strip (Task 6): a button's face is the card, hovered or pressed it is the tint over the strip. Its mark, in the vault's colour, is a drawing that has
+      // to show on each; the vault on screen has a ring in the main button's colour against the strip (the part that shows the state, with `aria-current` saying it in
+      // words); a locked vault has a small lock, the card's colour on a disc of the text colour, which has to show against the button and against the strip; and the
+      // button's focus ring is the vault's colour against the strip.
+      for (const [state, fill] of [["rest", card], ["hovered", hoveredNav], ["pressed", pressedNav]] as const) {
+        check(`vault strip mark on its button, ${state}`, c("--v"), fill, 3);
+      }
+      check("vault strip ring of the vault on screen, against the strip", c("--add"), rail, 3);
+      check("vault strip lock on its disc", c("--card"), c("--ink"), 4.5);
+      check("vault strip lock's disc against the button", c("--ink"), card, 3);
+      check("vault strip lock's disc against the strip", c("--ink"), rail, 3);
+      check("vault strip button focus ring against the strip", c("--v"), rail, 3);
       for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
         check(`vault menu action words, ${state}`, c("--ink"), fill, 4.5);
       }

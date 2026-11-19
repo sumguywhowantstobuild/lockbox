@@ -27,11 +27,14 @@ import {
   copyItemOut,
   pickAnotherOpenBackup,
   runOpenBackup,
+  startUnlockStep,
   useOpenBackup,
   useSessions,
+  useVaults,
   type OpenFlow,
   type SessionData,
 } from "../store";
+import { listedName } from "../vaultWords";
 import { Frame } from "./setup/Frame";
 import { NO_FOLDER } from "./forms/shared";
 import { foldersOf } from "./SideMenu";
@@ -286,7 +289,8 @@ interface Copying {
  * Copy to a vault (25b, 25c, 25d), in the item's panel of a read-only session (a backup or an older copy): the sentence, the button, and under it an inline form: **Vault** (each
  * unlocked writable session by name, the most recently unlocked first and chosen) and **Folder** (that vault's live folders, then No folder; the folder named as the item's folder
  * here is chosen when the vault has one, else No folder). Copy sends the item to that vault and folder; the window stays on this session. When the backup lacks files attached to
- * the item, 25d asks first, and Copy without them sends it again. With no such vault open, the form says to unlock one first.
+ * the item, 25d asks first, and Copy without them sends it again. With no such vault open, the form says to unlock one first and offers each locked vault of the list: its
+ * unlock step opens, the backup stays open, and the vault comes up behind it, so the form lists it when it is opened again.
  */
 export function CopyToVault({ data, summary, folderNames }: { data: SessionData; summary: ItemSummary; folderNames: ReadonlyMap<string, string> }) {
   const sessions = useSessions();
@@ -317,6 +321,9 @@ export function CopyToVault({ data, summary, folderNames }: { data: SessionData;
   }, [data.session, data.generation, summary.id]);
 
   const targets = sessions.filter((entry) => !entry.readOnly).sort((a, b) => b.opened - a.opened);
+  // The vaults of the list that can be opened and are not: with no vault open to copy into, each is offered to unlock, in the list's order.
+  const listed = useVaults() ?? [];
+  const locked = listed.filter((entry) => entry.available && !sessions.some((one) => one.vaultId === entry.id));
   const vault = targets.find((entry) => String(entry.session) === picked.vault) ?? targets[0];
   const folders = vault === undefined ? [] : foldersOf(vault.items ?? []);
   // The folder with the same name as this item's folder here, else none.
@@ -384,6 +391,17 @@ export function CopyToVault({ data, summary, folderNames }: { data: SessionData;
           <div ref={(node) => void (formBox.current = node)} id={formId} className="fld col" role="group" aria-label={COPY_TO_A_VAULT}>
             <p className="fhint">{NOWHERE_TO_COPY}</p>
             <div className="fact">
+              {locked.map((entry) => (
+                <Button
+                  key={entry.id}
+                  onClick={() => {
+                    // The vault's own unlock step; the window that is on screen now is the one that comes back, with the vault open behind it.
+                    startUnlockStep(entry.id, true);
+                  }}
+                >
+                  {`Unlock ${listedName(entry)}`}
+                </Button>
+              ))}
               <Button onClick={close}>Cancel</Button>
             </div>
           </div>

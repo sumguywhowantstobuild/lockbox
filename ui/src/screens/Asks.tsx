@@ -338,6 +338,15 @@ export function ShortcutAsk() {
 }
 
 /**
+ * Ask 16 for one vault (the vault's registry ID, or `null` for none): the refusal kept for it when it locked after its change landed, said beside its password box, on the lock
+ * screen when it is the one chosen and on its own unlock step (Task 6). Only that vault's unlock uses it up; nothing for another vault.
+ */
+export function LockNote({ vault }: { vault: number | null }) {
+  const note = useLockNote(vault);
+  return note === null ? null : <Notice text={messageText(messageFor(note))} actions={[]} />;
+}
+
+/**
  * What the lock screen says beside the password: a restore that Lockbox finished at launch (the vault's name as the notice gave it, and an Unlock
  * button that closes the notice and leaves that vault chosen with its password box focused; unlocking clears it too), and a refusal that the vault
  * it was about has locked before (Ask 16, "Locked before it could say"; words, no button): kept for one vault, shown while that vault is the one chosen
@@ -346,11 +355,10 @@ export function ShortcutAsk() {
  */
 export function LockScreenAsks({ chosen, onUnlock }: { chosen: number | null; onUnlock: (vault: number | null) => void }) {
   const { restore } = useNotices();
-  const note = useLockNote(chosen);
   const finished = restore?.ask === "finished" ? restore : null;
   return (
     <div className="asks">
-      {note === null ? null : <Notice text={messageText(messageFor(note))} actions={[]} />}
+      <LockNote vault={chosen} />
       {finished === null ? null : (
         <Notice
           text={finishedWords(finished.vault?.name ?? null)}

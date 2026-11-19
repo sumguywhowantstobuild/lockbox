@@ -269,6 +269,26 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "The unlock step of another vault, while one is open (Task 6; the note Ask 16 keeps for it is drawn by the same step, tested in Switch.test.tsx)",
+    shows: ["LockScreen#UnlockStep", "Asks#LockNote"],
+    reach: async () => {
+      start([vault(), vault({ id: 8, name: "Home" })]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitemradio", { name: /^Home/ }));
+      await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
+    },
+  },
+  {
+    name: "The vault strip, with a locked vault in it (Task 6)",
+    shows: ["VaultStrip#VaultStrip"],
+    reach: async () => {
+      start([vault(), vault({ id: 8, name: "Home" })]);
+      await unlockIt();
+      await screen.findByRole("navigation", { name: "Vaults" });
+    },
+  },
+  {
     name: "Lock screen with launch's notices (Ask 11, 10e, the shortcut taken, a finished restore)",
     shows: ["Asks#LockScreenAsks", "Asks#LostOutputsAsk", "Asks#OpenFilesAsk", "Asks#ShortcutAsk"],
     reach: async () => {

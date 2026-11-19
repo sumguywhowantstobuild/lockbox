@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ItemSummary } from "../api";
 import { ChevronsIcon, GeneratorIcon, ListIcon, LockIcon, PlusIcon, SearchIcon, SettingsIcon, SideMenuIcon, TrashIcon } from "../parts/Icon";
-import { Menu } from "../parts/Menu";
+import { Menu, type MenuRow } from "../parts/Menu";
 import { VaultMark, type VaultLook } from "../parts/Pattern";
 import {
   lockEverything,
@@ -12,11 +12,13 @@ import {
   openTrash,
   selectFolder,
   showSession,
+  startUnlockStep,
   useSessions,
   useVaults,
   type SessionData,
 } from "../store";
 import { kindRow, shownName } from "../openBackupWords";
+import { listedName, LOCKED, NOT_AVAILABLE } from "../vaultWords";
 import { NewFolderBox } from "./forms/FolderForm";
 
 /** A folder of the open vault, with how many items are in it. */
@@ -30,8 +32,8 @@ export interface FolderEntry {
 const TILES = ["t0", "t1", "t2", "t3", "t4"];
 
 /**
- * The side menu: which vault is open (its name opens the vault menu: each vault and whether it is open, a row for every open session that brings it to the front, and Lock for
- * the one on screen; an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
+ * The side menu: which vault is open (its name opens the vault menu: a row for every vault of the list, which brings an open one to the front and opens a locked one's unlock
+ * step, a row for every open backup and older copy, and Lock for the one on screen; an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
  * its count, and Settings and Lock all side by side. It closes to a strip of icons; then each icon carries its name for a screen reader, and for a hint
  * when the pointer rests on it. The menu is only there while a vault is unlocked, so the Generator never shows on the lock screen.
  * A vault opened read-only has no "New folder".
@@ -54,20 +56,42 @@ export function SideMenu({
   const [closed, setClosed] = useState(false);
   // The name box "New folder" becomes. A lock takes the whole side menu, and the box with it.
   const [naming, setNaming] = useState(false);
-  // Each vault the list can reach, and whether it is open: the vault menu says it in words, as the list's line does.
-  const vaults = useVaults();
+  // Every vault of the list is one row of the vault menu, in the list's order (each once): an open one brings its window to the front, a locked one opens its own unlock
+  // step, an unavailable one says so and does nothing yet, and one whose details can't be read opens Ask 8 from the same step. Then the sessions that are not on the list
+  // (a backup, an older copy), in the order they were opened (a switch does not reorder them); a read-only one says what it is under its name.
+  const vaults = useVaults() ?? [];
   const sessions = useSessions();
-  const open = new Set(sessions.map((session) => session.vaultId));
-  // Each vault is in the menu once: an open one is a row below (the choice to bring it to the front), so the lines above are only the vaults that are not open, which say Locked.
-  const notes = (vaults ?? [])
-    .filter((vault) => vault.available && vault.name !== null && !open.has(vault.id))
-    .map((vault) => ({ name: vault.name ?? "", state: "Locked" }));
-  // Every open session is a row that brings it to the front, in the order they were unlocked or opened (a switch does not reorder them); a read-only one says what it is
-  // under its name. A locked session is gone from the page, so it has no row, and a locked vault of the list stays a note above.
-  const rows = [...sessions]
+  const listed: MenuRow[] = vaults.map((vault) => {
+    const session = sessions.find((one) => one.vaultId === vault.id);
+    if (session !== undefined) {
+      return {
+        id: `vault:${String(vault.id)}`,
+        label: session.name,
+        detail: kindRow(session.kind),
+        checked: session.session === data.session,
+        onSelect: () => {
+          showSession(session.session);
+        },
+      };
+    }
+    if (!vault.available) {
+      return { id: `vault:${String(vault.id)}`, label: listedName(vault), detail: NOT_AVAILABLE, checked: false, unavailable: true, onSelect: () => undefined };
+    }
+    return {
+      id: `vault:${String(vault.id)}`,
+      label: listedName(vault),
+      detail: LOCKED,
+      checked: false,
+      onSelect: () => {
+        startUnlockStep(vault.id);
+      },
+    };
+  });
+  const others: MenuRow[] = sessions
+    .filter((session) => !vaults.some((vault) => vault.id === session.vaultId))
     .sort((a, b) => a.opened - b.opened)
     .map((session) => ({
-      id: String(session.session),
+      id: `session:${String(session.session)}`,
       label: session.name,
       detail: kindRow(session.kind),
       checked: session.session === data.session,
@@ -75,6 +99,7 @@ export function SideMenu({
         showSession(session.session);
       },
     }));
+  const rows = [...listed, ...others];
   const onScreen = shownName(data);
   // What a closed icon is called and said to be: the words it hides.
   const named = (name: string, count?: number) =>
@@ -95,7 +120,6 @@ export function SideMenu({
               <ChevronsIcon className="i vchev" />
             </>
           }
-          notes={notes}
           rows={rows}
           items={[
             {

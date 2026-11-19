@@ -150,7 +150,6 @@ test("a_menu_with_rows_keeps_its_rows_as_menu_items_that_say_which_is_current", 
     <LockboxParts>
       <Menu
         label="Vaults"
-        notes={[{ name: "My vault", state: "Unlocked" }]}
         rows={[
           {
             id: "a",
@@ -192,7 +191,9 @@ test("a_menu_with_rows_keeps_its_rows_as_menu_items_that_say_which_is_current", 
   expect(rows.map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
   expect(rows[1]?.querySelector("svg")).not.toBeNull();
   expect(rows[0]?.querySelector("svg")).toBeNull();
-  expect(within(menu).getByRole("group", { name: "Open now" })).toBeTruthy();
+  expect(within(menu).getByRole("group", { name: "Vaults" })).toBeTruthy();
+  // No line of notes is left: every vault is a row, and a locked one says so under its name.
+  expect(menu.querySelectorAll(".mnote")).toHaveLength(0);
   // The action stays a plain menu item, after the rows.
   expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Lock Old laptop backup"]);
   await expectNoAxe(menu);

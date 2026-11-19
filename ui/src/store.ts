@@ -234,6 +234,18 @@ export interface ForgotFlow {
 }
 
 /**
+ * The unlock step of one listed vault, shown while another vault is open (Task 6). It is the app's, not a vault's, and it holds no password: what is typed is the
+ * step's own state, wiped as it is sent, by Back and on every lock epoch. `vault` is the registry ID it was opened for, so the answer lands on that vault and no other.
+ * `opening` counts the steps begun: a vault that a step opened after it was left (Back while the answer was out) is held behind the window on screen and never takes
+ * its place. `stay`: the step was opened from Copy to a vault, so the window it came from is the one on screen again once the vault is open, with the vault behind it.
+ */
+export interface UnlockStep {
+  opening: number;
+  vault: number;
+  stay: boolean;
+}
+
+/**
  * Moving to a new computer (26a to 26c), the app's own like the restore: `what` is 26a ("What do you have?"), `here` is 26c, a vault has come in (`how`: its
  * backup was restored, or its folder was added). The vault list stops being empty after the first vault comes in, so these steps are held here and not in the
  * first screen's own state, or the app would switch to the lock screen under 26c.
@@ -642,6 +654,8 @@ export interface StoreState {
   moveIn: MoveIn | null;
   /** The vault the lock screen chooses when it next opens (26c's Unlock after a folder came in), or `null`; the lock screen takes it once. */
   unlockPick: number | null;
+  /** The unlock step of one more vault, shown while another vault is open (the vault menu, the vault strip, Copy to a vault), or `null`: see {@link UnlockStep}. */
+  unlockStep: UnlockStep | null;
   /**
    * The older copies the shell last listed, or `null` until a listing has come. The shell replaces every ID at each listing, so this is the page's one
    * listing: it is read again when Settings opens, when 24f opens and after each delete or open, and every button sends an ID from it as it is now.
@@ -689,6 +703,7 @@ const EMPTY: StoreState = {
   forgot: null,
   moveIn: null,
   unlockPick: null,
+  unlockStep: null,
   olderCopies: null,
   settings: null,
 };
@@ -820,6 +835,8 @@ export function dropSession(session: number): void {
     ...state,
     sessions,
     forgot,
+    // The unlock step is for a window with a vault in it to go back to: the last lock takes it, and the lock screen follows.
+    unlockStep: sessions.length === 0 ? null : state.unlockStep,
     toast: keepToast ? toast : null,
     search:
       search === null || sessions.length === 0
@@ -856,9 +873,16 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
  * What the page does with a vault that has just opened, whether a password opened it (`unlock`) or a recovery key did (`finishRecovery`): the session's
  * record is made, the asks are set from what the unlock found, what the lock screen was saying about this vault is let go, a new recovery key is begun when the
  * old one was never confirmed (21f), the backup reminder is read, a copy that waited is seated, and the list is read. `vaultId` is the registry ID the
- * flow was opened for. Gives `"opened"` when the list is on the page, `"stale"` when the vault locked again before it was read.
+ * flow was opened for. Gives `"opened"` when the list is on the page, `"stale"` when the vault locked again before it was read. The vault is the window on screen
+ * (`place` "front"), or is held behind the one that is (`"behind"`: an unlock step that was left, or that came from Copy to a vault); `endsStep` takes the unlock step
+ * away in the same change.
  */
-function publishUnlock(answer: api.Tagged<api.UnlockView>, vaultId: number): Promise<"opened" | "stale"> {
+function publishUnlock(
+  answer: api.Tagged<api.UnlockView>,
+  vaultId: number,
+  place: "front" | "behind" = "front",
+  endsStep = false,
+): Promise<"opened" | "stale"> {
   const { info } = answer.data;
   // The recovery key of this vault was made and never confirmed by picking: the page goes straight to a new one (21f), before it
   // shows anything of the vault. A read-only copy never does (the shell says false for it).
@@ -878,7 +902,8 @@ function publishUnlock(answer: api.Tagged<api.UnlockView>, vaultId: number): Pro
   // about another vault waits for that vault's own unlock.
   set({
     ...state,
-    sessions: withFront(state.sessions, record),
+    sessions: place === "front" ? withFront(state.sessions, record) : withBehind(state.sessions, record),
+    unlockStep: endsStep ? null : state.unlockStep,
     notices: { ...state.notices, restore: state.notices.restore?.ask === "finished" ? null : state.notices.restore },
     lockNotes: state.lockNotes.filter((note) => note.vault !== vaultId),
   });
@@ -1638,6 +1663,7 @@ export function startNotices(): Promise<void> {
         takeOpenEpoch();
         takeForgotEpoch();
         takeKeyEpoch();
+        takeUnlockEpoch();
       });
     } catch {
       // Without it a restore's or an open's steps stay up after a lock, and the shell's answers to what they send say it has gone.
@@ -2704,6 +2730,86 @@ function withFront(sessions: readonly SessionData[], entry: SessionData): Sessio
   const before = sessions.at(-1);
   const rest = sessions.filter((one) => one.session !== entry.session).map((one) => (one.session === before?.session ? withoutVoluntaryKey(one) : one));
   return [...rest, entry];
+}
+
+/** The sessions with `entry` just behind the last, which is the window on screen and stays so. With none open, `entry` is the only one and so the window. */
+function withBehind(sessions: readonly SessionData[], entry: SessionData): SessionData[] {
+  const rest = sessions.filter((one) => one.session !== entry.session);
+  const front = rest.at(-1);
+  return front === undefined ? [entry] : [...rest.slice(0, -1), entry, front];
+}
+
+// ---- Unlock another vault from inside (Plan 4C Task 6) ----
+//
+// A locked vault of the list is a row of the vault menu and a button of the vault strip. Choosing it opens its unlock step (`startUnlockStep`), which is the lock screen's
+// form for that one vault, with Back: the vaults that are open stay open and are not touched. The password is typed once and goes with the vault's registry ID
+// (`unlockInStep`); it is the step's own state and is wiped as it is sent, so nothing here holds one. An answer lands on the vault it was asked for, and takes the window
+// only while a step for that vault is still up: Back, or a step for another vault, leaves the screen as it is and holds the vault open behind it.
+
+/** The number of the last unlock step begun. */
+let unlockOpenings = 0;
+
+/**
+ * Opens the unlock step of a listed vault, with another vault open. Nothing is sent. A vault that is not on the list, one that is not available, a vault that is open
+ * already (a stale button: it is brought to the front instead, unless the step is from Copy to a vault, which changes nothing) and a page with no vault open (the lock
+ * screen has its own list) open nothing. `stay` is Copy to a vault's: see {@link UnlockStep}.
+ */
+export function startUnlockStep(vault: number, stay = false): void {
+  const listed = state.vaults?.find((entry) => entry.id === vault);
+  if (listed?.available !== true || state.sessions.length === 0) return;
+  const open = state.sessions.find((entry) => entry.vaultId === vault);
+  if (open !== undefined) {
+    if (!stay) showSession(open.session);
+    return;
+  }
+  unlockOpenings += 1;
+  set({ ...state, unlockStep: { opening: unlockOpenings, vault, stay } });
+}
+
+/** Back, on the unlock step: the step goes and the window that was on screen is back. A password still out is not taken back: its answer is held behind that window. */
+export function leaveUnlockStep(): void {
+  if (state.unlockStep !== null) set({ ...state, unlockStep: null });
+}
+
+/**
+ * The unlock step's Unlock, with the password typed: sends the vault's registry ID and the text, once, and nothing else; the screen wipes its box as it calls this. `"opened"`
+ * when the vault is on the page (on screen, or behind the window that was, see {@link UnlockStep}), `"stale"` when the step was left before the send, or the vault locked
+ * again before the answer was read, which is not an error. A refusal (a wrong password) is thrown for the step to say.
+ */
+export async function unlockInStep(opening: number, password: string): Promise<"opened" | "stale"> {
+  const step = state.unlockStep;
+  if (step?.opening !== opening || password === "") return "stale";
+  const { vault } = step;
+  let answer: api.Tagged<api.UnlockView>;
+  try {
+    answer = await api.unlockVault(vault, password);
+  } catch (error) {
+    // A lock of every vault, or the window's close, that lands during the unlock is refused as locked: no session exists yet for a lock event to clear.
+    if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
+    throw error;
+  }
+  // A step for this same vault is up (the one that asked, or one opened again after Back): the vault is what it was waiting for. Any other screen is left as it is.
+  const waiting = state.unlockStep?.vault === vault ? state.unlockStep : null;
+  const held = sessionOf(answer.session);
+  if (held?.generation === answer.generation) {
+    // Held already (two steps for one vault, answered twice): nothing is made twice.
+    if (waiting !== null) {
+      set({ ...state, unlockStep: null });
+      if (!waiting.stay) showSession(answer.session);
+    }
+    return "opened";
+  }
+  return publishUnlock(answer, vault, waiting === null || waiting.stay ? "behind" : "front", waiting !== null);
+}
+
+/** A lock epoch (Lock all, an idle lock, Windows locking or sleeping): every vault is about to lock, so the step has no window to go back to. */
+function takeUnlockEpoch(): void {
+  if (state.unlockStep !== null) set({ ...state, unlockStep: null });
+}
+
+/** The unlock step as the screens read it: `null` while none is up. */
+export function useUnlockStep(): UnlockStep | null {
+  return useSelect((current) => current.unlockStep);
 }
 
 /**
@@ -5577,6 +5683,7 @@ export function resetStoreForTests(): void {
   dismissingRestore = false;
   forgotOpenings = 0;
   forgotRuns = 0;
+  unlockOpenings = 0;
   settingsLine = Promise.resolve();
   shortcutNoticeVoid = false;
   listRuns.clear();

@@ -53,6 +53,7 @@ import { SearchPanel } from "./SearchPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
 import { TrashPanel, TrashView } from "./TrashView";
+import { VaultStrip } from "./VaultStrip";
 
 /** The words for the vaults that are not open, so the list does not look as if their items were missing. */
 function lockedLine(names: readonly string[]): string | null {
@@ -244,6 +245,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
 
   return (
     <div className="win">
+      <VaultStrip data={data} />
       <SideMenu data={data} look={look} folders={folders} total={items.length} trashed={inTrash.length} />
       <div className={panel === null && data.tool === null ? "stage" : "stage open"}>
         <main className="mainpane">
