@@ -114,11 +114,27 @@ export interface UnlockView {
   recovery_unconfirmed: boolean;
 }
 
-/** A vault just created and unlocked, with its recovery key, shown once. The vault is marked "not confirmed" already. */
+/**
+ * A vault just created and unlocked, with its recovery key, shown once. The vault is marked "not confirmed" already.
+ * `issue` is the key's number (always 1, as a session's first), which `recoveryConfirmed` sends back to confirm this key.
+ */
 export interface CreatedView {
   info: SessionInfo;
   recovery_key: string;
+  issue: number;
 }
+
+/** A new recovery key, shown once: its 24 words, and the number that names it for `recoveryConfirmed`. */
+export interface NewKeyView {
+  words: string;
+  issue: number;
+}
+
+/**
+ * What `recoveryConfirmed` answers: `Confirmed` when the key was the latest one made (its mark is cleared, 21f's permission
+ * ended), `Superseded` when a newer key has been made since (nothing changed, and the newer key is the one to confirm).
+ */
+export type Confirmation = "Confirmed" | "Superseded";
 
 export type ItemKind = "login" | "key" | "note" | "file" | "collection";
 
@@ -306,18 +322,47 @@ export function addExistingVaultConfirm(token: string): Promise<Outcome<VaultEnt
 /**
  * A new recovery key for the unlocked vault, shown once; the old one stops working. The shell writes the "not
  * confirmed" mark before the vault's header changes, and makes no key if it can't (`what: "vault state"`). No password
- * is asked on this path (21f).
+ * is asked on this path (21f), so the shell makes the key only for a session that entered 21f (an unlock that read the
+ * mark, or a vault just created); any other is refused (`invalid_input`, what `"recovery key"`) and the step ends.
  */
-export function regenerateRecovery(vault: SessionRef): Promise<Tagged<string>> {
-  return call<string>("regenerate_recovery", { session: vault.session, generation: vault.generation });
+export function regenerateRecovery(vault: SessionRef): Promise<Tagged<NewKeyView>> {
+  return call<NewKeyView>("regenerate_recovery", { session: vault.session, generation: vault.generation });
 }
 
 /**
- * The key was typed back: clears the vault's "not confirmed" mark. Refused on a stale generation and on a read-only
+ * A new recovery key the person asks for from inside the vault (Settings): the same as `regenerateRecovery`, but the
+ * current password is checked in the same call, and a wrong one (`core` `wrong_password`) changes nothing. The key it
+ * makes is confirmed with `recoveryConfirmed`, by its `issue`.
+ */
+export function newRecoveryKey(vault: SessionRef, currentPassword: string): Promise<Tagged<NewKeyView>> {
+  return call<NewKeyView>("new_recovery_key", {
+    session: vault.session,
+    generation: vault.generation,
+    current_password: currentPassword,
+  });
+}
+
+/**
+ * Sets a new password, with the current one checked in the same call: a wrong current password (`wrong_password`) or a
+ * new one under 12 characters (`password_too_short`) changes nothing. A lock that came after the change landed answers
+ * `locked_after_change` with the vault's registry ID.
+ */
+export function changePassword(vault: SessionRef, currentPassword: string, newPassword: string): Promise<Tagged<null>> {
+  return call<null>("change_password", {
+    session: vault.session,
+    generation: vault.generation,
+    current_password: currentPassword,
+    new_password: newPassword,
+  });
+}
+
+/**
+ * The key `issue` was typed back: when it is the latest one made, clears the vault's "not confirmed" mark (`Confirmed`);
+ * when a newer key has been made since, nothing changes (`Superseded`). Refused on a stale generation and on a read-only
  * copy. Send it only after the typed-back groups matched.
  */
-export function recoveryConfirmed(vault: SessionRef): Promise<Tagged<null>> {
-  return call<null>("recovery_confirmed", { session: vault.session, generation: vault.generation });
+export function recoveryConfirmed(vault: SessionRef, issue: number): Promise<Tagged<Confirmation>> {
+  return call<Confirmation>("recovery_confirmed", { session: vault.session, generation: vault.generation, issue });
 }
 
 /**

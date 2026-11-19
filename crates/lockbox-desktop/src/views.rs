@@ -231,6 +231,23 @@ pub struct PrinterList {
     pub default: Option<String>,
 }
 
+/// A new recovery key (`new_recovery_key`, `regenerate_recovery`): its 24 words, which cross to the page once, for
+/// showing (as at creation), and the `issue` number that names this key, which the page sends back to confirm it
+/// (`recovery_confirmed`). The words are wiped from memory when dropped, and the view has no `Debug` (R5).
+#[derive(Serialize)]
+pub struct NewKeyView {
+    pub words: Zeroizing<String>,
+    pub issue: u64,
+}
+
+/// `recovery_confirmed`'s answer: the key was the latest one made (`Confirmed`: its mark is cleared and 21f's permission
+/// ended), or a newer key has been made since and nothing changed (`Superseded`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Confirmation {
+    Confirmed,
+    Superseded,
+}
+
 /// A quarantined file no item references (spec §6.4), with its size in bytes.
 #[derive(Serialize)]
 pub struct OrphanView {

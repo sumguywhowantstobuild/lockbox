@@ -1436,7 +1436,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
+        let key = ts.shell.regenerate_recovery(s, g).unwrap().data.words;
         let dest = backup_file(&ts, "family.lockbox-backup");
         back_up(&ts, s, g, &dest);
 
@@ -1469,15 +1469,20 @@ mod tests {
     fn password_or_key_tries_a_well_formed_key_then_a_password() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
+        let key = ts.shell.regenerate_recovery(s, g).unwrap().data.words;
         // Another vault's recovery key, which is also a well-formed key: made this vault's password, so that only the
         // fallback to a password can open the backup with it.
         let (other, og) = ts.open_vault("Other");
-        let other_key = ts.shell.regenerate_recovery(other, og).unwrap().data;
+        let other_key = ts.shell.regenerate_recovery(other, og).unwrap().data.words;
         let dest = backup_file(&ts, "family.lockbox-backup");
         back_up(&ts, s, g, &dest);
         ts.shell
-            .change_password(s, g, Zeroizing::new(other_key.to_string()))
+            .change_password(
+                s,
+                g,
+                Zeroizing::new(TEST_PASSWORD.to_owned()),
+                Zeroizing::new(other_key.to_string()),
+            )
             .unwrap();
         let by_new_password = backup_file(&ts, "second.lockbox-backup");
         back_up(&ts, s, g, &by_new_password);
@@ -2515,7 +2520,7 @@ mod tests {
         assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
 
         // A well-formed recovery key opens it too, from the one box; one that is no key is refused before a job begins.
-        let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
+        let key = ts.shell.regenerate_recovery(s, g).unwrap().data.words;
         let by_key = backup_file(&ts, "by-key.lockbox-backup");
         back_up(&ts, s, g, &by_key);
         let picked = open_pick(&ts, &by_key);

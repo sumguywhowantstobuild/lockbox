@@ -3,8 +3,12 @@
 
 use super::Vault;
 use crate::blob::{CancelToken, NoJournal, NoProgress};
+use crate::header::write_headers;
 use crate::ids::{FileId, ItemId};
 use crate::item::ItemKind;
+use crate::kdf::derive_password_key;
+use crate::secret::{Key32, random_bytes};
+use crate::slots::{SlotType, wrap_slot};
 use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -74,6 +78,39 @@ pub fn backup_missing_a_file(dir: &Path, password: &str) -> BackupMissingAFile {
         kept,
         lost,
     }
+}
+
+/// Swaps the open vault's password slot, in memory and in both header files, for an authentic one: it opens with
+/// `password` (its own salt and the old settings, a tag that verifies) but wraps a different, random key than the
+/// vault's. What a check of the current password must still refuse: the slot is genuine, only its key is not this
+/// vault's. Nothing else in the header changes.
+pub fn password_slot_wrapping_another_key(vault: &mut Vault, password: &str) {
+    let params = vault
+        .header
+        .slots
+        .iter()
+        .find(|s| s.slot_type == SlotType::Password)
+        .and_then(|s| s.kdf)
+        .expect("the vault has a password slot");
+    let salt = random_bytes::<16>();
+    let key = derive_password_key(password, &salt, &params).expect("the password key is derived");
+    let slot = wrap_slot(
+        SlotType::Password,
+        &vault.header.vault_id,
+        salt,
+        Some(params),
+        &key,
+        &Key32::random(),
+    );
+    let mut header = vault.header.clone();
+    let target = header
+        .slots
+        .iter_mut()
+        .find(|s| s.slot_type == SlotType::Password)
+        .expect("the vault has a password slot");
+    *target = slot;
+    write_headers(&vault.dir, &header).expect("the headers are written");
+    vault.header = header;
 }
 
 #[cfg(test)]

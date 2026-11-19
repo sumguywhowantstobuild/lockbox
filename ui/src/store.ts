@@ -260,11 +260,12 @@ export type RecoveryStep =
   /**
    * The key on screen, to be saved. `unfinished` is the key of an earlier step that never finished (21f); `missed` is
    * that a wrong pick brought the person back here; `back` is that the questions did (a wrong pick or "Show the key again"),
-   * so focus goes to the heading.
+   * so focus goes to the heading. `issue` is the number the shell gave the key: the page confirms it by that number, and acts
+   * on a confirmation or on a newer key only when it belongs to the step's current one.
    */
-  | { phase: "show"; key: string; unfinished: boolean; missed: boolean; back?: boolean }
+  | { phase: "show"; key: string; issue: number; unfinished: boolean; missed: boolean; back?: boolean }
   /** The key hidden, and three words to pick, one question at a time: `at` (from 0) is the one now asked. */
-  | { phase: "pick"; key: string; unfinished: boolean; asks: readonly Ask[]; at: number };
+  | { phase: "pick"; key: string; issue: number; unfinished: boolean; asks: readonly Ask[]; at: number };
 
 /** The banners an unlock can raise, each closed with its own button (Asks 4, 5, 9 and 10). */
 export type Banner = "unreadable" | "leftover" | "spare" | "cloud" | "backup" | "details";
@@ -924,11 +925,13 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
   if (answer === "Dismissed") return "dismissed";
   if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
   const before = new Set((state.vaults ?? []).map((vault) => vault.id));
-  const { info, recovery_key } = answer.data;
-  // The vault's place on the list is not known until the list is read again; the record stands in the meantime.
+  const { info, recovery_key, issue } = answer.data;
+  // The vault's place on the list is not known until the list is read again; the record stands in the meantime. The
+  // creation key keeps the number the shell gave it, to confirm it by.
   const record = newRecord(answer, -1, info, {
     phase: "show",
     key: recovery_key,
+    issue,
     unfinished: false,
     missed: false,
   });
@@ -963,10 +966,25 @@ async function finishAdd(run: () => Promise<api.Outcome<VaultEntry>>): Promise<S
   return "done";
 }
 
+/** The number of the key a step holds, or `null` while it holds none (making one, or the shell would not). */
+function issueOf(step: RecoveryStep | null): number | null {
+  return step?.phase === "show" || step?.phase === "pick" ? step.issue : null;
+}
+
+/**
+ * Whether the shell refused a new key for want of 21f's permission (`invalid_input`, what `"recovery key"`): this session never
+ * entered 21f the way that grants a key without the password, so no number of tries would make one.
+ */
+function refusedForWantOfPermission(error: unknown): boolean {
+  return refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "recovery key";
+}
+
 /**
  * Asks the shell for a new recovery key for the unlocked vault and puts it on screen, shown once more (21f). No password
  * is asked. A refusal (the shell could not write its mark first, and so made no key) is kept for the screen to say,
- * with a way to ask again; a vault that locked meanwhile gets nothing.
+ * with a way to ask again; a refusal for want of the session's permission ends the step (nothing to try again); a vault
+ * that locked meanwhile gets nothing. A key whose number is not newer than the one the step holds (its reply came after a
+ * newer key's) is not the step's: the page acts only on the current one.
  */
 export async function makeNewKey(session: number): Promise<void> {
   const entry = sessionOf(session);
@@ -976,14 +994,19 @@ export async function makeNewKey(session: number): Promise<void> {
   try {
     const answer = await api.regenerateRecovery({ session, generation });
     if (!stillOpen(session, generation)) return;
-    update(session, (current) => ({
-      ...current,
-      recovery: { phase: "show", key: answer.data, unfinished: true, missed: false },
-    }));
+    const { words, issue } = answer.data;
+    update(session, (current) => {
+      if ((issueOf(current.recovery) ?? 0) >= issue) return current;
+      return { ...current, recovery: { phase: "show", key: words, issue, unfinished: true, missed: false } };
+    });
   } catch (error) {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
-    update(session, (current) => ({ ...current, recovery: { phase: "failed", error } }));
+    // Only this call's own step ("making") is ended or failed: a newer key that arrived first stays on screen.
+    update(session, (current) => {
+      if (current.recovery?.phase !== "making") return current;
+      return { ...current, recovery: refusedForWantOfPermission(error) ? null : { phase: "failed", error } };
+    });
   }
 }
 
@@ -991,8 +1014,8 @@ export async function makeNewKey(session: number): Promise<void> {
 export function startPicking(session: number, asks: readonly Ask[]): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "show") return entry;
-    const { key, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "pick", key, unfinished, asks, at: 0 } };
+    const { key, issue, unfinished } = entry.recovery;
+    return { ...entry, recovery: { phase: "pick", key, issue, unfinished, asks, at: 0 } };
   });
 }
 
@@ -1008,8 +1031,8 @@ export function nextQuestion(session: number, at: number): void {
 export function missedPick(session: number, at: number): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "pick" || entry.recovery.at !== at) return entry;
-    const { key, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "show", key, unfinished, missed: true, back: true } };
+    const { key, issue, unfinished } = entry.recovery;
+    return { ...entry, recovery: { phase: "show", key, issue, unfinished, missed: true, back: true } };
   });
 }
 
@@ -1020,28 +1043,32 @@ export function missedPick(session: number, at: number): void {
 export function showKeyAgain(session: number): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "pick") return entry;
-    const { key, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "show", key, unfinished, missed: false, back: true } };
+    const { key, issue, unfinished } = entry.recovery;
+    return { ...entry, recovery: { phase: "show", key, issue, unfinished, missed: false, back: true } };
   });
 }
 
 /**
- * The three words were right: tells the shell, which clears its mark, and only then lets the key go. The key and the
- * questions are dropped on success. A refusal is thrown for the screen to say, and the step stays.
+ * The three words were right: tells the shell, by the key's number, which clears its mark only when that is the latest key
+ * it made, and only then lets the key go. The key and the questions are dropped on `Confirmed`, and only while the step
+ * still holds that same key. `Superseded` (a newer key was made, and its step is on the page or on its way) changes nothing
+ * here. A refusal is thrown for the screen to say, and the step stays.
  */
 export async function confirmRecovery(session: number): Promise<void> {
   const entry = sessionOf(session);
-  if (entry === undefined) return;
+  if (entry?.recovery?.phase !== "pick") return;
   const { generation } = entry;
+  const { issue } = entry.recovery;
+  let answer;
   try {
-    await api.recoveryConfirmed({ session, generation });
+    answer = await api.recoveryConfirmed({ session, generation }, issue);
   } catch (error) {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
     throw error;
   }
-  if (!stillOpen(session, generation)) return;
-  update(session, (current) => ({ ...current, recovery: null }));
+  if (!stillOpen(session, generation) || answer.data !== "Confirmed") return;
+  update(session, (current) => (issueOf(current.recovery) === issue ? { ...current, recovery: null } : current));
 }
 
 /**

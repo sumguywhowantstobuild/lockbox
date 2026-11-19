@@ -79,6 +79,14 @@ impl VaultStateStore {
         }
     }
 
+    /// Whether `folder` has the mark, read strictly: a file that cannot be read for a reason other than damage is an
+    /// error here, never a yes (a damaged file still reads as no mark, as for [`is_unconfirmed`](Self::is_unconfirmed)).
+    /// What grants a session the right to make a recovery key without the password: a mark nobody could read proves
+    /// nothing, so the lenient answer (which shows 21f, at the cost of one extra key) must not be the one that grants.
+    pub fn is_unconfirmed_strict(&self, folder: &Path) -> ShellResult<bool> {
+        Ok(self.find(folder)?.is_some_and(|stored| stored.unconfirmed))
+    }
+
     /// When `folder` was last backed up, as it was set (RFC 3339, UTC: see [`crate::dates`]).
     pub fn last_backup(&self, folder: &Path) -> Option<String> {
         self.find(folder).ok()??.last_backup
@@ -197,6 +205,36 @@ mod tests {
         store
             .clear_unconfirmed(&temp.path().join("Other-00000000"))
             .unwrap();
+    }
+
+    /// The strict read says yes only for a mark it read: no file, a damaged file and a folder with no mark say no, and a
+    /// file that cannot be read is an error, where the lenient read says yes.
+    #[test]
+    fn the_strict_read_never_takes_an_unreadable_file_for_a_mark() {
+        let temp = TempDir::new();
+        let store = store(&temp);
+        let folder = temp.path().join("Family-1234abcd");
+        assert_eq!(store.is_unconfirmed_strict(&folder), Ok(false), "no file");
+        store.mark_unconfirmed(&folder).unwrap();
+        assert_eq!(store.is_unconfirmed_strict(&folder), Ok(true));
+        assert_eq!(
+            store.is_unconfirmed_strict(&temp.path().join("Other-00000000")),
+            Ok(false),
+            "another folder has no mark"
+        );
+        fs::write(&store.file, "not json").unwrap();
+        assert_eq!(store.is_unconfirmed_strict(&folder), Ok(false), "damaged");
+
+        fs::remove_file(&store.file).unwrap();
+        fs::create_dir(&store.file).unwrap();
+        assert!(store.is_unconfirmed(&folder), "the lenient read says yes");
+        assert!(
+            matches!(
+                store.is_unconfirmed_strict(&folder),
+                Err(ShellError::Core(view)) if view.kind == "io"
+            ),
+            "the strict read is an error"
+        );
     }
 
     #[test]

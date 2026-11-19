@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../../App";
 import { messageFor, messageText } from "../../messages";
 import { Pattern } from "../../parts/Pattern";
-import { debugState, resetStoreForTests } from "../../store";
+import { debugState, makeNewKey, resetStoreForTests } from "../../store";
 import { expectNoAxe } from "../../testing/axe";
 import {
   installFakeShell,
@@ -609,7 +609,8 @@ test("three_right_picks_confirm", async () => {
   pick(key, true);
   await screen.findByRole("heading", { level: 1, name: "All items" });
   expect(commandsSent().filter((cmd) => cmd === "recovery_confirmed")).toHaveLength(1);
-  expect(invoke).toHaveBeenCalledWith("recovery_confirmed", { session: live?.session, generation: live?.generation });
+  // It names the key it confirms: the creation key is the session's first.
+  expect(invoke).toHaveBeenCalledWith("recovery_confirmed", { session: live?.session, generation: live?.generation, issue: 1 });
   expect(shell.unconfirmed(1)).toBe(false);
   // The key is gone from the page and the store for good.
   expect(keyWordsOnPage(key)).toEqual([]);
@@ -733,7 +734,8 @@ test("new_key_screen_shows_on_unconfirmed_unlock", async () => {
   await toTheQuestions();
   pickAllRight(key);
   expect(await screen.findByRole("heading", { level: 1, name: "All items" })).toBeTruthy();
-  expect(invoke).toHaveBeenCalledWith("recovery_confirmed", { session: live?.session, generation: live?.generation });
+  // The key made in 21f is the first this session made.
+  expect(invoke).toHaveBeenCalledWith("recovery_confirmed", { session: live?.session, generation: live?.generation, issue: 1 });
   expect(shell.unconfirmed(7)).toBe(false);
 });
 
@@ -2063,4 +2065,109 @@ test("print_style_has_a_rule_that_can_fail", async () => {
   } finally {
     sheet.remove();
   }
+});
+
+// ---- The key's number (Plan 4C, Task 2): a confirmation names the key it confirms ----
+
+/** What `recovery_confirmed` was last sent, as the shell got it. */
+function lastConfirmation(): { session: number; generation: number; issue: number } | undefined {
+  const sent = shell.calls.filter((call) => call.cmd === "recovery_confirmed");
+  return sent.at(-1)?.args as { session: number; generation: number; issue: number } | undefined;
+}
+
+test("first_use_confirmation_carries_the_creation_keys_issue", async () => {
+  start([]);
+  // The shell numbered the creation key 41 (the fake can start anywhere; the real one starts at 1): the page sends what it
+  // was told, not a number of its own.
+  shell.nextIssueIs(41);
+  await toTheKey();
+  const key = shell.keyOf(1) ?? "";
+  const live = shell.sessionOf(1);
+  expect(debugState().sessions[0]?.recovery).toMatchObject({ phase: "show", issue: 41 });
+  await toTheQuestions();
+  expect(debugState().sessions[0]?.recovery).toMatchObject({ phase: "pick", issue: 41 });
+  pickAllRight(key);
+  await screen.findByRole("heading", { level: 1, name: "All items" });
+  expect(invoke).toHaveBeenCalledWith("recovery_confirmed", { session: live?.session, generation: live?.generation, issue: 41 });
+  expect(commandsSent().filter((cmd) => cmd === "recovery_confirmed")).toHaveLength(1);
+  expect(shell.unconfirmed(1)).toBe(false);
+});
+
+test("an_older_confirmation_answering_superseded_keeps_the_newer_step", async () => {
+  start([{ id: 7, name: "My vault", items: [], unconfirmed: true }]);
+  const field = await screen.findByLabelText(/^Password for /);
+  fireEvent.change(field, { target: { value: PASSWORD } });
+  fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+  await screen.findByRole("heading", { level: 1, name: "Finish your recovery key" });
+  const first = shell.keyOf(7) ?? "";
+  const live = shell.sessionOf(7);
+  await toTheQuestions();
+  pick(first, true);
+  pick(first, true);
+
+  // The confirmation of the first key is held on its way, and a newer key is made before the shell hears it: the replies come
+  // in the reverse order of the asking (the shell hears the new key first, so the old confirmation finds it superseded).
+  const real = invoke.getMockImplementation();
+  if (real === undefined) throw new Error("no fake shell");
+  let release: () => void = () => undefined;
+  invoke.mockImplementation((cmd: string, args?: unknown) => {
+    if (cmd === "recovery_confirmed") {
+      return new Promise<unknown>((resolve) => {
+        release = () => {
+          resolve(real(cmd, args));
+        };
+      });
+    }
+    return real(cmd, args) as Promise<unknown>;
+  });
+  pick(first, true);
+  await vi.waitFor(() => {
+    expect(commandsSent().filter((cmd) => cmd === "recovery_confirmed")).toHaveLength(0);
+    expect(release).not.toBe(undefined);
+  });
+  await act(async () => {
+    await makeNewKey(live?.session ?? 0);
+  });
+  const second = shell.keyOf(7) ?? "";
+  expect(second).not.toBe(first);
+  expect(debugState().sessions[0]?.recovery).toMatchObject({ phase: "show", key: second, issue: 2 });
+  await act(async () => {
+    release();
+    await Promise.resolve();
+  });
+  await vi.waitFor(() => {
+    expect(lastConfirmation()).toEqual({ session: live?.session, generation: live?.generation, issue: 1 });
+  });
+  await settle();
+
+  // The older key's confirmation was answered `Superseded`: the newer key's step is untouched, its mark stays, and it is still
+  // the one that can be confirmed.
+  expect(shell.unconfirmed(7)).toBe(true);
+  expect(debugState().sessions[0]?.recovery).toMatchObject({ phase: "show", key: second, issue: 2 });
+  expect(screen.getByRole("heading", { level: 1, name: "Finish your recovery key" })).toBeTruthy();
+  expect(keyWordsOnPage(second)).toEqual([...new Set(wordsOf(second))]);
+  invoke.mockImplementation(real);
+  await toTheQuestions();
+  pickAllRight(second);
+  await screen.findByRole("heading", { level: 1, name: "All items" });
+  expect(lastConfirmation()).toEqual({ session: live?.session, generation: live?.generation, issue: 2 });
+  expect(shell.unconfirmed(7)).toBe(false);
+});
+
+test("a_21f_step_refused_for_lack_of_permission_ends_the_step", async () => {
+  // The shell could not read its note about this vault, so 21f still shows (one extra key costs little) but the session was
+  // never given the right to make one without the password.
+  const { container } = start([{ id: 7, name: "My vault", items: [], unconfirmed: true, markUnreadable: true }]);
+  const field = await screen.findByLabelText(/^Password for /);
+  fireEvent.change(field, { target: { value: PASSWORD } });
+  fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+  // The step ends: the vault's own screen, no key, no "Try again" to press over and over.
+  expect(await screen.findByRole("heading", { level: 1, name: "All items" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  expect(screen.queryByRole("heading", { level: 1, name: "Finish your recovery key" })).toBeNull();
+  expect(debugState().sessions[0]?.recovery).toBeNull();
+  expect(commandsSent().filter((cmd) => cmd === "regenerate_recovery")).toHaveLength(1);
+  expect(shell.keyOf(7)).toBeUndefined();
+  expect(shell.unconfirmed(7)).toBe(true);
+  await expectNoAxe(container);
 });

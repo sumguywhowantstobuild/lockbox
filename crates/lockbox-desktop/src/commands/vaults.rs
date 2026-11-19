@@ -26,14 +26,20 @@ use crate::os::same_path;
 use crate::paths::default_vault_parent;
 use crate::pending::{PendingChoice, Token};
 use crate::registry::VaultEntry;
-use crate::session::{Location, OpenAnswer, OpenStep, Opened, SessionId, SessionInfo, Tagged};
+use crate::session::{
+    Change, KeyState, Location, OpenAnswer, OpenStep, Opened, SessionId, SessionInfo, Tagged,
+};
 use crate::shell::Shell;
+use crate::views::{Confirmation, NewKeyView};
 
 /// A new vault, open, with its recovery key: the one time the key crosses to the page (spec §4.1). No `Debug`.
 #[derive(Serialize)]
 pub struct CreatedView {
     pub info: SessionInfo,
     pub recovery_key: Zeroizing<String>,
+    /// The creation key's number, as a key made later is numbered: the page sends it back to confirm this key
+    /// (`recovery_confirmed`), and a confirmation of any other number is for an older key.
+    pub issue: u64,
 }
 
 /// An unlocked vault, with every warning the unlock raised (spec §6.3, §6.4). All false, and nothing cleaned, when
@@ -140,8 +146,20 @@ impl From<CleanupReport> for CleanupView {
 /// The header files a vault folder holds (the engine's names): a folder with neither holds no vault.
 const HEADER_FILES: [&str; 2] = ["vault.json", "vault.json.bak"];
 
-/// What a create that a lock overtook made: the vault exists and is on the vault list, but is not open.
-const VAULT_CREATED: &str = "vault created";
+/// What a create that a lock overtook made: the vault exists and is on the vault list, but is not open. Its registry ID
+/// is not known where the create begins (0: Task 7 gives the page the ID the list assigned).
+const VAULT_CREATED: Change = Change {
+    what: "vault created",
+    vault: 0,
+};
+
+/// Tests only: the step a change of password or a new recovery key reaches once the current password is checked.
+#[cfg(test)]
+const PASSWORD_CHECKED: &str = "shell.password.checked";
+
+/// Tests only: the step reached right before the stop check that comes ahead of the header writes.
+#[cfg(test)]
+const BEFORE_HEADER_WRITES: &str = "shell.header.before_writes";
 
 /// Refuses (`"folder"`) a checked folder that is not `location`, the place the session was registered under before
 /// the open (a junction on the listed path moved in between): the session must never hold one vault under another's
@@ -159,6 +177,27 @@ fn not_cancelled(cancel: &CancelToken) -> ShellResult<()> {
     match cancel.is_cancelled() {
         true => Err(ShellError::Locked),
         false => Ok(()),
+    }
+}
+
+/// The stop check that comes right before a header write, after everything slow is done (the new password's key
+/// derived, the mark written): `Cancelled` once a lock has cancelled the session's commands, so a lock that lands
+/// before it changes nothing, and one that lands after it leaves a change that is whole. Reached through the engine's
+/// `change_password_with` for a password, which is why it answers the engine's error type.
+fn before_header_writes(cancel: &CancelToken) -> lockbox_core::Result<()> {
+    #[cfg(test)]
+    lockbox_core::internals::fsio::failpoint::check(BEFORE_HEADER_WRITES)?;
+    match cancel.is_cancelled() {
+        true => Err(lockbox_core::CoreError::Cancelled),
+        false => Ok(()),
+    }
+}
+
+/// A lock that came before the header writes answers `Locked` (nothing was written), never `Cancelled`.
+fn stopped_by_a_lock(error: lockbox_core::CoreError) -> ShellError {
+    match error {
+        lockbox_core::CoreError::Cancelled => ShellError::Locked,
+        other => other.into(),
     }
 }
 
@@ -190,24 +229,59 @@ fn opened<X>(answer: OpenAnswer<X>) -> ShellResult<Tagged<(SessionInfo, Option<X
     }
 }
 
-/// `recover_vault`'s answer: the session and what its recovery unlock found, once the closure that sets the new
-/// password ran, or its question. A session already unlocked there (the closure skipped, the password not set) is
-/// refused.
-fn recovered(answer: OpenAnswer<Unlocked>) -> ShellResult<Outcome<Tagged<UnlockView>>> {
-    Ok(match answer {
-        Outcome::Done(Tagged {
-            session,
-            generation,
-            data: (info, Some(unlocked)),
-        }) => Outcome::Done(Tagged {
-            session,
-            generation,
-            data: unlock_view(info, unlocked),
-        }),
-        Outcome::Done(_) => return Err(UNLOCKED),
-        Outcome::Confirm(question) => Outcome::Confirm(question),
-        Outcome::Dismissed => Outcome::Dismissed,
-    })
+impl Shell {
+    /// `recover_vault`'s answer: the session and what its recovery unlock found, once the closure that sets the new
+    /// password ran, or its question. A session already unlocked there (the closure skipped, the password not set) is
+    /// refused. A recovery that enters 21f is given 21f's permission, as an unlock is (`enter_21f`).
+    fn recovered(&self, answer: OpenAnswer<Unlocked>) -> ShellResult<Outcome<Tagged<UnlockView>>> {
+        Ok(match answer {
+            Outcome::Done(Tagged {
+                session,
+                generation,
+                data: (info, Some(unlocked)),
+            }) => {
+                self.enter_21f(session, generation, info.read_only);
+                Outcome::Done(Tagged {
+                    session,
+                    generation,
+                    data: unlock_view(info, unlocked),
+                })
+            }
+            Outcome::Done(_) => return Err(UNLOCKED),
+            Outcome::Confirm(question) => Outcome::Confirm(question),
+            Outcome::Dismissed => Outcome::Dismissed,
+        })
+    }
+
+    /// 21f's permission for a session a writable unlock has just opened (with the password or the recovery key, so a
+    /// credential was proved): to make a recovery key without being given the password, only when the vault folder's
+    /// mark was read without error and is there. A file that cannot be read, a folder with no mark and a read-only
+    /// session get none. Showing 21f is a separate, lenient question (`recovery_unconfirmed`): it costs one extra key
+    /// where this costs the password check. A lock that came since the unlock leaves nothing to grant.
+    fn enter_21f(&self, session: SessionId, generation: u64, read_only: bool) {
+        if read_only {
+            return;
+        }
+        let Some(Location::Folder(folder)) = self.sessions.location_of(session) else {
+            return;
+        };
+        if self.vault_state.is_unconfirmed_strict(&folder) == Ok(true) {
+            let _ = self.sessions.grant_key_permission(session, generation);
+        }
+    }
+
+    /// The registry ID of the vault a session holds, for an answer the page keeps for that vault; 0 when the
+    /// session's folder is not on the list.
+    fn registry_id_of(&self, session: SessionId) -> u32 {
+        let Some(location) = self.sessions.location_of(session) else {
+            return 0;
+        };
+        self.registry
+            .entries()
+            .into_iter()
+            .find(|(_, folder)| same_path(folder, location.path()))
+            .map_or(0, |(id, _)| id)
+    }
 }
 
 impl Shell {
@@ -283,7 +357,7 @@ impl Shell {
             .open_since(epoch, None, Some(VAULT_CREATED), |cancel| {
                 self.create_in(parent, name, password, false, cancel)
             })?;
-        created(answer)
+        self.created(answer)
     }
 
     /// The user's yes to creating the vault in a cloud folder: goes on with the folder chosen before.
@@ -305,7 +379,7 @@ impl Shell {
             pick,
             |(parent, name, password), cancel| self.create_in(parent, name, password, true, cancel),
         )?;
-        created(answer)
+        self.created(answer)
     }
 
     /// The opening closure of a create: checks `parent` (again, after a yes: it may have changed since), asks first
@@ -397,22 +471,41 @@ impl Shell {
     }
 }
 
-/// What a create's open answers: the new session with its recovery key, or the question.
-fn created(answer: OpenAnswer<Zeroizing<String>>) -> ShellResult<Outcome<Tagged<CreatedView>>> {
-    Ok(match answer {
-        Outcome::Done(tagged) => {
-            let (info, recovery_key) = tagged.data;
-            // Never `None`: an open without a location always runs its closure.
-            let recovery_key = recovery_key.ok_or(ShellError::Cancelled)?;
-            Outcome::Done(Tagged {
-                session: tagged.session,
-                generation: tagged.generation,
-                data: CreatedView { info, recovery_key },
-            })
-        }
-        Outcome::Confirm(question) => Outcome::Confirm(question),
-        Outcome::Dismissed => Outcome::Dismissed,
-    })
+impl Shell {
+    /// What a create's open answers: the new session with its recovery key and the key's `issue` number, or the
+    /// question. The new session may make a recovery key without the password while 21c's step lasts (for its
+    /// retries), until the creation key is confirmed. A lock that came between the vault's opening and this grant
+    /// leaves the vault made and its key never shown: `LockedAfterChange`, as for a lock during the create.
+    fn created(
+        &self,
+        answer: OpenAnswer<Zeroizing<String>>,
+    ) -> ShellResult<Outcome<Tagged<CreatedView>>> {
+        Ok(match answer {
+            Outcome::Done(tagged) => {
+                let (info, recovery_key) = tagged.data;
+                // Never `None`: an open without a location always runs its closure.
+                let recovery_key = recovery_key.ok_or(ShellError::Cancelled)?;
+                let issue = self
+                    .sessions
+                    .start_creation_key(tagged.session, tagged.generation)
+                    .map_err(|_| ShellError::LockedAfterChange {
+                        what: VAULT_CREATED.what,
+                        vault: VAULT_CREATED.vault,
+                    })?;
+                Outcome::Done(Tagged {
+                    session: tagged.session,
+                    generation: tagged.generation,
+                    data: CreatedView {
+                        info,
+                        recovery_key,
+                        issue,
+                    },
+                })
+            }
+            Outcome::Confirm(question) => Outcome::Confirm(question),
+            Outcome::Dismissed => Outcome::Dismissed,
+        })
+    }
 }
 
 impl Shell {
@@ -453,7 +546,12 @@ impl Shell {
             data: (info, unlocked),
         } = opened(answer)?;
         let data = match unlocked {
-            Some(unlocked) => unlock_view(info, unlocked),
+            Some(unlocked) => {
+                // Only a closure that ran proved the password: an unlock answered for a vault already unlocked
+                // checked nothing, so it grants nothing.
+                self.enter_21f(session, generation, info.read_only);
+                unlock_view(info, unlocked)
+            }
             None => {
                 let unconfirmed = self.recovery_unconfirmed(&again, info.read_only);
                 already_unlocked_view(info, unconfirmed)
@@ -492,9 +590,13 @@ impl Shell {
             return Err(UNLOCKED);
         }
         let secret = RecoverySecret::parse(&recovery_key)?;
+        let change = Change {
+            what: "password",
+            vault: id,
+        };
         let answer = self
             .sessions
-            .open(Some(location.clone()), Some("password"), |cancel| {
+            .open(Some(location.clone()), Some(change), |cancel| {
                 #[cfg(test)]
                 test_step(CHECKING)?;
                 let check = self.check_location(&dir)?;
@@ -523,7 +625,7 @@ impl Shell {
                     unlocked,
                 ))
             })?;
-        recovered(answer)
+        self.recovered(answer)
     }
 
     /// The user's answer about the changed header: yes accepts it, sets the new password and opens the session; no
@@ -555,9 +657,15 @@ impl Shell {
             }
             other => Err(other),
         };
+        // The choice holds the vault's place, not its registry ID, and the change is named before the choice is taken:
+        // a lock that overtakes this answer says no vault (0), as a create's does. Task 4 replaces this step.
+        let change = Change {
+            what: "password",
+            vault: 0,
+        };
         let answer = self.sessions.open_choice(
             token,
-            Some("password"),
+            Some(change),
             pick,
             |(location, vault, new_password, mut report), cancel| {
                 // Before `accept_header` writes anything.
@@ -581,50 +689,129 @@ impl Shell {
                 ))
             },
         )?;
-        recovered(answer)
+        self.recovered(answer)
     }
 
+    /// Sets a new password, checking the current one in the same call. All inside one `write_change` closure, which
+    /// holds the vault's write lock, so no other change comes between the check and the writes: the new password's
+    /// length first (no Argon2 spent on a password that is refused), then the current password, then the new key's
+    /// derivation, then the stop check right before the header writes (`before_header_writes`), then the writes. A
+    /// wrong current password changes nothing. A lock that came before the writes answers `Locked`, with nothing
+    /// written; one that came during them answers `LockedAfterChange { what: "password", vault }` and no word of
+    /// anything else (the lease's generation check on the answer).
     pub fn change_password(
         &self,
         session: SessionId,
         generation: u64,
+        current_password: Zeroizing<String>,
         new_password: Zeroizing<String>,
     ) -> ShellResult<Tagged<()>> {
+        let change = Change {
+            what: "password",
+            vault: self.registry_id_of(session),
+        };
         self.sessions
-            .write_change(session, generation, "password", |vault, _| {
-                Ok(vault.change_password(&new_password)?)
+            .write_change(session, generation, change, |vault, cancel| {
+                check_new_password(&new_password)?;
+                vault.check_password(&current_password)?;
+                #[cfg(test)]
+                test_step(PASSWORD_CHECKED)?;
+                vault
+                    .change_password_with(&new_password, || before_header_writes(cancel))
+                    .map_err(stopped_by_a_lock)
             })
     }
 
-    /// A new recovery key, shown once; the old one stops working. The vault's "recovery key not confirmed" mark is
-    /// written first, so a crash or lock before the person has typed part of the key back leaves the mark, and the
-    /// next unlock makes another. If the mark cannot be written, no key is made (`TooLarge { what: "vault state" }`
-    /// or an I/O refusal). No password is asked: the person is already inside, and this is the way out of a key they
-    /// never saw. A mark stays if the engine then fails: the old key may still work, and one more new key costs less
-    /// than a key nobody saw.
+    /// A new recovery key the person asks for from inside the vault, with the current password checked in the same
+    /// call (the key it replaces may be one they still have): the password, then the "not confirmed" mark, then the
+    /// stop check, then the key, all inside one closure holding the vault's write lock. A wrong password writes no
+    /// mark and changes nothing. This does not give the session 21f's permission: the key it makes awaits its
+    /// confirmation, and a direct `regenerate_recovery` stays refused.
+    pub fn new_recovery_key(
+        &self,
+        session: SessionId,
+        generation: u64,
+        current_password: Zeroizing<String>,
+    ) -> ShellResult<Tagged<NewKeyView>> {
+        let change = Change {
+            what: "recovery key",
+            vault: self.registry_id_of(session),
+        };
+        self.sessions
+            .write_keys(session, generation, Some(change), |vault, keys, cancel| {
+                vault.check_password(&current_password)?;
+                #[cfg(test)]
+                test_step(PASSWORD_CHECKED)?;
+                self.make_key(vault, keys, cancel)
+            })
+    }
+
+    /// A new recovery key for a session in 21f (a key made and never confirmed, found at unlock or at creation): no
+    /// password is asked, since the person is in the step that makes the key they never saw. Refused
+    /// (`InvalidInput`) unless the session holds 21f's permission (see `enter_21f`, `KeyState`): any other session
+    /// asks for the password through `new_recovery_key`. The permission stays for this step's retries and ends when
+    /// the current key is confirmed. The mark is written first, as for any key: if it cannot be written, no key is
+    /// made (`TooLarge { what: "vault state" }` or an I/O refusal), and a mark stays if the engine then fails (the old
+    /// key may still work, and one more new key costs less than a key nobody saw).
     pub fn regenerate_recovery(
         &self,
         session: SessionId,
         generation: u64,
-    ) -> ShellResult<Tagged<Zeroizing<String>>> {
+    ) -> ShellResult<Tagged<NewKeyView>> {
+        let change = Change {
+            what: "recovery key",
+            vault: self.registry_id_of(session),
+        };
         self.sessions
-            .write_change(session, generation, "recovery key", |vault, _| {
-                self.vault_state.mark_unconfirmed(vault.dir())?;
-                Ok(vault.regenerate_recovery()?.to_display())
+            .write_keys(session, generation, Some(change), |vault, keys, cancel| {
+                if !keys.may_make_without_password() {
+                    return Err(ShellError::InvalidInput {
+                        what: "recovery key",
+                    });
+                }
+                self.make_key(vault, keys, cancel)
             })
     }
 
-    /// The person typed part of the new recovery key back: clears the "recovery key not confirmed" mark of the
-    /// session's vault. Clearing a mark that is not there is a success. Refused, as any change is, on a stale
-    /// generation, a session that is not there, and a read-only copy.
+    /// The part of making a key that follows its authorisation, inside the vault's write lock: the mark, the stop
+    /// check, the key, and its `issue` number (given only to a key that was made).
+    fn make_key(
+        &self,
+        vault: &mut Vault,
+        keys: &mut KeyState,
+        cancel: &CancelToken,
+    ) -> ShellResult<NewKeyView> {
+        // A lock that has come already leaves no mark behind (which would make the next unlock ask for a key).
+        not_cancelled(cancel)?;
+        self.vault_state.mark_unconfirmed(vault.dir())?;
+        before_header_writes(cancel).map_err(stopped_by_a_lock)?;
+        let words = vault.regenerate_recovery()?.to_display();
+        Ok(NewKeyView {
+            words,
+            issue: keys.next_issue(),
+        })
+    }
+
+    /// The person typed part of a recovery key back: `issue` names the key. When it is the latest one this session
+    /// made, the "not confirmed" mark of the session's vault is cleared (a mark that is not there is a success) and
+    /// 21f's permission ends: `Confirmed`. A key made since (the person asked for another before confirming this
+    /// one) leaves both as they are: `Superseded`. Under the vault's write lock, so it never interleaves with a key
+    /// being made. Refused, as any change is, on a stale generation, a session that is not there, and a read-only copy.
     pub fn recovery_confirmed(
         &self,
         session: SessionId,
         generation: u64,
-    ) -> ShellResult<Tagged<()>> {
-        self.sessions.write(session, generation, |vault, _| {
-            self.vault_state.clear_unconfirmed(vault.dir())
-        })
+        issue: u64,
+    ) -> ShellResult<Tagged<Confirmation>> {
+        self.sessions
+            .write_keys(session, generation, None, |vault, keys, _| {
+                if !keys.is_latest(issue) {
+                    return Ok(Confirmation::Superseded);
+                }
+                self.vault_state.clear_unconfirmed(vault.dir())?;
+                keys.revoke();
+                Ok(Confirmation::Confirmed)
+            })
     }
 
     /// Accepts a header changed outside Lockbox (after `header_mac_mismatch`), once the user agreed.
@@ -688,7 +875,24 @@ struct SessionArg {
 struct ChangePassword {
     session: SessionId,
     generation: u64,
+    current_password: Zeroizing<String>,
     new_password: Zeroizing<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewRecoveryKey {
+    session: SessionId,
+    generation: u64,
+    current_password: Zeroizing<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryConfirmed {
+    session: SessionId,
+    generation: u64,
+    issue: u64,
 }
 
 #[tauri::command]
@@ -809,17 +1013,33 @@ pub(super) async fn change_password(
     let ChangePassword {
         session,
         generation,
+        current_password,
         new_password,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.change_password(session, generation, new_password)).await
+    blocking(move || shell.change_password(session, generation, current_password, new_password))
+        .await
+}
+
+#[tauri::command]
+pub(super) async fn new_recovery_key(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<NewKeyView>> {
+    let NewRecoveryKey {
+        session,
+        generation,
+        current_password,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.new_recovery_key(session, generation, current_password)).await
 }
 
 #[tauri::command]
 pub(super) async fn regenerate_recovery(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
-) -> ShellResult<Tagged<Zeroizing<String>>> {
+) -> ShellResult<Tagged<NewKeyView>> {
     let SessionArg {
         session,
         generation,
@@ -832,13 +1052,14 @@ pub(super) async fn regenerate_recovery(
 pub(super) async fn recovery_confirmed(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
-) -> ShellResult<Tagged<()>> {
-    let SessionArg {
+) -> ShellResult<Tagged<Confirmation>> {
+    let RecoveryConfirmed {
         session,
         generation,
+        issue,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.recovery_confirmed(session, generation)).await
+    blocking(move || shell.recovery_confirmed(session, generation, issue)).await
 }
 
 #[tauri::command]
@@ -1103,7 +1324,8 @@ mod tests {
         assert_eq!(
             answer.err(),
             Some(ShellError::LockedAfterChange {
-                what: "vault created"
+                what: "vault created",
+                vault: 0
             })
         );
         let entries = ts.shell.registry.entries();
@@ -1164,7 +1386,9 @@ mod tests {
         join(&locker);
         match answer.err() {
             Some(ShellError::Locked) => assert_eq!(headers(&dir), before, "nothing changed"),
-            Some(ShellError::LockedAfterChange { what: "password" }) => {
+            Some(ShellError::LockedAfterChange {
+                what: "password", ..
+            }) => {
                 assert!(password_works(&dir, NEW_PW))
             }
             other => panic!("not overtaken by the lock: {other:?}"),
@@ -1197,6 +1421,7 @@ mod tests {
             }
             Some(ShellError::LockedAfterChange {
                 what: "vault created",
+                ..
             }) => {
                 assert_eq!(entries.len(), 2, "the new vault is on the list");
                 assert!(is_free(&entries[1].1));
@@ -1226,7 +1451,8 @@ mod tests {
         assert_eq!(
             answer.err(),
             Some(ShellError::LockedAfterChange {
-                what: "vault created"
+                what: "vault created",
+                vault: 0
             })
         );
         assert!(ts.shell.sessions.list().is_empty());
@@ -1956,7 +2182,10 @@ mod tests {
         failpoint::disarm_all();
         assert_eq!(
             answer.err(),
-            Some(ShellError::LockedAfterChange { what: "password" })
+            Some(ShellError::LockedAfterChange {
+                what: "password",
+                vault: 0
+            })
         );
         assert!(ts.shell.sessions.list().is_empty());
         assert!(is_free(&dir));
@@ -1991,11 +2220,16 @@ mod tests {
         let (session, generation) = (tagged.session, tagged.generation);
         let changed = heavy(|| {
             ts.shell
-                .change_password(session, generation, secret(NEW_PW))
+                .change_password(session, generation, secret(PW), secret(NEW_PW))
         });
         assert_eq!(changed.unwrap().generation, generation);
-        let recovery = heavy(|| ts.shell.regenerate_recovery(session, generation)).unwrap();
-        assert_ne!(recovery.data.as_str(), old_recovery.as_str());
+        // The new key asks for the password that is current now: the new one.
+        let recovery = heavy(|| {
+            ts.shell
+                .new_recovery_key(session, generation, secret(NEW_PW))
+        })
+        .unwrap();
+        assert_ne!(recovery.data.words.as_str(), old_recovery.as_str());
         // A stale generation is refused.
         assert_eq!(
             ts.shell.accept_header(session, generation + 1).err(),
@@ -2003,7 +2237,7 @@ mod tests {
         );
         ts.shell.sessions.lock_all(LockReason::Manual);
         assert!(password_works(&dir, NEW_PW));
-        let new_key = RecoverySecret::parse(&recovery.data).unwrap();
+        let new_key = RecoverySecret::parse(&recovery.data.words).unwrap();
         assert!(heavy(|| Vault::unlock_with_recovery(&dir, &new_key)).is_ok());
         let old_key = RecoverySecret::parse(&old_recovery).unwrap();
         assert!(heavy(|| Vault::unlock_with_recovery(&dir, &old_key)).is_err());
@@ -2356,124 +2590,12 @@ mod tests {
         assert_eq!(
             answer.err(),
             Some(ShellError::LockedAfterChange {
-                what: "vault created"
+                what: "vault created",
+                vault: 0
             })
         );
         assert!(ts.shell.vault_state.is_unconfirmed(&listed_dir(&ts)));
         assert_eq!(state_file(&ts)["vaults"].as_array().unwrap().len(), 1);
-    }
-
-    /// A new key's mark is on disk before the header changes.
-    #[test]
-    fn mark_written_before_new_key() {
-        let ts = TestShell::new();
-        let (session, generation) = ts.open_vault("Family");
-        let dir = listed_dir(&ts);
-        ts.shell.recovery_confirmed(session, generation).unwrap();
-        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
-
-        let seen = Rc::new(Cell::new(None));
-        let (shell, record, dir_seen) = (Arc::clone(&ts.shell), Rc::clone(&seen), dir.clone());
-        failpoint::observe(
-            "write_headers.before_first",
-            Box::new(move || record.set(Some(shell.vault_state.is_unconfirmed(&dir_seen)))),
-        );
-        let key = heavy(|| ts.shell.regenerate_recovery(session, generation));
-        failpoint::disarm_all();
-        key.unwrap();
-        assert_eq!(seen.get(), Some(true), "marked when the header was written");
-        assert!(
-            ts.shell.vault_state.is_unconfirmed(&dir),
-            "and stays marked"
-        );
-    }
-
-    /// A refusal to write the mark stops the new key before the header is touched: the old key still works.
-    #[test]
-    fn no_new_key_if_mark_cannot_be_written() {
-        let ts = TestShell::new();
-        let (session, generation) = ts.open_vault("Family");
-        let dir = listed_dir(&ts);
-        ts.shell.recovery_confirmed(session, generation).unwrap();
-        let before = headers(&dir);
-        let reached = Rc::new(Cell::new(false));
-        let seen = Rc::clone(&reached);
-        failpoint::observe(
-            "write_headers.before_first",
-            Box::new(move || seen.set(true)),
-        );
-
-        // The write fails.
-        failpoint::arm("atomic_write.before_replace");
-        let answer = heavy(|| ts.shell.regenerate_recovery(session, generation));
-        failpoint::disarm_all();
-        assert!(matches!(answer.err(), Some(ShellError::Core(view)) if view.kind == "io"));
-        assert!(!reached.get());
-        assert_eq!(headers(&dir), before, "no new key");
-        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
-
-        // The note would not fit.
-        let seed = nearly_full_state(&ts);
-        let answer = heavy(|| ts.shell.regenerate_recovery(session, generation));
-        assert_eq!(
-            answer.err(),
-            Some(ShellError::TooLarge {
-                what: "vault state"
-            })
-        );
-        assert!(!reached.get());
-        assert_eq!(headers(&dir), before, "no new key");
-        assert_eq!(
-            fs::read_to_string(&ts.shell.paths.vault_state).unwrap(),
-            seed
-        );
-        failpoint::disarm_all();
-    }
-
-    /// A stale generation, a foreign session and a read-only copy make no key and write no mark.
-    #[test]
-    fn new_key_refused_stale_foreign_and_read_only_writes_no_mark() {
-        let ts = TestShell::new();
-        let (session, generation) = ts.open_vault("Family");
-        let dir = listed_dir(&ts);
-        ts.shell.recovery_confirmed(session, generation).unwrap();
-        let before = headers(&dir);
-        assert_eq!(
-            ts.shell.regenerate_recovery(session, generation + 1).err(),
-            Some(ShellError::Locked)
-        );
-        assert_eq!(
-            ts.shell
-                .regenerate_recovery(SessionId(session.0 + 100), generation)
-                .err(),
-            Some(ShellError::NotFound)
-        );
-        assert_eq!(headers(&dir), before);
-        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
-
-        // A read-only copy: refused, and no mark is written for it (nor for anything else).
-        let backup = ts.folder("Backups").join("Family.lockbox-backup");
-        ts.dialogs.answer(Some(backup.clone()));
-        done(
-            heavy(|| ts.shell.backup_vault(session, generation, 1))
-                .unwrap()
-                .data,
-        );
-        ts.shell.sessions.lock_all(LockReason::Manual);
-        let credential = super::super::backup::CredentialArg::Password(secret(PW));
-        let copy = ts.open_backup_read_only(&backup, credential);
-        assert!(copy.data.read_only);
-        let state_before = fs::read(&ts.shell.paths.vault_state).unwrap();
-        assert_eq!(
-            heavy(|| ts.shell.regenerate_recovery(copy.session, copy.generation)).err(),
-            Some(ShellError::ReadOnly)
-        );
-        assert_eq!(
-            fs::read(&ts.shell.paths.vault_state).unwrap(),
-            state_before,
-            "the state file is unchanged"
-        );
-        assert_eq!(headers(&dir), before);
     }
 
     /// A mark that cannot be read for a reason other than damage (another program holds the file) is taken for a mark,
@@ -2483,7 +2605,7 @@ mod tests {
     fn an_unreadable_state_file_counts_as_a_mark() {
         let ts = TestShell::new();
         let (session, generation) = ts.open_vault("Family");
-        ts.shell.recovery_confirmed(session, generation).unwrap();
+        ts.shell.recovery_confirmed(session, generation, 1).unwrap();
         let id = ts.shell.registry.entries()[0].0;
         ts.shell.sessions.lock_all(LockReason::Manual);
         let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
@@ -2539,10 +2661,15 @@ mod tests {
         // The new key needs no password; once confirmed, the next unlock says nothing.
         let (session, generation) = (view.session, view.generation);
         let fresh = heavy(|| ts.shell.regenerate_recovery(session, generation)).unwrap();
-        assert_ne!(fresh.data.as_str(), key.as_str());
+        assert_ne!(fresh.data.words.as_str(), key.as_str());
+        assert_eq!(fresh.data.issue, 1, "the first key this session made");
         let after = ts.shell.unlock_vault(id, secret(PW)).unwrap();
         assert!(after.data.recovery_unconfirmed, "still unconfirmed");
-        ts.shell.recovery_confirmed(session, generation).unwrap();
+        let confirmed = ts
+            .shell
+            .recovery_confirmed(session, generation, fresh.data.issue)
+            .unwrap();
+        assert_eq!(confirmed.data, Confirmation::Confirmed);
         assert!(
             !ts.shell
                 .unlock_vault(id, secret(PW))
@@ -2559,14 +2686,18 @@ mod tests {
         ts.shell.vault_state.mark_unconfirmed(&dir).unwrap();
         let recovered = heavy(|| {
             ts.shell
-                .recover_vault(id, fresh.data.clone(), secret(NEW_PW))
+                .recover_vault(id, fresh.data.words.clone(), secret(NEW_PW))
         });
         assert!(done(recovered.unwrap()).data.recovery_unconfirmed);
         ts.shell.sessions.lock_all(LockReason::Manual);
 
         // And through the changed header's yes.
         change_header(&dir);
-        let asked = heavy(|| ts.shell.recover_vault(id, fresh.data.clone(), secret(PW))).unwrap();
+        let asked = heavy(|| {
+            ts.shell
+                .recover_vault(id, fresh.data.words.clone(), secret(PW))
+        })
+        .unwrap();
         let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
             panic!("the changed header asks first");
         };
@@ -2605,7 +2736,7 @@ mod tests {
         // And it cannot clear the folder's mark.
         assert_eq!(
             ts.shell
-                .recovery_confirmed(opened.session, opened.generation)
+                .recovery_confirmed(opened.session, opened.generation, 1)
                 .err(),
             Some(ShellError::ReadOnly)
         );
@@ -2622,10 +2753,10 @@ mod tests {
             ts.shell.registry.entries()[1].1.clone(),
         );
         assert!(ts.shell.vault_state.is_unconfirmed(&dir));
-        let answer = ts.shell.recovery_confirmed(session, generation).unwrap();
+        let answer = ts.shell.recovery_confirmed(session, generation, 1).unwrap();
         assert_eq!(
             serde_json::to_value(&answer).unwrap(),
-            json!({ "session": session.0, "generation": generation, "data": null })
+            json!({ "session": session.0, "generation": generation, "data": "Confirmed" })
         );
         assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
         assert!(
@@ -2633,8 +2764,8 @@ mod tests {
             "only this session's vault"
         );
         // Clearing a mark that is not there is a success.
-        ts.shell.recovery_confirmed(session, generation).unwrap();
-        ts.shell.recovery_confirmed(other.0, other.1).unwrap();
+        ts.shell.recovery_confirmed(session, generation, 1).unwrap();
+        ts.shell.recovery_confirmed(other.0, other.1, 1).unwrap();
         ts.shell.sessions.lock_all(LockReason::Manual);
         let id = ts.shell.registry.entries()[0].0;
         let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
@@ -2648,19 +2779,21 @@ mod tests {
         let dir = listed_dir(&ts);
         // A stale generation, a session that is not there, and a session that has locked since.
         assert_eq!(
-            ts.shell.recovery_confirmed(session, generation + 1).err(),
+            ts.shell
+                .recovery_confirmed(session, generation + 1, 1)
+                .err(),
             Some(ShellError::Locked)
         );
         assert_eq!(
             ts.shell
-                .recovery_confirmed(SessionId(session.0 + 100), generation)
+                .recovery_confirmed(SessionId(session.0 + 100), generation, 1)
                 .err(),
             Some(ShellError::NotFound)
         );
         assert!(ts.shell.vault_state.is_unconfirmed(&dir), "nothing cleared");
         ts.shell.sessions.lock_all(LockReason::Manual);
         assert_eq!(
-            ts.shell.recovery_confirmed(session, generation).err(),
+            ts.shell.recovery_confirmed(session, generation, 1).err(),
             Some(ShellError::Locked)
         );
         assert!(ts.shell.vault_state.is_unconfirmed(&dir));
@@ -2676,7 +2809,9 @@ mod tests {
         ts.shell.sessions.lock_all(LockReason::Manual);
         let credential = super::super::backup::CredentialArg::Password(secret(PW));
         let copy = ts.open_backup_read_only(&backup, credential);
-        let refused = ts.shell.recovery_confirmed(copy.session, copy.generation);
+        let refused = ts
+            .shell
+            .recovery_confirmed(copy.session, copy.generation, 1);
         assert_eq!(refused.err(), Some(ShellError::ReadOnly));
         let json = serde_json::to_value(ShellError::ReadOnly).unwrap();
         assert_eq!(json, json!({ "code": "read_only" }));
@@ -2716,17 +2851,24 @@ mod tests {
     /// `recovery_confirmed`'s answer, and its request.
     #[test]
     fn recovery_confirmed_answer_and_request_are_pinned() {
-        let answer = Tagged {
-            session: SessionId(7),
-            generation: 3,
-            data: (),
-        };
-        assert_eq!(
-            serde_json::to_string(&answer).unwrap(),
-            r#"{"session":7,"generation":3,"data":null}"#
-        );
-        // The same request as `regenerate_recovery` and `accept_header`, with nothing else allowed.
+        for (data, text) in [
+            (Confirmation::Confirmed, "Confirmed"),
+            (Confirmation::Superseded, "Superseded"),
+        ] {
+            let answer = Tagged {
+                session: SessionId(7),
+                generation: 3,
+                data,
+            };
+            assert_eq!(
+                serde_json::to_string(&answer).unwrap(),
+                format!(r#"{{"session":7,"generation":3,"data":"{text}"}}"#)
+            );
+        }
+        // `regenerate_recovery` and `accept_header` take no more than the session and its generation.
         refuses_a_path::<SessionArg>(json!({ "session": 7, "generation": 3 }));
+        // `recovery_confirmed` names the key it confirms.
+        refuses_a_path::<RecoveryConfirmed>(json!({ "session": 7, "generation": 3, "issue": 2 }));
     }
 
     /// `body` parses as the request `T`, and the same body with a `path` added is refused with the fixed answer.
@@ -2764,7 +2906,1020 @@ mod tests {
         refuses_a_path::<RecoverConfirm>(json!({ "token": token, "accept": true }));
         refuses_a_path::<SessionArg>(json!({ "session": 1, "generation": 1 }));
         refuses_a_path::<ChangePassword>(
-            json!({ "session": 1, "generation": 1, "new_password": NEW_PW }),
+            json!({ "session": 1, "generation": 1, "current_password": PW, "new_password": NEW_PW }),
         );
+        refuses_a_path::<NewRecoveryKey>(
+            json!({ "session": 1, "generation": 1, "current_password": PW }),
+        );
+    }
+
+    // ---- The current password, checked in the same call; 21f's permission and the confirmation (Plan 4C, Task 2) ----
+
+    /// A new vault, made through the shell, whose creation key is confirmed (issue 1): an unlocked session with no
+    /// mark and no 21f permission, like one opened after a confirmed key.
+    fn confirmed_session(ts: &TestShell, name: &str) -> (SessionId, u64) {
+        let (session, generation) = ts.open_vault(name);
+        let answer = ts.shell.recovery_confirmed(session, generation, 1).unwrap();
+        assert_eq!(answer.data, Confirmation::Confirmed);
+        (session, generation)
+    }
+
+    /// The folder a session holds.
+    fn folder_of(ts: &TestShell, session: SessionId) -> PathBuf {
+        ts.shell
+            .sessions
+            .location_of(session)
+            .expect("the session is there")
+            .path()
+            .to_path_buf()
+    }
+
+    /// The registry ID of the vault a session holds.
+    fn registry_id(ts: &TestShell, session: SessionId) -> u32 {
+        let folder = folder_of(ts, session);
+        ts.shell
+            .registry
+            .entries()
+            .into_iter()
+            .find(|(_, listed)| crate::os::same_path(listed, &folder))
+            .expect("the vault is listed")
+            .0
+    }
+
+    /// Everything a refused change must leave alone: both header files and the vault-state file (`None`: not there).
+    fn on_disk(ts: &TestShell, dir: &Path) -> OnDisk {
+        (headers(dir), fs::read(&ts.shell.paths.vault_state).ok())
+    }
+
+    /// The two header files' bytes and the state file's (`None`: not there).
+    type OnDisk = ((Vec<u8>, Vec<u8>), Option<Vec<u8>>);
+
+    /// Locks every vault when the command reaches the test step `step` (`PASSWORD_CHECKED`, `BEFORE_HEADER_WRITES`, or
+    /// one of the engine's own failpoints), on the thread that runs the command.
+    fn lock_at(ts: &TestShell, step: &'static str) {
+        let shell = Arc::clone(&ts.shell);
+        failpoint::observe(
+            step,
+            Box::new(move || shell.sessions.lock_all(LockReason::Manual)),
+        );
+    }
+
+    #[test]
+    fn wrong_current_password_changes_nothing() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = on_disk(&ts, &dir);
+        for wrong in [
+            "another long password",
+            "correct horse batter",
+            "CORRECT HORSE BATTERY",
+        ] {
+            let changed = heavy(|| {
+                ts.shell
+                    .change_password(session, generation, secret(wrong), secret(NEW_PW))
+            });
+            assert_eq!(changed.err(), Some(wrong_password()), "{wrong}");
+            let key = heavy(|| {
+                ts.shell
+                    .new_recovery_key(session, generation, secret(wrong))
+            });
+            assert_eq!(key.err(), Some(wrong_password()), "{wrong}");
+            assert_eq!(
+                on_disk(&ts, &dir),
+                before,
+                "{wrong}: both headers and the state file"
+            );
+        }
+        // The vault still opens with its password, and with nothing else.
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(password_works(&dir, PW));
+        assert!(!password_works(&dir, NEW_PW));
+        assert_eq!(on_disk(&ts, &dir), before);
+    }
+
+    #[test]
+    fn change_password_with_the_current_password_sets_the_new_one() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = headers(&dir);
+        let changed = heavy(|| {
+            ts.shell
+                .change_password(session, generation, secret(PW), secret(NEW_PW))
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&changed).unwrap(),
+            json!({ "session": session.0, "generation": generation, "data": null })
+        );
+        assert_ne!(headers(&dir), before);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(password_works(&dir, NEW_PW));
+        assert!(!password_works(&dir, PW));
+    }
+
+    /// The new password's length is checked first: a refused password spends no Argon2 (the step after the current
+    /// password's check is never reached), whatever the current password is.
+    #[test]
+    fn change_password_refuses_a_short_new_password_before_checking() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = on_disk(&ts, &dir);
+        let reached = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&reached);
+        failpoint::observe(PASSWORD_CHECKED, Box::new(move || seen.set(true)));
+        let too_short = ShellError::from(CoreError::PasswordTooShort { min: 12 });
+        for current in [PW, "another long password"] {
+            let answer =
+                ts.shell
+                    .change_password(session, generation, secret(current), secret("too short"));
+            assert_eq!(answer.err(), Some(too_short), "current: {current}");
+        }
+        failpoint::disarm_all();
+        assert!(!reached.get(), "the current password was never checked");
+        assert_eq!(on_disk(&ts, &dir), before);
+    }
+
+    /// The engine's fixture: a password slot that opens with the typed password and wraps another key than the vault's.
+    /// Both commands refuse it, changing nothing (headers and state file).
+    #[test]
+    fn change_password_and_new_recovery_key_refuse_a_slot_wrapping_another_key() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        ts.shell
+            .sessions
+            .write(session, generation, |vault, _| {
+                lockbox_core::internals::fixture::password_slot_wrapping_another_key(vault, PW);
+                Ok(())
+            })
+            .unwrap();
+        let before = on_disk(&ts, &dir);
+        let changed = heavy(|| {
+            ts.shell
+                .change_password(session, generation, secret(PW), secret(NEW_PW))
+        });
+        assert_eq!(changed.err(), Some(wrong_password()));
+        let key = heavy(|| ts.shell.new_recovery_key(session, generation, secret(PW)));
+        assert_eq!(key.err(), Some(wrong_password()));
+        assert_eq!(
+            on_disk(&ts, &dir),
+            before,
+            "headers and state file unchanged"
+        );
+    }
+
+    /// A lock that comes while the current password is checked: nothing is written, and the answer is `Locked`.
+    #[test]
+    fn a_lock_during_the_password_check_changes_nothing_and_answers_locked() {
+        let ts = TestShell::new();
+        for command in ["change_password", "new_recovery_key"] {
+            let (session, generation) = confirmed_session(&ts, command);
+            let dir = folder_of(&ts, session);
+            let before = on_disk(&ts, &dir);
+            lock_at(&ts, PASSWORD_CHECKED);
+            let answer = match command {
+                "change_password" => heavy(|| {
+                    ts.shell
+                        .change_password(session, generation, secret(PW), secret(NEW_PW))
+                        .map(|_| ())
+                }),
+                _ => heavy(|| {
+                    ts.shell
+                        .new_recovery_key(session, generation, secret(PW))
+                        .map(|_| ())
+                }),
+            };
+            failpoint::disarm_all();
+            assert_eq!(answer.err(), Some(ShellError::Locked), "{command}");
+            assert_eq!(on_disk(&ts, &dir), before, "{command}");
+            assert!(password_works(&dir, PW), "{command}");
+        }
+    }
+
+    /// A lock that comes after everything slow is done, just before the header writes: the stop check sees it, so
+    /// nothing is written and the answer is `Locked`.
+    #[test]
+    fn a_stop_just_before_the_header_writes_changes_nothing_and_answers_locked() {
+        let ts = TestShell::new();
+        for command in ["change_password", "new_recovery_key"] {
+            let (session, generation) = confirmed_session(&ts, command);
+            let dir = folder_of(&ts, session);
+            let before = headers(&dir);
+            lock_at(&ts, BEFORE_HEADER_WRITES);
+            let answer = match command {
+                "change_password" => heavy(|| {
+                    ts.shell
+                        .change_password(session, generation, secret(PW), secret(NEW_PW))
+                        .map(|_| ())
+                }),
+                _ => heavy(|| {
+                    ts.shell
+                        .new_recovery_key(session, generation, secret(PW))
+                        .map(|_| ())
+                }),
+            };
+            failpoint::disarm_all();
+            assert_eq!(answer.err(), Some(ShellError::Locked), "{command}");
+            assert_eq!(headers(&dir), before, "{command}: nothing was written");
+            assert!(password_works(&dir, PW), "{command}");
+            assert!(!password_works(&dir, NEW_PW), "{command}");
+        }
+    }
+
+    /// A lock that comes between the two header writes: the change is whole on disk, so the answer says it landed, for
+    /// the vault it landed in (its registry ID), and carries nothing of the new key.
+    #[test]
+    fn a_lock_after_the_change_landed_answers_locked_after_change_with_the_vault() {
+        let ts = TestShell::new();
+        let (other, _) = confirmed_session(&ts, "Other");
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let (id, other_id) = (registry_id(&ts, session), registry_id(&ts, other));
+        assert_ne!(id, other_id);
+        let dir = folder_of(&ts, session);
+        lock_at(&ts, "write_headers.before_second");
+        let answer = heavy(|| {
+            ts.shell
+                .change_password(session, generation, secret(PW), secret(NEW_PW))
+                .map(|_| ())
+        });
+        failpoint::disarm_all();
+        let error = answer.expect_err("overtaken by the lock");
+        assert_eq!(
+            error,
+            ShellError::LockedAfterChange {
+                what: "password",
+                vault: id
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            format!(r#"{{"code":"locked_after_change","what":"password","vault":{id}}}"#)
+        );
+        assert!(password_works(&dir, NEW_PW), "the new password landed");
+
+        // A new key: the same, and the answer holds no words.
+        let (session, generation) = confirmed_session(&ts, "Third");
+        let (id, dir) = (registry_id(&ts, session), folder_of(&ts, session));
+        let before = headers(&dir);
+        lock_at(&ts, "write_headers.before_second");
+        let answer = heavy(|| ts.shell.new_recovery_key(session, generation, secret(PW)));
+        failpoint::disarm_all();
+        let Err(error) = answer else {
+            panic!("overtaken by the lock");
+        };
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            format!(r#"{{"code":"locked_after_change","what":"recovery key","vault":{id}}}"#)
+        );
+        let after = headers(&dir);
+        assert_ne!(after, before, "the new key's header landed");
+        assert_eq!(after.0, after.1, "in both files");
+    }
+
+    /// Two changes that hold the same current password: the vault's write lock keeps them apart, so one wins and the
+    /// other is refused (busy while the first runs; wrong password once the first is done).
+    #[test]
+    fn two_changes_with_one_current_password_one_wins_the_other_is_refused() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        const OTHER_PW: &str = "yet another long password";
+
+        // The second starts while the first sits just after its password check, inside the write lock.
+        let second = Rc::new(RefCell::new(None));
+        let (shell, record) = (Arc::clone(&ts.shell), Rc::clone(&second));
+        failpoint::observe(
+            PASSWORD_CHECKED,
+            Box::new(move || {
+                let shell = Arc::clone(&shell);
+                let racer = thread::spawn(move || {
+                    shell
+                        .change_password(session, generation, secret(PW), secret(OTHER_PW))
+                        .map(|_| ())
+                });
+                *record.borrow_mut() = Some(racer.join().unwrap());
+            }),
+        );
+        let first = heavy(|| {
+            ts.shell
+                .change_password(session, generation, secret(PW), secret(NEW_PW))
+        });
+        failpoint::disarm_all();
+        assert!(first.is_ok());
+        let racer = second.borrow_mut().take().expect("the second ran");
+        assert_eq!(
+            racer.err(),
+            Some(ShellError::Busy {
+                what: "operation in progress"
+            })
+        );
+
+        // Once the first is done, the same current password is the old one.
+        let third = heavy(|| {
+            ts.shell
+                .change_password(session, generation, secret(PW), secret(OTHER_PW))
+        });
+        assert_eq!(third.err(), Some(wrong_password()));
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        assert!(password_works(&dir, NEW_PW));
+        assert!(!password_works(&dir, OTHER_PW));
+        assert!(!password_works(&dir, PW));
+    }
+
+    #[test]
+    fn new_recovery_key_checks_the_current_password_first() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = on_disk(&ts, &dir);
+        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
+        let wrong = heavy(|| {
+            ts.shell
+                .new_recovery_key(session, generation, secret(NEW_PW))
+        });
+        assert_eq!(wrong.err(), Some(wrong_password()));
+        assert_eq!(on_disk(&ts, &dir), before, "no mark, header unchanged");
+        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
+
+        let key = heavy(|| ts.shell.new_recovery_key(session, generation, secret(PW))).unwrap();
+        assert_eq!(key.data.issue, 2, "the creation key was 1");
+        assert!(
+            ts.shell.vault_state.is_unconfirmed(&dir),
+            "marked until confirmed"
+        );
+        assert_ne!(headers(&dir), before.0);
+    }
+
+    /// The mark is on disk when the first header file is written, and an interruption after the spare leaves it:
+    /// the next unlock makes another key (21f).
+    #[test]
+    fn new_recovery_key_writes_the_mark_before_the_header() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let id = registry_id(&ts, session);
+        let seen = Rc::new(Cell::new(None));
+        let (shell, record, dir_seen) = (Arc::clone(&ts.shell), Rc::clone(&seen), dir.clone());
+        failpoint::observe(
+            "write_headers.before_first",
+            Box::new(move || record.set(Some(shell.vault_state.is_unconfirmed(&dir_seen)))),
+        );
+        let key = heavy(|| ts.shell.new_recovery_key(session, generation, secret(PW)));
+        failpoint::disarm_all();
+        key.unwrap();
+        assert_eq!(seen.get(), Some(true), "marked when the header was written");
+        assert!(
+            ts.shell.vault_state.is_unconfirmed(&dir),
+            "and stays marked"
+        );
+
+        // Interrupted after the spare (`.bak`), before vault.json: the mark stays, and 21f follows at the next unlock.
+        let (session, generation) = confirmed_session(&ts, "Work");
+        let work = folder_of(&ts, session);
+        let before = headers(&work);
+        failpoint::arm("write_headers.before_second");
+        let key = heavy(|| ts.shell.new_recovery_key(session, generation, secret(PW)));
+        failpoint::disarm_all();
+        assert!(matches!(key.err(), Some(ShellError::Core(view)) if view.kind == "io"));
+        let after = headers(&work);
+        assert_eq!(after.0, before.0, "vault.json still holds the old key");
+        assert_ne!(after.1, before.1, "the spare holds the undelivered one");
+        assert!(ts.shell.vault_state.is_unconfirmed(&work));
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let work_id = ts
+            .shell
+            .registry
+            .entries()
+            .into_iter()
+            .find(|(_, listed)| crate::os::same_path(listed, &work))
+            .unwrap()
+            .0;
+        assert_ne!(work_id, id);
+        let view = heavy(|| ts.shell.unlock_vault(work_id, secret(PW))).unwrap();
+        assert!(view.data.recovery_unconfirmed, "21f follows");
+        // 21f's step may make the key it asks for without the password.
+        let made = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation));
+        assert!(made.is_ok());
+    }
+
+    #[test]
+    fn regenerate_recovery_refused_without_the_sessions_21f_permission() {
+        let ts = TestShell::new();
+        // An unlocked session with no mark: the vault's key was confirmed.
+        let (id, dir, _) = registered(&ts);
+        let opened = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(!opened.data.recovery_unconfirmed);
+        let (session, generation) = (opened.session, opened.generation);
+        let before = on_disk(&ts, &dir);
+        let refused = heavy(|| ts.shell.regenerate_recovery(session, generation));
+        assert_eq!(
+            refused.err(),
+            Some(ShellError::InvalidInput {
+                what: "recovery key"
+            })
+        );
+        assert_eq!(on_disk(&ts, &dir), before);
+
+        // A session whose voluntary key (made with the password) awaits confirmation: still no permission.
+        let key = heavy(|| ts.shell.new_recovery_key(session, generation, secret(PW))).unwrap();
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir));
+        let after_key = on_disk(&ts, &dir);
+        let refused = heavy(|| ts.shell.regenerate_recovery(session, generation));
+        assert_eq!(
+            refused.err(),
+            Some(ShellError::InvalidInput {
+                what: "recovery key"
+            })
+        );
+        assert_eq!(on_disk(&ts, &dir), after_key, "nothing changed");
+        // Its confirmation is the way out.
+        let confirmed = ts
+            .shell
+            .recovery_confirmed(session, generation, key.data.issue)
+            .unwrap();
+        assert_eq!(confirmed.data, Confirmation::Confirmed);
+        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
+    }
+
+    /// A mark the shell could not read (another program holds the file) shows 21f, at the cost of one extra key, but
+    /// never grants a key without the password.
+    #[test]
+    fn an_unreadable_state_file_never_grants_a_key_without_the_password() {
+        let ts = TestShell::new();
+        let (session, _) = confirmed_session(&ts, "Family");
+        let id = registry_id(&ts, session);
+        let dir = folder_of(&ts, session);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        // A folder where the file should be: reading it fails, and it is not a damaged file.
+        fs::remove_file(&ts.shell.paths.vault_state).unwrap();
+        fs::create_dir(&ts.shell.paths.vault_state).unwrap();
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(view.data.recovery_unconfirmed, "21f still shows");
+        let before = headers(&dir);
+        let refused = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation));
+        assert_eq!(
+            refused.err(),
+            Some(ShellError::InvalidInput {
+                what: "recovery key"
+            }),
+            "refused for want of permission, not for the unreadable file"
+        );
+        assert_eq!(headers(&dir), before);
+        assert!(ts.shell.paths.vault_state.is_dir(), "left as it was");
+        // With the password it is a different matter: the way out of 21f stays open (and fails only on the file).
+        let with_password = heavy(|| {
+            ts.shell
+                .new_recovery_key(view.session, view.generation, secret(PW))
+        });
+        assert!(matches!(
+            with_password.err(),
+            Some(ShellError::Core(error)) if error.kind == "io"
+        ));
+        assert_eq!(headers(&dir), before);
+    }
+
+    /// An unlock of a vault that is already unlocked answers with its session without checking the password it was
+    /// given, so it must grant nothing: only an unlock whose closure ran proved a password.
+    #[test]
+    fn unlocking_an_open_vault_checks_nothing_and_grants_nothing() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let id = registry_id(&ts, session);
+        let dir = folder_of(&ts, session);
+        ts.shell.vault_state.mark_unconfirmed(&dir).unwrap();
+        let before = on_disk(&ts, &dir);
+        let again = ts.shell.unlock_vault(id, secret("not the password at all"));
+        let again = again.expect("an unlock of an open vault answers with its session");
+        assert_eq!((again.session, again.generation), (session, generation));
+        assert!(again.data.recovery_unconfirmed, "21f shows");
+        let refused = heavy(|| ts.shell.regenerate_recovery(session, generation));
+        assert_eq!(
+            refused.err(),
+            Some(ShellError::InvalidInput {
+                what: "recovery key"
+            })
+        );
+        assert_eq!(on_disk(&ts, &dir), before);
+    }
+
+    /// A recovery (the recovery key and a new password, so a credential was proved) that enters 21f is given 21f's
+    /// permission, straight and through the changed-header question's yes; one with no mark is given none.
+    #[test]
+    fn a_recovery_that_enters_21f_grants_the_permission() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let refused = ShellError::InvalidInput {
+            what: "recovery key",
+        };
+
+        // No mark: the recovery opens the vault, and no key may be made without the password.
+        let plain =
+            done(heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW))).unwrap());
+        assert!(!plain.data.recovery_unconfirmed);
+        let none = heavy(|| {
+            ts.shell
+                .regenerate_recovery(plain.session, plain.generation)
+        });
+        assert_eq!(none.err(), Some(refused));
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // A mark: the recovery enters 21f, and the key it asks for is made without the password.
+        ts.shell.vault_state.mark_unconfirmed(&dir).unwrap();
+        let marked =
+            done(heavy(|| ts.shell.recover_vault(id, recovery.clone(), secret(NEW_PW))).unwrap());
+        assert!(marked.data.recovery_unconfirmed);
+        let made = heavy(|| {
+            ts.shell
+                .regenerate_recovery(marked.session, marked.generation)
+        });
+        let made = made.expect("21f may make a key");
+        assert_eq!(made.data.issue, 1);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // The same through the changed header's yes (with the key that was just made: the first one stopped working).
+        let current = made.data.words.clone();
+        change_header(&dir);
+        let asked = heavy(|| ts.shell.recover_vault(id, current.clone(), secret(NEW_PW))).unwrap();
+        let Outcome::Confirm(Confirm::HeaderChanged { token }) = asked else {
+            panic!("the changed header asks first");
+        };
+        let accepted = done(heavy(|| ts.shell.recover_vault_confirm(&token, true)).unwrap());
+        assert!(accepted.data.recovery_unconfirmed);
+        let key = heavy(|| {
+            ts.shell
+                .regenerate_recovery(accepted.session, accepted.generation)
+        });
+        assert!(key.is_ok());
+    }
+
+    /// The mark is the folder's, not the vault ID's: a copy of a vault in another folder keeps its ID but not the
+    /// mark, so unlocking it grants nothing, while the marked folder's session is granted.
+    #[test]
+    fn a_copy_with_the_same_vault_id_in_another_folder_gets_no_permission() {
+        let ts = TestShell::new();
+        let id = VaultId::random();
+        let (one, two) = (ts.folder("one"), ts.folder("two"));
+        let (a, b) = heavy(|| {
+            let a = Vault::create_with_id(&one, "Family", PW, id).unwrap();
+            let b = Vault::create_with_id(&two, "Family", PW, id).unwrap();
+            (
+                fs::canonicalize(a.vault.dir()).unwrap(),
+                fs::canonicalize(b.vault.dir()).unwrap(),
+            )
+        });
+        let (a_id, b_id) = (
+            ts.shell.registry.add(&a).unwrap(),
+            ts.shell.registry.add(&b).unwrap(),
+        );
+        ts.shell.vault_state.mark_unconfirmed(&a).unwrap();
+
+        let copy = heavy(|| ts.shell.unlock_vault(b_id, secret(PW))).unwrap();
+        assert!(!copy.data.recovery_unconfirmed);
+        let before = on_disk(&ts, &b);
+        let refused = heavy(|| ts.shell.regenerate_recovery(copy.session, copy.generation));
+        assert_eq!(
+            refused.err(),
+            Some(ShellError::InvalidInput {
+                what: "recovery key"
+            })
+        );
+        assert_eq!(on_disk(&ts, &b), before);
+
+        let marked = heavy(|| ts.shell.unlock_vault(a_id, secret(PW))).unwrap();
+        assert!(marked.data.recovery_unconfirmed);
+        assert!(
+            heavy(|| ts
+                .shell
+                .regenerate_recovery(marked.session, marked.generation))
+            .is_ok()
+        );
+    }
+
+    /// 21f and its Try again, unchanged: a created vault and a 21f unlock each make a key without the password, any
+    /// number of times, each with its own `issue`.
+    #[test]
+    fn regenerate_recovery_with_the_permission_still_makes_a_key() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let dir = folder_of(&ts, session);
+        let first = heavy(|| ts.shell.regenerate_recovery(session, generation)).unwrap();
+        let again = heavy(|| ts.shell.regenerate_recovery(session, generation)).unwrap();
+        assert_eq!((first.data.issue, again.data.issue), (2, 3));
+        assert_ne!(first.data.words.as_str(), again.data.words.as_str());
+        assert_eq!(
+            serde_json::to_value(&again).unwrap(),
+            json!({
+                "session": session.0,
+                "generation": generation,
+                "data": { "words": again.data.words.as_str(), "issue": 3 }
+            })
+        );
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir));
+        // The newest key is the vault's; the first stopped working.
+        let id = registry_id(&ts, session);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let newest = RecoverySecret::parse(&again.data.words).unwrap();
+        let oldest = RecoverySecret::parse(&first.data.words).unwrap();
+        assert!(heavy(|| Vault::unlock_with_recovery(&dir, &newest)).is_ok());
+        assert!(heavy(|| Vault::unlock_with_recovery(&dir, &oldest)).is_err());
+
+        // A 21f unlock: the same, numbered from 1 in the new session.
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(view.data.recovery_unconfirmed);
+        let key = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation)).unwrap();
+        assert_eq!(key.data.issue, 1);
+    }
+
+    /// A confirmation names its key. An older key's confirmation leaves the mark and the permission, so the newer key
+    /// is still the one to confirm; the reply for the newer key then clears both.
+    #[test]
+    fn confirming_an_older_key_leaves_the_mark_set() {
+        let ts = TestShell::new();
+        let (session, generation) = ts.open_vault("Family");
+        let dir = folder_of(&ts, session);
+        let newer = heavy(|| ts.shell.regenerate_recovery(session, generation)).unwrap();
+        assert_eq!(newer.data.issue, 2);
+        for older in [1, 0, 3, 99] {
+            let answer = ts
+                .shell
+                .recovery_confirmed(session, generation, older)
+                .unwrap();
+            assert_eq!(answer.data, Confirmation::Superseded, "issue {older}");
+            assert!(
+                ts.shell.vault_state.is_unconfirmed(&dir),
+                "issue {older}: the mark stays"
+            );
+        }
+        // The permission stayed too: 21f's Try again still works.
+        let retry = heavy(|| ts.shell.regenerate_recovery(session, generation)).unwrap();
+        assert_eq!(retry.data.issue, 3);
+        // The reply for the key before it is now the older one.
+        let late = ts.shell.recovery_confirmed(session, generation, 2).unwrap();
+        assert_eq!(late.data, Confirmation::Superseded);
+        assert!(ts.shell.vault_state.is_unconfirmed(&dir));
+        let current = ts.shell.recovery_confirmed(session, generation, 3).unwrap();
+        assert_eq!(current.data, Confirmation::Confirmed);
+        assert!(!ts.shell.vault_state.is_unconfirmed(&dir));
+    }
+
+    /// Confirming the current key ends 21f's permission: a direct `regenerate_recovery` is refused after it, for a
+    /// created vault and for a 21f unlock.
+    #[test]
+    fn confirming_the_current_key_revokes_the_permission() {
+        let ts = TestShell::new();
+        let refused = ShellError::InvalidInput {
+            what: "recovery key",
+        };
+
+        // A created vault: confirming its creation key.
+        let (session, generation) = ts.open_vault("Family");
+        let id = registry_id(&ts, session);
+        let answer = ts.shell.recovery_confirmed(session, generation, 1).unwrap();
+        assert_eq!(answer.data, Confirmation::Confirmed);
+        let before = headers(&folder_of(&ts, session));
+        let direct = heavy(|| ts.shell.regenerate_recovery(session, generation));
+        assert_eq!(direct.err(), Some(refused));
+        assert_eq!(headers(&folder_of(&ts, session)), before);
+
+        // A 21f unlock: a key made in its step, then confirmed.
+        ts.shell
+            .vault_state
+            .mark_unconfirmed(&folder_of(&ts, session))
+            .unwrap();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let view = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        assert!(view.data.recovery_unconfirmed);
+        let key = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation)).unwrap();
+        let answer = ts
+            .shell
+            .recovery_confirmed(view.session, view.generation, key.data.issue)
+            .unwrap();
+        assert_eq!(answer.data, Confirmation::Confirmed);
+        let direct = heavy(|| ts.shell.regenerate_recovery(view.session, view.generation));
+        assert_eq!(direct.err(), Some(refused));
+    }
+
+    /// 21c's direct key is the new vault's alone: another vault's session, unlocked beside it, has no permission.
+    #[test]
+    fn a_direct_regenerate_during_21c_is_allowed_only_for_the_new_vault() {
+        let ts = TestShell::new();
+        let (id, dir, _) = registered(&ts);
+        let existing = heavy(|| ts.shell.unlock_vault(id, secret(PW))).unwrap();
+        let (new_session, new_generation) = ts.open_vault("Work");
+        let before = on_disk(&ts, &dir);
+        let refused = heavy(|| {
+            ts.shell
+                .regenerate_recovery(existing.session, existing.generation)
+        });
+        assert_eq!(
+            refused.err(),
+            Some(ShellError::InvalidInput {
+                what: "recovery key"
+            })
+        );
+        assert_eq!(on_disk(&ts, &dir), before);
+        assert!(heavy(|| ts.shell.regenerate_recovery(new_session, new_generation)).is_ok());
+        // The new vault's confirmation does not reach the other one's session, nor the other way round.
+        assert_eq!(
+            ts.shell
+                .recovery_confirmed(existing.session, existing.generation, 1)
+                .unwrap()
+                .data,
+            Confirmation::Superseded
+        );
+    }
+
+    /// The creation key is numbered 1, on an ordinary create and on one that asked about a cloud folder first.
+    #[test]
+    fn creation_answers_its_keys_issue() {
+        let ts = TestShell::new();
+        let created =
+            done(heavy(|| ts.shell.create_vault("Family".into(), secret(PW), false)).unwrap());
+        assert_eq!(created.data.issue, 1);
+        let json = serde_json::to_value(&created).unwrap();
+        assert_eq!(json["data"]["issue"], 1);
+        assert_eq!(
+            ts.shell
+                .recovery_confirmed(created.session, created.generation, created.data.issue)
+                .unwrap()
+                .data,
+            Confirmation::Confirmed
+        );
+
+        let synced = ts.folder("synced");
+        ts.volumes.add_sync_root(&synced);
+        ts.dialogs.answer(Some(synced));
+        let asked = ts.shell.create_vault("Work".into(), secret(PW), true);
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) = asked else {
+            panic!("a cloud folder asks first");
+        };
+        let confirmed = done(heavy(|| ts.shell.create_vault_confirm(&token)).unwrap());
+        assert_eq!(confirmed.data.issue, 1);
+        assert_eq!(
+            serde_json::to_value(&confirmed).unwrap()["data"]["issue"],
+            1
+        );
+        // And its 21c retries are allowed: this key is the next one.
+        let retry = heavy(|| {
+            ts.shell
+                .regenerate_recovery(confirmed.session, confirmed.generation)
+        });
+        assert_eq!(retry.unwrap().data.issue, 2);
+    }
+
+    /// The mark cannot be written: neither header changes, for both commands. (A vault in 21f has the mark already, so
+    /// the state file is made to lose it first, as a program deleting or rewriting the file would.)
+    #[test]
+    fn no_mark_written_means_no_header_change() {
+        let ts = TestShell::new();
+        let (confirmed, confirmed_generation) = confirmed_session(&ts, "Family");
+        let (creating, creating_generation) = ts.open_vault("Work");
+        let (confirmed_dir, creating_dir) = (folder_of(&ts, confirmed), folder_of(&ts, creating));
+        let before = (headers(&confirmed_dir), headers(&creating_dir));
+        let reached = Rc::new(Cell::new(false));
+        let watch_headers = || {
+            let seen = Rc::clone(&reached);
+            failpoint::observe(
+                "write_headers.before_first",
+                Box::new(move || seen.set(true)),
+            );
+        };
+        watch_headers();
+        let both = |ts: &TestShell| {
+            (
+                heavy(|| {
+                    ts.shell
+                        .new_recovery_key(confirmed, confirmed_generation, secret(PW))
+                        .map(|_| ())
+                }),
+                heavy(|| {
+                    ts.shell
+                        .regenerate_recovery(creating, creating_generation)
+                        .map(|_| ())
+                }),
+            )
+        };
+
+        // The write fails.
+        fs::remove_file(&ts.shell.paths.vault_state).unwrap();
+        failpoint::arm("atomic_write.before_replace");
+        let (key, direct) = both(&ts);
+        failpoint::disarm_all();
+        watch_headers();
+        assert!(matches!(key.err(), Some(ShellError::Core(view)) if view.kind == "io"));
+        assert!(matches!(direct.err(), Some(ShellError::Core(view)) if view.kind == "io"));
+        assert!(!reached.get());
+        assert_eq!((headers(&confirmed_dir), headers(&creating_dir)), before);
+
+        // The note would not fit.
+        let seed = nearly_full_state(&ts);
+        let (key, direct) = both(&ts);
+        let too_large = Some(ShellError::TooLarge {
+            what: "vault state",
+        });
+        assert_eq!(key.err(), too_large);
+        assert_eq!(direct.err(), too_large);
+        assert!(!reached.get());
+        assert_eq!((headers(&confirmed_dir), headers(&creating_dir)), before);
+        assert_eq!(
+            fs::read_to_string(&ts.shell.paths.vault_state).unwrap(),
+            seed
+        );
+        failpoint::disarm_all();
+    }
+
+    /// A stale generation, a foreign session and a read-only copy: no key, no password change, no mark.
+    #[test]
+    fn change_password_and_new_recovery_key_refused_stale_foreign_and_read_only() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let dir = folder_of(&ts, session);
+        let before = on_disk(&ts, &dir);
+        type Command = fn(&TestShell, SessionId, u64) -> ShellResult<()>;
+        let commands: [(&str, Command); 3] = [
+            ("change_password", |ts, session, generation| {
+                heavy(|| {
+                    ts.shell
+                        .change_password(session, generation, secret(PW), secret(NEW_PW))
+                })
+                .map(|_| ())
+            }),
+            ("new_recovery_key", |ts, session, generation| {
+                heavy(|| ts.shell.new_recovery_key(session, generation, secret(PW))).map(|_| ())
+            }),
+            ("regenerate_recovery", |ts, session, generation| {
+                heavy(|| ts.shell.regenerate_recovery(session, generation)).map(|_| ())
+            }),
+        ];
+        for (name, command) in commands {
+            assert_eq!(
+                command(&ts, session, generation + 1).err(),
+                Some(ShellError::Locked),
+                "{name}"
+            );
+            assert_eq!(
+                command(&ts, SessionId(session.0 + 100), generation).err(),
+                Some(ShellError::NotFound),
+                "{name}"
+            );
+            assert_eq!(on_disk(&ts, &dir), before, "{name}");
+        }
+
+        // A read-only copy: refused, and nothing is written for it or anything else.
+        let backup = ts.folder("Backups").join("Family.lockbox-backup");
+        ts.dialogs.answer(Some(backup.clone()));
+        done(
+            heavy(|| ts.shell.backup_vault(session, generation, 1))
+                .unwrap()
+                .data,
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let credential = super::super::backup::CredentialArg::Password(secret(PW));
+        let copy = ts.open_backup_read_only(&backup, credential);
+        assert!(copy.data.read_only);
+        let before = on_disk(&ts, &dir);
+        for (name, command) in commands {
+            assert_eq!(
+                command(&ts, copy.session, copy.generation).err(),
+                Some(ShellError::ReadOnly),
+                "{name}"
+            );
+        }
+        assert_eq!(on_disk(&ts, &dir), before);
+
+        // A session that has locked since.
+        for (name, command) in commands {
+            assert_eq!(
+                command(&ts, session, generation).err(),
+                Some(ShellError::Locked),
+                "{name}"
+            );
+        }
+        assert_eq!(on_disk(&ts, &dir), before);
+    }
+
+    /// The commands that run Argon2 are `async` and hand their work to the blocking pool, never doing it on the
+    /// async runtime. (A Tauri test app cannot run a command inside this test program, so this reads the commands'
+    /// own source.)
+    #[test]
+    fn change_password_and_new_recovery_key_run_on_the_blocking_pool() {
+        let source = include_str!("vaults.rs");
+        for (name, method) in [
+            ("change_password", "shell.change_password("),
+            ("new_recovery_key", "shell.new_recovery_key("),
+            ("regenerate_recovery", "shell.regenerate_recovery("),
+            ("recovery_confirmed", "shell.recovery_confirmed("),
+        ] {
+            let start = source
+                .find(&format!("pub(super) async fn {name}("))
+                .unwrap_or_else(|| panic!("{name} is an async command"));
+            let end = start + source[start..].find("\n}\n").expect("the command ends");
+            let command = &source[start..end];
+            assert!(
+                source[..start].trim_end().ends_with("#[tauri::command]"),
+                "{name} is a command"
+            );
+            let blocking = command
+                .find("blocking(")
+                .unwrap_or_else(|| panic!("{name} uses the pool"));
+            let call = command
+                .find(method)
+                .unwrap_or_else(|| panic!("{name} calls its method"));
+            assert!(
+                blocking < call,
+                "{name}: the method runs inside the pool's closure"
+            );
+            assert!(command.contains(".await"), "{name} awaits the pool");
+        }
+    }
+
+    /// Through the bridge: each request's fields (and nothing else), and each answer's JSON.
+    #[test]
+    fn new_key_view_and_change_password_json_shapes() {
+        // The requests: every field named, the secrets as strings, nothing more allowed.
+        refuses_a_path::<ChangePassword>(
+            json!({ "session": 7, "generation": 3, "current_password": PW, "new_password": NEW_PW }),
+        );
+        refuses_a_path::<NewRecoveryKey>(
+            json!({ "session": 7, "generation": 3, "current_password": PW }),
+        );
+        refuses_a_path::<RecoveryConfirmed>(json!({ "session": 7, "generation": 3, "issue": 2 }));
+        // A change without the current password, or a confirmation without the key's number, is no request.
+        for body in [
+            json!({ "session": 7, "generation": 3, "new_password": NEW_PW }),
+            json!({ "session": 7, "generation": 3, "current_password": PW }),
+        ] {
+            assert_eq!(
+                parse::<ChangePassword>(&InvokeBody::Json(body)).err(),
+                Some(MALFORMED)
+            );
+        }
+        assert_eq!(
+            parse::<NewRecoveryKey>(&InvokeBody::Json(json!({ "session": 7, "generation": 3 })))
+                .err(),
+            Some(MALFORMED)
+        );
+        assert_eq!(
+            parse::<RecoveryConfirmed>(&InvokeBody::Json(json!({ "session": 7, "generation": 3 })))
+                .err(),
+            Some(MALFORMED)
+        );
+
+        // The answers.
+        let words = "alpha bravo charlie";
+        let key = Tagged {
+            session: SessionId(7),
+            generation: 3,
+            data: NewKeyView {
+                words: secret(words),
+                issue: 4,
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&key).unwrap(),
+            r#"{"session":7,"generation":3,"data":{"words":"alpha bravo charlie","issue":4}}"#
+        );
+        let changed = Tagged {
+            session: SessionId(7),
+            generation: 3,
+            data: (),
+        };
+        assert_eq!(
+            serde_json::to_string(&changed).unwrap(),
+            r#"{"session":7,"generation":3,"data":null}"#
+        );
+        // The refusals: a wrong current password is the existing one, and an overtaken change names its vault.
+        assert_eq!(
+            serde_json::to_value(wrong_password()).unwrap(),
+            json!({ "code": "core", "kind": "wrong_password" })
+        );
+        assert_eq!(
+            serde_json::to_value(ShellError::LockedAfterChange {
+                what: "recovery key",
+                vault: 2
+            })
+            .unwrap(),
+            json!({ "code": "locked_after_change", "what": "recovery key", "vault": 2 })
+        );
+        // The creation answer carries the key's number beside the key.
+        let info = SessionInfo {
+            session: SessionId(7),
+            generation: 3,
+            name: "Family".to_owned(),
+            read_only: false,
+            state: SessionState::Unlocked,
+            kind: SessionKind::Vault,
+        };
+        let created = CreatedView {
+            info,
+            recovery_key: secret(words),
+            issue: 1,
+        };
+        let json = serde_json::to_value(&created).unwrap();
+        assert_eq!(json["recovery_key"], words);
+        assert_eq!(json["issue"], 1);
     }
 }

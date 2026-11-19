@@ -26,8 +26,9 @@ use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
 use crate::search::{SearchHit, SearchIndex};
 use crate::secret::{Key32, random_bytes};
-use crate::slots::{KeySlot, SlotType, wrap_slot};
+use crate::slots::{KeySlot, SlotType, check_slot_version, unwrap_slot, wrap_slot};
 use crate::{CoreError, Result};
+use ctutils::CtEq;
 use naming::{created_at_now, validate_name};
 use std::collections::BTreeMap;
 use std::fs;
@@ -272,6 +273,82 @@ impl Vault {
     /// An `Err` may leave `vault.json.bak` one version behind: the old password may then
     /// still open the vault, from `.bak`, until the next successful unlock repairs it.
     pub fn change_password(&mut self, new_password: &str) -> Result<()> {
+        self.change_password_with(new_password, || Ok(()))
+    }
+
+    /// Whether `password` is the one that opens this vault, for a caller that must be sure before it changes
+    /// something (the shell's change of password, a new recovery key). Derives the password key from the open
+    /// header's password slot (its own salt and settings, within the read bounds), unwraps the slot and compares
+    /// what it holds with the live vault key in constant time: a slot that unwraps to another key is
+    /// [`CoreError::WrongPassword`] too. When the two header copies disagree on the password slot (the vault was
+    /// opened with the recovery key, so the other copy's slot is unverified), that slot is tried the same way: either
+    /// password opens the vault. Writes nothing; the temporary keys are wiped when dropped.
+    pub fn check_password(&self, password: &str) -> Result<()> {
+        let own = self
+            .header
+            .slots
+            .iter()
+            .find(|s| s.slot_type == SlotType::Password)
+            .ok_or(CoreError::Damaged { what: "key slots" })?;
+        let spare = self
+            .guard
+            .unverified
+            .as_ref()
+            .filter(|u| u.slot_type == SlotType::Password)
+            .map(|u| &u.other);
+        // The key from the last Argon2 run, kept for a spare with the same salt and settings.
+        let mut derived: Option<(&KeySlot, Key32)> = None;
+        let mut first_error = None;
+        for slot in std::iter::once(own).chain(spare) {
+            let outcome = self.slot_holds_live_key(slot, password, &mut derived);
+            match outcome {
+                Ok(()) => return Ok(()),
+                // A newer vault says so, whichever copy it is.
+                Err(CoreError::UnsupportedVersion) => return Err(CoreError::UnsupportedVersion),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_error.unwrap_or(CoreError::WrongPassword))
+    }
+
+    /// Whether `slot` opens with `password` and wraps the live vault key.
+    fn slot_holds_live_key<'a>(
+        &self,
+        slot: &'a KeySlot,
+        password: &str,
+        derived: &mut Option<(&'a KeySlot, Key32)>,
+    ) -> Result<()> {
+        check_slot_version(slot)?;
+        let params = slot.kdf.ok_or(CoreError::Damaged { what: "key slots" })?;
+        let reusable = derived
+            .as_ref()
+            .is_some_and(|(from, _)| from.salt == slot.salt && from.kdf == Some(params));
+        if !reusable {
+            let key = derive_password_key(password, &slot.salt, &params)?;
+            *derived = Some((slot, key));
+        }
+        let Some((_, key)) = derived.as_ref() else {
+            return Err(CoreError::WrongPassword);
+        };
+        let unwrapped = unwrap_slot(slot, &self.header.vault_id, key)?;
+        // Authentic is not enough: the slot must hold this vault's key.
+        let same = unwrapped.as_bytes().ct_eq(self.vault_key.as_bytes());
+        match same.to_bool() {
+            true => Ok(()),
+            false => Err(CoreError::WrongPassword),
+        }
+    }
+
+    /// [`change_password`](Self::change_password) with `before_write` run once the new password key is derived
+    /// (the slow part), immediately before the header files are written: an `Err` from it changes nothing on disk
+    /// and is returned. The shell stops a change here when a lock has come.
+    pub fn change_password_with(
+        &mut self,
+        new_password: &str,
+        before_write: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         self.guard.check(Some(SlotType::Password))?;
         check_new_password(new_password)?;
         let old = self
@@ -293,6 +370,7 @@ impl Vault {
             &key,
             &self.vault_key,
         );
+        before_write()?;
         self.replace_slot(slot, write_headers)
     }
 
@@ -1036,5 +1114,253 @@ mod tests {
         drop(vault);
         assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
         assert!(Vault::unlock_with_password(&dir, NEW_PW).is_ok());
+    }
+
+    // ---- The current password, checked against the open vault (Plan 4C, Task 2) ----
+
+    /// Copies a vault folder, leaving out the `.lock` a live vault holds (it cannot be read).
+    fn copy_folder(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_folder(&entry.path(), &target);
+            } else if entry.file_name() != ".lock" {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// Opens `dir` read-only with `credential`: whether it opened. Nothing is written by a read-only open.
+    fn opens_read_only(dir: &Path, credential: Credential) -> bool {
+        use crate::blob::{CancelToken, NoProgress};
+        ReadOnlyVault::open_folder(dir, credential, &CancelToken::new(), &NoProgress).is_ok()
+    }
+
+    #[test]
+    fn check_password_accepts_the_current_password() {
+        let parent = TempDir::new();
+        let vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        assert!(vault.check_password(PW).is_ok());
+        // Checking writes nothing and changes nothing: the same password is accepted again.
+        let before = read_pair(vault.dir());
+        assert!(vault.check_password(PW).is_ok());
+        assert_eq!(read_pair(vault.dir()), before);
+    }
+
+    #[test]
+    fn check_password_refuses_a_wrong_password() {
+        let parent = TempDir::new();
+        let vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let before = read_pair(vault.dir());
+        for wrong in [
+            "another long password",
+            "correct horse batter",
+            "CORRECT HORSE BATTERY",
+        ] {
+            assert!(is_wrong_password(vault.check_password(wrong)), "{wrong}");
+        }
+        assert_eq!(read_pair(vault.dir()), before);
+    }
+
+    /// The slot's tag verifies (it is authentic, and opens with the typed password) but it holds another key than
+    /// the live vault's: the password is not this vault's, so it is refused. Without the comparison with the live
+    /// key this test fails.
+    #[test]
+    fn check_password_refuses_a_slot_wrapping_another_key() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        assert!(
+            vault.check_password(PW).is_ok(),
+            "before the slot is swapped"
+        );
+        fixture::password_slot_wrapping_another_key(&mut vault, PW);
+        // The fixture's slot does open with PW and unwraps to a key (not a decryption failure).
+        let on_disk = parse_header(&fs::read(vault.dir().join(HEADER_FILE)).unwrap()).unwrap();
+        let slot = &on_disk.slots[0];
+        let key = derive_password_key(PW, &slot.salt, &slot.kdf.unwrap()).unwrap();
+        let unwrapped = crate::slots::unwrap_slot(slot, &vault.id(), &key).unwrap();
+        assert_ne!(unwrapped.as_bytes(), vault.vault_key.as_bytes());
+        assert!(is_wrong_password(vault.check_password(PW)));
+    }
+
+    #[test]
+    fn check_password_after_a_change_accepts_only_the_new_one() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        vault.change_password(NEW).unwrap();
+        assert!(vault.check_password(NEW).is_ok());
+        assert!(is_wrong_password(vault.check_password(PW)));
+    }
+
+    #[test]
+    fn check_password_on_a_vault_opened_with_the_recovery_key() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let recovery = created.recovery;
+        drop(created.vault);
+
+        // The pair agrees: the password slot is the open header's own.
+        let (vault, _) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert_eq!(vault.unverified_slot(), None);
+        assert!(vault.check_password(PW).is_ok());
+        assert!(is_wrong_password(vault.check_password(NEW)));
+        drop(vault);
+
+        // A password change that died between the two files: vault.json holds the new password slot, `.bak` the old.
+        // The recovery unlock could not check either, and both passwords open the vault (the old one through the
+        // spare): the open slot and the other copy's slot are each tried, and a wrong one is still refused.
+        let mut vault = Vault::unlock_with_password(&dir, PW).unwrap().0;
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.change_password(NEW).is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert!(!report.used_backup_header);
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Password));
+        assert!(vault.check_password(NEW).is_ok(), "the open header's slot");
+        assert!(vault.check_password(PW).is_ok(), "the other copy's slot");
+        assert!(is_wrong_password(
+            vault.check_password("another long password")
+        ));
+    }
+
+    /// A password change that died after `vault.json`, before `.bak` (the partial-write hook of
+    /// `vault_stays_usable_after_a_partial_header_write`), opened on its own copy with the new password: `vault.json`
+    /// opens, the spare is repaired, and the old password is then refused.
+    #[test]
+    fn change_password_interrupted_opens_with_the_new_password_on_its_own_copy() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.change_password(NEW).is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_ne!(main, bak, "interrupted: vault.json is ahead of .bak");
+
+        let copy = parent.path().join("interrupted-new");
+        copy_folder(&dir, &copy);
+        // A read-only open writes nothing.
+        assert!(opens_read_only(&copy, Credential::Password(NEW)));
+        assert_eq!(read_pair(&copy), (main.clone(), bak.clone()));
+        // A writable unlock opens vault.json (no Ask 9) and repairs the spare.
+        let (vault, report) = Vault::unlock_with_password(&copy, NEW).unwrap();
+        assert!(!report.used_backup_header && !report.header_repair_failed);
+        drop(vault);
+        assert_eq!(read_pair(&copy), (main.clone(), main));
+        // Once the pair agrees, the old password is refused.
+        assert!(is_wrong_password(Vault::unlock_with_password(&copy, PW)));
+        assert!(!opens_read_only(&copy, Credential::Password(PW)));
+    }
+
+    /// The same interrupted folder, opened on its own copy with the old password: it opens through the spare (Ask 9),
+    /// a read-only open writes nothing, and a writable unlock puts the old header back over vault.json, so the new
+    /// password is refused until the change is made again, which then refuses the old one.
+    #[test]
+    fn change_password_interrupted_opens_with_the_old_password_through_the_spare_on_its_own_copy() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.change_password(NEW).is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_ne!(main, bak);
+
+        let copy = parent.path().join("interrupted-old");
+        copy_folder(&dir, &copy);
+        assert!(opens_read_only(&copy, Credential::Password(PW)));
+        assert_eq!(
+            read_pair(&copy),
+            (main, bak.clone()),
+            "read-only writes nothing"
+        );
+        let (vault, report) = Vault::unlock_with_password(&copy, PW).unwrap();
+        assert!(report.used_backup_header, "Ask 9: the spare opened");
+        drop(vault);
+        assert_eq!(
+            read_pair(&copy),
+            (bak.clone(), bak),
+            "vault.json repaired from the spare"
+        );
+        assert!(is_wrong_password(Vault::unlock_with_password(&copy, NEW)));
+
+        // Making the change again completes it: the new password opens, the old one is refused.
+        let (mut vault, _) = Vault::unlock_with_password(&copy, PW).unwrap();
+        vault.change_password(NEW).unwrap();
+        drop(vault);
+        assert!(Vault::unlock_with_password(&copy, NEW).is_ok());
+        assert!(is_wrong_password(Vault::unlock_with_password(&copy, PW)));
+    }
+
+    /// A new recovery key writes `.bak` first. Interrupted after `.bak`, before `vault.json`: the old key is still
+    /// the one in vault.json. Each credential is tried on its own copy of that folder.
+    #[test]
+    fn new_recovery_key_interrupted_after_the_spare_keeps_the_old_key() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let old_key = created.recovery;
+        let mut vault = created.vault;
+        let dir = vault.dir().to_path_buf();
+        let (main_before, bak_before) = read_pair(&dir);
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.regenerate_recovery().is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(
+            main, main_before,
+            "vault.json still holds the old key's slot"
+        );
+        assert_ne!(
+            bak, bak_before,
+            "the spare holds the key that was never delivered"
+        );
+
+        // A password unlock opens, keeps the unverified recovery slot in `.bak` and so leads to 21f (the shell's
+        // mark is written before this header write; the engine's part is that nothing is repaired).
+        let by_password = parent.path().join("by-password");
+        copy_folder(&dir, &by_password);
+        assert!(opens_read_only(&by_password, Credential::Password(PW)));
+        assert_eq!(read_pair(&by_password), (main.clone(), bak.clone()));
+        let (vault, report) = Vault::unlock_with_password(&by_password, PW).unwrap();
+        assert!(!report.used_backup_header);
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Recovery));
+        drop(vault);
+        assert_eq!(
+            read_pair(&by_password),
+            (main.clone(), bak.clone()),
+            "not repaired"
+        );
+
+        // An unlock with the old key opens vault.json and repairs the spare.
+        let by_key = parent.path().join("by-old-key");
+        copy_folder(&dir, &by_key);
+        assert!(opens_read_only(&by_key, Credential::Recovery(&old_key)));
+        assert_eq!(read_pair(&by_key), (main.clone(), bak.clone()));
+        let (vault, report) = Vault::unlock_with_recovery(&by_key, &old_key).unwrap();
+        assert!(!report.used_backup_header);
+        assert_eq!(vault.unverified_slot(), None);
+        drop(vault);
+        assert_eq!(
+            read_pair(&by_key),
+            (main.clone(), main.clone()),
+            "the spare is repaired"
+        );
+
+        // If vault.json is then lost (here: lost before any repair), the password still opens through the spare.
+        let lost = parent.path().join("main-lost");
+        copy_folder(&dir, &lost);
+        fs::remove_file(lost.join(HEADER_FILE)).unwrap();
+        let (vault, report) = Vault::unlock_with_password(&lost, PW).unwrap();
+        assert!(report.used_backup_header);
+        drop(vault);
+        // The spare's recovery slot was never delivered: the old key does not open it.
+        assert!(Vault::unlock_with_recovery(&lost, &old_key).is_err());
     }
 }

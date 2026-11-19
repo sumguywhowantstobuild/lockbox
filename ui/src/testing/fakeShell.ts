@@ -57,6 +57,11 @@ export interface FakeVault {
   /** The "recovery key not confirmed" mark the shell keeps for the vault's folder. */
   unconfirmed?: boolean;
   /**
+   * The shell's note about this vault can't be read (another program holds the file): 21f still shows at unlock (the lenient
+   * read says yes), but the strict read that grants a key without the password is an error, so the session gets none.
+   */
+  markUnreadable?: boolean;
+  /**
    * The vault's details were changed outside Lockbox: every unlock reports `header_mac_mismatch` until `accept_header`,
    * and the engine refuses a new recovery key meanwhile, as `HeaderGuard` does.
    */
@@ -108,6 +113,8 @@ export const NEWER_VAULT = { code: "core", kind: "unsupported_version" };
 const ACCEPT_FIRST = { code: "core", kind: "invalid_input", what: "accept the header change first" };
 /** What the shell sends when it cannot write the mark first (`write_state(…, "vault state")`, `TooLarge`). */
 export const VAULT_STATE_REFUSED = { code: "too_large", what: "vault state" };
+/** What the shell sends when a session asks for a key without the password but never entered 21f the way that grants it. */
+const NO_KEY_PERMISSION = { code: "invalid_input", what: "recovery key" };
 /** What the shell sends while a print of its own runs, and when no PDF came (`error.rs`: `PRINTER_BUSY`, `PDF_NOT_MADE`). */
 export const PRINTER_BUSY = { code: "busy", what: "printer" };
 export const PDF_NOT_MADE = { code: "print_failed", what: "pdf" };
@@ -268,6 +275,8 @@ export interface FakeShell {
   refuseMarkNext(): void;
   /** The next key the shell makes is this one (a test of a key with a repeated word needs one the fake would not make). */
   nextKeyIs(key: string): void;
+  /** The next key the shell makes is numbered `issue` (the real shell counts 1, 2, 3 in a session; a test may start elsewhere to tell a carried number from a made-up one). */
+  nextIssueIs(issue: number): void;
   /** The next folder picker (create with `choose_folder`, add existing) is closed without a choice. */
   dismissPickerNext(): void;
   /** The vault the next `add_existing_vault` finds in the folder the person picks. */
@@ -1068,6 +1077,9 @@ export function installFakeShell(
   const keys = new Map<FakeVault, string>();
   let keysMade = 0;
   let chosenKey: string | undefined;
+  let chosenIssue: number | undefined;
+  /** What each session holds about its keys, as the shell's `KeyState` does: 21f's permission, and the last key's number. */
+  const keyStates = new Map<number, { may: boolean; last: number }>();
   let cloud = false;
   let refuseMark = false;
   let dismissPicker = false;
@@ -1366,7 +1378,26 @@ export function installFakeShell(
     const [session, state] = entry;
     state.unlocked = true;
     state.generation += 1;
+    // A new unlock starts the session's key state over: no permission, no key made yet.
+    keyStates.set(session, { may: false, last: 0 });
     return [session, state];
+  };
+
+  /** The session's key state (an unlocked session has one). */
+  const keyStateOf = (session: number): { may: boolean; last: number } => {
+    const found = keyStates.get(session);
+    if (found !== undefined) return found;
+    const fresh = { may: false, last: 0 };
+    keyStates.set(session, fresh);
+    return fresh;
+  };
+
+  /** Numbers the key the session has just made: the next in its count, or the one a test asked for. */
+  const numberKey = (session: number): number => {
+    const state = keyStateOf(session);
+    state.last = chosenIssue ?? state.last + 1;
+    chosenIssue = undefined;
+    return state.last;
   };
 
   const infoOf = (vault: FakeVault, session: number, generation: number) => ({
@@ -1401,10 +1432,14 @@ export function installFakeShell(
     };
     vaults.push(vault);
     const [session, state] = openSession(vault);
+    // A new vault's session may make its key again without the password (21c's retries) until the key is confirmed.
+    keyStateOf(session).may = true;
+    const recoveryKey = makeKey(vault);
     return {
       Done: tagged(session, state.generation, {
         info: infoOf(vault, session, state.generation),
-        recovery_key: makeKey(vault),
+        recovery_key: recoveryKey,
+        issue: numberKey(session),
       }),
     };
   };
@@ -1706,6 +1741,9 @@ export function installFakeShell(
         if (password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
         if (vault.newer ?? false) return refuse(NEWER_VAULT);
         const [session, state] = openSession(vault);
+        // A writable unlock that enters 21f from a mark read without error may make a key without the password; a mark the shell
+        // could not read shows 21f all the same, and grants nothing.
+        keyStateOf(session).may = (vault.unconfirmed ?? false) && !(vault.markUnreadable ?? false) && !(vault.readOnly ?? false);
         return tagged(session, state.generation, {
           info: infoOf(vault, session, state.generation),
           used_backup_header: vault.usedBackupHeader ?? false,
@@ -1778,6 +1816,8 @@ export function installFakeShell(
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // Without the password only a session that entered 21f may: any other asks through `new_recovery_key`.
+        if (!keyStateOf(session).may) return refuse(NO_KEY_PERMISSION);
         // The engine writes no header while a changed one waits for the person's yes.
         if (vault.headerChanged ?? false) return refuse(ACCEPT_FIRST);
         // The mark goes first; when it can't be written no key is made.
@@ -1786,7 +1826,43 @@ export function installFakeShell(
           return refuse(VAULT_STATE_REFUSED);
         }
         vault.unconfirmed = true;
-        return tagged(session, generation, makeKey(vault));
+        const words = makeKey(vault);
+        return tagged(session, generation, { words, issue: numberKey(session) });
+      }
+      case "new_recovery_key": {
+        const { session, generation, current_password } = exactly(args, ["session", "generation", "current_password"]) as {
+          session: number;
+          generation: number;
+          current_password: string;
+        };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The current password is checked first: a wrong one writes no mark and makes no key.
+        if (current_password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        if (refuseMark) {
+          refuseMark = false;
+          return refuse(VAULT_STATE_REFUSED);
+        }
+        if (vault.headerChanged ?? false) return refuse(ACCEPT_FIRST);
+        vault.unconfirmed = true;
+        const words = makeKey(vault);
+        return tagged(session, generation, { words, issue: numberKey(session) });
+      }
+      case "change_password": {
+        const { session, generation, current_password, new_password } = exactly(args, [
+          "session",
+          "generation",
+          "current_password",
+          "new_password",
+        ]) as { session: number; generation: number; current_password: string; new_password: string };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The new password's length first, then the current password; a wrong current one changes nothing.
+        if (Array.from(new_password.normalize("NFC")).length < 12) return refuse({ code: "core", kind: "password_too_short", min: 12 });
+        if (current_password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        if (vault.headerChanged ?? false) return refuse(ACCEPT_FIRST);
+        vault.password = new_password;
+        return tagged(session, generation, null);
       }
       case "accept_header": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
@@ -1803,11 +1879,19 @@ export function installFakeShell(
         outputResets += 1;
         return null;
       case "recovery_confirmed": {
-        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const { session, generation, issue } = exactly(args, ["session", "generation", "issue"]) as {
+          session: number;
+          generation: number;
+          issue: number;
+        };
         const vault = vaultFor(session, generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // Only the latest key's confirmation clears the mark and ends 21f's permission; an older one changes nothing.
+        const state = keyStateOf(session);
+        if (issue === 0 || issue !== state.last) return tagged(session, generation, "Superseded");
         vault.unconfirmed = false;
-        return tagged(session, generation, null);
+        state.may = false;
+        return tagged(session, generation, "Confirmed");
       }
       case "save_recovery_pdf": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
@@ -3744,6 +3828,9 @@ export function installFakeShell(
     },
     nextKeyIs: (key) => {
       chosenKey = key;
+    },
+    nextIssueIs: (issue) => {
+      chosenIssue = issue;
     },
     dismissPickerNext: () => {
       dismissPicker = true;

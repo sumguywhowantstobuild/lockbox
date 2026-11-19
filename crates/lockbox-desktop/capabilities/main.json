@@ -24,6 +24,7 @@
     "allow-recover-vault",
     "allow-recover-vault-confirm",
     "allow-change-password",
+    "allow-new-recovery-key",
     "allow-regenerate-recovery",
     "allow-recovery-confirmed",
     "allow-accept-header",

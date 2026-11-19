@@ -15,9 +15,12 @@ use crate::restore::{Leaves, RestoreNotice};
 pub enum ShellError {
     /// The session is locked, or locked while the command ran: nothing it read is returned (spec §7.4).
     Locked,
-    /// The change was made, but the session locked before the answer could be shown (spec §7.4).
+    /// The change was made, but the session locked before the answer could be shown (spec §7.4). `vault` is the
+    /// registry ID of the vault the change was made to, so the page keeps the outcome for that vault; 0 when the
+    /// vault is not on the list, or its ID is not known where the change began (a vault just created).
     LockedAfterChange {
         what: &'static str,
+        vault: u32,
     },
     NotFound,
     Busy {
@@ -285,8 +288,12 @@ mod tests {
             json!({ "code": "busy", "what": "opening" })
         );
         assert_eq!(
-            serde_json::to_value(ShellError::LockedAfterChange { what: "password" }).unwrap(),
-            json!({ "code": "locked_after_change", "what": "password" })
+            serde_json::to_value(ShellError::LockedAfterChange {
+                what: "password",
+                vault: 3
+            })
+            .unwrap(),
+            json!({ "code": "locked_after_change", "what": "password", "vault": 3 })
         );
         assert_eq!(
             serde_json::to_value(ShellError::Locked).unwrap(),
