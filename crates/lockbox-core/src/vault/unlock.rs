@@ -140,7 +140,9 @@ fn differing_slot<'a>(
     .then_some(theirs)
 }
 
-fn repair(file: &Path, bytes: &[u8]) -> Result<()> {
+/// Rewrites one header file whole: the unlock's repair of the other copy, and a new recovery
+/// key's repair of a `vault.json` that can't be read (`Vault::regenerate_recovery`).
+pub(super) fn repair(file: &Path, bytes: &[u8]) -> Result<()> {
     #[cfg(any(test, feature = "test-internals"))]
     crate::fsio::failpoint::check("unlock.repair_write")?;
     atomic_write(file, bytes)

@@ -103,6 +103,9 @@ jobs:
       # ui/osv-scanner.toml accepts advisories in build tools as "never shipped": this proves it on every push.
       - name: Shipped page holds no build-tool code
         run: node ../scripts/shipped-page-check.mjs
+      # The scan job runs the scanner tests without the UI installed, so their real-build half skips there: run here, it proves the check can still fail.
+      - name: Shipped page check fails on build-tool code
+        run: node --test ../scripts/shipped-page-check.test.mjs
 
   scan:
     name: Security scan

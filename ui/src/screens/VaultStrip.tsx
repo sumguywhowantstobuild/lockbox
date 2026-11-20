@@ -2,7 +2,7 @@ import { LockIcon } from "../parts/Icon";
 import { VaultMark, vaultLook } from "../parts/Pattern";
 import { showSession, startUnlockStep, useSessions, useVaults, type SessionData } from "../store";
 import { useMode } from "../theme";
-import { listedName } from "../vaultWords";
+import { placedName } from "../vaultWords";
 
 /**
  * The vault strip, a column of buttons beside the side menu, there only from two vaults on the list (as approved, 2026-11-04): a button for every listed vault, in the
@@ -21,10 +21,8 @@ export function VaultStrip({ data }: { data: SessionData }) {
       {vaults.map((vault, place) => {
         const session = sessions.find((one) => one.vaultId === vault.id);
         const look = vaultLook(place, false);
-        const name = session?.name ?? listedName(vault);
-        const alike = vaults.filter((other) => listedName(other) === listedName(vault)).length > 1;
         const state = session !== undefined ? null : vault.available ? "locked" : "not available";
-        const words = [alike ? `${name}, ${String(place + 1)} of ${String(vaults.length)}` : name, state].filter((part) => part !== null).join(", ");
+        const words = [placedName(vaults, place, session?.name), state].filter((part) => part !== null).join(", ");
         const on = session?.session === data.session;
         return (
           // Its own colour (the mode class beside it, so the variables resolve here) and its own shape.

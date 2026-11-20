@@ -1,5 +1,6 @@
-//! The vault list, and opening vaults: create, unlock, recover (spec §5.3, §6.10). Vaults are named by registry ID
-//! or session ID; their folders come only from the registry and from Rust's own dialogs (spec §4.1).
+//! The vault list, and opening vaults: create, unlock, recover (spec §5.3, §6.10). Vaults are named by their row of
+//! the list (`VaultRef`: the list's identity and the row's ID) or by session ID; their folders come only from the
+//! registry and from Rust's own dialogs (spec §4.1).
 //!
 //! Each command is a thin wrapper that parses its request and runs a [`Shell`] method below on the blocking pool:
 //! a key derivation takes about a second, and a dialog waits for the user.
@@ -575,34 +576,38 @@ impl Shell {
 
     /// Unlocks the vault `vault` of the vault list with its password. The row is looked up again inside the open,
     /// once the open is registered: a Remove that finished since the first look leaves nothing to unlock (`NotFound`),
-    /// and one that starts later finds the open under way (`Busy`).
+    /// and one that starts later finds the open under way (`Busy`). The lock epoch is read before the first look, so a
+    /// lock of all vaults between the look and the open's registration answers `Locked`.
     pub fn unlock_vault(
         &self,
         vault: VaultRef,
         password: Zeroizing<String>,
     ) -> ShellResult<Tagged<UnlockView>> {
+        let epoch = self.sessions.epoch();
         let (dir, location) = self.registered(vault)?;
         #[cfg(test)]
         test_step(LOOKED_UP)?;
         let again = location.clone();
-        let answer = self.sessions.open(Some(location.clone()), None, |_| {
-            let listed = self.registry.path_of(vault).ok_or(ShellError::NotFound)?;
-            if Location::folder(&listed)? != location {
-                return Err(ShellError::NotFound);
-            }
-            #[cfg(test)]
-            test_step(CHECKING)?;
-            let check = self.check_location(&dir)?;
-            same_place(&check, &location)?;
-            let (vault, report) = Vault::unlock_with_password(&check.path, &password)?;
-            let unconfirmed = self.recovery_unconfirmed(&location, false);
-            let unlocked = (report, check.cloud, unconfirmed);
-            Ok(OpenStep::Session(
-                location,
-                Opened::Writable(vault),
-                unlocked,
-            ))
-        })?;
+        let answer = self
+            .sessions
+            .open_since(epoch, Some(location.clone()), None, |_| {
+                let listed = self.registry.path_of(vault).ok_or(ShellError::NotFound)?;
+                if Location::folder(&listed)? != location {
+                    return Err(ShellError::NotFound);
+                }
+                #[cfg(test)]
+                test_step(CHECKING)?;
+                let check = self.check_location(&dir)?;
+                same_place(&check, &location)?;
+                let (vault, report) = Vault::unlock_with_password(&check.path, &password)?;
+                let unconfirmed = self.recovery_unconfirmed(&location, false);
+                let unlocked = (report, check.cloud, unconfirmed);
+                Ok(OpenStep::Session(
+                    location,
+                    Opened::Writable(vault),
+                    unlocked,
+                ))
+            })?;
         let Tagged {
             session,
             generation,
@@ -813,7 +818,14 @@ impl Shell {
         if header_changed && accept_changed_header {
             vault.accept_header()?;
         }
-        if let Err(error) = vault.change_password(&new_password) {
+        // The stop check right before the header writes, after the new password's derivation, as a password change
+        // has it: a lock during that second is `Locked`, with nothing written.
+        if let Err(error) =
+            vault.change_password_with(&new_password, || before_header_writes(cancel))
+        {
+            if let CoreError::Cancelled = error {
+                return Err(ShellError::Locked);
+            }
             // As a change from an open vault: the engine's `commit` reads `vault.json` back after a failed write and
             // makes the new header live when it landed. If it holds the new password, the change happened though
             // the write came back as an error: say so, never "nothing changed".
@@ -3011,6 +3023,28 @@ mod tests {
         assert_eq!(answer.err(), Some(ShellError::Locked));
         assert_eq!(headers(&dir), before);
         assert!(ts.shell.sessions.list().is_empty());
+        assert!(password_works(&dir, PW));
+    }
+
+    /// A lock during the new password's derivation (after the last check before it, before the header writes) is seen
+    /// at the stop check right before the writes, as in a password change: `Locked`, with nothing written.
+    #[test]
+    fn a_lock_during_finish_derivation_writes_nothing() {
+        let ts = TestShell::new();
+        let (id, dir, recovery) = registered(&ts);
+        let before = headers(&dir);
+        let checked = check(&ts, id, &recovery).unwrap();
+        let shell = Arc::clone(&ts.shell);
+        failpoint::observe(
+            BEFORE_HEADER_WRITES,
+            Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
+        );
+        let answer = finish(&ts, &checked.choice, NEW_PW, true);
+        failpoint::disarm_all();
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert_eq!(headers(&dir), before, "no header was written");
+        assert!(ts.shell.sessions.list().is_empty());
+        assert!(is_free(&dir));
         assert!(password_works(&dir, PW));
     }
 
@@ -6723,6 +6757,27 @@ mod tests {
         assert_eq!(*removed.borrow(), Some(Ok(())), "the Remove finished");
         assert_eq!(answer.err(), Some(ShellError::NotFound));
         assert!(ts.shell.sessions.list().is_empty());
+        assert!(is_free(&dir), "nothing opened it");
+    }
+
+    /// A Lock all (or Windows lock, or sleep) that lands between an unlock's lookup of its row and the registration of
+    /// its open: the epoch read before the lookup has moved, so the unlock is refused and nothing stays unlocked.
+    #[test]
+    fn an_unlock_looked_up_before_a_lock_of_all_vaults_is_refused() {
+        let ts = TestShell::new();
+        let (id, dir, _) = registered(&ts);
+        let row = ts.vault(id);
+        {
+            let shell = Arc::clone(&ts.shell);
+            failpoint::observe(
+                LOOKED_UP,
+                Box::new(move || shell.sessions.lock_all(LockReason::WindowsLocked)),
+            );
+        }
+        let answer = heavy(|| ts.shell.unlock_vault(row, secret(PW)));
+        failpoint::disarm_all();
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+        assert!(ts.shell.sessions.list().is_empty(), "no session was made");
         assert!(is_free(&dir), "nothing opened it");
     }
 

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
 import { debugState, refreshVaults, renameVault, resetStoreForTests, showSession } from "../store";
 import { expectNoAxe } from "../testing/axe";
+import { rowReads } from "../testing/menuRows";
 import {
   BACKUP_PASSWORD,
   DETAILS_UNCHECKED,
@@ -99,7 +100,7 @@ function rowsOf(menu: HTMLElement): HTMLElement[] {
 
 async function unlockFromMenu(name: string): Promise<void> {
   const menu = await openVaultMenu();
-  const row = rowsOf(menu).find((one) => one.textContent === `${name}Locked`);
+  const row = rowsOf(menu).find((one) => rowReads(one, name, "Locked"));
   if (row === undefined) throw new Error(`no locked row for ${name}`);
   fireEvent.click(row);
   await waitFor(() => {

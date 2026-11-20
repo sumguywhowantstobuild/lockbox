@@ -51,7 +51,8 @@ pub const JOB_STARTED_EVENT: &str = "lockbox://job-started";
 pub const PROGRESS_EVENT: &str = "lockbox://progress";
 /// All vaults locked, or the app closing, with or without any open: `{ epoch, reason }`.
 pub const LOCK_EPOCH_EVENT: &str = "lockbox://lock-epoch";
-/// A close or Quit arrived while a job runs or a restore waits: `{ reason, running, past_swap, restore_waiting }`. Sent to the main window and never kept.
+/// A close or Quit arrived while a job runs or a restore waits: `{ reason, running, past_swap, restore_waiting, question }` (`question` names
+/// this ask, for the answer to claim). Sent to the main window and never kept.
 pub const CLOSE_ASKED_EVENT: &str = "lockbox://close-asked";
 
 /// A question asked of the page: what it was about, and the lock epoch it was asked in. A lock of all vaults changes the

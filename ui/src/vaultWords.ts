@@ -38,3 +38,16 @@ export const CANT_BE_READ = "A vault that can't be read";
 export function listedName(vault: Pick<VaultEntry, "name">): string {
   return vault.name ?? CANT_BE_READ;
 }
+
+/**
+ * The name a row of the list `vaults` says for the vault at `place` (`name`: an open vault's own, else its listed name): with that place on the list, "My vault,
+ * 2 of 3", when another listed vault reads the same, so two rows never look or sound alike (every new vault starts as "My vault"). The vault strip, the vault menu
+ * and Copy to a vault all say it (the save box's list has its own, which counts the vaults it offers).
+ */
+export function placedName(vaults: readonly Pick<VaultEntry, "name">[], place: number, name?: string): string {
+  const vault = vaults[place];
+  if (vault === undefined) return name ?? "";
+  const shown = name ?? listedName(vault);
+  const alike = vaults.filter((other) => listedName(other) === listedName(vault)).length > 1;
+  return alike ? `${shown}, ${String(place + 1)} of ${String(vaults.length)}` : shown;
+}

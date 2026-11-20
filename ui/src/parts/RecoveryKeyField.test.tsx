@@ -83,6 +83,25 @@ test("a_read_only_box_is_read_and_not_typed_in", () => {
   expect(box().readOnly).toBe(true);
 });
 
+test("a_key_in_the_box_is_never_copied_or_cut_natively", () => {
+  // A native copy or cut would put the key in Windows' clipboard history with no timer or clearing (4C end review, astra6-1), so it is stopped, as for
+  // every other secret on the page (`useValueGuard`), while the key can be typed and while it is read-only; a paste still goes in.
+  const { unmount } = render(<Probe />);
+  const field = box();
+  fireEvent.change(field, { target: { value: "abandon ability able" } });
+  field.focus();
+  field.select();
+  expect(fireEvent.copy(field)).toBe(false);
+  expect(fireEvent.cut(field)).toBe(false);
+  expect(fireEvent.paste(field)).toBe(true);
+  expect(field.value).toBe("abandon ability able");
+  unmount();
+  render(<Probe readOnly />);
+  box().focus();
+  expect(fireEvent.copy(box())).toBe(false);
+  expect(fireEvent.cut(box())).toBe(false);
+});
+
 test("the_key_box_grows_to_show_a_whole_key", () => {
   // Found on the release build: a 24-word key takes five or six lines at the form's width, and four rows scrolled its last line out of sight. The box starts
   // at four lines (not a note's height) and grows with what is typed; a hand-drawn size would undo that.

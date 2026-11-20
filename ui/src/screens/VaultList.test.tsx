@@ -9,6 +9,7 @@ import { debugState, refreshVaults, removeVault, resetStoreForTests, sayOnLockSc
 import { expectNoAxe } from "../testing/axe";
 import { installFakeShell, PASSWORD, sampleItems, type FakeOlderCopy, type FakeShell, type FakeVault } from "../testing/fakeShell";
 import { readBeside } from "../testing/files";
+import { rowReads } from "../testing/menuRows";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -92,7 +93,7 @@ function actionsOf(menu: HTMLElement): string[] {
 
 async function unlockFromMenu(name: string): Promise<void> {
   const menu = await openVaultMenu();
-  const row = rowsOf(menu).find((one) => one.textContent === `${name}Locked`);
+  const row = rowsOf(menu).find((one) => rowReads(one, name, "Locked"));
   if (row === undefined) throw new Error(`no locked row for ${name}`);
   fireEvent.click(row);
   await waitFor(() => {
@@ -961,7 +962,7 @@ test("remove_and_show_hidden_on_a_listed_vault_that_opens_read_only", async () =
 
 async function toTheStepOf(name: string, index = 0): Promise<void> {
   const menu = await openVaultMenu();
-  const locked = rowsOf(menu).filter((one) => one.textContent === `${name}Locked`);
+  const locked = rowsOf(menu).filter((one) => rowReads(one, name, "Locked"));
   fireEvent.click(locked[index] as HTMLElement);
   await screen.findByRole("heading", { level: 1, name: `Unlock ${name}` });
 }

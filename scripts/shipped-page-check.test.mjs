@@ -44,8 +44,8 @@ test("shipped_page_holds_no_build_tool_code: a build with nothing to check fails
   assert.match(buildToolProblems(packagesOnly).join("\n"), /no chunk holds a module of our own/);
 });
 
-// The real build. Skipped where the UI's packages aren't installed (CI's scan job); CI's UI job and
-// scripts/check.mjs run the check itself.
+// The real build. Skipped where the UI's packages aren't installed (CI's scan job); CI's UI job runs this
+// file once the page is built, and scripts/check.mjs runs it with the UI installed.
 const real = { skip: canBuild() ? false : "ui/node_modules is not installed", timeout: 180_000 };
 
 test("shipped_page_holds_no_build_tool_code: the real page, run as a command, is clean", real, () => {

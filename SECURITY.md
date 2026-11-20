@@ -77,7 +77,7 @@ lose both the password and the recovery key, nothing opens the vault, or a backu
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
 | R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the last screens (4D) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
-| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box at its lock event |
+| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box when the vault it would save to locks, or every vault does (a lock of another vault leaves it) |
 | R7 Documented limits | This file |
 
 ## How the app is locked down
@@ -159,7 +159,8 @@ trusted than Rust.
   password is changed from the open vault). The box shows the words as they are typed, so they can be read back against
   the written copy. The page keeps the key in its box, read-only, until the check answers; a refused key (a typo, a word
   that is not a key word, a wrong count, another vault's key) stays there to be corrected, and the box is emptied when
-  the window loses focus or hides, at any lock, on Back, and once the key is accepted.
+  the window loses focus or hides, when every vault locks, on Back, and once the key is accepted. A key in the box is
+  never copied or cut natively (it would reach Windows' clipboard history), as for every secret the page shows.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
@@ -322,8 +323,9 @@ in the code with a `shortcut:` comment.
   program could add a vault to the list, raise the idle time or clipboard delay to their limits (a value out of range
   gives the defaults), turn capture protection off or change the save shortcut (`settings.json`; a shortcut the
   Settings screen would refuse, or any other value out of range, gives the defaults), remove a vault's "recovery key not
-  confirmed" note (a damaged `vault-state.json` also reads as having none), or empty the output journal so a leftover
-  stays. They hold no secrets. `vaults.json` keeps each vault's last-known name beside its folder path, so a vault whose
+  confirmed" note (a damaged `vault-state.json` also reads as having none), add one, so that the next unlock that can
+  write makes a new recovery key without asking for the password again (the old key stops working; the new one is shown
+  to whoever unlocked, who just typed the password), or empty the output journal so a leftover stays. They hold no secrets. `vaults.json` keeps each vault's last-known name beside its folder path, so a vault whose
   folder or drive is gone still shows its name on the lock screen. The name is not secret (the lock screen shows it before
   any password, read from the header without the key), but a vault on a removable drive leaves its name on the PC after
   the drive goes, as its path already does; Remove from list takes the name away with the row. Show in Explorer never runs a listed place through the shell's "open": it checks the
@@ -336,7 +338,13 @@ in the code with a `shortcut:` comment.
   created or added, and reports it at each unlock, where the screen warns. They are found by asking Windows about sync
   roots, then by each provider's known location,
   so a provider that does neither goes unnoticed. Syncing can leave conflicting copies of vault files, and old versions on
-  the provider's servers. *Accepted:* v1 does not support these folders, and the warning says so. A vault brought to a
+  the provider's servers. Two copies of one vault written apart (another PC on the same sync folder) don't merge: a
+  rename, password change or new recovery key here writes this copy's header over a change the other copy made, so that
+  change is undone: a password or recovery key set on the other copy stops working, and the one it replaced works again
+  (a leaked password that was changed there opens the vault again; someone who no longer has the replaced one is locked
+  out). Nothing unsigned is ever trusted: this needs a genuine change made by Lockbox on
+  the other copy. *Accepted:* v1 does not
+  support these folders, and the warning says so. A vault brought to a
   new computer ("Move to a new computer") keeps the settings calibrated on the PC that made it, and the old computer's
   copies of it stay as readable as any old backup (see "Old copies of the vault").
 - **A USB hard drive that reports as fixed is accepted** (the checks use what Windows reports). Unplugging it locks its
@@ -470,7 +478,9 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   notice, and the new password stops working). There is no key rotation. *Accepted:* it follows from the two-copy
   design; and because a password change does not change the vault key, an old password plus any older copy of the header
   already works (see "Old copies of the vault").
-- **The regenerate-recovery double fault.** A new recovery key is written to `.bak` first and then `vault.json`. If the
+- **The regenerate-recovery double fault.** A new recovery key is written to `.bak` first and then `vault.json`
+  (a `vault.json` that can't be read as a header is first rewritten with the open header, so the old key always has
+  a file to open). If the
   second write fails, the old recovery key keeps working and the new one is never shown. If `vault.json` is then
   destroyed before an unlock with the old key or a header write repairs `.bak` (a password unlock does not), `.bak` takes
   over, and its recovery slot belongs to the key that was never shown, so

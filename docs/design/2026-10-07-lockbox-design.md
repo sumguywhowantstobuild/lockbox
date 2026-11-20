@@ -292,7 +292,9 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
 - **A new recovery key writes the other way round: `vault.json.bak` first, then `vault.json`.** `vault.json` therefore
   never holds a key slot for a secret that was not delivered. If the write to `.bak` fails, nothing has changed. If the
   write to `vault.json` fails, the old key still opens `vault.json`, and `.bak` holds a recovery slot whose key nobody
-  was shown.
+  was shown. That needs a `vault.json` to fall back on: one that can't be read as a header (left so by an unlock from
+  `.bak` whose repair failed) is first rewritten with the open header, so a failure on `vault.json` never leaves the old
+  key opening neither file.
 - **An undelivered recovery slot.** A password unlock of that vault opens from `vault.json`, leaves both files as they
   are and remembers the recovery slot as unchecked. While it is unchecked, a header write that would copy it over the
   other file (a password change, a rename) is refused ("header copies disagree; replace the unchecked credential

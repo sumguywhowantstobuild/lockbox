@@ -20,6 +20,7 @@ import {
   type FakeVault,
 } from "../testing/fakeShell";
 import { readBeside } from "../testing/files";
+import { rowReads } from "../testing/menuRows";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -129,7 +130,7 @@ function typeAndSend(password: string) {
 /** A locked vault chosen from the menu (its row reads "<name>Locked"), its password typed, and the vault open and on screen. */
 async function unlockFromMenu(name: string, password = PASSWORD): Promise<void> {
   const menu = await openVaultMenu();
-  const row = rowsOf(menu).find((one) => one.textContent === `${name}Locked`);
+  const row = rowsOf(menu).find((one) => rowReads(one, name, "Locked"));
   if (row === undefined) throw new Error(`no locked row for ${name}`);
   fireEvent.click(row);
   await waitFor(() => {
@@ -774,9 +775,13 @@ test("vault_strip_two_named_alike_tells_them_apart", async () => {
   expect(first).toBe(markOf(3));
   expect(second).toBe(markOf(5));
   expect(first).not.toBe(second);
-  // The vault menu tells them apart as it always could: by the order of the list, and the locked one's word.
+  // The vault menu's rows say the same place (4C end review, astra6-4): two vaults with one status would otherwise read alike, the mark being a picture.
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "My vaultLocked"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault, 1 of 2Unlocked", "My vault, 2 of 2Locked"]);
+  // Each row is its own vault's: the second opens the second vault's unlock step.
+  fireEvent.click(rowsOf(menu)[1] as HTMLElement);
+  await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
+  expect(debugState().unlockStep).toMatchObject({ vault: 8 });
 });
 
 test("the_strip_has_a_look_for_every_state", () => {

@@ -175,7 +175,7 @@ pub trait Notifier: Send + Sync {
 }
 
 /// What an opening closure gives back: a new session, or a question to ask first, whose state waits in [`Pending`]
-/// (`recover_vault`'s changed header). The `fn` builds the question from the new token.
+/// (`create_vault`'s cloud folder). The `fn` builds the question from the new token.
 // Returned once per open and unpacked straight away: boxing the vault would only add an allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum OpenStep<X> {
@@ -2472,7 +2472,7 @@ mod tests {
     }
 
     /// Task 9: a question changes nothing, so a lock racing it answers `Locked` even for an open that names its
-    /// change (`recover_vault` asks before it sets the new password).
+    /// change (`create_vault` asks about a cloud folder before it makes the vault).
     #[test]
     fn ask_racing_lock_with_what_says_locked() {
         let (_, sessions) = sessions();

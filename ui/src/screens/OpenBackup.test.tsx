@@ -1133,6 +1133,47 @@ test("the_form_follows_a_vault_that_locks_while_it_is_open", async () => {
   });
 });
 
+test("two_vaults_named_alike_are_told_apart_by_their_place_in_copy_to_a_vault", async () => {
+  // Every new vault starts as "My vault", so two alike are likely (4C end review, astra4-13): the Vault list and the Unlock buttons say each one's place on the
+  // list, as the vault strip and the save box do, and the copy goes to the one chosen.
+  const twin = (id: number): FakeVault => ({ id, name: "Twin", items: id === 8 ? (home().items ?? []) : sampleItems() });
+  await unlocked([twin(7), twin(8)]);
+  await act(async () => {
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
+  });
+  await openTheBackup();
+  const panel = await select("Bot admin console");
+  fireEvent.click(within(panel).getByRole("button", { name: "Copy to a vault" }));
+  // The one most recently unlocked is chosen.
+  expect(within(panel).getByRole("combobox", { name: "Vault" }).textContent).toBe("Twin, 2 of 2");
+  const vaultList = within(panel).getByRole("combobox", { name: "Vault" });
+  fireEvent.pointerDown(vaultList, { button: 0 });
+  fireEvent.click(vaultList);
+  expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual(["Twin, 2 of 2", "Twin, 1 of 2"]);
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+  await waitFor(() => {
+    expect(screen.queryAllByRole("option")).toEqual([]);
+  });
+  await pickOption(panel, "Vault", "Twin, 1 of 2");
+  press(panel, "Copy");
+  await waitFor(() => {
+    expect(sent("copy_item_to")).toHaveLength(1);
+  });
+  expect(sent("copy_item_to")[0]).toMatchObject({ to: shell.sessionOf(7)?.session });
+
+  // Both lock: each is offered to unlock by its place.
+  act(() => {
+    shell.lock(shell.sessionOf(7)?.session ?? 0);
+  });
+  act(() => {
+    shell.lock(shell.sessionOf(8)?.session ?? 0);
+  });
+  const again = await select("Bot admin console");
+  if (within(again).queryByText(NOWHERE) === null) fireEvent.click(within(again).getByRole("button", { name: "Copy to a vault" }));
+  await within(again).findByText(NOWHERE);
+  expect(buttonsIn(again).slice(-3)).toEqual(["Unlock Twin, 1 of 2", "Unlock Twin, 2 of 2", "Cancel"]);
+});
+
 test("a_busy_copy_says_copying_the_item", async () => {
   await unlocked();
   await openTheBackup();

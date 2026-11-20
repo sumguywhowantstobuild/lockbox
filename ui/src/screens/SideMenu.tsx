@@ -22,7 +22,7 @@ import {
 } from "../store";
 import { kindRow, shownName } from "../openBackupWords";
 import { useMode } from "../theme";
-import { listedName, LOCKED, NOT_AVAILABLE, UNLOCKED } from "../vaultWords";
+import { listedName, LOCKED, NOT_AVAILABLE, placedName, UNLOCKED } from "../vaultWords";
 import { focusButton } from "../focus";
 import { NewFolderBox } from "./forms/FolderForm";
 import { RenameVaultBox } from "./RenameVault";
@@ -79,13 +79,14 @@ export function SideMenu({
   // colour still look different. The mode class sits beside the colour's so the colour resolves in the menu, which is drawn outside the window's own element. A session that
   // is no listed vault's (a backup, an older copy) wears the read-only look, as its window does.
   const markOf = (look: VaultLook) => <VaultMark points={look.points} className={`vprint mode-${mode} v-${look.accent}`} />;
+  // Two vaults that read alike say their place on the list too, as the strip does (the mark alone is a picture).
   const listed: MenuRow[] = vaults.map((vault, place) => {
     const session = sessions.find((one) => one.vaultId === vault.id);
     const icon = markOf(vaultLook(place, false));
     if (session !== undefined) {
       return {
         id: `vault:${String(vault.id)}`,
-        label: session.name,
+        label: placedName(vaults, place, session.name),
         // 18a's line under an open vault's name.
         detail: kindRow(session.kind) ?? UNLOCKED,
         icon,
@@ -98,7 +99,7 @@ export function SideMenu({
     if (!vault.available) {
       return {
         id: `vault:${String(vault.id)}`,
-        label: listedName(vault),
+        label: placedName(vaults, place),
         detail: NOT_AVAILABLE,
         icon,
         checked: false,
@@ -109,7 +110,7 @@ export function SideMenu({
     }
     return {
       id: `vault:${String(vault.id)}`,
-      label: listedName(vault),
+      label: placedName(vaults, place),
       detail: LOCKED,
       icon,
       checked: false,

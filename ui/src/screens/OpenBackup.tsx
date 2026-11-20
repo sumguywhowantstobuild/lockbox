@@ -34,7 +34,7 @@ import {
   type OpenFlow,
   type SessionData,
 } from "../store";
-import { listedName } from "../vaultWords";
+import { placedName } from "../vaultWords";
 import { Frame } from "./setup/Frame";
 import { NO_FOLDER } from "./forms/shared";
 import { foldersOf } from "./SideMenu";
@@ -324,6 +324,11 @@ export function CopyToVault({ data, summary, folderNames }: { data: SessionData;
   // The vaults of the list that can be opened and are not: with no vault open to copy into, each is offered to unlock, in the list's order.
   const listed = useVaults() ?? [];
   const locked = listed.filter((entry) => entry.available && !sessions.some((one) => one.vaultId === entry.id));
+  // Two vaults that read alike say their place on the list too, in the Vault list and the Unlock buttons, as the strip and the save box do.
+  const targetName = (entry: (typeof targets)[number]) => {
+    const place = listed.findIndex((one) => one.id === entry.vaultId);
+    return place < 0 ? entry.name : placedName(listed, place, entry.name);
+  };
   const vault = targets.find((entry) => String(entry.session) === picked.vault) ?? targets[0];
   const folders = vault === undefined ? [] : foldersOf(vault.items ?? []);
   // The folder with the same name as this item's folder here, else none.
@@ -399,7 +404,7 @@ export function CopyToVault({ data, summary, folderNames }: { data: SessionData;
                     startUnlockStep(entry.id, true);
                   }}
                 >
-                  {`Unlock ${listedName(entry)}`}
+                  {`Unlock ${placedName(listed, listed.indexOf(entry))}`}
                 </Button>
               ))}
               <Button onClick={close}>Cancel</Button>
@@ -410,7 +415,7 @@ export function CopyToVault({ data, summary, folderNames }: { data: SessionData;
             <div className="fbox">
               <Select
                 label="Vault"
-                items={targets.map((entry) => ({ value: String(entry.session), label: entry.name }))}
+                items={targets.map((entry) => ({ value: String(entry.session), label: targetName(entry) }))}
                 value={String(vault.session)}
                 onValueChange={(next) => {
                   setPicked({ vault: next, folder: null });

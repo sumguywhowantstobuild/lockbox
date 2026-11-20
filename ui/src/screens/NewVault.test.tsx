@@ -7,6 +7,7 @@ import App from "../App";
 import { Pattern } from "../parts/Pattern";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
+import { rowReads } from "../testing/menuRows";
 import {
   installFakeShell,
   PASSWORD,
@@ -119,7 +120,7 @@ function typeAndSendUnlock(password: string) {
 /** A locked vault chosen from the menu (its row reads "<name>Locked"), its password typed, and the vault open and on screen. */
 async function unlockFromMenu(name: string, password = PASSWORD): Promise<void> {
   const menu = await openVaultMenu();
-  const row = rowsOf(menu).find((one) => one.textContent === `${name}Locked`);
+  const row = rowsOf(menu).find((one) => rowReads(one, name, "Locked"));
   if (row === undefined) throw new Error(`no locked row for ${name}`);
   fireEvent.click(row);
   await waitFor(() => {

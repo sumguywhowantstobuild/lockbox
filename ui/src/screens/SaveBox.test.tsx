@@ -7,7 +7,19 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
 import { messageFor, messageText } from "../messages";
-import { chooseSaveVault, debugState, makeNewRecoveryKey, openNewRecoveryKey, refreshVaults, resetStoreForTests, saveCapture, startRestore, unlockInBox } from "../store";
+import {
+  acceptDetails,
+  chooseSaveVault,
+  debugState,
+  makeNewRecoveryKey,
+  openDetailsChanged,
+  openNewRecoveryKey,
+  refreshVaults,
+  resetStoreForTests,
+  saveCapture,
+  startRestore,
+  unlockInBox,
+} from "../store";
 import { expectNoAxe } from "../testing/axe";
 import {
   BACKUP_PASSWORD,
@@ -2091,6 +2103,24 @@ test("unlocking_on_the_lock_screen_makes_that_vault_the_choice", async () => {
   });
 });
 
+test("a_vault_unlocked_on_the_save_step_that_opens_read_only_keeps_the_box_on_it_and_says_why", async () => {
+  // Task 10b's R2 (end-of-plan fix round): the save step's Unlock and continue is the person's pick for the copy. It used to wipe the choice, so a vault that
+  // opened read-only sent the box to the first vault that could take a key (Home's password), not the one the person picked.
+  await start({ vaults: [{ id: 7, name: "My vault", items: withKey(), readOnly: true }, homeVault()] });
+  await press({ text: COPIED });
+  await screen.findByRole("heading", { level: 1, name: PAGE_WORDS });
+  fireEvent.change(screen.getByLabelText("Password for My vault"), { target: { value: PASSWORD } });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock and continue" }));
+  const panel = await boxPanel();
+  const alert = await within(panel).findByRole("alert");
+  expect(alert.textContent).toBe(`My vault: ${messageText(messageFor({ code: "read_only" }))}`);
+  expect(vaultBox(panel).textContent).toBe("My vault");
+  expect(within(panel).queryByLabelText("Password for Home")).toBeNull();
+  expect(within(panel).queryByRole("button", { name: "Save" })).toBeNull();
+  expect(debugState().capture?.choice).toMatchObject({ kind: "locked", vault: 7 });
+  expect(sent("capture_choose")).toEqual([]);
+});
+
 test("a_locked_choice_opened_elsewhere_becomes_the_open_choice", async () => {
   const panel = await boxOverOneOpen();
   await chooseVault(panel, "Archive");
@@ -2718,6 +2748,33 @@ test("a_password_typed_before_its_vault_becomes_unavailable_is_gone_when_the_vau
   });
   expect(passwordBox(boxDom(), "Archive").value).toBe("");
   expectNoValue("half-typed-5");
+});
+
+test("a_value_typed_before_its_vault_waits_on_a_step_is_gone_when_the_step_is_done", async () => {
+  // Task 10b's R4 (end-of-plan fix round): a block takes the Value box away, and what was typed in it goes too, so it can't come back on screen unseen. Archive,
+  // behind, opens Ask 3 (a refused rename's See the change), which it waits on until it is answered.
+  await openAll([{ id: 7, name: "My vault", items: withKey() }, { id: 9, name: "Archive", items: sampleItems() }], ["Archive"], "My vault");
+  await press("empty");
+  const panel = await boxPanel();
+  await chooseVault(panel, "Archive");
+  fireEvent.change(within(boxDom()).getByLabelText("Value"), { target: { value: "MU-typed-value-9" } });
+  act(() => {
+    openDetailsChanged(liveOf(9).session);
+  });
+  await waitFor(() => {
+    expect(within(boxDom()).queryByLabelText("Value")).toBeNull();
+  });
+  expect(within(boxDom()).getByRole("alert").textContent).toBe("Archive needs a step before it can be used. Switch to it to finish, then save.");
+  expectNoValue("MU-typed-value-9");
+  // The step done (Ask 3 accepted), the box takes a value again, empty.
+  await act(async () => {
+    await acceptDetails(liveOf(9).session);
+  });
+  await waitFor(() => {
+    expect(within(boxDom()).queryByLabelText("Value")).not.toBeNull();
+  });
+  expect(within(boxDom()).getByLabelText<HTMLInputElement>("Value").value).toBe("");
+  expectNoValue("MU-typed-value-9");
 });
 
 test("the_vault_list_keeps_keyboard_focus_when_the_offers_change_while_the_box_is_blocked", async () => {

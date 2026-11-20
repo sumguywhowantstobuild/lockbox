@@ -405,8 +405,20 @@ impl Vault {
     /// failure on `vault.json`, `.bak` may hold an undelivered recovery slot until the next
     /// recovery unlock or header write. If `vault.json` is lost before then, the vault
     /// opens with the password only, and recovery must be regenerated.
+    ///
+    /// That order needs a `vault.json` to fall back on. After an unlock from `.bak` whose
+    /// repair failed, `vault.json` may be missing or not read as a header at all, so the old
+    /// secret opens only `.bak`, and a failure on `vault.json` after `.bak` landed would leave
+    /// it opening neither file. So such a `vault.json` is first rewritten with the open header
+    /// (which `.bak` already holds): a failure there changes nothing, and then the order above
+    /// keeps its promise. (A `vault.json` that reads but keeps its own recovery slot is the
+    /// unverified slot this write replaces: `.bak` first, as above.)
     pub fn regenerate_recovery(&mut self) -> Result<RecoverySecret> {
         self.guard.check(Some(SlotType::Recovery))?;
+        let primary = self.dir.join(HEADER_FILE);
+        if unlock::load(&primary).is_err() {
+            unlock::repair(&primary, &serialize_header(&self.header))?;
+        }
         let secret = RecoverySecret::generate();
         let salt = random_bytes::<16>();
         let slot = wrap_slot(
@@ -894,6 +906,59 @@ mod tests {
         assert!(!report.header_repair_failed);
         let (main, bak) = read_pair(&dir);
         assert_eq!(main, bak);
+    }
+
+    /// 4C end review (astra3-3): after an unlock from `.bak` whose repair failed (a damaged
+    /// `vault.json` that could not be rewritten), the old recovery secret opens only `.bak`.
+    /// A new secret first repairs `vault.json` from the open header, then writes `.bak` first
+    /// as always, so a failure at any of the three writes leaves the old secret working (without
+    /// the repair, a failure on `vault.json` after `.bak` would leave it opening neither), and
+    /// `vault.json` never holds the undelivered slot, so a later change in the same session
+    /// can't spread it. With no failure the new one works at once and the old one stops.
+    #[test]
+    fn new_recovery_after_a_failed_repair_keeps_the_old_secret_through_any_failure() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let old = created.recovery;
+        drop(created.vault);
+        let degraded = || {
+            fs::write(dir.join(HEADER_FILE), b"{\"truncated").unwrap();
+            failpoint::arm("unlock.repair_write");
+            let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+            failpoint::disarm_all();
+            assert!(report.used_backup_header && report.header_repair_failed);
+            vault
+        };
+
+        // A failure at the repair, at `.bak`, then at `vault.json`: each is an `Err`, and the old
+        // secret still opens, also after a password change in the same session.
+        for point in [
+            "unlock.repair_write",
+            "write_headers.before_first",
+            "write_headers.before_second",
+        ] {
+            let mut vault = degraded();
+            failpoint::arm(point);
+            let failed = vault.regenerate_recovery().map(|_| ());
+            failpoint::disarm_all();
+            assert!(failed.is_err(), "{point}");
+            if vault.change_password("a different long password").is_ok() {
+                vault.change_password(PW).unwrap();
+            }
+            drop(vault);
+            let (vault, _) = Vault::unlock_with_recovery(&dir, &old)
+                .unwrap_or_else(|e| panic!("{point}: the old secret stopped working: {e:?}"));
+            drop(vault);
+        }
+
+        // No failure: the new secret works and the old one stops.
+        let mut vault = degraded();
+        let fresh = vault.regenerate_recovery().unwrap();
+        drop(vault);
+        assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
+        assert!(Vault::unlock_with_recovery(&dir, &old).is_err());
+        assert!(Vault::unlock_with_recovery(&dir, &fresh).is_ok());
     }
 
     /// Final review, Important 3: a write that fails on an unverified disk state must not

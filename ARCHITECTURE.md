@@ -370,10 +370,11 @@ app refuses to run without it. `Shell::launch_work` settles a half-done restore,
 `open\`. Only then is the shell made available to commands and the window built, and the app refuses to run if WebView2
 cannot confirm that external file drops are off.
 
-**Unlock** (`unlock_vault`). The page sends a registry ID and the password, never a path. The strict parser reads them
-into a wiped string. The session opens under its location, so a vault opens once. Inside: `check_location` on the folder,
-a check that it is still the listed one, then the engine's unlock. If a lock came during that second or so, the result
-is discarded and the vault's key is released (spec 7.4). The answer carries the session and generation, which the bridge
+**Unlock** (`unlock_vault`). The page sends the vault's row (the list's identity and the row's ID) and the password,
+never a path. The strict parser reads them into a wiped string. The session opens under its location, so a vault opens
+once, and only in the lock epoch read before the row was looked up. Inside: `check_location` on the folder, a check that
+it is still the listed one, then the engine's unlock. If a lock came during that second or so, the result is discarded
+and the vault's key is released (spec 7.4). The answer carries the session and generation, which the bridge
 remembers.
 
 **Change password and a new recovery key** (`change_password`, `new_recovery_key`). Each runs inside one write of the
@@ -381,11 +382,14 @@ session, so nothing else changes the vault between its checks and its writes: th
 password (`Vault::check_password`; a wrong one changes nothing), for a key the "not confirmed" note, then the stop check,
 then the header writes. A lock before the writes answers `Locked`; one after them answers `LockedAfterChange` (the
 change is in effect, and the page says so). A key made for an unconfirmed vault (`regenerate_recovery`) is allowed
-without the password only for a session that entered that step from a note read without error. `recovery_confirmed`
-clears the note only for the latest key this session made. **Forgot password** (`recover_check`, `recover_finish`,
+without the password only for a session that entered that step from a note read without error at its unlock, or for
+the session of a vault just created (its first key was made with it). The engine writes a new key `.bak` first, and first
+rewrites a `vault.json` that can't be read as a header (left so by an unlock from `.bak` whose repair failed) with the
+open header, so a failure at any write leaves the old key working. `recovery_confirmed` clears the note only for the latest key this session
+made. **Forgot password** (`recover_check`, `recover_finish`,
 `recover_forget`): the check opens nothing and holds the key (see `pending.rs`); the finish re-checks the folder, both
 header files and the key, unlocks with the key, accepts a changed header only on the person's yes, sets the new
-password, then publishes the session. **The vault list** (`forget_vault`, `show_vault_in_explorer`,
+password (with the same stop check right before the header writes as a password change), then publishes the session. **The vault list** (`forget_vault`, `show_vault_in_explorer`,
 `add_existing_vault`): a row is named by the list's identity and ID; Remove locks the vault first, is refused while an
 unlock or job of it runs, and leaves the folder alone; Show in Explorer opens only a folder that is not a link.
 

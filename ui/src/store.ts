@@ -199,7 +199,8 @@ export type RestoreStart = { vault?: number; origin?: RestoreOrigin };
 /**
  * Where Forgot password is (28a to 28e), or `null` when it is not begun. It is the app's, not a vault's, like the restore: it belongs to the listed vault it
  * was opened for (`vault`, its registry ID) and is shown full-screen above the lock screen, and above the vault it opens, so 28e still shows once the session
- * is there. The typed key and the typed passwords are never here: they are the screen's own state, wiped as they are sent. The shell holds the checked key
+ * is there. The typed key and the typed passwords are never here: they are the screen's own state. The passwords are wiped as they are sent; the key stays,
+ * read-only, until the check answers (a refused key stays to be corrected) and is wiped on blur, hide, a lock of every vault, Back and once accepted. The shell holds the checked key
  * under `choice`; the page holds only that token.
  */
 export interface ForgotFlow {
@@ -926,6 +927,8 @@ export function dropSession(session: number): void {
 export async function unlock(vault: api.VaultRef, password: string, keepsChoice = false): Promise<"opened" | "stale"> {
   // The lock screen's add said its refusal until the next unlock: this is it.
   if (state.addRefusal !== null) set({ ...state, addRefusal: null });
+  // With a copy waiting (8b), this unlock is the save step's Unlock and continue: the person's pick of a vault for that copy's box.
+  const pickFor = keepsChoice ? null : (state.capture?.opening ?? null);
   let answer;
   try {
     answer = await api.unlockVault(vault, password);
@@ -935,9 +938,15 @@ export async function unlock(vault: api.VaultRef, password: string, keepsChoice 
     if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
     throw error;
   }
-  // With a copy waiting (8b), this unlock is the one for the save: the vault that opens becomes the box's choice, whatever it had chosen before. Only once the
-  // password was right: a refusal changes nothing. A restore's unlock (`keepsChoice`) is not the person choosing a vault for the copy, so the choice stays.
-  if (!keepsChoice && state.capture !== null && state.capture.choice !== null) set({ ...state, capture: { ...state.capture, choice: null, choiceName: null } });
+  // The vault that opens becomes the box's choice, whatever it had chosen before, and only for the box it was picked for (a copy that replaced the waiting one keeps
+  // the box; a box opened since is not this pick's). It is set as that vault, locked, and settles onto its session through `seatCapture` once it is ready; one that
+  // opened read-only or waiting on a step keeps the choice, and the box says why rather than moving to another vault (Task 10b's R2). Only once the password was
+  // right: a refusal changes nothing. A restore's unlock (`keepsChoice`) is not the person choosing a vault for the copy, so the choice stays.
+  const capture = state.capture;
+  if (pickFor !== null && capture?.opening === pickFor) {
+    const choice: SaveChoice = { kind: "locked", vault: vault.id, list: vault.list };
+    set({ ...state, capture: { ...capture, choice, choiceName: choiceNameOf(choice, state.sessions, state.vaults, capture.choiceName) } });
+  }
   return publishUnlock(answer, vault.id, "front", false, vault.list);
 }
 
@@ -3695,7 +3704,8 @@ export function useRestore(): RestoreFlow | null {
 //
 // Two steps, as the shell has them. The recovery key is typed once and sent with the listed vault's registry ID (`recoverCheck`): the shell reads its form, checks
 // that it opens this vault's recovery slot, and holds it under a choice. The new password is typed once and sent with the choice (`recoverFinish`): the shell
-// sets it, and only then opens the vault. What is typed is the screen's own state and is wiped as it is sent, so nothing here holds a key or a password: only the
+// sets it, and only then opens the vault. What is typed is the screen's own state (the password wiped as it is sent, the key when the screen's rules say, see
+// `ForgotFlow`), so nothing here holds a key or a password: only the
 // choice's token, which the shell gave. Every answer is matched to the step it was asked in (`opening` and `run`): one that comes after the flow was left or moved
 // on comes to nothing, and a choice it brings is let go at once. A lock epoch drops the shell's choice, so the flow goes back to the key with nothing typed.
 

@@ -1,4 +1,5 @@
-import { useId, type KeyboardEvent, type Ref } from "react";
+import { useCallback, useId, useRef, type KeyboardEvent, type Ref } from "react";
+import { useValueGuard } from "../useValueGuard";
 
 /**
  * The box a recovery key alone is typed into (forgot password's 28a, as drawn): several lines in the mono face, the words shown as typed and wrapping, so
@@ -10,7 +11,8 @@ import { useId, type KeyboardEvent, type Ref } from "react";
  * one, for a key copied out line by line, and an Enter that ends a word an input method is composing is that method's own. There is no Caps Lock line: the
  * words are read whatever their case.
  *
- * The text is the caller's state: this part keeps none, so the screen decides when it is wiped.
+ * The text is the caller's state: this part keeps none, so the screen decides when it is wiped. A key in the box is never copied or cut natively, typed or
+ * read-only, as for every secret shown on the page (`useValueGuard`): it would reach Windows' clipboard history with no timer or clearing. A paste goes in.
  */
 export function RecoveryKeyField({
   label,
@@ -33,6 +35,17 @@ export function RecoveryKeyField({
   ref?: Ref<HTMLTextAreaElement>;
 }) {
   const id = useId();
+  const own = useRef<HTMLTextAreaElement>(null);
+  useValueGuard(own);
+  // The box is both the guard's and the caller's.
+  const attach = useCallback(
+    (node: HTMLTextAreaElement | null) => {
+      own.current = node;
+      if (typeof ref === "function") ref(node);
+      else if (ref) ref.current = node;
+    },
+    [ref],
+  );
   const about = `${id}-hint`;
   const problem = `${id}-error`;
   const send = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -44,7 +57,7 @@ export function RecoveryKeyField({
     <div>
       <label htmlFor={id}>{label}</label>
       <textarea
-        ref={ref}
+        ref={attach}
         id={id}
         className="finp farea fkey m"
         rows={4}

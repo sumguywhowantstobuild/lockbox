@@ -220,9 +220,10 @@ export function SaveBox({ host }: { host: SessionData | null }) {
   const currentValue = current?.value ?? "";
   // Why the chosen vault can't take the copy (read-only, waiting on a step, left the list or unavailable), on screen or behind: the box says it and offers no Save.
   const block = current === undefined ? null : boxBlock(current.choice, sessions, vaults);
-  // A blocked vault has no password field and no name question: a password typed before it was blocked is gone with its field (it is not there when the vault comes
-  // back), and a question about a name is closed (Replace and Keep both would save into a vault that can't take the key).
+  // A blocked vault has no password field, no Value box and no name question: a password or a key value typed before it was blocked is gone with its field (it is
+  // not there when the vault comes back), and a question about a name is closed (Replace and Keep both would save into a vault that can't take the key).
   if (block !== null && password !== "") setPassword("");
+  if (block !== null && typed !== "") setTyped("");
   if (block !== null && asked !== null) setAsked(null);
 
   // Another vault chosen: what was typed for the last one's password, and what was said about it, goes.
