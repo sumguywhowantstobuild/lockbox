@@ -1627,7 +1627,8 @@ mod tests {
     }
 
     /// The launch runs before the window: copies a viewer holds wait for Retry and the next lock, close or launch, not
-    /// for the delete's whole retry schedule (about 4 s each), listed in the journal or not.
+    /// for the delete's whole retry schedule (about 4 s each), listed in the journal or not. Counted in tries, not
+    /// timed: under a loaded machine Windows' own file work alone has taken several seconds here.
     #[test]
     fn launch_does_not_wait_out_held_copies() {
         let ts = TestShell::new();
@@ -1653,11 +1654,18 @@ mod tests {
         held.push(hold(&unlisted.join("report.pdf")));
         folders.push(unlisted);
 
-        let started = Instant::now();
+        let before = ts.shell.outputs.retries();
         let report = ts.shell.sweep_outputs();
-        let took = started.elapsed();
+        let retried = ts.shell.outputs.retries() - before;
         assert_eq!((report.removed, report.kept), (0, 2));
-        assert!(took < Duration::from_secs(3), "the launch waited {took:?}");
+        // Each held copy was tried again (so the count saw them), but only within the launch's own few tries: three
+        // copies, at most two retries each (a literal, so raising the launch's tries fails here too).
+        assert_eq!(folders.len(), 3);
+        let most = 6;
+        assert!(
+            retried > 0 && retried <= most,
+            "the launch retried {retried} times, at most {most} expected"
+        );
         drop(held);
         ts.shell.open_folders.retry();
         assert!(folders.iter().all(|folder| !folder.exists()));

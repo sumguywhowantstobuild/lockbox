@@ -115,8 +115,11 @@ test("usb_folder_is_refused_with_copy_it_first", async () => {
   expect(debugState().vaults).toEqual([]);
   expect(screen.getByRole("button", { name: "A vault folder" }).getAttribute("aria-disabled")).toBeNull();
   expect(screen.getByRole("button", { name: "A backup file" }).getAttribute("aria-disabled")).toBeNull();
-  // Focus is back on the button that was pressed.
-  expect(document.activeElement).toBe(screen.getByRole("button", { name: "A vault folder" }));
+  // Focus is back on the button that was pressed (moved by an effect after the render that showed the alert, so it is
+  // waited for: on a loaded machine the alert can be found before that effect has run).
+  await waitFor(() => {
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "A vault folder" }));
+  });
   // The next try starts clean.
   shell.dismissPickerNext();
   press("A vault folder");
