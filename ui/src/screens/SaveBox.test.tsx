@@ -2052,6 +2052,53 @@ test("a_switch_keeps_the_box_over_the_other_window_and_the_windows_own_panel_wai
   expect(shell.captureSlot()).toBeNull();
 });
 
+test("a_switch_keeps_the_folder_the_box_started_on", async () => {
+  // My vault is on screen with Lineproof shown when the copy comes; Home is open behind it.
+  await openAll([{ id: 7, name: "My vault", items: withKey() }, homeVault()], ["Home"], "My vault");
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Vault and folders" })).getByRole("button", { name: /^Lineproof/ }));
+  await press({ text: COPIED });
+  const panel = await boxPanel();
+  expect(within(panel).getByRole("combobox", { name: "Folder" }).textContent).toBe("Lineproof");
+  typeName(panel, "KEPT_FOLDER_KEY");
+  // Another folder opened behind the box (it is a side panel, not a modal) leaves the box's folder as it was.
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Vault and folders" })).getByRole("button", { name: /^Agency support agent/ }));
+  await waitFor(() => {
+    expect(debugState().sessions.at(-1)?.folder).toBe(FOLDER);
+  });
+  expect(screen.getByRole("complementary", { name: PAGE_WORDS })).toBe(panel);
+  expect(within(panel).getByRole("combobox", { name: "Folder" }).textContent).toBe("Lineproof");
+  // A switch to Home behind the box: the box still saves into My vault, and its folder is the one it started on, not "No folder".
+  fireEvent.click(screen.getByRole("button", { name: "Home" }));
+  await waitFor(() => {
+    expect(debugState().sessions.at(-1)?.vaultId).toBe(8);
+  });
+  expect(vaultBox(panel).textContent).toBe("My vault");
+  expect(within(panel).getByRole("combobox", { name: "Folder" }).textContent).toBe("Lineproof");
+  // Nothing in the list moved either: the folder it started on is still first.
+  const list = within(panel).getByRole("combobox", { name: "Folder" });
+  fireEvent.pointerDown(list, { button: 0 });
+  fireEvent.click(list);
+  const options = await screen.findAllByRole("option");
+  expect(options.map((one) => one.textContent)).toEqual(["Lineproof", "Agency support agent", "No folder"]);
+  // The list closes on the folder it already has.
+  const same = options[0] as HTMLElement;
+  fireEvent.pointerDown(same);
+  fireEvent.click(same);
+  await waitFor(() => {
+    expect(screen.queryAllByRole("option")).toEqual([]);
+  });
+  expect(screen.getByRole("complementary", { name: PAGE_WORDS })).toBe(panel);
+  fireEvent.click(saveButton(panel));
+  // My vault is behind now, so the message names it too; the key is in Lineproof, in My vault.
+  await waitFor(() => {
+    expect(toastText()).toContain("KEPT_FOLDER_KEY saved in");
+  });
+  expect(toastText()).toContain("KEPT_FOLDER_KEY saved in Lineproof, My vault");
+  expect(sent("capture_save")[0]?.collection).toBe(FOLDER_2);
+  expect((vault.items ?? []).find((item) => item.title === "KEPT_FOLDER_KEY")?.collection).toBe(FOLDER_2);
+  expect(homeKeys()).toEqual([]);
+});
+
 test("the_env_offer_is_only_for_the_vault_on_screen", async () => {
   const panel = await boxOverTwoOpen({ text: ENV_TEXT });
   expect(within(panel).getByRole("button", { name: "Save as separate keys" })).toBeTruthy();

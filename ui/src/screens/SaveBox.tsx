@@ -160,6 +160,11 @@ export function SaveBox({ host }: { host: SessionData | null }) {
   const [typed, setTyped] = useState("");
   /** The folder picked, and the vault it was picked in: a vault chosen after it takes the pick away. */
   const [picked, setPicked] = useState<{ vault: string; folder: string } | null>(null);
+  /**
+   * The folder the box starts on, and the vault it was decided for: set once when a vault is chosen (or first drawn), from the window it is drawn over then. A
+   * switch behind the box, or a folder opened there, does not move it; choosing another vault decides it again.
+   */
+  const [start, setStart] = useState<{ vault: string; folder: string } | null>(null);
   const [clear, setClear] = useState(true);
   /** A save, an unlock, or the reading as a `.env`, is on its way: a second press does nothing. */
   const [busy, setBusy] = useState(false);
@@ -326,9 +331,10 @@ export function SaveBox({ host }: { host: SessionData | null }) {
   const onScreen = chosenSession?.session === host.session;
   const folders = foldersOf(chosenSession?.items ?? []);
   // A folder that has gone while the box was open is no longer a choice: the save goes to no folder unless another is picked. Before one is picked, the vault on
-  // screen starts on the folder shown, and another vault on "No folder".
-  const start = onScreen ? (host.folder ?? NO_FOLDER) : NO_FOLDER;
-  const wanted = picked?.vault === currentValue ? picked.folder : start;
+  // screen when it was chosen starts on the folder shown then, and another vault on "No folder"; a later switch or folder behind the box leaves it.
+  const startFolder = start?.vault === currentValue ? start.folder : onScreen ? (host.folder ?? NO_FOLDER) : NO_FOLDER;
+  if (start?.vault !== currentValue) setStart({ vault: currentValue, folder: startFolder });
+  const wanted = picked?.vault === currentValue ? picked.folder : startFolder;
   const folder = wanted === NO_FOLDER || folders.some((entry) => entry.id === wanted) ? wanted : NO_FOLDER;
   const place = folder === NO_FOLDER ? null : folder;
   const vaultName = chosenSession?.name ?? "";
@@ -571,7 +577,7 @@ export function SaveBox({ host }: { host: SessionData | null }) {
               <div className="fbox">
                 <Select
                   label="Folder"
-                  items={folderChoices(folders, onScreen ? host.folder : null)}
+                  items={folderChoices(folders, startFolder === NO_FOLDER ? null : startFolder)}
                   value={folder}
                   onValueChange={(next) => {
                     setPicked({ vault: currentValue, folder: next });
