@@ -41,10 +41,10 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
   still guessable. Argon2id makes each guess costly; it cannot make a poor password good.
 - **Unlimited guessing against a copied folder.** There is no lockout after wrong passwords, because an attacker with
   the folder simply bypasses the app. The cost of each guess is the protection.
-- **Old copies of the vault.** Changing the password or regenerating the recovery key does **not** change the vault
-  key. Anyone holding an earlier copy of the vault folder (an old backup, an old header) plus the old password or old
-  recovery key can recover the vault key, and that key opens current and future data if they also get copies of the
-  newer files. Full revocation needs "Rotate vault key", planned for v1.1 (spec 5.3). A backup is such a copy (see
+- **Old copies of the vault.** Changing the password, recovering with the recovery key and regenerating the recovery
+  key do **not** change the vault key. Anyone holding an earlier copy of the vault folder (an old backup, an old header) plus the old password or old
+  recovery key can recover the vault key, and that key opens current and future items and files if they also get copies
+  of them. Full revocation needs "Rotate vault key", planned for v1.1 (spec 5.3). A backup is such a copy (see
   "Old backups keep old passwords working" under "Honest limits").
 - **Old data a restore leaves behind.** The vault a restore replaces stays beside it until you delete it (see "A
   restore keeps the vault it replaced" under "Honest limits").
@@ -66,9 +66,9 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 ## Where each requirement stands today
 
 The Rust core (Plans 1 and 2), the desktop shell (Plan 3), the daily-use screens (4A) and the backup, restore, files and
-long-job screens (4B) exist. The forgotten-password screens and changing the password come in 4C, and export in 4D, so a vault
-whose password is lost cannot be recovered in place yet; restoring a backup you can still open, with its password or the
-recovery key, is the way back.
+long-job screens (4B) and the vault and password screens (4C: change password, forgot password, a new recovery key,
+several vaults open, a new vault, rename, remove and add back) exist. Export, and emptying the trash, come in 4D. If you
+lose both the password and the recovery key, nothing opens the vault, or a backup made since you last changed them.
 
 | Requirement | State |
 |---|---|
@@ -150,6 +150,13 @@ trusted than Rust.
   other lock does end it and removes its staging folder: Lock all, the window's close button (which locks all), Windows
   locking or sleeping, signing out and closing the app. The copy and the swap pause the idle timer while they run, so no
   idle lock lands in either.
+- **A recovery key typed for "forgot password".** The page sends the 24 words once, to a check that opens nothing; Rust
+  keeps the key (wiped when dropped) with both header files as they were read, under a one-time token the page holds. It
+  is dropped by a lock of all vaults (an idle lock included), five minutes, closing, Back, or when the new password is
+  set. A short new password or no yes to a changed header keeps it; a typo or a wrong key holds nothing. Before it writes
+  anything the finish checks again that the folder is the listed one and that both header files and the key are as the
+  check saw them; if not, the answer is "choice expired". A vault that is unlocked cannot be recovered this way (its
+  password is changed from the open vault). The page empties the box the moment the key is sent.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
@@ -206,7 +213,11 @@ it (IDs, the extra context each encryption is bound to, base64). Exact versions 
   is derived from it with HKDF-SHA256 (a standard way to derive keys from a secret), crates `hkdf` and `sha2`. The
   earlier 52-character form is no longer accepted; it was never released. The 24 words look like a crypto wallet's
   recovery phrase, which malware and scams hunt for, so every screen and PDF that shows it is headed "Lockbox recovery
-  key, not a crypto wallet phrase". Keep a saved copy off this PC.
+  key, not a crypto wallet phrase". Keep a saved copy off this PC. A password change, a recovery (forgot password) and a
+  new recovery key do not change the vault key. Someone with an old copy of the vault's details (the header: an earlier
+  copy of the folder, or an old backup) and its old password or old recovery key can read the vault's current and future
+  items and files, if they get copies of them. Full revocation needs "Rotate vault key", planned for v1.1 (see "Old
+  copies of the vault").
 - **Encryption:** XChaCha20-Poly1305 (encryption that also detects tampering), crate `chacha20poly1305`. Key slots
   and items use it directly with a fresh random 24-byte nonce (a one-time value) each time.
 - **Files:** each stored file has its own random key, kept inside its encrypted item. File contents are encrypted in
@@ -243,7 +254,8 @@ in the code with a `shortcut:` comment.
   The one box of "Test a backup" (and of "Open a backup") holds a password or a recovery key: Rust reads the text as a recovery key first and,
   if it is a well-formed key that turns out wrong, tries it as a password too (text that is not a well-formed key is
   tried as a password only, with no typo words); it is wiped when the try ends, and the page empties the box after
-  every send, a wrong password included (unlike the unlock form). The same box of "Restore a backup" is sent once, to
+  every send, a wrong password included (unlike the unlock form). The recovery key box of "forgot password" is sent
+  once, to the check; the key then lives in Rust in the held recovery choice. The same box of "Restore a backup" is sent once, to
   the check; the credential that worked then lives in Rust, in the held pick, until the copy finishes or the pick is
   dropped (see "A backup picked to be restored"). *Accepted:* wiping the buffers would mean replacing Tauri's transport.
 - **Webview memory is not wiped.** Values typed or shown in the window live in WebView2's memory until the browser engine
@@ -456,8 +468,10 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   already works (see "Old copies of the vault").
 - **The regenerate-recovery double fault.** A new recovery key is written to `.bak` first and then `vault.json`. If the
   second write fails, the old recovery key keeps working and the new one is never shown. If `vault.json` is then
-  destroyed before the next repair, `.bak` takes over, and its recovery slot belongs to the key that was never shown, so
-  recovery is lost (the password still works and a new recovery key can be made). *Accepted:* it needs two failures in a
+  destroyed before an unlock with the old key or a header write repairs `.bak` (a password unlock does not), `.bak` takes
+  over, and its recovery slot belongs to the key that was never shown, so
+  recovery is lost (the password still works and a new recovery key can be made). The app leaves its "recovery key not
+  confirmed" note, so the next unlock offers a new key straight away. *Accepted:* it needs two failures in a
   row; the other write order could leave a vault with no working recovery key at all.
 - **A new recovery key can be lost if the process dies right after writing it.** If Lockbox is killed after both header
   files are written but before the caller shows the new recovery key, the old key no longer works and the new one was
@@ -484,7 +498,7 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   and clears the block. *Accepted:* the user may have to replace the unchecked credential first.
 - **A header changed outside Lockbox must be accepted before any other header change.** While the "changed outside
   Lockbox" warning is pending, changing the password or regenerating the recovery key is refused ("accept the header
-  change first"), so the authentic `.bak` is never overwritten by the edited header before the user agrees. The
+  change first"), and so is renaming the vault, so the authentic `.bak` is never overwritten by the edited header before the user agrees. The
   screen's way to decline is "Lock this vault": nothing is written, and the question comes back at the next unlock.
 - **Both at once.** If the header was changed and a slot is unverified, accepting writes each file with the accepted
   name and date and a fresh stamp but keeps that file's OWN version of the unverified slot (the stamp does not cover
@@ -504,6 +518,7 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   ("header copies disagree; replace the unchecked credential first"), and while the header state is unknown after a
   failed header write ("header state unknown; reopen the vault"). *Accepted:* a backup made then would keep a header
   nobody has checked; accepting the change, replacing the unchecked credential or reopening the vault ends it.
+  Renaming the vault is refused in the same four cases.
 - **Odd header files read as damaged.** A `vault.json` saved with a byte-order mark (an invisible marker some editors
   add), or a version number out of range, reads as damaged rather than "update Lockbox", so Lockbox may fall back to
   `.bak` and repair the unreadable file from it. *Accepted:* only a header that passed its checks is ever copied over
@@ -643,22 +658,19 @@ Lockbox defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plans 4C
-and 4D (changing the password, "forgot password", a new recovery key from Settings, and unlocking a second vault from
-inside the window in 4C; emptying the trash and export in 4D; switching between vaults that are already open works from the side menu), the
-end-to-end tests on the running app, and the installer. Until "forgot password" has a screen, a lost password means the
-vault is reachable only through a backup you can still open (its password or your recovery key opens it), so test your
-backups. Plans 4A and 4B are built
+These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plan 4D
+(emptying the trash, the list of items that have been in the trash for 30 days or more, and export), the
+end-to-end tests on the running app, and the installer. Plans 4A, 4B and 4C are built
 (first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
 folders and the trash, `.env` in and out, the save shortcut, stored files, settings, and backing up, testing and
 restoring a backup, older copies, opening a backup read-only, moving a vault to a new computer, adding many files,
-Save all files, and progress and a stop for long jobs), and the page clears what it shows at
+Save all files, changing the password, forgot password with the recovery key, a new recovery key, unlocking a second vault from inside the window and switching, a new vault, renaming a vault, removing a vault from the list and adding it back, and progress and a stop for long jobs), and the page clears what it shows at
 a lock; the shell's other commands exist with no button yet. Unlocking a vault can still write to it (header repair and
 cleanup); to look at a vault or a backup without writing, open it read-only.
 
 ### Limits that come with the screens
 
-These come with the screens of Plans 4A and 4B, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
+These come with the screens of Plans 4A, 4B and 4C, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
 
 - **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
   that value (the save box's tick box, and the same tick box in the paste panel for a `.env` you pasted): after the key is

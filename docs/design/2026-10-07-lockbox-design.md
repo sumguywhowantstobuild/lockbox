@@ -188,6 +188,12 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
   of the header (an earlier copy of the vault folder, an old backup) plus the old password or old recovery key can
   recover the vault key, and that key decrypts **current and future data too**, if they ever get copies of the newer
   items and blobs. Full revocation needs **Rotate vault key** (v1.1).
+- **The current password is asked again.** Changing the password and making a new recovery key from an open vault check
+  the current password in the same call that writes, so an unlocked, unattended PC cannot do either without it; a wrong
+  password changes nothing. This is a delay, not protection against malware (5.6), and there is no lockout. The one
+  exception is the step that makes a recovery key nobody has confirmed (a new vault's, or one found unconfirmed at
+  unlock), which does not ask. **Forgot password** needs the recovery key and a locked vault; the new password is set
+  (12 characters or more) before the vault opens.
 
 ### 5.4 Items
 - Each item is serialized as JSON (max 1 MiB) and **padded to the next 512-byte boundary** before encryption, so
@@ -273,14 +279,31 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
   the same parent (same drive), synced, then renamed to its final name. A crash leaves only a staging folder, never a
   half-built vault. Staging folders left by a crash are deleted the next time a vault is created in that parent.
 - Write the new `vault.json` (6.2), then the same content to `vault.json.bak` (6.2).
-- **Interrupted between the two:** the next successful unlock of a writable session notices they differ and rewrites
-  `.bak`. A read-only opening never repairs: it writes nothing (6.9).
+- **Interrupted between the two:** the next successful unlock of a writable session rewrites the copy that did not open,
+  but only when the header that opened passes its MAC and the rewrite cannot throw away a key slot nobody has checked
+  (see the next two points). A read-only opening never repairs: it writes nothing (6.9).
 - **Unlocking tries both headers.** If `vault.json` fails to parse, or its slot fails to unwrap and `.bak` differs from
   it, Lockbox tries the matching slot in `.bak` (reusing the derived key when the salt and parameters are equal, so no
-  extra Argon2 cost). Recovery follows the same rule.
+  extra Argon2 cost). Recovery follows the same rule. A readable `vault.json` falls back only to a `.bak` of the same
+  vault.
 - **When `.bak` is used**, a visible warning says: "Opened from the backup header. If you changed this vault's password
   recently, it may need your *previous* password. Change the password again after unlocking." After unlocking a
-  writable session, both headers are rewritten.
+  writable session, the other header copy is rewritten under the same rule.
+- **A new recovery key writes the other way round: `vault.json.bak` first, then `vault.json`.** `vault.json` therefore
+  never holds a key slot for a secret that was not delivered. If the write to `.bak` fails, nothing has changed. If the
+  write to `vault.json` fails, the old key still opens `vault.json`, and `.bak` holds a recovery slot whose key nobody
+  was shown.
+- **An undelivered recovery slot.** A password unlock of that vault opens from `vault.json`, leaves both files as they
+  are and remembers the recovery slot as unchecked. While it is unchecked, a header write that would copy it over the
+  other file (a password change, a rename) is refused ("header copies disagree; replace the unchecked credential
+  first"). Accepting a changed header is allowed: each file keeps its own version of that slot. A new recovery key, which replaces that slot, is allowed and ends the block;
+  so does an unlock with the old key, which repairs `.bak` from `vault.json`. If `vault.json` is lost first, the
+  password opens the vault from `.bak` (with the warning above) and the old key no longer opens it: make a new key. The
+  app writes a "recovery key not confirmed" note for the vault's folder before it makes a key, and leaves it if the
+  write fails, so the next unlock goes straight to making a new key.
+- **Renaming a vault** checks as a backup does (a changed header not accepted, a header stamp that does not verify, an
+  unknown header state, a key slot the copies disagree on), signs the header again and writes `vault.json`, then
+  `.bak`. The slots, vault ID, creation time and folder name are unchanged.
 - After a password change completes, `.bak` is rewritten and, for writable sessions, leftover header `*.tmp` files are
   deleted at the next unlock, so **no copy of the old password slot remains in the vault folder** (older backups and external copies: 5.3).
 
@@ -502,6 +525,12 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
   never in the Roaming profile (tested).
 - **Vault registry:** the list of known vault locations is kept in `%LOCALAPPDATA%\Lockbox\vaults.json` (locations
   and each vault's last-known name, which the lock screen shows anyway; no secrets). "Add existing vault folder" adds one.
+  The page names a vault by the list's identity and the vault's ID, never by path. An ID is never given twice on one
+  list, so a removed vault's ID is not reused. Up to 1000 vaults are listed. **Remove from list** takes only the row
+  away: the folder and the notes kept about it stay, and it is refused while an unlock or a job of that vault runs.
+  **Add existing vault folder** adds a vault back; a folder already listed keeps its ID. A vault whose folder or drive
+  is missing stays on the list as unavailable, with its last-known name, and can still be removed. **Show in Explorer**
+  works from the row's ID and opens only a folder that is not a link.
 - For writable sessions, `.lock` is held with an **OS exclusive file lock** (`LockFileEx`) while the vault is open. A stale `.lock` without a
   held lock (after a crash) is ignored and re-locked.
 - **Supported:** local, fixed NTFS drives. **Refused in v1:** removable drives (drives Windows reports as removable,
@@ -509,7 +538,7 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
   (not supported in v1).
 - Supported means `GetDriveTypeW` reports a fixed drive and the file system is NTFS; CD and DVD drives, RAM disks and
   unknown types are refused too. A USB hard drive that reports as fixed is accepted; unplugging it locks its vault
-  (below). The checks run when a vault is created, added, restored to and unlocked. Cloud folders are found by asking
+  (below). The checks run when a vault is created, added, restored to, unlocked and recovered with its recovery key. Cloud folders are found by asking
   Windows whether the path is under a cloud sync root, then by each provider's known location.
 - If the drive holding an unlocked vault disappears, that vault is locked and shown as "unavailable", never treated as
   deleted.
