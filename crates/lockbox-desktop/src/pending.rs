@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use lockbox_core::env_file::EnvEntry;
 use lockbox_core::ids::{FileId, ItemId, VaultId};
-use lockbox_core::{UnlockReport, Vault};
+use lockbox_core::recovery::RecoverySecret;
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 use crate::commands::readable::ReadableJob;
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
+use crate::registry::VaultRef;
 use crate::restore::Checked;
 use crate::session::{Location, SessionId};
 
@@ -84,15 +85,12 @@ pub enum PendingChoice {
         name: String,
         password: Zeroizing<String>,
     },
-    /// `recover_vault` after a header changed outside Lockbox (`Confirm::HeaderChanged`): the vault, unlocked with
-    /// the recovery key (it holds its `.lock` while it waits), the new password to set once the user accepts, and what
-    /// that unlock found, for the answer.
-    RecoverVault {
-        location: Location,
-        vault: Box<Vault>,
-        new_password: Zeroizing<String>,
-        report: UnlockReport,
-    },
+    /// `recover_check`'s recovery key, waiting for `recover_finish` (the forgotten-password flow, 28b to 28d): the key
+    /// that opened the vault's recovery slot, with what it was checked against. It holds no unlocked vault and no
+    /// `.lock`, and no password: the new one is typed after the check. Launch-scoped as a held restore pick is: dropped
+    /// by `recover_finish` (used up), `recover_forget`, every lock of all vaults (an idle one too), Windows locking or
+    /// sleeping, closing, and its five minutes ([`Pending::drain`], [`Pending::sweep_expired`]). Holds a secret.
+    Recovery(RecoveryChoice),
     /// `add_existing_vault` of a folder a cloud provider syncs, waiting for the user's yes (`Confirm::CloudFolder`):
     /// the folder chosen (canonical), so the dialog is not shown again.
     AddVault { dir: PathBuf },
@@ -201,6 +199,20 @@ pub enum PendingChoice {
     /// Tests only: records when it is dropped.
     #[cfg(test)]
     Marker(DropMarker),
+}
+
+/// What a checked recovery key holds (see [`PendingChoice::Recovery`]): the vault's row on the list (the list's identity
+/// and its registry ID) and its place as the check found them, the lock epoch it was held in, the key (wiped when
+/// dropped), the bytes of both header files as the check read them (`None`: the file was not there), and whether the
+/// header that opened failed its MAC. Internal to Rust: the page sees only the token. No `Debug`: it holds a secret.
+pub struct RecoveryChoice {
+    pub vault: VaultRef,
+    pub location: Location,
+    pub epoch: u64,
+    pub secret: RecoverySecret,
+    pub main: Option<Vec<u8>>,
+    pub backup: Option<Vec<u8>>,
+    pub header_changed: bool,
 }
 
 /// What a plan of Save all, or its cloud question, holds (see [`PendingChoice::SaveAll`]). No `Debug`: the folder is the
@@ -858,6 +870,43 @@ impl Pending {
             let mut parked = lock(&self.parked);
             let found = parked.iter().position(|p| {
                 p.token.matches(token) && matches!(p.choice, PendingChoice::RestorePick { .. })
+            });
+            found.map(|at| parked.swap_remove(at))
+        };
+        drop(gone);
+    }
+
+    /// What the recovery choice held under `token` is for, without taking it or starting its five minutes again: the
+    /// row of its vault on the list and whether its header failed the MAC. `None` for a token that is not there, was
+    /// dropped, is five minutes old or holds another kind of choice, which is left alone.
+    pub fn recovery_of(&self, token: &Token) -> Option<(VaultRef, bool)> {
+        self.recovery_of_at(token, Instant::now())
+    }
+
+    fn recovery_of_at(&self, token: &Token, now: Instant) -> Option<(VaultRef, bool)> {
+        let (found, expired) = {
+            let mut parked = lock(&self.parked);
+            let expired = take_expired(&mut parked, now);
+            let found = parked.iter().find_map(|p| match &p.choice {
+                PendingChoice::Recovery(held) if p.token.matches(token) => {
+                    Some((held.vault, held.header_changed))
+                }
+                _ => None,
+            });
+            (found, expired)
+        };
+        drop(expired);
+        found
+    }
+
+    /// Drops the recovery choice held under `token`, and nothing else: a token that is not there, was dropped already
+    /// or holds another kind of choice is left alone, with no error (forgetting is idempotent). The key is wiped as it
+    /// drops, with the table's lock released.
+    pub fn forget_recovery(&self, token: &Token) {
+        let gone = {
+            let mut parked = lock(&self.parked);
+            let found = parked.iter().position(|p| {
+                p.token.matches(token) && matches!(p.choice, PendingChoice::Recovery(_))
             });
             found.map(|at| parked.swap_remove(at))
         };
@@ -1924,5 +1973,61 @@ mod tests {
             Err(ShellError::NotFound)
         ));
         assert_eq!(pending.len(), 0, "an expired choice is dropped");
+    }
+
+    /// The row `id` on a list whose identity is 5.
+    fn row(id: u32) -> VaultRef {
+        VaultRef { list: 5, id }
+    }
+
+    fn recovery(vault: u32, header_changed: bool) -> PendingChoice {
+        PendingChoice::Recovery(RecoveryChoice {
+            vault: row(vault),
+            location: Location::Folder(PathBuf::from("a")),
+            epoch: 1,
+            secret: lockbox_core::internals::recovery::generate(),
+            main: Some(b"main".to_vec()),
+            backup: None,
+            header_changed,
+        })
+    }
+
+    /// A recovery choice is looked at by its own token only (a peek that takes nothing and starts no new five minutes),
+    /// forgotten by it alone (another kind's token and a token that is not there are nothing to forget), and dropped
+    /// by a lock of all vaults and by its five minutes, the lookup included.
+    #[test]
+    fn a_recovery_choice_is_seen_and_forgotten_by_its_own_token_only() {
+        let pending = Pending::default();
+        let now = Instant::now();
+        let token = pending.put_at(recovery(7, true), now);
+        let plain = pending.put_at(recovery(8, false), now);
+        let other = pending.put_at(held(1), now);
+
+        assert_eq!(pending.recovery_of_at(&token, now), Some((row(7), true)));
+        assert_eq!(pending.recovery_of_at(&plain, now), Some((row(8), false)));
+        assert_eq!(pending.recovery_of_at(&other, now), None, "another kind");
+        assert_eq!(pending.recovery_of_at(&Token::random(), now), None);
+        assert_eq!(pending.len(), 3, "a look takes nothing");
+        // A look does not start the five minutes again.
+        assert_eq!(
+            pending.recovery_of_at(&token, now + LIFETIME - Duration::from_secs(1)),
+            Some((row(7), true))
+        );
+        assert_eq!(pending.recovery_of_at(&token, now + LIFETIME), None);
+        assert_eq!(pending.len(), 0, "an expired choice is dropped by the look");
+
+        let token = pending.put_at(recovery(7, true), now);
+        let other = pending.put_at(held(1), now);
+        pending.forget_recovery(&other);
+        pending.forget_recovery(&Token::random());
+        assert_eq!(pending.len(), 2, "another kind's choice is left alone");
+        pending.forget_recovery(&token);
+        pending.forget_recovery(&token);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.recovery_of_at(&token, now), None);
+
+        let token = pending.put_at(recovery(7, false), now);
+        drop(pending.drain());
+        assert_eq!(pending.recovery_of_at(&token, now), None, "a lock drops it");
     }
 }

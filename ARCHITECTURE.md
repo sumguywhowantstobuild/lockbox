@@ -2,11 +2,12 @@
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
 restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
-The real screens come in Plan 4, in three parts; the first two, daily use (4A) and files and long jobs (4B), are built: `ui/` has the bridge to Rust, first-time
+The real screens come in Plan 4, in four parts; the first three, daily use (4A), files and long jobs (4B), and vaults and passwords (4C), are built: `ui/` has the bridge to Rust, first-time
 setup with the recovery key, the lock screen, and the main window with search, the item panel, the forms, the Trash, folders,
 `.env` in and out, the save shortcut's box and settings ([the UI design](docs/design/2026-11-05-user-interface-design.md)),
-and the backup, restore, older-copy, open-a-backup, move-in, add-files and Save all screens with progress and a Stop.
-The rest comes in 4C: changing the password, "forgot password", a new recovery key, emptying the trash and export. The target design and the
+and the backup, restore, older-copy, open-a-backup, move-in, add-files and Save all screens with progress and a Stop, and, from 4C, changing the password, forgot password, a new
+recovery key, a second vault unlocked and switched to in the window, a new vault, rename, remove and add back.
+Emptying the trash and export come in 4D. The target design and the
 reasons behind it are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as
 "spec 5.2" and so on.
 
@@ -19,7 +20,9 @@ The public surface is what the shell uses, and nothing more:
 - from the crate root: `Vault`, `ReadOnlyVault`, `CoreError`, `Result`, `BackupReport`, `BackupSummary`,
   `BackupPlan` (a backup that `Vault::backup_check` passed and nothing has begun to write; its `write` makes it, and
   `Vault::backup` is the two together), `CleanupReport`, `CreatedVault`, `Credential`, `JournalStep`, `JournalView`,
-  `PreparedRestore`, `Recovery`,
+  `PreparedRestore`, `Recovery`, `RecoveryCheck` (what `Vault::check_recovery_key` found: the opening header's name,
+  both header files' bytes and whether its stamp failed), `NewExportError`, `header_is_damaged` (whether neither header
+  copy can be read, for a vault whose details are lost),
   `RestoreDestination`, `RestoreOutcome`, `UnlockReport`, `UnverifiedSlot` (which credential's key slot the two header
   copies disagree on, from `Vault::unverified_slot`; `Vault::created_at` is the header's creation time, for the
   backup reminder), `dismiss_restore_journal`, `inspect_restore_journal`,
@@ -71,7 +74,7 @@ Everything in this table is in `crates/lockbox-core/src/`. App code goes through
 | `fsio/mod.rs` | Safe file operations: `atomic_write` (all or nothing), `replace_file`, `rename_dir_no_replace`, the gated renames that publish an output (`rename_replace_gated`; `rename_no_replace_gated`, which never replaces), retries, hidden temps, space checks |
 | `fsio/windows.rs` | The Win32 calls. The only place `unsafe` is allowed |
 | `fsio/portable.rs` | The same small surface for non-Windows systems |
-| `vault/mod.rs` | `Vault`: create (`create_with_id` when the caller must know the folder first), change password, regenerate recovery key, accept a changed header, search |
+| `vault/mod.rs` | `Vault`: create (`create_with_id` when the caller must know the folder first), change password, check the current password, regenerate recovery key, check a recovery key without opening, rename, accept a changed header, search |
 | `vault/unlock.rs` | Opening a vault: header fallback and repair |
 | `vault/items.rs` | Items in an open vault: add, edit, trash, restore, collections |
 | `vault/files.rs` | Files in an open vault: import, replace, save a decrypted copy (replacing, or never replacing with numbered names), purge |
@@ -216,6 +219,12 @@ then `.bak`. `regenerate_recovery` writes `.bak` first, then `vault.json`, so a 
 holding a secret the user did not receive. (If the process dies after both writes but before the caller shows the new
 secret, it is lost; the password still works.) Neither changes the vault key (spec 5.3).
 
+`check_password` derives the key of the open header's password slot (and of the other copy's, when the copies disagree
+on it) and compares what it unwraps with the live vault key in constant time; it writes nothing. `check_recovery_key`
+reads both headers, opens no vault, takes no `.lock`, repairs nothing and runs no Argon2. `rename` is refused as a
+backup is, signs the header again and writes `vault.json`, then `.bak`. `change_password_with` runs a callback after the
+slow key derivation and just before the writes, so the shell can stop a change when a lock has come.
+
 ## Rules the code must keep
 
 1. **All writes go through `atomic_write` or `replace_file`.** Nothing is written in place. A file gets its final name
@@ -312,7 +321,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 |---|---|
 | `lib.rs` | Builds the app: the launch order, the signal and tick threads, locking on every way out |
 | `shell.rs` | `Shell`: owns everything below, runs the launch work, sends the page's events |
-| `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard (`SessionInfo` also says its `kind`, from the location and the read-only flag: `vault`, `older_copy` or `backup`; a backup's `name` is its file's name without `.lockbox-backup`); the lock epoch and the launch token (cancelled and replaced with each lock of all vaults); locking in two phases; the ordered lock-hook thread |
+| `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard (`SessionInfo` also says its `kind`, from the location and the read-only flag: `vault`, `older_copy` or `backup`; a backup's `name` is its file's name without `.lockbox-backup`); the lock epoch and the launch token (cancelled and replaced with each lock of all vaults); locking in two phases; the ordered lock-hook thread; `KeyState`, per writable session: whether it may make a recovery key without the password (the unconfirmed-key step) and the number of the last key made, so a key's confirmation never races a newer key (`write_keys`) |
 | `autolock.rs` | The idle timer, the table of long operations (jobs) that pauses it, Windows signals, and the shutdown with its 2 s bound |
 | `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `lockbox://job-started`, `lockbox://progress` and `lockbox://lock-epoch` events; also the shape of `lockbox://close-asked` |
 | `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
@@ -320,12 +329,12 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries; also `save_name`, the lighter name rule for a folder's saved files (only what Windows refuses, what could leave the folder, or a direction control that makes an executable read as a document is changed) |
 | `restore.rs` | One restore at a time: the five steps (pick, password check, folder, copy, swap), its state machine, launch recovery, pre-restore copies and their checks |
 | `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
-| `registry.rs` | The vault list (`vaults.json`): locations only, no secrets |
+| `registry.rs` | The vault list (`vaults.json`, version 2): locations and each vault's last-known name, no secrets (the name is read from the header, kept at add, rename and each list read, shown when the folder or header is gone, and removed with its row); a random list identity and a highest-ID mark, so a row is named by list and ID (`VaultRef`), an ID is never given twice on one list, and a row from before Ask 12's new list names nothing; version 1 reads and is rewritten as 2 |
 | `settings.rs` | The app-wide settings with their bounds (`settings.json`): idle time, clipboard delay, theme, the save shortcut (two modifiers, a letter, digit or F1 to F12, never Ctrl with C, V or X) and capture protection |
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
 | `dates.rs` | The one date shape the shell writes and reads (RFC 3339, UTC, whole seconds), and "whole days since": the 30-day backup reminder counts from the last backup, else from the vault's creation |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again; a backup picked to be opened read-only (`PendingChoice::OpenBackup`) is held the same way, as a kind of its own that the test never answers for (and the other way round), with `forget_open_backup`; a backup picked to be restored is held the same way (`PendingChoice::RestorePick`, with `forget_restore_pick`, and every use of it, a check or a copy, in use until it ends), and once the password has worked it also holds the credential that worked and what the check found (the vault's name, ID and date, and the folder), so the typed text is on the page only until it is sent; a lock of all vaults of any kind, an idle one included, drops it |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again; a backup picked to be opened read-only (`PendingChoice::OpenBackup`) is held the same way, as a kind of its own that the test never answers for (and the other way round), with `forget_open_backup`; a backup picked to be restored is held the same way (`PendingChoice::RestorePick`, with `forget_restore_pick`, and every use of it, a check or a copy, in use until it ends), and once the password has worked it also holds the credential that worked and what the check found (the vault's name, ID and date, and the folder), so the typed text is on the page only until it is sent; a lock of all vaults of any kind, an idle one included, drops it; a recovery key checked for "forgot password" (`PendingChoice::Recovery`: the key, both header files' bytes as read and the lock epoch) is held the same way, drops at a lock of all vaults, five minutes or closing, and is told apart from every other kind |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
@@ -361,11 +370,28 @@ app refuses to run without it. `Shell::launch_work` settles a half-done restore,
 `open\`. Only then is the shell made available to commands and the window built, and the app refuses to run if WebView2
 cannot confirm that external file drops are off.
 
-**Unlock** (`unlock_vault`). The page sends a registry ID and the password, never a path. The strict parser reads them
-into a wiped string. The session opens under its location, so a vault opens once. Inside: `check_location` on the folder,
-a check that it is still the listed one, then the engine's unlock. If a lock came during that second or so, the result
-is discarded and the vault's key is released (spec 7.4). The answer carries the session and generation, which the bridge
+**Unlock** (`unlock_vault`). The page sends the vault's row (the list's identity and the row's ID) and the password,
+never a path. The strict parser reads them into a wiped string. The session opens under its location, so a vault opens
+once, and only in the lock epoch read before the row was looked up. Inside: `check_location` on the folder, a check that
+it is still the listed one, then the engine's unlock. If a lock came during that second or so, the result is discarded
+and the vault's key is released (spec 7.4). The answer carries the session and generation, which the bridge
 remembers.
+
+**Change password and a new recovery key** (`change_password`, `new_recovery_key`). Each runs inside one write of the
+session, so nothing else changes the vault between its checks and its writes: the new password's length, the current
+password (`Vault::check_password`; a wrong one changes nothing), for a key the "not confirmed" note, then the stop check,
+then the header writes. A lock before the writes answers `Locked`; one after them answers `LockedAfterChange` (the
+change is in effect, and the page says so). A key made for an unconfirmed vault (`regenerate_recovery`) is allowed
+without the password only for a session that entered that step from a note read without error at its unlock, or for
+the session of a vault just created (its first key was made with it). The engine writes a new key `.bak` first, and first
+rewrites a `vault.json` that can't be read as a header (left so by an unlock from `.bak` whose repair failed) with the
+open header, so a failure at any write leaves the old key working. `recovery_confirmed` clears the note only for the latest key this session
+made. **Forgot password** (`recover_check`, `recover_finish`,
+`recover_forget`): the check opens nothing and holds the key (see `pending.rs`); the finish re-checks the folder, both
+header files and the key, unlocks with the key, accepts a changed header only on the person's yes, sets the new
+password (with the same stop check right before the header writes as a password change), then publishes the session. **The vault list** (`forget_vault`, `show_vault_in_explorer`,
+`add_existing_vault`): a row is named by the list's identity and ID; Remove locks the vault first, is refused while an
+unlock or job of it runs, and leaves the folder alone; Show in Explorer opens only a folder that is not a link.
 
 **Lock** (`Sessions::lock`, `lock_all`, `revoke_some`). Two phases. First, the revocation: in one step every affected
 session's generation goes up and its state becomes `Locked` or `Unavailable`, and from this moment no command gets
@@ -401,26 +427,34 @@ close button and the tray's Quit first ask `AutoLock::running_kinds`, which list
 timer counts (each once, in start order), and `Restores::waiting`, which is true only in `RestoreState::Prepared` (a
 restore extracted, checked and waiting at 24d for the yes). With none running and none waiting, both do what they always
 did. With either, nothing is locked, hidden or cancelled: the page is sent `lockbox://close-asked` (`reason` close or
-quit, the kinds, `past_swap` and `restore_waiting`; the page shows a job's question before the waiting restore's) and the shell keeps
-one pending question, with the lock epoch it was asked in and what was sent. A Quit comes from the tray, so the window is shown first. A
-second close or Quit while it is pending sends the same event again (the first one's reason and payload; a Quit shows the window again), so a
-question the page never showed cannot leave Close and Quit dead; the page keeps one question, so a repeat changes nothing there
-(`a_second_close_sends_the_same_question_again`). A lock of all vaults (a new epoch) clears it. **When the last
+quit, the kinds, `past_swap`, `restore_waiting` and `question`; the page shows a job's question before the waiting restore's) and the shell keeps
+one pending question, with the lock epoch it was asked in and what was sent. `question` is the question's own ID, minted by the shell (a counter
+kept under the same lock as the pending question, counting up from 1 and never reused; a plain JSON number, far below 2^53 like the operation IDs
+and the lock epoch, and the page ignores one that is not a positive safe integer). A Quit comes from the tray, so the window is shown first. A
+second close or Quit while it is pending sends the same event again (the first one's reason, payload and ID; a Quit shows the window again), so a
+question the page never showed cannot leave Close and Quit dead; the page knows a repeat by its ID and changes nothing, and ignores the event of a
+question whose answer has settled or that is older than the newest it has shown, so a late echo cannot bring an answered question back; a question
+a lock cleared on the page before anyone answered it shows again if the shell repeats it, since the shell may still hold it
+(`a_second_close_sends_the_same_question_again`, `a_repeat_carries_the_same_id`, `a_repeated_event_after_its_answer_cannot_reopen_it`,
+`a_question_cleared_by_a_lock_before_an_answer_shows_again_when_the_shell_repeats_it`).
+A lock of all vaults (a new epoch) clears it. **When the last
 running operation ends while the question is pending in the current epoch, and no restore waits at 24d or is past its swap,
 the shell answers it as Close anyway itself** (`Shell::carry_on_close`): there is nothing left to cancel, so the close or
 Quit the person asked for goes ahead with no second press, and the page's own answer, if it comes after, is `NotFound`
-(`last_job_ending_carries_on_with_the_close`, `last_job_ending_carries_on_with_the_quit`). The auto-lock tells the shell through a
+(`the_last_job_ending_still_carries_on_with_the_close`, `last_job_ending_carries_on_with_the_quit`). The auto-lock tells the shell through a
 hook (`AutoLock::on_last_end`) that `Operations::end` calls with no lock of its own held; the hook only starts a thread
 (`lockbox-carry-on`, holding a `Weak` to the shell, which is why `Shell::new` returns an `Arc`), because the end can come from
 `LongOp`'s drop inside a lock's cancel or a lock hook and the go path waits for the lock hooks
 (`the_carry_on_does_not_run_on_the_ending_jobs_thread`). A thread that cannot start leaves the question pending. With anything
 still running or waiting the question stays as asked (`a_job_ending_with_another_running_keeps_the_question`,
 `a_restore_waiting_at_24d_keeps_the_question_when_its_copy_ends`). The page
-answers with `close_answer(go)`: `false` changes nothing, `true` runs the old path for the question's reason (a close:
+answers with `close_answer(question, go)`, naming the question it was given: `Shell::claim_close_answer` compares the ID and the
+lock epoch with the pending question's under the lock before it takes the question out, so an answer to an older question (answered or
+dropped) is `NotFound` and leaves a newer one pending (`a_stale_answer_is_refused_and_leaves_the_newer_question_answerable`). `false` changes nothing, `true` runs the old path for the question's reason (a close:
 `close_window`, whose lock cancels the jobs, ends a waiting restore and which still shows 5b on a first close; a Quit: the shutdown within 2 s,
 which also waits, inside that bound, for the waiting restore's clean-up so its staging folder and journal are gone before the exit
-(`quitting_removes_the_staging_folder_and_journal_before_it_returns`), then the exit through `MainWindow::exit_app`). Either answer uses the question up, and an answer with none pending is
-`NotFound`. `past_swap` is the engine's flag from `PreparedRestore::swap_flag`, which goes on when the restore's journal
+(`quitting_removes_the_staging_folder_and_journal_before_it_returns`), then the exit through `MainWindow::exit_app`). Either answer uses the question up, and an answer with none pending (or for
+another question) is `NotFound`. `past_swap` is the engine's flag from `PreparedRestore::swap_flag`, which goes on when the restore's journal
 says `swapping` (the point from which a cancel no longer counts) and is kept in `RestoreState::Committing`: a restore
 there finishes, or is undone by recovery at the next launch, whatever is answered. Windows ending the session never
 asks (its path is the shutdown, as before).
@@ -496,7 +530,8 @@ since the backup unpacks into a new folder beside it (the existing new-folder qu
 vault list tells the page which vaults Ask 8 is for: `VaultEntry.details_damaged` is true exactly when the folder holds a
 header file (`vault.json` or `vault.json.bak`) and every copy there is refused by the engine as damaged (corrupt or too
 large: `lockbox_core::header_is_damaged`); an empty folder, one with no header files, a header another program holds (a
-sharing violation) and a newer vault have no name either but are not damaged (`both_headers_unreadable_listed_without_a_name`,
+sharing violation) and a newer vault have no name from the header either but are not damaged; each such row shows the
+name the list kept for it, or none when it never had one (`both_headers_unreadable_listed_with_the_kept_name`,
 `a_listed_folder_with_no_vault_in_it_lists_the_same_way`, `a_header_held_by_another_program_is_not_damage`). While the
 pick's folder is still the damaged vault's own parent (Choose another has not moved it), `restore_prepare` never uses the
 engine's same-vault rule, which would find a healthy copy of the backup's vault there (the sibling an earlier Ask 8 restore
@@ -505,11 +540,16 @@ damaged folder's, and is refused ("vault already here", as the engine refuses a 
 folder) when such a sibling is there (`a_second_ask_8_restore_never_replaces_the_first_sibling`,
 `ask_8_from_a_renamed_folder_goes_to_the_default_folder`). Ask 4's vault opens, so it keeps the same-vault rule.
 `restore_check` takes the typed
-text (`{ "password_or_key": text }`: a well-formed key is tried as a key, then as a password), opens the backup read-only
+text (`{ "password_or_key": text }`: a well-formed key is tried as a key, then as a password) and the page's `request`, opens the backup read-only
 without unpacking it (`ReadOnlyVault::open_backup`), and keeps the credential that worked (`Attempts::run_keeping`), the
 vault's name and ID, the day it was made (`backup_created_at` read in the PC's zone, `Clock::utc_offset_secs`) and the
-usual folder (`<Profile>\Lockbox Vaults`) in the pick; it is not a job, and a wrong password leaves the pick unchecked and
-held. `restore_choose_folder` (needs a checked pick) opens "Restore into this folder" starting in the pick's folder and
+usual folder (`<Profile>\Lockbox Vaults`) in the pick. It is a launch-scoped job of kind `restore_check` (`begin_launch_job`,
+begun with the page's `request` after the credential has been read: `job-started`, idle time paused, counted by the close
+question, no progress) whose own stop, a child of the launch token, is what `open_backup` is given: Cancel at 24a
+(`cancel_operation`) ends it as `Cancelled`, and a good result found cancelled just before it would be kept is discarded
+with its credential. A refusal or a Stop keeps nothing new and leaves the pick held as it was (an earlier check stays,
+exactly as after a wrong password); 24a's Cancel leaves the restore and lets the file go. A lock of all vaults drops the
+pick (`Locked`). `restore_choose_folder` (needs a checked pick) opens "Restore into this folder" starting in the pick's folder and
 moves the pick there, the credential kept (in the pending table only: across the dialog the call holds the folder it starts
 in and a use guard, `RestorePickUse::release_checked`, and takes the pick again after it, `ChoiceExpired` if it is gone, so
 a lock wipes the credential while the dialog is open). Both answer `RestoreChecked { name, made, folder_shown, usual,
@@ -607,7 +647,7 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
     `close_with_a_job_running_asks_first`, `close_anyway_cancels_the_jobs_then_hides_and_locks`, `keep_it_running_changes_nothing`,
     `quit_with_a_job_running_asks_first`, `close_past_the_swap_says_it_finishes_next_time`, `a_lock_epoch_change_clears_the_question`,
     `windows_ending_the_session_does_not_wait_for_an_answer`. When the last job ends the shell carries the question on:
-    `last_job_ending_carries_on_with_the_close`, `last_job_ending_carries_on_with_the_quit`,
+    `the_last_job_ending_still_carries_on_with_the_close`, `last_job_ending_carries_on_with_the_quit`,
     `keep_it_running_then_the_job_ends_closes_nothing`. A restore waiting for its yes asks too:
     `close_with_a_restore_waiting_asks_first`, `quit_with_a_restore_waiting_asks_first`,
     `close_anyway_with_a_restore_waiting_ends_it_then_hides_and_locks`, `keep_it_open_leaves_the_restore_waiting`.
@@ -632,7 +672,7 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
     `other_things_in_the_open_folder_are_left_alone`. A held copy does not hold up the launch:
     `launch_does_not_wait_out_held_copies`.
 18. **Locations are checked at create, add, unlock, recover and the restore parent.** `locations_refused_table`,
-    `fixed_ntfs_accepted`, `link_into_a_forbidden_folder_refused`, `unlock_rechecks_location`, `recover_confirm_rechecks_location`,
+    `fixed_ntfs_accepted`, `link_into_a_forbidden_folder_refused`, `unlock_rechecks_location`, `recover_finish_rechecks_location`,
     `add_existing_vault_checks_the_folder`, `restore_parent_location_checked`, `cloud_folder_needs_confirmation`. Output stays
     out of the state folder: `save_into_state_folder_refused`. A new vault folder never goes inside another vault's folder (the engine's
     `create_inside_a_vault_folder_refused`, `same_vault_restore_inside_a_vault_folder_refused`). Spec 6.10.

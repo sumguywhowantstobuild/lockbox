@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { messageFor, messageText } from "../../messages";
+import { NEW_KEY_CHECK_HEADING } from "../../newKeyWords";
 import { confirmRecovery, missedPick, nextQuestion, showKeyAgain, type SessionData } from "../../store";
 import { Frame, SAY_KEY } from "./Frame";
 import { QUESTIONS, wordsOf } from "./keyWords";
@@ -26,7 +27,7 @@ export function PickWords({ data }: { data: SessionData }) {
   }, [at]);
 
   if (step?.phase !== "pick") return null;
-  const { key, unfinished, asks } = step;
+  const { key, unfinished, voluntary, asks } = step;
   const ask = asks[at];
   if (ask === undefined) return null;
   const right = wordsOf(key)[ask.position - 1];
@@ -58,8 +59,8 @@ export function PickWords({ data }: { data: SessionData }) {
 
   return (
     <Frame say={SAY_KEY}>
-      {unfinished ? null : <p className="fu-step">Step 2 of 2</p>}
-      <h1>Check your recovery key</h1>
+      {unfinished || voluntary ? null : <p className="fu-step">Step 2 of 2</p>}
+      <h1>{voluntary ? NEW_KEY_CHECK_HEADING : "Check your recovery key"}</h1>
       <p className="fu-sub">The key is hidden now. For each number, pick the word you saved.</p>
       <p className="fu-step">{`Question ${String(at + 1)} of ${String(QUESTIONS)}`}</p>
       <div role="group" aria-labelledby={questionId} className="fu-ask">

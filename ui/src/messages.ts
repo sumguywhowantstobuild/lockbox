@@ -41,10 +41,18 @@ export const MESSAGES: Record<string, Words> = {
     title: "The vault locked before Lockbox could show your new recovery key.",
     body: "Unlock the vault, and Lockbox will make another one to write down.",
   },
+  // A new vault was made and listed, then a lock came before Lockbox could show its recovery key (Task 7): it is kept for that vault's unlock, and 21f makes the key.
+  // The words are the session's, for Ariel to change.
+  "code:locked_after_change:vault created": {
+    title: "Your new vault was made, but it locked before Lockbox could show its recovery key.",
+    body: "Unlock it with its password, and Lockbox will make a recovery key to write down.",
+  },
   "code:not_found": { title: "Lockbox can't find that.", body: "It may have been moved or deleted." },
   "code:busy": { title: "That vault is busy.", body: "Wait for what it's doing to finish, then try again." },
   "code:read_only": { title: "This vault is read-only.", body: "It was opened from a backup, so nothing in it can change." },
   "code:too_large": { title: "That is too big for Lockbox to keep.", body: "" },
+  // The list of vaults is full (a create or an add; nothing was changed). The words are the session's, for Ariel to change.
+  "code:too_large:vault list": { title: "Lockbox's list of vaults is full.", body: "It holds up to 1,000 vaults. Nothing was changed." },
   "code:invalid_input": { title: "Lockbox can't use that.", body: "Check what you entered and try again." },
   "code:invalid_input:removable drive": {
     title: "A vault can't live on a removable, FAT32 or network drive.",
@@ -113,6 +121,8 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:no keys": { title: "This folder has no keys.", body: "Add a key first." },
   // A copied key saved with the shortcut (Task 18): the copy was empty or too big, and nothing was typed in its place.
   "code:invalid_input:capture value": { title: "Paste or type the value first.", body: "" },
+  // The save box (Plan 4C Task 10): the copy was not handed to the vault the box saves into (the shell holds it to the vault chosen in the box). The words are the session's, for Ariel to change.
+  "code:invalid_input:capture vault": { title: "That vault wasn't ready for the save.", body: "Press Save again." },
   // Settings (Task 20): the save shortcut, and Start with Windows. `{shortcut}` is the combination the page tried, put in by the page.
   "code:invalid_input:shortcut": {
     title: "Use at least two of Ctrl, Shift and Alt, with a letter, a digit or F1 to F12.",
@@ -130,6 +140,13 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:password copies disagree": { title: "Change this vault's password once more, then back up.", body: "" },
   "code:invalid_input:recovery key copies disagree": { title: "Make a new recovery key for this vault, then back up.", body: "" },
   "code:invalid_input:details unchecked": { title: "Lock this vault and open it again, then back up.", body: "" },
+  // Rename a vault (Task 8): refused as a backup is, with the same four reasons ending "then rename it" (the page's own kinds, since the backup words end "then back up"), and a
+  // name the engine won't keep (the page asks for a name itself, so in practice this is a name over 200 characters; create says it too). The words are the session's, for Ariel to change.
+  "core:invalid_input:vault name": { title: "That name is too long.", body: "A vault name can have up to 200 characters." },
+  "page:rename_details_changed": { title: "Its details were changed outside Lockbox.", body: "Look at that change and accept it first, then rename it." },
+  "page:rename_password_copies_disagree": { title: "Change this vault's password once more, then rename it.", body: "" },
+  "page:rename_recovery_key_copies_disagree": { title: "Make a new recovery key for this vault, then rename it.", body: "" },
+  "page:rename_details_unchecked": { title: "Lock this vault and open it again, then rename it.", body: "" },
   // Save all of a folder's files (Task 11): the folder had none by the time the shell counted, or its files are no longer the ones planned.
   "code:invalid_input:no files": { title: "This folder has no files to save.", body: "" },
   "code:invalid_input:folder changed": { title: "The files in this folder changed.", body: "Save them again." },
@@ -156,14 +173,34 @@ export const MESSAGES: Record<string, Words> = {
   "page:copy_it_first": { title: "That folder is on a removable drive.", body: "Copy it to this PC first, then choose the copy." },
   // A restore whose copy was stopped (Cancel, Windows locking or sleeping, Lock all, closing): nothing was changed. Said on the first step of the restore.
   "page:restore_cancelled": { title: "The restore was cancelled.", body: "Your vault is as it was." },
+  // Change password (27b): the shell's wrong password, said on the form's own first field. The words are the drawn screen's; the design gives none, so they are the session's.
+  // A vault made from inside the window (Task 7) that the list refused: the shell's `vault not listed`, said with a control the person can see (the vault menu's Add existing
+  // vault folder), since the first screen's words name a button that is not there. The words are the screen map's draft, for Ariel to change.
+  "page:vault_not_listed_inside": {
+    title: "Your new vault is on disk but couldn't be added to the list.",
+    body: "Use Add existing vault folder, then make a new recovery key.",
+  },
+  "page:wrong_current_password": { title: "That isn't the current password.", body: "" },
+  // Forgot password (28b): a key the shell read as a key but that does not open this vault (another vault's, or an old one: the cipher can't tell them apart).
+  // The shell sends `wrong_password`; the design's words, with the vault's name from the list put in by the page.
+  "page:recovery_key_does_not_open": { title: "This key doesn't open {vault}.", body: "" },
+  // Forgot password: the shell let go of the checked key (five minutes, a lock) or the vault changed on disk since it was checked, so the key is typed again.
+  // The design gives no words for it; they are the session's.
+  "page:recovery_choice_expired": {
+    title: "Type the recovery key again.",
+    body: "It waited too long, or the vault changed since it was checked. Nothing was changed.",
+  },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
   "page:save_all_expired": { title: "That took too long, so nothing was saved. Choose Save all files again.", body: "" },
   "page:output_expired": { title: "Lockbox can't open that folder now.", body: "Open it from Windows." },
+  // Show in Explorer on a vault whose place on the list is a file, a link or a junction, not a plain folder (Task 9). The words are the session's, for Ariel to change.
+  "page:show_not_a_folder": { title: "Lockbox won't open that in Explorer.", body: "That vault's place on the list isn't a plain folder." },
 
   "core:wrong_password": { title: "Wrong password.", body: "" },
-  "core:recovery_key_typo": { title: "That recovery key has a typing mistake.", body: "Check it against the one you saved." },
+  // The spec's words (5.2: "That recovery key has a typo"), on every screen that meets it.
+  "core:recovery_key_typo": { title: "That recovery key has a typo.", body: "Check it against the one you saved." },
   "core:invalid_recovery_key": { title: "That isn't a recovery key for Lockbox.", body: "" },
   // These two say a number of their own, filled in from the refusal's: `{position}` and `{found}`, and `{s}`, which is
   // an "s" unless `found` is 1.
@@ -256,6 +293,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "backup: wrong vault",
   "being deleted",
   "capture value",
+  "capture vault",
   "chunk",
   "clipboard",
   "clipboard delay",
@@ -420,7 +458,7 @@ function lookup(key: string): Words | undefined {
  * The words for a refusal, from the fixed table. Anything that is not a refusal the table knows gets
  * {@link GENERIC}. The refusal's own text is never part of the answer, whatever it holds.
  */
-export function messageFor(error: unknown, names: { shortcut?: string } = {}): Message {
+export function messageFor(error: unknown, names: { shortcut?: string; vault?: string } = {}): Message {
   if (!isRecord(error)) return { ...GENERIC };
   const { code, kind, what } = error;
   if (typeof code !== "string") return { ...GENERIC };
@@ -442,8 +480,10 @@ export function messageFor(error: unknown, names: { shortcut?: string } = {}): M
   // A message with a number's place in it needs that number as a whole number: without it, it is the generic message.
   const counted = filled(words, numbers);
   if (counted === undefined) return { ...GENERIC };
-  // The shortcut the page tried is the page's own text (never the shell's); a message that names one says "that shortcut" without it.
-  const named = (part: string) => part.replace("{shortcut}", () => names.shortcut ?? "that shortcut");
+  // The shortcut the page tried and the vault's name on the list are the page's own text (never the shell's); a message that names one says "that
+  // shortcut" or "this vault" without it. Both are put in in one pass, so what is put in is never read as a place to fill.
+  const named = (part: string) =>
+    part.replace(/\{(shortcut|vault)\}/g, (_, place: string) => (place === "shortcut" ? (names.shortcut ?? "that shortcut") : (names.vault ?? "this vault")));
   const said = { title: named(counted.title), body: named(counted.body) };
   return Object.keys(numbers).length > 0 ? { ...said, numbers } : { ...said };
 }

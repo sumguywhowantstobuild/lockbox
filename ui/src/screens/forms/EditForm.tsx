@@ -9,9 +9,9 @@ import { GeneratorInForm } from "../GeneratorPanel";
 import type { FolderEntry } from "../SideMenu";
 import { NAME_RULE, refusedTheName } from "./KeyForm";
 import { hasInnerLineBreak, NO_FOLDER, PASSWORD_MANY_LINES, useFocusOnOpen, whereWords } from "./shared";
-import { hasLineBreak, MANY_LINES, ValueField } from "./ValueField";
+import { hasLineBreak, ValueField } from "./ValueField";
 
-/** What a form says under a Password or Value box it left empty because the stored value has a line break inside it. */
+/** What the login form says under a Password box it left empty because the stored password has a line break inside it. */
 const MORE_THAN_ONE_LINE =
   "This value has more than one line, so it isn't shown here. Leave the box empty to keep it, or type a new one.";
 
@@ -50,7 +50,9 @@ function useStoredSecret(session: number, id: string, field: "password" | "key_v
  * (7b's) and Edit file (10f: its title and note only). What the form needs of the item (a login's password, a key's value) is
  * asked of Rust when it opens and held only here. It sends a field only when it was changed: one that was not stays as stored,
  * byte for byte. That matters most for a value with a line break inside, which a one-line box cannot hold (it would drop the
- * break): such a box stays empty, says why, and sends nothing unless something is typed in it. Cancel changes nothing, and a
+ * break). A key's value with line breaks is loaded, hidden, into the Value box for lines and sent only if a paste replaces it
+ * (`ValueField`); a login's password with one stays out of its box, which says why, and sends nothing unless something is typed
+ * in it. Cancel changes nothing, and a
  * lock takes the form and says nothing. Saving opens the details again with "Saved", and focus on Edit.
  */
 export function EditForm({
@@ -72,8 +74,9 @@ export function EditForm({
   const website = useText(detail.urls[0] ?? "");
   const notes = useText(detail.notes);
   const stored = useStoredSecret(data.session, summary.id, isLogin ? "password" : "key_value", isLogin ? detail.has_password : isKey ? detail.has_value : false);
-  // A stored value a one-line box cannot hold is not put in it: the box stays empty, and typing in it replaces the value.
-  const multiLine = stored.phase === "ready" && hasLineBreak(stored.value);
+  // A login's stored password a one-line box cannot hold is not put in it: the box stays empty, and typing in it replaces the
+  // password. A key's value with line breaks is held, hidden, in the Value box for lines.
+  const multiLine = isLogin && stored.phase === "ready" && hasLineBreak(stored.value);
   const secret = useText(stored.phase === "ready" && !multiLine ? stored.value : "");
   const ready = stored.phase === "ready";
 
@@ -240,6 +243,8 @@ export function EditForm({
                 type="text"
                 autoComplete="off"
                 spellCheck={false}
+                autoCorrect="off"
+                autoCapitalize="off"
                 value={secret.value}
                 disabled={!ready}
                 aria-busy={stored.phase === "loading" ? true : undefined}
@@ -307,27 +312,10 @@ export function EditForm({
             id={`${formId}-value`}
             value={secret.value}
             onChange={secret.set}
-            onRefused={() => {
-              setProblem(MANY_LINES);
-              setPasteRefused(true);
-              setTitleMarked(false);
-            }}
-            onAccepted={() => {
-              if (pasteRefused) {
-                setProblem(null);
-                setPasteRefused(false);
-              }
-            }}
+            manyLines
             disabled={!ready}
             busy={stored.phase === "loading"}
-            describedBy={secretHint}
-          >
-            {multiLine ? (
-              <p className="fhint" id={secretHint}>
-                {MORE_THAN_ONE_LINE}
-              </p>
-            ) : null}
-          </ValueField>
+          />
         ) : null}
         {showNotes ? (
           <div className="fbox">

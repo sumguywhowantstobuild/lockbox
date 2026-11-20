@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { messageFor, messageText } from "../../messages";
+import { NEW_KEY_HEADING, NEW_KEY_SUB } from "../../newKeyWords";
 import { useValueGuard } from "../../useValueGuard";
 import { makeNewKey, startPicking, useSettings, type SessionData } from "../../store";
 import { Frame, SAY_KEY } from "./Frame";
@@ -16,7 +17,7 @@ function focusWhenShown(heading: HTMLHeadingElement | null): void {
 }
 
 /**
- * The recovery key step (21c for a new vault, 21f for one whose earlier step never finished): the key as 24 numbered
+ * The recovery key step (21c for a new vault, 21f for one whose earlier step never finished, 29b for a key the person asked for): the key as 24 numbered
  * words in two columns, headed as what it is (a Lockbox key, not a crypto wallet phrase), shown for as long as the vault
  * stays unlocked, and what losing it means. It is the store's, so any lock takes it off the screen and the
  * next unlock makes a new one. It can be printed or saved as a PDF (`KeyActions`); what goes on paper is the one element
@@ -71,8 +72,11 @@ export function RecoveryKey({ data }: { data: SessionData }) {
   }
 
   if (step.phase !== "show") return null;
-  const { key, unfinished, missed } = step;
-  const back = step.back === true;
+  const { key, unfinished, voluntary, missed } = step;
+  // The heading takes focus when the key comes back after the questions, and when 29b replaces the New recovery key panel (whose button went with it).
+  const back = step.back === true || voluntary;
+  // A key made for a vault that already exists (29b) has its own headings and no setup step line; 21c and 21f keep theirs.
+  const title = voluntary ? NEW_KEY_HEADING : unfinished ? "Finish your recovery key" : "Save your recovery key";
   const words = wordsOf(key);
   const half = Math.ceil(words.length / 2);
   // Two columns, 1 to 12 and 13 to 24, so the words can be copied by hand in order. Each word is its own element, and
@@ -89,10 +93,11 @@ export function RecoveryKey({ data }: { data: SessionData }) {
   );
   return (
     <Frame say={SAY_KEY}>
-      {unfinished ? null : <p className="fu-step">Step 2 of 2</p>}
+      {unfinished || voluntary ? null : <p className="fu-step">Step 2 of 2</p>}
       <h1 tabIndex={back ? -1 : undefined} ref={back ? focusWhenShown : undefined}>
-        {unfinished ? "Finish your recovery key" : "Save your recovery key"}
+        {title}
       </h1>
+      {voluntary ? <p className="fu-sub">{NEW_KEY_SUB}</p> : null}
       {unfinished ? (
         <p className="fu-sub">
           Last time this step didn&apos;t finish, so that key may not have been saved. This is a new one, and the old one no

@@ -31,9 +31,29 @@ test("the_panel_and_the_list_beside_it_slide_together_over_0.4s", () => {
   expect(rulesFor(".lscroll").join(" ")).toMatch(/transition: right var\(--slide\) var\(--ease\)/);
 });
 
-test.each([".win", ".stage"])("%s_clips_the_sliding_panel_without_being_scrollable", (selector) => {
+test.each([".win", ".stage", ".boxlayer"])("%s_clips_the_sliding_panel_without_being_scrollable", (selector) => {
   const rules = rulesFor(selector);
   expect(rules.length, `${selector} has a rule`).toBeGreaterThan(0);
   expect(rules.join(" ")).toMatch(/overflow: clip/);
   for (const rule of rules) expect(rule, `${selector} never goes back to a scrollable overflow`).not.toMatch(/overflow(-x)?: (hidden|auto|scroll)/);
+});
+
+// The save box is the app's, drawn over whichever window is on screen (Plan 4C Task 10). Its panel has the width the window's own panels have, so
+// `--pw` is on `.app` (which holds both), the 1000px override is on `.app` too, and the layer lets a click through everywhere but the panel.
+test("the_panel_width_is_one_for_the_window_and_the_box_over_it", () => {
+  const base = readBeside(import.meta.url, "./base.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const app = [...base.matchAll(/(?:^|\})\s*\.app\s*\{([^{}]*)\}/g)].map((rule) => rule[1] ?? "").join(" ");
+  expect(app, "--pw is set on .app").toMatch(/--pw: clamp\(340px, 30vw, 420px\)/);
+  expect(rulesFor(".win").join(" "), "not on .win, which would hide it from the box").not.toMatch(/--pw:/);
+  const small = rulesFor(".app").filter((rule) => rule.includes("--pw:")).join(" ");
+  expect(small, "the 1000px override is on .app").toMatch(/--pw: 320px/);
+});
+
+test("the_box_layer_covers_the_app_above_the_window_and_lets_clicks_through", () => {
+  const layer = rulesFor(".boxlayer").join(" ");
+  expect(layer).toMatch(/position: absolute/);
+  expect(layer).toMatch(/inset: 0/);
+  expect(layer).toMatch(/z-index: 10/);
+  expect(layer).toMatch(/pointer-events: none/);
+  expect(rulesFor(".boxlayer > .panel").join(" ")).toMatch(/pointer-events: auto/);
 });

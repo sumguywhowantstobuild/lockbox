@@ -57,10 +57,13 @@ const SWAP_TITLE = "A restore is finishing";
 const SWAP_TEXT =
   "It's past the point of cancelling. If you close now, Lockbox finishes or undoes it the next time it opens, so nothing is lost.";
 
-function asked(reason: "close" | "quit", running: string[], pastSwap = false, restoreWaiting = false) {
+/** The shell asks; the number it gave the question is returned (the shell mints it, the first is 1). */
+function asked(reason: "close" | "quit", running: string[], pastSwap = false, restoreWaiting = false): number {
+  let question = 0;
   act(() => {
-    shell.askClose(reason, { running, pastSwap, restoreWaiting });
+    question = shell.askClose(reason, { running, pastSwap, restoreWaiting });
   });
+  return question;
 }
 
 function answersSent(): unknown[][] {
@@ -82,6 +85,7 @@ const TITLES: [string, string][] = [
   ["backup", BACKUP_TITLE],
   ["test", "A backup is being tested"],
   ["restore", "A restore is running"],
+  ["restore_check", "A backup is being checked for a restore"],
   ["open_backup", "A backup is being opened"],
   ["open", "A file is being opened"],
   ["replace", "A file is being replaced"],
@@ -192,7 +196,7 @@ test("keep_it_running_answers_no_and_changes_nothing", async () => {
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
-  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
+  expect(answersSent()).toEqual([["close_answer", { question: 1, go: false }]]);
   expect(shell.closeAnswers()).toEqual([false]);
   // Nothing locked, nothing hidden, and the window is as it was.
   expect(shell.sessionOf(7)?.unlocked).toBe(true);
@@ -209,7 +213,7 @@ test("escape_is_keep_it_running", async () => {
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
-  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
+  expect(answersSent()).toEqual([["close_answer", { question: 1, go: false }]]);
   expect(shell.quits()).toBe(0);
   expect(shell.sessionOf(7)?.unlocked).toBe(true);
 });
@@ -235,7 +239,7 @@ test("close_anyway_on_a_close_answers_yes_once_and_the_close_goes_on", async () 
   fireEvent.click(button);
   // Pressed twice, sent once; a second press, or Escape, while the answer is out adds nothing.
   fireEvent.keyDown(dialog, { key: "Escape" });
-  expect(answersSent()).toEqual([["close_answer", { go: true }]]);
+  expect(answersSent()).toEqual([["close_answer", { question: 1, go: true }]]);
   // The question stays until the answer settles.
   expect(screen.queryByRole("dialog", { name: BACKUP_TITLE })).not.toBeNull();
   await act(async () => {
@@ -258,7 +262,7 @@ test("close_anyway_on_a_quit_answers_yes_and_the_app_quits", async () => {
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
-  expect(answersSent()).toEqual([["close_answer", { go: true }]]);
+  expect(answersSent()).toEqual([["close_answer", { question: 1, go: true }]]);
   expect(shell.quits()).toBe(1);
 });
 
@@ -288,7 +292,7 @@ test("the_question_shows_over_the_lock_screen_for_a_job_with_no_vault", async ()
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
-  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
+  expect(answersSent()).toEqual([["close_answer", { question: 1, go: false }]]);
 });
 
 test("an_answer_the_shell_says_it_has_no_question_for_closes_the_question_quietly", async () => {
@@ -389,6 +393,16 @@ test("an_event_that_is_not_a_question_asks_nothing", async () => {
     { reason: "close", running: [], past_swap: false },
     // Nothing running, nothing past its swap and no restore waiting: there is nothing to say.
     { reason: "close", running: [], past_swap: false, restore_waiting: false },
+    // Plan 4C Task 12: a question with no usable number cannot be answered, so it is not shown: missing, text, zero, negative, fractional, past what
+    // a number holds exactly, and not a number at all.
+    { reason: "close", running: ["backup"], past_swap: false, restore_waiting: false },
+    ...["1", 0, -1, 1.5, 2 ** 53, null, Number.NaN, [1], { n: 1 }].map((question) => ({
+      reason: "close",
+      running: ["backup"],
+      past_swap: false,
+      restore_waiting: false,
+      question,
+    })),
   ];
   for (const payload of bad) {
     act(() => {
@@ -405,7 +419,7 @@ test("a_question_naming_only_kinds_the_page_does_not_know_still_asks", async () 
   // The shell holds its question until it is answered, so a question the page drops leaves Close and Quit doing nothing. A job the page has no name
   // for (a kind added in the shell before the page knows it) still asks, in the words for jobs in general.
   act(() => {
-    shell.sendRaw("lockbox://close-asked", { reason: "close", running: ["format_disk"], past_swap: false, restore_waiting: false });
+    shell.sendRaw("lockbox://close-asked", { reason: "close", running: ["format_disk"], past_swap: false, restore_waiting: false, question: 1 });
   });
   const dialog = await screen.findByRole("dialog", { name: "Several jobs are running" });
   expect(within(dialog).getByText("Closing will cancel them, and nothing half-made is left behind.")).toBeTruthy();
@@ -413,7 +427,7 @@ test("a_question_naming_only_kinds_the_page_does_not_know_still_asks", async () 
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
-  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
+  expect(answersSent()).toEqual([["close_answer", { question: 1, go: false }]]);
 });
 
 // Task 13d: a restore finished and waiting for its yes at 24d (nothing runs) is a question of its own.
@@ -473,7 +487,7 @@ test("a_waiting_restore_alone_is_a_question", async () => {
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
-  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
+  expect(answersSent()).toEqual([["close_answer", { question: 1, go: false }]]);
   expect(shell.closeAnswers()).toEqual([false]);
   expect(shell.sessionOf(7)?.unlocked).toBe(true);
   expect(shell.windowHidden()).toBe(false);
@@ -484,8 +498,8 @@ test("a_waiting_restore_alone_is_a_question", async () => {
   fireEvent.click(within(again).getByRole("button", { name: ANYWAY }));
   expect(await screen.findByRole("dialog", { name: "Lockbox stays by the clock" })).toBeTruthy();
   expect(answersSent()).toEqual([
-    ["close_answer", { go: false }],
-    ["close_answer", { go: true }],
+    ["close_answer", { question: 1, go: false }],
+    ["close_answer", { question: 2, go: true }],
   ]);
   expect(shell.closeAnswers()).toEqual([false, true]);
   expect(shell.sessionOf(7)?.unlocked).toBe(false);
@@ -500,7 +514,7 @@ test("a_waiting_restore_alone_over_the_lock_screen_is_a_question_and_escape_keep
   await waitFor(() => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
-  expect(answersSent()).toEqual([["close_answer", { go: false }]]);
+  expect(answersSent()).toEqual([["close_answer", { question: 1, go: false }]]);
   expect(shell.quits()).toBe(0);
 });
 
@@ -510,6 +524,156 @@ test("close_question_with_a_waiting_restore_has_no_axe_violations", async () => 
   await screen.findByRole("dialog", { name: WAITING_TITLE });
   await expectNoAxe(container);
   await expectNoAxe(document.body);
+});
+
+/** The event for question `question`, as the shell sends it (the same again for a repeat). */
+function eventFor(question: number, running: string[] = ["backup"]) {
+  return { reason: "close", running, past_swap: false, restore_waiting: false, question };
+}
+
+// Plan 4C Task 12 (Greptile P2 of PR 8): the shell says the pending question again when Close is pressed again. Heard while the answer to that
+// question is out, it is the same question, so the answer that settles still takes it away; it used to replace the one the answer was for, and
+// the question stayed until one more press.
+test("a_repeat_close_while_an_answer_is_in_flight_keeps_one_question", async () => {
+  await unlocked();
+  const id = asked("close", ["backup"]);
+  const dialog = await screen.findByRole("dialog", { name: BACKUP_TITLE });
+  const real = invoke.getMockImplementation();
+  if (real === undefined) throw new Error("no fake shell");
+  let answer: () => void = () => undefined;
+  invoke.mockImplementation((cmd: string, args?: unknown) =>
+    cmd === "close_answer"
+      ? new Promise((resolve) => {
+          answer = () => {
+            resolve(real(cmd, args));
+          };
+        })
+      : (real(cmd, args) as Promise<unknown>),
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: KEEP }));
+  expect(answersSent()).toEqual([["close_answer", { question: id, go: false }]]);
+
+  // Close pressed again, and the shell says the same question again, while the answer is out. The repeat really reached the page's listener (the
+  // question and its repeat: two events), so what follows is not a test of an event that never came.
+  expect(shell.closeAskedHeard()).toBe(1);
+  act(() => {
+    shell.repeatClose();
+  });
+  expect(shell.closeAskedHeard()).toBe(2);
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  await act(async () => {
+    answer();
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  // One question, one answer: no second press was needed, and none was sent.
+  expect(answersSent()).toHaveLength(1);
+  expect(shell.closeAnswers()).toEqual([false]);
+  expect(shell.pendingClose()).toBe(false);
+});
+
+// The shell says a question again when the page asks to hear it again; an answered question's event that arrives after its answer (late, or a
+// repeat that was already on its way) must not bring the question back, for any of the ways a question ends.
+test("a_repeated_event_after_its_answer_cannot_reopen_it", async () => {
+  await unlocked();
+  const first = asked("close", ["backup"]);
+  fireEvent.click(within(await screen.findByRole("dialog", { name: BACKUP_TITLE })).getByRole("button", { name: KEEP }));
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  act(() => {
+    shell.sendRaw("lockbox://close-asked", eventFor(first));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(screen.queryByRole("dialog")).toBeNull();
+
+  // A new question is a new number and shows; the old one's event arriving now changes nothing about it.
+  const second = asked("quit", ["import"]);
+  expect(second).not.toBe(first);
+  await screen.findByRole("dialog", { name: "Files are being added" });
+  act(() => {
+    shell.sendRaw("lockbox://close-asked", eventFor(first));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.queryByRole("dialog", { name: BACKUP_TITLE })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "Files are being added" })).not.toBeNull();
+
+  // A question nobody answered that a lock cleared may show again if the shell says it again (it may still hold it: the next test); the answered
+  // first one still may not. The lock clears the second once more before the next question.
+  act(() => {
+    shell.changeLockEpoch("windows_locked");
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  act(() => {
+    shell.sendRaw("lockbox://close-asked", eventFor(first));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  act(() => {
+    shell.sendRaw("lockbox://close-asked", eventFor(second, ["import"]));
+  });
+  await screen.findByRole("dialog", { name: "Files are being added" });
+  act(() => {
+    shell.changeLockEpoch("windows_locked");
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  // And the answer a question's button sends carries that question's own number, never an earlier one.
+  const third = asked("close", ["backup"]);
+  expect(third).toBeGreaterThan(second);
+  fireEvent.click(within(await screen.findByRole("dialog", { name: BACKUP_TITLE })).getByRole("button", { name: ANYWAY }));
+  await waitFor(() => {
+    expect(answersSent()).toHaveLength(2);
+  });
+  expect(answersSent()[1]).toEqual(["close_answer", { question: third, go: true }]);
+
+  // A control: an event numbered above any shown shows its question, so the absences above were not an `eventFor` the page throws out.
+  act(() => {
+    shell.sendRaw("lockbox://close-asked", eventFor(third + 100, ["import"]));
+  });
+  expect(await screen.findByRole("dialog", { name: "Files are being added" })).toBeTruthy();
+});
+
+// The race behind it: a lock of all vaults and a close at the same moment, the lock's event reaching the page after the question. The page clears a
+// question the shell still holds, and Close and Quit would do nothing at all if the page then refused every repeat. A question cleared by a lock
+// before anyone answered it shows again when the shell says it again; once it is answered it never does.
+test("a_question_cleared_by_a_lock_before_an_answer_shows_again_when_the_shell_repeats_it", async () => {
+  await unlocked();
+  const id = asked("close", ["backup"]);
+  await screen.findByRole("dialog", { name: BACKUP_TITLE });
+  act(() => {
+    shell.changeLockEpoch("idle");
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  const heard = shell.closeAskedHeard();
+
+  // The shell still holds it, and says it again.
+  act(() => {
+    shell.sendRaw("lockbox://close-asked", eventFor(id));
+  });
+  expect(shell.closeAskedHeard()).toBe(heard + 1);
+  const dialog = await screen.findByRole("dialog", { name: BACKUP_TITLE });
+
+  // Answered (the fake has none pending, so it is refused and goes quietly, as a shell that had dropped it would): now it is over for good.
+  fireEvent.click(within(dialog).getByRole("button", { name: KEEP }));
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  expect(answersSent()).toEqual([["close_answer", { question: id, go: false }]]);
+  act(() => {
+    shell.sendRaw("lockbox://close-asked", eventFor(id));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
 test("a_second_question_while_one_shows_changes_its_words", async () => {

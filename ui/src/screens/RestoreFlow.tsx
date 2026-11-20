@@ -353,6 +353,7 @@ function Steps({ flow }: { flow: Flow }) {
         <PasswordField
           key={epoch}
           label={passwordFromWords(flow.checked?.made ?? null)}
+          autoComplete="current-password"
           value={typed}
           onChange={(next) => {
             setTyped(next);

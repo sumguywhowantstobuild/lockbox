@@ -123,7 +123,7 @@ test("settings_offers_test_a_backup_beside_back_up_and_the_pick_comes_first", as
   await unlocked();
   const settings = await settingsPanel();
   const group = within(settings).getByRole("heading", { name: "This vault" }).closest("section") as HTMLElement;
-  expect(buttonsIn(group)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup"]);
+  expect(buttonsIn(group)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup", "Change password", "New recovery key"]);
   fireEvent.click(within(group).getByRole("button", { name: "Test a backup" }));
   const panel = await screen.findByRole("complementary", { name: "Test a backup" });
   // The picker opened first, with nothing sent but the pick's own (no choice yet): the credential waits for a file.

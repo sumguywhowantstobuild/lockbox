@@ -34,7 +34,7 @@ const WRONG = "Wrong password. It needs the one from the day this backup was mad
 const EXPIRED = "That choice has expired. Pick the backup again.";
 const CANCELLED = "The restore was cancelled. Your vault is as it was.";
 const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this.";
-const WAITS = "This waits for your answer, however long you take. Only Windows locking or sleeping cancels it.";
+const WAITS = "This waits for your answer, however long you take. Lock all, closing Lockbox, or Windows locking or sleeping cancels it.";
 const NO_SPACE = "Not enough space. This needs 1.2 GB, and that drive has 400 MB free.";
 const WRONG_DRIVE = "A vault can't live on a removable, FAT32 or network drive. Choose a folder on this PC.";
 const TOO_MANY = "There are too many older copies of this vault. Delete some, then restore again.";
@@ -173,7 +173,7 @@ test("backup_first_then_password_or_key", async () => {
   const choice = shell.restorePickTokens()[0];
   expect(choice).toMatch(/^[0-9a-f]{32}$/);
   await toTheFolder();
-  expect(sent("restore_check")).toEqual([{ choice, credential: { password_or_key: BACKUP_PASSWORD } }]);
+  expect(sent("restore_check")).toEqual([{ choice, credential: { password_or_key: BACKUP_PASSWORD }, request: expect.any(Number) as number }]);
   expect(shell.restorePicks()).toEqual([{ name: BACKUP_NAME, size: 1_288_490_188, checked: true }]);
 });
 
@@ -182,7 +182,7 @@ test("the_restore_is_offered_in_settings_after_test_a_backup_and_works_from_ther
   fireEvent.click(within(screen.getByRole("navigation", { name: "Vault and folders" })).getByRole("button", { name: "Settings" }));
   const settings = await screen.findByRole("complementary", { name: "Settings" });
   const group = within(settings).getByRole("heading", { name: "This vault" }).closest("section") as HTMLElement;
-  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup"]);
+  expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Back up", "Test a backup", "Open a backup", "Restore a backup", "Change password", "New recovery key"]);
   press("Restore a backup", settings);
   await heading("Restore a backup");
   // The open vault's window is not on screen while the restore is.
@@ -462,6 +462,17 @@ test("a_refusal_that_comes_after_the_job_began_and_one_that_comes_before_are_bot
   expect(onScreen(WRONG_DRIVE)).toBeTruthy();
 });
 
+// Plan 4C Task 12: Close anyway at the close question ends a waiting restore too (spec 7.4), so 24d no longer says "only Windows". An idle lock does
+// not end it, and the words do not say it does. These are Ariel's words, pinned beside the copy the other tests use.
+test("twenty_four_d_says_what_cancels_it", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  await toTheReplaceQuestion();
+  expect(screen.getByText("This waits for your answer, however long you take. Lock all, closing Lockbox, or Windows locking or sleeping cancels it.")).toBeTruthy();
+  expect(document.body.textContent).not.toContain("Only Windows");
+  expect(document.body.textContent).not.toMatch(/idle/i);
+});
+
 test("replace_question_says_the_current_one_is_kept", async () => {
   await onTheLockScreen();
   await restoreFromTheLockScreen();
@@ -515,7 +526,7 @@ test("finish_says_unlock_with_the_backups_password", async () => {
   fireEvent.change(screen.getByLabelText("Password from 2 October 2026"), { target: { value: BACKUP_PASSWORD } });
   press("Unlock");
   await heading("All items");
-  expect(sent("unlock_vault")[1]).toEqual({ id: 7, password: BACKUP_PASSWORD });
+  expect(sent("unlock_vault")[1]).toEqual({ vault: { list: shell.listIdentity(), id: 7 }, password: BACKUP_PASSWORD });
   expect(screen.queryByRole("heading", { level: 1, name: "My vault is restored" })).toBeNull();
 });
 
@@ -533,7 +544,7 @@ test("finish_without_a_date_and_a_vault_that_was_not_there_before", async () => 
   press("Unlock");
   await heading("All items");
   // The restored vault was added to the list, and it is the one unlocked.
-  expect(sent("unlock_vault")).toEqual([{ id: 8, password: BACKUP_PASSWORD }]);
+  expect(sent("unlock_vault")).toEqual([{ vault: { list: shell.listIdentity(), id: 8 }, password: BACKUP_PASSWORD }]);
   expect(sent("list_vaults").length).toBeGreaterThanOrEqual(2);
 });
 
@@ -1107,6 +1118,87 @@ test("the_first_step_cancel_lets_the_file_go", async () => {
   await screen.findByLabelText(/^Password for /);
   expect(sent("forget_restore_pick")).toEqual([{ choice }]);
   expect(shell.restorePicks()).toEqual([]);
+});
+
+// Plan 4C Task 11: the check at 24a is a job the shell tells the page of (`restore_check`, under the request the page sent), and Cancel stops it.
+test("cancel_at_24a_stops_the_running_check_by_its_request", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  const choice = shell.restorePickTokens()[0];
+  const release = shell.holdRestoreCheck();
+  type(BACKUP_PASSWORD);
+  press("Continue");
+  await waitFor(() => {
+    expect(shell.runningLaunchJobs()).toHaveLength(1);
+  });
+  const job = theJob();
+  // A launch-scoped job of its own kind, under the number the page sent.
+  expect(job.kind).toBe("restore_check");
+  expect(job.scope.type).toBe("launch");
+  expect(sent("restore_check")).toEqual([{ choice, credential: { password_or_key: BACKUP_PASSWORD }, request: job.request }]);
+  // The page has heard of it (the event came as the command began), so Cancel names the operation the shell gave.
+  expect(sent("cancel_operation")).toEqual([]);
+  press("Cancel");
+  await screen.findByLabelText(/^Password for /);
+  await waitFor(() => {
+    expect(sent("cancel_operation")).toEqual([{ operation: job.operation, scope: job.scope }]);
+  });
+  // The check is stopped in the shell, and nothing it would have found is kept; the file is let go as Cancel always does.
+  expect(shell.runningLaunchJobs()).toEqual([]);
+  expect(sent("forget_restore_pick")).toEqual([{ choice }]);
+  expect(shell.restorePicks()).toEqual([]);
+  act(() => {
+    release();
+  });
+  await act(async () => {
+    await new Promise((done) => window.setTimeout(done, 10));
+  });
+  // The late answer changes nothing on screen.
+  expect(screen.queryByRole("heading", { level: 1, name: "Where it goes" })).toBeNull();
+  expect(sent("cancel_operation")).toHaveLength(1);
+});
+
+test("cancel_before_the_job_started_event_is_matched_by_request", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  const release = shell.holdRestoreCheck();
+  // The command has begun in the shell, but its `job-started` has not reached the page.
+  const arrive = shell.holdJobStarted();
+  type(BACKUP_PASSWORD);
+  press("Continue");
+  await waitFor(() => {
+    expect(sent("restore_check")).toHaveLength(1);
+  });
+  const job = theJob();
+  press("Cancel");
+  await screen.findByLabelText(/^Password for /);
+  // The stop cannot name an operation yet, so it waits for the event, which names its request.
+  expect(sent("cancel_operation")).toEqual([]);
+  expect(shell.runningLaunchJobs()).toHaveLength(1);
+  act(() => {
+    arrive();
+  });
+  await waitFor(() => {
+    expect(sent("cancel_operation")).toEqual([{ operation: job.operation, scope: job.scope }]);
+  });
+  // And the work in the shell stopped.
+  expect(shell.runningLaunchJobs()).toEqual([]);
+  act(() => {
+    release();
+  });
+});
+
+test("cancel_after_the_check_answered_sends_no_stop", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  await toTheFolder();
+  expect(sent("restore_check")).toHaveLength(1);
+  press("Back");
+  await heading("Restore a backup");
+  press("Cancel");
+  await screen.findByLabelText(/^Password for /);
+  // The job was over when the answer came: nothing is left to stop.
+  expect(sent("cancel_operation")).toEqual([]);
 });
 
 test("no_command_carries_a_path_or_a_name_the_page_chose", async () => {

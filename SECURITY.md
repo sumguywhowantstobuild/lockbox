@@ -41,10 +41,10 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
   still guessable. Argon2id makes each guess costly; it cannot make a poor password good.
 - **Unlimited guessing against a copied folder.** There is no lockout after wrong passwords, because an attacker with
   the folder simply bypasses the app. The cost of each guess is the protection.
-- **Old copies of the vault.** Changing the password or regenerating the recovery key does **not** change the vault
-  key. Anyone holding an earlier copy of the vault folder (an old backup, an old header) plus the old password or old
-  recovery key can recover the vault key, and that key opens current and future data if they also get copies of the
-  newer files. Full revocation needs "Rotate vault key", planned for v1.1 (spec 5.3). A backup is such a copy (see
+- **Old copies of the vault.** Changing the password, recovering with the recovery key and regenerating the recovery
+  key do **not** change the vault key. Anyone holding an earlier copy of the vault folder (an old backup, an old header) plus the old password or old
+  recovery key can recover the vault key, and that key opens current and future items and files if they also get copies
+  of them. Full revocation needs "Rotate vault key", planned for v1.1 (spec 5.3). A backup is such a copy (see
   "Old backups keep old passwords working" under "Honest limits").
 - **Old data a restore leaves behind.** The vault a restore replaces stays beside it until you delete it (see "A
   restore keeps the vault it replaced" under "Honest limits").
@@ -66,18 +66,18 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 ## Where each requirement stands today
 
 The Rust core (Plans 1 and 2), the desktop shell (Plan 3), the daily-use screens (4A) and the backup, restore, files and
-long-job screens (4B) exist. The forgotten-password screens, changing the password and export come in 4C, so a vault
-whose password is lost cannot be recovered in place yet; restoring a backup you can still open, with its password or the
-recovery key, is the way back.
+long-job screens (4B) and the vault and password screens (4C: change password, forgot password, a new recovery key,
+several vaults open, a new vault, rename, remove and add back) exist. Export, and emptying the trash, come in 4D. If you
+lose both the password and the recovery key, nothing opens the vault, or a backup made since you last changed them.
 
 | Requirement | State |
 |---|---|
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the last screens (4C) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the last screens (4D) |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
-| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box at its lock event |
+| R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box when the vault it would save to locks, or every vault does (a lock of another vault leaves it) |
 | R7 Documented limits | This file |
 
 ## How the app is locked down
@@ -150,6 +150,17 @@ trusted than Rust.
   other lock does end it and removes its staging folder: Lock all, the window's close button (which locks all), Windows
   locking or sleeping, signing out and closing the app. The copy and the swap pause the idle timer while they run, so no
   idle lock lands in either.
+- **A recovery key typed for "forgot password".** The page sends the 24 words once, to a check that opens nothing; Rust
+  keeps the key (wiped when dropped) with both header files as they were read, under a one-time token the page holds. It
+  is dropped by a lock of all vaults (an idle lock included), five minutes, closing, Back, or when the new password is
+  set. A short new password or no yes to a changed header keeps it; a typo or a wrong key holds nothing. Before it writes
+  anything the finish checks again that the folder is the listed one and that both header files and the key are as the
+  check saw them; if not, the answer is "choice expired". A vault that is unlocked cannot be recovered this way (its
+  password is changed from the open vault). The box shows the words as they are typed, so they can be read back against
+  the written copy. The page keeps the key in its box, read-only, until the check answers; a refused key (a typo, a word
+  that is not a key word, a wrong count, another vault's key) stays there to be corrected, and the box is emptied when
+  the window loses focus or hides, when every vault locks, on Back, and once the key is accepted. A key in the box is
+  never copied or cut natively (it would reach Windows' clipboard history), as for every secret the page shows.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
@@ -171,7 +182,7 @@ trusted than Rust.
   exceptions: an unlock runs to its end (see "Unlocking cannot be cancelled inside the engine"), and a restore whose swap
   has started finishes or rolls back.
 - **Long operations pause the idle timer** (adding files, Save a copy, Save all files, Open, Replace file, copying an
-  item, backup, test a backup, open a backup, restore) and keep the PC awake, and time
+  item, backup, test a backup, open a backup, the check of a backup picked for a restore, restore) and keep the PC awake, and time
   spent in them does not count. Windows lock and sleep still cancel them. A question waiting for your answer does not
   pause anything, and one exception to what a lock drops: a finished restore waiting for your answer survives an idle
   lock (see "A finished restore waits through an idle lock").
@@ -206,7 +217,11 @@ it (IDs, the extra context each encryption is bound to, base64). Exact versions 
   is derived from it with HKDF-SHA256 (a standard way to derive keys from a secret), crates `hkdf` and `sha2`. The
   earlier 52-character form is no longer accepted; it was never released. The 24 words look like a crypto wallet's
   recovery phrase, which malware and scams hunt for, so every screen and PDF that shows it is headed "Lockbox recovery
-  key, not a crypto wallet phrase". Keep a saved copy off this PC.
+  key, not a crypto wallet phrase". Keep a saved copy off this PC. A password change, a recovery (forgot password) and a
+  new recovery key do not change the vault key. Someone with an old copy of the vault's details (the header: an earlier
+  copy of the folder, or an old backup) and its old password or old recovery key can read the vault's current and future
+  items and files, if they get copies of them. Full revocation needs "Rotate vault key", planned for v1.1 (see "Old
+  copies of the vault").
 - **Encryption:** XChaCha20-Poly1305 (encryption that also detects tampering), crate `chacha20poly1305`. Key slots
   and items use it directly with a fresh random 24-byte nonce (a one-time value) each time.
 - **Files:** each stored file has its own random key, kept inside its encrypted item. File contents are encrypted in
@@ -243,7 +258,9 @@ in the code with a `shortcut:` comment.
   The one box of "Test a backup" (and of "Open a backup") holds a password or a recovery key: Rust reads the text as a recovery key first and,
   if it is a well-formed key that turns out wrong, tries it as a password too (text that is not a well-formed key is
   tried as a password only, with no typo words); it is wiped when the try ends, and the page empties the box after
-  every send, a wrong password included (unlike the unlock form). The same box of "Restore a backup" is sent once, to
+  every send, a wrong password included (unlike the unlock form). The recovery key box of "forgot password" is sent
+  once, to the check; the key then lives in Rust in the held recovery choice, and on the page in its box until the check
+  answers, or after a refusal until the box is emptied (see "A recovery key typed for 'forgot password'"). The same box of "Restore a backup" is sent once, to
   the check; the credential that worked then lives in Rust, in the held pick, until the copy finishes or the pick is
   dropped (see "A backup picked to be restored"). *Accepted:* wiping the buffers would mean replacing Tauri's transport.
 - **Webview memory is not wiped.** Values typed or shown in the window live in WebView2's memory until the browser engine
@@ -306,14 +323,28 @@ in the code with a `shortcut:` comment.
   program could add a vault to the list, raise the idle time or clipboard delay to their limits (a value out of range
   gives the defaults), turn capture protection off or change the save shortcut (`settings.json`; a shortcut the
   Settings screen would refuse, or any other value out of range, gives the defaults), remove a vault's "recovery key not
-  confirmed" note (a damaged `vault-state.json` also reads as having none), or empty the output journal so a leftover
-  stays. They hold no secrets. *Accepted:* the same reasoning as the restore
-  journal (see "Someone who can already write inside your vault folder").
+  confirmed" note (a damaged `vault-state.json` also reads as having none), add one, so that the next unlock that can
+  write makes a new recovery key without asking for the password again (the old key stops working; the new one is shown
+  to whoever unlocked, who just typed the password), or empty the output journal so a leftover stays. They hold no secrets. `vaults.json` keeps each vault's last-known name beside its folder path, so a vault whose
+  folder or drive is gone still shows its name on the lock screen. The name is not secret (the lock screen shows it before
+  any password, read from the header without the key), but a vault on a removable drive leaves its name on the PC after
+  the drive goes, as its path already does; Remove from list takes the name away with the row. Show in Explorer never runs a listed place through the shell's "open": it checks the
+  listed place is a plain folder (not a file, a link or a junction), then starts `explorer.exe` from the Windows folder
+  by its full path with that folder as its one argument. Explorer looks the argument up again itself, after the check,
+  so a program running as you could swap the folder for something else in between, or list a spelling that Windows
+  reads differently once the `\\?\` prefix is dropped. *Accepted:* the same reasoning as the restore journal (see
+  "Someone who can already write inside your vault folder").
 - **Cloud folders.** A vault in a OneDrive, Google Drive or Dropbox folder is not refused. The shell asks first when one is
   created or added, and reports it at each unlock, where the screen warns. They are found by asking Windows about sync
   roots, then by each provider's known location,
   so a provider that does neither goes unnoticed. Syncing can leave conflicting copies of vault files, and old versions on
-  the provider's servers. *Accepted:* v1 does not support these folders, and the warning says so. A vault brought to a
+  the provider's servers. Two copies of one vault written apart (another PC on the same sync folder) don't merge: a
+  rename, password change or new recovery key here writes this copy's header over a change the other copy made, so that
+  change is undone: a password or recovery key set on the other copy stops working, and the one it replaced works again
+  (a leaked password that was changed there opens the vault again; someone who no longer has the replaced one is locked
+  out). Nothing unsigned is ever trusted: this needs a genuine change made by Lockbox on
+  the other copy. *Accepted:* v1 does not
+  support these folders, and the warning says so. A vault brought to a
   new computer ("Move to a new computer") keeps the settings calibrated on the PC that made it, and the old computer's
   copies of it stay as readable as any old backup (see "Old copies of the vault").
 - **A USB hard drive that reports as fixed is accepted** (the checks use what Windows reports). Unplugging it locks its
@@ -447,10 +478,14 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   notice, and the new password stops working). There is no key rotation. *Accepted:* it follows from the two-copy
   design; and because a password change does not change the vault key, an old password plus any older copy of the header
   already works (see "Old copies of the vault").
-- **The regenerate-recovery double fault.** A new recovery key is written to `.bak` first and then `vault.json`. If the
+- **The regenerate-recovery double fault.** A new recovery key is written to `.bak` first and then `vault.json`
+  (a `vault.json` that can't be read as a header is first rewritten with the open header, so the old key always has
+  a file to open). If the
   second write fails, the old recovery key keeps working and the new one is never shown. If `vault.json` is then
-  destroyed before the next repair, `.bak` takes over, and its recovery slot belongs to the key that was never shown, so
-  recovery is lost (the password still works and a new recovery key can be made). *Accepted:* it needs two failures in a
+  destroyed before an unlock with the old key or a header write repairs `.bak` (a password unlock does not), `.bak` takes
+  over, and its recovery slot belongs to the key that was never shown, so
+  recovery is lost (the password still works and a new recovery key can be made). The app leaves its "recovery key not
+  confirmed" note, so the next unlock offers a new key straight away. *Accepted:* it needs two failures in a
   row; the other write order could leave a vault with no working recovery key at all.
 - **A new recovery key can be lost if the process dies right after writing it.** If Lockbox is killed after both header
   files are written but before the caller shows the new recovery key, the old key no longer works and the new one was
@@ -477,7 +512,7 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   and clears the block. *Accepted:* the user may have to replace the unchecked credential first.
 - **A header changed outside Lockbox must be accepted before any other header change.** While the "changed outside
   Lockbox" warning is pending, changing the password or regenerating the recovery key is refused ("accept the header
-  change first"), so the authentic `.bak` is never overwritten by the edited header before the user agrees. The
+  change first"), and so is renaming the vault, so the authentic `.bak` is never overwritten by the edited header before the user agrees. The
   screen's way to decline is "Lock this vault": nothing is written, and the question comes back at the next unlock.
 - **Both at once.** If the header was changed and a slot is unverified, accepting writes each file with the accepted
   name and date and a fresh stamp but keeps that file's OWN version of the unverified slot (the stamp does not cover
@@ -497,6 +532,7 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   ("header copies disagree; replace the unchecked credential first"), and while the header state is unknown after a
   failed header write ("header state unknown; reopen the vault"). *Accepted:* a backup made then would keep a header
   nobody has checked; accepting the change, replacing the unchecked credential or reopening the vault ends it.
+  Renaming the vault is refused in the same four cases.
 - **Odd header files read as damaged.** A `vault.json` saved with a byte-order mark (an invisible marker some editors
   add), or a version number out of range, reads as damaged rather than "update Lockbox", so Lockbox may fall back to
   `.bak` and repair the unreadable file from it. *Accepted:* only a header that passed its checks is ever copied over
@@ -636,22 +672,19 @@ Lockbox defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plan 4C
-(changing the password, "forgot password", a new recovery key from Settings, emptying the trash, export, and unlocking a
-second vault from inside the window; switching between vaults that are already open works from the side menu), the
-end-to-end tests on the running app, and the installer. Until "forgot password" has a screen, a lost password means the
-vault is reachable only through a backup you can still open (its password or your recovery key opens it), so test your
-backups. Plans 4A and 4B are built
+These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plan 4D
+(emptying the trash, the list of items that have been in the trash for 30 days or more, and export), the
+end-to-end tests on the running app, and the installer. Plans 4A, 4B and 4C are built
 (first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
 folders and the trash, `.env` in and out, the save shortcut, stored files, settings, and backing up, testing and
 restoring a backup, older copies, opening a backup read-only, moving a vault to a new computer, adding many files,
-Save all files, and progress and a stop for long jobs), and the page clears what it shows at
+Save all files, changing the password, forgot password with the recovery key, a new recovery key, unlocking a second vault from inside the window and switching, a new vault, renaming a vault, removing a vault from the list and adding it back, and progress and a stop for long jobs), and the page clears what it shows at
 a lock; the shell's other commands exist with no button yet. Unlocking a vault can still write to it (header repair and
 cleanup); to look at a vault or a backup without writing, open it read-only.
 
 ### Limits that come with the screens
 
-These come with the screens of Plans 4A and 4B, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
+These come with the screens of Plans 4A, 4B and 4C, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
 
 - **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
   that value (the save box's tick box, and the same tick box in the paste panel for a `.env` you pasted): after the key is

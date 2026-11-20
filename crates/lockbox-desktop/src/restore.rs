@@ -5,7 +5,8 @@
 //!
 //! **Five steps on one held pick**, none taking a path from the page: `restore_pick` holds the backup (and `Busy` while
 //! a restore lives), `restore_check` opens it read-only with the typed password or key and keeps the credential that
-//! worked, in Rust, in the pick, `restore_choose_folder` moves the pick's folder, `restore_prepare` copies (a
+//! worked, in Rust, in the pick (a launch-scoped job with a Stop of its own, so Cancel at 24a ends it),
+//! `restore_choose_folder` moves the pick's folder, `restore_prepare` copies (a
 //! launch-scoped job with progress and a Stop), `restore_commit` swaps (a job with no Stop). A finished restore survives
 //! an idle lock and no other lock of all vaults ([`Restores::lock_hook`]).
 //!
@@ -147,12 +148,14 @@ impl fmt::Debug for NoticeVault {
     }
 }
 
-/// A path as the user knows it: Lockbox spells a drive path `\\?\C:\..`, which Explorer does not.
+/// A path as the user knows it: Lockbox spells a drive path `\\?\C:\..` and a share `\\?\UNC\srv\share\..`, which
+/// Explorer does not (`C:\..`, `\\srv\share\..`). The one rule for what is shown and what Show in Explorer opens.
 pub(crate) fn shown(path: &Path) -> String {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
-        Some(plain) if !plain.starts_with(r"UNC\") => plain.to_owned(),
-        _ => text.into_owned(),
+        Some(share) if share.starts_with(r"UNC\") => format!(r"\\{}", &share[4..]),
+        Some(plain) => plain.to_owned(),
+        None => text.into_owned(),
     }
 }
 
@@ -1054,7 +1057,7 @@ impl Shell {
             (Some(found), _) => found,
             (None, Recovered::Finished) => {
                 let dir = fs::canonicalize(target).ok()?;
-                (self.registry.add(&dir).ok()?, dir)
+                (self.registry.add(&dir).ok()?.id, dir)
             }
             (None, _) => return None,
         };
@@ -1171,12 +1174,19 @@ impl Shell {
     /// `usual` is then false; `NotFound` if that vault has left the list). A second check replaces the first. A wrong password or key, a damaged backup and
     /// every other refusal leave the pick held, so the person tries again without picking the file again.
     ///
-    /// `ChoiceExpired` (before anything else) for a pick that is not held. Not a job: about a second, like unlocking, so
-    /// it pauses nothing; a lock of all vaults while it runs cancels it and answers `Locked`, with nothing held.
+    /// `ChoiceExpired` (before anything else) for a pick that is not held. The credential is read before the job begins, so
+    /// one that cannot be read (a recovery key that is no key) starts nothing. The check is a launch-scoped job of kind
+    /// `restore_check` (idle time paused, counted by the close question) that the page's `request` names, with a stop of its
+    /// own: the Stop (`cancel_operation`) ends it as `Cancelled`, and a result that was good but is found cancelled just
+    /// before it would be kept is discarded, so a Stop keeps nothing new. Like every refusal it leaves the pick as it was
+    /// (held, and an earlier check, if there was one, stays). 24a's Cancel on the page leaves the restore and lets the file
+    /// go. A lock of all vaults (or the app closing) while it runs cancels it too, and answers `Locked`,
+    /// with nothing held.
     pub fn restore_check(
         &self,
         choice: &Token,
         credential: CredentialArg,
+        request: u32,
     ) -> ShellResult<RestoreChecked> {
         let epoch = self.sessions.epoch();
         let now = || self.os.clock.now();
@@ -1196,46 +1206,61 @@ impl Shell {
             None => (default_vault_parent(self.os.env.as_ref())?, true),
         };
         let attempts = credential.attempts()?;
-        let (launch_epoch, launch) = self.sessions.launch_scope();
-        if launch_epoch != epoch {
-            return Err(ShellError::Locked);
-        }
-        let opened = attempts.run_keeping(|credential| {
-            ReadOnlyVault::open_backup(held.path(), credential, &launch, &NoProgress)
-        });
-        let (vault, credential) = match opened {
-            Ok(found) => found,
-            Err(refusal) if self.locked_since(epoch) => {
-                drop(refusal);
-                return Err(ShellError::Locked);
-            }
-            Err(refusal) => return Err(refusal.into()),
-        };
-        let offset = self.os.clock.utc_offset_secs();
-        let made = vault
-            .backup_created_at()
-            .and_then(dates::parse_utc)
-            .map(|secs| dates::local_date_of(secs, offset));
-        let checked = Checked::new(
-            credential,
-            vault.name().to_owned(),
-            vault.id(),
-            made,
-            parent,
-            usual,
-        );
-        drop(vault);
-        // A lock that came while the backup was opened has dropped the pick: nothing is kept.
+        let job = self.begin_launch_job(JobKind::RestoreCheck, Some(request));
+        // A lock before the job began: nothing is read. (One after it cancels the job's token, and its answer is refused
+        // by `answer_job`.)
         if self.locked_since(epoch) {
             return Err(ShellError::Locked);
         }
-        // Beside a vault whose details are damaged the restore makes a new folder, so it replaces nothing there.
-        let beside = self.beside_damaged_vault(held.vault(), &checked, &checked.parent)?;
-        let view = self.checked_view(&checked, beside.is_some());
-        match held.set_checked(checked) {
-            true => Ok(view),
-            false => Err(ShellError::ChoiceExpired),
-        }
+        let answer = (|| {
+            // The job's own stop, a child of the launch's: the Stop of this check ends this check only, and a lock still
+            // reaches it through the launch.
+            let opened = attempts.run_keeping(|credential| {
+                ReadOnlyVault::open_backup(held.path(), credential, job.token(), &NoProgress)
+            });
+            let (vault, credential) = match opened {
+                Ok(found) => found,
+                Err(refusal) if self.locked_since(epoch) => {
+                    drop(refusal);
+                    return Err(ShellError::Locked);
+                }
+                Err(refusal) => return Err(refusal.into()),
+            };
+            let offset = self.os.clock.utc_offset_secs();
+            let made = vault
+                .backup_created_at()
+                .and_then(dates::parse_utc)
+                .map(|secs| dates::local_date_of(secs, offset));
+            let checked = Checked::new(
+                credential,
+                vault.name().to_owned(),
+                vault.id(),
+                made,
+                parent,
+                usual,
+            );
+            drop(vault);
+            #[cfg(test)]
+            let _ = lockbox_core::internals::fsio::failpoint::check("restore_check.after_open");
+            // A lock that came while the backup was opened has dropped the pick: nothing is kept.
+            if self.locked_since(epoch) {
+                return Err(ShellError::Locked);
+            }
+            // Beside a vault whose details are damaged the restore makes a new folder, so it replaces nothing there.
+            let beside = self.beside_damaged_vault(held.vault(), &checked, &checked.parent)?;
+            let view = self.checked_view(&checked, beside.is_some());
+            // The person's Stop, seen after a good result: the result and the credential are let go, the pick stays. (A
+            // lock cancels the token too, but it is told apart above: its epoch has moved.)
+            if job.token().is_cancelled() {
+                return Err(ShellError::Cancelled);
+            }
+            match held.set_checked(checked) {
+                true => Ok(view),
+                false => Err(ShellError::ChoiceExpired),
+            }
+        })();
+        // Ending the job announces on `lockbox://busy`, where a lock can land: the answer is checked after it.
+        self.autolock.answer_job(job, answer)
     }
 
     /// 24b's "Choose another": opens the picker "Restore into this folder", starting in the folder the pick is in now when
@@ -1409,14 +1434,17 @@ impl Shell {
             fs::create_dir_all(wanted)?;
         }
         let check = self.check_location(wanted)?;
-        if check.cloud.is_some() && !cloud_confirmed {
+        if let (Some(provider), false) = (check.cloud, cloud_confirmed) {
             let question = RestoreChoice {
                 pick: pick.clone(),
                 destination,
                 cloud_confirmed: false,
                 asked: Asked::Cloud,
             };
-            return self.park(question, epoch, |token| Confirm::CloudFolder { token });
+            return self.park(question, epoch, move |token| Confirm::CloudFolder {
+                token,
+                provider,
+            });
         }
         // Ask 8's restore, still beside the damaged vault it was started from, makes a new folder and nothing else: the
         // engine's same-vault rule would find a healthy vault of the backup's ID there (the sibling an earlier restore
@@ -1471,7 +1499,7 @@ impl Shell {
         let beside = dir
             .parent()
             .is_some_and(|beside| same_folder(beside, parent));
-        if !beside || !self.registry.entry(vault, &dir).details_damaged {
+        if !beside || !crate::registry::details_damaged(&dir) {
             return Ok(None);
         }
         // A readable copy of this vault is beside it already (a sibling an earlier restore made): the engine keeps one
@@ -1763,7 +1791,11 @@ impl Shell {
                 self.restore.end_commit(restore, false);
                 operation.progress().advance(1, 1);
                 let dir = fs::canonicalize(&outcome.dir).unwrap_or(outcome.dir);
-                let listed = self.registry.add(&dir).map_err(|_| VAULT_NOT_LISTED);
+                let listed = self
+                    .registry
+                    .add(&dir)
+                    .map(|vault| vault.id)
+                    .map_err(|_| VAULT_NOT_LISTED);
                 // The operation ends only now, listed or not: a Quit that waited for it (the close question's carry-on)
                 // must not exit before the restored vault is on the list.
                 drop(operation);
@@ -2163,7 +2195,7 @@ mod tests {
     use crate::jobs::{CloseReason, JobScope, OperationId};
     use crate::os::{Clock, DriveType, KnownFolder, OsSignal};
     use crate::session::{SessionKind, SessionState, VaultRef};
-    use crate::testing::{FakeVolume, TEST_PASSWORD, TestShell, heavy};
+    use crate::testing::{Events, FakeVolume, TEST_PASSWORD, TestShell, heavy};
 
     /// Always disarms, so a failing test cannot leak a failpoint into the next one on this thread.
     struct Cleanup;
@@ -2245,7 +2277,7 @@ mod tests {
 
     /// The pick's password check, with the right password.
     fn check(ts: &TestShell, choice: &Token) -> RestoreChecked {
-        heavy(|| ts.shell.restore_check(choice, working())).unwrap()
+        heavy(|| ts.shell.restore_check(choice, working(), REQUEST)).unwrap()
     }
 
     /// The folder picker answered for `parent` and the pick moved there.
@@ -2379,7 +2411,7 @@ mod tests {
     fn unlock(ts: &TestShell, id: u32) -> (SessionId, u64) {
         let unlocked = heavy(|| {
             ts.shell
-                .unlock_vault(id, Zeroizing::new(TEST_PASSWORD.to_owned()))
+                .unlock_vault(ts.vault(id), Zeroizing::new(TEST_PASSWORD.to_owned()))
         })
         .unwrap();
         (unlocked.session, unlocked.generation)
@@ -2938,8 +2970,10 @@ mod tests {
         let cloud = ts.folder("Cloud");
         ts.volumes.add_sync_root(&cloud);
 
-        let Outcome::Confirm(Confirm::CloudFolder { token }) =
-            prepare(&ts, &backup, &cloud).unwrap()
+        let Outcome::Confirm(Confirm::CloudFolder {
+            token,
+            provider: crate::locations::CloudProvider::Other,
+        }) = prepare(&ts, &backup, &cloud).unwrap()
         else {
             panic!("not asked");
         };
@@ -2958,7 +2992,7 @@ mod tests {
                 what: "restore answer"
             })
         );
-        let Outcome::Confirm(Confirm::CloudFolder { token }) =
+        let Outcome::Confirm(Confirm::CloudFolder { token, .. }) =
             prepare(&ts, &backup, &cloud).unwrap()
         else {
             panic!("not asked again");
@@ -3027,7 +3061,7 @@ mod tests {
         // A question waits in Pending; a lock of all vaults drops it.
         let cloud = ts.folder("Cloud");
         ts.volumes.add_sync_root(&cloud);
-        let Outcome::Confirm(Confirm::CloudFolder { token }) =
+        let Outcome::Confirm(Confirm::CloudFolder { token, .. }) =
             prepare(&ts, &backup, &cloud).unwrap()
         else {
             panic!("not asked");
@@ -3048,7 +3082,7 @@ mod tests {
         let parent = vaults_folder(&ts);
         let before = names(&parent);
         let held = pick(&ts, &backup);
-        let refused = heavy(|| ts.shell.restore_check(&held.choice, wrong())).err();
+        let refused = heavy(|| ts.shell.restore_check(&held.choice, wrong(), REQUEST)).err();
         assert_eq!(refused, Some(CoreError::WrongPassword.into()));
         assert_eq!(names(&parent), before);
         assert!(!ts.shell.paths.journal.exists() && ts.shell.restore.is_idle());
@@ -3159,7 +3193,7 @@ mod tests {
         );
         assert_eq!(ts.shell.sessions.pending().len(), others + 1);
         assert_eq!(
-            heavy(|| ts.shell.restore_check(&held.choice, working())).err(),
+            heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err(),
             Some(ShellError::ChoiceExpired)
         );
         check(&ts, &second.choice);
@@ -3185,7 +3219,7 @@ mod tests {
         let dialogs = ts.dialogs.opened();
 
         for _ in 0..3 {
-            let refused = heavy(|| ts.shell.restore_check(&held.choice, wrong())).err();
+            let refused = heavy(|| ts.shell.restore_check(&held.choice, wrong(), REQUEST)).err();
             assert_eq!(refused, Some(CoreError::WrongPassword.into()));
             assert_eq!(
                 ts.shell.sessions.pending().len(),
@@ -3211,9 +3245,9 @@ mod tests {
         let junk = ts.folder("Backups").join("junk.lockbox-backup");
         fs::write(&junk, b"not a backup").unwrap();
         let bad = pick(&ts, &junk);
-        let first = heavy(|| ts.shell.restore_check(&bad.choice, working())).err();
+        let first = heavy(|| ts.shell.restore_check(&bad.choice, working(), REQUEST)).err();
         assert!(matches!(first, Some(ShellError::Core(_))), "{first:?}");
-        let again = heavy(|| ts.shell.restore_check(&bad.choice, working())).err();
+        let again = heavy(|| ts.shell.restore_check(&bad.choice, working(), REQUEST)).err();
         assert_eq!(first, again);
         assert_eq!(ts.shell.sessions.pending().len(), others + 2);
     }
@@ -3362,10 +3396,10 @@ mod tests {
         // Words that are no key and no password of this vault: wrong, and the pick stays.
         let wrong_key = heavy(|| {
             ts.shell
-                .restore_check(&held.choice, typed(&"abandon ".repeat(24)))
+                .restore_check(&held.choice, typed(&"abandon ".repeat(24)), REQUEST)
         });
         assert!(wrong_key.is_err());
-        let view = heavy(|| ts.shell.restore_check(&held.choice, typed(&key))).unwrap();
+        let view = heavy(|| ts.shell.restore_check(&held.choice, typed(&key), REQUEST)).unwrap();
         assert_eq!(view.name, "Family");
         choose(&ts, &held.choice, &parent);
         let prepared = done(copy(&ts, &held.choice).unwrap());
@@ -3416,7 +3450,7 @@ mod tests {
         assert!(ts.shell.restore.is_idle());
         assert_eq!(ts.shell.sessions.list()[0].state, SessionState::Unlocked);
         assert_eq!(
-            heavy(|| ts.shell.restore_check(&choice, working())).err(),
+            heavy(|| ts.shell.restore_check(&choice, working(), REQUEST)).err(),
             Some(ShellError::ChoiceExpired),
             "a Stop forgets the pick"
         );
@@ -3779,7 +3813,7 @@ mod tests {
             Some(ShellError::ChoiceExpired)
         );
         assert_eq!(
-            heavy(|| ts.shell.restore_check(&held.choice, working())).err(),
+            heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err(),
             Some(ShellError::ChoiceExpired)
         );
     }
@@ -3799,7 +3833,8 @@ mod tests {
         let others = ts.shell.sessions.pending().len();
 
         let choice = chosen(&ts, &backup, &cloud);
-        let Outcome::Confirm(Confirm::CloudFolder { token: asked }) = copy(&ts, &choice).unwrap()
+        let Outcome::Confirm(Confirm::CloudFolder { token: asked, .. }) =
+            copy(&ts, &choice).unwrap()
         else {
             panic!("not asked");
         };
@@ -3948,7 +3983,8 @@ mod tests {
         let others = ts.shell.sessions.pending().len();
 
         let choice = chosen(&ts, &backup, &cloud);
-        let Outcome::Confirm(Confirm::CloudFolder { token: asked }) = copy(&ts, &choice).unwrap()
+        let Outcome::Confirm(Confirm::CloudFolder { token: asked, .. }) =
+            copy(&ts, &choice).unwrap()
         else {
             panic!("not asked");
         };
@@ -3973,7 +4009,8 @@ mod tests {
 
         // A pick forgotten between the question and the yes: the yes is told so, and nothing is written.
         let choice = chosen(&ts, &backup, &cloud);
-        let Outcome::Confirm(Confirm::CloudFolder { token: asked }) = copy(&ts, &choice).unwrap()
+        let Outcome::Confirm(Confirm::CloudFolder { token: asked, .. }) =
+            copy(&ts, &choice).unwrap()
         else {
             panic!("not asked again");
         };
@@ -4042,7 +4079,7 @@ mod tests {
             "gone with the copy"
         );
         assert_eq!(
-            heavy(|| ts.shell.restore_check(&choice, working())).err(),
+            heavy(|| ts.shell.restore_check(&choice, working(), REQUEST)).err(),
             Some(ShellError::ChoiceExpired)
         );
         ts.shell.restore_discard(view.restore).unwrap();
@@ -4063,13 +4100,13 @@ mod tests {
         ] {
             let held = pick(&ts, &backup);
             let dialogs = ts.dialogs.opened();
-            let refused = heavy(|| ts.shell.restore_check(&held.choice, wrong())).err();
+            let refused = heavy(|| ts.shell.restore_check(&held.choice, wrong(), REQUEST)).err();
             assert_eq!(refused, Some(CoreError::WrongPassword.into()), "{reason:?}");
 
             ts.shell.sessions.lock_all(reason);
             assert_eq!(ts.shell.sessions.pending().len(), 0, "{reason:?}");
             assert_eq!(
-                heavy(|| ts.shell.restore_check(&held.choice, working())).err(),
+                heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err(),
                 Some(ShellError::ChoiceExpired),
                 "{reason:?}"
             );
@@ -4097,15 +4134,366 @@ mod tests {
                 }
             }),
         );
-        let answer = heavy(|| ts.shell.restore_check(&held.choice, working())).err();
+        let answer = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err();
         failpoint::disarm_all();
 
         assert_eq!(answer, LOCKED);
         assert_eq!(ts.shell.sessions.pending().len(), 0, "nothing is held");
         assert_eq!(
-            heavy(|| ts.shell.restore_check(&held.choice, working())).err(),
+            heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err(),
             Some(ShellError::ChoiceExpired)
         );
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // The check as a job that stops (Plan 4C, Task 11).
+    // ------------------------------------------------------------------------------------------------------------
+
+    /// The checks' `job-started` events: the page's number, the operation and the scope of each.
+    fn check_jobs(events: &Events) -> Vec<(u32, OperationId, JobScope)> {
+        events
+            .started()
+            .iter()
+            .filter(|event| event["kind"] == json!("restore_check"))
+            .map(|event| {
+                (
+                    u32::try_from(event["request"].as_u64().unwrap()).unwrap(),
+                    OperationId(event["operation"].as_u64().unwrap()),
+                    serde_json::from_value(event["scope"].clone()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// Arms the engine's step `at` to press Cancel once on the check that is running: the page's own call, by the
+    /// operation and scope that `job-started` told it.
+    fn cancel_check_at(ts: &TestShell, at: &'static str) {
+        let (shell, events, once) = (
+            Arc::clone(&ts.shell),
+            Arc::clone(&ts.events),
+            Cell::new(true),
+        );
+        failpoint::observe(
+            at,
+            Box::new(move || {
+                if once.replace(false) {
+                    let (_, operation, scope) = *check_jobs(&events)
+                        .last()
+                        .expect("the check is a job the page was told of");
+                    shell.autolock.cancel_operation(operation, scope).unwrap();
+                }
+            }),
+        );
+    }
+
+    /// A vault with a file in it, a backup of it, and that backup picked at 24a: what a check starts from. The vault's
+    /// session and generation come with the pick.
+    fn picked_backup(ts: &TestShell) -> (RestorePick, SessionId, u64) {
+        let (s, g) = ts.open_vault("Family");
+        ts.stored_file(s, g, "report.pdf", b"report");
+        ts.stored_file(s, g, "notes.pdf", b"notes");
+        let backup = backup_of(ts, s, g, "family.lockbox-backup");
+        (pick(ts, &backup), s, g)
+    }
+
+    /// The check is a launch-scoped job of kind `restore_check`, told to the page under its `request` before any work, with
+    /// a stop of its own: the page's Cancel stops it by the operation and scope it was told, a Cancel naming another
+    /// operation or another epoch stops nothing, and the launch's own token is never touched.
+    #[test]
+    fn restore_check_is_a_launch_job_with_its_own_stop() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (held, ..) = picked_backup(&ts);
+        assert!(check_jobs(&ts.events).is_empty(), "a pick is no job");
+        let epoch = ts.shell.sessions.epoch();
+
+        let seen = Rc::new(RefCell::new(None));
+        let inside = Rc::clone(&seen);
+        let (shell, events) = (Arc::clone(&ts.shell), Arc::clone(&ts.events));
+        failpoint::observe(
+            "source.item",
+            Box::new(move || {
+                if inside.borrow().is_some() {
+                    return;
+                }
+                let jobs = check_jobs(&events);
+                let (_, operation, scope) = *jobs.last().expect("told before the work");
+                let launch = shell.sessions.launch_scope().1;
+                let wrong_operation = shell
+                    .autolock
+                    .cancel_operation(OperationId(operation.0 + 100), scope);
+                let wrong_epoch = shell
+                    .autolock
+                    .cancel_operation(operation, JobScope::Launch { epoch: epoch + 1 });
+                let kinds = shell.autolock.running_kinds();
+                let own = shell.autolock.cancel_operation(operation, scope);
+                *inside.borrow_mut() = Some((
+                    jobs,
+                    kinds,
+                    wrong_operation,
+                    wrong_epoch,
+                    own,
+                    launch.is_cancelled(),
+                ));
+            }),
+        );
+        let answer = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err();
+        failpoint::disarm_all();
+
+        let (jobs, kinds, wrong_operation, wrong_epoch, own, launch_cancelled) =
+            seen.borrow_mut().take().expect("the check read an item");
+        assert_eq!(jobs.len(), 1, "one job");
+        assert_eq!(jobs[0].0, REQUEST, "under the page's number");
+        assert_eq!(jobs[0].2, JobScope::Launch { epoch });
+        assert_eq!(kinds, [JobKind::RestoreCheck], "counted as running");
+        assert_eq!(wrong_operation, Err(ShellError::NotFound));
+        assert_eq!(wrong_epoch, Err(ShellError::Locked));
+        assert_eq!(own, Ok(()), "its own stop");
+        assert!(!launch_cancelled, "the launch's token was not touched");
+        assert_eq!(answer, CANCELLED, "the stop ended the check");
+        assert!(
+            !ts.shell.sessions.launch_scope().1.is_cancelled(),
+            "a stop of the check is no lock"
+        );
+        assert!(ts.shell.autolock.running_kinds().is_empty(), "it ended");
+        let busy = ts.events.busy();
+        assert!(
+            busy.contains(&(None, vec!["restore_check"])),
+            "`lockbox://busy` named it: {busy:?}"
+        );
+        assert_eq!(busy.last(), Some(&(None, vec![])));
+    }
+
+    /// Cancel at 24a stops the check where it is and says `Cancelled`; the pick is still held and nothing the check found
+    /// was kept (no folder to choose yet), so the same pick checks again.
+    #[test]
+    fn cancel_at_24a_stops_the_check_and_keeps_the_pick() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (held, ..) = picked_backup(&ts);
+        let before = ts.shell.sessions.pending().len();
+
+        cancel_check_at(&ts, "source.item");
+        let read = Rc::new(Cell::new(0usize));
+        let counted = Rc::clone(&read);
+        failpoint::observe(
+            "source.item",
+            Box::new(move || counted.set(counted.get() + 1)),
+        );
+        let answer = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err();
+        failpoint::disarm_all();
+
+        assert_eq!(answer, CANCELLED);
+        assert_eq!(read.get(), 1, "the work stopped at the first item it read");
+        assert_eq!(ts.shell.sessions.pending().len(), before, "still held");
+        assert_eq!(
+            ts.shell.restore_choose_folder(&held.choice).err(),
+            Some(ShellError::ChoiceExpired),
+            "nothing was found, so nothing is checked"
+        );
+        assert!(ts.shell.autolock.running_kinds().is_empty());
+        // The retry is the same pick, and this time nobody cancels.
+        let view = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST + 1)).unwrap();
+        assert_eq!(view.name, "Family");
+        assert_eq!(
+            check_jobs(&ts.events)
+                .iter()
+                .map(|job| job.0)
+                .collect::<Vec<_>>(),
+            [REQUEST, REQUEST + 1],
+            "each try is a job of its own"
+        );
+    }
+
+    /// A Cancel that comes before the page has heard `job-started` (4B's one-second rule: the page matches the stop to the
+    /// request, and sends it when the event arrives, so in the shell it lands at the earliest moment, with the job
+    /// registered and the event not yet sent) still stops the work: nothing of the backup is read.
+    #[test]
+    fn cancel_before_the_job_started_event_is_matched_by_request() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (held, ..) = picked_backup(&ts);
+        let before = ts.shell.sessions.pending().len();
+        // The number the check's job will get: the next after the last one begun.
+        let probe = ts.shell.begin_launch_job(JobKind::Test, None);
+        let operation = OperationId(probe.id().expect("registered").0 + 1);
+        drop(probe);
+        let epoch = ts.shell.sessions.epoch();
+
+        let told = Arc::new(AtomicUsize::new(usize::MAX));
+        let (shell, events, inside) = (
+            Arc::clone(&ts.shell),
+            Arc::clone(&ts.events),
+            Arc::clone(&told),
+        );
+        ts.events.during_next_busy(Box::new(move || {
+            inside.store(check_jobs(&events).len(), Ordering::SeqCst);
+            shell
+                .autolock
+                .cancel_operation(operation, JobScope::Launch { epoch })
+                .unwrap();
+        }));
+        let read = Rc::new(Cell::new(0usize));
+        let counted = Rc::clone(&read);
+        failpoint::observe(
+            "source.item",
+            Box::new(move || counted.set(counted.get() + 1)),
+        );
+        let answer = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err();
+        failpoint::disarm_all();
+
+        assert_eq!(
+            told.load(Ordering::SeqCst),
+            0,
+            "the page had not been told yet"
+        );
+        assert_eq!(answer, CANCELLED);
+        assert_eq!(read.get(), 0, "no item of the backup was read");
+        assert_eq!(ts.shell.sessions.pending().len(), before, "the pick stays");
+        let jobs = check_jobs(&ts.events);
+        assert_eq!(jobs.len(), 1, "and the event came after, under its request");
+        assert_eq!((jobs[0].0, jobs[0].1), (REQUEST, operation));
+    }
+
+    /// A check that read the whole backup and found it good, with Cancel pressed after the engine's last look and before the
+    /// shell keeps the result: the person said stop, so the result is discarded (nothing kept: no folder to choose, no
+    /// credential for the copy) and the pick stays for a retry.
+    #[test]
+    fn cancel_just_before_a_good_result_discards_it_and_keeps_the_pick() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (held, ..) = picked_backup(&ts);
+        let before = ts.shell.sessions.pending().len();
+
+        cancel_check_at(&ts, "restore_check.after_open");
+        let answer = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err();
+        failpoint::disarm_all();
+
+        assert_eq!(
+            answer, CANCELLED,
+            "a good result that was cancelled is not shown"
+        );
+        assert_eq!(ts.shell.sessions.pending().len(), before, "the pick stays");
+        assert_eq!(
+            ts.shell.restore_choose_folder(&held.choice).err(),
+            Some(ShellError::ChoiceExpired),
+            "and the result was not kept"
+        );
+        assert_eq!(
+            ts.shell.restore_prepare(&held.choice, REQUEST + 1).err(),
+            Some(ShellError::ChoiceExpired),
+            "no copy can start from it"
+        );
+        let view = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST + 1)).unwrap();
+        assert_eq!(view.name, "Family");
+    }
+
+    /// Cancelling the check leaves every other job running: another launch job (a test of a backup), a job of the open
+    /// vault's session, and the vault itself.
+    #[test]
+    fn cancelling_the_check_leaves_other_jobs_running() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        let (held, s, g) = picked_backup(&ts);
+        let session_token = ts
+            .shell
+            .sessions
+            .read(s, g, |_, cancel| Ok(cancel.clone()))
+            .unwrap()
+            .data;
+        let other_launch = ts.shell.begin_launch_job(JobKind::Test, Some(98));
+        let other_session = ts.shell.autolock.begin_job(
+            JobScope::Session {
+                session: s,
+                generation: g,
+            },
+            JobKind::Import,
+            &session_token,
+            Some(99),
+        );
+
+        cancel_check_at(&ts, "source.item");
+        let answer = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).err();
+        failpoint::disarm_all();
+
+        assert_eq!(answer, CANCELLED);
+        assert!(
+            !other_launch.token().is_cancelled(),
+            "a launch job was stopped"
+        );
+        assert!(
+            !other_session.token().is_cancelled(),
+            "a session job was stopped"
+        );
+        assert!(!session_token.is_cancelled(), "the session was stopped");
+        assert_eq!(
+            ts.shell.autolock.running_kinds(),
+            [JobKind::Test, JobKind::Import],
+            "only the check ended"
+        );
+        assert_eq!(ts.shell.sessions.list()[0].state, SessionState::Unlocked);
+    }
+
+    /// While the check runs the idle timer is paused (an idle time far past the limit locks nothing), and a close or Quit
+    /// asks, naming the check by its kind; once it has ended idle time counts from its end.
+    #[test]
+    fn the_check_pauses_idle_time_and_the_close_question_counts_it() {
+        let ts = TestShell::new();
+        let _cleanup = Cleanup;
+        ts.shell.settings.mark_close_explained().unwrap();
+        let (held, ..) = picked_backup(&ts);
+        let t0 = ts.clock.now();
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+
+        let seen = Rc::new(RefCell::new(None));
+        let inside = Rc::clone(&seen);
+        let shell = Arc::clone(&ts.shell);
+        let (idle, events, window) = (
+            Arc::clone(&ts.idle),
+            Arc::clone(&ts.events),
+            Arc::clone(&ts.window),
+        );
+        failpoint::observe(
+            "source.item",
+            Box::new(move || {
+                if inside.borrow().is_some() {
+                    return;
+                }
+                idle.set(minutes(30));
+                shell.autolock.tick(t0 + minutes(30));
+                let state = shell.sessions.list()[0].state;
+                shell.close_or_ask();
+                let asked = events.close_asked();
+                let hides = window.hides();
+                let answered = events.answer_last_close(&shell, false);
+                *inside.borrow_mut() = Some((state, asked, hides, answered));
+            }),
+        );
+        let view = heavy(|| ts.shell.restore_check(&held.choice, working(), REQUEST)).unwrap();
+        failpoint::disarm_all();
+
+        let (state, asked, hides, answered) =
+            seen.borrow_mut().take().expect("the check read an item");
+        assert_eq!(view.name, "Family");
+        assert_eq!(state, SessionState::Unlocked, "idle time was paused");
+        assert_eq!(
+            asked,
+            [json!({
+                "reason": "close",
+                "running": ["restore_check"],
+                "past_swap": false,
+                "restore_waiting": false,
+                "question": 1
+            })]
+        );
+        assert_eq!(hides, 0, "nothing was hidden while the question stood");
+        assert_eq!(answered, Ok(()));
+        // The pause ends with the check: idle time counts from then.
+        ts.idle.set(minutes(50));
+        ts.shell.autolock.tick(t0 + minutes(4));
+        assert_eq!(ts.shell.sessions.list()[0].state, SessionState::Unlocked);
+        ts.shell.autolock.tick(t0 + minutes(5));
+        assert_eq!(ts.shell.sessions.list()[0].state, SessionState::Locked);
     }
 
     /// Every new command answers a token it does not hold as `choice_expired`, never `not_found`: one never given, a
@@ -4119,7 +4507,7 @@ mod tests {
         let expired = Some(ShellError::ChoiceExpired);
         let all_refused = |ts: &TestShell, choice: &Token, why: &str| {
             assert_eq!(
-                heavy(|| ts.shell.restore_check(choice, working())).err(),
+                heavy(|| ts.shell.restore_check(choice, working(), REQUEST)).err(),
                 expired,
                 "check: {why}"
             );
@@ -4394,28 +4782,32 @@ mod tests {
         let view = prepared(&ts, &backup, &parent);
         assert!(!ts.shell.restore.past_swap());
         assert!(ts.shell.ask_before_closing(CloseReason::Close));
-        assert_eq!(ts.shell.close_answer(false), Ok(()));
+        assert_eq!(ts.answer_close(false), Ok(()));
 
         // Committing, before the journal says `swapping`, then after it.
-        let (shell, once) = (Arc::clone(&ts.shell), Cell::new(true));
+        let (shell, events, once) = (
+            Arc::clone(&ts.shell),
+            Arc::clone(&ts.events),
+            Cell::new(true),
+        );
         failpoint::observe(
             "restore.before_swapping",
             Box::new(move || {
                 if once.replace(false) {
                     assert!(!shell.restore.past_swap());
                     assert!(shell.ask_before_closing(CloseReason::Close));
-                    assert_eq!(shell.close_answer(false), Ok(()));
+                    assert_eq!(events.answer_last_close(&shell, false), Ok(()));
                 }
             }),
         );
-        let shell = Arc::clone(&ts.shell);
+        let (shell, events) = (Arc::clone(&ts.shell), Arc::clone(&ts.events));
         failpoint::observe(
             "restore.after_journal",
             Box::new(move || {
                 assert!(shell.restore.past_swap());
                 assert!(shell.ask_before_closing(CloseReason::Quit));
                 // Answered: a question left pending would be carried on when the commit ends (Task 14).
-                assert_eq!(shell.close_answer(false), Ok(()));
+                assert_eq!(events.answer_last_close(&shell, false), Ok(()));
             }),
         );
         let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
@@ -4424,9 +4816,9 @@ mod tests {
         assert_eq!(
             ts.events.close_asked(),
             [
-                waiting_question("close"),
-                json!({ "reason": "close", "running": ["restore"], "past_swap": false, "restore_waiting": false }),
-                json!({ "reason": "quit", "running": ["restore"], "past_swap": true, "restore_waiting": false }),
+                waiting_question(1, "close"),
+                json!({ "reason": "close", "running": ["restore"], "past_swap": false, "restore_waiting": false, "question": 2 }),
+                json!({ "reason": "quit", "running": ["restore"], "past_swap": true, "restore_waiting": false, "question": 3 }),
             ]
         );
         // The swap went through whatever was asked, and nothing was lost.
@@ -4469,7 +4861,7 @@ mod tests {
         assert!(dir.is_dir() && !ts.shell.paths.journal.exists());
         assert!(staging_in(&parent).is_empty());
         assert_eq!(ts.window.exits(), 1, "the Quit did not go ahead");
-        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(true), Err(ShellError::NotFound));
         assert_eq!(ts.window.exits(), 1);
     }
 
@@ -4531,16 +4923,20 @@ mod tests {
             "the app exited before the restored vault was on the list"
         );
         assert_eq!(listed.len(), 2);
-        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(true), Err(ShellError::NotFound));
     }
 
     // -----------------------------------------------------------------------------------------------------------
     // Task 13d: closing while a restore waits for its answer (24d).
     // -----------------------------------------------------------------------------------------------------------
 
-    /// What the page is sent when a close or Quit finds a finished restore waiting and no job running.
-    fn waiting_question(reason: &str) -> Value {
-        json!({ "reason": reason, "running": [], "past_swap": false, "restore_waiting": true })
+    /// What the page is sent when a close or Quit finds a finished restore waiting and no job running, as question
+    /// number `question` (the shell counts its questions from 1).
+    fn waiting_question(question: u64, reason: &str) -> Value {
+        json!({
+            "reason": reason, "running": [], "past_swap": false, "restore_waiting": true,
+            "question": question
+        })
     }
 
     /// An open vault, a backup of it, and a restore of that backup waiting at 24d, with the window's first-close
@@ -4587,7 +4983,7 @@ mod tests {
 
         ts.shell.close_or_ask();
 
-        assert_eq!(ts.events.close_asked(), [waiting_question("close")]);
+        assert_eq!(ts.events.close_asked(), [waiting_question(1, "close")]);
         assert_eq!(ts.window.hides(), 0);
         assert_eq!(ts.window.forwards(), 0, "a close has the window up already");
         assert!(ts.events.locked().is_empty());
@@ -4607,7 +5003,8 @@ mod tests {
         ts.shell.close_or_ask();
         assert_eq!(
             ts.events.close_asked(),
-            [waiting_question("close"), waiting_question("close")]
+            [waiting_question(1, "close"), waiting_question(1, "close")],
+            "the same question, with the same ID"
         );
         assert_eq!(ts.window.hides(), 0);
         assert!(ts.shell.restore.waiting());
@@ -4621,7 +5018,7 @@ mod tests {
 
         assert!(ts.shell.ask_before_closing(CloseReason::Quit));
 
-        assert_eq!(ts.events.close_asked(), [waiting_question("quit")]);
+        assert_eq!(ts.events.close_asked(), [waiting_question(1, "quit")]);
         assert_eq!(ts.window.forwards(), 1, "a Quit shows the window first");
         assert_eq!(ts.window.exits(), 0);
         assert!(ts.shell.restore.waiting());
@@ -4655,7 +5052,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ));
         });
-        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.answer_close(true), Ok(()));
         ended(&ts);
 
         assert_eq!(
@@ -4672,7 +5069,7 @@ mod tests {
             ts.shell.restore_commit(view.restore, REQUEST).err(),
             CANCELLED
         );
-        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(true), Err(ShellError::NotFound));
 
         // The same for a Quit.
         let Waiting {
@@ -4683,7 +5080,7 @@ mod tests {
             ..
         } = a_restore_waiting();
         assert!(ts.shell.ask_before_closing(CloseReason::Quit));
-        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.answer_close(true), Ok(()));
         ended(&ts);
         assert_eq!(ts.window.exits(), 1);
         assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
@@ -4703,20 +5100,21 @@ mod tests {
         } = a_restore_waiting();
         ts.shell.close_or_ask();
 
-        assert_eq!(ts.shell.close_answer(false), Ok(()));
+        assert_eq!(ts.answer_close(false), Ok(()));
 
         assert!(ts.shell.restore.waiting());
         assert_eq!(ts.window.hides(), 0);
         assert!(ts.events.locked().is_empty());
         assert_eq!(staging_in(&parent).len(), 1);
         assert!(ts.shell.paths.journal.exists());
-        assert_eq!(ts.shell.close_answer(false), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(false), Err(ShellError::NotFound));
         ts.shell.close_or_ask();
         assert_eq!(
             ts.events.close_asked(),
-            [waiting_question("close"), waiting_question("close")]
+            [waiting_question(1, "close"), waiting_question(2, "close")],
+            "the answered question is gone, so the next close is a new one"
         );
-        assert_eq!(ts.shell.close_answer(false), Ok(()));
+        assert_eq!(ts.answer_close(false), Ok(()));
 
         let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
         assert!(restored.before_restore);
@@ -4802,7 +5200,7 @@ mod tests {
         assert_eq!(ts.window.hides(), 1);
         assert_eq!(ts.shell.sessions.list()[0].state, SessionState::Locked);
         assert!(ts.events.locked().iter().any(|(id, _, _)| *id == s));
-        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(true), Err(ShellError::NotFound));
     }
 
     /// A waiting restore and a running job make one question that names both; its yes cancels the job and ends the
@@ -4821,11 +5219,12 @@ mod tests {
         assert_eq!(
             ts.events.close_asked(),
             [json!({
-                "reason": "close", "running": ["backup"], "past_swap": false, "restore_waiting": true
+                "reason": "close", "running": ["backup"], "past_swap": false, "restore_waiting": true,
+                "question": 1
             })]
         );
 
-        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.answer_close(true), Ok(()));
         ended(&ts);
         assert!(token.is_cancelled());
         assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
@@ -4853,11 +5252,7 @@ mod tests {
         assert!(ts.shell.restore.waiting(), "the waiting restore ended");
         assert_eq!(staging_in(&parent).len(), 1);
         assert!(ts.shell.paths.journal.exists());
-        assert_eq!(
-            ts.shell.close_answer(false),
-            Ok(()),
-            "the question was gone"
-        );
+        assert_eq!(ts.answer_close(false), Ok(()), "the question was gone");
     }
 
     /// The destination is locked with the restore's reason before the first rename.
@@ -6328,7 +6723,7 @@ mod tests {
         let source = ts.folder("Source");
         let folder = names(&source).remove(0);
         let dir = fs::canonicalize(source.join(folder)).unwrap();
-        let id = ts.shell.registry.add(&dir).unwrap();
+        let id = ts.shell.registry.add(&dir).unwrap().id;
         (s, g, id, dir)
     }
 
@@ -6450,18 +6845,19 @@ mod tests {
         assert_eq!(ts.shell.sessions.pending().len(), held, "nothing held");
 
         let first = pick_for(&ts, &backup, 1);
-        ts.shell.registry.forget(1).unwrap();
+        ts.shell.registry.forget(ts.vault(1)).unwrap();
         assert_eq!(
-            heavy(|| ts.shell.restore_check(&first.choice, working())).err(),
+            heavy(|| ts.shell.restore_check(&first.choice, working(), REQUEST)).err(),
             Some(ShellError::NotFound)
         );
         assert!(ts.shell.restore.is_idle());
     }
 
-    /// A vault with both header copies damaged lists with no name, as available and with its details damaged: the page's
-    /// trigger for Ask 8.
+    /// A vault with both header copies damaged lists as available and with its details damaged (the page's trigger for
+    /// Ask 8), and with no name of its own: the row says the name the list kept (Task 9b), or none when it never had one
+    /// (`a_listed_folder_with_no_vault_in_it_lists_the_same_way`).
     #[test]
-    fn both_headers_unreadable_listed_without_a_name() {
+    fn both_headers_unreadable_listed_with_the_kept_name() {
         let ts = TestShell::new();
         let (s, _) = ts.open_vault("Clients");
         let dir = vault_dir(&ts);
@@ -6477,12 +6873,13 @@ mod tests {
         let listed = first();
         assert_eq!(
             (listed.id, listed.name.as_deref(), listed.available),
-            (1, None, true)
+            (1, Some("Clients"), true),
+            "the kept name"
         );
         assert!(listed.details_damaged);
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
-            json!({ "id": 1, "name": null, "available": true, "details_damaged": true })
+            json!({ "list": listed.list, "id": 1, "name": "Clients", "available": true, "details_damaged": true })
         );
         // Header files that are there but unreadable count whichever copy is left, and a lost copy does not clear it.
         fs::remove_file(dir.join("vault.json")).unwrap();
@@ -6499,7 +6896,7 @@ mod tests {
         let ts = TestShell::new();
         let empty = ts.folder("Nothing here");
         fs::write(empty.join("notes.txt"), b"not a vault").unwrap();
-        let id = ts.shell.registry.add(&empty).unwrap();
+        let id = ts.shell.registry.add(&empty).unwrap().id;
         let listed = ts.shell.registry.list().unwrap();
         assert_eq!((listed[0].id, listed[0].name.as_deref()), (id, None));
         assert!(listed[0].available);
@@ -6677,7 +7074,8 @@ mod tests {
             .shell
             .registry
             .add(&fs::canonicalize(&old).unwrap())
-            .unwrap();
+            .unwrap()
+            .id;
         let before = snapshot(&old);
 
         let held = pick_for(&ts, &backup, id);
@@ -6717,7 +7115,8 @@ mod tests {
             .open(dir.join("vault.json"))
             .unwrap();
         let listed = ts.shell.registry.list().unwrap().remove(0);
-        assert_eq!(listed.name, None);
+        // No header can be read, so the name is the kept one (Task 9b); busy is still not damage.
+        assert_eq!(listed.name.as_deref(), Some("Clients"));
         assert!(listed.available);
         assert!(!listed.details_damaged, "busy is not damaged");
         drop(held);

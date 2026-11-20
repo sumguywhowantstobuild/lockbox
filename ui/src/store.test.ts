@@ -14,12 +14,15 @@ import {
   openNewLogin,
   openSearch,
   resetStoreForTests,
+  saveChoices,
   selectItem,
   setForm,
   startNotices,
   startStore,
   unlock,
+  type SessionData,
 } from "./store";
+import type { VaultEntry } from "./api";
 import { installFakeShell, itemId, LOCKED, PASSWORD, sampleItems, type FakeShell } from "./testing/fakeShell";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
@@ -37,10 +40,13 @@ beforeEach(() => {
   shell = installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: sampleItems() }]);
 });
 
+/** A row of the vault list as the shell gave it (Task 9): the list's identity and the vault's ID. */
+const ref = (id: number) => ({ list: shell.listIdentity(), id });
+
 /** Starts the store and opens vault 7: its session and generation. */
 async function opened(): Promise<{ session: number; generation: number }> {
   await startStore();
-  expect(await unlock(7, PASSWORD)).toBe("opened");
+  expect(await unlock(ref(7), PASSWORD)).toBe("opened");
   const live = shell.sessionOf(7);
   if (live === undefined) throw new Error("the fake shell opened no session");
   return { session: live.session, generation: live.generation };
@@ -108,8 +114,8 @@ test("a_lock_of_one_vault_leaves_the_other_alone", async () => {
     { id: 8, name: "Home", items: sampleItems() },
   ]);
   await startStore();
-  await unlock(7, PASSWORD);
-  await unlock(8, PASSWORD);
+  await unlock(ref(7), PASSWORD);
+  await unlock(ref(8), PASSWORD);
   const first = shell.sessionOf(7);
   const second = shell.sessionOf(8);
   if (first === undefined || second === undefined) throw new Error("not open");
@@ -128,7 +134,7 @@ test("stale_answer_shows_no_error", async () => {
 
   // A list in flight when the lock comes: its answer is from the old generation. Nothing is stored, nothing is thrown.
   const release = shell.holdListItems();
-  const unlocking = unlock(7, PASSWORD);
+  const unlocking = unlock(ref(7), PASSWORD);
   await vi.waitFor(() => {
     expect(shell.calls.some((call) => call.cmd === "list_items")).toBe(true);
   });
@@ -144,7 +150,7 @@ test("stale_answer_shows_no_error", async () => {
   expect(JSON.stringify(debugState())).not.toContain("Bot admin console");
 
   // The vault opens again afterwards, in the next generation.
-  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("opened");
   expect(openedItems(live.session)?.length).toBeGreaterThan(0);
 });
 
@@ -167,7 +173,7 @@ test("an_unlock_answer_older_than_its_lock_is_dropped", async () => {
         })
       : (real(cmd, args) as Promise<unknown>),
   );
-  const unlocking = unlock(7, PASSWORD);
+  const unlocking = unlock(ref(7), PASSWORD);
   const handler = (listen.mock.calls[0] as [string, (event: { payload: unknown }) => void])[1];
   act(() => {
     handler({ payload: { session: 9001, generation: 2, reason: "idle" } });
@@ -199,8 +205,8 @@ test("lock_all_drops_every_session_even_if_no_lock_event_comes", async () => {
     { id: 8, name: "Home", items: sampleItems() },
   ]);
   await startStore();
-  await unlock(7, PASSWORD);
-  await unlock(8, PASSWORD);
+  await unlock(ref(7), PASSWORD);
+  await unlock(ref(8), PASSWORD);
   const first = shell.sessionOf(7);
   if (first === undefined) throw new Error("not open");
   addReveal(first.session, "a", "first-secret");
@@ -228,7 +234,7 @@ test("a_locked_refusal_drops_the_session_and_shows_no_error", async () => {
 
   // A list refused as locked: the vault is not open, so no list and no error.
   answerWith("list_items", refusedAsLocked);
-  await expect(unlock(7, PASSWORD)).resolves.toBe("stale");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("stale");
   expect(debugState().sessions).toEqual([]);
 });
 
@@ -262,8 +268,8 @@ test("lock_one_vault_leaves_the_other_open", async () => {
     { id: 8, name: "Home", items: sampleItems() },
   ]);
   await startStore();
-  await unlock(7, PASSWORD);
-  await unlock(8, PASSWORD);
+  await unlock(ref(7), PASSWORD);
+  await unlock(ref(8), PASSWORD);
   const first = shell.sessionOf(7);
   const second = shell.sessionOf(8);
   if (first === undefined || second === undefined) throw new Error("not open");
@@ -292,7 +298,7 @@ test("an_old_lock_answer_does_not_close_the_vault_unlocked_again", async () => {
     shell.lock(session);
   });
   expect(debugState().sessions).toEqual([]);
-  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("opened");
   expect(debugState().sessions).toHaveLength(1);
   answerNow();
   await locking;
@@ -340,7 +346,7 @@ test("a_late_locked_refusal_does_not_drop_the_vault_unlocked_again", async () =>
   act(() => {
     shell.lock(session);
   });
-  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("opened");
   answer(refusedAsLocked);
   await copying;
   expect(debugState().sessions).toHaveLength(1);
@@ -374,7 +380,7 @@ test("an_unlock_overtaken_by_a_lock_is_stale_not_an_error", async () => {
   // Lock all, or the window's close, landed during the unlock: the shell refuses it as locked, and no session exists yet for
   // a lock event to clear. Nothing to show, as for a stale answer.
   answerWith("unlock_vault", refusedAsLocked);
-  await expect(unlock(7, PASSWORD)).resolves.toBe("stale");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("stale");
   expect(debugState().sessions).toEqual([]);
   expect(debugState().toast).toBeNull();
 });
@@ -388,7 +394,7 @@ test("a_late_lock_all_answer_does_not_drop_the_vault_unlocked_again", async () =
   act(() => {
     shell.lock(session);
   });
-  await expect(unlock(7, PASSWORD)).resolves.toBe("opened");
+  await expect(unlock(ref(7), PASSWORD)).resolves.toBe("opened");
   answer(() => Promise.resolve(null));
   await locking;
   expect(debugState().sessions).toHaveLength(1);
@@ -435,4 +441,149 @@ test("first_close_notice_sets_and_clears_5b_and_is_never_asked_for_at_launch", a
     shell.sendEvent({ kind: "first_close", explain: false });
   });
   expect(debugState().notices.firstClose).toBe(false);
+});
+
+// ---- The save box's choices (Plan 4C Task 10) ----
+
+/** A session's record with only what `saveChoices` reads. */
+function open(vaultId: number, name: string, options: { readOnly?: boolean; session?: number } = {}): SessionData {
+  return {
+    session: options.session ?? vaultId + 100,
+    generation: 1,
+    vaultId,
+    vaultList: 5,
+    name,
+    readOnly: options.readOnly ?? false,
+    kind: "vault",
+    opened: vaultId,
+    recovery: null,
+    asks: { detailsChanged: false },
+  } as unknown as SessionData;
+}
+
+/** The same session waiting on a step: its recovery key (21f, 29b) or Ask 3. */
+function waiting(session: SessionData, on: "recovery" | "details"): SessionData {
+  return on === "recovery"
+    ? ({ ...session, recovery: { phase: "making" } } as unknown as SessionData)
+    : ({ ...session, asks: { detailsChanged: true } } as unknown as SessionData);
+}
+
+function listed(id: number, name: string | null, options: { available?: boolean; damaged?: boolean; list?: number } = {}): VaultEntry {
+  return { list: options.list ?? 5, id, name, available: options.available ?? true, details_damaged: options.damaged ?? false };
+}
+
+const labelsOf = (options: { label: string }[]): string[] => options.map((one) => one.label);
+
+test("save_choices_puts_the_vault_on_screen_first_then_the_list_in_order", () => {
+  const vaults = [listed(1, "One"), listed(2, "Two"), listed(3, "Three")];
+  const sessions = [open(3, "Three"), open(2, "Two")];
+  const options = saveChoices(sessions.at(-1), sessions, vaults);
+  expect(options.map((one) => [one.value, one.label])).toEqual([
+    ["s:102", "Two"],
+    ["v:5:1", "One"],
+    ["s:103", "Three"],
+  ]);
+  expect(options.map((one) => one.choice)).toEqual([
+    { kind: "open", session: 102 },
+    { kind: "locked", vault: 1, list: 5 },
+    { kind: "open", session: 103 },
+  ]);
+});
+
+test("save_choices_leaves_out_what_cannot_take_a_key", () => {
+  // An unavailable vault, one whose details are damaged, an open read-only one and one that can't be read at all are no choices.
+  const vaults = [listed(1, "One"), listed(2, "Gone", { available: false }), listed(3, "Hurt", { damaged: true }), listed(4, "Ref"), listed(5, null), listed(6, "Six")];
+  const sessions = [open(4, "Ref", { readOnly: true }), open(1, "One")];
+  expect(labelsOf(saveChoices(sessions.at(-1), sessions, vaults))).toEqual(["One", "Six"]);
+  // A read-only window on screen is not offered itself: the first vault that can be saved into is.
+  const readOnly = [open(1, "One"), open(4, "Ref", { readOnly: true })];
+  expect(labelsOf(saveChoices(readOnly.at(-1), readOnly, vaults))).toEqual(["One", "Six"]);
+  expect(saveChoices(readOnly.at(-1), readOnly, [listed(4, "Ref")])).toEqual([]);
+});
+
+test("save_choices_before_the_list_has_come_offers_only_the_window_on_screen", () => {
+  const sessions = [open(1, "One")];
+  expect(labelsOf(saveChoices(sessions.at(-1), sessions, null))).toEqual(["One"]);
+  const readOnly = [open(1, "One", { readOnly: true })];
+  expect(saveChoices(readOnly.at(-1), readOnly, null)).toEqual([]);
+  expect(saveChoices(undefined, [], [listed(1, "One")])).toEqual([{ value: "v:5:1", label: "One", name: "One", choice: { kind: "locked", vault: 1, list: 5 } }]);
+});
+
+test("save_choices_says_the_place_on_the_list_of_vaults_with_one_name", () => {
+  const vaults = [listed(1, "Twin"), listed(2, "Other"), listed(3, "Twin")];
+  const sessions = [open(3, "Twin")];
+  expect(labelsOf(saveChoices(sessions.at(-1), sessions, vaults))).toEqual(["Twin, 3 of 3", "Twin, 1 of 3", "Other"]);
+});
+
+test("save_choices_names_an_open_vault_by_its_session_and_a_locked_one_by_the_list", () => {
+  const renamed = open(1, "Renamed since listed");
+  expect(labelsOf(saveChoices(renamed, [renamed], [listed(1, "Old name"), listed(2, "Locked one")]))).toEqual(["Renamed since listed", "Locked one"]);
+});
+
+test("a_writable_session_that_is_not_listed_is_offered_only_while_on_screen", () => {
+  const stray = open(-1, "Not on the list", { session: 9 });
+  const behind = [stray, open(1, "One")];
+  expect(labelsOf(saveChoices(behind.at(-1), behind, [listed(1, "One")]))).toEqual(["One"]);
+  const front = [open(1, "One"), stray];
+  expect(labelsOf(saveChoices(front.at(-1), front, [listed(1, "One")]))).toEqual(["Not on the list", "One"]);
+});
+
+test("a_vault_with_the_same_number_on_another_list_is_another_vault", () => {
+  // The list was replaced: its vault 2 is not the vault 2 the box chose (list 5), though the number and the name are the same.
+  const vaults = [listed(1, "One", { list: 6 }), listed(2, "Two", { list: 6 })];
+  const sessions = [open(1, "One")];
+  const keep = { choice: { kind: "locked", vault: 2, list: 5 } as const, name: "Two" };
+  const options = saveChoices(sessions.at(-1), sessions, vaults, keep);
+  expect(options.map((one) => one.value).sort()).toEqual(["s:101", "v:5:2", "v:6:1", "v:6:2"]);
+  // The vault open from the old list is not the new list's vault 1 either, so that one is a locked entry of its own.
+  expect(options.find((one) => one.value === "v:6:1")?.choice).toEqual({ kind: "locked", vault: 1, list: 6 });
+  // On the same list the number is the vault: one entry, as before.
+  const same = saveChoices(sessions.at(-1), sessions, [listed(1, "One"), listed(2, "Two")], { choice: { kind: "locked", vault: 2, list: 5 }, name: "Two" });
+  expect(same.map((one) => one.value)).toEqual(["s:101", "v:5:2"]);
+});
+
+test("a_vault_open_behind_and_waiting_on_a_step_is_not_offered", () => {
+  const vaults = [listed(1, "One"), listed(2, "Two"), listed(3, "Three")];
+  for (const on of ["recovery", "details"] as const) {
+    const sessions = [waiting(open(2, "Two"), on), open(3, "Three"), open(1, "One")];
+    expect(labelsOf(saveChoices(sessions.at(-1), sessions, vaults)), on).toEqual(["One", "Three"]);
+  }
+  // The window on screen is offered whatever it waits on: its own step is what is drawn.
+  const front = [open(1, "One"), waiting(open(2, "Two"), "recovery")];
+  expect(labelsOf(saveChoices(front.at(-1), front, vaults))).toEqual(["Two", "One", "Three"]);
+});
+
+test("the_choice_stays_on_offer_as_its_own_entry_whatever_became_of_its_vault", () => {
+  const vaults = [listed(1, "One"), listed(2, "Two")];
+  const locked = { kind: "locked", vault: 2, list: 5 } as const;
+  const keep = { choice: locked, name: "Two" };
+  // Open behind the window but read-only, or waiting on a step: the entry the person chose, not a fallback.
+  const cases = [open(2, "Two", { readOnly: true }), waiting(open(2, "Two"), "recovery"), waiting(open(2, "Two"), "details")];
+  for (const behind of cases) {
+    const sessions = [behind, open(1, "One")];
+    expect(saveChoices(sessions.at(-1), sessions, vaults, keep).map((one) => one.choice)).toEqual([{ kind: "open", session: 101 }, locked]);
+    // Without the box's choice it is not offered at all.
+    expect(labelsOf(saveChoices(sessions.at(-1), sessions, vaults))).toEqual(["One"]);
+    // On screen it is the same entry (a read-only window is not offered, and a waiting one is replaced by the choice).
+    const front = [open(1, "One"), behind];
+    const onScreen = saveChoices(front.at(-1), front, vaults, keep).map((one) => one.choice);
+    expect(onScreen, "on screen").toContainEqual(locked);
+    expect(onScreen.filter((choice) => choice.kind === "open" && choice.session === 102), "on screen: the session is not a second entry").toEqual([]);
+    expect(onScreen.length, "on screen: one entry for each vault").toBe(2);
+  }
+  // A vault that left the list, or can't be reached: still the entry, with the name kept in the choice.
+  const gone = { choice: { kind: "locked", vault: 3, list: 5 } as const, name: "Gone" };
+  const only = [open(1, "One")];
+  expect(saveChoices(only.at(-1), only, [listed(1, "One")], gone).map((one) => [one.choice, one.label])).toEqual([
+    [{ kind: "open", session: 101 }, "One"],
+    [gone.choice, "Gone"],
+  ]);
+  const away = [listed(1, "One"), listed(2, "Two", { available: false })];
+  expect(saveChoices(only.at(-1), only, away, keep).map((one) => one.label)).toEqual(["One", "Two"]);
+  // A vault that can take a key is the open session, not the locked entry (the store settles the choice onto it).
+  const usable = [open(2, "Two"), open(1, "One")];
+  expect(saveChoices(usable.at(-1), usable, vaults, keep).map((one) => one.choice)).toEqual([
+    { kind: "open", session: 101 },
+    { kind: "open", session: 102 },
+  ]);
 });

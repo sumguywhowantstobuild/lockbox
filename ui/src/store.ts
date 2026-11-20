@@ -13,9 +13,10 @@ import { batchHasFocus, focusList, takeJobFocus } from "./focus";
 import { resetCloseAskForTests, startCloseAsk } from "./closeAsk";
 import { awayMessage, partialWords, refusalWords, wasClean } from "./addFilesWords";
 import { spokenEnd } from "./saveAllWords";
-import { announceJob, cancelRequest, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
+import { announceJob, cancelRequest, currentLockEpoch, jobOfRequest, nextRequest, releaseRequest, resetJobsForTests, startJobs } from "./jobs";
 import { leftOutWords } from "./format";
 import { backupNotFinishedMore, BACKUP_NOT_FINISHED } from "./messages";
+import { listedName } from "./vaultWords";
 import type { CopyableField, CopyTarget, FileView, ItemDetail, ItemSummary, LockEpochEvent, SearchHit, VaultEntry } from "./api";
 import type { Ask } from "./screens/setup/keyWords";
 
@@ -57,8 +58,6 @@ export type Tool =
    * on a copy that was read in Rust already (`captureAsEnv`): the answer's names and token, and the folder the save box had chosen.
    */
   | { kind: "paste_env"; opening: number; rows?: api.EnvRows; folder?: string }
-  /** The save box (8a, 8c): what the shortcut copied, to be named and saved. What is typed lives in the box; the copy is `StoreState.capture`. */
-  | { kind: "save_box" }
   /**
    * The Edit form of an item (11a, and 7a, 7b and 10f for the other kinds), from the summary and the details the panel had
    * when Edit was pressed. What the form asks of Rust (the password, a key's value) and what is typed live in the form.
@@ -85,7 +84,39 @@ export type Tool =
   /** Open a backup (25a), begun from this window: where it is, is `StoreState.openBackup` (its `host` is this session), which goes with the panel. */
   | { kind: "open_backup" }
   /** Older copies (24f), from Settings: the copies a restore kept of this vault, opened read-only or deleted. What it lists is `StoreState.olderCopies`. */
-  | { kind: "older_copies" };
+  | { kind: "older_copies" }
+  /** Change password (27a, 27b), for this vault, from Settings, Ask 9 or Ask 2. Where it is, is `SessionData.passwordChange`; what is typed is the form's own state. */
+  | { kind: "change_password" }
+  /** A new recovery key (29a), for this vault, from Settings or Ask 2. Where it is, is `SessionData.newKey`; what is typed is the form's own state. */
+  | { kind: "new_recovery_key" };
+
+/**
+ * Where a new recovery key the person asked for is (29a, and 29c after it), or `null` when none is begun. Like `PasswordChange` it lives in the session's
+ * record, so it belongs to its vault: a switch leaves it as it is, a lock takes it, and an answer that comes for one vault lands in that vault's record. The
+ * key itself is never here: once it is made it is the session's `recovery` step (29b), and what is typed is the form's own state, wiped as it is sent.
+ */
+export type NewKeyFlow =
+  /** The form. `sending`: a key is asked for and has no answer yet, so a second press does nothing. `problem`: what the last try was refused with, and which field says it. */
+  | { phase: "ask"; sending: boolean; problem: PasswordProblem | null }
+  /** The key was picked back and the shell heard it: 29c, the offer of a fresh backup. */
+  | { phase: "done" };
+
+/**
+ * Where a change of this vault's password is (27a to 27c), or `null` when none is begun. It lives in the session's record, so it belongs to its
+ * vault: a switch leaves it as it is, a lock takes it, and an answer that comes for one vault lands in that vault's record and shows when it is
+ * on screen. No password is ever in it: what is typed is the form's own state, wiped as it is sent.
+ */
+export type PasswordChange =
+  /** The form. `sending`: a change is out and has no answer yet, so a second press does nothing. `problem`: what the last try was refused with, and which field says it. */
+  | { phase: "ask"; sending: boolean; problem: PasswordProblem | null }
+  /** The change landed and the page heard: 27c, the offer of a fresh backup. */
+  | { phase: "done" };
+
+/** A refusal of a change of password, and the field of the form that says it (`form` for the form as a whole). */
+export interface PasswordProblem {
+  field: "current" | "new" | "form";
+  error: unknown;
+}
 
 /**
  * Where a backup of this vault is (22a to 22d, and Ask 2), or `null` when none is begun. It lives in the session's record, so a lock takes it with
@@ -166,6 +197,75 @@ export type RestoreOrigin = "first_screen";
 export type RestoreStart = { vault?: number; origin?: RestoreOrigin };
 
 /**
+ * Where Forgot password is (28a to 28e), or `null` when it is not begun. It is the app's, not a vault's, like the restore: it belongs to the listed vault it
+ * was opened for (`vault`, its registry ID) and is shown full-screen above the lock screen, and above the vault it opens, so 28e still shows once the session
+ * is there. The typed key and the typed passwords are never here: they are the screen's own state. The passwords are wiped as they are sent; the key stays,
+ * read-only, until the check answers (a refused key stays to be corrected) and is wiped on blur, hide, a lock of every vault, Back and once accepted. The shell holds the checked key
+ * under `choice`; the page holds only that token.
+ */
+export interface ForgotFlow {
+  /** Counts the times the flow was begun: an answer meant for an earlier one is dropped (and the choice it brought is let go). */
+  opening: number;
+  /** Moves on at every step: an answer meant for an earlier step of this flow is dropped. */
+  run: number;
+  /** The listed vault it is for. */
+  vault: number;
+  /** The identity of the list the vault was read from, with `vault` the row the key check names (Task 9). */
+  list: number;
+  /**
+   * `key`: 28a, and 28b when `problem` says what was wrong with the key; `no_key`: 28c; `changed`: the question about details changed outside Lockbox, over 28a,
+   * asked before the new password; `password`: 28d; `done`: 28e, with the vault open under it.
+   */
+  phase: "key" | "no_key" | "changed" | "password" | "done";
+  /** The key is out to be checked: its box can't be typed in meanwhile. */
+  checking: boolean;
+  /** The new password is out: its boxes can't be typed in, and the flow can't be left, meanwhile. */
+  sending: boolean;
+  /** What 28b says under the key's box: the shell's refusal, or the page's own of the same shape. `null` for none. */
+  problem: unknown;
+  /** What 28d says about the new password when the shell refused it and kept the key's choice (too short, or the changed details not accepted). */
+  passwordProblem: { field: "new" | "form"; error: unknown } | null;
+  /** The shell's choice for the checked key, while one is held. */
+  choice: string | null;
+  /** The vault's name from the details the key opened, once checked. */
+  name: string | null;
+  /** The person said yes to details changed outside Lockbox: it goes with the new password. */
+  accepted: boolean;
+  /** The session the new password opened, once it has: 28e's Back up now is for it. */
+  session: number | null;
+}
+
+/**
+ * The unlock step of one listed vault, shown while another vault is open (Task 6). It is the app's, not a vault's, and it holds no password: what is typed is the
+ * step's own state, wiped as it is sent, by Back and on every lock epoch. `vault` is the registry ID it was opened for, so the answer lands on that vault and no other.
+ * `opening` counts the steps begun: a vault that a step opened after it was left (Back while the answer was out) is held behind the window on screen and never takes
+ * its place. `stay`: the step was opened from Copy to a vault, so the window it came from is the one on screen again once the vault is open, with the vault behind it.
+ */
+export interface UnlockStep {
+  opening: number;
+  vault: number;
+  /** The identity of the list the vault was read from when the step was opened: the unlock names the row as `{ list, id: vault }`. */
+  list: number;
+  stay: boolean;
+}
+
+/**
+ * The form of a new vault begun from the vault menu (Task 7), shown while other vaults are open: setup's step 1 of 2 with Back. It is the app's, not a vault's, and holds
+ * no password: what is typed is the form's own state, wiped as it is sent, by Back and on every lock epoch. `opening` counts the forms begun, so a form opened again starts
+ * empty. The new vault's key and questions are the new session's own `recovery` step, as at first setup.
+ */
+export interface NewVault {
+  opening: number;
+}
+
+/**
+ * Add existing vault folder begun from the vault menu (Task 7) or from the lock screen (Task 9, `from` "lock"): `picking` while Windows' folder picker is open (nothing is on
+ * screen for it), `cloud` once the shell asked about a cloud-synced folder first (the first screens' question, with the token the yes goes on with). It is the app's, and a
+ * lock epoch takes it.
+ */
+export type AddFolder = { opening: number; from: "window" | "lock"; phase: "picking" } | { opening: number; from: "window" | "lock"; phase: "cloud"; token: string };
+
+/**
  * Moving to a new computer (26a to 26c), the app's own like the restore: `what` is 26a ("What do you have?"), `here` is 26c, a vault has come in (`how`: its
  * backup was restored, or its folder was added). The vault list stops being empty after the first vault comes in, so these steps are held here and not in the
  * first screen's own state, or the app would switch to the lock screen under 26c.
@@ -206,7 +306,7 @@ export interface RestoreFlow {
   problem: unknown;
   /** What the checked backup is and where it would go (24b, and the date 24e names). `null` before the check. */
   checked: api.RestoreChecked | null;
-  /** The number the copy's or the swap's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
+  /** The number the check's, the copy's or the swap's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
   request: number | null;
   /** The token a question waits under (`cloud`, `name`), and the name suggested for a new folder (`name`). */
   token: string | null;
@@ -260,11 +360,14 @@ export type RecoveryStep =
   /**
    * The key on screen, to be saved. `unfinished` is the key of an earlier step that never finished (21f); `missed` is
    * that a wrong pick brought the person back here; `back` is that the questions did (a wrong pick or "Show the key again"),
-   * so focus goes to the heading.
+   * so focus goes to the heading. `issue` is the number the shell gave the key: the page confirms it by that number, and acts
+   * on a confirmation or on a newer key only when it belongs to the step's current one. `voluntary` is the key the person asked for
+   * from inside the vault (29b): it has its own headings, its confirmation is followed by 29c's offer, and the key and the questions are
+   * dropped when the person leaves the vault for another or a lock epoch comes, as well as on a lock.
    */
-  | { phase: "show"; key: string; unfinished: boolean; missed: boolean; back?: boolean }
+  | { phase: "show"; key: string; issue: number; unfinished: boolean; voluntary: boolean; missed: boolean; back?: boolean }
   /** The key hidden, and three words to pick, one question at a time: `at` (from 0) is the one now asked. */
-  | { phase: "pick"; key: string; unfinished: boolean; asks: readonly Ask[]; at: number };
+  | { phase: "pick"; key: string; issue: number; unfinished: boolean; voluntary: boolean; asks: readonly Ask[]; at: number };
 
 /** The banners an unlock can raise, each closed with its own button (Asks 4, 5, 9 and 10). */
 export type Banner = "unreadable" | "leftover" | "spare" | "cloud" | "backup" | "details";
@@ -347,10 +450,23 @@ export interface Notices {
   openFiles: number;
 }
 
+/** The vault chosen in the save box: an open, writable session, or a listed vault that is locked (its unlock step shows in the box). */
+export type SaveChoice = { kind: "open"; session: number } | { kind: "locked"; vault: number; list: number };
+
+/** One entry of the box's Vault list. `value` is `s:<session>` or `v:<registry id>`. */
+export interface SaveOption {
+  value: string;
+  label: string;
+  /** The vault's name alone, as the box's lines say it (the label adds its place on the list when two names are alike). */
+  name: string;
+  choice: SaveChoice;
+}
+
 /**
  * The copy the save shortcut left waiting in the shell, as far as the page knows it: never its value. It is not a vault's: it can wait while
- * every vault is locked (the lock screen asks for an unlock first, 8b), and goes when the person saves or cancels, the shell lets it go (a
- * lock of the vault it was handed to, Lock all, idle) or the paste panel takes it over.
+ * every vault is locked (the lock screen asks for an unlock first, 8b), and goes when the person saves or cancels, a lock of the vault chosen
+ * in the box (the shell lets it go and says so), Lock all, idle, or the paste panel takes it over. A lock of the vault on screen, when another
+ * is chosen, leaves it.
  */
 export interface CaptureView {
   /** The copy's id: 32 lowercase hex characters, new for every press. A command about an older id is refused `not_found`. */
@@ -361,8 +477,14 @@ export interface CaptureView {
   envKeys: number | null;
   /** A later press found a different value while this was waiting: the box says so and keeps what was typed. */
   changed: boolean;
-  /** The session the copy was handed to (`capture_choose`), or `null` while no vault is open. */
+  /** The session the shell holds the copy for (`capture_choose` was asked), or `null` (none yet, or a locked vault is chosen). */
   chosen: number | null;
+  /** Counts the boxes: new when a copy comes with none waiting, the same for a copy that replaces a waiting one. The box is keyed by it. */
+  opening: number;
+  /** The vault chosen in the box; `null` until a window is on screen to start from (8b). Carried to a copy that replaces this one. Only the person's own pick changes it. */
+  choice: SaveChoice | null;
+  /** The chosen vault's name, kept with the choice: the box's lines say it even when the vault has left the list. */
+  choiceName: string | null;
 }
 
 /** One unlocked vault. */
@@ -371,6 +493,11 @@ export interface SessionData {
   generation: number;
   /** The vault's place on the registry's list. A session that is no listed vault's (an older copy, a backup) has `NOT_ON_THE_LIST`. */
   vaultId: number;
+  /**
+   * The identity of the registry list `vaultId` belongs to (`VaultEntry.list`): a registry ID is only a vault within its own list, and a replaced list may give an ID to another
+   * vault. `0` for a session that is on no list.
+   */
+  vaultList: number;
   /** A backup's is the backup file's name without its ending; an older copy keeps its vault's name (the header says "older copy" beside it). */
   name: string;
   readOnly: boolean;
@@ -429,6 +556,10 @@ export interface SessionData {
   saveAll: SaveAllFlow | null;
   /** The long operations the shell says are running for this vault (`lockbox://busy`): while there are any, auto-lock waits and the window says so. */
   operations: string[];
+  /** Change password, begun from Settings, Ask 9 or Ask 2 and not put away: see {@link PasswordChange}. */
+  passwordChange: PasswordChange | null;
+  /** A new recovery key, begun from Settings or Ask 2 and not put away: see {@link NewKeyFlow}. The key it makes is `recovery`. */
+  newKey: NewKeyFlow | null;
 }
 
 /** One batch of files, from the pick to its end. The paths stay in Rust: the page holds names and sizes for display, and the choice (a token). */
@@ -548,8 +679,11 @@ export interface StoreState {
   sessions: SessionData[];
   toast: Toast | null;
   notices: Notices;
-  /** A refusal to say on the lock screen, since the vault it was about has locked (Ask 16); `null` for none. */
-  lockNote: unknown;
+  /**
+   * What to say on the lock screen about a vault that locked after its change landed (Ask 16), each for one vault by its registry ID: it shows when that
+   * vault is the one chosen to unlock, and only that vault's unlock uses it up. A refusal as the shell sent it, or the page's own of the same shape.
+   */
+  lockNotes: { vault: number; refusal: unknown }[];
   /** The search, or `null` while it is closed. */
   search: SearchState | null;
   /** The copy the shortcut left waiting, or `null` for none. */
@@ -558,10 +692,20 @@ export interface StoreState {
   restore: RestoreFlow | null;
   /** Open a backup, or `null` while none is begun. It is the app's own, shown in one window's panel or full-screen from the lock screen: see {@link OpenFlow}. */
   openBackup: OpenFlow | null;
+  /** Forgot password (28a to 28e), or `null` while it is not open. It is the app's own, shown full-screen above the lock screen and the vault it opens: see {@link ForgotFlow}. */
+  forgot: ForgotFlow | null;
   /** Moving to a new computer (26a to 26c), or `null` while it is not open. */
   moveIn: MoveIn | null;
   /** The vault the lock screen chooses when it next opens (26c's Unlock after a folder came in), or `null`; the lock screen takes it once. */
   unlockPick: number | null;
+  /** The unlock step of one more vault, shown while another vault is open (the vault menu, the vault strip, Copy to a vault), or `null`: see {@link UnlockStep}. */
+  unlockStep: UnlockStep | null;
+  /** The form of a new vault begun from the vault menu, or `null`: see {@link NewVault}. */
+  newVault: NewVault | null;
+  /** Add existing vault folder begun from the vault menu or the lock screen, or `null`: see {@link AddFolder}. */
+  addFolder: AddFolder | null;
+  /** The shell's refusal of the lock screen's Add existing vault folder, said in its plate until the next add or unlock; `null` for none. Nothing in it is secret. */
+  addRefusal: unknown;
   /**
    * The older copies the shell last listed, or `null` until a listing has come. The shell replaces every ID at each listing, so this is the page's one
    * listing: it is read again when Settings opens, when 24f opens and after each delete or open, and every button sends an ID from it as it is now.
@@ -601,13 +745,18 @@ const EMPTY: StoreState = {
   sessions: [],
   toast: null,
   notices: { lostOutputs: false, restore: null, firstClose: false, shortcut: null, openFiles: 0 },
-  lockNote: null,
+  lockNotes: [],
   search: null,
   capture: null,
   restore: null,
   openBackup: null,
+  forgot: null,
   moveIn: null,
   unlockPick: null,
+  unlockStep: null,
+  newVault: null,
+  addFolder: null,
+  addRefusal: null,
   olderCopies: null,
   settings: null,
 };
@@ -660,9 +809,16 @@ function update(session: number, change: (entry: SessionData) => SessionData): v
   // Open a backup shown in this window's panel is the panel's own too: whatever takes the panel from it ends the flow.
   const flow = state.openBackup;
   const endsOpen = flow !== null && flow.host === session && flow.phase !== "picking" && next.tool?.kind !== "open_backup";
+  // The save box is the app's, drawn over the window on screen: another panel taking that window's place (a tool, an item or the Trash) lets the copy go,
+  // as it did when the box was a panel of the window's own.
+  const takesThePlace =
+    state.capture !== null &&
+    state.sessions.at(-1)?.session === session &&
+    ((next.tool !== null && next.tool !== before.tool) || (next.openItem !== null && next.openItem.id !== before.openItem?.id) || (next.trash && !before.trash));
   set({ ...state, sessions: state.sessions.map((entry) => (entry.session === session ? next : entry)), openBackup: endsOpen ? null : state.openBackup });
   if (before.test !== null && next.test?.opening !== before.test.opening) letGoOfTest(before.test);
   if (endsOpen) letGoOfOpen(flow);
+  if (takesThePlace) endCapture(true);
 }
 
 /** Whether the session is still open in the generation the caller read it in. */
@@ -688,6 +844,8 @@ export function startStore(): Promise<void> {
     try {
       await api.onLocked((event) => {
         dropSession(event.session);
+        // The drive went while the vault was open: its row reads unavailable at once, not at the next read of the list.
+        if (event.reason === "drive_gone") void refreshVaults();
       });
     } catch {
       // Without the lock listener the page could not hear a lock, so it asks the shell for nothing: no vault list, no
@@ -713,6 +871,8 @@ export function startStore(): Promise<void> {
 
 /** Forgets everything the page holds of the vault: the list, the open item, revealed values and typed text. */
 export function dropSession(session: number): void {
+  // A new recovery key that reached this vault while another was on screen was never shown: its unlock says so.
+  sayOfUnseenKeys(state.sessions, session);
   // A test running for this vault is stopped and its backup let go: the vault's lock ends the panel the test lived in.
   const leaving = sessionOf(session)?.test ?? null;
   if (leaving !== null) letGoOfTest(leaving);
@@ -731,9 +891,18 @@ export function dropSession(session: number): void {
     searchRun += 1;
     searchOpening += 1;
   }
+  // 28e's offer is for the vault the new password opened: when that vault locks, the offer has nothing to back up and goes.
+  const forgot = state.forgot?.phase === "done" && state.forgot.session === session ? null : state.forgot;
   set({
     ...state,
     sessions,
+    forgot,
+    // The unlock step is for a window with a vault in it to go back to: the last lock takes it, and the lock screen follows.
+    unlockStep: sessions.length === 0 ? null : state.unlockStep,
+    // So are the new vault's form and Add existing vault folder: both are begun from a window, and the last lock leaves none to go back to. An add begun from
+    // the lock screen has no window to go back to in the first place, so a lock leaves it be (a lock epoch takes it, as it takes any step).
+    newVault: sessions.length === 0 ? null : state.newVault,
+    addFolder: sessions.length === 0 && state.addFolder?.from !== "lock" ? null : state.addFolder,
     toast: keepToast ? toast : null,
     search:
       search === null || sessions.length === 0
@@ -745,24 +914,57 @@ export function dropSession(session: number): void {
             asking: search.asking?.session === session ? null : search.asking,
           },
   });
-  // The copy that was handed to this vault goes with its lock (the shell lets it go too, and says so with `gone`): none of it stays on screen.
-  if (state.capture?.chosen === session) endCapture(true);
+  // The copy that was handed to this vault, or that the box has chosen it for, goes with its lock (the shell lets it go too, and says so with `gone`): none of it
+  // stays on screen. The lock of any other vault, the one on screen among them, leaves it.
+  const held = state.capture;
+  if (held !== null && (held.chosen === session || (held.choice?.kind === "open" && held.choice.session === session))) endCapture(true);
 }
 
 /**
  * Unlocks the vault and reads its list. `"opened"` when the list is on the page; `"stale"` when the vault locked again
  * before an answer was read, which is not an error. A refusal (a wrong password) is thrown for the lock screen to say.
  */
-export async function unlock(vaultId: number, password: string): Promise<"opened" | "stale"> {
+export async function unlock(vault: api.VaultRef, password: string, keepsChoice = false): Promise<"opened" | "stale"> {
+  // The lock screen's add said its refusal until the next unlock: this is it.
+  if (state.addRefusal !== null) set({ ...state, addRefusal: null });
+  // With a copy waiting (8b), this unlock is the save step's Unlock and continue: the person's pick of a vault for that copy's box.
+  const pickFor = keepsChoice ? null : (state.capture?.opening ?? null);
   let answer;
   try {
-    answer = await api.unlockVault(vaultId, password);
+    answer = await api.unlockVault(vault, password);
   } catch (error) {
     // A lock of every vault, or the window's close, that lands during the unlock is refused as locked: no session exists yet
     // for a lock event to clear, and it is no more an error to show than a stale answer (Review Focus 1).
     if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
     throw error;
   }
+  // The vault that opens becomes the box's choice, whatever it had chosen before, and only for the box it was picked for (a copy that replaced the waiting one keeps
+  // the box; a box opened since is not this pick's). It is set as that vault, locked, and settles onto its session through `seatCapture` once it is ready; one that
+  // opened read-only or waiting on a step keeps the choice, and the box says why rather than moving to another vault (Task 10b's R2). Only once the password was
+  // right: a refusal changes nothing. A restore's unlock (`keepsChoice`) is not the person choosing a vault for the copy, so the choice stays.
+  const capture = state.capture;
+  if (pickFor !== null && capture?.opening === pickFor) {
+    const choice: SaveChoice = { kind: "locked", vault: vault.id, list: vault.list };
+    set({ ...state, capture: { ...capture, choice, choiceName: choiceNameOf(choice, state.sessions, state.vaults, capture.choiceName) } });
+  }
+  return publishUnlock(answer, vault.id, "front", false, vault.list);
+}
+
+/**
+ * What the page does with a vault that has just opened, whether a password opened it (`unlock`) or a recovery key did (`finishRecovery`): the session's
+ * record is made, the asks are set from what the unlock found, what the lock screen was saying about this vault is let go, a new recovery key is begun when the
+ * old one was never confirmed (21f), the backup reminder is read, a copy that waited is seated, and the list is read. `vaultId` is the registry ID the
+ * flow was opened for. Gives `"opened"` when the list is on the page, `"stale"` when the vault locked again before it was read. The vault is the window on screen
+ * (`place` "front"), or is held behind the one that is (`"behind"`: an unlock step that was left, or that came from Copy to a vault); `endsStep` takes the unlock step
+ * away in the same change.
+ */
+function publishUnlock(
+  answer: api.Tagged<api.UnlockView>,
+  vaultId: number,
+  place: "front" | "behind" = "front",
+  endsStep = false,
+  list?: number,
+): Promise<"opened" | "stale"> {
   const { info } = answer.data;
   // The recovery key of this vault was made and never confirmed by picking: the page goes straight to a new one (21f), before it
   // shows anything of the vault. A read-only copy never does (the shell says false for it).
@@ -777,13 +979,15 @@ export async function unlock(vaultId: number, password: string): Promise<"opened
     leftover: answer.data.cleanup.orphans_quarantined,
     spareDetails: answer.data.used_backup_header,
     cloud: answer.data.cloud,
-  });
-  // The vault is open: what the lock screen was still saying (a restore finished, a change saved before a lock) has been read.
+  }, list);
+  // The vault is open: what the lock screen was still saying about it (a restore finished, a change saved before a lock) has been read. What it said
+  // about another vault waits for that vault's own unlock.
   set({
     ...state,
-    sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record],
+    sessions: place === "front" ? withFront(state.sessions, record) : withBehind(state.sessions, record),
+    unlockStep: endsStep ? null : state.unlockStep,
     notices: { ...state.notices, restore: state.notices.restore?.ask === "finished" ? null : state.notices.restore },
-    lockNote: null,
+    lockNotes: state.lockNotes.filter((note) => note.vault !== vaultId),
   });
   if (unfinished && !details) void makeNewKey(record.session);
   // The 30-day reminder (Ask 1) is read beside the list, never ahead of it. A read-only copy has none to make.
@@ -802,12 +1006,16 @@ function newRecord(
   info: { name: string; read_only: boolean; kind: api.SessionKind },
   recovery: RecoveryStep | null,
   asks: SessionAsks = NO_ASKS,
+  list?: number,
 ): SessionData {
   sessionsOpened += 1;
+  // The list the vault was opened from: the one the caller sent its row of, else the list the page holds the vault on (a session on no list has `0`).
+  const vaultList = list ?? (vaultId <= 0 ? 0 : (state.vaults?.find((entry) => entry.id === vaultId)?.list ?? state.vaults?.[0]?.list ?? 0));
   return {
     session: answer.session,
     generation: answer.generation,
     vaultId,
+    vaultList,
     name: info.name,
     readOnly: info.read_only,
     kind: info.kind,
@@ -829,6 +1037,8 @@ function newRecord(
     addFiles: null,
     saveAll: null,
     operations: [],
+    passwordChange: null,
+    newKey: null,
   };
 }
 
@@ -884,12 +1094,12 @@ export type SetupResult =
   | "stale"
   /** The person closed the folder picker. */
   | "dismissed"
-  /** A cloud-synced folder: nothing is done until the person says yes, with this token. */
-  | { confirm: string };
+  /** A cloud-synced folder: nothing is done until the person says yes, with this token. `provider` is the service the shell found, for 18c to name. */
+  | { confirm: string; provider: api.CloudProvider };
 
-/** Pulls the token out of a cloud-folder question, or refuses any other question (none is expected here). */
-function cloudToken(question: api.Confirm): string {
-  if (typeof question === "object" && "CloudFolder" in question) return question.CloudFolder.token;
+/** Pulls the token and the service out of a cloud-folder question, or refuses any other question (none is expected here). */
+function cloudQuestion(question: api.Confirm): { confirm: string; provider: api.CloudProvider } {
+  if (typeof question === "object" && "CloudFolder" in question) return { confirm: question.CloudFolder.token, provider: question.CloudFolder.provider };
   // eslint-disable-next-line @typescript-eslint/only-throw-error -- a refusal is a plain object, as the shell's are
   throw UNEXPECTED;
 }
@@ -915,6 +1125,12 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
   } catch (error) {
     // The vault may have been made all the same (a lock after it, or a list that wouldn't take it): read the list again.
     if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) await refreshVaults();
+    // A lock overtook a vault that was made and listed: its key was never seen, and the shell says which vault it is (its registry ID). The words are kept for that
+    // vault's own unlock (the lock screen, or its unlock step in the vault menu), where 21f follows by the shell's mark.
+    if (refusedWith(error, "locked_after_change")) {
+      const named = (error as { vault?: unknown }).vault;
+      if (typeof named === "number" && Number.isSafeInteger(named) && named > 0) sayOnLockScreen(landedBeforeLock(named, "vault created"), named);
+    }
     if (error instanceof api.StaleAnswer) return "stale";
     // A lock that ended the create before anything was made (the picker was open when Windows locked): no vault exists
     // and the person did nothing wrong, so there is nothing to say.
@@ -922,22 +1138,33 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
     throw error;
   }
   if (answer === "Dismissed") return "dismissed";
-  if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
-  const before = new Set((state.vaults ?? []).map((vault) => vault.id));
-  const { info, recovery_key } = answer.data;
-  // The vault's place on the list is not known until the list is read again; the record stands in the meantime.
-  const record = newRecord(answer, -1, info, {
+  if ("Confirm" in answer) return cloudQuestion(answer.Confirm);
+  const { info, recovery_key, issue, vault_id } = answer.data;
+  // The vault's place on the list is the registry ID the shell gave it, from the answer itself, never found by comparing lists: another vault may have been
+  // listed at the same moment (an add in another window). An answer without a whole number above 0 leaves the record with the stand-in `-1`.
+  const vaultId = Number.isSafeInteger(vault_id) && vault_id > 0 ? vault_id : -1;
+  // The creation key keeps the number the shell gave it, to confirm it by.
+  const record = newRecord(answer, vaultId, info, {
     phase: "show",
     key: recovery_key,
+    issue,
     unfinished: false,
+    voluntary: false,
     missed: false,
   });
-  set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+  // The window of the new vault takes the place of the form that made it (when one was up), with the vaults that were open still open behind it.
+  set({ ...state, sessions: withFront(state.sessions, record), newVault: null });
   void loadItems(record);
   const list = await refreshVaults();
-  const added = (list ?? []).filter((vault) => !before.has(vault.id));
-  const made = added.at(-1);
-  if (made !== undefined) update(record.session, (entry) => ({ ...entry, vaultId: made.id }));
+  // Now the list says which list the new vault is on.
+  const listed = state.vaults?.find((entry) => entry.id === vaultId);
+  if (listed !== undefined) update(record.session, (current) => ({ ...current, vaultList: listed.list }));
+  // The list could not be read again (the old one is kept): the vault that was made is put on it all the same, so the menu and the lock screen have it.
+  if (list === null && vaultId > 0 && !(state.vaults ?? []).some((vault) => vault.id === vaultId)) {
+    // Its list is the one the other entries came from; with none held there is no identity to give it, and `0` is one no list has (a send for it is `not_found`, never another vault).
+    const list = state.vaults?.[0]?.list ?? 0;
+    set({ ...state, vaults: [...(state.vaults ?? []), { list, id: vaultId, name: info.name, available: true, details_damaged: false }] });
+  }
   return "done";
 }
 
@@ -953,7 +1180,7 @@ export function confirmAddExistingVault(token: string): Promise<SetupResult> {
 async function finishAdd(run: () => Promise<api.Outcome<VaultEntry>>): Promise<SetupResult> {
   const answer = await run();
   if (answer === "Dismissed") return "dismissed";
-  if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
+  if ("Confirm" in answer) return cloudQuestion(answer.Confirm);
   const list = await refreshVaults();
   // 26c: the vault's own name, from the entry the shell answered with.
   const { id, name } = answer.Done;
@@ -963,10 +1190,25 @@ async function finishAdd(run: () => Promise<api.Outcome<VaultEntry>>): Promise<S
   return "done";
 }
 
+/** The number of the key a step holds, or `null` while it holds none (making one, or the shell would not). */
+function issueOf(step: RecoveryStep | null): number | null {
+  return step?.phase === "show" || step?.phase === "pick" ? step.issue : null;
+}
+
+/**
+ * Whether the shell refused a new key for want of 21f's permission (`invalid_input`, what `"recovery key"`): this session never
+ * entered 21f the way that grants a key without the password, so no number of tries would make one.
+ */
+function refusedForWantOfPermission(error: unknown): boolean {
+  return refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "recovery key";
+}
+
 /**
  * Asks the shell for a new recovery key for the unlocked vault and puts it on screen, shown once more (21f). No password
  * is asked. A refusal (the shell could not write its mark first, and so made no key) is kept for the screen to say,
- * with a way to ask again; a vault that locked meanwhile gets nothing.
+ * with a way to ask again; a refusal for want of the session's permission ends the step (nothing to try again); a vault
+ * that locked meanwhile gets nothing. A key whose number is not newer than the one the step holds (its reply came after a
+ * newer key's) is not the step's: the page acts only on the current one.
  */
 export async function makeNewKey(session: number): Promise<void> {
   const entry = sessionOf(session);
@@ -976,14 +1218,19 @@ export async function makeNewKey(session: number): Promise<void> {
   try {
     const answer = await api.regenerateRecovery({ session, generation });
     if (!stillOpen(session, generation)) return;
-    update(session, (current) => ({
-      ...current,
-      recovery: { phase: "show", key: answer.data, unfinished: true, missed: false },
-    }));
+    const { words, issue } = answer.data;
+    update(session, (current) => {
+      if ((issueOf(current.recovery) ?? 0) >= issue) return current;
+      return { ...current, recovery: { phase: "show", key: words, issue, unfinished: true, voluntary: false, missed: false } };
+    });
   } catch (error) {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
-    update(session, (current) => ({ ...current, recovery: { phase: "failed", error } }));
+    // Only this call's own step ("making") is ended or failed: a newer key that arrived first stays on screen.
+    update(session, (current) => {
+      if (current.recovery?.phase !== "making") return current;
+      return { ...current, recovery: refusedForWantOfPermission(error) ? null : { phase: "failed", error } };
+    });
   }
 }
 
@@ -991,8 +1238,8 @@ export async function makeNewKey(session: number): Promise<void> {
 export function startPicking(session: number, asks: readonly Ask[]): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "show") return entry;
-    const { key, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "pick", key, unfinished, asks, at: 0 } };
+    const { key, issue, unfinished, voluntary } = entry.recovery;
+    return { ...entry, recovery: { phase: "pick", key, issue, unfinished, voluntary, asks, at: 0 } };
   });
 }
 
@@ -1008,8 +1255,8 @@ export function nextQuestion(session: number, at: number): void {
 export function missedPick(session: number, at: number): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "pick" || entry.recovery.at !== at) return entry;
-    const { key, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "show", key, unfinished, missed: true, back: true } };
+    const { key, issue, unfinished, voluntary } = entry.recovery;
+    return { ...entry, recovery: { phase: "show", key, issue, unfinished, voluntary, missed: true, back: true } };
   });
 }
 
@@ -1020,28 +1267,37 @@ export function missedPick(session: number, at: number): void {
 export function showKeyAgain(session: number): void {
   update(session, (entry) => {
     if (entry.recovery?.phase !== "pick") return entry;
-    const { key, unfinished } = entry.recovery;
-    return { ...entry, recovery: { phase: "show", key, unfinished, missed: false, back: true } };
+    const { key, issue, unfinished, voluntary } = entry.recovery;
+    return { ...entry, recovery: { phase: "show", key, issue, unfinished, voluntary, missed: false, back: true } };
   });
 }
 
 /**
- * The three words were right: tells the shell, which clears its mark, and only then lets the key go. The key and the
- * questions are dropped on success. A refusal is thrown for the screen to say, and the step stays.
+ * The three words were right: tells the shell, by the key's number, which clears its mark only when that is the latest key
+ * it made, and only then lets the key go. The key and the questions are dropped on `Confirmed`, and only while the step
+ * still holds that same key. `Superseded` (a newer key was made, and its step is on the page or on its way) changes nothing
+ * here. A refusal is thrown for the screen to say, and the step stays. The key the person asked for from inside the vault (`voluntary`) is
+ * followed by 29c's offer of a fresh backup, and only while the step still held that key: a person who left, or a lock, gets no offer.
  */
 export async function confirmRecovery(session: number): Promise<void> {
   const entry = sessionOf(session);
-  if (entry === undefined) return;
+  if (entry?.recovery?.phase !== "pick") return;
   const { generation } = entry;
+  const { issue } = entry.recovery;
+  let answer;
   try {
-    await api.recoveryConfirmed({ session, generation });
+    answer = await api.recoveryConfirmed({ session, generation }, issue);
   } catch (error) {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
     throw error;
   }
-  if (!stillOpen(session, generation)) return;
-  update(session, (current) => ({ ...current, recovery: null }));
+  if (!stillOpen(session, generation) || answer.data !== "Confirmed") return;
+  update(session, (current) => {
+    if (issueOf(current.recovery) !== issue) return current;
+    const asked = current.recovery?.phase === "show" || current.recovery?.phase === "pick" ? current.recovery.voluntary : false;
+    return { ...current, recovery: null, newKey: asked ? { phase: "done" } : current.newKey };
+  });
 }
 
 /**
@@ -1505,6 +1761,10 @@ export function startNotices(): Promise<void> {
       await api.onLockEpoch((event) => {
         takeRestoreEpoch(event);
         takeOpenEpoch();
+        takeForgotEpoch();
+        takeKeyEpoch();
+        takeUnlockEpoch();
+        takeNewVaultEpoch();
       });
     } catch {
       // Without it a restore's or an open's steps stay up after a lock, and the shell's answers to what they send say it has gone.
@@ -1530,12 +1790,12 @@ export async function setOutputRecordAside(): Promise<void> {
 }
 
 /**
- * Puts a refusal on the lock screen for the person to read, when the vault it was about is locked already (Ask 16: a new
- * password was saved but the vault locked before the page could say so). It goes when a vault is unlocked. The change-
- * password screen (4C) is what calls this; nothing in 4A does.
+ * Keeps a refusal for the lock screen to say, for the vault it was about (by its registry ID), which is locked already (Ask 16: a new password was
+ * saved but the vault locked before the page could say so). It shows when that vault is the one chosen to unlock, and goes when that vault is
+ * unlocked: another vault's unlock leaves it, and a second one for the same vault takes the first's place. Nothing in it is secret.
  */
-export function sayOnLockScreen(refusal: unknown): void {
-  set({ ...state, lockNote: refusal });
+export function sayOnLockScreen(refusal: unknown, vault: number): void {
+  set({ ...state, lockNotes: [...state.lockNotes.filter((note) => note.vault !== vault), { vault, refusal }] });
 }
 
 /** How an item comes to the panel, beyond which one: from where it was opened. */
@@ -1751,6 +2011,285 @@ export function closeTool(session: number): void {
   update(session, (current) => ({ ...current, tool: null }));
 }
 
+// ---- Change password (Plan 4C Task 3: 27a to 27c, and Ask 16) ----
+//
+// The form is opened for one session (from Settings, Ask 9 or Ask 2) and what is typed lives in the form alone: it is wiped from the fields as it is sent and
+// comes here only as the two arguments of `changePassword`, which hand them to the shell once and keep them nowhere. Every step names its session and the
+// generation it was opened in, never whatever is on screen: a form is its vault's, an answer lands in that vault's record and shows when that vault is on
+// screen, and a lock drops the lot. A change that landed before a lock is the one thing kept (a registry ID and fixed words, no secret), for that vault's next
+// unlock to say (`sayOnLockScreen`, Ask 16).
+
+/** The page's own refusal for a current password the shell refused as wrong: the form's words for it (`messages.ts`). */
+const WRONG_CURRENT = { code: "page", kind: "wrong_current_password" };
+
+/**
+ * What the lock screen says about a change that landed before the lock (Ask 16, and the new recovery key that was made and never seen): the shell's own refusal's
+ * shape, which `messages.ts` has the words for.
+ */
+function landedBeforeLock(vault: number, what: "password" | "recovery key" | "vault created" = "password"): { code: string; what: string; vault: number } {
+  return { code: "locked_after_change", what, vault };
+}
+
+/** Opens Change password (27a) in the vault's panel. Not in a read-only copy, which has nothing to change. A change that is out keeps its place. */
+export function openChangePassword(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const out = entry.passwordChange?.phase === "ask" && entry.passwordChange.sending;
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "change_password" },
+    passwordChange: out ? current.passwordChange : { phase: "ask", sending: false, problem: null },
+  }));
+}
+
+/** Closes the form (Cancel, Close panel, Escape). What was typed goes with it. A change that is out goes on, and is answered where its vault is on screen. */
+export function closeChangePassword(session: number): void {
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "change_password" ? null : current.tool,
+    passwordChange: current.passwordChange?.phase === "ask" && current.passwordChange.sending ? current.passwordChange : null,
+  }));
+}
+
+/** The person has begun to mend the form: what the last refusal said goes. */
+export function clearPasswordProblem(session: number): void {
+  update(session, (current) =>
+    current.passwordChange?.phase === "ask" && current.passwordChange.problem !== null
+      ? { ...current, passwordChange: { ...current.passwordChange, problem: null } }
+      : current,
+  );
+}
+
+/** 27c's answer: "Back up now" opens 22a for this vault, "Not now" only closes the offer. Either way the change is finished. */
+export function finishPasswordChange(session: number, backUp: boolean): void {
+  update(session, (current) => (current.passwordChange?.phase === "done" ? { ...current, passwordChange: null } : current));
+  if (backUp) openBackup(session);
+}
+
+/**
+ * Sets the vault's new password, with the current one checked in the same call. The passwords are the form's, already gone from its fields: they go
+ * to the shell once and are not kept here. The session and generation are those the form was opened in. A second press while a change is out sends
+ * nothing.
+ *
+ * - **Done:** the form closes and 27c's offer of a fresh backup waits in this vault's record, shown when it is on screen. Ask 9's question about the
+ *   spare details is answered by it, so it goes.
+ * - **A wrong current password, a new one the shell calls too short, or any other refusal:** said on the form (its own field for the first two), with
+ *   the form's fields empty. Nothing changed (see the last point).
+ * - **A lock before the headers were written (`locked`):** nothing changed and nothing is said; the old password still opens.
+ * - **A lock after the change landed:** the shell's `locked_after_change` (with the vault's registry ID), or its good answer dropped by the bridge as
+ *   from before the lock, which the shell only gives a change that was written. Either way Ask 16 is kept for that vault's unlock. The shell answers
+ *   the same way (locking the vault first) for a write that came back as an error after `vault.json` landed and the new password is live, so a
+ *   disk error that left the new password in effect never reaches the form as a plain refusal.
+ * - Any other refusal (a disk error included) is the shell saying the write failed before anything landed: the old password still opens, so it is
+ *   said on the form, and no Ask 16 is kept for it.
+ */
+export async function changePassword(session: number, currentPassword: string, newPassword: string): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.passwordChange;
+  if (entry === undefined || entry.readOnly || flow?.phase !== "ask" || flow.sending) return;
+  const { generation, vaultId } = entry;
+  update(session, (current) => ({ ...current, passwordChange: { phase: "ask", sending: true, problem: null } }));
+  try {
+    await api.changePassword({ session, generation }, currentPassword, newPassword);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) {
+      const named = refusedWith(error, "locked_after_change") ? (error as { vault?: unknown }).vault : undefined;
+      const vault = typeof named === "number" && Number.isInteger(named) && named > 0 ? named : vaultId;
+      if (vault > 0) sayOnLockScreen(landedBeforeLock(vault), vault);
+      dropIfStillOpen(session, generation);
+      return;
+    }
+    if (refusedAsLocked(error)) {
+      dropIfStillOpen(session, generation);
+      return;
+    }
+    if (!stillOpen(session, generation)) return;
+    const wrong = refusedWith(error, "core") && (error as { kind?: unknown }).kind === "wrong_password";
+    const short = refusedWith(error, "core") && (error as { kind?: unknown }).kind === "password_too_short";
+    const problem: PasswordProblem = wrong
+      ? { field: "current", error: WRONG_CURRENT }
+      : { field: short ? "new" : "form", error };
+    update(session, (current) => ({ ...current, passwordChange: { phase: "ask", sending: false, problem } }));
+    return;
+  }
+  if (!stillOpen(session, generation)) return;
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "change_password" ? null : current.tool,
+    passwordChange: { phase: "done" },
+    asks: current.asks.closed.includes("spare") ? current.asks : { ...current.asks, closed: [...current.asks.closed, "spare"] },
+  }));
+}
+
+// ---- Rename a vault (Plan 4C Task 8: 18d) ----
+//
+// The small box in the vault menu's place is opened for one session and sends the session and the generation it was opened in, never whatever is on screen (the box goes with
+// its vault, so an answer for a vault that is no longer on screen still lands in that vault's record). What is typed is the vault's name, which is not a secret: the shell keeps
+// it in the vault's details and the list reads it from there, so the page takes the new name from what it sent and reads the list again.
+
+/** The four reasons a backup is refused, which Rename is refused for as well, and the page's own kind for each: its words end "then rename it" (`messages.ts`). */
+const RENAME_REFUSALS: Readonly<Record<string, string>> = {
+  "details changed": "rename_details_changed",
+  "details unchecked": "rename_details_unchecked",
+  "password copies disagree": "rename_password_copies_disagree",
+  "recovery key copies disagree": "rename_recovery_key_copies_disagree",
+};
+
+/** A refusal of a rename as the box says it: one of the four backup reasons becomes the page's own kind, any other is passed as it is. */
+function asRenameRefusal(error: unknown): unknown {
+  if (!refusedWith(error, "invalid_input")) return error;
+  const what = (error as { what?: unknown }).what;
+  const kind = typeof what === "string" && Object.hasOwn(RENAME_REFUSALS, what) ? RENAME_REFUSALS[what] : undefined;
+  return kind === undefined ? error : { code: "page", kind };
+}
+
+/**
+ * Reads the vault list again after a rename that landed. The list reads each name from the vault's details, so this is what the lock screen and the vault menu's rows
+ * say; when it can't be read, the entry of the vault the record held (by its registry ID, never by name) is given the new name instead.
+ */
+async function readListAfterRename(vaultId: number, name: string): Promise<void> {
+  const list = await refreshVaults();
+  if (list !== null || vaultId <= 0 || state.vaults === null) return;
+  set({ ...state, vaults: state.vaults.map((entry) => (entry.id === vaultId ? { ...entry, name } : entry)) });
+}
+
+/**
+ * Gives the vault a new name (18d). `name` is sent exactly as given (the box has trimmed it). The session and generation are those the box was opened in.
+ *
+ * - **`"done"`:** the vault's record takes the name (so the side menu's head, the vault menu's row and its Lock and Rename items, and the vault strip change at once) and the
+ *   list is read again for the lock screen.
+ * - **A lock after the name landed** (`locked_after_change`, or the shell's good answer dropped by the bridge as from before the lock): the list is read again, the record
+ *   goes if it is still that generation, and nothing is said: the lock screen shows the new name. `"stale"`.
+ * - **A lock before it was written** (`locked`): nothing changed; the record goes if still that generation. `"stale"`.
+ * - **Any other refusal:** the list is read again (it says what is really on disk), and the refusal comes back as `{ failed }` for the box to say, the four backup reasons
+ *   as the page's own kinds.
+ */
+export async function renameVault(vault: api.SessionRef, name: string): Promise<"done" | "stale" | { failed: unknown }> {
+  const { session, generation } = vault;
+  const vaultId = sessionOf(session)?.vaultId ?? NOT_ON_THE_LIST;
+  try {
+    await api.renameVault(vault, name);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) {
+      await readListAfterRename(vaultId, name);
+      dropIfStillOpen(session, generation);
+      return "stale";
+    }
+    if (refusedAsLocked(error)) {
+      dropIfStillOpen(session, generation);
+      return "stale";
+    }
+    await refreshVaults();
+    return { failed: asRenameRefusal(error) };
+  }
+  if (stillOpen(session, generation)) update(session, (current) => ({ ...current, name }));
+  await readListAfterRename(vaultId, name);
+  return "done";
+}
+
+// ---- A new recovery key (Plan 4C Task 5: 29a to 29c) ----
+//
+// Asked for from inside an open vault, with the current password checked in the same call. The form (29a) is the vault's own, as the change-password form is: what is
+// typed lives in the form and is wiped as it is sent. The key that comes back is the session's `recovery` step (shown by 29b, picked back as 21d does), marked
+// `voluntary`, and it is held only in that record: a lock, a lock epoch or leaving the vault for another takes it, and the shell's mark makes the vault's next
+// unlock say so (21f). An answer that comes for another vault than the one on screen waits in its own vault's record and shows when that vault is on screen.
+
+/** Opens the New recovery key form (29a) in the vault's panel. Not in a read-only copy, which has no key to replace. A key that is asked for keeps its place. */
+export function openNewRecoveryKey(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const out = entry.newKey?.phase === "ask" && entry.newKey.sending;
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "new_recovery_key" },
+    newKey: out ? current.newKey : { phase: "ask", sending: false, problem: null },
+  }));
+}
+
+/** Closes the form (Cancel, Close panel, Escape). What was typed goes with it. A key that is asked for goes on, and is answered where its vault is on screen. */
+export function closeNewRecoveryKey(session: number): void {
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "new_recovery_key" ? null : current.tool,
+    newKey: current.newKey?.phase === "ask" && current.newKey.sending ? current.newKey : null,
+  }));
+}
+
+/** The person has begun to mend the form: what the last refusal said goes. */
+export function clearNewKeyProblem(session: number): void {
+  update(session, (current) =>
+    current.newKey?.phase === "ask" && current.newKey.problem !== null ? { ...current, newKey: { ...current.newKey, problem: null } } : current,
+  );
+}
+
+/** 29c's answer: "Back up now" opens 22a for this vault, "Not now" only closes the offer. Either way the new key is finished. */
+export function finishNewKey(session: number, backUp: boolean): void {
+  update(session, (current) => (current.newKey?.phase === "done" ? { ...current, newKey: null } : current));
+  if (backUp) openBackup(session);
+}
+
+/**
+ * Asks the shell for a new recovery key for the vault, with the current password checked in the same call. The password is the form's, already gone from its
+ * field: it goes to the shell once and is kept nowhere here. The session and generation are those the form was opened in. A second press while a key is asked for
+ * sends nothing.
+ *
+ * - **Made:** the key is the session's `recovery` step (29b) and the form is gone. An answer for a key older than the one the step holds changes nothing.
+ * - **A wrong current password, or any other refusal (the shell could not write its mark first, say):** said on the form (its own field for the first), with the field
+ *   empty. Nothing was made, and no mark was written.
+ * - **A lock before anything was written (`locked`):** nothing changed and nothing is said.
+ * - **A lock after the key was made** (`locked_after_change` with the vault's registry ID, or the shell's good answer dropped by the bridge as from before the lock,
+ *   which the shell only gives a key that was made): the key was never seen, so that vault's next unlock says so (the session's words), and 21f follows it by the mark.
+ */
+export async function makeNewRecoveryKey(session: number, currentPassword: string): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.newKey;
+  if (entry === undefined || entry.readOnly || flow?.phase !== "ask" || flow.sending) return;
+  const { generation, vaultId } = entry;
+  // The lock epoch the key was asked for in: a lock that starts before the reply lands (Windows locking, an idle lock) can reach the page before this vault's own
+  // `locked` event, and the reply must not put the words back.
+  const epoch = currentLockEpoch();
+  update(session, (current) => ({ ...current, newKey: { phase: "ask", sending: true, problem: null } }));
+  let answer;
+  try {
+    answer = await api.newRecoveryKey({ session, generation }, currentPassword);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) {
+      const named = refusedWith(error, "locked_after_change") ? (error as { vault?: unknown }).vault : undefined;
+      const vault = typeof named === "number" && Number.isInteger(named) && named > 0 ? named : vaultId;
+      if (vault > 0) sayOnLockScreen(landedBeforeLock(vault, "recovery key"), vault);
+      dropIfStillOpen(session, generation);
+      return;
+    }
+    if (refusedAsLocked(error)) {
+      dropIfStillOpen(session, generation);
+      return;
+    }
+    if (!stillOpen(session, generation)) return;
+    const wrong = refusedWith(error, "core") && (error as { kind?: unknown }).kind === "wrong_password";
+    const problem: PasswordProblem = wrong ? { field: "current", error: WRONG_CURRENT } : { field: "form", error };
+    update(session, (current) => ({ ...current, newKey: { phase: "ask", sending: false, problem } }));
+    return;
+  }
+  if (!stillOpen(session, generation)) return;
+  if (currentLockEpoch() !== epoch) {
+    // The key was made and a lock has started: its words are dropped unread, and that vault's unlock says so (the mark makes 21f follow).
+    if (vaultId > 0) sayOnLockScreen(landedBeforeLock(vaultId, "recovery key"), vaultId);
+    dropSession(session);
+    return;
+  }
+  const { words, issue } = answer.data;
+  update(session, (current) => {
+    const closed = { ...current, tool: current.tool?.kind === "new_recovery_key" ? null : current.tool, newKey: null };
+    // A key whose number is not newer than the one the step holds (its reply came after a newer key's) is not the step's: the page acts only on the current one.
+    if ((issueOf(current.recovery) ?? 0) >= issue) return closed;
+    return { ...closed, recovery: { phase: "show", key: words, issue, unfinished: false, voluntary: true, missed: false } };
+  });
+}
+
 // ---- Back up a vault (Plan 4B Task 3: 22a to 22d, Ask 1 and Ask 2) ----
 //
 // Back up is pressed in the panel; Rust opens Windows' save dialog and writes the file, so the page never holds a path. The command is a long job
@@ -1818,6 +2357,16 @@ export function seeTheChange(session: number): void {
   update(session, (current) =>
     current.backup?.phase === "refused" ? { ...current, backup: null, asks: { ...current.asks, detailsChanged: true, detailsError: null } } : current,
   );
+}
+
+/**
+ * The rename box's "See the change" (4C Task 13b): the shell refused the rename because this vault's details were changed outside Lockbox, so Ask 3 opens for it, as Ask 2's
+ * button does for a backup. A vault opened read-only has nothing to accept.
+ */
+export function openDetailsChanged(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  update(session, (current) => ({ ...current, asks: { ...current.asks, detailsChanged: true, detailsError: null } }));
 }
 
 /** Says how a backup ended, where the person is: in the panel when it is still open, else as a message. Nothing for a vault that locked. */
@@ -2274,7 +2823,7 @@ export async function runOpenBackup(credential: string): Promise<void> {
       showSession(opened.session);
     } else {
       const record = newRecord(opened, NOT_ON_THE_LIST, opened.data, null);
-      set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+      set({ ...state, sessions: withFront(state.sessions, record) });
       void loadItems(record);
     }
     focusList();
@@ -2319,6 +2868,333 @@ export function useOpenBackup(): OpenFlow | null {
   return useSelect((current) => current.openBackup);
 }
 
+/** A session's record without the key of a new recovery key that was asked for (29b), shown or being picked: the key and its questions are gone. Any other step stays. */
+function withoutVoluntaryKey(entry: SessionData): SessionData {
+  const step = entry.recovery;
+  return (step?.phase === "show" || step?.phase === "pick") && step.voluntary ? { ...entry, recovery: null } : entry;
+}
+
+/**
+ * A lock epoch (Lock all, an idle lock, Windows locking or sleeping): every vault is about to lock, and the key of a new recovery key on screen goes from the page
+ * now, without waiting for its vault's own `locked` event. The shell's mark stays, so the vault's next unlock makes another key (21f).
+ */
+function takeKeyEpoch(): void {
+  if (!state.sessions.some((entry) => withoutVoluntaryKey(entry) !== entry)) return;
+  sayOfUnseenKeys(state.sessions);
+  set({ ...state, sessions: state.sessions.map((entry) => withoutVoluntaryKey(entry)) });
+}
+
+/**
+ * A new recovery key that reached a vault in the background (another vault was on screen) was never shown. When the record that holds it goes (a lock, a lock
+ * epoch), that vault's next unlock says so, as it does for a key whose reply came after the lock. Only the front session's key was ever on screen. `only` limits
+ * it to one session (the one that is being dropped).
+ */
+function sayOfUnseenKeys(sessions: readonly SessionData[], only?: number): void {
+  const front = sessions.at(-1);
+  for (const entry of sessions) {
+    if (only !== undefined && entry.session !== only) continue;
+    if (entry.session === front?.session || entry.vaultId <= 0 || withoutVoluntaryKey(entry) === entry) continue;
+    sayOnLockScreen(landedBeforeLock(entry.vaultId, "recovery key"), entry.vaultId);
+  }
+}
+
+/**
+ * The sessions with `entry` last, which is the one the window shows. The session that was on screen before it loses a new recovery key it was showing (29b), with
+ * its questions: the person is leaving it unsaved, and the shell's mark makes that vault's next unlock say so (21f). Every path that changes the foreground session
+ * goes through here.
+ */
+function withFront(sessions: readonly SessionData[], entry: SessionData): SessionData[] {
+  const before = sessions.at(-1);
+  const rest = sessions.filter((one) => one.session !== entry.session).map((one) => (one.session === before?.session ? withoutVoluntaryKey(one) : one));
+  return [...rest, entry];
+}
+
+/** The sessions with `entry` just behind the last, which is the window on screen and stays so. With none open, `entry` is the only one and so the window. */
+function withBehind(sessions: readonly SessionData[], entry: SessionData): SessionData[] {
+  const rest = sessions.filter((one) => one.session !== entry.session);
+  const front = rest.at(-1);
+  return front === undefined ? [entry] : [...rest.slice(0, -1), entry, front];
+}
+
+// ---- Unlock another vault from inside (Plan 4C Task 6) ----
+//
+// A locked vault of the list is a row of the vault menu and a button of the vault strip. Choosing it opens its unlock step (`startUnlockStep`), which is the lock screen's
+// form for that one vault, with Back: the vaults that are open stay open and are not touched. The password is typed once and goes with the vault's registry ID
+// (`unlockInStep`); it is the step's own state and is wiped as it is sent, so nothing here holds one. An answer lands on the vault it was asked for, and takes the window
+// only while a step for that vault is still up: Back, or a step for another vault, leaves the screen as it is and holds the vault open behind it.
+
+/** The number of the last unlock step begun. */
+let unlockOpenings = 0;
+
+/**
+ * Opens the unlock step of a listed vault, with another vault open. Nothing is sent. A vault that is not on the list, one that is not available, a vault that is open
+ * already (a stale button: it is brought to the front instead, unless the step is from Copy to a vault, which changes nothing) and a page with no vault open (the lock
+ * screen has its own list) open nothing. `stay` is Copy to a vault's: see {@link UnlockStep}.
+ */
+export function startUnlockStep(vault: number, stay = false): void {
+  const listed = state.vaults?.find((entry) => entry.id === vault);
+  if (listed?.available !== true || state.sessions.length === 0) return;
+  const open = state.sessions.find((entry) => entry.vaultId === vault);
+  if (open !== undefined) {
+    if (!stay) showSession(open.session);
+    return;
+  }
+  unlockOpenings += 1;
+  set({ ...state, unlockStep: { opening: unlockOpenings, vault, list: listed.list, stay } });
+}
+
+/** Back, on the unlock step: the step goes and the window that was on screen is back. A password still out is not taken back: its answer is held behind that window. */
+export function leaveUnlockStep(): void {
+  if (state.unlockStep !== null) set({ ...state, unlockStep: null });
+}
+
+/**
+ * The unlock step's Unlock, with the password typed: sends the vault's registry ID and the text, once, and nothing else; the screen wipes its box as it calls this. `"opened"`
+ * when the vault is on the page (on screen, or behind the window that was, see {@link UnlockStep}), `"stale"` when the step was left before the send, or the vault locked
+ * again before the answer was read, which is not an error. A refusal (a wrong password) is thrown for the step to say.
+ */
+export async function unlockInStep(opening: number, password: string): Promise<"opened" | "stale"> {
+  const step = state.unlockStep;
+  if (step?.opening !== opening || password === "") return "stale";
+  const { vault } = step;
+  let answer: api.Tagged<api.UnlockView>;
+  try {
+    answer = await api.unlockVault({ list: step.list, id: vault }, password);
+  } catch (error) {
+    // A lock of every vault, or the window's close, that lands during the unlock is refused as locked: no session exists yet for a lock event to clear.
+    if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
+    throw error;
+  }
+  // A step for this same vault is up (the one that asked, or one opened again after Back): the vault is what it was waiting for. Any other screen is left as it is.
+  const waiting = state.unlockStep?.vault === vault ? state.unlockStep : null;
+  const held = sessionOf(answer.session);
+  if (held?.generation === answer.generation) {
+    // Held already (two steps for one vault, answered twice): nothing is made twice.
+    if (waiting !== null) {
+      set({ ...state, unlockStep: null });
+      if (!waiting.stay) showSession(answer.session);
+    }
+    return "opened";
+  }
+  return publishUnlock(answer, vault, waiting === null || waiting.stay ? "behind" : "front", waiting !== null, step.list);
+}
+
+/** A lock epoch (Lock all, an idle lock, Windows locking or sleeping): every vault is about to lock, so the step has no window to go back to. */
+function takeUnlockEpoch(): void {
+  if (state.unlockStep !== null) set({ ...state, unlockStep: null });
+}
+
+/** The unlock step as the screens read it: `null` while none is up. */
+export function useUnlockStep(): UnlockStep | null {
+  return useSelect((current) => current.unlockStep);
+}
+
+// ---- Make another vault, or add one, from inside (Plan 4C Task 7) ----
+//
+// New vault and Add existing vault folder are actions of the vault menu, with other vaults open. New vault is setup's two steps again: its form (step 1 of 2, with Back)
+// takes the window until it is left, and the vault it makes comes up on its own recovery key (step 2 of 2) as a first vault's does, with the vaults that were open still
+// open behind it (`finishCreate`). Add existing vault folder runs the same add as 26a's "A vault folder", with the same cloud question, and opens the added vault's unlock
+// step. Neither holds a password: the form's is its own state, wiped as it is sent. A lock epoch takes both, and the last lock does too.
+
+/** The number of the last new-vault form begun. */
+let newVaultOpenings = 0;
+
+/**
+ * Opens the new vault's form, over the window on screen: nothing is sent. A page with no vault open (the first screen has its own form), a form already up and an add
+ * that is under way open nothing. An unlock step that was up is replaced by it.
+ */
+export function startNewVault(): void {
+  if (state.sessions.length === 0 || state.newVault !== null || state.addFolder !== null) return;
+  newVaultOpenings += 1;
+  set({ ...state, newVault: { opening: newVaultOpenings }, unlockStep: null });
+}
+
+/** Back, on the new vault's form: the form goes and the window that was on screen is back. Nothing was sent, and the form's own state goes with it. */
+export function leaveNewVault(): void {
+  if (state.newVault !== null) set({ ...state, newVault: null });
+}
+
+/** A lock epoch (Lock all, an idle lock, Windows locking or sleeping): every vault is about to lock, so these steps have no window to go back to. */
+function takeNewVaultEpoch(): void {
+  if (state.newVault !== null || state.addFolder !== null || state.addRefusal !== null) set({ ...state, newVault: null, addFolder: null, addRefusal: null });
+}
+
+/** The new vault's form as the screens read it: `null` while none is up. */
+export function useNewVault(): NewVault | null {
+  return useSelect((current) => current.newVault);
+}
+
+/** Add existing vault folder's step as the screens read it: `null` while none is up. */
+export function useAddFolder(): AddFolder | null {
+  return useSelect((current) => current.addFolder);
+}
+
+/** The number of the last Add existing vault folder begun. */
+let addFolderOpenings = 0;
+
+/**
+ * Add existing vault folder, from the vault menu: Windows' folder picker opens at once (nothing is drawn for it, the window stays), and what comes of it is one of: the
+ * picker closed (nothing), a refusal (said in words on the window, where nothing was changed), a cloud-synced folder (the first screens' question, `cloud`), or the folder
+ * added, which opens that vault's unlock step. Nothing is sent when a step is already up or no vault is open.
+ *
+ * From the lock screen (`"lock"`, 01a's second row) it needs no open session: the cloud question is drawn in the lock screen's place, a refusal is kept (`addRefusal`) for
+ * the lock screen's own line instead of a toast, and a folder that was added is the vault the lock screen chooses next (`unlockPick`), its password box focused.
+ */
+export function startAddFolder(from: "window" | "lock" = "window"): void {
+  // A menu item hands its click to whatever it calls: anything but "lock" is the window's own add.
+  const where = from === "lock" ? "lock" : "window";
+  if (state.addFolder !== null) return;
+  if (where === "window" && (state.sessions.length === 0 || state.newVault !== null)) return;
+  if (where === "lock" && state.sessions.length > 0) return;
+  addFolderOpenings += 1;
+  const opening = addFolderOpenings;
+  set({ ...state, addFolder: { opening, from: where, phase: "picking" }, addRefusal: null });
+  void runAddFolder(opening, () => api.addExistingVault());
+}
+
+/** The cloud question's yes: the token it was given goes back, and the add goes on. */
+export function confirmAddFolder(opening: number, token: string): Promise<void> {
+  return runAddFolder(opening, () => api.addExistingVaultConfirm(token));
+}
+
+/** The cloud question's "Choose another": the picker opens again. */
+export function chooseAnotherFolder(opening: number): Promise<void> {
+  return runAddFolder(opening, () => api.addExistingVault());
+}
+
+/** The cloud question's Cancel: nothing was done, and the window that was on screen is back. */
+export function leaveAddFolder(opening: number): void {
+  if (state.addFolder?.opening === opening) set({ ...state, addFolder: null });
+}
+
+/**
+ * What one asking of the shell for an add came to. An answer that comes after a lock epoch took the step does nothing here (the list is read again all the same, so the
+ * vault that was added is on it).
+ */
+async function runAddFolder(opening: number, run: () => Promise<api.Outcome<VaultEntry>>): Promise<void> {
+  // Read again after each wait: the page's state moves on meanwhile (a lock epoch takes the step).
+  const stillUp = (): boolean => state.addFolder?.opening === opening;
+  if (!stillUp()) return;
+  const got: { id: number | null } = { id: null };
+  let result: SetupResult;
+  try {
+    result = await finishAdd(async () => {
+      const answer = await run();
+      if (answer !== "Dismissed" && "Done" in answer) got.id = answer.Done.id;
+      return answer;
+    });
+  } catch (error) {
+    if (!stillUp()) return;
+    // A lock the page had not heard of is no refusal to say.
+    if (state.addFolder?.from === "lock") {
+      set({ ...state, addFolder: null, addRefusal: refusedAsLocked(error) ? null : error });
+      return;
+    }
+    const front = state.sessions.at(-1);
+    set({ ...state, addFolder: null, toast: refusedAsLocked(error) ? state.toast : { kind: "failed", session: front?.session ?? null, error } });
+    return;
+  }
+  const from = state.addFolder?.from;
+  if (!stillUp() || from === undefined) return;
+  if (typeof result === "object") {
+    set({ ...state, addFolder: { opening, from, phase: "cloud", token: result.confirm } });
+    return;
+  }
+  // From the lock screen the vault added is the one it chooses next; from a window it opens its unlock step.
+  set({ ...state, addFolder: null, unlockPick: from === "lock" && result === "done" && got.id !== null ? got.id : state.unlockPick });
+  if (from === "window" && result === "done" && got.id !== null) startUnlockStep(got.id);
+}
+
+// ---- Remove, Show in Explorer and Try again (Plan 4C Task 9) ----
+//
+// A vault of the list can be taken off it (its folder stays), shown in Explorer, and, when its folder or drive isn't there, tried again. Every one names the row as the list
+// gave it (`{ list, id }`, taken from a `VaultEntry` the page holds), never an ID made up from a number, and the page never sends or holds a path.
+
+/**
+ * Remove from list: the shell locks the vault when it is open, then takes it off the list, and the folder and everything in it stay. Done, the page lets go of everything
+ * it held for that vault (its session record if the lock event has not come yet, its unlock step or recovery flow with the checked key, what the lock screen was
+ * saying about it) and reads the list again; when that read fails, the row is taken out of the held list all the same. A refusal (it is busy, the row has gone, the list
+ * can't be written) reads the list again and comes back as `{ failed }`, for the box to say in words, and the vault stays as it was.
+ */
+export async function removeVault(vault: api.VaultRef): Promise<"done" | { failed: unknown }> {
+  const wasOpen = state.sessions.some((entry) => entry.vaultId === vault.id);
+  try {
+    await api.forgetVault(vault);
+  } catch (error) {
+    await refreshVaults();
+    // The shell locks an open vault before it writes the list, so a write that failed afterwards leaves the vault locked and listed, and the window the box was in has gone with
+    // the lock: the refusal is said on the window that is left, since the box can't say it.
+    const front = state.sessions.at(-1);
+    if (wasOpen && front !== undefined && !state.sessions.some((entry) => entry.vaultId === vault.id)) {
+      set({ ...state, toast: { kind: "failed", session: front.session, error } });
+    }
+    return { failed: error };
+  }
+  for (const entry of state.sessions.filter((one) => one.vaultId === vault.id)) dropSession(entry.session);
+  const flow = state.forgot;
+  const leavesForgot = flow !== null && flow.vault === vault.id;
+  set({
+    ...state,
+    unlockStep: state.unlockStep?.vault === vault.id ? null : state.unlockStep,
+    forgot: leavesForgot ? null : state.forgot,
+    lockNotes: state.lockNotes.filter((note) => note.vault !== vault.id),
+    unlockPick: state.unlockPick === vault.id ? null : state.unlockPick,
+  });
+  // A key that was checked for this vault waits in the shell for a new password nobody will set: it is let go.
+  if (flow !== null && leavesForgot && flow.choice !== null) forgetRecovery(flow.choice);
+  const list = await refreshVaults();
+  if (list === null) set({ ...state, vaults: (state.vaults ?? []).filter((entry) => entry.id !== vault.id) });
+  return "done";
+}
+
+/**
+ * Asks the shell to show the vault's folder in Explorer; gives `null` when it did, or the refusal as the page says it (`{ failed }`). A refusal that says the row or its folder
+ * is gone reads the list again first, so the row then reads unavailable or goes. A list entry that is not a plain folder is the page's own words (`show_not_a_folder`).
+ */
+async function showFolder(vault: api.VaultRef): Promise<{ failed: unknown } | null> {
+  try {
+    await api.showVaultInExplorer(vault);
+    return null;
+  } catch (error) {
+    if (refusedWith(error, "not_found")) await refreshVaults();
+    const folder = refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "folder";
+    return { failed: folder ? SHOW_NOT_A_FOLDER : error };
+  }
+}
+
+/** The page's own refusal for a list entry that is not a plain folder; `messages.ts` has its words. */
+const SHOW_NOT_A_FOLDER = { code: "page", kind: "show_not_a_folder" };
+
+/** The vault menu's Show in Explorer: a refusal is the message bar's, on the window that is on screen. Nothing is drawn when the folder opens. */
+export async function showVaultInExplorer(vault: api.VaultRef): Promise<void> {
+  const outcome = await showFolder(vault);
+  if (outcome === null) return;
+  const front = state.sessions.at(-1);
+  set({ ...state, toast: { kind: "failed", session: front?.session ?? null, error: outcome.failed } });
+}
+
+/** Show in Explorer on the unlock step and Ask 8 (no message bar there): `"done"`, or the refusal for the screen's own line. */
+export async function showVaultFolder(vault: api.VaultRef): Promise<"done" | { failed: unknown }> {
+  return (await showFolder(vault)) ?? "done";
+}
+
+/**
+ * Try again on an unavailable vault: the list is read again. `"back"` when the vault's row is available now, `"still"` when it is not, `"gone"` when the list has no such row
+ * any more, `{ failed }` when the list could not be read (the refusal the page keeps for the lock screen's line).
+ */
+export async function tryVaultAgain(id: number): Promise<"back" | "still" | "gone" | { failed: unknown }> {
+  const list = await refreshVaults();
+  if (list === null) return { failed: state.startError };
+  const row = list.find((entry) => entry.id === id);
+  if (row === undefined) return "gone";
+  return row.available ? "back" : "still";
+}
+
+/** The lock screen's add: its refusal, as the shell sent it, or `null` (see {@link StoreState.addRefusal}). */
+export function useAddRefusal(): unknown {
+  return useSelect((current) => current.addRefusal);
+}
+
 /**
  * Brings an open session to the front: the window shows the last of the sessions, so it goes last. Nothing else about any session changes. An Open a backup panel that was
  * waiting for a password in the window that is left goes with it (its choice is let go); one that is opening carries on, and its backup comes to the front when it is open.
@@ -2329,7 +3205,7 @@ export function showSession(session: number): void {
   if (entry === undefined || current === undefined || current.session === session) return;
   const flow = state.openBackup;
   const leaving = flow !== null && flow.host === current.session && flow.phase === "ask";
-  set({ ...state, sessions: [...state.sessions.filter((one) => one.session !== session), entry], openBackup: leaving ? null : state.openBackup });
+  set({ ...state, sessions: withFront(state.sessions, entry), openBackup: leaving ? null : state.openBackup });
   if (leaving) {
     letGoOfOpen(flow);
     closeOpenPanel(flow.host);
@@ -2517,28 +3393,35 @@ export async function pickAnotherRestore(): Promise<void> {
 /**
  * Continue, pressed on 24a with the text typed: sends the choice and the text as one box's (`password_or_key`) and nothing else. The screen wipes its box as
  * it calls this; the shell keeps the working credential beside the pick. A wrong password (or any refusal) comes back to 24a with its words and the file
- * still picked; a choice the shell no longer holds takes the file away. The backup opened, 24b follows.
+ * still picked; a choice the shell no longer holds takes the file away. The backup opened, 24b follows. The check is a job the shell tells the page
+ * of (`request`): Cancel at 24a (`closeRestore`) stops it by that number, even before the shell's `job-started` has arrived.
  */
 export async function checkRestore(credential: string): Promise<void> {
   const flow = state.restore;
   if (flow === null || flow.phase !== "pick" || flow.busy || flow.choice === null || credential === "") return;
   const { opening, choice } = flow;
-  const run = moveRestore(opening, flow.run, () => ({ phase: "checking", problem: null }));
-  if (run === null) return;
+  const request = nextRequest();
+  const run = moveRestore(opening, flow.run, () => ({ phase: "checking", problem: null, request }));
+  if (run === null) {
+    releaseRequest(request);
+    return;
+  }
   let checked: api.RestoreChecked | { refused: unknown };
   try {
-    const answer = await api.restoreCheck(choice, { password_or_key: credential });
+    const answer = await api.restoreCheck(choice, { password_or_key: credential }, request);
     checked = typeof answer === "object" && typeof (answer as { name?: unknown }).name === "string" ? answer : { refused: UNEXPECTED };
   } catch (error) {
     checked = { refused: error };
+  } finally {
+    releaseRequest(request);
   }
   if ("refused" in checked) {
     const { refused } = checked;
     const gone = refusedWith(refused, "choice_expired") || refusedAsLocked(refused);
-    moveRestore(opening, run, () => (gone ? noFile(TEST_CHOICE_EXPIRED) : { phase: "pick", problem: refused }));
+    moveRestore(opening, run, () => (gone ? noFile(TEST_CHOICE_EXPIRED) : { phase: "pick", problem: refused, request: null }));
   } else {
     const found = checked;
-    moveRestore(opening, run, () => ({ phase: "where", checked: found, problem: null }));
+    moveRestore(opening, run, () => ({ phase: "where", checked: found, problem: null, request: null }));
   }
 }
 
@@ -2743,14 +3626,15 @@ export function backToRestoreFolder(): void {
 }
 
 /**
- * Cancel, on any step that has one: the restore goes. A copy that runs is stopped, the shell lets the pick go, and a finished copy that was not swapped is
- * let go. Nothing of the vault changes. Where the flow had come from is what the app shows next.
+ * Cancel, on any step that has one: the restore goes. A check at 24a or a copy that runs is stopped (by its request, as every job's Cancel is), the shell
+ * lets the pick go, and a finished copy that was not swapped is let go. Nothing of the vault changes. Where the flow had come from is what the app shows
+ * next.
  */
 export function closeRestore(): void {
   const flow = state.restore;
   if (flow === null) return;
   set({ ...state, restore: null });
-  if (flow.phase === "copying" && flow.request !== null) cancelRequest(flow.request);
+  if ((flow.phase === "copying" || flow.phase === "checking") && flow.request !== null) cancelRequest(flow.request);
   if (flow.choice !== null) forgetRestoreStray(flow.choice);
   if (flow.prepared !== null && flow.restored === null && flow.phase !== "swapping") void api.restoreDiscard(flow.prepared.restore).catch(() => undefined);
 }
@@ -2763,7 +3647,13 @@ export async function unlockRestored(password: string): Promise<"opened" | "stal
   const flow = state.restore;
   if (flow === null || flow.phase !== "done" || flow.restored === null) return "stale";
   const { opening } = flow;
-  const result = await unlock(flow.restored.vault, password);
+  // The row is the one the list gave, read again after the restore: no row, nothing is sent.
+  const row = state.vaults?.find((entry) => entry.id === flow.restored?.vault);
+  if (row === undefined) {
+    // eslint-disable-next-line @typescript-eslint/only-throw-error -- a refusal is a plain object, as the shell's are
+    throw { code: "not_found" };
+  }
+  const result = await unlock({ list: row.list, id: row.id }, password, true);
   if (result === "opened" && state.restore?.opening === opening) set({ ...state, restore: null });
   return result;
 }
@@ -2808,6 +3698,229 @@ function takeRestoreEpoch(event: LockEpochEvent): void {
 /** Restore a backup as the screens read it: `null` while none is begun. */
 export function useRestore(): RestoreFlow | null {
   return useSelect((current) => current.restore);
+}
+
+// ---- Forgot password (Plan 4C Task 4: 28a to 28e) ----
+//
+// Two steps, as the shell has them. The recovery key is typed once and sent with the listed vault's registry ID (`recoverCheck`): the shell reads its form, checks
+// that it opens this vault's recovery slot, and holds it under a choice. The new password is typed once and sent with the choice (`recoverFinish`): the shell
+// sets it, and only then opens the vault. What is typed is the screen's own state (the password wiped as it is sent, the key when the screen's rules say, see
+// `ForgotFlow`), so nothing here holds a key or a password: only the
+// choice's token, which the shell gave. Every answer is matched to the step it was asked in (`opening` and `run`): one that comes after the flow was left or moved
+// on comes to nothing, and a choice it brings is let go at once. A lock epoch drops the shell's choice, so the flow goes back to the key with nothing typed.
+
+/** The number of the last time Forgot password was begun, and of the last step taken in any of them. */
+let forgotOpenings = 0;
+let forgotRuns = 0;
+
+/** The page's own refusal for a key the shell read as a key that doesn't open the vault (`wrong_password`); `messages.ts` has the design's words for it. */
+const KEY_DOES_NOT_OPEN = { code: "page", kind: "recovery_key_does_not_open" };
+
+/** The page's own refusal for a choice the shell no longer holds, or details that changed since the check; `messages.ts` has its words. */
+const RECOVERY_CHOICE_EXPIRED = { code: "page", kind: "recovery_choice_expired" };
+
+/** The flow at its first step, with nothing checked and nothing said: where a lock, a refused finish or Back leaves it. */
+const AT_THE_KEY: Pick<ForgotFlow, "phase" | "checking" | "sending" | "problem" | "passwordProblem" | "choice" | "name" | "accepted"> = {
+  phase: "key",
+  checking: false,
+  sending: false,
+  problem: null,
+  passwordProblem: null,
+  choice: null,
+  name: null,
+  accepted: false,
+};
+
+/** Whether the flow the caller began is still at the step it was in. */
+function forgotStill(opening: number, run: number): boolean {
+  return state.forgot?.opening === opening && state.forgot.run === run;
+}
+
+/**
+ * Takes the flow to its next step while it is still at `run`: the changes are made and the run number moves on, so an answer to the step before is dropped.
+ * Returns the new run, or `null` when the flow had been left or had moved on.
+ */
+function moveForgot(opening: number, run: number, change: (flow: ForgotFlow) => Partial<ForgotFlow>): number | null {
+  const flow = state.forgot;
+  if (flow?.opening !== opening || flow.run !== run) return null;
+  forgotRuns += 1;
+  set({ ...state, forgot: { ...flow, ...change(flow), run: forgotRuns } });
+  return forgotRuns;
+}
+
+/** Lets a checked key go: the shell drops the choice (a choice already gone is no error, and nothing is said of a failure to ask). */
+function forgetRecovery(choice: string): void {
+  void api.recoverForget(choice).catch(() => undefined);
+}
+
+/**
+ * The lock screen's "Forgot password?": 28a for the vault chosen there, by its registry ID. Nothing is sent by opening it. A vault that is not on the list
+ * opens nothing, and one flow is open at a time.
+ */
+export function startForgot(vault: number): void {
+  const listed = state.vaults?.find((entry) => entry.id === vault);
+  if (state.forgot !== null || listed === undefined) return;
+  forgotOpenings += 1;
+  forgotRuns += 1;
+  set({ ...state, forgot: { opening: forgotOpenings, run: forgotRuns, vault, list: listed.list, ...AT_THE_KEY, session: null } });
+}
+
+/**
+ * Back on 28a, Cancel's way out of the flow: it goes, and the lock screen shows with this vault chosen. A key still out is let go by its answer (the flow it
+ * was for is gone), and a choice already held is let go now. The flow can't be left while the new password is out, whose answer is the flow's own. On 28e it
+ * is "Not now" (see `finishForgot`).
+ */
+export function closeForgot(): void {
+  const flow = state.forgot;
+  if (flow === null || flow.sending || flow.phase === "done") return;
+  // Begun from a vault's unlock step (another vault open), Back gives that step back as it was, and leaves the lock screen nothing to choose later.
+  set({ ...state, forgot: null, unlockPick: state.sessions.length === 0 ? flow.vault : state.unlockPick });
+  if (flow.choice !== null) forgetRecovery(flow.choice);
+}
+
+/** 28a's "I don't have my recovery key": 28c. Not while a key is out. */
+export function noRecoveryKey(): void {
+  const flow = state.forgot;
+  if (flow === null || flow.phase !== "key" || flow.checking) return;
+  moveForgot(flow.opening, flow.run, () => ({ phase: "no_key", problem: null }));
+}
+
+/** Back, on 28c and 28d (and No to the changed details): 28a with nothing typed, and the checked key, if one is held, let go. */
+export function backToForgotKey(): void {
+  const flow = state.forgot;
+  if (flow === null || flow.sending || flow.checking || (flow.phase !== "no_key" && flow.phase !== "password" && flow.phase !== "changed")) return;
+  const { choice } = flow;
+  moveForgot(flow.opening, flow.run, () => ({ ...AT_THE_KEY }));
+  if (choice !== null) forgetRecovery(choice);
+}
+
+/** The person has begun to mend what 28b or 28d said was wrong: the line goes. */
+export function clearForgotProblem(): void {
+  const flow = state.forgot;
+  if (flow === null || (flow.problem === null && flow.passwordProblem === null)) return;
+  set({ ...state, forgot: { ...flow, problem: null, passwordProblem: null } });
+}
+
+/**
+ * 28a's Continue, with the key typed: sends the vault's registry ID and the text, once, and nothing else. The screen keeps the key in its box, read-only, until
+ * the answer. The key's own refusals (a typo, a word that is no listed word, a wrong count) and every other refusal come back to 28a with their words, the key
+ * still in the box to be mended (Plan 4C Task 13c); an accepted key moves the flow on, and the screen wipes it; the shell's
+ * `wrong_password` is the page's "doesn't open this vault", since it is the same to the person for another vault's key and an old one. A key that opens
+ * the vault goes to 28d, or to the question about details changed outside Lockbox first when the shell says so.
+ */
+export async function checkRecoveryKey(key: string): Promise<void> {
+  const flow = state.forgot;
+  if (flow === null || flow.phase !== "key" || flow.checking || key === "") return;
+  const { opening, vault, list } = flow;
+  const run = moveForgot(opening, flow.run, () => ({ checking: true, problem: null }));
+  if (run === null) return;
+  let answer: api.RecoveryCheckView;
+  try {
+    answer = await api.recoverCheck({ list, id: vault }, key);
+  } catch (error) {
+    if (!forgotStill(opening, run)) return;
+    // A lock that overtook the check leaves nothing to say: the key is typed again.
+    const wrong = refusedWith(error, "core") && (error as { kind?: unknown }).kind === "wrong_password";
+    moveForgot(opening, run, () => ({ ...AT_THE_KEY, problem: refusedAsLocked(error) ? null : wrong ? KEY_DOES_NOT_OPEN : error }));
+    return;
+  }
+  if (!forgotStill(opening, run)) {
+    // The flow was left (Back, a lock) while the key was out: the shell holds a choice nobody will use.
+    forgetRecovery(answer.choice);
+    return;
+  }
+  moveForgot(opening, run, () => ({
+    checking: false,
+    choice: answer.choice,
+    name: answer.vault_name,
+    phase: answer.kind === "header_changed" ? "changed" : "password",
+  }));
+}
+
+/**
+ * The question about details changed outside Lockbox (Ask 3's words), asked before the new password. Yes goes to 28d, and the yes goes to the shell with the
+ * password; No lets the key go and is 28a again, with nothing changed.
+ */
+export function answerChangedDetails(yes: boolean): void {
+  const flow = state.forgot;
+  if (flow === null || flow.phase !== "changed") return;
+  if (yes) moveForgot(flow.opening, flow.run, () => ({ phase: "password", accepted: true }));
+  else backToForgotKey();
+}
+
+/**
+ * 28d's Set new password, with the password typed (once: the screen has checked it is long enough and that the two match, and wipes its boxes as it calls this).
+ * The choice and the password go to the shell, and the shell sets it and opens the vault. A second press while it is out sends nothing.
+ *
+ * - **Done:** the vault is published as an unlock publishes it (`publishUnlock`) and 28e's offer of a fresh backup shows over it.
+ * - **A new password the shell calls too short, or the changed details not accepted:** said on 28d; the shell kept the choice.
+ * - **The choice gone (`choice_expired`), or any other refusal:** the shell used the choice up, so the key is typed again on 28a, with the refusal said there.
+ * - **A lock before the password was written (`locked`):** nothing changed and nothing is said; 28a, empty.
+ * - **A lock after it was written** (`locked_after_change` with the vault's registry ID, or the shell's good answer dropped by the bridge as from before the lock):
+ *   the new password is in effect, so Ask 16 is kept for that vault's unlock and the flow ends at the lock screen.
+ */
+export async function finishRecovery(newPassword: string): Promise<void> {
+  const flow = state.forgot;
+  if (flow === null || flow.phase !== "password" || flow.sending || flow.choice === null) return;
+  const { opening, vault, choice, accepted } = flow;
+  const run = moveForgot(opening, flow.run, () => ({ sending: true, passwordProblem: null }));
+  if (run === null) return;
+  let answer: api.Tagged<api.UnlockView>;
+  try {
+    answer = await api.recoverFinish(choice, newPassword, accepted);
+  } catch (error) {
+    if (error instanceof api.StaleAnswer || refusedWith(error, "locked_after_change")) {
+      const named = refusedWith(error, "locked_after_change") ? (error as { vault?: unknown }).vault : undefined;
+      const landed = typeof named === "number" && Number.isInteger(named) && named > 0 ? named : vault;
+      sayOnLockScreen(landedBeforeLock(landed), landed);
+      if (state.forgot?.opening === opening) set({ ...state, forgot: null, unlockPick: vault });
+      return;
+    }
+    if (!forgotStill(opening, run)) return;
+    const kind = refusedWith(error, "core") ? (error as { kind?: unknown }).kind : undefined;
+    const keptShort = kind === "password_too_short";
+    const keptHeader = refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "header changed on disk";
+    if (keptShort || keptHeader) {
+      moveForgot(opening, run, () => ({ sending: false, passwordProblem: { field: keptShort ? "new" : "form", error } }));
+      return;
+    }
+    // The page lets go of its handle on the key here, so it tells the shell too: usually the shell already dropped it (a harmless success), but a refusal that
+    // came before the shell took the choice (an IPC failure) would leave the key held for five minutes.
+    forgetRecovery(choice);
+    moveForgot(opening, run, () => ({
+      ...AT_THE_KEY,
+      problem: refusedAsLocked(error) ? null : refusedWith(error, "choice_expired") ? RECOVERY_CHOICE_EXPIRED : error,
+    }));
+    return;
+  }
+  // The password is set and the vault is open: published as an unlock publishes it, and 28e shows over it. Begun from that vault's unlock step (another vault open),
+  // the vault comes to the front and the step it was begun from goes, as an unlock from the step ends it.
+  void publishUnlock(answer, vault, "front", state.unlockStep?.vault === vault);
+  moveForgot(opening, run, () => ({ phase: "done", sending: false, choice: null, session: answer.session }));
+}
+
+/** 28e's answer: Back up now opens 22a for the vault that was opened, Not now only closes the offer. Either way the flow is over. */
+export function finishForgot(backUp: boolean): void {
+  const flow = state.forgot;
+  if (flow?.phase !== "done") return;
+  set({ ...state, forgot: null });
+  if (backUp && flow.session !== null) openBackup(flow.session);
+}
+
+/**
+ * A lock epoch (Lock all, an idle lock, Windows locking or sleeping, the app closing): the shell dropped the checked key, so the steps that hold or wait for
+ * one are 28a again, with nothing said, and the answer of a key still out is let go when it comes. A new password that is out is the flow's own: its answer says
+ * whether the lock came before or after the password was written. 28c and 28e hold nothing the lock took.
+ */
+function takeForgotEpoch(): void {
+  const flow = state.forgot;
+  if (flow === null || flow.sending) return;
+  if (flow.phase === "key" || flow.phase === "changed" || flow.phase === "password") moveForgot(flow.opening, flow.run, () => ({ ...AT_THE_KEY }));
+}
+
+/** Forgot password as the screens read it: `null` while it is not begun. */
+export function useForgot(): ForgotFlow | null {
+  return useSelect((current) => current.forgot);
 }
 
 // ---- Moving to a new computer (26a to 26c) ----
@@ -2969,7 +4082,7 @@ export async function openOlderCopy(vault: number, folder: string, passwordOrKey
       return "stale";
     }
     const record = newRecord(answer, NOT_ON_THE_LIST, answer.data, null, { ...NO_ASKS, headerChanged: answer.data.header_changed });
-    set({ ...state, sessions: [...state.sessions.filter((entry) => entry.session !== record.session), record] });
+    set({ ...state, sessions: withFront(state.sessions, record) });
     void loadOlderCopies();
     return await loadItems(record);
   } finally {
@@ -4469,8 +5582,10 @@ export async function confirmEnvFile(session: number, token: string): Promise<En
 //
 // The shell reads the clipboard when the shortcut is pressed and keeps the text in one slot; the page hears a state and an id
 // (`lockbox://capture`) and never the text, which comes only on Reveal and is kept by the box that asked for it, never here. The copy
-// is not a vault's: with every vault locked the lock screen asks for an unlock first (8b), and once one is open the save box (8a, 8c)
-// takes that vault's panel and the copy is handed to it, so a lock of that vault lets the copy go.
+// is not a vault's: with every vault locked the lock screen asks for an unlock first (8b), and once a window is on screen the save box (8a, 8c)
+// is drawn over it, with the vault it saves into chosen in the box (Plan 4C Task 10). The box is the app's, not a window's: it stays through a
+// switch and a lock of the vault under it. The copy is handed to the vault chosen (`capture_choose`), or to none while a locked vault is chosen
+// (`capture_unchoose`), so only a lock of that vault, or of every vault, lets the copy go.
 
 /** The copy, session and generation a `capture_choose` was last sent for, so one is not sent twice for the same. */
 let chooseSent: string | null = null;
@@ -4478,8 +5593,21 @@ let chooseSent: string | null = null;
 /** The copy being read as a `.env` right now: its `gone` (the shell empties the slot as it reads it) must not close the box that asked. */
 let converting: string | null = null;
 
-/** The hand-over of a copy to a vault (`capture_choose`) as it was last sent, and whether it worked: Reveal waits for it, since the shell calls the vault locked until it is done. */
-let choosing: { id: string; done: Promise<boolean> } | null = null;
+/** The copy whose `gone` came while it was being read as a `.env`: the read says what became of it. */
+let goneWhileConverting: string | null = null;
+
+/** How many boxes have been opened: a copy that comes with none waiting is a new one. */
+let captureOpenings = 0;
+
+/**
+ * The hand-over of a copy as it was last asked (`capture_choose`, or `capture_unchoose`), and whether it worked: Reveal and Save wait for it while `out`, since the
+ * shell calls the vault locked until a hand-over is done. Hand-overs go one at a time: two on the shell's pool could land out of order, so one asked while another
+ * is out waits for it, and only the last asked is then sent (`handTicket`).
+ */
+let choosing: { id: string; kind: "choose" | "unchoose"; out: boolean; failed: boolean; done: Promise<boolean> } | null = null;
+
+/** The number of the last hand-over asked: a waiting one that is no longer the last is not sent. */
+let handTicket = 0;
 
 /** How many `lockbox://capture` events the page has heard: an answer to `capture_state` that was asked before one came is older than it. */
 let captureHeard = 0;
@@ -4521,21 +5649,15 @@ function letGo(id: string): void {
 }
 
 /**
- * The copy is over, as far as the page goes: the box closes (unless `closeBox` is false) and nothing of it stays. `tellShell` is for when the
- * shell may still hold it (Cancel, a panel that took the place, a lock): it is asked to let go, and a copy it has let go already makes that a no-op.
+ * The copy is over, as far as the page goes: the box goes and nothing of it stays. `tellShell` is for when the shell may still hold it (Cancel, a panel
+ * that took the place, a lock): it is asked to let go, and a copy it has let go already makes that a no-op.
  */
-function endCapture(tellShell: boolean, closeBox = true): void {
+function endCapture(tellShell: boolean): void {
   const capture = state.capture;
   if (capture === null) return;
   chooseSent = null;
   choosing = null;
-  set({
-    ...state,
-    capture: null,
-    sessions: closeBox
-      ? state.sessions.map((entry) => (entry.tool?.kind === "save_box" ? { ...endReveals(entry), tool: null } : entry))
-      : state.sessions,
-  });
+  set({ ...state, capture: null });
   if (tellShell) letGo(capture.id);
 }
 
@@ -4544,22 +5666,21 @@ export function cancelCapture(): void {
   endCapture(true);
 }
 
-/** The box that showed copy `id` has left the screen some other way (another panel took its place): the copy is let go, if it is still the one waiting. */
-export function abandonCapture(id: string): void {
-  if (state.capture?.id === id) endCapture(true);
-}
-
 /**
  * Takes in what the shortcut did: a copy (`value`, `empty`, `too_large`), or `gone` for one the shell let go of. A `gone` for another id than the
  * one held is an old copy's and changes nothing. With no vault in existence at all (first-time setup is showing) the copy is let go and nothing
- * shows. A copy that comes while another waits replaces it: what was typed in the box is kept, and `changed` says the value differs.
+ * shows. A copy that comes while another waits replaces it: what was typed in the box is kept, the choice and the hand-over too, and `changed` says
+ * the value differs.
  */
 function takeCapture(event: unknown): void {
   if (!isRecord(event) || typeof event.capture_id !== "string") return;
   const id = event.capture_id;
   const copied = event.state;
   if (copied === "gone") {
-    if (state.capture?.id === id) endCapture(false, converting !== id);
+    if (state.capture?.id !== id) return;
+    // The shell empties its slot as it reads the copy as a `.env`: the read says what comes of the box.
+    if (converting === id) goneWhileConverting = id;
+    else endCapture(false);
     return;
   }
   if (copied !== "value" && copied !== "empty" && copied !== "too_large") return;
@@ -4568,6 +5689,7 @@ function takeCapture(event: unknown): void {
     return;
   }
   const before = state.capture;
+  captureOpenings += before === null ? 1 : 0;
   set({
     ...state,
     capture: {
@@ -4576,31 +5698,269 @@ function takeCapture(event: unknown): void {
       envKeys: copied === "value" && typeof event.env_keys === "number" ? event.env_keys : null,
       changed: (before?.changed ?? false) || event.changed === true,
       chosen: before?.chosen ?? null,
+      opening: before?.opening ?? captureOpenings,
+      choice: before?.choice ?? null,
+      choiceName: before?.choiceName ?? null,
     },
   });
+  // The shell keeps a copy's binding when another replaces it. With a locked vault chosen, `seatCapture` asks the shell again for this copy while the page still counts
+  // it as handed to a vault (an unchoose still out for the copy that went answers `not_found` and changes nothing here).
+  seatCapture();
+}
+
+/** Whether two choices are the same vault: the same open session, or the same locked listed vault. */
+function sameChoice(a: SaveChoice | null, b: SaveChoice | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.kind === "open") return b.kind === "open" && a.session === b.session;
+  return b.kind === "locked" && a.vault === b.vault && a.list === b.list;
+}
+
+/** Whether an open session is the vault `id` of registry list `list`: an ID is only a vault within its own list. */
+function isListed(session: SessionData, list: number, id: number): boolean {
+  return session.vaultId === id && session.vaultList === list;
+}
+
+/** The value a choice has in the box's Vault list (`SaveOption.value`): an open session, or a listed vault by its list and ID. */
+export function saveChoiceValue(choice: SaveChoice): string {
+  return choice.kind === "open" ? `s:${String(choice.session)}` : `v:${String(choice.list)}:${String(choice.vault)}`;
+}
+
+/** Whether an open vault is waiting on a step the design says shows nothing of the vault yet: its recovery key (21f, 29b) or Ask 3 (its details changed outside Lockbox). */
+function waitsOnStep(entry: SessionData): boolean {
+  return entry.recovery !== null || entry.asks.detailsChanged;
+}
+
+/** Whether an open session can take the copy now: writable and not waiting on a step. */
+function ready(session: SessionData): boolean {
+  return !session.readOnly && !waitsOnStep(session);
+}
+
+/**
+ * Why the vault chosen in the box can't take the copy now, or `null` when it can (or it is a locked one to unlock): `read_only` (it is open and read-only, on screen or
+ * behind), `step` (it is open and waiting on a step: its recovery key, or Ask 3), or `gone` (a locked one that left the list or can't be reached). The box stays on that
+ * vault, says why, and offers no Save; only the person's own pick moves it. A locked choice whose vault is open and ready returns `null`: the store settles it onto the session.
+ */
+export function boxBlock(choice: SaveChoice, sessions: readonly SessionData[], vaults: readonly VaultEntry[] | null): "read_only" | "step" | "gone" | null {
+  const open = choice.kind === "open" ? sessions.find((one) => one.session === choice.session) : sessions.find((one) => isListed(one, choice.list, choice.vault));
+  if (open !== undefined) return open.readOnly ? "read_only" : waitsOnStep(open) ? "step" : null;
+  if (choice.kind === "open" || vaults === null) return null;
+  const listed = vaults.find((entry) => entry.list === choice.list && entry.id === choice.vault);
+  return listed === undefined || !listed.available || listed.details_damaged || listed.name === null ? "gone" : null;
+}
+
+/** The name the box says a choice by: the open session's (renamed since it was listed), the list's for a locked one, else the one kept (`fallback`) when it is gone. */
+function choiceNameOf(choice: SaveChoice, sessions: readonly SessionData[], vaults: readonly VaultEntry[] | null, fallback: string | null): string {
+  if (choice.kind === "open") return sessions.find((one) => one.session === choice.session)?.name ?? fallback ?? "";
+  const open = sessions.find((one) => isListed(one, choice.list, choice.vault));
+  if (open !== undefined) return open.name;
+  const listed = vaults?.find((entry) => entry.list === choice.list && entry.id === choice.vault);
+  return listed?.name ?? fallback ?? "";
+}
+
+/**
+ * The vaults the save box offers to save into, the one on screen first when it can take a key, then every listed vault in the list's order that can: an open one
+ * that is writable, or a locked one (it is unlocked in the box). One that is unavailable, whose details can't be read or that is open read-only is not a choice, and
+ * neither is a writable session that is not on the list unless it is the one on screen. Two labels alike say their place on the list ("Home, 2 of 3", as the vault
+ * strip does). Before the list has come, only the window on screen is offered. An open vault behind the window that is waiting on a step (its recovery key, 21f
+ * and 29b, or Ask 3) shows nothing of itself until the step is done, so it is not offered either. `keep` is the box's own choice, with the name kept for it: the box never
+ * moves it by itself, so it is always on offer as its own entry, whatever became of its vault (open but read-only or waiting on a step, on screen or behind; left the
+ * list; unavailable), where the vault's own row would be skipped or would stand for another choice. A locked choice whose vault is open and ready is left to the open
+ * session, which the store settles it onto.
+ */
+export function saveChoices(
+  front: SessionData | undefined,
+  sessions: readonly SessionData[],
+  vaults: readonly VaultEntry[] | null,
+  keep: { choice: SaveChoice; name: string } | null = null,
+): SaveOption[] {
+  // A vault is its list's identity and its ID together: a replaced list may give an ID to another vault.
+  type Vault = { list: number; id: number };
+  const found: { choice: SaveChoice; name: string; place: number | null; vault: Vault | null }[] = [];
+  const list = vaults ?? [];
+  const same = (one: Vault | null, other: Vault) => one !== null && one.list === other.list && one.id === other.id;
+  if (front !== undefined && !front.readOnly) {
+    const own = { list: front.vaultList, id: front.vaultId };
+    const at = list.findIndex((entry) => same(own, entry));
+    found.push({ choice: { kind: "open", session: front.session }, name: front.name, place: at < 0 ? null : at + 1, vault: own });
+  }
+  list.forEach((entry, at) => {
+    if ((front !== undefined && isListed(front, entry.list, entry.id)) || !entry.available || entry.details_damaged || entry.name === null) return;
+    const open = sessions.find((one) => isListed(one, entry.list, entry.id));
+    const vault = { list: entry.list, id: entry.id };
+    if (open === undefined) found.push({ choice: { kind: "locked", vault: entry.id, list: entry.list }, name: listedName(entry), place: at + 1, vault });
+    else if (ready(open)) found.push({ choice: { kind: "open", session: open.session }, name: open.name, place: at + 1, vault });
+  });
+  if (keep !== null) {
+    const chosen = keep.choice;
+    const own = chosen.kind === "open" ? sessions.find((one) => one.session === chosen.session) : undefined;
+    const vault: Vault | null = chosen.kind === "locked" ? { list: chosen.list, id: chosen.vault } : own === undefined ? null : { list: own.vaultList, id: own.vaultId };
+    const at = vault === null ? -1 : list.findIndex((entry) => same(vault, entry));
+    const kept = { choice: keep.choice, name: keep.name, place: at < 0 ? null : at + 1, vault };
+    const there = vault === null ? -1 : found.findIndex((one) => same(one.vault, vault));
+    if (there < 0) found.push(kept);
+    else if (!sameChoice(found[there]?.choice ?? null, keep.choice)) {
+      // The vault has a row of its own that is not the choice: a locked choice whose vault is open and ready becomes that session (the store settles it); any other
+      // is kept as the entry the person chose in that row's place.
+      const session = vault === null ? undefined : sessions.find((one) => isListed(one, vault.list, vault.id));
+      if (session === undefined || !ready(session)) found[there] = kept;
+    }
+  }
+  return found.map((one) => {
+    const alike = found.filter((other) => other.name === one.name).length > 1;
+    return {
+      value: saveChoiceValue(one.choice),
+      label: alike && one.place !== null ? `${one.name}, ${String(one.place)} of ${String(list.length)}` : one.name,
+      name: one.name,
+      choice: one.choice,
+    };
+  });
+}
+
+/** The window on screen's panel closes (the box takes its place, as opening a tool did); the records of its other panels are left as they are. */
+function closePanelFor(session: number): void {
+  update(session, (current) => ({ ...endReveals(current), openItem: null, tool: null }));
+}
+
+/**
+ * Puts a waiting copy in front of the person, and settles the vault it is for. With no window on screen there is nothing to do: the lock screen shows the step
+ * (8b), and `unlock` comes back here. The first time a window is on screen the box starts on the first vault it offers (the window on screen when it can take a
+ * key, else the first listed vault that can), and the panel of that window closes. After that the box never moves the choice by itself (Task 10b): when the vault
+ * chosen can't take the copy (read-only, waiting on a step, left the list, unavailable, on screen or behind) the choice stays, the box says why and offers no Save, and
+ * nothing is handed to another vault; only the person's own pick (`chooseSaveVault`) changes it. The one thing done on its own is to settle a locked choice onto its
+ * vault's session once that is open and ready. An open choice is handed to the shell (`capture_choose`) once for its session and generation. A locked one is handed to
+ * none: if the page still counts the copy as handed to a vault (the shell has not answered that it was let go for this copy), the unchoose is asked, once at a time.
+ * With nothing to offer at the first seat the copy is let go and "This vault is read-only." is said, as before. Safe to call again: nothing is sent twice for the same.
+ */
+function seatCapture(): void {
+  const capture = state.capture;
+  const front = state.sessions.at(-1);
+  if (capture === null || front === undefined) return;
+  let choice = capture.choice;
+  let name = capture.choiceName;
+  if (choice === null) {
+    // The first seat: the first vault the box offers.
+    const first = saveChoices(front, state.sessions, state.vaults, null)[0];
+    if (first === undefined) {
+      sayFailure(front.session, { code: "read_only" });
+      endCapture(true);
+      return;
+    }
+    if (first.choice.kind === "open" && first.choice.session === front.session) closePanelFor(front.session);
+    choice = first.choice;
+    name = first.name;
+  } else if (choice.kind === "locked") {
+    // Its vault is open now and can take a key: the choice is that session. Anything else (still locked, or open but unable) stays as it is.
+    const { vault, list } = choice;
+    const opened = state.sessions.find((one) => isListed(one, list, vault));
+    if (opened !== undefined && boxBlock(choice, state.sessions, state.vaults) === null) {
+      choice = { kind: "open", session: opened.session };
+      name = opened.name;
+    }
+  }
+  const now = state.capture;
+  if (now === null) return;
+  // The name is kept with the choice, and follows the vault's own (a rename) while it can be read.
+  name = choiceNameOf(choice, state.sessions, state.vaults, name);
+  const entry = choice.kind === "open" ? sessionOf(choice.session) : undefined;
+  const bound = choice.kind === "open" ? (entry?.session ?? now.chosen) : now.chosen;
+  if (!sameChoice(now.choice, choice) || now.choiceName !== name || now.chosen !== bound) set({ ...state, capture: { ...now, choice, choiceName: name, chosen: bound } });
+  if (choice.kind === "locked") {
+    // Handed to no vault. The page counts the copy as unbound only once the shell has answered for this copy's id (`unchooseCapture`), so until then a lock of the vault it
+    // was handed to still ends it here as it does there, and a copy that replaced it (which keeps the binding in the shell) is asked again.
+    if (state.capture?.chosen !== null && !unchoosing(now.id)) {
+      chooseSent = null;
+      handOver(now.id, { kind: "unchoose" });
+    }
+    return;
+  }
+  if (entry === undefined) return;
+  const sent = `${now.id}:${String(entry.session)}:${String(entry.generation)}`;
+  if (chooseSent === sent) return;
+  chooseSent = sent;
+  handOver(now.id, { kind: "choose", session: entry.session, generation: entry.generation });
+}
+
+/** The box's Vault list, settled again after the vaults on offer changed under it (a vault went unavailable, a window was switched): the store's own `seatCapture`. */
+export function settleSaveChoice(): void {
   seatCapture();
 }
 
 /**
- * Puts a waiting copy in front of the person: in the vault on screen (the one opened last), its box takes the panel as opening any tool
- * does, and the copy is handed to it. With no vault open there is nothing to do: the lock screen shows the step (8b), and `unlock` comes back
- * here. A read-only vault cannot take a key, so it is said and the copy is let go. A box already open stays as it is, with what was typed.
+ * The box's Vault list: the vault chosen is the one the copy is for. The same choice does nothing. An open vault is handed the copy (`capture_choose`, once for its
+ * session and generation). A locked one hands it to none (`capture_unchoose`), so only a lock of every vault lets it go while its password is asked for in the box:
+ * an `unchoose` that finds the copy gone closes the box quietly, and another refusal is not said (the old binding stays, whose lock still closes the box).
  */
-function seatCapture(): void {
+export function chooseSaveVault(choice: SaveChoice): void {
   const capture = state.capture;
-  const active = state.sessions.at(-1);
-  if (capture === null || active === undefined) return;
-  if (active.readOnly) {
-    sayFailure(active.session, { code: "read_only" });
-    endCapture(true);
-    return;
+  if (capture === null || sameChoice(capture.choice, choice)) return;
+  // The name goes with the choice, from the entry the person picked in the list.
+  const name = saveChoices(state.sessions.at(-1), state.sessions, state.vaults, capture.choice === null ? null : { choice: capture.choice, name: capture.choiceName ?? "" }).find((one) =>
+    sameChoice(one.choice, choice),
+  )?.name;
+  chooseSent = null;
+  set({ ...state, capture: { ...capture, choice, choiceName: name ?? choiceNameOf(choice, state.sessions, state.vaults, null) } });
+  seatCapture();
+}
+
+/** What a hand-over asks of the shell: the copy for one session at one generation, or for none. */
+type HandOver = { kind: "choose"; session: number; generation: number } | { kind: "unchoose" };
+
+/**
+ * Asks the shell to hand copy `id` over, one at a time and the last asked only: it waits for the one that is out, and is not sent if another was asked after it, or
+ * the copy has gone meanwhile. `choosing` is for the one asked last, which Reveal and Save wait for (`handedOver`).
+ */
+function handOver(id: string, what: HandOver): void {
+  handTicket += 1;
+  const ticket = handTicket;
+  const before = choosing?.id === id ? choosing.done : Promise.resolve(true);
+  const mine: { id: string; kind: "choose" | "unchoose"; out: boolean; failed: boolean; done: Promise<boolean> } = {
+    id,
+    kind: what.kind,
+    out: true,
+    failed: false,
+    done: Promise.resolve(true),
+  };
+  mine.done = (async () => {
+    let worked = false;
+    try {
+      await before;
+      if (state.capture?.id !== id) return false;
+      // Asked again since: that one is sent, and this is no news for whoever waited on it.
+      if (ticket !== handTicket) {
+        worked = true;
+        return true;
+      }
+      worked = what.kind === "choose" ? await chooseCapture(what.session, what.generation, id) : await unchooseCapture(id);
+      return worked;
+    } finally {
+      mine.out = false;
+      mine.failed = !worked;
+    }
+  })();
+  choosing = mine;
+}
+
+/**
+ * Whether the copy is handed over, once the hand-over that is out has been answered: false when it did not work (the page has said so, or the box is gone). A newer one
+ * asked meanwhile is waited for too. A caller that finds none out (`handingOver`) goes on in the same step instead of waiting a turn for nothing.
+ */
+async function handedOver(id: string): Promise<boolean> {
+  for (;;) {
+    const waiting = choosing;
+    if (waiting === null || waiting.id !== id || !waiting.out) return true;
+    if (!(await waiting.done)) return false;
+    if (choosing === waiting) return true;
   }
-  if (active.tool?.kind !== "save_box") openTool(active.session, { kind: "save_box" });
-  const sent = `${capture.id}:${String(active.session)}:${String(active.generation)}`;
-  if (chooseSent === sent) return;
-  chooseSent = sent;
-  set({ ...state, capture: { ...capture, chosen: active.session } });
-  choosing = { id: capture.id, done: chooseCapture(active.session, active.generation, capture.id) };
+}
+
+/** Whether a hand-over of copy `id` is out right now. */
+function handingOver(id: string): boolean {
+  return choosing?.id === id && choosing.out;
+}
+
+/** Whether the hand-over asked last for copy `id` is an unchoose that is still out. */
+function unchoosing(id: string): boolean {
+  return choosing?.id === id && choosing.out && choosing.kind === "unchoose";
 }
 
 /**
@@ -4627,6 +5987,23 @@ async function chooseCapture(session: number, generation: number, id: string): P
   }
 }
 
+/**
+ * `capture_unchoose`: tells the shell the copy is handed to no vault. An old id means the shell has let go or replaced the copy, so the box goes quietly. Any other
+ * refusal is not said: the old binding stays, and its lock still closes the box. Nothing waits on the answer being good: there is no vault to ask anything of.
+ */
+async function unchooseCapture(id: string): Promise<boolean> {
+  try {
+    await api.captureUnchoose(id);
+  } catch (error) {
+    if (refusedWith(error, "not_found") && state.capture?.id === id) endCapture(false);
+    return true;
+  }
+  // The shell has answered for this copy: only now is it unbound here. (An answer for a copy that was replaced since is not about the one on screen.)
+  const now = state.capture;
+  if (now?.id === id && now.choice?.kind === "locked" && now.chosen !== null) set({ ...state, capture: { ...now, chosen: null } });
+  return true;
+}
+
 /** What Reveal came to: the value (for the box that asked to keep, never here), a copy that is gone (nothing to say), or a refusal. */
 export type CaptureRevealed = { value: string } | "gone" | { failed: unknown };
 
@@ -4639,7 +6016,9 @@ export type CaptureRevealed = { value: string } | "gone" | { failed: unknown };
  */
 export async function revealCapture(id: string): Promise<CaptureRevealed> {
   const current = () => state.capture?.id === id;
-  if (choosing?.id === id && !(await choosing.done)) return "gone";
+  // A hand-over that is out is waited for, and one that did not work (the page has said so) is not asked past: nothing is asked of a copy that was not handed over.
+  const handing = choosing?.id === id ? choosing : null;
+  if (handing !== null && (handing.out ? !(await handedOver(id)) : handing.failed)) return "gone";
   if (!current()) return "gone";
   try {
     const value = await api.captureReveal(id);
@@ -4686,16 +6065,31 @@ async function copyStillThere(id: string): Promise<boolean> {
 /** How saving the copy came out: saved (the box is gone, the key is open), a name taken (`clash` is the name Keep both would use), a lock or a gone copy (nothing to say), or the refusal. */
 export type CaptureSaveResult = "saved" | "stale" | "gone" | { clash: string } | { failed: unknown };
 
+/** What Save is told when the copy is not handed to the vault it was asked for: the shell's own refusal of the same, so the box says it the same way. */
+const NOT_HANDED_OVER = { code: "invalid_input", what: "capture vault" };
+
 /**
- * Saves the copy as a key in the vault, in one write by the shell, which also clears the clipboard when asked. A name that is taken comes
- * back as `clash`, with nothing written. Saved: the copy is over, the list is read again, the new key is selected and "<name> saved in <where>" is said,
- * with what became of the clipboard (`sayAfterSave`). A refusal comes back for the box to say, and the box stays. A lock meanwhile gets nothing
- * said (what was written stays written); a copy the shell no longer has closes the box quietly, but a `not_found` while the copy is still waiting
- * is about the folder, and is said.
+ * Saves the copy as a key in the vault, in one write by the shell, which also clears the clipboard when asked. The shell saves only into the vault the copy is
+ * handed to: Save waits for a hand-over that is out, and asks nothing when the box's choice is not that session (the hand-over is settled again, and the refusal
+ * comes back as the shell's own would: the box says it and nothing was written). A name that is taken comes back as `clash`, with nothing written. Saved: the copy
+ * is over, the vault's list is read again, the new key is selected when that vault is the window on screen, and `where` is said (`<name> saved in <where>`), with
+ * what became of the clipboard (`sayAfterSave`). A refusal comes back for the box to say, and the box stays. A lock meanwhile gets nothing said (what was written
+ * stays written); a copy the shell no longer has closes the box quietly, but a `not_found` while the copy is still waiting is about the folder, and is said.
  */
 export async function saveCapture(session: number, save: api.CaptureSave, where: string): Promise<CaptureSaveResult> {
+  if (handingOver(save.captureId) && !(await handedOver(save.captureId))) return "gone";
+  const capture = state.capture;
+  if (capture?.id !== save.captureId) return "gone";
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
+  if (capture.chosen !== session) {
+    seatCapture();
+    return { failed: NOT_HANDED_OVER };
+  }
+  // The choice as it is now, right before sending: this vault, open, writable and not waiting on a step. A vault that has become blocked (an open name question
+  // outlived it), or that is no longer the choice (a Save queued while another vault was picked and the shell's unbinding failed), is sent nothing.
+  const choice = capture.choice;
+  if (choice?.kind !== "open" || choice.session !== session || !ready(entry)) return "stale";
   const { generation } = entry;
   try {
     const answer = await api.captureSave({ session, generation }, save);
@@ -4707,10 +6101,11 @@ export async function saveCapture(session: number, save: api.CaptureSave, where:
     const record = sessionOf(session);
     if (record === undefined) return "stale";
     if ((await loadItems(record)) === "stale" || !stillOpen(session, generation)) return "stale";
-    // The saved key is selected only if the panel is still free: another press, or another form or item opened while this was on its way, has
-    // the panel now, and it is left as it is (its copy, or what was typed in it). The save is still said.
+    // The saved key is selected only if that vault is the window on screen and its panel is still free: another press, or another form or item opened while this
+    // was on its way, has the panel now, and it is left as it is (its copy, or what was typed in it). A vault saved into behind the window on screen stays
+    // behind it. The save is still said.
     const now = sessionOf(session);
-    if (state.capture === null && now !== undefined && now.tool === null && now.openItem === null) {
+    if (state.capture === null && now !== undefined && state.sessions.at(-1)?.session === session && now.tool === null && now.openItem === null) {
       void selectItem(session, id, { saved: true });
     }
     sayAfterSave(session, `${name} saved in ${where}`, clipboard);
@@ -4718,6 +6113,12 @@ export async function saveCapture(session: number, save: api.CaptureSave, where:
   } catch (error) {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    if (refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "capture vault") {
+      // The shell holds the copy for another vault than the box's choice: the hand-over is sent again, and the refusal is said.
+      chooseSent = null;
+      seatCapture();
+      return { failed: error };
+    }
     if (refusedWith(error, "not_found") && !(await copyStillThere(save.captureId))) return "gone";
     return { failed: error };
   }
@@ -4736,18 +6137,19 @@ export async function captureAsEnv(session: number, id: string, folder: string):
   if (entry === undefined || entry.readOnly) return "stale";
   const { generation } = entry;
   converting = id;
+  let opened = false;
   try {
     const answer = await api.captureEnv({ session, generation }, id);
     if (!stillOpen(session, generation)) return "stale";
     const rows = answer.data;
-    // The box that asked is still the one on screen, with no newer copy in it: a second press while this was on its way has a box of its own,
-    // which this must not close, and a box that was cancelled has nothing to open on. Either way the values this read parked are let go.
-    const newer = state.capture !== null && state.capture.id !== id;
-    if (newer || sessionOf(session)?.tool?.kind !== "save_box") {
+    // The box that asked is still the one on screen, with no newer copy in it: a second press while this was on its way has a copy of its own (the
+    // same box, which this must not close), and a box that was cancelled has nothing to open on. Either way the values this read parked are let go.
+    if (state.capture?.id !== id) {
       if (rows.token !== null) releaseEnv(session, generation, rows.token, rows.rows.map((row) => row.index));
       return "gone";
     }
     endCapture(false);
+    opened = true;
     pasteOpenings += 1;
     openTool(session, { kind: "paste_env", opening: pasteOpenings, rows, folder });
     return "opened";
@@ -4761,7 +6163,38 @@ export async function captureAsEnv(session: number, id: string, folder: string):
     return { failed: error };
   } finally {
     if (converting === id) converting = null;
+    // The shell let go of the copy as it read it, and the read did not take it over: the box goes, as the shell's `gone` would have closed it.
+    if (goneWhileConverting === id) {
+      goneWhileConverting = null;
+      if (!opened && state.capture?.id === id) endCapture(false);
+    }
   }
+}
+
+/**
+ * The box's own unlock, for the vault chosen in it while it is locked (8b's content in the panel): sends the vault's registry ID and the text, once, and nothing else;
+ * the screen wipes its box as it calls this. `"stale"` (nothing sent) unless the box is still the one that asked (`opening`) with that same vault chosen, and also when
+ * the vault locked again before the answer was read, which is not an error. A refusal (a wrong password) is thrown for the box to say. The vault opens behind the window
+ * on screen (the window stays; with none open it is the window): its session is seated like any, which turns the box's choice into that session and hands the copy to
+ * it (`capture_choose`) only while the box's choice is still that vault. A choice changed meanwhile leaves the vault open behind, with the copy handed to none.
+ */
+export async function unlockInBox(opening: number, choice: Extract<SaveChoice, { kind: "locked" }>, password: string): Promise<"opened" | "stale"> {
+  const capture = state.capture;
+  if (capture?.opening !== opening || !sameChoice(capture.choice, choice) || password === "") return "stale";
+  let answer: api.Tagged<api.UnlockView>;
+  try {
+    answer = await api.unlockVault({ list: choice.list, id: choice.vault }, password);
+  } catch (error) {
+    // A lock of every vault, or the window's close, that lands during the unlock is refused as locked: no session exists yet for a lock event to clear.
+    if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
+    throw error;
+  }
+  // Held already (the same vault unlocked elsewhere meanwhile): nothing is made twice; the box's choice is settled on it.
+  if (sessionOf(answer.session)?.generation === answer.generation) {
+    seatCapture();
+    return "opened";
+  }
+  return publishUnlock(answer, choice.vault, "behind", false, choice.list);
 }
 
 /** Opens the search (Ctrl+F, Ctrl+K): the one search, empty. It does nothing when there is no vault open, or one is open already. */
@@ -4819,7 +6252,7 @@ function sayInSearch(error: unknown): void {
 export function showResult(session: number, id: string): void {
   const entry = sessionOf(session);
   if (entry === undefined) return;
-  set({ ...state, sessions: [...state.sessions.filter((other) => other.session !== session), entry] });
+  set({ ...state, sessions: withFront(state.sessions, entry) });
   closeSearch();
   void selectItem(session, id);
 }
@@ -4915,8 +6348,9 @@ export function useNotices(): Notices {
   return useSelect((current) => current.notices);
 }
 
-export function useLockNote(): unknown {
-  return useSelect((current) => current.lockNote);
+/** What the lock screen says about the vault with this registry ID (Ask 16), or `null` for nothing (and for no vault chosen). */
+export function useLockNote(vault: number | null): unknown {
+  return useSelect((current) => (vault === null ? null : (current.lockNotes.find((note) => note.vault === vault)?.refusal ?? null)));
 }
 
 /** The search, or `null` while it is closed. */
@@ -4932,6 +6366,16 @@ export function useSettings(): api.Settings {
 /** The copy the save shortcut left waiting, or `null` for none. */
 export function useCapture(): CaptureView | null {
   return useSelect((current) => current.capture);
+}
+
+/** The number of the box the waiting copy is in, or `null` for no copy: for the app, which mounts the box by it, with no redraw for the copy's other changes. */
+export function useCaptureOpening(): number | null {
+  return useSelect((current) => current.capture?.opening ?? null);
+}
+
+/** Whether a copy waits, and so the save box is up: for a window that makes room for the box and leaves its own panels be, with no redraw for the copy's changes. */
+export function useCaptureWaiting(): boolean {
+  return useSelect((current) => current.capture !== null);
 }
 
 /** The vault's item list, or `null` while it is on its way or when the vault is not unlocked. */
@@ -4962,6 +6406,9 @@ export function resetStoreForTests(): void {
   choosing = null;
   chooseSent = null;
   converting = null;
+  goneWhileConverting = null;
+  captureOpenings = 0;
+  handTicket = 0;
   confirmingClose = false;
   searchRun = 0;
   searchShown = 0;
@@ -4969,6 +6416,11 @@ export function resetStoreForTests(): void {
   retryingOpen = false;
   retryingRestore = false;
   dismissingRestore = false;
+  forgotOpenings = 0;
+  forgotRuns = 0;
+  unlockOpenings = 0;
+  newVaultOpenings = 0;
+  addFolderOpenings = 0;
   settingsLine = Promise.resolve();
   shortcutNoticeVoid = false;
   listRuns.clear();

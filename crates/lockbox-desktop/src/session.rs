@@ -175,12 +175,13 @@ pub trait Notifier: Send + Sync {
 }
 
 /// What an opening closure gives back: a new session, or a question to ask first, whose state waits in [`Pending`]
-/// (`recover_vault`'s changed header). The `fn` builds the question from the new token.
+/// (`create_vault`'s cloud folder). The `fn` builds the question from the new token.
 // Returned once per open and unpacked straight away: boxing the vault would only add an allocation.
 #[allow(clippy::large_enum_variant)]
 pub enum OpenStep<X> {
     Session(Location, Opened, X),
-    Ask(PendingChoice, fn(Token) -> Confirm),
+    /// A question first: the choice to park, and how to ask it once parked (it may name what the check found).
+    Ask(PendingChoice, Box<dyn FnOnce(Token) -> Confirm + Send>),
 }
 
 /// What [`Sessions::open`] answers: `Outcome<Tagged<(SessionInfo, Option<X>)>>`, the session and `X` when the
@@ -393,13 +394,69 @@ impl Handle {
             }),
         }
     }
+
+    /// What a writable session holds about its recovery key: `ReadOnly` for a read-only session.
+    fn keys(&self) -> ShellResult<&Mutex<KeyState>> {
+        match self {
+            Handle::Writable(held) => Ok(&held.keys),
+            Handle::ReadOnly(_) => Err(ShellError::ReadOnly),
+        }
+    }
+}
+
+/// What a writable session knows about the recovery keys it has made, for as long as the vault stays unlocked in one
+/// generation (a lock drops it with the vault, and an unlock starts it again).
+///
+/// Every change to it other than a grant happens while the vault's write lock is held (the commands that make or
+/// confirm a key run inside [`Sessions::write_keys`]), so a key's issue and its confirmation never interleave.
+#[derive(Default)]
+pub struct KeyState {
+    /// Whether this session may make a new recovery key without being given the password (21f's step: a key nobody
+    /// has typed part of back, so the person is still in the screens that make one). Granted when a writable unlock
+    /// enters 21f from a mark that was read without error, and when a vault is created; kept for that step's retries;
+    /// revoked when the current key is confirmed.
+    may_make_without_password: bool,
+    /// The `issue` number of the last key this session made: 0 until one is, then 1, 2, ... The creation key is 1.
+    last_issue: u64,
+}
+
+impl KeyState {
+    pub fn may_make_without_password(&self) -> bool {
+        self.may_make_without_password
+    }
+
+    /// Takes 21f's permission back.
+    pub fn revoke(&mut self) {
+        self.may_make_without_password = false;
+    }
+
+    /// Notes that a key was made, and gives its `issue` number.
+    pub fn next_issue(&mut self) -> u64 {
+        self.last_issue += 1;
+        self.last_issue
+    }
+
+    /// Whether `issue` is the last key made (never true for 0, which no key has).
+    pub fn is_latest(&self, issue: u64) -> bool {
+        issue != 0 && issue == self.last_issue
+    }
 }
 
 /// A vault, counted among its session's [`Vaults`] until it is dropped. Fields drop in order, so the vault goes
 /// before the count does.
 struct Held<T> {
     vault: T,
+    /// Only a writable session uses it.
+    keys: Mutex<KeyState>,
     _counted: Counted,
+}
+
+/// A change a lock may overtake: what it was, for the page's words, and the registry ID of the vault it was made to
+/// (0: the vault is not on the list, or its ID is not known where the change was started).
+#[derive(Clone, Copy, Debug)]
+pub struct Change {
+    pub what: &'static str,
+    pub vault: u32,
 }
 
 /// One vault of a session, counted from when it becomes the session's until it is dropped.
@@ -512,7 +569,7 @@ impl Lease {
         id: SessionId,
         generation: u64,
         result: ShellResult<T>,
-        change: Option<&'static str>,
+        change: Option<Change>,
     ) -> ShellResult<Tagged<T>> {
         let Lease { handle, gate, .. } = self;
         drop(handle);
@@ -527,11 +584,12 @@ impl Lease {
     }
 }
 
-/// The answer for work a lock overtook: `LockedAfterChange` when it was a change (`what`) that went through, else
-/// `Locked`.
-fn overtaken<T>(result: &ShellResult<T>, change: Option<&'static str>) -> ShellError {
+/// The answer for work a lock overtook: `LockedAfterChange` when it was a change that went through, else `Locked`.
+fn overtaken<T>(result: &ShellResult<T>, change: Option<Change>) -> ShellError {
     match (result, change) {
-        (Ok(_), Some(what)) => ShellError::LockedAfterChange { what },
+        (Ok(_), Some(Change { what, vault })) => ShellError::LockedAfterChange { what, vault },
+        // A change the closure itself found had landed though its write came back as an error: a lock does not take that back.
+        (Err(landed @ ShellError::LockedAfterChange { .. }), _) => *landed,
         _ => ShellError::Locked,
     }
 }
@@ -577,6 +635,9 @@ fn wait_for<G>(
 struct Inner {
     sessions: Vec<Entry>,
     opening: Vec<Opening>,
+    /// The locations a Remove from the vault list holds ([`Sessions::begin_removal`]): an open of one answers `Busy`
+    /// while it is there, so an unlock never lands on a vault that is being taken off the list.
+    removing: Vec<Location>,
     /// Bumped by every lock of all vaults: an open that started before one discards what it made.
     epoch: u64,
     /// The token the jobs with no session are children of: cancelled and replaced by every lock of all vaults, in the
@@ -618,10 +679,14 @@ impl Inner {
         })
     }
 
-    /// What an open of `location` answers without running: the session already unlocked there, or `Busy` while
-    /// another open of it is under way. `None`: it runs.
+    /// What an open of `location` answers without running: `Busy` while a Remove of it is under way (first, so it is
+    /// never the session the Remove is locking), the session already unlocked there, or `Busy` while another open of
+    /// it is under way. `None`: it runs.
     fn open_answer<X>(&self, location: Option<&Location>) -> Option<ShellResult<OpenAnswer<X>>> {
         let location = location?;
+        if self.removing.contains(location) {
+            return Some(Err(BUSY));
+        }
         if let Some(entry) = self.unlocked_at(location) {
             return Some(Ok(Outcome::Done(tag_info(entry.info(), None))));
         }
@@ -665,6 +730,7 @@ impl Inner {
                 false,
                 Handle::Writable(Arc::new(Held {
                     vault: RwLock::new(vault),
+                    keys: Mutex::default(),
                     _counted: counted,
                 })),
             ),
@@ -673,6 +739,7 @@ impl Inner {
                 true,
                 Handle::ReadOnly(Arc::new(Held {
                     vault,
+                    keys: Mutex::default(),
                     _counted: counted,
                 })),
             ),
@@ -715,6 +782,34 @@ impl Drop for OpeningGuard<'_> {
         if !self.done {
             let mut inner = self.sessions.inner();
             self.finish(&mut inner);
+        }
+    }
+}
+
+/// A Remove from the vault list that holds its location ([`Sessions::begin_removal`]): takes the location out of
+/// `removing` when it is dropped, also when the Remove panicked.
+pub(crate) struct Removal<'a> {
+    sessions: &'a Sessions,
+    location: Location,
+    session: Option<SessionId>,
+}
+
+impl Removal<'_> {
+    /// The session that was unlocked at the location when the Remove began, if any.
+    pub(crate) fn session(&self) -> Option<SessionId> {
+        self.session
+    }
+}
+
+impl Drop for Removal<'_> {
+    fn drop(&mut self) {
+        let mut inner = self.sessions.inner();
+        if let Some(at) = inner
+            .removing
+            .iter()
+            .position(|held| *held == self.location)
+        {
+            inner.removing.remove(at);
         }
     }
 }
@@ -863,7 +958,7 @@ impl Sessions {
     pub fn open<X>(
         &self,
         location: Option<Location>,
-        what: Option<&'static str>,
+        what: Option<Change>,
         open: impl FnOnce(&CancelToken) -> ShellResult<OpenStep<X>>,
     ) -> ShellResult<OpenAnswer<X>> {
         self.open_with(
@@ -882,7 +977,7 @@ impl Sessions {
         &self,
         epoch: u64,
         location: Option<Location>,
-        what: Option<&'static str>,
+        what: Option<Change>,
         open: impl FnOnce(&CancelToken) -> ShellResult<OpenStep<X>>,
     ) -> ShellResult<OpenAnswer<X>> {
         self.open_with(
@@ -902,7 +997,7 @@ impl Sessions {
     pub fn open_choice<C, X>(
         &self,
         token: &Token,
-        what: Option<&'static str>,
+        what: Option<Change>,
         pick: impl FnOnce(PendingChoice) -> Result<(Option<Location>, C), PendingChoice>,
         open: impl FnOnce(C, &CancelToken) -> ShellResult<OpenStep<X>>,
     ) -> ShellResult<OpenAnswer<X>> {
@@ -924,7 +1019,7 @@ impl Sessions {
     fn open_with<C, X>(
         &self,
         since: Option<u64>,
-        what: Option<&'static str>,
+        what: Option<Change>,
         claim: impl FnOnce(&mut Vec<PendingChoice>) -> ShellResult<(Option<Location>, C)>,
         open: impl FnOnce(C, &CancelToken) -> ShellResult<OpenStep<X>>,
     ) -> ShellResult<OpenAnswer<X>> {
@@ -1053,15 +1148,45 @@ impl Sessions {
     }
 
     /// Like [`write`](Self::write), for a change the user must hear about even when a lock overtakes its answer (a
-    /// new password or recovery key): `LockedAfterChange { what }` when `f` succeeded.
+    /// new password or recovery key): `LockedAfterChange { what, vault }` when `f` succeeded.
     pub fn write_change<T>(
         &self,
         id: SessionId,
         generation: u64,
-        what: &'static str,
+        change: Change,
         f: impl FnOnce(&mut Vault, &CancelToken) -> ShellResult<T>,
     ) -> ShellResult<Tagged<T>> {
-        self.write_with(id, generation, Wait::Short, Some(what), f)
+        self.write_with(id, generation, Wait::Short, Some(change), f)
+    }
+
+    /// Like [`write`](Self::write) (or [`write_change`](Self::write_change), with a `change`), for a command that makes
+    /// or confirms a recovery key: `f` also gets the session's [`KeyState`], read and changed while the vault's write
+    /// lock is held, so no two such commands interleave.
+    pub fn write_keys<T>(
+        &self,
+        id: SessionId,
+        generation: u64,
+        change: Option<Change>,
+        f: impl FnOnce(&mut Vault, &mut KeyState, &CancelToken) -> ShellResult<T>,
+    ) -> ShellResult<Tagged<T>> {
+        self.write_inner(id, generation, Wait::Short, change, f)
+    }
+
+    /// Gives the session 21f's permission to make a recovery key without the password (see [`KeyState`]). Only the
+    /// session unlocked in `generation` gets it; a lock since then, or a read-only session, refuses.
+    pub fn grant_key_permission(&self, id: SessionId, generation: u64) -> ShellResult<()> {
+        let lease = self.inner().lease(id, generation)?;
+        lock(lease.handle.keys()?).may_make_without_password = true;
+        Ok(())
+    }
+
+    /// Grants the permission and numbers the key a new vault was made with (its `issue`, always 1: the session is new).
+    /// Refused as [`grant_key_permission`](Self::grant_key_permission) is.
+    pub fn start_creation_key(&self, id: SessionId, generation: u64) -> ShellResult<u64> {
+        let lease = self.inner().lease(id, generation)?;
+        let mut keys = lock(lease.handle.keys()?);
+        keys.may_make_without_password = true;
+        Ok(keys.next_issue())
     }
 
     fn read_with<T>(
@@ -1087,14 +1212,28 @@ impl Sessions {
         id: SessionId,
         generation: u64,
         wait: Wait,
-        change: Option<&'static str>,
+        change: Option<Change>,
         f: impl FnOnce(&mut Vault, &CancelToken) -> ShellResult<T>,
+    ) -> ShellResult<Tagged<T>> {
+        self.write_inner(id, generation, wait, change, |vault, _, cancel| {
+            f(vault, cancel)
+        })
+    }
+
+    fn write_inner<T>(
+        &self,
+        id: SessionId,
+        generation: u64,
+        wait: Wait,
+        change: Option<Change>,
+        f: impl FnOnce(&mut Vault, &mut KeyState, &CancelToken) -> ShellResult<T>,
     ) -> ShellResult<Tagged<T>> {
         let lease = self.inner().lease(id, generation)?;
         let held = lease.handle.writable()?;
+        let keys = lease.handle.keys()?;
         let result = {
             let mut vault = wait_for(wait, &lease.gate, generation, || held.try_write())?;
-            f(&mut vault, &lease.cancel)
+            f(&mut vault, &mut lock(keys), &lease.cancel)
         };
         lease.answer(id, generation, result, change)
     }
@@ -1165,6 +1304,58 @@ impl Sessions {
             return Err(ShellError::Locked);
         }
         f()
+    }
+
+    /// [`Sessions::publish`] for a writable session only: `ReadOnly` for a read-only one (after `NotFound` for a foreign
+    /// ID and `Locked` for a stale generation), in the same step that finds the session. The check reads the session's
+    /// handle and takes no lock of the vault, so a long change under way never makes it `Busy`.
+    pub fn publish_writable<T>(
+        &self,
+        id: SessionId,
+        generation: u64,
+        f: impl FnOnce() -> ShellResult<T>,
+    ) -> ShellResult<T> {
+        let gate = {
+            let mut inner = self.inner();
+            let (gate, live) = inner.live(id, generation)?;
+            live.handle.writable()?;
+            Arc::clone(gate)
+        };
+        let _attempt = lock(&gate.publish);
+        if !gate.is(generation) {
+            return Err(ShellError::Locked);
+        }
+        f()
+    }
+
+    /// Starts a Remove of the vault at `location` from the vault list, in one step under the sessions mutex: `Busy` when
+    /// an open of `location` is under way or a Remove of it already is; otherwise `location` is held in `removing` (an
+    /// open of it answers `Busy` from now on) until the [`Removal`] is dropped. `has_jobs` is asked of the session
+    /// unlocked at `location`, if there is one, and `Busy` when it says a job of that session runs. The caller holds
+    /// the auto-lock's list of running operations across this call, so no job begins in between.
+    pub(crate) fn begin_removal(
+        &self,
+        location: &Location,
+        has_jobs: impl FnOnce(SessionId) -> bool,
+    ) -> ShellResult<Removal<'_>> {
+        let mut inner = self.inner();
+        let opening = inner
+            .opening
+            .iter()
+            .any(|opening| opening.location.as_ref() == Some(location));
+        if opening || inner.removing.contains(location) {
+            return Err(BUSY);
+        }
+        let session = inner.unlocked_at(location).map(|entry| entry.id);
+        if session.is_some_and(has_jobs) {
+            return Err(BUSY);
+        }
+        inner.removing.push(location.clone());
+        Ok(Removal {
+            sessions: self,
+            location: location.clone(),
+            session,
+        })
     }
 
     /// Locks one session; nothing happens if it is not unlocked. Returns once its hooks ran (the page's lock command
@@ -1425,6 +1616,21 @@ impl Sessions {
             .iter()
             .find(|entry| entry.id == id)
             .map(|entry| entry.location.clone())
+    }
+
+    /// Lists the vault session `id` under `name`, locked or not: a rename made inside the vault, so that
+    /// [`list`](Self::list) says the new name (an unlock reads it from the header anyway). A backup keeps the name of
+    /// its file, and a session that is not there is left alone. Holds the sessions mutex only for the change, never
+    /// while waiting for a vault.
+    pub(crate) fn set_name(&self, id: SessionId, name: &str) {
+        let mut inner = self.inner();
+        let entry = inner
+            .sessions
+            .iter_mut()
+            .find(|entry| entry.id == id && matches!(entry.location, Location::Folder(_)));
+        if let Some(entry) = entry {
+            entry.name = name.to_owned();
+        }
     }
 
     /// Whether a session is unlocked at `location` or an open of it is under way, both read under the one sessions
@@ -1773,7 +1979,11 @@ mod tests {
             ),
         ];
         for (failure, expected) in failures {
-            for what in [None, Some("vault created")] {
+            let created = Change {
+                what: "vault created",
+                vault: 0,
+            };
+            for what in [None, Some(created)] {
                 let answer = sessions.open::<()>(None, what, |_| {
                     sessions.lock_all(LockReason::WindowsLocked);
                     Err(failure)
@@ -1890,7 +2100,11 @@ mod tests {
         let (started, go) = (Meet::default(), Meet::default());
         let answer = thread::scope(|s| {
             let changing = s.spawn(|| {
-                sessions.write_change(id, generation, "password", |_, _| {
+                let change = Change {
+                    what: "password",
+                    vault: 7,
+                };
+                sessions.write_change(id, generation, change, |_, _| {
                     started.wait();
                     go.wait();
                     Ok(())
@@ -1903,7 +2117,10 @@ mod tests {
         });
         assert_eq!(
             answer.err(),
-            Some(ShellError::LockedAfterChange { what: "password" })
+            Some(ShellError::LockedAfterChange {
+                what: "password",
+                vault: 7
+            })
         );
     }
 
@@ -1923,7 +2140,15 @@ mod tests {
         );
         assert_eq!(
             sessions
-                .write_change(id, generation, "password", |_, _| Ok(()))
+                .write_change(
+                    id,
+                    generation,
+                    Change {
+                        what: "password",
+                        vault: 7
+                    },
+                    |_, _| Ok(())
+                )
                 .err(),
             Some(ShellError::ReadOnly)
         );
@@ -2075,6 +2300,58 @@ mod tests {
         assert_ne!(Location::Backup(shouted), Location::Folder(canonical));
     }
 
+    fn name_of(sessions: &Sessions, id: SessionId) -> String {
+        sessions
+            .list()
+            .into_iter()
+            .find(|info| info.session == id)
+            .expect("the session is listed")
+            .name
+    }
+
+    /// A rename changes the name a vault's session is listed under, locked or not, and nothing else's: not another
+    /// session's, not a backup's (called what its file is called), and a session that is not there is left alone.
+    #[test]
+    fn set_name_changes_a_vault_sessions_listed_name_locked_or_not() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let (first, first_generation, _) = open_writable(&sessions, parent.path());
+        let (second, ..) = open_writable(&sessions, parent.path());
+        let backup = Location::Backup(parent.path().join("Spare.lockbox-backup"));
+        let vault = open_read_only_vault(&create_closed(parent.path()));
+        let (copy, _) = open_as(&sessions, backup, Opened::ReadOnly(vault));
+        assert_eq!(name_of(&sessions, copy), "Spare");
+
+        sessions.set_name(first, "Work");
+        assert_eq!(name_of(&sessions, first), "Work");
+        assert_eq!(name_of(&sessions, second), "Family");
+        let info = sessions
+            .list()
+            .into_iter()
+            .find(|i| i.session == first)
+            .unwrap();
+        assert_eq!(
+            (info.generation, info.state),
+            (first_generation, SessionState::Unlocked),
+            "only the name changes"
+        );
+
+        // A lock keeps the new name; so does a second change of it.
+        sessions.lock_all(LockReason::Manual);
+        assert_eq!(state(&sessions, first), SessionState::Locked);
+        assert_eq!(name_of(&sessions, first), "Work");
+        sessions.set_name(first, "Work again");
+        assert_eq!(name_of(&sessions, first), "Work again");
+        assert_eq!(state(&sessions, first), SessionState::Locked);
+
+        // A backup keeps its file's name; a session that is not there changes nothing.
+        sessions.set_name(copy, "Not a vault name");
+        assert_eq!(name_of(&sessions, copy), "Spare");
+        let before = sessions.list().len();
+        sessions.set_name(SessionId(first.0 + 100), "Nobody");
+        assert_eq!(sessions.list().len(), before);
+    }
+
     #[test]
     fn same_location_opens_once() {
         let parent = TempDir::new();
@@ -2160,7 +2437,7 @@ mod tests {
                     locked.wait();
                     Ok(OpenStep::<()>::Ask(
                         PendingChoice::Test(Some(Box::new(vault))),
-                        ask,
+                        Box::new(ask),
                     ))
                 })
             });
@@ -2175,7 +2452,10 @@ mod tests {
 
         // Not raced: a question whose token is taken once.
         let answer = sessions.open(Some(location), None, |_| {
-            Ok(OpenStep::<()>::Ask(PendingChoice::Test(None), ask))
+            Ok(OpenStep::<()>::Ask(
+                PendingChoice::Test(None),
+                Box::new(ask),
+            ))
         });
         let Ok(Outcome::Confirm(Confirm::HeaderChanged { token })) = answer else {
             panic!("the open asks first");
@@ -2192,15 +2472,20 @@ mod tests {
     }
 
     /// Task 9: a question changes nothing, so a lock racing it answers `Locked` even for an open that names its
-    /// change (`recover_vault` asks before it sets the new password).
+    /// change (`create_vault` asks about a cloud folder before it makes the vault).
     #[test]
     fn ask_racing_lock_with_what_says_locked() {
         let (_, sessions) = sessions();
-        let answer = sessions.open(None, Some("password"), |_| {
+        let change = Change {
+            what: "password",
+            vault: 1,
+        };
+        let answer = sessions.open(None, Some(change), |_| {
             sessions.lock_all(LockReason::Manual);
-            Ok(OpenStep::<()>::Ask(PendingChoice::Test(None), |token| {
-                Confirm::HeaderChanged { token }
-            }))
+            Ok(OpenStep::<()>::Ask(
+                PendingChoice::Test(None),
+                Box::new(|token| Confirm::HeaderChanged { token }),
+            ))
         });
         assert_eq!(answer.err(), Some(ShellError::Locked));
         assert_eq!(sessions.pending().len(), 0);
@@ -2214,7 +2499,11 @@ mod tests {
         let made = OnceLock::new();
         let answer = thread::scope(|s| {
             let creating = s.spawn(|| {
-                sessions.open(None, Some("vault created"), |_| {
+                let change = Change {
+                    what: "vault created",
+                    vault: 0,
+                };
+                sessions.open(None, Some(change), |_| {
                     let vault = create(parent.path());
                     made.set(vault.dir().to_path_buf()).unwrap();
                     let location = Location::folder(vault.dir()).unwrap();
@@ -2231,7 +2520,8 @@ mod tests {
         assert_eq!(
             answer.err(),
             Some(ShellError::LockedAfterChange {
-                what: "vault created"
+                what: "vault created",
+                vault: 0
             })
         );
         assert!(sessions.list().is_empty());
@@ -2475,6 +2765,91 @@ mod tests {
             !ran.load(Ordering::SeqCst),
             "a publish after the lock never runs"
         );
+    }
+
+    /// `publish_writable` is `publish` for a writable session only: a read-only one answers `ReadOnly`, a stale generation
+    /// `Locked` and a foreign ID `NotFound`, and in each the attempt never runs. The writable check does not take the
+    /// vault's lock, so a long change under way does not make it `Busy`; and the attempt is under the same guard, so a
+    /// lock waits for it and a lock before it refuses it.
+    #[test]
+    fn publish_writable_runs_only_for_a_writable_session_in_its_generation() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let (id, generation, dir) = open_writable(&sessions, parent.path());
+        let copy = parent.path().join("Family.read-only");
+        copy_folder(&dir, &copy);
+        let (read_only, read_only_generation) = open_read_only(&sessions, &copy);
+        let ran = AtomicBool::new(false);
+        let attempt = || {
+            ran.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+
+        assert_eq!(
+            sessions
+                .publish_writable(read_only, read_only_generation, attempt)
+                .err(),
+            Some(ShellError::ReadOnly)
+        );
+        assert_eq!(
+            sessions.publish_writable(id, generation + 1, attempt).err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(
+            sessions
+                .publish_writable(SessionId(id.0 + 100), generation, attempt)
+                .err(),
+            Some(ShellError::NotFound)
+        );
+        assert!(!ran.load(Ordering::SeqCst), "a refused attempt ran");
+
+        // A long change under way: still answered, not `Busy`.
+        let (held, is_held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let answered = thread::scope(|s| {
+            let sessions = &sessions;
+            let holder = s.spawn(move || {
+                sessions.write_long(id, generation, |_, _| {
+                    held.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(30)).unwrap();
+                    Ok(())
+                })
+            });
+            is_held
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the change started");
+            let answered = sessions.publish_writable(id, generation, attempt);
+            release.send(()).unwrap();
+            assert!(holder.join().unwrap().is_ok());
+            answered
+        });
+        assert_eq!(answered, Ok(()));
+        assert!(ran.swap(false, Ordering::SeqCst), "the attempt did not run");
+
+        // The same guard as `publish`: a lock waits for the attempt under way, and an attempt after the lock never runs.
+        let entered = Meet::default();
+        let finished = AtomicBool::new(false);
+        let finished_first = thread::scope(|s| {
+            let publishing = s.spawn(|| {
+                sessions.publish_writable(id, generation, || {
+                    entered.wait();
+                    thread::sleep(Duration::from_millis(50));
+                    finished.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            });
+            entered.wait();
+            sessions.lock(id, LockReason::Manual);
+            let finished_first = finished.load(Ordering::SeqCst);
+            assert_eq!(publishing.join().unwrap(), Ok(()));
+            finished_first
+        });
+        assert!(finished_first, "the lock did not wait for the attempt");
+        assert_eq!(
+            sessions.publish_writable(id, generation, attempt).err(),
+            Some(ShellError::Locked)
+        );
+        assert!(!ran.load(Ordering::SeqCst), "an attempt after the lock ran");
     }
 
     /// Logs what each step of a lock can observe.

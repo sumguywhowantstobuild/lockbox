@@ -143,6 +143,19 @@ async function pressTheShortcut() {
   });
 }
 
+/** Picks `name` in the save box's Vault list. */
+async function chooseInBox(panel: HTMLElement, name: string) {
+  const list = within(panel).getByRole("combobox", { name: "Vault" });
+  fireEvent.pointerDown(list, { button: 0 });
+  fireEvent.click(list);
+  const option = (await screen.findAllByRole("option")).find((one) => one.textContent === name);
+  fireEvent.pointerDown(option as HTMLElement);
+  fireEvent.click(option as HTMLElement);
+  await waitFor(() => {
+    expect(within(panel).getByRole("combobox", { name: "Vault" }).textContent).toBe(name);
+  });
+}
+
 // ---- The screens ----
 
 interface Case {
@@ -266,6 +279,67 @@ const CASES: Case[] = [
     reach: async () => {
       start([vault()]);
       await screen.findByRole("heading", { level: 1, name: "Unlock My vault" });
+    },
+  },
+  {
+    name: "The unlock step of another vault, while one is open (Task 6; the note Ask 16 keeps for it is drawn by the same step, tested in Switch.test.tsx)",
+    shows: ["LockScreen#UnlockStep", "Asks#LockNote"],
+    reach: async () => {
+      start([vault(), vault({ id: 8, name: "Home" })]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitemradio", { name: /^Home/ }));
+      await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
+    },
+  },
+  {
+    name: "The vault strip, with a locked vault in it (Task 6)",
+    shows: ["VaultStrip#VaultStrip"],
+    reach: async () => {
+      start([vault(), vault({ id: 8, name: "Home" })]);
+      await unlockIt();
+      await screen.findByRole("navigation", { name: "Vaults" });
+    },
+  },
+  {
+    name: "New vault from the vault menu, step 1 of 2 (18b, Task 7)",
+    shows: ["setup/CreateVault#CreateVault"],
+    reach: async () => {
+      start([vault()]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "New vault" }));
+      await screen.findByRole("heading", { level: 1, name: "New vault" });
+      await screen.findByRole("button", { name: "Cancel" });
+    },
+  },
+  {
+    name: "New vault from the vault menu, a cloud folder warns (18c, Task 7)",
+    shows: ["setup/CreateVault#CreateVault"],
+    reach: async () => {
+      start([vault()]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "New vault" }));
+      await screen.findByRole("heading", { level: 1, name: "New vault" });
+      fireEvent.change(screen.getByLabelText("Password"), { target: { value: "a long enough password" } });
+      fireEvent.change(screen.getByLabelText("Repeat the password"), { target: { value: "a long enough password" } });
+      shell.cloudNext();
+      click("Continue");
+      await screen.findByRole("button", { name: "Continue anyway" });
+    },
+  },
+  {
+    name: "Add existing vault folder from the vault menu, the cloud question (18c, Task 7)",
+    shows: ["setup/AddFolderStep#AddFolderStep", "setup/CloudQuestion#CloudQuestion"],
+    reach: async () => {
+      start([vault()]);
+      await unlockIt();
+      shell.offerExisting({ id: 9, name: "Old vault", items: [] });
+      shell.cloudNext();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Add existing vault folder" }));
+      await screen.findByRole("heading", { level: 1, name: "This folder is synced to the cloud" });
     },
   },
   {
@@ -715,6 +789,92 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Change password: the form, with the lines that say what is wrong with it (27a, 27b)",
+    shows: ["ChangePassword#ChangePasswordPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Change password", settings);
+      const panel = await screen.findByRole("complementary", { name: "Change password" });
+      // The view with the most on it: a short new password and a second one that differs, said on the form.
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: "MU-not the one" } });
+      fireEvent.change(within(panel).getByLabelText("New password"), { target: { value: "MU-short" } });
+      fireEvent.change(within(panel).getByLabelText("New password again"), { target: { value: "MU-other" } });
+      click("Change password", panel);
+      await within(panel).findAllByRole("alert");
+    },
+  },
+  {
+    name: "Change password: the offer of a fresh backup once it is changed (27c)",
+    shows: ["ChangePassword#ChangePasswordDone"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Change password", settings);
+      const panel = await screen.findByRole("complementary", { name: "Change password" });
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: PASSWORD } });
+      fireEvent.change(within(panel).getByLabelText("New password"), { target: { value: "MU-a new passphrase" } });
+      fireEvent.change(within(panel).getByLabelText("New password again"), { target: { value: "MU-a new passphrase" } });
+      click("Change password", panel);
+      await screen.findByRole("dialog", { name: "Make a fresh backup now?" });
+    },
+  },
+  {
+    name: "New recovery key: the form, with the line a wrong password puts on it (29a)",
+    shows: ["NewRecoveryKey#NewRecoveryKeyPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("New recovery key", settings);
+      const panel = await screen.findByRole("complementary", { name: "New recovery key" });
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: "MU-not the one" } });
+      click("Make a new key", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "New recovery key: the key shown, then picked back (29b)",
+    shows: ["setup/RecoveryKey#RecoveryKey", "setup/PickWords#PickWords"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("New recovery key", settings);
+      const panel = await screen.findByRole("complementary", { name: "New recovery key" });
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: PASSWORD } });
+      click("Make a new key", panel);
+      await screen.findByRole("heading", { level: 1, name: "Your new recovery key" });
+    },
+  },
+  {
+    name: "New recovery key: the offer of a fresh backup once it is picked back (29c)",
+    shows: ["NewRecoveryKey#NewRecoveryKeyDone"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("New recovery key", settings);
+      const panel = await screen.findByRole("complementary", { name: "New recovery key" });
+      fireEvent.change(within(panel).getByLabelText("Current password"), { target: { value: PASSWORD } });
+      click("Make a new key", panel);
+      await screen.findByRole("heading", { level: 1, name: "Your new recovery key" });
+      const key = shell.keyOf(7) ?? "";
+      click("Continue");
+      await screen.findByRole("heading", { level: 1, name: "Check your new recovery key" });
+      for (let n = 0; n < 3; n += 1) {
+        const label = screen.getByText(/^Which word is number \d+\?$/);
+        const position = Number.parseInt(/(\d+)/.exec(label.textContent)?.[1] ?? "0", 10);
+        const group = screen.getByRole("group", { name: label.textContent });
+        const right = key.split(/\s+/)[position - 1];
+        fireEvent.click(within(group).getByRole("button", { name: right }));
+      }
+      await screen.findByRole("dialog", { name: "Make a fresh backup now?" });
+    },
+  },
+  {
     name: "A backup open: Copy to a vault and the question about the files it lacks (25b to 25d)",
     shows: ["OpenBackup#CopyToVault"],
     reach: async () => {
@@ -754,6 +914,23 @@ const CASES: Case[] = [
       click("Replace");
       // The last of its views, the one with a field on it.
       await screen.findByRole("heading", { level: 1, name: "My vault is restored" });
+    },
+  },
+  {
+    name: "Forgot password: the recovery key, the new password and the offer of a fresh backup (28a to 28e)",
+    shows: ["ForgotPassword#ForgotPassword"],
+    reach: async () => {
+      start([vault()]);
+      fireEvent.click(await screen.findByRole("button", { name: "Forgot password?" }));
+      await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
+      fireEvent.change(screen.getByLabelText("Recovery key"), { target: { value: shell.recoveryKeyOf(7) } });
+      click("Continue");
+      await screen.findByRole("heading", { level: 1, name: "Choose a new password" });
+      fireEvent.change(screen.getByLabelText("New password"), { target: { value: "MU-new passphrase 2026" } });
+      fireEvent.change(screen.getByLabelText("New password again"), { target: { value: "MU-new passphrase 2026" } });
+      click("Set new password");
+      // The last of its views.
+      await screen.findByRole("heading", { level: 1, name: "Make a fresh backup now?" });
     },
   },
   {
@@ -871,6 +1048,29 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Save what you copied, with a Vault list of two (Task 10)",
+    shows: [],
+    reach: async () => {
+      start([vault(), vault({ id: 8, name: "Home", items: items() })]);
+      await unlockIt();
+      await pressTheShortcut();
+      const panel = await screen.findByRole("complementary", { name: "Save what you copied" });
+      await within(panel).findByRole("combobox", { name: "Vault" });
+    },
+  },
+  {
+    name: "Save what you copied, a locked vault chosen in the box (8b in the box)",
+    shows: [],
+    reach: async () => {
+      start([vault(), vault({ id: 8, name: "Home", items: items() })]);
+      await unlockIt();
+      await pressTheShortcut();
+      const panel = await screen.findByRole("complementary", { name: "Save what you copied" });
+      await chooseInBox(panel, "Home");
+      await within(panel).findByLabelText("Password for Home");
+    },
+  },
+  {
     name: "Paste a .env, with its rows (15a, 15b)",
     shows: ["EnvPaste#EnvPaste", "forms/ClearClipboard#ClearClipboardBox"],
     reach: async () => {
@@ -912,6 +1112,53 @@ const CASES: Case[] = [
       await openFolder("Agency support agent");
       await folderMenu("Rename folder");
       await screen.findByRole("dialog", { name: "Rename folder" });
+    },
+  },
+  {
+    name: "Rename a vault, a small box in the vault menu's place (18d, Task 8)",
+    shows: ["RenameVault#RenameVaultBox"],
+    reach: async () => {
+      await unlocked();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Rename My vault" }));
+      return screen.findByRole("dialog", { name: "Rename vault" });
+    },
+  },
+  {
+    name: "Remove a vault from the list, asked in the vault menu's place (18g, Task 9)",
+    shows: ["VaultBoxes#RemoveVaultBox"],
+    reach: async () => {
+      await unlocked();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Remove My vault from this list" }));
+      return screen.findByRole("alertdialog", { name: "Remove vault from this list" });
+    },
+  },
+  {
+    name: "An unavailable vault's box in the vault menu's place, with its status line (Task 9)",
+    shows: ["VaultBoxes#UnavailableVaultBox"],
+    reach: async () => {
+      start([vault(), { id: 8, name: "Home", available: false }]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitemradio", { name: "HomeNot available" }));
+      const box = await screen.findByRole("dialog", { name: "Home is unavailable" });
+      fireEvent.click(within(box).getByRole("button", { name: "Try again" }));
+      await within(box).findByText("Still unavailable. Connect its drive or put its folder back, then try again.");
+      return box;
+    },
+  },
+  {
+    name: "Show in Explorer and Remove from this list on a locked vault's unlock step (Task 9)",
+    shows: ["VaultLinks#VaultLinks"],
+    reach: async () => {
+      start([vault(), { id: 8, name: "Home", items: items() }]);
+      await unlockIt();
+      const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
+      fireEvent.click(within(menu).getByRole("menuitemradio", { name: "HomeLocked" }));
+      await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
+      await screen.findByRole("button", { name: "Show Home in Explorer" });
+      await screen.findByRole("button", { name: "Remove Home from this list" });
     },
   },
   {

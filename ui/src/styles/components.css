@@ -140,9 +140,59 @@
   outline-offset: 2px;
 }
 
+/* A vault whose folder or drive isn't there (30b): no choice, so no pointer and no tint; it is quiet by its words and its mark (the muted ink, which reads as well as any),
+   not by fading, since Try again and Remove from list sit in it. The mark, the name with its line and the two links share one line, as 30b draws them: the plate is 440px
+   wide at every window size, so each link is narrow and breaks onto two lines when its words need it ("Remove / from list", as the picture has it), which leaves the
+   name's line two lines, not four. The row wraps only when the plate is narrower than that (the links then go under the name), and the line that says a Try again found
+   it still missing is the row's own last line. */
 .vbtn.off {
-  cursor: not-allowed;
-  opacity: 0.7;
+  flex-wrap: wrap;
+  row-gap: 0;
+  cursor: default;
+}
+
+.vbtn.off .lnk {
+  height: auto;
+  min-height: 24px;
+  max-width: 5em;
+  padding: 2px 0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.vbtn.off:hover,
+.vbtn.off:active {
+  background: var(--card);
+}
+
+.vbtn.off b {
+  color: var(--ink2);
+}
+
+.vbtn.off .vmini path {
+  stroke: var(--ink2);
+}
+
+/* The name's column: it asks for little (about 8 characters' width) and takes what the links leave, so the links stay beside it until the plate is too narrow for both. A
+   word too long for the column breaks rather than push the links out. */
+.vgrow {
+  flex: 1 1 8em;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.vstill {
+  flex: 1 0 100%;
+  margin: 0;
+  /* Lines up with the name: the mark's width and the gap after it. */
+  padding-left: 48px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ink2);
+}
+
+.vstill:not(:empty) {
+  margin-top: 6px;
 }
 
 .vradio {
@@ -333,6 +383,8 @@
 /* A quiet button on its own line under the sentence that offers it (18c's Choose another): its words line up with the
    sentence's, the hover tint reaching into the margin. */
 .fu-other {
+  /* As wide as its words: in the steps' column a button would stretch to the column's width and centre them (28a). */
+  align-self: flex-start;
   margin: 0 0 0 -8px;
 }
 
@@ -559,7 +611,6 @@
 
 .win {
   --gut: clamp(20px, 2.6vw, 36px);
-  --pw: clamp(340px, 30vw, 420px);
   position: relative;
   display: flex;
   height: 100%;
@@ -587,6 +638,96 @@
   white-space: nowrap;
   color: var(--ink);
   box-shadow: inset 0 0 0 1px rgba(var(--sh), 0.34);
+}
+
+/* The vault strip, beside the side menu from two vaults on the list (approved 2026-11-04): a button for each vault, in its own colour and shape. */
+
+.dock {
+  position: relative;
+  z-index: 3;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 60px;
+  min-height: 0;
+  padding: 12px 0;
+  overflow-y: auto;
+  background: var(--rail);
+  border-right: 1px solid var(--line);
+}
+
+.dvault {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: var(--card);
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.dvault:hover {
+  background: var(--hov);
+}
+
+.dvault:active {
+  background: var(--prs);
+}
+
+/* The vault on screen: a ring in the vault's colour (not a tint alone), and `aria-current` says it in words. */
+.dvault.on {
+  box-shadow: 0 0 0 2px var(--add);
+}
+
+/* A vault whose folder can't be reached: greyed, and it does nothing yet. */
+.dvault.off {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* 26px for 200 units: 6.6 units is a line of about a pixel and a half. */
+.dvault .dmark {
+  width: 26px;
+  height: 26px;
+}
+
+.dvault .dmark path {
+  fill: none;
+  stroke: var(--v);
+  stroke-width: 6.6;
+}
+
+/* A locked vault: a small lock on the corner of its button, drawn in the card's colour on a disc of the text colour, so it shows against the button and the strip. */
+.dvault .dlock {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--card);
+}
+
+.dvault .dlock .i {
+  width: 10px;
+  height: 10px;
+  stroke-width: 2;
+}
+
+/* The strip carries each vault's mark, so the side menu does not draw its own beside the name. */
+.dock ~ .rail .vprint {
+  display: none;
 }
 
 /* The side menu: which vault, its folders, and Lock all. */
@@ -1509,6 +1650,24 @@
   color: var(--ink2);
 }
 
+/* ---- The save box's layer ---- */
+
+/* The save box is the app's, not a window's: it is drawn over whichever window is on screen, so a lock of the vault under it, a switch, or the lock screen
+   does not take it. The layer covers the app and lets every click through but the ones on the panel. clip, as .win and .stage: focus moving into the sliding
+   panel can't scroll the app sideways (styles/panels.test.ts). The panel's own place (top, right, bottom) is the same as in the stage, since the layer starts
+   where the stage does. */
+.boxlayer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  overflow: clip;
+  pointer-events: none;
+}
+
+.boxlayer > .panel {
+  pointer-events: auto;
+}
+
 /* ---- The panel from the right ---- */
 
 .panel {
@@ -1964,6 +2123,12 @@
   color: var(--ink2);
 }
 
+/* A vault's mark before its name in the vault menu, as drawn (18a): 28px, in the vault's own colour (its row's mark carries the vault's classes). */
+.mi .vprint {
+  width: 28px;
+  height: 28px;
+}
+
 /* A menu that opens with lines saying how things stand (the vault menu: each vault, and Unlocked or Locked). */
 .menu.mwide {
   display: flex;
@@ -1995,54 +2160,19 @@
   overflow-y: auto;
 }
 
-.menu.mwide > :is(.mline, [role="group"]) {
+.menu.mwide > .mline {
   flex: none;
 }
 
-/* When the window leaves the menu short, the locked vaults' lines give up their room first, down to one line (they say only that a vault is
-   locked, and scroll); then the open rows scroll. The actions never shrink. Checked by measurement at 300 px of room: 19 locked and 1 open, 19
-   and 4, 3 and 12, 0 and 12 all keep Lock in view and every open row whole until the rows must scroll. */
-.menu.mwide > .mscroll:first-child {
-  flex-shrink: 1000;
-  min-height: 2.5em;
-}
-
-/* The group under the locked vaults' lines holds the open rows (in their own scroll area) and the actions: it may shrink, so the rows scroll and
-   the actions stay. */
-.menu.mwide > .mgroup {
+/* When the window leaves the menu short, the rows (every vault, backup and older copy, in their own scroll area) give up their room, down to a row and a
+   half, and scroll; the arrow keys reach every row and bring it into view. The actions never shrink. */
+.menu.mwide > .mscroll {
   flex: 0 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
+  min-height: 4.5em;
 }
 
-.menu.mwide > [role="menuitem"],
-.menu.mwide > .mgroup > [role="menuitem"] {
+.menu.mwide > [role="menuitem"] {
   flex: none;
-}
-
-.mnote {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
-  min-height: 34px;
-  padding: 6px 10px;
-  font-size: 14px;
-}
-
-.mnote .mt {
-  min-width: 0;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.mnote .ms {
-  flex: none;
-  font-size: 12.5px;
-  color: var(--ink2);
 }
 
 .mline {
@@ -2218,6 +2348,20 @@
 
 .asks:empty {
   display: none;
+}
+
+/* Over a vault's list the banners are the list's width, as Ask 9 is drawn, so they line up with each other and with the rows under them; the lock screen's keep their column. */
+.lscroll > .asks {
+  max-width: none;
+}
+
+/* A banner's heading, where the design draws one (Ask 9): the banner's own size, bold, the words under it. */
+.ask-t {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--ink);
 }
 
 /* A banner is words, with its buttons below: the card's colour and an edge, the text colour for the words. */
@@ -2414,6 +2558,19 @@
   font-size: 13.5px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+/* What a password or key change leaves as it was (27a, 28d, 29a): the backup sentence and spec 5.3's limit as one paragraph in a soft box, as drawn. The
+   transparent edge shows in high contrast, where the fill is dropped. */
+.caveat {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--well);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 /* A sentence in the panel that has to be read before something is deleted (the originals stay; keep the files that did not go in). */
@@ -2770,8 +2927,40 @@
   color: var(--ink2);
 }
 
+/* A rule that is met, in the side panel (the change-password form): a check mark in the vault's colour, and the words in the ordinary text colour. */
+.fhint.ok {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--ink);
+}
+
+.fhint.ok .i {
+  color: var(--v);
+}
+
 .finp.m {
   font-family: "Geist Mono Variable", ui-monospace, monospace;
+}
+
+/* A key's value with line breaks (a private key file), in the new-key and edit-key forms: a read-only box of one fixed height, the same
+   whether the value is hidden (one row of dots) or shown (its lines, scrolling), so its shape never tells how many lines there are.
+   The lines are not selectable, since a native copy would skip the marks that keep them out of Windows' clipboard history. */
+.finp.kbox {
+  height: 132px;
+  padding: 10px 12px;
+  overflow-y: auto;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.finp.kbox .kdots {
+  color: var(--ink2);
+  letter-spacing: 0.09em;
 }
 
 /* A note's text: a taller box that grows downward only, its lines kept as typed. */
@@ -2782,6 +2971,14 @@
   line-height: 1.5;
   font-family: inherit;
   resize: vertical;
+}
+
+/* Forgot password's recovery key box (28a): four lines to begin with, growing with what is typed, so a whole key (five or six lines at the form's width)
+   shows without scrolling and can be read against the saved copy. Where `field-sizing` is not known its four rows scroll. */
+.farea.fkey {
+  min-height: calc(4lh + 20px);
+  field-sizing: content;
+  resize: none;
 }
 
 .finp[aria-invalid="true"] {
@@ -2890,6 +3087,65 @@
 
 .nfold .err {
   margin: 6px 4px 0;
+}
+
+/* Rename vault (18d): the vault menu's own box turned into a small form, in the menu's place and width (the popup is `menu mwide`). The label and the name box sit in a block
+   padded as drawn (8px 8px 2px); the label has no space above it here, the box's own edge says it is a field (as every field's does), and the buttons sit at the foot, at
+   the right, as a dialog's do. The refusal goes under the box. */
+.rnbox {
+  flex: none;
+}
+
+.rnname {
+  padding: 8px 8px 2px;
+}
+
+.rnname .flab {
+  margin-top: 0;
+}
+
+.rnname .err {
+  margin: 6px 4px 0;
+}
+
+.rnbox .dbtns {
+  margin-top: 8px;
+  padding: 0 3px 3px;
+}
+
+/* Remove from list (18g) and the unavailable vault's box (Task 9): the same small box in the vault menu's place and width. The sentence is padded as the rename box's block is;
+   the line under it says how Try again went (a status, quiet) or why a Remove was refused (the error colour); the buttons sit at the foot, at the right, and wrap in a
+   narrow window. */
+.mbox {
+  flex: none;
+}
+
+.mwarn {
+  margin: 0;
+  padding: 8px 8px 2px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.mstill {
+  margin: 0;
+  padding: 0 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ink2);
+}
+
+.mstill:not(:empty) {
+  padding-top: 6px;
+}
+
+.mbox .mproblem {
+  margin: 6px 8px 0;
+}
+
+.mbox .dbtns {
+  margin-top: 10px;
+  padding: 0 3px 3px;
 }
 
 /* The generator: the value, what changes it, and its two buttons. Inside the form it sits under the password; on its own

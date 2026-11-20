@@ -6,7 +6,7 @@
 
 @media (forced-colors: active) {
   /* What had only a background or a shadow gets a real edge. */
-  .app :is(.pill, .prim, .addb, .seg, .rbtn, .tb2, .ib, .ex, .fin, .ssort, .inp, .finp, .cval, .vbtn, .srch, .nav.on, .lrow.on) {
+  .app :is(.pill, .prim, .addb, .seg, .rbtn, .tb2, .ib, .ex, .fin, .ssort, .inp, .finp, .cval, .vbtn, .dvault, .srch, .nav.on, .lrow.on) {
     border: 1px solid CanvasText !important;
   }
 
@@ -122,12 +122,19 @@
     background: HighlightText !important;
   }
 
-  .app .vbtn.on {
+  .app :is(.vbtn.on, .dvault.on) {
     border: 3px solid Highlight !important;
   }
 
+  /* The lock on a locked vault's strip button: the system's own colours, in the disc's place, so it still shows. */
+  .app .dvault .dlock {
+    forced-color-adjust: none !important;
+    background: CanvasText !important;
+    color: Canvas !important;
+  }
+
   /* Marks drawn in a fixed colour would disappear on a dark or a light contrast theme. */
-  .app :is(.vmini, .rose, .vprint) path {
+  .app :is(.vmini, .rose, .vprint, .dmark) path {
     stroke: CanvasText !important;
   }
 

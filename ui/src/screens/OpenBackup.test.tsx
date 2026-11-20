@@ -53,6 +53,12 @@ const NOWHERE = "Unlock a vault first, then copy into it.";
 const OLDER = "My vault.before-restore";
 const ANY_REQUEST = expect.any(Number) as number;
 
+/** A vault's menu row by its name: an open vault's row reads "<name>Unlocked" (its status line, 4C Task 13b), so either way finds it. */
+function rowName(name: string | RegExp): string | RegExp | ((read: string) => boolean) {
+  if (typeof name !== "string") return name;
+  return (read) => read === name || read === `${name}Unlocked`;
+}
+
 function mine(): FakeVault {
   return { id: 7, name: "My vault", items: sampleItems() };
 }
@@ -88,7 +94,7 @@ async function unlocked(list: FakeVault[] = [mine()]) {
 async function twoVaults() {
   const view = await unlocked([mine(), home()]);
   await act(async () => {
-    expect(await unlock(8, PASSWORD)).toBe("opened");
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
   });
   await screen.findByRole("button", { name: "Home, vault menu" });
   return view;
@@ -547,7 +553,7 @@ test("a_second_open_of_the_same_backup_brings_it_to_the_front_as_it_is", async (
   const first = debugState().sessions.at(-1);
   // Back to the live vault through the menu, then the same file again: the shell answers the session it has, and the page shows that one.
   const menu = await openMenu(screen.getByRole("button", { name: BACKUP_MENU }));
-  fireEvent.click(within(menu).getByRole("menuitemradio", { name: "My vault" }));
+  fireEvent.click(within(menu).getByRole("menuitemradio", { name: rowName("My vault") }));
   await screen.findByRole("button", { name: "My vault, vault menu" });
   await openPanel();
   const panel = screen.getByRole("complementary", { name: "Open a backup" });
@@ -566,7 +572,7 @@ test("open_backup_from_the_lock_screen_shows_full_screen", async () => {
   await screen.findByLabelText(/^Password for /);
   // A link beside Restore a backup, under the form.
   const links = screen.getAllByRole("button").map((button) => button.textContent);
-  expect(links).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
+  expect(links).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   fireEvent.click(screen.getByRole("button", { name: "Open a backup" }));
   // The same steps, full-screen on the setup frame: no panel, no window, the page's banner and one heading.
   const heading = await screen.findByRole("heading", { level: 1, name: "Open a backup" });
@@ -659,7 +665,7 @@ test("read_only_label_on_every_screen_of_that_session", async () => {
   expect(within(settings).getByText("Read-only", { selector: ".chip" })).toBeTruthy();
   // The live vault's own screens carry no chip: back to it through the menu.
   const menu = await openMenu(screen.getByRole("button", { name: BACKUP_MENU }));
-  fireEvent.click(within(menu).getByRole("menuitemradio", { name: "My vault" }));
+  fireEvent.click(within(menu).getByRole("menuitemradio", { name: rowName("My vault") }));
   await screen.findByRole("button", { name: "My vault, vault menu" });
   expect(document.querySelector(".chip")).toBeNull();
 });
@@ -688,7 +694,7 @@ test("older_copy_header_says_older_copy", async () => {
   // The vault menu says so too, under its name.
   const menu = await openMenu(head);
   const rows = within(menu).getAllByRole("menuitemradio");
-  expect(rows.map((row) => row.textContent)).toEqual(["My vault", "My vault" + "Older copy"]);
+  expect(rows.map((row) => row.textContent)).toEqual(["My vaultUnlocked", "My vault" + "Older copy"]);
 });
 
 test("save_a_copy_works_on_a_read_only_backup", async () => {
@@ -898,7 +904,7 @@ test("a_missing_files_answer_for_another_backup_opens_no_question_and_sends_noth
   // The login is open in the first backup too, so switching back finds the same item ID open: the panel must not be the second's.
   await select("Bot admin console");
   const live = await openMenu(screen.getByRole("button", { name: BACKUP_MENU }));
-  fireEvent.click(within(live).getByRole("menuitemradio", { name: "My vault" }));
+  fireEvent.click(within(live).getByRole("menuitemradio", { name: rowName("My vault") }));
   await screen.findByRole("button", { name: "My vault, vault menu" });
   shell.pickBackupNext("Other 2026-09-01.lockbox-backup", MB);
   const panel = await openPanel();
@@ -1069,11 +1075,11 @@ test("nowhere_to_copy_to_says_unlock_a_vault_first", async () => {
   await screen.findByRole("button", { name: BACKUP_MENU });
   const panel = await select("Bot admin console");
   fireEvent.click(within(panel).getByRole("button", { name: "Copy to a vault" }));
-  // The form shows only the sentence and Cancel: no lists, no Copy.
+  // The form shows the sentence, the locked vault to unlock (Task 6) and Cancel: no lists, no Copy.
   expect(within(panel).getByText(NOWHERE)).toBeTruthy();
   expect(within(panel).queryByRole("combobox")).toBeNull();
   expect(within(panel).queryByRole("button", { name: "Copy" })).toBeNull();
-  expect(buttonsIn(panel).slice(-1)).toEqual(["Cancel"]);
+  expect(buttonsIn(panel).slice(-2)).toEqual(["Unlock My vault", "Cancel"]);
   press(panel, "Cancel");
   expect(within(panel).queryByText(NOWHERE)).toBeNull();
   expect(sent("copy_item_to")).toEqual([]);
@@ -1127,6 +1133,47 @@ test("the_form_follows_a_vault_that_locks_while_it_is_open", async () => {
   });
 });
 
+test("two_vaults_named_alike_are_told_apart_by_their_place_in_copy_to_a_vault", async () => {
+  // Every new vault starts as "My vault", so two alike are likely (4C end review, astra4-13): the Vault list and the Unlock buttons say each one's place on the
+  // list, as the vault strip and the save box do, and the copy goes to the one chosen.
+  const twin = (id: number): FakeVault => ({ id, name: "Twin", items: id === 8 ? (home().items ?? []) : sampleItems() });
+  await unlocked([twin(7), twin(8)]);
+  await act(async () => {
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
+  });
+  await openTheBackup();
+  const panel = await select("Bot admin console");
+  fireEvent.click(within(panel).getByRole("button", { name: "Copy to a vault" }));
+  // The one most recently unlocked is chosen.
+  expect(within(panel).getByRole("combobox", { name: "Vault" }).textContent).toBe("Twin, 2 of 2");
+  const vaultList = within(panel).getByRole("combobox", { name: "Vault" });
+  fireEvent.pointerDown(vaultList, { button: 0 });
+  fireEvent.click(vaultList);
+  expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual(["Twin, 2 of 2", "Twin, 1 of 2"]);
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+  await waitFor(() => {
+    expect(screen.queryAllByRole("option")).toEqual([]);
+  });
+  await pickOption(panel, "Vault", "Twin, 1 of 2");
+  press(panel, "Copy");
+  await waitFor(() => {
+    expect(sent("copy_item_to")).toHaveLength(1);
+  });
+  expect(sent("copy_item_to")[0]).toMatchObject({ to: shell.sessionOf(7)?.session });
+
+  // Both lock: each is offered to unlock by its place.
+  act(() => {
+    shell.lock(shell.sessionOf(7)?.session ?? 0);
+  });
+  act(() => {
+    shell.lock(shell.sessionOf(8)?.session ?? 0);
+  });
+  const again = await select("Bot admin console");
+  if (within(again).queryByText(NOWHERE) === null) fireEvent.click(within(again).getByRole("button", { name: "Copy to a vault" }));
+  await within(again).findByText(NOWHERE);
+  expect(buttonsIn(again).slice(-3)).toEqual(["Unlock Twin, 1 of 2", "Unlock Twin, 2 of 2", "Cancel"]);
+});
+
 test("a_busy_copy_says_copying_the_item", async () => {
   await unlocked();
   await openTheBackup();
@@ -1146,18 +1193,18 @@ test("vault_menu_lists_open_read_only_sessions", async () => {
   await openTheBackup();
   const menu = await openMenu(screen.getByRole("button", { name: BACKUP_MENU }));
   // A row for each open session, in a group of their own: the live vault, then the backup (the one on screen), each a menu item that says whether it is the current one.
-  const group = within(menu).getByRole("group", { name: "Open now" });
+  const group = within(menu).getByRole("group", { name: "Vaults" });
   const rows = within(group).getAllByRole("menuitemradio");
-  // Each vault is there once: an open one is a row only, with no "Unlocked" note beside it.
+  // Each vault is there once: the open one is a row that says Unlocked under its name, and the backup is a row that says Backup.
   expect(menu.querySelectorAll(".mnote")).toHaveLength(0);
-  expect(menu.textContent).not.toContain("Unlocked");
-  expect(rows.map((row) => row.textContent)).toEqual(["My vault", `${BACKUP}Backup`]);
+  expect(menu.textContent.match(/Unlocked/g)).toHaveLength(1);
+  expect(rows.map((row) => row.textContent)).toEqual(["My vaultUnlocked", `${BACKUP}Backup`]);
   expect(rows.map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
-  // Lock stays the menu's action, for the session on screen.
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([`Lock ${BACKUP}`]);
+  // Lock stays the menu's action for the session on screen, after New vault and Add existing vault folder (Task 7), which belong to no session.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", `Lock ${BACKUP}`]);
   await expectNoAxe(menu);
   // Choosing the live vault's row brings it to the front: the window is the vault's, and the menu is shut.
-  fireEvent.click(within(menu).getByRole("menuitemradio", { name: "My vault" }));
+  fireEvent.click(within(menu).getByRole("menuitemradio", { name: rowName("My vault") }));
   await screen.findByRole("button", { name: "My vault, vault menu" });
   expect(screen.queryByRole("menu")).toBeNull();
   expect(debugState().sessions.at(-1)?.vaultId).toBe(7);
@@ -1179,13 +1226,13 @@ test("vault_menu_lists_open_read_only_sessions", async () => {
   expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7]);
   // The closed backup has no row any more.
   const last = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
-  expect(within(last).queryAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vault"]);
+  expect(within(last).queryAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultUnlocked"]);
 });
 
-test("a_locked_backup_has_no_row_and_a_locked_vault_stays_a_note", async () => {
+test("a_locked_backup_has_no_row_and_a_locked_vault_is_a_row", async () => {
   await unlocked([mine(), home()]);
   await openTheBackup();
-  // Home was never unlocked: it is a note, not a row. Locking the live vault from outside leaves the backup, the only row.
+  // Home was never unlocked: it is a row that says Locked (it opens its unlock step). Locking the live vault from outside leaves the backup open, and My vault is a locked row too.
   act(() => {
     shell.lock(shell.sessionOf(7)?.session ?? 0);
   });
@@ -1193,8 +1240,8 @@ test("a_locked_backup_has_no_row_and_a_locked_vault_stays_a_note", async () => {
     expect(debugState().sessions.map((one) => one.kind)).toEqual(["backup"]);
   });
   const menu = await openMenu(screen.getByRole("button", { name: BACKUP_MENU }));
-  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual([`${BACKUP}Backup`]);
-  expect([...menu.querySelectorAll(".mnote")].map((row) => row.textContent)).toEqual(["My vaultLocked", "HomeLocked"]);
+  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultLocked", "HomeLocked", `${BACKUP}Backup`]);
+  expect(menu.querySelectorAll(".mnote")).toHaveLength(0);
   // The backup is closed by its own lock; the live vault is not in the list now, so the lock screen follows.
   fireEvent.click(within(menu).getByRole("menuitem", { name: `Lock ${BACKUP}` }));
   await screen.findByLabelText(/^Password for /);

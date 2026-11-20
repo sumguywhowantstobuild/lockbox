@@ -352,9 +352,9 @@ test("each_refusal_shows_its_design_message", async () => {
   // Ask 2, and the three beside it. Each leaves 22a, names the vault, and says what the design says, word for word.
   const cases = [
     { refusal: REFUSED_CHANGED, words: CHANGED, buttons: ["Not now", "See the change"] },
-    // "Change password" and "New recovery key" are 4C's screens: until they exist, these two show "Not now" alone.
-    { refusal: REFUSED_PASSWORD, words: PASSWORD_COPIES, buttons: ["Not now"] },
-    { refusal: REFUSED_KEY, words: KEY_COPIES, buttons: ["Not now"] },
+    // "Change password" is 4C Task 3's screen and "New recovery key" is Task 5's.
+    { refusal: REFUSED_PASSWORD, words: PASSWORD_COPIES, buttons: ["Not now", "Change password"] },
+    { refusal: REFUSED_KEY, words: KEY_COPIES, buttons: ["Not now", "New recovery key"] },
     { refusal: REFUSED_UNCHECKED, words: UNCHECKED, buttons: ["Not now", "Lock this vault"] },
   ];
   for (const one of cases) {

@@ -317,6 +317,23 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("vault button focus ring on the side menu", c("--ink"), rail, 3);
       check("vault menu name words on the card", c("--ink"), card, 4.5);
       check("vault menu state words on the card", c("--ink2"), card, 4.5);
+      // Every vault is a row of that menu (Task 6): the quiet words under its name (Locked, Not available, Backup) on the row at rest, highlighted and pressed, and a
+      // row that can't be used keeps them as readable as any (it is greyed by its cursor and its words, not by fading).
+      for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`vault menu row's quiet words, ${state}`, c("--ink2"), fill, 4.5);
+      }
+      // The vault strip (Task 6): a button's face is the card, hovered or pressed it is the tint over the strip. Its mark, in the vault's colour, is a drawing that has
+      // to show on each; the vault on screen has a ring in the main button's colour against the strip (the part that shows the state, with `aria-current` saying it in
+      // words); a locked vault has a small lock, the card's colour on a disc of the text colour, which has to show against the button and against the strip; and the
+      // button's focus ring is the vault's colour against the strip.
+      for (const [state, fill] of [["rest", card], ["hovered", hoveredNav], ["pressed", pressedNav]] as const) {
+        check(`vault strip mark on its button, ${state}`, c("--v"), fill, 3);
+      }
+      check("vault strip ring of the vault on screen, against the strip", c("--add"), rail, 3);
+      check("vault strip lock on its disc", c("--card"), c("--ink"), 4.5);
+      check("vault strip lock's disc against the button", c("--ink"), card, 3);
+      check("vault strip lock's disc against the strip", c("--ink"), rail, 3);
+      check("vault strip button focus ring against the strip", c("--v"), rail, 3);
       for (const [state, fill] of [["rest", card], ["highlighted", hoveredRow], ["pressed", pressedRow]] as const) {
         check(`vault menu action words, ${state}`, c("--ink"), fill, 4.5);
       }
@@ -362,6 +379,10 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       // Add, the new-login form and the generator. Add is the main button on the toolbar's ground (its words in each state
       // and its fill against the ground are the main button's pairs above). In the form: its fields are the panel's card
       // (words, edge and error edge measured above), and its hint and the folder list's words are the ordinary text.
+      // Change password (27a): its password rule once met has a check mark in the vault's colour on the panel (the words are the ordinary text colour,
+      // measured above), a hint that is the form hint, the limit's sentence in the text colour, and a field in error with its edge and line (above).
+      check("change password rule's met check mark on the panel", c("--v"), paper, 3);
+      check("change password limit sentence on the panel", c("--ink"), paper, 4.5);
       check("form hint on the panel", c("--ink2"), paper, 4.5);
       check("form error line on the panel", c("--danger"), paper, 4.5);
       check("form field in error, edge on the panel", c("--danger"), paper, 3);
@@ -378,6 +399,12 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       // (the hint is the form hint above), and a note of the page's own (what the copy was, or that it changed) is the quiet words.
       check("copied value, hidden dots on its box", c("--ink2"), card, 4.5);
       check("copied value, shown, on its box", c("--ink"), card, 4.5);
+      // A key's value with line breaks (Task 10a), in the key forms: a read-only box with a field's edge on the panel, its dots while hidden, its
+      // lines in the ordinary text colour once shown, and the ring that marks the focused box (the box is reached by Tab, and a paste goes to it).
+      check("multi-line key value box, edge on the panel", c("--edge"), paper, 3);
+      check("multi-line key value box, hidden dots on its box", c("--ink2"), card, 4.5);
+      check("multi-line key value box, shown lines on its box", c("--ink"), card, 4.5);
+      check("multi-line key value box, focus ring on the panel", c("--ink"), paper, 3);
       check("clear the clipboard tick box on the panel", c("--v"), paper, 3);
       check("clear the clipboard words on the panel", c("--ink"), paper, 4.5);
       check("save box note on the panel", c("--ink2"), paper, 4.5);
@@ -450,6 +477,41 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("new folder box words on its card", c("--ink"), card, 4.5);
       check("new folder box error edge on the side menu", c("--danger"), rail, 3);
       check("new folder box focus ring on the side menu", c("--v"), rail, 3);
+      // Rename vault (18d, Task 8): a small box on the vault menu's card. Its label, the name box (edge, words, focus ring, and the error edge once the name was refused), the
+      // refusal line under it, Cancel (the quiet pill over the card, at rest, hovered and pressed) and Rename, which greys while an answer is out (the shade of a disabled button).
+      check("rename vault label on the menu's card", c("--ink2"), card, 4.5);
+      check("rename vault box edge on the menu's card", c("--edge"), card, 3);
+      check("rename vault box words on its card", c("--ink"), card, 4.5);
+      check("rename vault box focus ring on the menu's card", c("--v"), card, 3);
+      check("rename vault box error edge on the menu's card", c("--danger"), card, 3);
+      check("rename vault refusal line on the menu's card", c("--danger"), card, 4.5);
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`rename vault Cancel words, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
+      }
+      check("rename vault Rename words, waiting", c("--ink2"), over(c("--line"), card), 4.5);
+      // Remove from list (18g) and the unavailable vault's box (Task 9): small boxes on the vault menu's card. The sentence, the status line (Try again found it still missing, in the
+      // quiet words) and the refusal line; Cancel and Remove from list are the quiet pill and Try again and Remove the main pill, each at rest, hovered and pressed (the tints laid
+      // over the card), the main pill's fill against the card, and Remove which greys while an answer is out.
+      check("remove box sentence on the menu's card", c("--ink"), card, 4.5);
+      check("unavailable box status line on the menu's card", c("--ink2"), card, 4.5);
+      check("remove and unavailable box refusal line on the menu's card", c("--danger"), card, 4.5);
+      for (const [state, alpha] of [["rest", 0.07], ["hover", 0.13], ["pressed", 0.18]] as const) {
+        check(`remove and unavailable box quiet pill words, ${state}`, c("--ink"), over([...rgbOf("--sh"), alpha] as Rgba, card), 4.5);
+      }
+      for (const [state, fill] of [["rest", "--add"], ["hover", "--addh"], ["pressed", "--addp"]] as const) {
+        check(`remove and unavailable box main pill words, ${state}`, c("--addi"), c(fill), 4.5);
+        check(`remove and unavailable box main pill against the card, ${state}`, c(fill), card, 3);
+      }
+      check("remove box main pill words, waiting", c("--ink2"), over(c("--line"), card), 4.5);
+      // An unavailable vault's row on the lock screen (30b): it is quiet by its words and its mark (the quiet ink, not a fade), on the row's card. Its name, its mark (a line
+      // drawing), the line under the name, the status line under the row, and its two links at rest, hovered and pressed (the tints laid over the card).
+      check("unavailable row name on its card", c("--ink2"), card, 4.5);
+      check("unavailable row mark on its card", c("--ink2"), card, 3);
+      check("unavailable row line on its card", c("--ink2"), card, 4.5);
+      check("unavailable row status line on its card", c("--ink2"), card, 4.5);
+      for (const [state, fill] of [["rest", card], ["hover", hoveredRow], ["pressed", pressedRow]] as const) {
+        check(`unavailable row links words, ${state}`, c("--ink"), fill, 4.5);
+      }
 
       // Show one kind, and sort (Task 15). The two lists in the toolbar are on the list's ground: their words and their
       // arrow pair at rest, hovered or open, and pressed (the tints laid over the ground), and their focus ring.

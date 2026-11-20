@@ -59,11 +59,11 @@ test("every_shell_error_has_a_message", () => {
     if (what !== undefined) expect(KNOWN_WHATS, id).toContain(what);
   }
 
-  // Every message is words: a title, and a body that may be empty. The only braces are a number's place, `{position}`, and the
-  // place for the shortcut the page tried, `{shortcut}`.
+  // Every message is words: a title, and a body that may be empty. The only braces are a number's place, `{position}`, the
+  // place for the shortcut the page tried, `{shortcut}`, and the one for the vault's name from the list, `{vault}`.
   for (const [id, message] of Object.entries(MESSAGES)) {
     expect(message.title.length, id).toBeGreaterThan(0);
-    const bare = `${message.title} ${message.body}`.replace(/\{(?:position|found|s|shortcut)\}/g, "1");
+    const bare = `${message.title} ${message.body}`.replace(/\{(?:position|found|s|shortcut|vault)\}/g, "1");
     expect(bare, id).not.toMatch(/[{}[\]]|undefined|null|\\/);
   }
 });
@@ -178,9 +178,31 @@ test("word_and_count_refusals_have_words", () => {
       expect(JSON.stringify(message)).not.toContain("SENTINEL");
     }
   }
-  // The old kinds are as they were.
-  expect(messageFor({ code: "core", kind: "recovery_key_typo" }).title).toBe("That recovery key has a typing mistake.");
+  // The typo's words are the spec's (5.2: "That recovery key has a typo"), on every screen that meets it; the other old kind is as it was.
+  expect(messageFor({ code: "core", kind: "recovery_key_typo" })).toEqual({ title: "That recovery key has a typo.", body: "Check it against the one you saved." });
   expect(messageFor({ code: "core", kind: "invalid_recovery_key" }).title).toBe("That isn't a recovery key for Lockbox.");
+});
+
+test("a_key_that_does_not_open_a_vault_names_the_vault_the_page_gives", () => {
+  // The design's words (28b). The shell sends `wrong_password` and the page makes this refusal of it; the vault's name is the list's, put in by the page.
+  const refusal = { code: "page", kind: "recovery_key_does_not_open" };
+  expect(messageFor(refusal, { vault: "My vault" })).toEqual({ title: "This key doesn't open My vault.", body: "" });
+  // With no name (a vault whose details can't be read) it says "this vault", and never leaves a brace.
+  expect(messageFor(refusal)).toEqual({ title: "This key doesn't open this vault.", body: "" });
+  // The name is put in as text: nothing in it is read as a place to fill, and a name with `$` characters comes out as it is.
+  expect(messageFor(refusal, { vault: "$& {vault} $1" }).title).toBe("This key doesn't open $& {vault} $1.");
+  // The shortcut's place still works beside it.
+  expect(messageFor({ code: "invalid_input", what: "shortcut taken" }, { shortcut: "Ctrl+Shift+L", vault: "My vault" }).title).toBe("Another app already uses Ctrl+Shift+L.");
+});
+
+test("a_recovery_choice_that_expired_asks_for_the_key_again", () => {
+  // The page's own refusal of the shell's `choice_expired` from `recover_finish` (the words are the session's: the design gives none).
+  expect(messageFor({ code: "page", kind: "recovery_choice_expired" })).toEqual({
+    title: "Type the recovery key again.",
+    body: "It waited too long, or the vault changed since it was checked. Nothing was changed.",
+  });
+  // The shared "Pick the files again." is not what it says.
+  expect(messageFor({ code: "choice_expired" }).body).toBe("Pick the files again.");
 });
 
 test("a_vault_made_but_not_listed_points_at_the_first_screens_words", () => {
@@ -374,4 +396,26 @@ test("the_four_backup_refusals_have_the_designs_words", () => {
   for (const what of ["details changed", "password copies disagree", "recovery key copies disagree", "details unchecked"]) {
     expect(KNOWN_WHATS).toContain(what);
   }
+});
+
+// Plan 4C Task 8: Rename is refused as a backup is, with the same four reasons in words that end "then rename it" (the backup words end "then back up"), and a
+// name the engine won't keep. The words are the session's, for Ariel to change.
+test("the_rename_refusals_have_words_of_their_own", () => {
+  const said = (error: object) => messageText(messageFor(error));
+  expect(said({ code: "core", kind: "invalid_input", what: "vault name" })).toBe("That name is too long. A vault name can have up to 200 characters.");
+  expect(said({ code: "page", kind: "rename_details_changed" })).toBe(
+    "Its details were changed outside Lockbox. Look at that change and accept it first, then rename it.",
+  );
+  expect(said({ code: "page", kind: "rename_password_copies_disagree" })).toBe("Change this vault's password once more, then rename it.");
+  expect(said({ code: "page", kind: "rename_recovery_key_copies_disagree" })).toBe("Make a new recovery key for this vault, then rename it.");
+  expect(said({ code: "page", kind: "rename_details_unchecked" })).toBe("Lock this vault and open it again, then rename it.");
+  // Not the backup's words, and not the generic ones.
+  for (const kind of ["rename_details_changed", "rename_password_copies_disagree", "rename_recovery_key_copies_disagree", "rename_details_unchecked"]) {
+    expect(said({ code: "page", kind })).not.toMatch(/back up/);
+    expect(messageFor({ code: "page", kind }).title, kind).not.toBe(GENERIC.title);
+  }
+  // The engine's `core:invalid_input` for a name is no longer the generic sentence; every other `invalid_input` still is.
+  expect(messageFor({ code: "core", kind: "invalid_input", what: "vault name" }).title).not.toBe(MESSAGES["core:invalid_input"]?.title);
+  expect(messageFor({ code: "core", kind: "invalid_input", what: "something else" }).title).toBe(MESSAGES["core:invalid_input"]?.title);
+  expect(KNOWN_WHATS).toContain("vault name");
 });

@@ -9,6 +9,7 @@ use serde::Serialize;
 use tauri::Url;
 use zeroize::Zeroizing;
 
+use crate::pending::Token;
 use crate::session::{SessionId, Tagged};
 
 /// An attached file: what the page shows of it, never what opens it.
@@ -229,6 +230,42 @@ pub struct SavedView {
 pub struct PrinterList {
     pub printers: Vec<String>,
     pub default: Option<String>,
+}
+
+/// A new recovery key (`new_recovery_key`, `regenerate_recovery`): its 24 words, which cross to the page once, for
+/// showing (as at creation), and the `issue` number that names this key, which the page sends back to confirm it
+/// (`recovery_confirmed`). The words are wiped from memory when dropped, and the view has no `Debug` (R5).
+#[derive(Serialize)]
+pub struct NewKeyView {
+    pub words: Zeroizing<String>,
+    pub issue: u64,
+}
+
+/// What `recover_check` found: the key opens the vault's recovery slot (`Checked`), or opens it through a header that
+/// was changed outside Lockbox, which the page asks about before it goes on (`HeaderChanged`, spec §5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCheckKind {
+    Checked,
+    HeaderChanged,
+}
+
+/// `recover_check`'s answer: what it found, the `choice` that holds the checked key in Rust (sent back to
+/// `recover_finish` and `recover_forget`), and the name in the header the key opened, for the page to show. No `Debug`:
+/// the name is the user's own (R5).
+#[derive(Serialize)]
+pub struct RecoveryCheckView {
+    pub kind: RecoveryCheckKind,
+    pub choice: Token,
+    pub vault_name: String,
+}
+
+/// `recovery_confirmed`'s answer: the key was the latest one made (`Confirmed`: its mark is cleared and 21f's permission
+/// ended), or a newer key has been made since and nothing changed (`Superseded`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Confirmation {
+    Confirmed,
+    Superseded,
 }
 
 /// A quarantined file no item references (spec §6.4), with its size in bytes.

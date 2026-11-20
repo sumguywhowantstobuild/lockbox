@@ -51,11 +51,23 @@ export interface FakeVault {
   available?: boolean;
   /** Both copies of the vault's details are unreadable (Ask 8): the list says `details_damaged: true`. False unless a test makes it so. */
   detailsDamaged?: boolean;
+  /** The vault's place on the list is a file, a link or a junction, not a plain folder: Show in Explorer is refused as `invalid_input` `folder`. */
+  notAFolder?: boolean;
   password?: string;
+  /**
+   * The recovery key that opens the vault's recovery slot (Forgot password): `fakeKey(40 + id)` when none is given and none was made. A key the fake makes
+   * (create, `regenerate_recovery`, `new_recovery_key`) replaces it, as a new key replaces the old one in the vault's details.
+   */
+  recoveryKey?: string;
   readOnly?: boolean;
   items?: FakeItem[];
   /** The "recovery key not confirmed" mark the shell keeps for the vault's folder. */
   unconfirmed?: boolean;
+  /**
+   * The shell's note about this vault can't be read (another program holds the file): 21f still shows at unlock (the lenient
+   * read says yes), but the strict read that grants a key without the password is an error, so the session gets none.
+   */
+  markUnreadable?: boolean;
   /**
    * The vault's details were changed outside Lockbox: every unlock reports `header_mac_mismatch` until `accept_header`,
    * and the engine refuses a new recovery key meanwhile, as `HeaderGuard` does.
@@ -106,8 +118,23 @@ export const VAULT_LIST_DAMAGED = { code: "core", kind: "damaged", what: "vault 
 export const NEWER_VAULT = { code: "core", kind: "unsupported_version" };
 /** What the engine refuses a new recovery key with while a changed header waits to be accepted (`HeaderGuard::check`). */
 const ACCEPT_FIRST = { code: "core", kind: "invalid_input", what: "accept the header change first" };
+/**
+ * What Rename is refused with, as a backup is (`backup_refusal`): the shell's own `what`s for the four reasons, and the engine's refusal of a name it won't keep (`validate_name`).
+ * The fake models the first (`headerChanged`) and the last; `refuseNext("rename_vault", …)` gives it the other three.
+ */
+export const DETAILS_CHANGED = { code: "invalid_input", what: "details changed" };
+export const DETAILS_UNCHECKED = { code: "invalid_input", what: "details unchecked" };
+export const PASSWORD_COPIES_DISAGREE = { code: "invalid_input", what: "password copies disagree" };
+export const RECOVERY_KEY_COPIES_DISAGREE = { code: "invalid_input", what: "recovery key copies disagree" };
+export const VAULT_NAME_REFUSED = { code: "core", kind: "invalid_input", what: "vault name" };
 /** What the shell sends when it cannot write the mark first (`write_state(…, "vault state")`, `TooLarge`). */
 export const VAULT_STATE_REFUSED = { code: "too_large", what: "vault state" };
+/** What a create answers when the vault was made but the list refused it and the folder could not be removed again (`VAULT_NOT_LISTED`, `error.rs`). */
+export const VAULT_NOT_LISTED = { code: "invalid_input", what: "vault not listed" };
+/** What a create or an add answers when the list holds its most (`registry.check_room`: `TooLarge { what: "vault list" }`); nothing is written. */
+export const VAULT_LIST_FULL = { code: "too_large", what: "vault list" };
+/** What the shell sends when a session asks for a key without the password but never entered 21f the way that grants it. */
+const NO_KEY_PERMISSION = { code: "invalid_input", what: "recovery key" };
 /** What the shell sends while a print of its own runs, and when no PDF came (`error.rs`: `PRINTER_BUSY`, `PDF_NOT_MADE`). */
 export const PRINTER_BUSY = { code: "busy", what: "printer" };
 export const PDF_NOT_MADE = { code: "print_failed", what: "pdf" };
@@ -263,11 +290,13 @@ export interface FakeShell {
   /** Whether the vault carries the "not confirmed" mark. */
   unconfirmed(vaultId: number): boolean;
   /** The next create or add-existing asks about a cloud folder first, as the shell does. */
-  cloudNext(): void;
+  cloudNext(provider?: "OneDrive" | "GoogleDrive" | "Dropbox" | "Other"): void;
   /** The next create or new key finds the mark can't be written: nothing is made, the shell refuses. */
   refuseMarkNext(): void;
   /** The next key the shell makes is this one (a test of a key with a repeated word needs one the fake would not make). */
   nextKeyIs(key: string): void;
+  /** The next key the shell makes is numbered `issue` (the real shell counts 1, 2, 3 in a session; a test may start elsewhere to tell a carried number from a made-up one). */
+  nextIssueIs(issue: number): void;
   /** The next folder picker (create with `choose_folder`, add existing) is closed without a choice. */
   dismissPickerNext(): void;
   /** The vault the next `add_existing_vault` finds in the folder the person picks. */
@@ -328,9 +357,15 @@ export interface FakeShell {
   /**
    * A close or a Quit while a job runs, as the shell asks it (Plan 4B Task 12): `lockbox://close-asked` goes out and the question is pending,
    * with nothing locked, hidden or cancelled, until `close_answer`. `running` is the kinds as the shell names them (distinct, in start order);
-   * `restoreWaiting` is a finished restore waiting for its yes at 24d (Task 13d), alone or beside jobs.
+   * `restoreWaiting` is a finished restore waiting for its yes at 24d (Task 13d), alone or beside jobs. Each call is a new question: the shell
+   * gives it the next number (1, 2, ...), which is in the event and is returned; `close_answer` must name it, and an answer naming another
+   * question is refused and leaves the pending one.
    */
-  askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean; restoreWaiting?: boolean }): void;
+  askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean; restoreWaiting?: boolean }): number;
+  /** The shell says the pending question again (a second close or Quit, a reloaded page): the same event, with the same `question` number. Nothing if none is pending. */
+  repeatClose(): void;
+  /** How many `lockbox://close-asked` events the page's listener has been handed so far (every one, however it was sent). */
+  closeAskedHeard(): number;
   /** The shell's lock epoch changes (Lock all, Windows locking or sleeping, an idle lock): `lockbox://lock-epoch` goes out and a pending question is dropped. */
   changeLockEpoch(reason?: string): void;
   /** Whether a question is waiting for `close_answer`. */
@@ -415,8 +450,8 @@ export interface FakeShell {
   clipboard(): string | null;
   /** The next clipboard clear (a save's, or the paste panel's) errors: the answer is `failed`, and the text stays. */
   failClipboardClearNext(): void;
-  /** The slot the shell holds, as the page can only know it by asking: its id, state and the vault it was handed to. `null` for none. */
-  captureSlot(): { id: string; state: string; chosen: number | null } | null;
+  /** The slot the shell holds, as the page can only know it by asking: its id, state and the vault it was handed to (session and generation). `null` for none. */
+  captureSlot(): { id: string; state: string; chosen: number | null; chosenGeneration: number | null } | null;
   /** Empties the slot as a lock of its vault does: `lockbox://capture` with `gone` is sent. */
   emptyCaptureSlot(): void;
   /** Empties the slot and says nothing, as when the page missed the `gone` event: the next command about it is `not_found`. */
@@ -438,6 +473,11 @@ export interface FakeShell {
    * a `capture_reveal` meanwhile is `locked`, as the shell answers it.
    */
   holdCaptureChoose(): () => void;
+  /**
+   * Holds the next `capture_unchoose` (that one only) until `release` is called, and does it then: until it is done the shell still holds the copy for the vault it was
+   * handed to, and a press that replaces the copy keeps that binding (`fill`). Later ones go through.
+   */
+  holdCaptureUnchoose(): () => void;
   /**
    * Every stored-file command that got as far as working on a file, in order (`open_file`, `save_file_copy`, `add_file`,
    * `attach_file`, `replace_file`), with the ids it was sent. A refused one, a question (a program file asks first) and a
@@ -557,7 +597,10 @@ export interface FakeShell {
   restoreIs(found: Partial<{ name: string; made: string | null; replaces: boolean; keptAs: string }>): void;
   /** Lets the shell forget every held restore pick at once, as five minutes do. */
   expireRestorePicks(): void;
-  /** Holds every `restore_check` until `release` is called, as unlocking the backup takes a moment: the answer is decided at release. */
+  /**
+   * Holds every `restore_check` until `release` is called, as unlocking the backup takes a moment: its job (kind `restore_check`, scope `launch`) runs from the
+   * moment the command arrives, and the answer is decided at release (a Cancel in between leaves `cancelled`, the pick kept and nothing found).
+   */
   holdRestoreCheck(): () => void;
   /** Holds every restore copy (`restore_prepare`, `restore_prepare_confirm`) until `release` is called: its job (kind `restore`, scope `launch`) runs from the moment it starts. */
   holdRestoreCopy(): () => void;
@@ -627,6 +670,96 @@ export interface FakeShell {
    * command arrives, so an older answer comes after a newer one, as it can on a busy shell.
    */
   holdGetItem(): () => void;
+  /**
+   * Holds every `change_password` answer until `release` is called: the change is decided (and written, when it is good) as the command arrives,
+   * as the shell writes it, and the answer comes later, so the person can switch vault or a lock can come in between.
+   */
+  holdChangePassword(): () => void;
+  /**
+   * Holds every `unlock_vault` answer until `release` is called (Plan 4C Task 6): the password is checked and the session is opened as the command arrives, as the
+   * shell does it, and the answer comes later, so the person can go Back, or lock the vault, in between.
+   */
+  holdUnlock(): () => void;
+  /**
+   * Holds every `create_vault` and `create_vault_confirm` answer until `release` is called (Plan 4C Task 7): the vault is decided, made and listed as the command
+   * arrives, as the shell does it, and the answer comes later, so the typed text can be looked for, or a lock can come in between.
+   */
+  holdCreate(): () => void;
+  /**
+   * The next `create_vault` or `create_vault_confirm` that would make a vault (not one that asks, is dismissed or is refused first) is cut short as a lock of all
+   * vaults can cut it: every unlocked session locks, and the lock epoch moves on. `lock_before_create`: nothing was made, and the answer is `locked`.
+   * `lock_after_create`: the vault is made and listed (with its "not confirmed" mark and a key nobody saw) and its session opened, then the lock; the answer is
+   * tagged with the generation from before (the bridge drops it as stale). `lock_after_create_as_error`: the vault is made and listed (mark and key as above),
+   * no session is opened, then the lock, and the answer is `locked_after_change` with the new vault's registry ID.
+   */
+  interruptCreateNext(how: "lock_before_create" | "lock_after_create" | "lock_after_create_as_error"): void;
+  /**
+   * The next create that makes a vault also puts `vault` on the list right after its own, with the next higher ID, as an add in another window would. `vault.id`
+   * is overwritten with that ID. A page that took the newest vault of the list for its own would take this one.
+   */
+  listAlongsideNextCreate(vault: FakeVault): void;
+  /**
+   * The next `change_password` is cut short as a lock can cut it (Plan 4C Task 3, Ask 16's cases). `lock_before_write`: the lock came before the
+   * headers were written, so nothing changed and the answer is `locked`. `lock_after_write`: the change landed, then the lock event reached the
+   * page before the good answer did, so the answer is tagged with the generation from before. `lock_after_write_as_error`: the change landed and the
+   * shell answered `locked_after_change` with the vault's registry ID: this is also what the shell answers when `vault.json` landed though the
+   * write came back as an error (`commit` read it back and made the new header live), after locking that vault. `refused_before_write`: the write
+   * failed before `vault.json` was touched, so nothing changed, the old password still opens and the answer is this plain refusal.
+   */
+  interruptChangeNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error" | { refused_before_write: object }): void;
+  /**
+   * The vaults shown in Explorer by `show_vault_in_explorer`, by registry ID, in order (Plan 4C Task 9). A refusal puts nothing here.
+   */
+  openedVaults: number[];
+  /** The identity of the vault list now (what each `list_vaults` entry says in `list`): a new list (`start_new_vault_list`) has another. */
+  listIdentity(): number;
+  /**
+   * The vault list is replaced by another (as when a damaged list was started over and the vaults added back): it has a new identity, and `next` are the vaults on it, whose
+   * IDs may be numbers the old list used for other vaults. Vaults that are open stay open, as they do in the shell. Nothing is sent to the page; it reads the list again.
+   */
+  replaceVaultList(next: FakeVault[]): void;
+  /** The vault's folder or drive is there again (`true`) or isn't (`false`): the list says `available` from then on. Nothing is sent to the page. */
+  setAvailable(vaultId: number, available: boolean): void;
+  /** The vault's drive goes while it is open: it is `available: false` from now, and its session (when open) locks alone with the reason `drive_gone`, with the event. */
+  driveGone(vaultId: number): void;
+  /**
+   * The next `forget_vault` that gets past the busy check locks the vault when it is open, keeps it listed and refuses with `error`, as the shell's can when the list write
+   * fails after the lock.
+   */
+  forgetFailsAfterLockNext(error: object): void;
+  /** Holds every `forget_vault` answer until `release` is called: the vault is locked and taken off the list as the command arrives, and the answer comes later. */
+  holdForget(): () => void;
+  /**
+   * Holds every `rename_vault` answer until `release` is called (Plan 4C Task 8): the name is decided (and written, when it is good) as the command arrives, as the shell writes it,
+   * and the answer comes later, so the person can switch vault or a lock can come in between.
+   */
+  holdRename(): () => void;
+  /**
+   * The next `rename_vault` that gets as far as the write is cut short as a lock can cut it, as `interruptChangeNext` does for a change. `lock_before_write`: the lock came first,
+   * so nothing changes and the answer is `locked`. `lock_after_write`: the name is set, then the lock event reaches the page before the good answer, so the answer is tagged with
+   * the generation from before (the bridge drops it as stale). `lock_after_write_as_error`: the name is set, the vault locks, and the answer is `locked_after_change` with
+   * what `"vault name"` and the vault's registry ID.
+   */
+  interruptRenameNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error"): void;
+  /**
+   * Forgot password (Plan 4C Task 4). The recovery key that opens the vault now: its `recoveryKey`, or the key the fake last made for it, or `fakeKey(40 + id)`.
+   * `keyOf` stays as it is (what a setup test expects: `undefined` until a key was made).
+   */
+  recoveryKeyOf(vaultId: number): string;
+  /** Holds every `recover_check` until `release` is called: it is decided, and its choice parked, as the command arrives; the answer comes at release. */
+  holdRecoverCheck(): () => void;
+  /** Holds every `recover_finish` until `release` is called: it is decided, and the password written, as the command arrives; the answer comes at release. */
+  holdRecoverFinish(): () => void;
+  /**
+   * The next `recover_finish` is cut short as a lock can cut it, as `interruptChangeNext` does for a change. `lock_before_write`: the lock epoch moves on, nothing
+   * changes and the answer is `locked`. `lock_after_write`: the password is set and the session opened, then it locks, and the answer is tagged with the
+   * generation from before (the bridge drops it as stale). `lock_after_write_as_error`: the same, and the answer is `locked_after_change` with the vault's ID.
+   */
+  interruptRecoverNext(how: "lock_before_write" | "lock_after_write" | "lock_after_write_as_error"): void;
+  /** The tokens of the recovery choices the shell holds now (a checked key waits for its new password), in order. */
+  recoveryChoiceTokens(): string[];
+  /** Lets the shell forget every held recovery choice at once, as five minutes do: a `recover_finish` for one is then `choice_expired`. */
+  expireRecoveryChoices(): void;
   /** The settings the shell holds now (what the last accepted `set_settings` sent), and every one it accepted, in order. */
   settings(): FakeSettings;
   settingsSaved: FakeSettings[];
@@ -824,6 +957,22 @@ function readEnvText(text: string): { rows: EnvPasted[]; bad: number[] } {
   return { rows, bad };
 }
 
+/**
+ * A stand-in for the engine's `.env` writer (`env_file::write`, whose own tests prove it): `NAME=value` per line, a value of only
+ * letters, digits and `_-./:@+=,` bare, one with no quote or line break in single quotes, any other in double quotes with
+ * `\\`, `\"`, `\n`, `\r`, `\t` and `$` escaped. Line breaks are never turned into others.
+ */
+function writeEnvText(keys: readonly { title: string; value?: string }[]): string {
+  return keys
+    .map(({ title, value = "" }) => {
+      if (/^[A-Za-z0-9_\-./:@+=,]*$/.test(value)) return `${title}=${value}\n`;
+      if (!/['\r\n]/.test(value)) return `${title}='${value}'\n`;
+      const escaped = value.replace(/[\\"\n\r\t$]/g, (c) => ({ "\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t", $: "\\$" })[c] ?? c);
+      return `${title}="${escaped}"\n`;
+    })
+    .join("");
+}
+
 /** The live key items filed in `place` (a folder's id, or null for none), as the engine counts them. */
 function liveKeys(items: readonly FakeItem[], place: string | null): FakeItem[] {
   return items.filter((item) => item.kind === "key" && !(item.trashed ?? false) && (item.collection ?? null) === place);
@@ -856,8 +1005,13 @@ interface FakeSlot {
   id: string;
   text: string | null;
   state: "value" | "empty" | "too_large";
+  /** The session the copy is handed to, with its generation (`capture_choose`), or `null` for none. Save and Reveal are held to both. */
   chosen: number | null;
+  chosenGeneration: number | null;
 }
+
+/** What the shell sends when `capture_save` is given a session the copy is not handed to (none chosen, another one, or the chosen one at another generation). */
+export const CAPTURE_VAULT = { code: "invalid_input", what: "capture vault" };
 
 /** What the engine sends for a file that does not decrypt (`Damaged { what: "file" }`), and for an item that holds no files. */
 export const FILE_DAMAGED = { code: "core", kind: "damaged", what: "file" };
@@ -1025,8 +1179,13 @@ export function installFakeShell(
   let heldSettings: (() => void)[] | undefined;
   // The handlers each event has, as `listen` was given them.
   const handlers = new Map<string, ((event: { payload: unknown }) => void)[]>();
+  // How many `lockbox://close-asked` events a listener was handed, by whatever sent them (a test checks a repeat really arrived).
+  let closeAskedHeard = 0;
   const emit = (event: string, payload: unknown): void => {
-    for (const handler of handlers.get(event) ?? []) handler({ payload });
+    for (const handler of handlers.get(event) ?? []) {
+      if (event === "lockbox://close-asked") closeAskedHeard += 1;
+      handler({ payload });
+    }
   };
   let launchNotices: object[] = [];
   let outputResets = 0;
@@ -1036,7 +1195,9 @@ export function installFakeShell(
   let hidden = false;
   let closeExplainedCalls = 0;
   // The question a close or a Quit asked and the shell is holding, what was answered, how often the app quit, and the lock epoch's number.
-  let pendingClose: "close" | "quit" | undefined;
+  // Each question gets its number from the shell (Plan 4C Task 12); a repeat of the pending one carries the same number.
+  let pendingClose: { reason: "close" | "quit"; question: number; event: Record<string, unknown> } | undefined;
+  let closeQuestions = 0;
   const closeAnswers: boolean[] = [];
   let quits = 0;
   let lockEpoch = 0;
@@ -1057,6 +1218,21 @@ export function installFakeShell(
   let heldNewItem: (() => void)[] | undefined;
   let heldReveal: (() => void)[] | undefined;
   let heldUpdate: (() => void)[] | undefined;
+  let heldChange: (() => void)[] | undefined;
+  let heldUnlock: (() => void)[] | undefined;
+  let heldCreate: (() => void)[] | undefined;
+  let interruptCreate: Parameters<FakeShell["interruptCreateNext"]>[0] | undefined;
+  let alongside: FakeVault | undefined;
+  let interruptChange: Parameters<FakeShell["interruptChangeNext"]>[0] | undefined;
+  let heldRename: (() => void)[] | undefined;
+  let interruptRename: Parameters<FakeShell["interruptRenameNext"]>[0] | undefined;
+  // Forgot password (Task 4): the checked keys the shell holds under their choices (32 hex characters, launch-scoped: every lock epoch and the five minutes drop
+  // them), what the vault's details were as checked, the holds a test can put on the two steps, and how the next finish is cut short.
+  const recoveryHeld = new Map<string, { vault: FakeVault; key: string; headerChanged: boolean }>();
+  let recoveriesMade = 0;
+  let heldRecoverChecks: (() => void)[] | undefined;
+  let heldRecoverFinishes: (() => void)[] | undefined;
+  let interruptRecover: Parameters<FakeShell["interruptRecoverNext"]>[0] | undefined;
   let heldTrash: (() => void)[] | undefined;
   const refusals = new Map<string, object>();
   const edited: FakeShell["edited"] = [];
@@ -1066,13 +1242,40 @@ export function installFakeShell(
   const random = randomSource(7);
   let nextItem = 0x1000;
   const keys = new Map<FakeVault, string>();
+  /** Every key the fake issued or was told to issue (`makeKey`, `nextKeyIs`): a key that reads as a key but is none of these (or a `fakeKey`) has a typo. */
+  const issuedKeys = new Set<string>();
   let keysMade = 0;
   let chosenKey: string | undefined;
-  let cloud = false;
+  let chosenIssue: number | undefined;
+  /** What each session holds about its keys, as the shell's `KeyState` does: 21f's permission, and the last key's number. */
+  const keyStates = new Map<number, { may: boolean; last: number }>();
+  // The service the next create or add-existing finds syncing its folder (`cloudNext`), or `null` for none.
+  let cloud: "OneDrive" | "GoogleDrive" | "Dropbox" | "Other" | null = null;
   let refuseMark = false;
   let dismissPicker = false;
   let existing: FakeVault | undefined;
   let listDamaged = false;
+  // The vault list's identity and high-water mark (Task 9): an ID is never given twice within a list, and a row from another list is `not_found`.
+  let listId = 4242;
+  let lastId = Math.max(0, ...vaults.map((v) => v.id));
+  const nextVaultId = (): number => {
+    lastId += 1;
+    return lastId;
+  };
+  const openedVaults: number[] = [];
+  let heldForget: (() => void)[] | undefined;
+  let forgetFailsAfterLock: object | undefined;
+  /** A row as the page names it, `{ list, id }`: exactly those two whole numbers; another list's row or an ID not listed is `not_found`. */
+  const vaultRefOf = (raw: unknown): FakeVault => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return refuse(MALFORMED);
+    if (Object.keys(raw).sort().join() !== "id,list") return refuse(MALFORMED);
+    const { list, id } = raw as { list: unknown; id: unknown };
+    if (typeof list !== "number" || typeof id !== "number" || !Number.isSafeInteger(list) || !Number.isSafeInteger(id) || list <= 0 || id <= 0) return refuse(MALFORMED);
+    if (listDamaged || list !== listId) return refuse({ code: "not_found" });
+    const found = vaults.find((v) => v.id === id);
+    if (found === undefined) return refuse({ code: "not_found" });
+    return found;
+  };
   let heldStartList: (() => void)[] | undefined;
   let failAfterMove: object | undefined;
   let nextToken = 0;
@@ -1103,6 +1306,7 @@ export function installFakeShell(
   let heldCaptureReveal: (() => void)[] | undefined;
   let heldCaptureState: (() => void)[] | undefined;
   let heldCaptureChoose: (() => void)[] | undefined;
+  let heldCaptureUnchoose: (() => void)[] | undefined;
   let captureRevealed = 0;
   // Stored files: what the commands did, the picker's next choice, a closed dialog, the hold, and the opened copies left behind.
   const fileOps: FakeShell["fileOps"] = [];
@@ -1276,6 +1480,8 @@ export function installFakeShell(
     // Every lock drops the picks and the questions; a finished copy waits through an idle lock and is ended by every other reason.
     restoreHeld.clear();
     restoreAsked.clear();
+    // The checked recovery keys go the same way: a lock epoch of any reason drops them.
+    recoveryHeld.clear();
     if (reason !== "idle") for (const copy of restorePrepared.values()) copy.ended = true;
     for (const job of [...running.values()]) {
       if (job.scope.type !== "launch" || (job.pastTheSwap ?? false)) continue;
@@ -1366,7 +1572,26 @@ export function installFakeShell(
     const [session, state] = entry;
     state.unlocked = true;
     state.generation += 1;
+    // A new unlock starts the session's key state over: no permission, no key made yet.
+    keyStates.set(session, { may: false, last: 0 });
     return [session, state];
+  };
+
+  /** The session's key state (an unlocked session has one). */
+  const keyStateOf = (session: number): { may: boolean; last: number } => {
+    const found = keyStates.get(session);
+    if (found !== undefined) return found;
+    const fresh = { may: false, last: 0 };
+    keyStates.set(session, fresh);
+    return fresh;
+  };
+
+  /** Numbers the key the session has just made: the next in its count, or the one a test asked for. */
+  const numberKey = (session: number): number => {
+    const state = keyStateOf(session);
+    state.last = chosenIssue ?? state.last + 1;
+    chosenIssue = undefined;
+    return state.last;
   };
 
   const infoOf = (vault: FakeVault, session: number, generation: number) => ({
@@ -1383,7 +1608,64 @@ export function installFakeShell(
     const key = chosenKey ?? fakeKey(keysMade);
     chosenKey = undefined;
     keys.set(vault, key);
+    issuedKeys.add(key);
     return key;
+  };
+
+  /** The recovery key that opens the vault now: the last one made for it, else the one it was given, else `fakeKey(40 + id)`. */
+  const recoveryKeyOf = (vault: FakeVault): string => keys.get(vault) ?? vault.recoveryKey ?? fakeKey(40 + vault.id);
+
+  /**
+   * The shell's reading of a typed recovery key (`RecoverySecret::parse`), in its order: the text is lowercased and split at white space, commas and
+   * dots; list numbers ("3", "3)") are dropped; the first token that is no listed word is `recovery_key_word` with its place among the words kept; any
+   * count but 24 is `recovery_key_count`; a key that is no key anyone made (a word swapped for another) is `recovery_key_typo`. Gives the key in its display form.
+   */
+  const readRecoveryKey = (text: string): string => {
+    const tokens = text
+      .toLowerCase()
+      .split(/[\s,.]+/)
+      .filter((token) => token !== "" && !/^\d+\)?$/.test(token));
+    const place = tokens.findIndex((token) => !FAKE_WORDS.includes(token));
+    if (place >= 0) return refuse({ code: "core", kind: "recovery_key_word", position: place + 1 });
+    if (tokens.length !== 24) return refuse({ code: "core", kind: "recovery_key_count", found: tokens.length });
+    const key = tokens.join(" ");
+    const known =
+      Array.from({ length: 64 }, (_, n) => fakeKey(n)).includes(key) || issuedKeys.has(key) || vaults.some((one) => one.recoveryKey === key);
+    if (!known) return refuse({ code: "core", kind: "recovery_key_typo" });
+    return key;
+  };
+
+  /** One token for a held recovery choice: 32 lowercase hex characters, a new one for every check. */
+  const recoveryToken = (): string => {
+    recoveriesMade += 1;
+    return `${(0xec0).toString(16)}${recoveriesMade.toString(16).padStart(29, "0")}`;
+  };
+
+  /** What an unlock found and answers (`UnlockView`), for the vault just opened in `session`. */
+  const unlockView = (vault: FakeVault, session: number, generation: number, headerMacMismatch: boolean) => ({
+    info: infoOf(vault, session, generation),
+    used_backup_header: vault.usedBackupHeader ?? false,
+    header_mac_mismatch: headerMacMismatch,
+    header_repair_failed: false,
+    cleanup: {
+      partials_removed: 0,
+      temps_removed: 0,
+      retired_deleted: 0,
+      purges_finished: 0,
+      orphans_quarantined: vault.leftover ?? 0,
+      orphans_restored: 0,
+      skipped_damaged: vault.unreadable ?? 0,
+      failed: 0,
+    },
+    cloud: vault.cloud ?? null,
+    // Worked out on every answer, as the shell does: a writable vault with the mark, never a read-only copy.
+    recovery_unconfirmed: (vault.unconfirmed ?? false) && !(vault.readOnly ?? false),
+  });
+
+  /** A lock of all vaults, as Lock all, an idle lock or the app closing do it: every unlocked session locks, then the lock epoch moves on. */
+  const lockEveryVault = (): void => {
+    for (const session of [...live.keys()]) lock(session);
+    bumpEpoch();
   };
 
   /** A create that goes through: the mark is written first, then the vault is made, listed and unlocked. */
@@ -1392,29 +1674,59 @@ export function installFakeShell(
       refuseMark = false;
       return refuse(VAULT_STATE_REFUSED);
     }
+    // A cut (`interruptCreateNext`) is used by the create that makes a vault, and only that one.
+    const cut = interruptCreate;
+    interruptCreate = undefined;
+    if (cut === "lock_before_create") {
+      lockEveryVault();
+      return refuse(LOCKED);
+    }
     const vault: FakeVault = {
-      id: Math.max(0, ...vaults.map((v) => v.id)) + 1,
+      id: nextVaultId(),
       name,
       password,
       items: [],
       unconfirmed: true,
     };
     vaults.push(vault);
+    // An add in another window lands on the list right after this vault: the next ID is its.
+    if (alongside !== undefined) {
+      const other = alongside;
+      alongside = undefined;
+      other.id = nextVaultId();
+      vaults.push(other);
+    }
+    if (cut === "lock_after_create_as_error") {
+      // Made and listed, with a key nobody saw, then the lock: no session, and the answer names the vault.
+      makeKey(vault);
+      lockEveryVault();
+      return refuse({ code: "locked_after_change", what: "vault created", vault: vault.id });
+    }
     const [session, state] = openSession(vault);
-    return {
+    // A new vault's session may make its key again without the password (21c's retries) until the key is confirmed.
+    keyStateOf(session).may = true;
+    const recoveryKey = makeKey(vault);
+    const done = {
       Done: tagged(session, state.generation, {
         info: infoOf(vault, session, state.generation),
-        recovery_key: makeKey(vault),
+        recovery_key: recoveryKey,
+        issue: numberKey(session),
+        vault_id: vault.id,
       }),
     };
+    // The lock came after the vault was made and opened: the good answer is from before it, and the bridge drops it as stale.
+    if (cut === "lock_after_create") lockEveryVault();
+    return done;
   };
 
   const added = (): unknown => {
     const vault = existing;
     if (vault === undefined) return refuse({ code: "not_found" });
     existing = undefined;
+    // The list gives the new row the next ID of its own (as it does a created vault): the one the test offered is overwritten.
+    vault.id = nextVaultId();
     vaults.push(vault);
-    return { Done: { id: vault.id, name: vault.name, available: true } };
+    return { Done: { list: listId, id: vault.id, name: vault.name, available: true, details_damaged: vault.detailsDamaged ?? false } };
   };
 
   /** The held choice of a pick session, when it is this session's at this generation; otherwise the shell's `choice_expired`. */
@@ -1640,13 +1952,15 @@ export function installFakeShell(
       case "list_vaults":
         exactly(args ?? {}, []);
         if (listDamaged) return refuse(VAULT_LIST_DAMAGED);
-        return vaults.map((v) => ({ id: v.id, name: v.name, available: v.available ?? true, details_damaged: v.detailsDamaged ?? false }));
+        return vaults.map((v) => ({ list: listId, id: v.id, name: v.name, available: v.available ?? true, details_damaged: v.detailsDamaged ?? false }));
       case "start_new_vault_list":
         exactly(args ?? {}, []);
         // Only a damaged list is started over: a good one is refused and left as it is.
         if (!listDamaged) return refuse({ code: "invalid_input", what: "vault list" });
-        // The damaged file is set aside and a new, empty list is made: no vault is on it until each is added back.
+        // The damaged file is set aside and a new, empty list is made: no vault is on it until each is added back. It has its own identity, and IDs start again at 1.
         listDamaged = false;
+        listId += 1;
+        lastId = 0;
         vaults.splice(0);
         if (failAfterMove !== undefined) {
           const failure = failAfterMove;
@@ -1700,31 +2014,74 @@ export function installFakeShell(
         exactly(args ?? {}, []);
         return { version: "1.2.3" };
       case "unlock_vault": {
-        const { id, password } = exactly(args, ["id", "password"]);
-        const vault = vaults.find((v) => v.id === id);
-        if (vault === undefined) return refuse({ code: "not_found" });
+        const { vault: row, password } = exactly(args, ["vault", "password"]);
+        const vault = vaultRefOf(row);
         if (password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
         if (vault.newer ?? false) return refuse(NEWER_VAULT);
         const [session, state] = openSession(vault);
-        return tagged(session, state.generation, {
-          info: infoOf(vault, session, state.generation),
-          used_backup_header: vault.usedBackupHeader ?? false,
-          header_mac_mismatch: vault.headerChanged ?? false,
-          header_repair_failed: false,
-          cleanup: {
-            partials_removed: 0,
-            temps_removed: 0,
-            retired_deleted: 0,
-            purges_finished: 0,
-            orphans_quarantined: vault.leftover ?? 0,
-            orphans_restored: 0,
-            skipped_damaged: vault.unreadable ?? 0,
-            failed: 0,
-          },
-          cloud: vault.cloud ?? null,
-          // Worked out on every answer, as the shell does: a writable vault with the mark, never a read-only copy.
-          recovery_unconfirmed: (vault.unconfirmed ?? false) && !(vault.readOnly ?? false),
-        });
+        // A writable unlock that enters 21f from a mark read without error may make a key without the password; a mark the shell
+        // could not read shows 21f all the same, and grants nothing.
+        keyStateOf(session).may = (vault.unconfirmed ?? false) && !(vault.markUnreadable ?? false) && !(vault.readOnly ?? false);
+        return tagged(session, state.generation, unlockView(vault, session, state.generation, vault.headerChanged ?? false));
+      }
+      case "recover_check": {
+        const sent = exactly(args, ["vault", "recovery_key"]);
+        if (typeof sent.recovery_key !== "string") return refuse(MALFORMED);
+        const vault = vaultRefOf(sent.vault);
+        // A vault that is open has no need of its recovery key here.
+        if ([...live.entries()].some(([session, entry]) => entry.unlocked && sessionVault.get(session) === vault)) {
+          return refuse({ code: "invalid_input", what: "vault is unlocked" });
+        }
+        // The key is read first (no derivation is spent on a typo), then tried against this vault's recovery slot alone.
+        const key = readRecoveryKey(sent.recovery_key);
+        if (key !== recoveryKeyOf(vault)) return refuse(WRONG_PASSWORD);
+        const choice = recoveryToken();
+        recoveryHeld.set(choice, { vault, key, headerChanged: vault.headerChanged ?? false });
+        return { kind: (vault.headerChanged ?? false) ? "header_changed" : "checked", choice, vault_name: vault.name ?? "" };
+      }
+      case "recover_finish": {
+        const sent = exactly(args, ["choice", "new_password", "accept_changed_header"]);
+        if (typeof sent.choice !== "string" || typeof sent.new_password !== "string" || typeof sent.accept_changed_header !== "boolean") return refuse(MALFORMED);
+        // The new password's length first, before anything is looked up: the choice is kept.
+        if (Array.from(sent.new_password.normalize("NFC")).length < 12) return refuse({ code: "core", kind: "password_too_short", min: 12 });
+        const held = recoveryHeld.get(sent.choice);
+        if (held === undefined) return refuse(CHOICE_EXPIRED);
+        // The changed details are accepted by a yes, never by a silence: refused, with the choice kept.
+        if (held.headerChanged && !sent.accept_changed_header) return refuse({ code: "invalid_input", what: "header changed on disk" });
+        // From here the choice is used up, whatever comes.
+        recoveryHeld.delete(sent.choice);
+        const { vault } = held;
+        if ([...live.entries()].some(([session, entry]) => entry.unlocked && sessionVault.get(session) === vault)) {
+          return refuse({ code: "invalid_input", what: "vault is unlocked" });
+        }
+        // The key must still open it and the details be as they were checked: otherwise it is checked again.
+        if (recoveryKeyOf(vault) !== held.key || (vault.headerChanged ?? false) !== held.headerChanged) return refuse(CHOICE_EXPIRED);
+        const cut = interruptRecover;
+        interruptRecover = undefined;
+        if (cut === "lock_before_write") {
+          bumpEpoch();
+          return refuse(LOCKED);
+        }
+        vault.password = sent.new_password;
+        if (held.headerChanged) vault.headerChanged = false;
+        const [session, state] = openSession(vault);
+        keyStateOf(session).may = (vault.unconfirmed ?? false) && !(vault.markUnreadable ?? false) && !(vault.readOnly ?? false);
+        const before = state.generation;
+        if (cut === "lock_after_write") {
+          lock(session);
+          return { Done: tagged(session, before, unlockView(vault, session, before, false)) };
+        }
+        if (cut === "lock_after_write_as_error") {
+          lock(session);
+          return refuse({ code: "locked_after_change", what: "password", vault: vault.id });
+        }
+        return { Done: tagged(session, before, unlockView(vault, session, before, false)) };
+      }
+      case "recover_forget": {
+        const sent = exactly(args, ["choice"]);
+        if (typeof sent.choice !== "string") return refuse(MALFORMED);
+        recoveryHeld.delete(sent.choice);
+        return null;
       }
       case "create_vault": {
         const { name, password, choose_folder } = exactly(args, ["name", "password", "choose_folder"]) as {
@@ -1737,12 +2094,13 @@ export function installFakeShell(
           dismissPicker = false;
           return "Dismissed";
         }
-        if (cloud) {
-          cloud = false;
+        if (cloud !== null) {
+          const provider = cloud;
+          cloud = null;
           nextToken += 1;
           const token = `create-token-${String(nextToken)}`;
           pendingCreates.set(token, { name, password });
-          return { Confirm: { CloudFolder: { token } } };
+          return { Confirm: { CloudFolder: { token, provider } } };
         }
         return created(name, password);
       }
@@ -1760,12 +2118,13 @@ export function installFakeShell(
           return "Dismissed";
         }
         if (existing === undefined) return refuse({ code: "invalid_input", what: "not a vault folder" });
-        if (cloud) {
-          cloud = false;
+        if (cloud !== null) {
+          const provider = cloud;
+          cloud = null;
           nextToken += 1;
           const token = `add-token-${String(nextToken)}`;
           pendingAdds.add(token);
-          return { Confirm: { CloudFolder: { token } } };
+          return { Confirm: { CloudFolder: { token, provider } } };
         }
         return added();
       }
@@ -1778,6 +2137,8 @@ export function installFakeShell(
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // Without the password only a session that entered 21f may: any other asks through `new_recovery_key`.
+        if (!keyStateOf(session).may) return refuse(NO_KEY_PERMISSION);
         // The engine writes no header while a changed one waits for the person's yes.
         if (vault.headerChanged ?? false) return refuse(ACCEPT_FIRST);
         // The mark goes first; when it can't be written no key is made.
@@ -1786,13 +2147,92 @@ export function installFakeShell(
           return refuse(VAULT_STATE_REFUSED);
         }
         vault.unconfirmed = true;
-        return tagged(session, generation, makeKey(vault));
+        const words = makeKey(vault);
+        return tagged(session, generation, { words, issue: numberKey(session) });
+      }
+      case "new_recovery_key": {
+        const { session, generation, current_password } = exactly(args, ["session", "generation", "current_password"]) as {
+          session: number;
+          generation: number;
+          current_password: string;
+        };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The current password is checked first: a wrong one writes no mark and makes no key.
+        if (current_password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        if (refuseMark) {
+          refuseMark = false;
+          return refuse(VAULT_STATE_REFUSED);
+        }
+        if (vault.headerChanged ?? false) return refuse(ACCEPT_FIRST);
+        vault.unconfirmed = true;
+        const words = makeKey(vault);
+        return tagged(session, generation, { words, issue: numberKey(session) });
+      }
+      case "change_password": {
+        const { session, generation, current_password, new_password } = exactly(args, [
+          "session",
+          "generation",
+          "current_password",
+          "new_password",
+        ]) as { session: number; generation: number; current_password: string; new_password: string };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The new password's length first, then the current password; a wrong current one changes nothing.
+        if (Array.from(new_password.normalize("NFC")).length < 12) return refuse({ code: "core", kind: "password_too_short", min: 12 });
+        if (current_password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        if (vault.headerChanged ?? false) return refuse(ACCEPT_FIRST);
+        // A lock that cuts the change short: before the headers are written nothing changes; after, the change stays.
+        const cut = interruptChange;
+        interruptChange = undefined;
+        if (cut === "lock_before_write") {
+          lock(session);
+          return refuse(LOCKED);
+        }
+        if (typeof cut === "object") return refuse(cut.refused_before_write);
+        vault.password = new_password;
+        if (cut === "lock_after_write") {
+          lock(session);
+          return tagged(session, generation, null);
+        }
+        if (cut === "lock_after_write_as_error") {
+          lock(session);
+          return refuse({ code: "locked_after_change", what: "password", vault: vault.id });
+        }
+        return tagged(session, generation, null);
       }
       case "accept_header": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         vault.headerChanged = false;
+        return tagged(session, generation, null);
+      }
+      case "rename_vault": {
+        const sent = exactly(args, ["session", "generation", "name"]);
+        const { session, generation, name } = sent;
+        if (typeof session !== "number" || typeof generation !== "number" || typeof name !== "string") return refuse(MALFORMED);
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The engine's own check of the name first (`validate_name`: nothing but spaces, or over 200 characters), then the backup's refusals.
+        if (name.trim() === "" || Array.from(name).length > 200) return refuse(VAULT_NAME_REFUSED);
+        if (vault.headerChanged ?? false) return refuse(DETAILS_CHANGED);
+        // A lock that cuts the rename short: before the headers are written nothing changes; after, the new name stays.
+        const cut = interruptRename;
+        interruptRename = undefined;
+        if (cut === "lock_before_write") {
+          lock(session);
+          return refuse(LOCKED);
+        }
+        vault.name = name;
+        if (cut === "lock_after_write") {
+          lock(session);
+          return tagged(session, generation, null);
+        }
+        if (cut === "lock_after_write_as_error") {
+          lock(session);
+          return refuse({ code: "locked_after_change", what: "vault name", vault: vault.id });
+        }
         return tagged(session, generation, null);
       }
       case "launch_notices":
@@ -1803,11 +2243,19 @@ export function installFakeShell(
         outputResets += 1;
         return null;
       case "recovery_confirmed": {
-        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const { session, generation, issue } = exactly(args, ["session", "generation", "issue"]) as {
+          session: number;
+          generation: number;
+          issue: number;
+        };
         const vault = vaultFor(session, generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // Only the latest key's confirmation clears the mark and ends 21f's permission; an older one changes nothing.
+        const state = keyStateOf(session);
+        if (issue === 0 || issue !== state.last) return tagged(session, generation, "Superseded");
         vault.unconfirmed = false;
-        return tagged(session, generation, null);
+        state.may = false;
+        return tagged(session, generation, "Confirmed");
       }
       case "save_recovery_pdf": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
@@ -1827,7 +2275,7 @@ export function installFakeShell(
           nextToken += 1;
           const token = `pdf-token-${String(nextToken)}`;
           pendingPdfs.set(token, { session, generation, envFolder: null });
-          return tagged(session, generation, { Confirm: { CloudFolder: { token } } });
+          return tagged(session, generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
         }
         pdfs.push(SAVED_FOLDER);
         return tagged(session, generation, { Done: { folder: SAVED_FOLDER } });
@@ -1854,15 +2302,26 @@ export function installFakeShell(
         return slot === undefined ? null : slotEvent(slot, false);
       case "capture_choose": {
         const sent = exactly(args, ["session", "generation", "capture_id"]) as { session: number; generation: number; capture_id: string };
-        vaultFor(sent.session, sent.generation);
+        const vault = vaultFor(sent.session, sent.generation);
+        // A read-only vault can't take a key: it is never a choice.
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
         slot.chosen = sent.session;
+        slot.chosenGeneration = sent.generation;
         return tagged(sent.session, sent.generation, null);
+      }
+      case "capture_unchoose": {
+        const sent = exactly(args, ["capture_id"]) as { capture_id: string };
+        if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
+        slot.chosen = null;
+        slot.chosenGeneration = null;
+        return null;
       }
       case "capture_reveal": {
         const sent = exactly(args, ["capture_id"]) as { capture_id: string };
         if (slot?.id !== sent.capture_id || slot.text === null || slot.state !== "value") return refuse({ code: "not_found" });
-        if (slot.chosen === null || live.get(slot.chosen)?.unlocked !== true) return refuse(LOCKED);
+        const chosen = slot.chosen === null ? undefined : live.get(slot.chosen);
+        if (chosen?.unlocked !== true || chosen.generation !== slot.chosenGeneration) return refuse(LOCKED);
         captureRevealed += 1;
         // The value saved and shown is the text with its surrounding spaces and line breaks dropped.
         return slot.text.trim();
@@ -1896,6 +2355,8 @@ export function installFakeShell(
         const vault = vaultFor(sent.session, sent.generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
+        // Only into the vault the copy is handed to, at the generation it was handed to.
+        if (slot.chosen !== sent.session || slot.chosenGeneration !== sent.generation) return refuse(CAPTURE_VAULT);
         const name = sent.name;
         const place = sent.collection;
         const onClash = sent.on_clash;
@@ -2060,6 +2521,8 @@ export function installFakeShell(
         if (twice !== undefined) return tagged(sent.session, sent.generation, { Duplicate: { name: twice.title } });
         if (cmd === "env_copy") {
           envCopied.push(folder.id);
+          // The text is made and put on the clipboard in Rust: here it waits in the fake's clipboard, for a test to read.
+          clipboardText = writeEnvText(keysHere);
           return tagged(sent.session, sent.generation, "Done");
         }
         if (dismissPdf) {
@@ -2071,7 +2534,7 @@ export function installFakeShell(
           nextToken += 1;
           const token = `env-file-token-${String(nextToken)}`;
           pendingPdfs.set(token, { session: sent.session, generation: sent.generation, envFolder: folder.id });
-          return tagged(sent.session, sent.generation, { Saved: { Confirm: { CloudFolder: { token } } } });
+          return tagged(sent.session, sent.generation, { Saved: { Confirm: { CloudFolder: { token, provider: "Other" } } } });
         }
         envFiles.push(folder.id);
         return tagged(sent.session, sent.generation, { Saved: { Done: { folder: SAVED_FOLDER } } });
@@ -2107,7 +2570,7 @@ export function installFakeShell(
           nextToken += 1;
           const token = `copy-token-${String(nextToken)}`;
           pendingPdfs.set(token, { session: sent.session, generation: sent.generation, envFolder: null, copy: { id: sent.id, file_id: sent.file_id } });
-          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token } } });
+          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
         }
         if ((vault.damagedFiles ?? []).includes(sent.file_id)) return refuse(FILE_DAMAGED);
         fileOps.push({ cmd, id: sent.id, file_id: sent.file_id });
@@ -2279,7 +2742,8 @@ export function installFakeShell(
         return { Done: { choice: token, file_name: file.name, size: file.size } };
       }
       case "restore_check": {
-        const sent = exactly(args, ["choice", "credential"]);
+        // Decided as the check ends (`restoreCheckCommand` begins the job and calls this): the request names the job, and is checked there.
+        const sent = exactly(args, ["choice", "credential", "request"]);
         const credential = sent.credential;
         if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
         const text = (credential as { password_or_key?: unknown }).password_or_key;
@@ -2506,7 +2970,7 @@ export function installFakeShell(
           nextToken += 1;
           const token = `save-all-token-${String(nextToken)}`;
           parkedSaves.set(token, { session: sent.session, generation: sent.generation, folder: sent.folder });
-          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token } } });
+          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
         }
         return planSave(sent.session, sent.generation, vault, sent.folder);
       }
@@ -2983,15 +3447,45 @@ export function installFakeShell(
         explained();
         return null;
       case "close_answer": {
-        const { go } = exactly(args, ["go"]);
-        if (typeof go !== "boolean") return refuse(MALFORMED);
-        // No question pending, or a second answer: refused, with nothing done.
-        if (pendingClose === undefined) return refuse({ code: "not_found" });
-        const reason = pendingClose;
+        const { question, go } = exactly(args, ["question", "go"]);
+        if (typeof go !== "boolean" || typeof question !== "number" || !Number.isSafeInteger(question)) return refuse(MALFORMED);
+        // No question pending, a second answer, or an answer to another question than the pending one: refused, with nothing done and the pending question kept.
+        if (pendingClose === undefined || pendingClose.question !== question) return refuse({ code: "not_found" });
+        const { reason } = pendingClose;
         pendingClose = undefined;
         closeAnswers.push(go);
         if (go && reason === "close") closeAsBefore();
         if (go && reason === "quit") quits += 1;
+        return null;
+      }
+      case "forget_vault": {
+        const row = vaultRefOf(exactly(args, ["vault"]).vault);
+        const open = [...live.entries()].find(([session, entry]) => entry.unlocked && sessionVault.get(session) === row);
+        // A job of that vault's open session is running: the Remove is refused, and nothing changes.
+        if (open !== undefined && [...running.values()].some((job) => job.scope.type === "session" && job.scope.session === open[0])) {
+          return refuse({ code: "busy", what: "operation in progress" });
+        }
+        // The list write fails after the lock: the vault is locked, still listed, and the answer is the refusal.
+        if (forgetFailsAfterLock !== undefined) {
+          const error = forgetFailsAfterLock;
+          forgetFailsAfterLock = undefined;
+          if (open !== undefined) lock(open[0], "manual");
+          return refuse(error);
+        }
+        // An open vault is locked first (its lock event goes out), then it comes off the list. The high-water mark stays, so its ID is never given again.
+        if (open !== undefined) lock(open[0], "manual");
+        vaults.splice(vaults.indexOf(row), 1);
+        return null;
+      }
+      case "show_vault_in_explorer": {
+        const row = vaultRefOf(exactly(args, ["vault"]).vault);
+        if (!(row.available ?? true)) return refuse({ code: "not_found" });
+        if (row.notAFolder ?? false) return refuse({ code: "invalid_input", what: "folder" });
+        if (explorerFails) {
+          explorerFails = false;
+          return refuse({ code: "core", kind: "io" });
+        }
+        openedVaults.push(row.id);
         return null;
       }
       case "lock_vault": {
@@ -3184,6 +3678,63 @@ export function installFakeShell(
     reject(error);
   };
 
+  /**
+   * 24a's check of the picked backup, as the shell does it: the arguments are checked and the credential read as one box's; a pick that is not held is
+   * `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `restore_check`, `lockbox://job-started` under the page's
+   * request, no progress). It ends when the answer is decided (held until released with `holdRestoreCheck`): a Cancel answers `cancelled` and keeps the pick
+   * and no result; otherwise the answer is the check's own (a wrong password, damage, or what was found).
+   */
+  const restoreCheckCommand = (args: unknown): Promise<unknown> => {
+    const sent = exactly(args, ["choice", "credential", "request"]);
+    const request = requestOf(sent);
+    const credential = sent.credential;
+    if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
+    if (typeof (credential as { password_or_key?: unknown }).password_or_key !== "string" || typeof sent.choice !== "string") return refuse(MALFORMED);
+    if (!restoreHeld.has(sent.choice)) return refuse(CHOICE_EXPIRED);
+    const epoch = lockEpoch;
+    nextOperation += 1;
+    const job: RunningJob = {
+      request,
+      operation: nextOperation,
+      scope: { type: "launch", epoch },
+      kind: "restore_check",
+      done: 0,
+      total: 0,
+      cancel: () => undefined,
+    };
+    running.set(job.operation, job);
+    const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
+    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    else heldStarts.push(() => {
+      emit("lockbox://job-started", startedEvent);
+    });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const end = (cancelled: boolean): void => {
+        if (settled) return;
+        settled = true;
+        running.delete(job.operation);
+        if (cancelled) {
+          // The pick stays, and what the check would have found is not kept.
+          rejectPlain(reject, { code: "cancelled" });
+          return;
+        }
+        try {
+          resolve(answer("restore_check", args));
+        } catch (error) {
+          rejectPlain(reject, error as object);
+        }
+      };
+      job.cancel = () => {
+        end(true);
+      };
+      if (heldRestoreChecks === undefined) end(false);
+      else heldRestoreChecks.push(() => {
+        end(false);
+      });
+    });
+  };
+
   /** One long step of a restore as a launch-scoped job of kind `restore`: `job-started` goes out as the command begins, as it does for a test. */
   const restoreJob = (request: number, total: number, pastTheSwap: boolean): { job: RunningJob; epoch: number } => {
     const epoch = lockEpoch;
@@ -3280,7 +3831,7 @@ export function installFakeShell(
         const token = `restore-token-${String(nextToken)}`;
         restoreAsked.set(token, sent.choice);
         return Promise.resolve({
-          Confirm: kind === "cloud" ? { CloudFolder: { token } } : { NewFolder: { suggested: `${checked.name} (restored)`, token } },
+          Confirm: kind === "cloud" ? { CloudFolder: { token, provider: "Other" } } : { NewFolder: { suggested: `${checked.name} (restored)`, token } },
         });
       }
       return restoreCopy(sent.choice, request);
@@ -3336,7 +3887,7 @@ export function installFakeShell(
           vaultId = target.id;
           for (const [session] of [...live.entries()]) if (sessionVault.get(session) === target) lock(session, "restore");
         } else {
-          vaultId = Math.max(0, ...vaults.map((v) => v.id)) + 1;
+          vaultId = nextVaultId();
           vaults.push({ id: vaultId, name: copy.name, password: BACKUP_PASSWORD, items: [] });
         }
         resolve({ vault: vaultId, before_restore: copy.replaces });
@@ -3419,18 +3970,32 @@ export function installFakeShell(
         });
       });
     }
-    if (cmd === "restore_check" && heldRestoreChecks !== undefined) {
-      // Unlocking the backup takes a moment: it is decided when it is let go.
-      const waiting = heldRestoreChecks;
-      return new Promise((resolve, reject) => {
-        waiting.push(() => {
-          try {
-            resolve(answer(cmd, args));
-          } catch (error) {
-            rejectPlain(reject, error as object);
-          }
+    const heldRecover = cmd === "recover_check" ? heldRecoverChecks : cmd === "recover_finish" ? heldRecoverFinishes : undefined;
+    if (heldRecover !== undefined) {
+      // Decided as the command arrives (a choice parked, a password written, a lock that came with it); the answer reaches the page at release.
+      try {
+        const decided = answer(cmd, args);
+        return new Promise((resolve) => {
+          heldRecover.push(() => {
+            resolve(decided);
+          });
         });
-      });
+      } catch (error) {
+        return new Promise((_, reject) => {
+          heldRecover.push(() => {
+            rejectPlain(reject, error as object);
+          });
+        });
+      }
+    }
+    if (cmd === "restore_check") {
+      // A job of its own; unlocking the backup takes a moment when it is held: it is decided when it is let go.
+      try {
+        return restoreCheckCommand(args);
+      } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+        return Promise.reject(error);
+      }
     }
     if ((cmd === "test_backup_pick" || cmd === "open_backup_pick" || cmd === "restore_pick") && heldPicker !== undefined) {
       // The picker stays open: the pick is made when it closes.
@@ -3466,6 +4031,21 @@ export function installFakeShell(
     if (cmd === "capture_choose" && heldCaptureChoose !== undefined) {
       // Done when released: until then the shell has not handed the copy to the vault.
       const waiting = heldCaptureChoose;
+      return new Promise((resolve, reject) => {
+        waiting.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          }
+        });
+      });
+    }
+    if (cmd === "capture_unchoose" && heldCaptureUnchoose !== undefined) {
+      // The next one only, and done when released: until then the shell still holds the copy for the vault it was handed to, and a copy that replaces it inherits that.
+      const waiting = heldCaptureUnchoose;
+      heldCaptureUnchoose = undefined;
       return new Promise((resolve, reject) => {
         waiting.push(() => {
           try {
@@ -3615,6 +4195,12 @@ export function installFakeShell(
         ["get_item", heldGetItem],
         ["set_settings", heldSettings],
         ["start_new_vault_list", heldStartList],
+        ["change_password", heldChange],
+        ["rename_vault", heldRename],
+        ["forget_vault", heldForget],
+        ["unlock_vault", heldUnlock],
+        ["create_vault", heldCreate],
+        ["create_vault_confirm", heldCreate],
       ] as const) {
         if (cmd === name && waiting !== undefined) {
           return new Promise((resolve) => {
@@ -3736,14 +4322,45 @@ export function installFakeShell(
       return vault === undefined ? undefined : keys.get(vault);
     },
     unconfirmed: (vaultId) => vaults.find((v) => v.id === vaultId)?.unconfirmed ?? false,
-    cloudNext: () => {
-      cloud = true;
+    cloudNext: (provider = "Other") => {
+      cloud = provider;
     },
     refuseMarkNext: () => {
       refuseMark = true;
     },
     nextKeyIs: (key) => {
       chosenKey = key;
+      issuedKeys.add(key);
+    },
+    recoveryKeyOf: (vaultId) => {
+      const vault = vaults.find((v) => v.id === vaultId);
+      return vault === undefined ? "" : recoveryKeyOf(vault);
+    },
+    holdRecoverCheck: () => {
+      const waiting: (() => void)[] = [];
+      heldRecoverChecks = waiting;
+      return () => {
+        heldRecoverChecks = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdRecoverFinish: () => {
+      const waiting: (() => void)[] = [];
+      heldRecoverFinishes = waiting;
+      return () => {
+        heldRecoverFinishes = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    interruptRecoverNext: (how) => {
+      interruptRecover = how;
+    },
+    recoveryChoiceTokens: () => [...recoveryHeld.keys()],
+    expireRecoveryChoices: () => {
+      recoveryHeld.clear();
+    },
+    nextIssueIs: (issue) => {
+      chosenIssue = issue;
     },
     dismissPickerNext: () => {
       dismissPicker = true;
@@ -3816,9 +4433,16 @@ export function installFakeShell(
     outputJournalResets: () => outputResets,
     closeWindow: closeAsBefore,
     askClose: (reason, { running: kinds, pastSwap = false, restoreWaiting = false }) => {
-      pendingClose = reason;
-      emit("lockbox://close-asked", { reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting });
+      closeQuestions += 1;
+      const event = { reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting, question: closeQuestions };
+      pendingClose = { reason, question: closeQuestions, event };
+      emit("lockbox://close-asked", event);
+      return closeQuestions;
     },
+    repeatClose: () => {
+      if (pendingClose !== undefined) emit("lockbox://close-asked", pendingClose.event);
+    },
+    closeAskedHeard: () => closeAskedHeard,
     changeLockEpoch: bumpEpoch,
     pendingClose: () => pendingClose !== undefined,
     closeAnswers: () => [...closeAnswers],
@@ -3896,6 +4520,79 @@ export function installFakeShell(
     },
     refuseNext: (cmd, error) => {
       refusals.set(cmd, error);
+    },
+    holdChangePassword: () => {
+      const waiting: (() => void)[] = [];
+      heldChange = waiting;
+      return () => {
+        heldChange = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    openedVaults,
+    listIdentity: () => listId,
+    replaceVaultList: (next) => {
+      listId += 1;
+      vaults.splice(0, vaults.length, ...next);
+      lastId = Math.max(0, ...vaults.map((v) => v.id));
+    },
+    setAvailable: (vaultId, available) => {
+      const found = vaults.find((v) => v.id === vaultId);
+      if (found !== undefined) found.available = available;
+    },
+    driveGone: (vaultId) => {
+      const found = vaults.find((v) => v.id === vaultId);
+      if (found === undefined) return;
+      found.available = false;
+      const open = [...live.entries()].find(([session, entry]) => entry.unlocked && sessionVault.get(session) === found);
+      if (open !== undefined) lock(open[0], "drive_gone");
+    },
+    forgetFailsAfterLockNext: (error) => {
+      forgetFailsAfterLock = error;
+    },
+    holdForget: () => {
+      const waiting: (() => void)[] = [];
+      heldForget = waiting;
+      return () => {
+        heldForget = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdRename: () => {
+      const waiting: (() => void)[] = [];
+      heldRename = waiting;
+      return () => {
+        heldRename = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    interruptRenameNext: (how) => {
+      interruptRename = how;
+    },
+    holdUnlock: () => {
+      const waiting: (() => void)[] = [];
+      heldUnlock = waiting;
+      return () => {
+        heldUnlock = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdCreate: () => {
+      const waiting: (() => void)[] = [];
+      heldCreate = waiting;
+      return () => {
+        heldCreate = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    interruptCreateNext: (how) => {
+      interruptCreate = how;
+    },
+    listAlongsideNextCreate: (vault) => {
+      alongside = vault;
+    },
+    interruptChangeNext: (how) => {
+      interruptChange = how;
     },
     settings: () => ({ ...settings, shortcut: { ...settings.shortcut } }),
     settingsSaved: saved,
@@ -4192,7 +4889,7 @@ export function installFakeShell(
       const id = `${(0xca97).toString(16)}${pressesMade.toString(16).padStart(28, "0")}`;
       const before = slot;
       const value = (made: FakeSlot | undefined) => (made?.state === "value" ? (made.text ?? "").trim() : null);
-      const next: FakeSlot = { id, text: state === "value" ? text : null, state, chosen: before?.chosen ?? null };
+      const next: FakeSlot = { id, text: state === "value" ? text : null, state, chosen: before?.chosen ?? null, chosenGeneration: before?.chosenGeneration ?? null };
       // A copy was waiting and its value differs from this one's.
       const changed = before !== undefined && value(before) !== value(next);
       slot = next;
@@ -4205,7 +4902,7 @@ export function installFakeShell(
     failClipboardClearNext: () => {
       failClear = true;
     },
-    captureSlot: () => (slot === undefined ? null : { id: slot.id, state: slot.state, chosen: slot.chosen }),
+    captureSlot: () => (slot === undefined ? null : { id: slot.id, state: slot.state, chosen: slot.chosen, chosenGeneration: slot.chosenGeneration }),
     emptyCaptureSlot: emptySlot,
     forgetCaptureSlot: () => {
       slot = undefined;
@@ -4232,6 +4929,14 @@ export function installFakeShell(
       heldCaptureChoose = waiting;
       return () => {
         heldCaptureChoose = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdCaptureUnchoose: () => {
+      const waiting: (() => void)[] = [];
+      heldCaptureUnchoose = waiting;
+      return () => {
+        heldCaptureUnchoose = undefined;
         for (const release of waiting) release();
       };
     },

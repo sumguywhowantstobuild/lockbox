@@ -157,7 +157,7 @@ const CHANGED_ON_DISK: &str = "header changed on disk";
 /// disagreeing on the password, or on the recovery key (which one is asked of the open vault); and "details couldn't be
 /// checked", which a header state left unknown by a failed write and a `vault.json` that is no longer the header that
 /// was opened both mean (lock and open the vault again). Every other refusal, and a stop, is passed on as it is.
-fn backup_refusal(vault: &Vault, refusal: ShellError) -> ShellError {
+pub(super) fn backup_refusal(vault: &Vault, refusal: ShellError) -> ShellError {
     let ShellError::Core(view) = refusal else {
         return refusal;
     };
@@ -939,12 +939,15 @@ struct RestorePickArgs {
     vault: Option<u32>,
 }
 
-/// `restore_check`: the held pick, and what was typed (a password or a recovery key, in the one box).
+/// `restore_check`: the held pick, what was typed (a password or a recovery key, in the one box), and the page's number for
+/// the job.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestoreCheckArgs {
     choice: Token,
     credential: CredentialArg,
+    /// The page's number for this job: its operation reaches the page by `lockbox://job-started` under it.
+    request: u32,
 }
 
 /// `restore_choose_folder`: the held pick, whose folder is chosen.
@@ -1029,9 +1032,13 @@ pub(super) async fn restore_check(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<RestoreChecked> {
-    let RestoreCheckArgs { choice, credential } = args(&request)?;
+    let RestoreCheckArgs {
+        choice,
+        credential,
+        request,
+    } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.restore_check(&choice, credential)).await
+    blocking(move || shell.restore_check(&choice, credential, request)).await
 }
 
 #[tauri::command]
@@ -1436,7 +1443,7 @@ mod tests {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
         ts.stored_file(s, g, "report.pdf", b"report");
-        let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
+        let key = ts.shell.regenerate_recovery(s, g).unwrap().data.words;
         let dest = backup_file(&ts, "family.lockbox-backup");
         back_up(&ts, s, g, &dest);
 
@@ -1469,15 +1476,20 @@ mod tests {
     fn password_or_key_tries_a_well_formed_key_then_a_password() {
         let ts = TestShell::new();
         let (s, g) = ts.open_vault("Family");
-        let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
+        let key = ts.shell.regenerate_recovery(s, g).unwrap().data.words;
         // Another vault's recovery key, which is also a well-formed key: made this vault's password, so that only the
         // fallback to a password can open the backup with it.
         let (other, og) = ts.open_vault("Other");
-        let other_key = ts.shell.regenerate_recovery(other, og).unwrap().data;
+        let other_key = ts.shell.regenerate_recovery(other, og).unwrap().data.words;
         let dest = backup_file(&ts, "family.lockbox-backup");
         back_up(&ts, s, g, &dest);
         ts.shell
-            .change_password(s, g, Zeroizing::new(other_key.to_string()))
+            .change_password(
+                s,
+                g,
+                Zeroizing::new(TEST_PASSWORD.to_owned()),
+                Zeroizing::new(other_key.to_string()),
+            )
             .unwrap();
         let by_new_password = backup_file(&ts, "second.lockbox-backup");
         back_up(&ts, s, g, &by_new_password);
@@ -2515,7 +2527,7 @@ mod tests {
         assert_eq!(open_with(&ts, &picked, typed(TEST_PASSWORD)).err(), EXPIRED);
 
         // A well-formed recovery key opens it too, from the one box; one that is no key is refused before a job begins.
-        let key = ts.shell.regenerate_recovery(s, g).unwrap().data;
+        let key = ts.shell.regenerate_recovery(s, g).unwrap().data.words;
         let by_key = backup_file(&ts, "by-key.lockbox-backup");
         back_up(&ts, s, g, &by_key);
         let picked = open_pick(&ts, &by_key);
@@ -3590,9 +3602,10 @@ mod tests {
         refuses_a_path(json!({ "choice": hex }), &|body| {
             parse::<RestorePickArgs>(&InvokeBody::Json(body)).is_ok()
         });
-        refuses_a_path(json!({ "choice": hex, "credential": one_box }), &|body| {
-            parse::<RestoreCheckArgs>(&InvokeBody::Json(body)).is_ok()
-        });
+        refuses_a_path(
+            json!({ "choice": hex, "credential": one_box, "request": 4 }),
+            &|body| parse::<RestoreCheckArgs>(&InvokeBody::Json(body)).is_ok(),
+        );
         refuses_a_path(json!({ "choice": hex }), &|body| {
             parse::<ChooseRestoreFolder>(&InvokeBody::Json(body)).is_ok()
         });
@@ -3646,22 +3659,26 @@ mod tests {
             let refused = parse::<RestorePrepare>(&InvokeBody::Json(bad.clone()));
             assert_eq!(refused.err(), Some(MALFORMED), "{bad}");
         }
-        // The check takes a token and one credential: a password, a key, or the one box; not two, and not none.
+        // The check takes a token, one credential (a password, a key, or the one box; not two, and not none) and the
+        // page's number for its job.
         for good in [
             json!({ "password": "pw" }),
             json!({ "recovery_key": "k" }),
             json!({ "password_or_key": "pw" }),
         ] {
-            let body = json!({ "choice": hex, "credential": good });
+            let body = json!({ "choice": hex, "credential": good, "request": 4 });
             assert!(parse::<RestoreCheckArgs>(&InvokeBody::Json(body)).is_ok());
         }
         for bad in [
-            json!({ "choice": hex }),
-            json!({ "credential": one_box }),
-            json!({ "choice": null, "credential": one_box }),
-            json!({ "choice": "SENTINEL-7f3a", "credential": one_box }),
-            json!({ "choice": hex, "credential": { "password_or_key": "x", "password": "y" } }),
-            json!({ "choice": hex, "credential": one_box, "request": 4 }),
+            json!({ "choice": hex, "request": 4 }),
+            json!({ "credential": one_box, "request": 4 }),
+            json!({ "choice": null, "credential": one_box, "request": 4 }),
+            json!({ "choice": "SENTINEL-7f3a", "credential": one_box, "request": 4 }),
+            json!({ "choice": hex, "credential": { "password_or_key": "x", "password": "y" }, "request": 4 }),
+            json!({ "choice": hex, "credential": one_box }),
+            json!({ "choice": hex, "credential": one_box, "request": -1 }),
+            json!({ "choice": hex, "credential": one_box, "request": "4" }),
+            json!({ "choice": hex, "credential": one_box, "request": 4_294_967_296_u64 }),
         ] {
             let refused = parse::<RestoreCheckArgs>(&InvokeBody::Json(bad.clone()));
             assert_eq!(refused.err(), Some(MALFORMED), "{bad}");

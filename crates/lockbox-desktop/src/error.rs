@@ -6,6 +6,7 @@
 use lockbox_core::CoreError;
 use serde::Serialize;
 
+use crate::locations::CloudProvider;
 use crate::pending::Token;
 use crate::restore::{Leaves, RestoreNotice};
 
@@ -15,9 +16,12 @@ use crate::restore::{Leaves, RestoreNotice};
 pub enum ShellError {
     /// The session is locked, or locked while the command ran: nothing it read is returned (spec §7.4).
     Locked,
-    /// The change was made, but the session locked before the answer could be shown (spec §7.4).
+    /// The change was made, but the session locked before the answer could be shown (spec §7.4). `vault` is the
+    /// registry ID of the vault the change was made to, so the page keeps the outcome for that vault; 0 when the
+    /// vault is not on the list. A create carries the ID the list gave the new vault (never 0).
     LockedAfterChange {
         what: &'static str,
+        vault: u32,
     },
     NotFound,
     Busy {
@@ -191,8 +195,12 @@ pub enum Outcome<T> {
 /// same command again with its flag set. Each task adds the variants it needs.
 #[derive(Serialize)]
 pub enum Confirm {
-    /// The folder is synced by a cloud provider, which Lockbox does not support (spec §6.10): go on anyway?
-    CloudFolder { token: Token },
+    /// The folder is synced by a cloud provider, which Lockbox does not support (spec §6.10): go on anyway? `provider`
+    /// is the one the location check found, a fixed name (never a path), so the question can name it (18c).
+    CloudFolder {
+        token: Token,
+        provider: CloudProvider,
+    },
     /// The vault's header was changed outside Lockbox (spec §5.2): accept it before the recovery goes on.
     HeaderChanged { token: Token },
     /// The stored file is of a type that can run code (spec §7.2): open it anyway? Confirmed by sending `open_file`
@@ -285,8 +293,12 @@ mod tests {
             json!({ "code": "busy", "what": "opening" })
         );
         assert_eq!(
-            serde_json::to_value(ShellError::LockedAfterChange { what: "password" }).unwrap(),
-            json!({ "code": "locked_after_change", "what": "password" })
+            serde_json::to_value(ShellError::LockedAfterChange {
+                what: "password",
+                vault: 3
+            })
+            .unwrap(),
+            json!({ "code": "locked_after_change", "what": "password", "vault": 3 })
         );
         assert_eq!(
             serde_json::to_value(ShellError::Locked).unwrap(),

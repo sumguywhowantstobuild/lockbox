@@ -1715,7 +1715,7 @@ mod tests {
         // Unlocked again: a new generation, and the old choice is gone for good.
         let id = ts.shell.registry.entries()[0].0;
         let password = Zeroizing::new(TEST_PASSWORD.to_owned());
-        let unlocked = heavy(|| ts.shell.unlock_vault(id, password)).unwrap();
+        let unlocked = heavy(|| ts.shell.unlock_vault(ts.vault(id), password)).unwrap();
         let (s2, g2) = (unlocked.session, unlocked.generation);
         assert_ne!(g2, g);
         assert_eq!(ts.shell.add_files(s2, g2, &mine, FOLDER, 2).err(), EXPIRED);

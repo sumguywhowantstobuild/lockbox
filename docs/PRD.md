@@ -174,8 +174,8 @@ Each story is one thing a person can do with a v1 feature. Engineering detail li
 ## Success measures
 
 Where the design spec states a number, it is used as written. Numbers marked "Plan 1" were set while building the core
-engine (Plan 1), not in the spec. Plan 3 is the desktop shell, and Plan 4 the UI, in three parts: 4A daily use, 4B files
-and long jobs, 4C the rest (see the [README](../README.md#what-exists-today)).
+engine (Plan 1), not in the spec. Plan 3 is the desktop shell, and Plan 4 the UI, in four parts: 4A daily use, 4B files
+and long jobs, 4C vaults and passwords, 4D the rest (see the [README](../README.md#what-exists-today)).
 
 | Measure | Target | Where it comes from | How it is checked |
 |---|---|---|---|

@@ -50,6 +50,8 @@ pub enum JobKind {
     Backup,
     Test,
     Restore,
+    /// 24a's check of the picked backup: it opens it read-only with the typed credential, and nothing is unpacked.
+    RestoreCheck,
     OpenBackup,
     Open,
     Replace,
@@ -67,15 +69,19 @@ impl JobKind {
             JobKind::Backup => "backup",
             JobKind::Test => "test_backup",
             JobKind::Restore => "restore",
+            JobKind::RestoreCheck => "restore_check",
             JobKind::OpenBackup => "open_backup",
             JobKind::Open => "open",
             JobKind::CopyItem => "copy_item",
         }
     }
 
-    /// Whether the page is sent progress for it: the jobs with a bar of their own.
+    /// Whether the page is sent progress for it: the jobs with a bar of their own (24a has none for its check).
     fn reports_progress(self) -> bool {
-        !matches!(self, JobKind::Open | JobKind::Replace | JobKind::CopyItem)
+        !matches!(
+            self,
+            JobKind::Open | JobKind::Replace | JobKind::CopyItem | JobKind::RestoreCheck
+        )
     }
 }
 
@@ -118,13 +124,16 @@ pub enum CloseReason {
 /// `lockbox://close-asked`: a close or Quit arrived while at least one job runs, or while a finished restore waits for
 /// its yes at 24d. The kinds, each once, in the order the first of each began, whether a restore is past its swap (a
 /// cancel no longer counts, so it finishes or is undone by recovery at the next launch), and whether a restore is
-/// waiting for its yes (`RestoreState::Prepared`; closing ends it). Nothing else: no path, no name, no count.
+/// waiting for its yes (`RestoreState::Prepared`; closing ends it). `question` is the question's own ID, minted by the shell
+/// (counting up from 1, never reused; a repeat of the pending question carries the same one) and sent back with the
+/// answer, so an answer can only reach the question it was given for. Nothing else: no path, no name, no count.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CloseAsked {
     pub reason: CloseReason,
     pub running: Vec<JobKind>,
     pub past_swap: bool,
     pub restore_waiting: bool,
+    pub question: u64,
 }
 
 /// A job under way: it holds its place in the auto-lock's list (so idle time does not count and the PC stays awake),
@@ -397,6 +406,7 @@ mod tests {
             (JobKind::Backup, "backup"),
             (JobKind::Test, "test"),
             (JobKind::Restore, "restore"),
+            (JobKind::RestoreCheck, "restore_check"),
             (JobKind::OpenBackup, "open_backup"),
             (JobKind::Open, "open"),
             (JobKind::Replace, "replace"),

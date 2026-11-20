@@ -26,8 +26,9 @@ use crate::lockfile::VaultLock;
 use crate::recovery::{RecoverySecret, derive_recovery_key};
 use crate::search::{SearchHit, SearchIndex};
 use crate::secret::{Key32, random_bytes};
-use crate::slots::{KeySlot, SlotType, wrap_slot};
+use crate::slots::{KeySlot, SlotType, check_slot_version, unwrap_slot, wrap_slot};
 use crate::{CoreError, Result};
+use ctutils::CtEq;
 use naming::{created_at_now, validate_name};
 use std::collections::BTreeMap;
 use std::fs;
@@ -86,6 +87,19 @@ pub struct UnlockReport {
     /// media). The vault is open anyway; the next unlock retries the repair.
     pub header_repair_failed: bool,
     pub cleanup: CleanupReport,
+}
+
+/// What a read-only look at a vault's headers with a recovery key found ([`Vault::check_recovery_key`]). No `Debug`: the
+/// name is the user's own.
+pub struct RecoveryCheck {
+    /// The header that opened failed its MAC: it was changed outside Lockbox (see [`UnlockReport`]).
+    pub header_mac_mismatch: bool,
+    /// The vault's name, from the header that opened.
+    pub name: String,
+    /// `vault.json` exactly as read; `None` when the file is not there or could not be read.
+    pub main: Option<Vec<u8>>,
+    /// `vault.json.bak` exactly as read; `None` when the file is not there or could not be read.
+    pub backup: Option<Vec<u8>>,
 }
 
 /// A new vault, open, with the recovery secret to show the user once.
@@ -266,12 +280,98 @@ impl Vault {
         unlock::open(dir, Credential::Recovery(secret))
     }
 
+    /// Whether `secret` opens the recovery slot of the vault in `dir`, and whether the header that opened passes its
+    /// MAC, without opening the vault: no `.lock` is taken, nothing is cleaned or repaired, nothing is written, and no
+    /// Argon2 runs (the recovery key's derivation is HKDF). Picks the header as unlocking does (`vault.json`, else
+    /// `.bak` of the same vault) and answers with both files' bytes as read, so the caller can tell later whether
+    /// either changed. A key that opens no slot is [`CoreError::WrongPassword`]: another vault's key and an old key
+    /// look alike to the cipher.
+    pub fn check_recovery_key(dir: &Path, secret: &RecoverySecret) -> Result<RecoveryCheck> {
+        unlock::check_recovery(dir, secret)
+    }
+
     /// Sets a new password (checked against the minimum length) with a fresh salt. The
     /// vault key and the recovery slot stay as they are.
     ///
     /// An `Err` may leave `vault.json.bak` one version behind: the old password may then
     /// still open the vault, from `.bak`, until the next successful unlock repairs it.
     pub fn change_password(&mut self, new_password: &str) -> Result<()> {
+        self.change_password_with(new_password, || Ok(()))
+    }
+
+    /// Whether `password` is the one that opens this vault, for a caller that must be sure before it changes
+    /// something (the shell's change of password, a new recovery key). Derives the password key from the open
+    /// header's password slot (its own salt and settings, within the read bounds), unwraps the slot and compares
+    /// what it holds with the live vault key in constant time: a slot that unwraps to another key is
+    /// [`CoreError::WrongPassword`] too. When the two header copies disagree on the password slot (the vault was
+    /// opened with the recovery key, so the other copy's slot is unverified), that slot is tried the same way: either
+    /// password opens the vault. Writes nothing; the temporary keys are wiped when dropped.
+    pub fn check_password(&self, password: &str) -> Result<()> {
+        let own = self
+            .header
+            .slots
+            .iter()
+            .find(|s| s.slot_type == SlotType::Password)
+            .ok_or(CoreError::Damaged { what: "key slots" })?;
+        let spare = self
+            .guard
+            .unverified
+            .as_ref()
+            .filter(|u| u.slot_type == SlotType::Password)
+            .map(|u| &u.other);
+        // The key from the last Argon2 run, kept for a spare with the same salt and settings.
+        let mut derived: Option<(&KeySlot, Key32)> = None;
+        let mut first_error = None;
+        for slot in std::iter::once(own).chain(spare) {
+            let outcome = self.slot_holds_live_key(slot, password, &mut derived);
+            match outcome {
+                Ok(()) => return Ok(()),
+                // A newer vault says so, whichever copy it is.
+                Err(CoreError::UnsupportedVersion) => return Err(CoreError::UnsupportedVersion),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_error.unwrap_or(CoreError::WrongPassword))
+    }
+
+    /// Whether `slot` opens with `password` and wraps the live vault key.
+    fn slot_holds_live_key<'a>(
+        &self,
+        slot: &'a KeySlot,
+        password: &str,
+        derived: &mut Option<(&'a KeySlot, Key32)>,
+    ) -> Result<()> {
+        check_slot_version(slot)?;
+        let params = slot.kdf.ok_or(CoreError::Damaged { what: "key slots" })?;
+        let reusable = derived
+            .as_ref()
+            .is_some_and(|(from, _)| from.salt == slot.salt && from.kdf == Some(params));
+        if !reusable {
+            let key = derive_password_key(password, &slot.salt, &params)?;
+            *derived = Some((slot, key));
+        }
+        let Some((_, key)) = derived.as_ref() else {
+            return Err(CoreError::WrongPassword);
+        };
+        let unwrapped = unwrap_slot(slot, &self.header.vault_id, key)?;
+        // Authentic is not enough: the slot must hold this vault's key.
+        let same = unwrapped.as_bytes().ct_eq(self.vault_key.as_bytes());
+        match same.to_bool() {
+            true => Ok(()),
+            false => Err(CoreError::WrongPassword),
+        }
+    }
+
+    /// [`change_password`](Self::change_password) with `before_write` run once the new password key is derived
+    /// (the slow part), immediately before the header files are written: an `Err` from it changes nothing on disk
+    /// and is returned. The shell stops a change here when a lock has come.
+    pub fn change_password_with(
+        &mut self,
+        new_password: &str,
+        before_write: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         self.guard.check(Some(SlotType::Password))?;
         check_new_password(new_password)?;
         let old = self
@@ -293,6 +393,7 @@ impl Vault {
             &key,
             &self.vault_key,
         );
+        before_write()?;
         self.replace_slot(slot, write_headers)
     }
 
@@ -304,8 +405,20 @@ impl Vault {
     /// failure on `vault.json`, `.bak` may hold an undelivered recovery slot until the next
     /// recovery unlock or header write. If `vault.json` is lost before then, the vault
     /// opens with the password only, and recovery must be regenerated.
+    ///
+    /// That order needs a `vault.json` to fall back on. After an unlock from `.bak` whose
+    /// repair failed, `vault.json` may be missing or not read as a header at all, so the old
+    /// secret opens only `.bak`, and a failure on `vault.json` after `.bak` landed would leave
+    /// it opening neither file. So such a `vault.json` is first rewritten with the open header
+    /// (which `.bak` already holds): a failure there changes nothing, and then the order above
+    /// keeps its promise. (A `vault.json` that reads but keeps its own recovery slot is the
+    /// unverified slot this write replaces: `.bak` first, as above.)
     pub fn regenerate_recovery(&mut self) -> Result<RecoverySecret> {
         self.guard.check(Some(SlotType::Recovery))?;
+        let primary = self.dir.join(HEADER_FILE);
+        if unlock::load(&primary).is_err() {
+            unlock::repair(&primary, &serialize_header(&self.header))?;
+        }
         let secret = RecoverySecret::generate();
         let salt = random_bytes::<16>();
         let slot = wrap_slot(
@@ -372,6 +485,25 @@ impl Vault {
         })?;
         self.guard.consent_pending = false;
         Ok(())
+    }
+
+    /// Gives the vault a new name (18d): checked as `create` checks it, refused exactly when a backup is (a changed header
+    /// not accepted, a header MAC that does not verify, a header state left unknown, a key slot the copies disagree on),
+    /// then the header is signed again and written `vault.json` first, then `vault.json.bak`. Slots, ID, creation time and
+    /// the folder's name stay. An `Err` after `vault.json` landed leaves the new name live (`commit` reads it back); the
+    /// next writable unlock repairs `.bak`.
+    ///
+    /// Not through [`HeaderGuard::check`]: it has no argument that refuses all of these (`check(None)` lets a pending
+    /// consent through, and `check(Some(_))` lets a disagreeing slot of that type through). When the refusal passes the
+    /// guard is all clear, so it is neither read nor reset here; a failed write sets `uncertain` in `commit`.
+    pub fn rename(&mut self, name: &str) -> Result<()> {
+        validate_name(name)?;
+        self.refuse_backup()?;
+        let mut header = self.header.clone();
+        header.name = name.to_owned();
+        header.header_mac = Some(header_mac(&header, &self.vault_key));
+        let primary = header.clone();
+        self.commit(header, &primary, |dir| write_headers(dir, &primary))
     }
 
     /// Runs `write` (which saves `header`, or the pair of headers whose `vault.json` half is
@@ -776,6 +908,59 @@ mod tests {
         assert_eq!(main, bak);
     }
 
+    /// 4C end review (astra3-3): after an unlock from `.bak` whose repair failed (a damaged
+    /// `vault.json` that could not be rewritten), the old recovery secret opens only `.bak`.
+    /// A new secret first repairs `vault.json` from the open header, then writes `.bak` first
+    /// as always, so a failure at any of the three writes leaves the old secret working (without
+    /// the repair, a failure on `vault.json` after `.bak` would leave it opening neither), and
+    /// `vault.json` never holds the undelivered slot, so a later change in the same session
+    /// can't spread it. With no failure the new one works at once and the old one stops.
+    #[test]
+    fn new_recovery_after_a_failed_repair_keeps_the_old_secret_through_any_failure() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let old = created.recovery;
+        drop(created.vault);
+        let degraded = || {
+            fs::write(dir.join(HEADER_FILE), b"{\"truncated").unwrap();
+            failpoint::arm("unlock.repair_write");
+            let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+            failpoint::disarm_all();
+            assert!(report.used_backup_header && report.header_repair_failed);
+            vault
+        };
+
+        // A failure at the repair, at `.bak`, then at `vault.json`: each is an `Err`, and the old
+        // secret still opens, also after a password change in the same session.
+        for point in [
+            "unlock.repair_write",
+            "write_headers.before_first",
+            "write_headers.before_second",
+        ] {
+            let mut vault = degraded();
+            failpoint::arm(point);
+            let failed = vault.regenerate_recovery().map(|_| ());
+            failpoint::disarm_all();
+            assert!(failed.is_err(), "{point}");
+            if vault.change_password("a different long password").is_ok() {
+                vault.change_password(PW).unwrap();
+            }
+            drop(vault);
+            let (vault, _) = Vault::unlock_with_recovery(&dir, &old)
+                .unwrap_or_else(|e| panic!("{point}: the old secret stopped working: {e:?}"));
+            drop(vault);
+        }
+
+        // No failure: the new secret works and the old one stops.
+        let mut vault = degraded();
+        let fresh = vault.regenerate_recovery().unwrap();
+        drop(vault);
+        assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
+        assert!(Vault::unlock_with_recovery(&dir, &old).is_err());
+        assert!(Vault::unlock_with_recovery(&dir, &fresh).is_ok());
+    }
+
     /// Final review, Important 3: a write that fails on an unverified disk state must not
     /// let a later change spread that state. Unlock falls back to a good `.bak` (primary
     /// password slot damaged), the repair fails, then the password change fails before it
@@ -1036,5 +1221,601 @@ mod tests {
         drop(vault);
         assert_eq!(read_pair(&dir).0, read_pair(&dir).1);
         assert!(Vault::unlock_with_password(&dir, NEW_PW).is_ok());
+    }
+
+    // ---- The current password, checked against the open vault (Plan 4C, Task 2) ----
+
+    /// Copies a vault folder, leaving out the `.lock` a live vault holds (it cannot be read).
+    fn copy_folder(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_folder(&entry.path(), &target);
+            } else if entry.file_name() != ".lock" {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// Opens `dir` read-only with `credential`: whether it opened. Nothing is written by a read-only open.
+    fn opens_read_only(dir: &Path, credential: Credential) -> bool {
+        use crate::blob::{CancelToken, NoProgress};
+        ReadOnlyVault::open_folder(dir, credential, &CancelToken::new(), &NoProgress).is_ok()
+    }
+
+    #[test]
+    fn check_password_accepts_the_current_password() {
+        let parent = TempDir::new();
+        let vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        assert!(vault.check_password(PW).is_ok());
+        // Checking writes nothing and changes nothing: the same password is accepted again.
+        let before = read_pair(vault.dir());
+        assert!(vault.check_password(PW).is_ok());
+        assert_eq!(read_pair(vault.dir()), before);
+    }
+
+    #[test]
+    fn check_password_refuses_a_wrong_password() {
+        let parent = TempDir::new();
+        let vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let before = read_pair(vault.dir());
+        for wrong in [
+            "another long password",
+            "correct horse batter",
+            "CORRECT HORSE BATTERY",
+        ] {
+            assert!(is_wrong_password(vault.check_password(wrong)), "{wrong}");
+        }
+        assert_eq!(read_pair(vault.dir()), before);
+    }
+
+    /// The slot's tag verifies (it is authentic, and opens with the typed password) but it holds another key than
+    /// the live vault's: the password is not this vault's, so it is refused. Without the comparison with the live
+    /// key this test fails.
+    #[test]
+    fn check_password_refuses_a_slot_wrapping_another_key() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        assert!(
+            vault.check_password(PW).is_ok(),
+            "before the slot is swapped"
+        );
+        fixture::password_slot_wrapping_another_key(&mut vault, PW);
+        // The fixture's slot does open with PW and unwraps to a key (not a decryption failure).
+        let on_disk = parse_header(&fs::read(vault.dir().join(HEADER_FILE)).unwrap()).unwrap();
+        let slot = &on_disk.slots[0];
+        let key = derive_password_key(PW, &slot.salt, &slot.kdf.unwrap()).unwrap();
+        let unwrapped = crate::slots::unwrap_slot(slot, &vault.id(), &key).unwrap();
+        assert_ne!(unwrapped.as_bytes(), vault.vault_key.as_bytes());
+        assert!(is_wrong_password(vault.check_password(PW)));
+    }
+
+    #[test]
+    fn check_password_after_a_change_accepts_only_the_new_one() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        vault.change_password(NEW).unwrap();
+        assert!(vault.check_password(NEW).is_ok());
+        assert!(is_wrong_password(vault.check_password(PW)));
+    }
+
+    #[test]
+    fn check_password_on_a_vault_opened_with_the_recovery_key() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let dir = created.vault.dir().to_path_buf();
+        let recovery = created.recovery;
+        drop(created.vault);
+
+        // The pair agrees: the password slot is the open header's own.
+        let (vault, _) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert_eq!(vault.unverified_slot(), None);
+        assert!(vault.check_password(PW).is_ok());
+        assert!(is_wrong_password(vault.check_password(NEW)));
+        drop(vault);
+
+        // A password change that died between the two files: vault.json holds the new password slot, `.bak` the old.
+        // The recovery unlock could not check either, and both passwords open the vault (the old one through the
+        // spare): the open slot and the other copy's slot are each tried, and a wrong one is still refused.
+        let mut vault = Vault::unlock_with_password(&dir, PW).unwrap().0;
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.change_password(NEW).is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert!(!report.used_backup_header);
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Password));
+        assert!(vault.check_password(NEW).is_ok(), "the open header's slot");
+        assert!(vault.check_password(PW).is_ok(), "the other copy's slot");
+        assert!(is_wrong_password(
+            vault.check_password("another long password")
+        ));
+    }
+
+    /// A password change that died after `vault.json`, before `.bak` (the partial-write hook of
+    /// `vault_stays_usable_after_a_partial_header_write`), opened on its own copy with the new password: `vault.json`
+    /// opens, the spare is repaired, and the old password is then refused.
+    #[test]
+    fn change_password_interrupted_opens_with_the_new_password_on_its_own_copy() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.change_password(NEW).is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_ne!(main, bak, "interrupted: vault.json is ahead of .bak");
+
+        let copy = parent.path().join("interrupted-new");
+        copy_folder(&dir, &copy);
+        // A read-only open writes nothing.
+        assert!(opens_read_only(&copy, Credential::Password(NEW)));
+        assert_eq!(read_pair(&copy), (main.clone(), bak.clone()));
+        // A writable unlock opens vault.json (no Ask 9) and repairs the spare.
+        let (vault, report) = Vault::unlock_with_password(&copy, NEW).unwrap();
+        assert!(!report.used_backup_header && !report.header_repair_failed);
+        drop(vault);
+        assert_eq!(read_pair(&copy), (main.clone(), main));
+        // Once the pair agrees, the old password is refused.
+        assert!(is_wrong_password(Vault::unlock_with_password(&copy, PW)));
+        assert!(!opens_read_only(&copy, Credential::Password(PW)));
+    }
+
+    /// The same interrupted folder, opened on its own copy with the old password: it opens through the spare (Ask 9),
+    /// a read-only open writes nothing, and a writable unlock puts the old header back over vault.json, so the new
+    /// password is refused until the change is made again, which then refuses the old one.
+    #[test]
+    fn change_password_interrupted_opens_with_the_old_password_through_the_spare_on_its_own_copy() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.change_password(NEW).is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_ne!(main, bak);
+
+        let copy = parent.path().join("interrupted-old");
+        copy_folder(&dir, &copy);
+        assert!(opens_read_only(&copy, Credential::Password(PW)));
+        assert_eq!(
+            read_pair(&copy),
+            (main, bak.clone()),
+            "read-only writes nothing"
+        );
+        let (vault, report) = Vault::unlock_with_password(&copy, PW).unwrap();
+        assert!(report.used_backup_header, "Ask 9: the spare opened");
+        drop(vault);
+        assert_eq!(
+            read_pair(&copy),
+            (bak.clone(), bak),
+            "vault.json repaired from the spare"
+        );
+        assert!(is_wrong_password(Vault::unlock_with_password(&copy, NEW)));
+
+        // Making the change again completes it: the new password opens, the old one is refused.
+        let (mut vault, _) = Vault::unlock_with_password(&copy, PW).unwrap();
+        vault.change_password(NEW).unwrap();
+        drop(vault);
+        assert!(Vault::unlock_with_password(&copy, NEW).is_ok());
+        assert!(is_wrong_password(Vault::unlock_with_password(&copy, PW)));
+    }
+
+    /// A new recovery key writes `.bak` first. Interrupted after `.bak`, before `vault.json`: the old key is still
+    /// the one in vault.json. Each credential is tried on its own copy of that folder.
+    #[test]
+    fn new_recovery_key_interrupted_after_the_spare_keeps_the_old_key() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let old_key = created.recovery;
+        let mut vault = created.vault;
+        let dir = vault.dir().to_path_buf();
+        let (main_before, bak_before) = read_pair(&dir);
+        failpoint::arm("write_headers.before_second");
+        assert!(vault.regenerate_recovery().is_err());
+        failpoint::disarm_all();
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(
+            main, main_before,
+            "vault.json still holds the old key's slot"
+        );
+        assert_ne!(
+            bak, bak_before,
+            "the spare holds the key that was never delivered"
+        );
+
+        // A password unlock opens, keeps the unverified recovery slot in `.bak` and so leads to 21f (the shell's
+        // mark is written before this header write; the engine's part is that nothing is repaired).
+        let by_password = parent.path().join("by-password");
+        copy_folder(&dir, &by_password);
+        assert!(opens_read_only(&by_password, Credential::Password(PW)));
+        assert_eq!(read_pair(&by_password), (main.clone(), bak.clone()));
+        let (vault, report) = Vault::unlock_with_password(&by_password, PW).unwrap();
+        assert!(!report.used_backup_header);
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Recovery));
+        drop(vault);
+        assert_eq!(
+            read_pair(&by_password),
+            (main.clone(), bak.clone()),
+            "not repaired"
+        );
+
+        // An unlock with the old key opens vault.json and repairs the spare.
+        let by_key = parent.path().join("by-old-key");
+        copy_folder(&dir, &by_key);
+        assert!(opens_read_only(&by_key, Credential::Recovery(&old_key)));
+        assert_eq!(read_pair(&by_key), (main.clone(), bak.clone()));
+        let (vault, report) = Vault::unlock_with_recovery(&by_key, &old_key).unwrap();
+        assert!(!report.used_backup_header);
+        assert_eq!(vault.unverified_slot(), None);
+        drop(vault);
+        assert_eq!(
+            read_pair(&by_key),
+            (main.clone(), main.clone()),
+            "the spare is repaired"
+        );
+
+        // If vault.json is then lost (here: lost before any repair), the password still opens through the spare.
+        let lost = parent.path().join("main-lost");
+        copy_folder(&dir, &lost);
+        fs::remove_file(lost.join(HEADER_FILE)).unwrap();
+        let (vault, report) = Vault::unlock_with_password(&lost, PW).unwrap();
+        assert!(report.used_backup_header);
+        drop(vault);
+        // The spare's recovery slot was never delivered: the old key does not open it.
+        assert!(Vault::unlock_with_recovery(&lost, &old_key).is_err());
+    }
+
+    // ---- Rename (Plan 4C, Task 8) ----
+
+    /// Disarms every failpoint when a test ends, also when it fails part-way.
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            failpoint::disarm_all();
+        }
+    }
+
+    fn header_on_disk(dir: &Path, file: &str) -> crate::header::VaultHeader {
+        parse_header(&fs::read(dir.join(file)).unwrap()).unwrap()
+    }
+
+    /// The renamed vault's header is whole: both slots exactly as they were, the same ID and creation time, a new MAC
+    /// that verifies (the MAC covers the name), the same bytes in both files, and no Ask 3 at the next unlock with
+    /// either credential. Skipping the new MAC fails this.
+    #[test]
+    fn rename_keeps_both_slots_and_rewrites_the_mac() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let recovery = created.recovery;
+        let mut vault = created.vault;
+        let dir = vault.dir().to_path_buf();
+        let before = header_on_disk(&dir, HEADER_FILE);
+        assert_eq!(before.slots.len(), 2);
+
+        vault.rename("Work and home").unwrap();
+        assert_eq!(vault.name(), "Work and home");
+        drop(vault);
+
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, bak, "both files hold the same header");
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            let after = header_on_disk(&dir, file);
+            assert_eq!(after.name, "Work and home", "{file}");
+            assert_eq!(after.slots, before.slots, "{file}: both slots, unchanged");
+            assert_eq!(after.vault_id, before.vault_id, "{file}");
+            assert_eq!(after.created_at, before.created_at, "{file}");
+            assert!(after.header_mac.is_some(), "{file}");
+            assert_ne!(after.header_mac, before.header_mac, "{file}: signed again");
+        }
+
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(!report.header_mac_mismatch, "no Ask 3");
+        assert!(!report.used_backup_header && !report.header_repair_failed);
+        assert_eq!(vault.name(), "Work and home");
+        assert_eq!(vault.unverified_slot(), None);
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            assert!(
+                crate::header::verify_header_mac(&header_on_disk(&dir, file), &vault.vault_key),
+                "{file}: the MAC verifies with the vault's key"
+            );
+        }
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_recovery(&dir, &recovery).unwrap();
+        assert!(
+            !report.header_mac_mismatch,
+            "no Ask 3 with the recovery key"
+        );
+        assert_eq!(vault.name(), "Work and home");
+    }
+
+    /// The name is changed in `vault.json` only, outside Lockbox, and the vault opened with its password: Ask 3 is
+    /// pending.
+    fn unlocked_after_an_outside_name_change(dir: &Path) -> Vault {
+        let mut header = header_on_disk(dir, HEADER_FILE);
+        header.name = "Renamed".to_owned();
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        let (vault, report) = Vault::unlock_with_password(dir, PW).unwrap();
+        assert!(report.header_mac_mismatch);
+        vault
+    }
+
+    /// A rename is refused exactly as a backup is, and the words are the backup's. Whatever the refusal, both
+    /// header files, the folder's listing and the open name are as they were.
+    fn assert_rename_refused(vault: &mut Vault, expected: &str) {
+        let before = (read_pair(vault.dir()), names(vault.dir()));
+        let name = vault.name().to_owned();
+        assert_eq!(what(vault.rename("Another name")), expected);
+        assert_eq!(vault.name(), name);
+        assert_eq!((read_pair(vault.dir()), names(vault.dir())), before);
+        // The backup's own check says the same thing: one rule, shared.
+        assert_eq!(what(vault.refuse_backup()), expected);
+    }
+
+    #[test]
+    fn rename_refused_as_a_backup_is_with_both_files_unchanged() {
+        let _cleanup = Cleanup;
+        let parent = TempDir::new();
+
+        // An unaccepted header change. Accepting it lifts the refusal.
+        let dir = Vault::create(parent.path(), "Accept", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        let mut vault = unlocked_after_an_outside_name_change(&dir);
+        assert!(vault.guard.consent_pending);
+        assert_rename_refused(&mut vault, "accept the header change first");
+        vault.accept_header().unwrap();
+        vault.rename("After accepting").unwrap();
+        drop(vault);
+
+        // A header whose MAC does not verify, with no consent pending (the MAC test alone).
+        let dir = Vault::create(parent.path(), "Mac", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        let mut vault = unlocked_after_an_outside_name_change(&dir);
+        vault.guard.consent_pending = false;
+        assert_rename_refused(&mut vault, "accept the header change first");
+        drop(vault);
+
+        // A header state left unknown by a failed write.
+        let dir = Vault::create(parent.path(), "Unknown", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        let mut header = header_on_disk(&dir, HEADER_FILE);
+        header.slots[0].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        failpoint::arm("unlock.repair_write");
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        failpoint::disarm_all();
+        failpoint::arm("write_headers.before_first");
+        assert!(vault.change_password(NEW).is_err());
+        failpoint::disarm_all();
+        assert!(vault.guard.uncertain);
+        assert_rename_refused(&mut vault, "header state unknown; reopen the vault");
+        drop(vault);
+
+        // The copies disagree on a key slot. Replacing that credential lifts the refusal.
+        let dir = Vault::create(parent.path(), "Disagree", PW)
+            .unwrap()
+            .vault
+            .dir()
+            .to_path_buf();
+        let mut header = header_on_disk(&dir, HEADER_FILE);
+        header.slots[1].ciphertext[0] ^= 1;
+        fs::write(dir.join(HEADER_FILE), serialize_header(&header)).unwrap();
+        let (mut vault, _) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert_eq!(vault.unverified_slot(), Some(UnverifiedSlot::Recovery));
+        assert_rename_refused(
+            &mut vault,
+            "header copies disagree; replace the unchecked credential first",
+        );
+        vault.regenerate_recovery().unwrap();
+        vault.rename("After the new key").unwrap();
+    }
+
+    /// A name is checked as `create` checks it: nothing but spaces, or over 200 characters, is refused with the same
+    /// words, before anything else is looked at; any other name is kept exactly as given, spaces and all.
+    #[test]
+    fn rename_checks_the_name_as_create_does() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        let before = (read_pair(&dir), names(&dir));
+
+        let too_long = "x".repeat(201);
+        let too_long_wide = "é".repeat(201);
+        for bad in ["", " ", "\t\r\n", "   \u{a0}  ", &too_long, &too_long_wide] {
+            assert_eq!(what(vault.rename(bad)), "vault name", "{bad:?}");
+            assert_eq!(
+                what(Vault::create(parent.path(), bad, PW).map(|_| ())),
+                "vault name",
+                "create says the same for {bad:?}"
+            );
+            assert_eq!(vault.name(), "Family");
+            assert_eq!((read_pair(&dir), names(&dir)), before, "{bad:?}");
+        }
+
+        // The name is looked at first: a refused backup state does not hide it.
+        let other = Vault::create(parent.path(), "Other", PW).unwrap().vault;
+        let other_dir = other.dir().to_path_buf();
+        drop(other);
+        let mut pending = unlocked_after_an_outside_name_change(&other_dir);
+        assert_eq!(what(pending.rename("   ")), "vault name");
+        assert_eq!(
+            what(pending.rename("Fine")),
+            "accept the header change first"
+        );
+        drop(pending);
+
+        // 200 characters (of any width) are kept, as is a name with spaces round it.
+        let longest = "é".repeat(200);
+        for good in [
+            "x".repeat(200),
+            longest,
+            "  Padded  ".to_owned(),
+            "AC/DC: a \"name\"".to_owned(),
+        ] {
+            assert!(validate_name(&good).is_ok());
+            vault.rename(&good).unwrap();
+            assert_eq!(vault.name(), good);
+            assert_eq!(header_on_disk(&dir, HEADER_FILE).name, good);
+            assert_eq!(header_on_disk(&dir, HEADER_BACKUP).name, good);
+        }
+    }
+
+    /// The folder keeps the name it was made with, whatever the vault is called now.
+    #[test]
+    fn rename_leaves_the_folder_name() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        let id = vault.id();
+        let listing = names(parent.path());
+        assert_eq!(listing.len(), 1);
+
+        vault.rename("Something else entirely").unwrap();
+        assert_eq!(vault.dir(), dir);
+        assert!(
+            !parent
+                .path()
+                .join(folder_name("Something else entirely", &id))
+                .exists()
+        );
+        drop(vault);
+        assert_eq!(names(parent.path()), listing, "no folder made or renamed");
+        assert_eq!(read_vault_name(&dir).unwrap(), "Something else entirely");
+        assert!(Vault::unlock_with_password(&dir, PW).is_ok());
+    }
+
+    /// The MAC still covers the name after a rename: a name changed outside Lockbox, on a vault Lockbox renamed, is
+    /// still Ask 3 at the next unlock (so the rename did not weaken what the MAC checks).
+    #[test]
+    fn a_name_changed_outside_lockbox_still_shows_ask_3() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        vault.rename("Renamed in Lockbox").unwrap();
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(!report.header_mac_mismatch);
+        assert_eq!(vault.name(), "Renamed in Lockbox");
+        drop(vault);
+
+        // Outside Lockbox, in both files, the name is changed again.
+        let mut header = header_on_disk(&dir, HEADER_FILE);
+        header.name = "Changed outside".to_owned();
+        for file in [HEADER_FILE, HEADER_BACKUP] {
+            fs::write(dir.join(file), serialize_header(&header)).unwrap();
+        }
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(report.header_mac_mismatch, "Ask 3");
+        assert_eq!(vault.name(), "Changed outside");
+        drop(vault);
+        let (vault, report) = Vault::unlock_with_password(&dir, PW).unwrap();
+        assert!(
+            report.header_mac_mismatch,
+            "still pending: nothing accepted"
+        );
+        drop(vault);
+    }
+
+    /// A rename that dies between the two files (the write hook between `vault.json` and `.bak`): `vault.json` is
+    /// ahead, with the new name, and the vault in the session already says so. Each credential is tried on its own
+    /// copy of the interrupted folder: a read-only open writes nothing, a writable unlock opens `vault.json` (no
+    /// Ask 9) and repairs the spare, and both credentials still work. A third copy that lost `vault.json` opens the
+    /// spare (Ask 9) with the old name.
+    #[test]
+    fn rename_interrupted_is_repaired_at_the_next_writable_unlock() {
+        let parent = TempDir::new();
+        let created = Vault::create(parent.path(), "Family", PW).unwrap();
+        let recovery = created.recovery;
+        let mut vault = created.vault;
+        let dir = vault.dir().to_path_buf();
+        let (old_main, old_bak) = read_pair(&dir);
+        assert_eq!(old_main, old_bak);
+
+        failpoint::arm("write_headers.before_second");
+        let result = vault.rename("Renamed");
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert_eq!(
+            vault.name(),
+            "Renamed",
+            "vault.json landed: the name is live"
+        );
+        assert_eq!(vault.unverified_slot(), None);
+        assert!(!vault.guard.uncertain);
+        drop(vault);
+        let (main, bak) = read_pair(&dir);
+        assert_ne!(main, bak, "interrupted: vault.json is ahead of .bak");
+        assert_eq!(bak, old_bak);
+        assert_eq!(header_on_disk(&dir, HEADER_FILE).name, "Renamed");
+
+        let by_password = parent.path().join("by-password");
+        copy_folder(&dir, &by_password);
+        assert!(opens_read_only(&by_password, Credential::Password(PW)));
+        assert_eq!(read_pair(&by_password), (main.clone(), bak.clone()));
+        let (vault, report) = Vault::unlock_with_password(&by_password, PW).unwrap();
+        assert!(!report.used_backup_header, "no Ask 9");
+        assert!(!report.header_mac_mismatch, "no Ask 3");
+        assert!(!report.header_repair_failed);
+        assert_eq!(vault.name(), "Renamed");
+        drop(vault);
+        assert_eq!(read_pair(&by_password), (main.clone(), main.clone()));
+        assert!(Vault::unlock_with_recovery(&by_password, &recovery).is_ok());
+
+        let by_key = parent.path().join("by-recovery-key");
+        copy_folder(&dir, &by_key);
+        assert!(opens_read_only(&by_key, Credential::Recovery(&recovery)));
+        assert_eq!(read_pair(&by_key), (main.clone(), bak.clone()));
+        let (vault, report) = Vault::unlock_with_recovery(&by_key, &recovery).unwrap();
+        assert!(!report.used_backup_header && !report.header_mac_mismatch);
+        assert_eq!(vault.name(), "Renamed");
+        drop(vault);
+        assert_eq!(read_pair(&by_key), (main.clone(), main.clone()));
+        assert!(Vault::unlock_with_password(&by_key, PW).is_ok());
+
+        // vault.json lost before any repair: the spare opens, with the old name (Ask 9), and the new name is gone
+        // with the file; nothing else is lost.
+        let lost = parent.path().join("main-lost");
+        copy_folder(&dir, &lost);
+        fs::remove_file(lost.join(HEADER_FILE)).unwrap();
+        let (vault, report) = Vault::unlock_with_password(&lost, PW).unwrap();
+        assert!(report.used_backup_header, "Ask 9: the spare opened");
+        assert!(!report.header_mac_mismatch);
+        assert_eq!(vault.name(), "Family");
+        drop(vault);
+        assert!(Vault::unlock_with_recovery(&lost, &recovery).is_ok());
+    }
+
+    /// A write that dies before `vault.json` is touched changes nothing: the old name stays live, both files are as
+    /// they were, and a retry goes through.
+    #[test]
+    fn rename_failed_before_vault_json_changes_nothing() {
+        let parent = TempDir::new();
+        let mut vault = Vault::create(parent.path(), "Family", PW).unwrap().vault;
+        let dir = vault.dir().to_path_buf();
+        let before = read_pair(&dir);
+        failpoint::arm("write_headers.before_first");
+        let result = vault.rename("Renamed");
+        failpoint::disarm_all();
+        assert!(matches!(result, Err(CoreError::Io(_))));
+        assert_eq!(vault.name(), "Family");
+        assert_eq!(read_pair(&dir), before);
+        vault.rename("Renamed").unwrap();
+        assert_eq!(read_vault_name(&dir).unwrap(), "Renamed");
+        let (main, bak) = read_pair(&dir);
+        assert_eq!(main, bak);
     }
 }

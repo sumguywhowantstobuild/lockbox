@@ -12,6 +12,7 @@ const TITLE: Record<JobKind, string> = {
   backup: "A backup is running",
   test: "A backup is being tested",
   restore: "A restore is running",
+  restore_check: "A backup is being checked for a restore",
   open_backup: "A backup is being opened",
   open: "A file is being opened",
   replace: "A file is being replaced",

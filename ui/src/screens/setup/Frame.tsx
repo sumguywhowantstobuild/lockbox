@@ -10,13 +10,14 @@ export const SAY_KEY = "This key is the only way back in if you forget your pass
 /**
  * The frame of the first-use and recovery key screens: the lock screen's two sides, with the nine-point pattern on the
  * dark one (the setup screens' own, not a vault's), and the steps on the other. The steps are the screen's `children`.
+ * The New vault form begun from the vault menu (18b) passes the `points` of the place the new vault will take instead.
  */
-export function Frame({ say, children }: { say: string; children: ReactNode }) {
+export function Frame({ say, points = 9, children }: { say: string; points?: number; children: ReactNode }) {
   return (
     <div className="lock">
       {/* The page's banner: a screen reader moving by landmarks finds the name and its line, not only the steps. */}
       <header className="field">
-        <Pattern points={9} className="rose" />
+        <Pattern points={points} className="rose" />
         <p className="mark">Lockbox</p>
         <p className="say">{say}</p>
       </header>

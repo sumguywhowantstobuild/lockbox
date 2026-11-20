@@ -105,6 +105,8 @@ struct TestHooks {
     on_attempt: Mutex<Option<AttemptHook>>,
     /// Run once, after a delete attempt of the sweep has failed and before the next one.
     on_retry: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// How many times a delete attempt of the sweep has failed and been tried again, so far.
+    retries: std::sync::atomic::AtomicU32,
     /// Run once, right before reset moves the journal to the name it is given.
     on_set_aside: Mutex<Option<PathHook>>,
 }
@@ -163,6 +165,12 @@ impl Outputs {
     #[cfg(test)]
     pub(crate) fn on_retry(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.hooks.on_retry) = Some(hook);
+    }
+
+    /// Tests only: how many times a delete attempt of the sweep has failed and been tried again, so far.
+    #[cfg(test)]
+    pub(crate) fn retries(&self) -> u32 {
+        self.hooks.retries.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Tests only: runs `hook` once, right before reset moves the journal to the name it is given.
@@ -415,8 +423,13 @@ impl Outputs {
                 Err(e) if temp_folder && e.raw_os_error() == Some(145) => return Swept::NotEmpty,
                 Err(e) if attempt < tries && is_transient(&e) => {
                     #[cfg(test)]
-                    if let Some(hook) = lock(&self.hooks.on_retry).take() {
-                        hook();
+                    {
+                        self.hooks
+                            .retries
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if let Some(hook) = lock(&self.hooks.on_retry).take() {
+                            hook();
+                        }
                     }
                     thread::sleep(wait);
                     wait = (wait * 2).min(MAX_WAIT);

@@ -1478,7 +1478,7 @@ mod tests {
         bytes[last] ^= 1;
         fs::write(&file, bytes).unwrap();
 
-        let unlocked = heavy(|| ts.shell.unlock_vault(registry_id, secret(PW))).unwrap();
+        let unlocked = heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), secret(PW))).unwrap();
         let list = ts
             .shell
             .list_items(unlocked.session, unlocked.generation)
@@ -1637,7 +1637,7 @@ mod tests {
         // Two vaults with a match each, Family searched first, then Work.
         let (registry_id, _) = ts.shell.registry.entries()[0].clone();
         let unlock_family = || {
-            heavy(|| ts.shell.unlock_vault(registry_id, secret(PW)))
+            heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), secret(PW)))
                 .unwrap()
                 .session
         };
@@ -2074,7 +2074,7 @@ mod tests {
         item.trashed_at = Some("2020-01-01T00:00:00Z".into());
         fs::write(&file, seal_item(&item, &vault_id, &key).unwrap()).unwrap();
 
-        let unlocked = heavy(|| ts.shell.unlock_vault(registry_id, secret(PW))).unwrap();
+        let unlocked = heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), secret(PW))).unwrap();
         let (s, g) = (unlocked.session, unlocked.generation);
         assert_eq!(ts.shell.old_trash(s, g, 30).unwrap().data, [old]);
         assert_eq!(ts.shell.list_items(s, g).unwrap().data.items.len(), 2);
@@ -2995,6 +2995,113 @@ mod tests {
         ts.shell.sessions.lock(s, LockReason::Manual);
         assert_eq!(ts.clipboard.text(), None, "the lock left it");
         assert_eq!(ts.shell.clipboard.owner(), None);
+    }
+
+    /// A key's value with line breaks (a private key file pasted whole) is kept exactly as given, CRLF and LF alike and a
+    /// break at each end too: stored by a new key and by an edit, given back by Reveal, left as it is by an edit that does
+    /// not change it, and copied with the usual marks and timer. The `.env` copy-out writes it in double quotes, and reads
+    /// back as the same text.
+    #[test]
+    fn a_key_value_with_line_breaks_is_stored_and_copied_unchanged() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let folder = folder(&ts, s, g, "Agency");
+        let crlf =
+            "-----BEGIN TEST KEY-----\r\nline-two\r\nline-three\r\n-----END TEST KEY-----\r\n";
+        let mixed = "\nfirst\r\nsecond\nthird\r\n\r\nlast\r";
+        let id = ts
+            .shell
+            .new_item(
+                s,
+                g,
+                NewKind::Key,
+                "MULTI_LINE_KEY".into(),
+                Some(folder.clone()),
+                Some(ItemFields {
+                    value: secret(crlf),
+                    ..ItemFields::default()
+                }),
+            )
+            .unwrap()
+            .data;
+        let revealed_now = || {
+            ts.shell
+                .reveal_password(s, g, &id, RevealField::KeyValue)
+                .unwrap()
+                .data
+        };
+        assert_eq!(
+            revealed_now().as_bytes(),
+            crlf.as_bytes(),
+            "stored as given"
+        );
+        assert!(ts.shell.get_item(s, g, &id).unwrap().data.has_value);
+
+        // Copy: the same text, with the marks, the owner and the timer of any copy.
+        let start = ts.clock.now();
+        ts.shell.copy_field(s, g, &id, CopyField::KeyValue).unwrap();
+        assert_eq!(
+            ts.clipboard.text().as_deref().map(str::as_bytes),
+            Some(crlf.as_bytes()),
+            "the clipboard holds the text as given"
+        );
+        assert_eq!(ts.clipboard.formats(), EXCLUSION_FORMATS, "the marks");
+        assert_eq!(ts.shell.clipboard.owner(), Some(s));
+        let at = |secs: u64| {
+            let when = start + Duration::from_secs(secs);
+            ts.clock.set(when);
+            ts.timer.run_due(when);
+        };
+        at(29);
+        assert!(ts.clipboard.text().is_some(), "cleared early");
+        at(30);
+        assert_eq!(ts.clipboard.text(), None, "not cleared at 30 s");
+
+        // An edit that leaves the value alone keeps it byte for byte; one that changes it stores the new text as given.
+        let in_folder = |revision: u64, value: Option<&str>| ItemEdit {
+            collection: Some(folder.clone()),
+            ..key_edit(&id, revision, "MULTI_LINE_KEY", value)
+        };
+        let revision = revision_of(&ts, s, g, &id);
+        ts.shell
+            .update_item(s, g, in_folder(revision, None))
+            .unwrap();
+        assert_eq!(
+            revealed_now().as_bytes(),
+            crlf.as_bytes(),
+            "an untouched value changed"
+        );
+        let revision = revision_of(&ts, s, g, &id);
+        ts.shell
+            .update_item(s, g, in_folder(revision, Some(mixed)))
+            .unwrap();
+        assert_eq!(
+            revealed_now().as_bytes(),
+            mixed.as_bytes(),
+            "an edited value changed"
+        );
+        ts.shell.copy_field(s, g, &id, CopyField::KeyValue).unwrap();
+        assert_eq!(
+            ts.clipboard.text().as_deref().map(str::as_bytes),
+            Some(mixed.as_bytes())
+        );
+
+        // Copy all as .env: the existing writer puts it in double quotes with the breaks as `\r` and `\n`, and the text
+        // reads back as the value given.
+        ts.shell.env_copy(s, g, &folder).unwrap();
+        let out = ts.clipboard.text().expect("copied out");
+        assert_eq!(
+            out,
+            lockbox_core::env_file::write(&[("MULTI_LINE_KEY", mixed)]).as_str()
+        );
+        assert_eq!(
+            out,
+            "MULTI_LINE_KEY=\"\\nfirst\\r\\nsecond\\nthird\\r\\n\\r\\nlast\\r\"\n"
+        );
+        let read = lockbox_core::env_file::parse(&out);
+        assert!(read.bad_lines.is_empty());
+        assert_eq!(read.entries.len(), 1);
+        assert_eq!(read.entries[0].value.as_bytes(), mixed.as_bytes());
     }
 
     /// A key's own fields go with a key, a login's with a login: each asked of the other is refused with a fixed

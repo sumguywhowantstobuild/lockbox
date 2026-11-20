@@ -20,6 +20,15 @@ test("a_label_with_a_button_beside_it_sits_as_drawn_above_its_box", () => {
   expect(declarationsFor(".flrow .flab")).toMatch(/margin: 0 0 0 2px;/);
 });
 
+test("the_backup_note_on_the_password_forms_is_a_soft_box_as_drawn", () => {
+  // 27a draws the backup sentence and the limit as one paragraph of ordinary weight in a soft box (4C Task 13, V8); high contrast gives it an edge.
+  const note = declarationsFor(".caveat");
+  expect(note).toMatch(/background: var\(--well\);/);
+  expect(note).toMatch(/border: 1px solid transparent;/);
+  expect(note).toMatch(/color: var\(--ink\);/);
+  expect(note).not.toMatch(/font-weight/);
+});
+
 test("the_recovery_key_sits_in_a_soft_grey_box_as_drawn", () => {
   // Found at stage 7 (21c): the key was in a white box with a dark edge; drawn as a soft grey box with a hairline round it.
   const box = declarationsFor(".fu-key");
@@ -27,6 +36,27 @@ test("the_recovery_key_sits_in_a_soft_grey_box_as_drawn", () => {
   expect(box).toMatch(/box-shadow: inset 0 0 0 1px var\(--line\);/);
   expect(box).toMatch(/border-radius: 10px;/);
   expect(box).not.toMatch(/border: /);
+});
+
+test("a_password_rule_that_is_met_in_a_panel_shows_its_check_mark_in_the_vaults_colour", () => {
+  // The change-password form (27a) is in the side panel, whose hint is `.fhint`: once the 12 characters are typed, a check mark in the vault's
+  // colour and the words in the ordinary text colour, as the setup form's rule does on its plate (`.fu-hint.ok`); the colour pair is measured in
+  // `tokens.contrast.test.ts`.
+  const met = declarationsFor(".fhint.ok");
+  expect(met).toMatch(/color: var\(--ink\);/);
+  expect(met).toMatch(/display: flex;/);
+  expect(declarationsFor(".fhint.ok .i")).toMatch(/color: var\(--v\);/);
+});
+
+test("the_box_for_a_key_value_with_line_breaks_has_one_fixed_height_and_its_lines_cannot_be_selected", () => {
+  // Task 10a: hidden or shown, the box is the same size, so how tall it looks never tells how many lines the value has; it scrolls instead of
+  // growing. Its lines are not selectable (a native copy would skip the clipboard's marks, timer and clearing).
+  const box = declarationsFor(".finp.kbox");
+  expect(box).toMatch(/(^| )height: \d+px;/);
+  expect(box).not.toMatch(/min-height|max-height|height: auto|resize/);
+  expect(box).toMatch(/overflow-y: auto;/);
+  expect(box).toMatch(/white-space: pre-wrap;/);
+  expect(box).toMatch(/user-select: none;/);
 });
 
 test("a_list_in_a_settings_row_is_filled_with_no_edge_at_its_own_width_as_drawn", () => {

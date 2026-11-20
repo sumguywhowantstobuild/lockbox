@@ -34,6 +34,12 @@ beforeEach(() => {
 const MINE: FakeVault = { id: 7, name: "My vault", items: sampleItems() };
 const HOME: FakeVault = { id: 8, name: "Home", items: sampleItems() };
 
+/** A vault's menu row by its name: an open vault's row reads "<name>Unlocked" (its status line, 4C Task 13b), so either way finds it. */
+function rowName(name: string | RegExp): string | RegExp | ((read: string) => boolean) {
+  if (typeof name !== "string") return name;
+  return (read) => read === name || read === `${name}Unlocked`;
+}
+
 /** The app on its lock screen with `vaults`, then My vault unlocked through the screen as a person would. */
 async function unlocked(vaults: FakeVault[] = [{ ...MINE }, { ...HOME }]) {
   shell = installFakeShell(invoke, listen, vaults);
@@ -81,20 +87,29 @@ test("lock_this_vault_from_its_menu", async () => {
   const live = shell.sessionOf(7);
   if (live === undefined) throw new Error("not open");
   const menu = await openVaultMenu();
-  // What the menu lets a person do in 4A: lock this vault. Everything drawn on 5a that a later plan builds is not shown.
-  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Lock My vault"]);
-  for (const later of [/new vault/i, /add existing/i, /rename/i, /explorer/i, /remove/i, /delete/i]) {
+  // What the menu lets a person do: make a new vault, add an existing vault's folder (Task 7), lock this vault, and rename it (Task 8). Everything drawn on 5a that a later task builds is not shown.
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "New vault",
+    "Add existing vault folder",
+    "Lock My vault",
+    "Rename My vault",
+    "Show My vault in Explorer",
+    "Remove My vault from this list",
+  ]);
+  // Delete a vault waits for a later version (18e); Show in Explorer and Remove from this list are Task 9's, above.
+  for (const later of [/delete/i]) {
     expect(within(menu).queryByText(later), String(later)).toBeNull();
   }
   // Each listed vault says whether it is open; the menu's own words say the same to a screen reader.
-  // An open vault is one row (chosen, and said "checked"); a vault that is not open is a note that says Locked. Each vault appears once.
-  expect(within(menu).queryByText("Unlocked")).toBeNull();
-  expect(within(menu).getByRole("menuitemradio", { name: "My vault" }).getAttribute("aria-checked")).toBe("true");
+  // Every vault is one row with its state under its name: an open vault (chosen, and said "checked") says Unlocked, one that is not open says Locked. Each vault appears once.
+  expect(within(menu).getByText("Unlocked")).toBeTruthy();
+  expect(within(menu).getByRole("menuitemradio", { name: rowName("My vault") }).getAttribute("aria-checked")).toBe("true");
   expect(within(menu).getByText("Locked")).toBeTruthy();
+  expect(within(menu).getByRole("menuitemradio", { name: "HomeLocked" }).getAttribute("aria-checked")).toBe("false");
   // No style element: the policy refuses one. (The parts place themselves by script, which is allowed; the markup of
   // the screen's own parts holds no style attribute.)
   expect(document.querySelectorAll("style")).toHaveLength(0);
-  expect(container.querySelectorAll(".mnote[style], .mline[style], .vsw[style]")).toHaveLength(0);
+  expect(container.querySelectorAll(".mline[style], .vsw[style], .dock[style], .dvault[style]")).toHaveLength(0);
   await expectNoAxe(container);
 
   fireEvent.click(within(menu).getByRole("menuitem", { name: "Lock My vault" }));
@@ -134,12 +149,12 @@ test("lock_all_returns_to_lock_screen", async () => {
   await unlocked();
   // A second vault is open as well (the person unlocked it earlier): both are listed as open.
   await act(async () => {
-    expect(await unlock(8, PASSWORD)).toBe("opened");
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
   });
   // The vault opened last is the one on screen.
   const menu = await openVaultMenu("Home");
-  expect(within(menu).queryAllByText("Unlocked")).toHaveLength(0);
-  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vault", "Home"]);
+  expect(within(menu).queryAllByText("Unlocked")).toHaveLength(2);
+  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked"]);
   expect(within(menu).getAllByRole("menuitemradio").map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => {
@@ -157,7 +172,7 @@ test("lock_all_returns_to_lock_screen", async () => {
   // The tray's Lock all is the shell locking every vault itself: the page hears the same events and comes to the same screen.
   await unlockOnScreen();
   await act(async () => {
-    await unlock(8, PASSWORD);
+    await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD);
   });
   act(() => {
     for (const id of [7, 8]) shell.lock(shell.sessionOf(id)?.session ?? -1);
@@ -362,26 +377,25 @@ test("locked_vault_line_on_the_list", async () => {
   await unlocked([
     { ...MINE },
     { ...HOME },
-    // A vault that can't be reached is neither named in the line nor listed in the menu as locked.
+    // A vault that can't be reached is not named in the line, and is a row of the menu that says so (Task 6).
     { id: 9, name: null, available: false },
   ]);
   expect(screen.getByText("Home is locked, so its items aren't listed.")).toBeTruthy();
   const menu = await openVaultMenu();
-  // The menu agrees with the line: the vault that is open is a row (once, with no note beside it), the one that is not is a note that says Locked.
-  const notes = [...menu.querySelectorAll(".mnote")].map((row) => row.textContent);
-  expect(notes).toEqual(["HomeLocked"]);
-  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vault"]);
-  expect(within(menu).getByRole("group", { name: "Home, Locked." })).toBeTruthy();
+  // The menu agrees with the line: every vault is one row, in the list's order (once, with no line of notes): the open one, the locked one that says Locked, and the
+  // one that can't be reached, which says so.
+  expect(menu.querySelectorAll(".mnote")).toHaveLength(0);
+  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked", "A vault that can't be readNot available"]);
+  expect(within(menu).getByRole("group", { name: "Vaults" })).toBeTruthy();
   // The state is in words, not in colour alone.
-  expect(menu.querySelectorAll(".mnote .ms")).toHaveLength(1);
+  expect(menu.querySelectorAll(".mi .ms")).toHaveLength(3);
 });
 
 test("locked_vault_line_names_how_many_when_there_are_several", async () => {
   await unlocked([{ ...MINE }, { ...HOME }, { id: 9, name: "Work", items: [] }]);
   expect(screen.getByText("2 other vaults are locked, so their items aren't listed.")).toBeTruthy();
   const menu = await openVaultMenu();
-  expect([...menu.querySelectorAll(".mnote")].map((row) => row.textContent)).toEqual(["HomeLocked", "WorkLocked"]);
-  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vault"]);
+  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked", "WorkLocked"]);
 });
 
 test("the_vault_menu_keeps_its_action_in_reach_with_many_vaults", async () => {
@@ -389,16 +403,16 @@ test("the_vault_menu_keeps_its_action_in_reach_with_many_vaults", async () => {
   for (let n = 1; n <= 19; n += 1) many.push({ id: 100 + n, name: `Vault ${String(n)}`, items: [] });
   await unlocked(many);
   const menu = await openVaultMenu();
-  // All twenty are listed (the open one as a row, the nineteen that are locked as lines in an area of their own); the action is not inside it, so scrolling the lines never takes it away.
+  // All twenty are rows (the open one and the nineteen that are locked), in the one area that scrolls; the action is not inside it, so scrolling the rows never takes it away.
   const area = menu.querySelector(".mscroll");
   expect(area).not.toBeNull();
-  expect(area?.querySelectorAll(".mnote")).toHaveLength(19);
-  expect(within(menu).getAllByRole("menuitemradio")).toHaveLength(1);
+  expect(area?.querySelectorAll('[role="menuitemradio"]')).toHaveLength(20);
+  expect(within(menu).getAllByRole("menuitemradio")).toHaveLength(20);
   const lock = within(menu).getByRole("menuitem", { name: "Lock My vault" });
   expect(area?.contains(lock)).toBe(false);
   expect(menu.classList.contains("mwide")).toBe(true);
   // jsdom lays nothing out, so the style sheet is read: the menu is never taller than the room the window leaves it (the
-  // positioner's `--available-height`), and the vault lines are what scroll. The real window is the hands-on's to check.
+  // positioner's `--available-height`), and the rows are what scroll. The real window is the hands-on's to check.
   const css = readBeside(import.meta.url, "../styles/components.css");
   const rule = (selector: string) => {
     const at = css.indexOf(`\n${selector} {`);
@@ -417,7 +431,7 @@ test("the_vault_menu_keeps_its_action_in_reach_with_many_open_vaults", async () 
   await unlocked([{ ...MINE }, { ...HOME }, { id: 9, name: "Work", items: [] }]);
   for (const id of [8, 9]) {
     await act(async () => {
-      expect(await unlock(id, PASSWORD)).toBe("opened");
+      expect(await unlock({ list: shell.listIdentity(), id }, PASSWORD)).toBe("opened");
     });
   }
   const menu = await openVaultMenu("Work");
@@ -428,15 +442,15 @@ test("the_vault_menu_keeps_its_action_in_reach_with_many_open_vaults", async () 
   for (const row of rows) expect(row.closest(".mscroll")).toBe(area);
   const lock = within(menu).getByRole("menuitem", { name: "Lock Work" });
   expect(lock.closest(".mscroll")).toBeNull();
-  // With locked vaults listed too, the group that holds the rows may shrink inside the menu, so its own area is what scrolls (jsdom lays nothing out).
+  // The area the rows are in may shrink inside the menu (down to a row and a half), so it is what scrolls and the action stays (jsdom lays nothing out).
   const css = readBeside(import.meta.url, "../styles/components.css");
   const rule = (selector: string) => {
     const at = css.indexOf(`\n${selector} {`);
     expect(at, `${selector} is in the style sheet`).toBeGreaterThan(-1);
     return css.slice(at, css.indexOf("}", at));
   };
-  expect(rule(".menu.mwide > .mgroup")).toMatch(/min-height:\s*0/);
-  // The locked vaults' lines give up their room before the open rows do (down to one line), so the vault on screen is always a whole row.
-  expect(rule(".menu.mwide > .mscroll:first-child")).toMatch(/flex-shrink:\s*1000/);
-  expect(rule(".menu.mwide > .mscroll:first-child")).toMatch(/min-height:\s*2\.5em/);
+  expect(rule(".menu.mwide > .mscroll")).toMatch(/flex:\s*0 1 auto/);
+  expect(rule(".menu.mwide > .mscroll")).toMatch(/min-height:\s*4\.5em/);
+  // No line of notes is left in the style sheet or the menu.
+  expect(css).not.toContain(".mnote");
 });

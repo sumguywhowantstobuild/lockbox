@@ -305,7 +305,8 @@ mod tests {
         assert_eq!(
             ts.events.close_asked(),
             [serde_json::json!({
-                "reason": "quit", "running": ["backup"], "past_swap": false, "restore_waiting": false
+                "reason": "quit", "running": ["backup"], "past_swap": false, "restore_waiting": false,
+                "question": 1
             })]
         );
         assert!(!all_locked(&ts));
@@ -327,18 +328,18 @@ mod tests {
                 .begin(Some(session), crate::jobs::JobKind::Backup, token.clone());
         quit_or_ask(&ts.shell, || {});
 
-        ts.shell.close_answer(false).unwrap();
+        ts.answer_close(false).unwrap();
         assert_eq!(ts.window.exits(), 0);
         assert!(!all_locked(&ts));
         assert!(!token.is_cancelled());
         assert_eq!(
-            ts.shell.close_answer(false),
+            ts.answer_close(false),
             Err(crate::error::ShellError::NotFound)
         );
 
         quit_or_ask(&ts.shell, || {});
         let started = Instant::now();
-        ts.shell.close_answer(true).unwrap();
+        ts.answer_close(true).unwrap();
         assert!(started.elapsed() < SHUTDOWN_WAIT);
         assert_eq!(ts.window.exits(), 1);
         assert!(all_locked(&ts));
@@ -350,7 +351,7 @@ mod tests {
                 .all(|(_, _, reason)| *reason == LockReason::AppClosing)
         );
         assert_eq!(
-            ts.shell.close_answer(true),
+            ts.answer_close(true),
             Err(crate::error::ShellError::NotFound)
         );
         assert_eq!(ts.window.exits(), 1);

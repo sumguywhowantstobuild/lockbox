@@ -86,7 +86,7 @@ impl Shell {
         // may have become a vault's.
         let dest = match self.checked_output(dest, cloud_confirmed)? {
             Checked::Ready(dest) => dest,
-            Checked::Cloud(dest) => {
+            Checked::Cloud(dest, provider) => {
                 let token = self.sessions.pending().put(PendingChoice::StoredCopy {
                     session,
                     generation,
@@ -94,7 +94,7 @@ impl Shell {
                     file_id,
                     dest,
                 });
-                let ask = Outcome::Confirm(Confirm::CloudFolder { token });
+                let ask = Outcome::Confirm(Confirm::CloudFolder { token, provider });
                 return self.still_current(session, generation, ask);
             }
         };
@@ -1081,7 +1081,11 @@ mod tests {
     ) -> Token {
         ts.dialogs.answer(Some(dest.to_path_buf()));
         let Ok(Tagged {
-            data: Outcome::Confirm(Confirm::CloudFolder { token }),
+            data:
+                Outcome::Confirm(Confirm::CloudFolder {
+                    token,
+                    provider: crate::locations::CloudProvider::Other,
+                }),
             ..
         }) = ts.shell.save_file_copy(session, generation, id, file_id, 1)
         else {
@@ -1335,7 +1339,7 @@ mod tests {
         ts.volumes.add_sync_root(dest.parent().unwrap());
         ts.dialogs.answer(Some(dest.clone()));
         let asked = ts.shell.save_file_copy(s, g, &id, &file_id, 20).unwrap();
-        let Outcome::Confirm(Confirm::CloudFolder { token }) = asked.data else {
+        let Outcome::Confirm(Confirm::CloudFolder { token, .. }) = asked.data else {
             panic!("a cloud folder asks first");
         };
         assert!(

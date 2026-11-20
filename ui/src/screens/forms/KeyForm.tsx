@@ -7,7 +7,7 @@ import { Select } from "../../parts/Select";
 import { closeTool, saveNewKey, type SessionData } from "../../store";
 import type { FolderEntry } from "../SideMenu";
 import { folderChoices, NO_FOLDER, useFocusOnOpen, whereWords } from "./shared";
-import { MANY_LINES, ValueField } from "./ValueField";
+import { ValueField } from "./ValueField";
 
 /** What a key's name may be, said once under its box and again when the shell refuses a name. */
 export const NAME_RULE = "Letters, digits and underscores (_) only. It can't start with a digit.";
@@ -22,7 +22,8 @@ export function refusedTheName(error: unknown): boolean {
  * write, then opens it hidden with "Saved". What is typed lives in this form's own state, the value included: Cancel, a lock
  * and picking another item all take it, and a lock says nothing. The name must be a variable name (letters, digits and `_`,
  * not starting with a digit), since a key's name is what `.env` out uses: the shell refuses any other, in words under the
- * fields, and the form stays as it was. The Value box is the one the edit-key form uses (`ValueField`).
+ * fields, and the form stays as it was. The Value box is the one the edit-key form uses (`ValueField`); a value with line breaks
+ * (a private key file pasted whole) is kept exactly as pasted, in a box that does not show its shape.
  */
 export function KeyForm({ data, folders }: { data: SessionData; folders: readonly FolderEntry[] }) {
   const formId = useId();
@@ -33,17 +34,9 @@ export function KeyForm({ data, folders }: { data: SessionData; folders: readonl
   const [problem, setProblem] = useState<string | null>(null);
   /** The name is empty, or the shell refused it, and Save was pressed: the box is marked, and the words say why. */
   const [nameMarked, setNameMarked] = useState(false);
-  /** The words now under the fields are the refused paste's (they clear on the next change or a clean paste). */
-  const [pasteRefused, setPasteRefused] = useState(false);
   const nameBox = useRef<HTMLInputElement>(null);
 
   useFocusOnOpen(nameBox);
-
-  /** Something other than a refused paste has the line now: a change to the value must not clear it. */
-  const saySomethingElse = (words: string | null) => {
-    setProblem(words);
-    setPasteRefused(false);
-  };
 
   const cancel = () => {
     closeTool(data.session);
@@ -54,19 +47,19 @@ export function KeyForm({ data, folders }: { data: SessionData; folders: readonl
     event.preventDefault();
     if (saving) return;
     if (name.trim() === "") {
-      saySomethingElse("Type a name first.");
+      setProblem("Type a name first.");
       setNameMarked(true);
       nameBox.current?.focus();
       return;
     }
     setSaving(true);
-    saySomethingElse(null);
+    setProblem(null);
     setNameMarked(false);
     const done = await saveNewKey(data.session, { name, value, folder: folder === NO_FOLDER ? null : folder });
     // Saved or locked: the form is already gone, and there is nothing to say.
     if (typeof done !== "object") return;
     const words = messageFor(done.failed);
-    saySomethingElse(words.body === "" ? words.title : `${words.title} ${words.body}`);
+    setProblem(words.body === "" ? words.title : `${words.title} ${words.body}`);
     setNameMarked(refusedTheName(done.failed));
     setSaving(false);
   };
@@ -108,22 +101,7 @@ export function KeyForm({ data, folders }: { data: SessionData; folders: readonl
             {NAME_RULE}
           </p>
         </div>
-        <ValueField
-          id={`${formId}-value`}
-          value={value}
-          onChange={setValue}
-          onRefused={() => {
-            setProblem(MANY_LINES);
-            setPasteRefused(true);
-            setNameMarked(false);
-          }}
-          onAccepted={() => {
-            if (pasteRefused) {
-              setProblem(null);
-              setPasteRefused(false);
-            }
-          }}
-        />
+        <ValueField id={`${formId}-value`} value={value} onChange={setValue} manyLines />
         <div className="fbox">
           <Select
             label="Folder"

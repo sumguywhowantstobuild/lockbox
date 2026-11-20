@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import App from "../App";
 import { LockboxParts } from "../parts/LockboxParts";
-import { resetStoreForTests, startStore } from "../store";
+import { debugState, resetStoreForTests, startStore } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { installFakeShell, PASSWORD, sampleItems, type FakeShell } from "../testing/fakeShell";
 import { LockScreen } from "./LockScreen";
@@ -71,7 +72,7 @@ test("two_vaults_list_with_the_first_chosen", async () => {
   type("wrong for home");
   submit();
   expect(await screen.findByRole("alert")).toBeTruthy();
-  expect(invoke).toHaveBeenCalledWith("unlock_vault", { id: 8, password: "wrong for home" });
+  expect(invoke).toHaveBeenCalledWith("unlock_vault", { vault: { list: shell.listIdentity(), id: 8 }, password: "wrong for home" });
   await expectNoAxe(container);
 });
 
@@ -95,9 +96,10 @@ test("a_vault_that_is_not_there_cannot_be_chosen", async () => {
     { id: 7, name: "My vault", items: sampleItems() },
     { id: 8, name: "Old laptop", available: false },
   ]);
-  const old = screen.getByRole<HTMLInputElement>("radio", { name: /Old laptop/ });
-  expect(old.disabled).toBe(true);
-  expect(screen.getByText("Not available")).toBeTruthy();
+  // Not a radio at all (Task 9, 30b): its row says so in 30b's words, and has Try again and Remove from list.
+  expect(screen.queryByRole("radio", { name: /Old laptop/ })).toBeNull();
+  expect(screen.getByText("Unavailable: its folder or drive isn't there")).toBeTruthy();
+  expect(screen.queryByText("Not available")).toBeNull();
 });
 
 test("wrong_password_says_so_and_stays", async () => {
@@ -164,7 +166,7 @@ test("enter_unlocks", async () => {
   expect(button.form).toBe(passwordField().form);
   submit();
   await vi.waitFor(() => {
-    expect(invoke).toHaveBeenCalledWith("unlock_vault", { id: 7, password: PASSWORD });
+    expect(invoke).toHaveBeenCalledWith("unlock_vault", { vault: { list: shell.listIdentity(), id: 7 }, password: PASSWORD });
   });
   await vi.waitFor(() => {
     expect(shell.sessionOf(7)).toBeDefined();
@@ -259,19 +261,63 @@ test("a_typed_password_does_not_survive_leaving_the_window", async () => {
   expect(passwordField().value).toBe("kept");
 });
 
-test("no_forgot_password_link_until_4c", async () => {
+test("forgot_password_link_opens_28a", async () => {
   const { container } = await show([
     { id: 7, name: "My vault", items: sampleItems() },
     { id: 8, name: "Home", items: sampleItems() },
   ]);
-  // Nothing on the lock screen leads to a screen a later plan builds: no forgotten password, no adding a vault folder, no generator. Restore a backup
-  // (4B's Task 5) and Open a backup (Task 7) are the two links under the form; the rest are the vaults, the password and Unlock.
-  for (const words of [/forgot/i, /add existing/i, /generate/i, /recovery/i]) {
+  // Nothing on the lock screen leads to a screen a later plan builds: no generator. Forgot password? (Task 28) sits beside Unlock; Restore a backup (4B's Task 5), Add existing
+  // vault folder (Task 9) and Open a backup (Task 7) are the links under the form; the rest are the vaults, the password and Unlock.
+  for (const words of [/generate/i]) {
     expect(screen.queryByText(words)).toBeNull();
   }
   expect(screen.queryAllByRole("link")).toEqual([]);
-  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Restore a backup", "Open a backup"]);
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Forgot password?", "Restore a backup", "Add existing vault folder", "Open a backup"]);
   expect(container.querySelectorAll("[style]")).toHaveLength(0);
+  // It is a button of the form's own line, not a submit: pressed, it opens 28a for the vault chosen (the second one here), and sends nothing yet.
+  const link = screen.getByRole<HTMLButtonElement>("button", { name: "Forgot password?" });
+  expect(link.type).toBe("button");
+  fireEvent.click(screen.getByRole("radio", { name: /Home/ }));
+  fireEvent.click(link);
+  expect(debugState().forgot).toMatchObject({ vault: 8, phase: "key" });
+  expect(invoke.mock.calls.filter(([name]) => String(name).startsWith("recover_"))).toEqual([]);
+});
+
+test("forgot_password_is_not_offered_while_a_copy_waits_for_its_vault", async () => {
+  // The save step (8b) is the same screen with its own words and a Cancel: its way out is the copy's, not the password's.
+  shell = installFakeShell(invoke, listen, [{ id: 7, name: "My vault", items: sampleItems() }]);
+  render(<App />);
+  await vi.waitFor(() => {
+    expect(shell.calls.some((call) => call.cmd === "capture_state")).toBe(true);
+  });
+  await act(async () => {
+    shell.press({ text: "MU-copied value" });
+    await Promise.resolve();
+  });
+  await screen.findByRole("heading", { level: 1, name: "Save what you copied" });
+  expect(screen.queryByRole("button", { name: "Forgot password?" })).toBeNull();
+});
+
+test("the_save_steps_vaults_are_a_group_named_vault_on_screen", async () => {
+  // 8b draws a "Vault" label over the choice of vault, as the in-window save box has (4C Task 13b): on the save step the group's name shows, in the field labels'
+  // look; on the plain lock screen it is still there for a screen reader, and not shown.
+  shell = installFakeShell(invoke, listen, [
+    { id: 7, name: "My vault", items: sampleItems() },
+    { id: 8, name: "Home", items: sampleItems() },
+  ]);
+  render(<App />);
+  const plain = await screen.findByRole("group", { name: "Vault" });
+  expect(plain.querySelector("legend")?.className).toBe("sr");
+  await vi.waitFor(() => {
+    expect(shell.calls.some((call) => call.cmd === "capture_state")).toBe(true);
+  });
+  await act(async () => {
+    shell.press({ text: "MU-copied value" });
+    await Promise.resolve();
+  });
+  await screen.findByRole("heading", { level: 1, name: "Save what you copied" });
+  const group = screen.getByRole("group", { name: "Vault" });
+  expect(group.querySelector("legend")?.className).toBe("flab");
 });
 
 test("restore_a_backup_is_a_second_line_under_the_form_and_opens_the_first_step", async () => {

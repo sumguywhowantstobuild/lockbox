@@ -188,6 +188,8 @@ export function LoginForm({
             type="password"
             autoComplete="off"
             spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="off"
             value={password}
             onChange={(event) => {
               setPassword(event.currentTarget.value);

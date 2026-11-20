@@ -619,8 +619,6 @@ test("a_name_that_is_not_a_variable_name_is_refused_in_words_and_the_form_stays"
   expect(shell.made).toHaveLength(1);
 });
 
-const ONE_LINE_ONLY = "That value has more than one line, so it wasn't pasted. A key's value is one line here.";
-
 /** Pastes `text` into `box` as the page hears it; false when the page stopped the paste. */
 function pasteInto(box: HTMLElement, text: string): boolean {
   return fireEvent.paste(box, { clipboardData: { getData: () => text } });
@@ -631,99 +629,46 @@ function dropOnto(box: HTMLElement, text: string): boolean {
   return fireEvent.drop(box, { dataTransfer: { getData: () => text } });
 }
 
-test("a_value_with_more_than_one_line_is_not_pasted_or_dropped_and_the_words_say_so", async () => {
-  await unlocked();
-  const form = await openForm("Key");
-  const value = inputOf(form, "Value");
-  // What the box holds; each change is to a different text, since a change to the same text is no change.
-  let held = TYPED_KEY;
-  typeInto(form, "Value", held);
-  const change = () => {
-    held = held === TYPED_KEY ? `${TYPED_KEY}x` : TYPED_KEY;
-    typeInto(form, "Value", held);
-  };
-  for (const shown of [false, true]) {
-    if (shown) fireEvent.click(within(form).getByRole("button", { name: "Show" }));
-    expect(value.type).toBe(shown ? "text" : "password");
-    for (const text of ["line one\r\nline two", "line one\nline two", "\nline one\nline two\n", "a\rb"]) {
-      // The paste is stopped before the box can change what it holds, and the form says why, in the form's own problem line.
-      expect(pasteInto(value, text), JSON.stringify(text)).toBe(false);
-      expect(value.value).toBe(held);
-      expect((await within(form).findByRole("alert")).textContent).toBe(ONE_LINE_ONLY);
-      // The next change clears it.
-      change();
-      expect(within(form).queryByRole("alert")).toBeNull();
-      // A drop is the same.
-      expect(dropOnto(value, text), JSON.stringify(text)).toBe(false);
-      expect(value.value).toBe(held);
-      expect((await within(form).findByRole("alert")).textContent).toBe(ONE_LINE_ONLY);
-      change();
-      expect(within(form).queryByRole("alert")).toBeNull();
-    }
-  }
-  expect(sent("new_item")).toEqual([]);
-});
+// A paste or a drop with a line break inside the value is no longer stopped in the new-key form (Task 10a: `MultiLineValue.test.tsx`
+// keeps it exactly as given); the save box's one-line box still stops it (`SaveBox.test.tsx`).
 
-test("a_value_with_only_a_line_break_at_the_start_or_end_still_pastes", async () => {
+test("a_value_with_no_line_break_still_pastes_into_the_one_line_box", async () => {
   await unlocked();
   const form = await openForm("Key");
   const value = inputOf(form, "Value");
   for (const shown of [false, true]) {
     if (shown) fireEvent.click(within(form).getByRole("button", { name: "Show" }));
-    for (const text of ["one-line-value\n", "one-line-value\r\n", "\none-line-value", "\r\none-line-value\r\n", "one-line-value"]) {
-      // Left to the box, which drops the break as it always has: the page neither stops it nor says anything.
+    for (const text of ["one-line-value", "demo key with spaces"]) {
+      // Left to the one-line box: the page neither stops it nor says anything. (A break anywhere in the text, the ends too, is kept whole,
+      // exactly as pasted: `MultiLineValue.test.tsx`.)
       expect(pasteInto(value, text), JSON.stringify(text)).toBe(true);
       expect(dropOnto(value, text), JSON.stringify(text)).toBe(true);
       expect(within(form).queryByRole("alert")).toBeNull();
     }
   }
-  // A clean paste clears the words a refused one left.
-  expect(pasteInto(value, "a\nb")).toBe(false);
-  await within(form).findByRole("alert");
-  expect(pasteInto(value, "fine")).toBe(true);
-  expect(within(form).queryByRole("alert")).toBeNull();
   // A paste of no text at all (a file, a picture) is left alone too.
   expect(pasteInto(value, "")).toBe(true);
+  expect(within(form).queryByRole("alert")).toBeNull();
 });
 
-test("the_words_for_a_refused_paste_do_not_hide_the_saves_own", async () => {
-  await unlocked();
-  const form = await openForm("Key");
-  typeInto(form, "Name", "OpenAI key");
-  typeInto(form, "Value", TYPED_KEY);
-  fireEvent.click(within(form).getByRole("button", { name: "Save" }));
-  await within(form).findByRole("alert");
-  // A refused paste replaces the line with its own words; Save says its own again.
-  expect(pasteInto(inputOf(form, "Value"), "a\nb")).toBe(false);
-  expect((await within(form).findByRole("alert")).textContent).toBe(ONE_LINE_ONLY);
-  typeInto(form, "Name", "OPENAI_KEY");
-  fireEvent.click(within(form).getByRole("button", { name: "Save" }));
-  await screen.findByRole("complementary", { name: "OPENAI_KEY" });
-  expect(shell.made.at(-1)?.fields).toEqual({ value: TYPED_KEY });
-});
-
-test("a_changed_value_does_not_clear_the_words_save_put_in_place_of_a_refused_pastes", async () => {
+test("a_changed_value_does_not_clear_the_words_save_put_up", async () => {
   await unlocked();
   const form = await openForm("Key");
   const refusedName =
     "That isn't a name Lockbox can use for a key. Use letters, digits and underscores (_) only, and don't start with a digit.";
-  // A refused paste, then Save with no name: Save's words take the line over from the paste's.
-  expect(pasteInto(inputOf(form, "Value"), "a\nb")).toBe(false);
-  expect((await within(form).findByRole("alert")).textContent).toBe(ONE_LINE_ONLY);
+  // Save with no name says so.
   fireEvent.click(within(form).getByRole("button", { name: "Save" }));
   await waitFor(() => {
     expect(within(form).getByRole("alert").textContent).toBe("Type a name first.");
   });
   expect(inputOf(form, "Name").getAttribute("aria-invalid")).toBe("true");
-  // A change to the value is not the paste's words going away: Save's words stay, and so does the mark on the Name box.
+  // A change to the value is not those words going away: they stay, and so does the mark on the Name box.
   typeInto(form, "Value", TYPED_KEY);
   expect(within(form).getByRole("alert").textContent).toBe("Type a name first.");
   expect(inputOf(form, "Name").getAttribute("aria-invalid")).toBe("true");
 
-  // The same when the shell refuses the name: a refused paste, Save, then a change to the value.
+  // The same when the shell refuses the name: Save, then a change to the value.
   typeInto(form, "Name", "bad name");
-  expect(pasteInto(inputOf(form, "Value"), "a\nb")).toBe(false);
-  expect(within(form).getByRole("alert").textContent).toBe(ONE_LINE_ONLY);
   fireEvent.click(within(form).getByRole("button", { name: "Save" }));
   await waitFor(() => {
     expect(within(form).getByRole("alert").textContent).toBe(refusedName);

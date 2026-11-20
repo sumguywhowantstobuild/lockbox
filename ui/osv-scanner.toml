@@ -1,14 +1,9 @@
 # Known vulnerabilities in the UI's npm dependencies we accept for now, each with a reason and an expiry date.
 # osv-scanner reads this file for ui/package-lock.json (the root osv-scanner.toml covers Cargo.lock). When a date
 # passes, the scan fails again: re-check the advisory, then fix it or renew the entry with a new date. See
-# docs/SETUP.md "Security scan".
+# docs/SETUP.md "Security scan". scripts/shipped-page-check.mjs proves none of these packages is in the shipped page.
 
 [[IgnoredVulns]]
 id = "GHSA-g3hv-75wg-m249"
-ignoreUntil = 2026-12-15
-reason = "minimatch 10.2.6 only via eslint 10 and typescript-eslint (lint-time dev tools, never shipped); the globs it reads are our own lint config; the fix (11.0.1) is a new major version eslint 10.14.0 does not yet accept (^10.2.6)"
-
-[[IgnoredVulns]]
-id = "GHSA-fc5q-39xc-vjpf"
-ignoreUntil = 2026-12-15
-reason = "picomatch 4.0.7 only via vite 8 and vitest 5 (build and test tools, never shipped); the globs it reads are our own config and test paths; no fixed version exists yet (every release up to 4.0.7 is affected)"
+ignoreUntil = 2027-01-15
+reason = "minimatch 10.2.6, only through lint-time dev tools, never shipped: eslint 10.13.0 (directly and through @eslint/config-array 0.23.5) and typescript-eslint 8.72.1 (through @typescript-eslint/typescript-estree 8.72.1); the globs it reads are our own lint config. The fix (11.0.1) is a new major version first accepted by eslint 10.15.0 and @eslint/config-array 0.23.6 (2026-11-13) and typescript-estree 8.73.0 (2026-11-16), all under two weeks old on 2026-11-19: update once they are"

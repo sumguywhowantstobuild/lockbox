@@ -12,14 +12,16 @@ documented and honest about its limits.
 
 ## What exists today
 
-The first three of five planned stages are built, and the first two parts of the fourth: the screens for daily use (4A)
-and for files and long jobs (4B). You can build and run the desktop app, set up a vault with its recovery key, and keep
+The first three of five planned stages are built, and the first three parts of the fourth: the screens for daily use (4A),
+for files and long jobs (4B), and for vaults and passwords (4C). You can build and run the desktop app, set up a vault with its recovery key, and keep
 logins, keys, notes, files and `.env`s in it: search, reveal and copy, add and edit, move, trash and restore, folders, a
 folder's `.env` in and out, a shortcut that saves a copied key, and settings. You can also back up a vault, test a
 backup, restore one (the vault it replaces is kept as an older copy you can open or delete), open a backup read-only and
 copy single items out of it, bring vaults onto a new computer, add many files at once and save all of a folder's files,
-each with progress and a Stop or Cancel, and closing during a long job asks first. The forgotten-password screens come
-in the last part (4C). Together the five plans make up Phase 1, the Windows app (see the
+each with progress and a Stop or Cancel, and closing during a long job asks first. You can change a vault's password, get back in with the recovery key if you forget
+it, make a new recovery key, keep several vaults open and switch between them, make a new vault from inside the app,
+rename a vault, take one off the list and add it back, and see a vault's folder in Explorer. Export and emptying the
+trash come in the last part (4D). Together the five plans make up Phase 1, the Windows app (see the
 [phases](docs/PRD.md#phases)).
 
 | Plan | What it delivers | State |
@@ -27,7 +29,7 @@ in the last part (4C). Together the five plans make up Phase 1, the Windows app 
 | 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
 | 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built |
 | 3 | Desktop shell (built with Tauri, a toolkit for desktop apps), `crates/lockbox-desktop`: sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Built |
-| 4 | The user interface, from clickable design mockups, in three parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C the rest | 4A and 4B built; 4C to come |
+| 4 | The user interface, from clickable design mockups, in four parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C vaults and passwords, 4D the rest | 4A, 4B and 4C built; 4D to come |
 | 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
 
 The core can already create and unlock vaults (with the password, or with the recovery key: a long code shown once that

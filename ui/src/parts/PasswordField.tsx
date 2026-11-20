@@ -1,10 +1,11 @@
-import { useId, useState, type KeyboardEvent } from "react";
+import { useId, useState, type KeyboardEvent, type Ref } from "react";
 import { CheckIcon } from "./Icon";
 
 /**
- * A password box: hidden, named by its label, and never kept or filled in by the browser. It says when Caps Lock is on
- * (as a hint, not an alarm), and shows `error` as an alert tied to the box. The text is the caller's state: this part
- * keeps none.
+ * A password box: hidden, named by its label, and never kept, filled in or corrected by the browser or the on-screen keyboard (spellcheck,
+ * autocorrect and auto-capitalisation are off, and `autoComplete` says what the box is for). It says when Caps Lock is on (as a hint, not an
+ * alarm), and shows `error` as an alert tied to the box; while it shows, a counting rule steps aside, so one line says what is wrong. The text is the
+ * caller's state: this part keeps none.
  */
 export function PasswordField({
   label,
@@ -13,7 +14,11 @@ export function PasswordField({
   error,
   rule,
   minimum,
+  autoComplete,
+  look = "plate",
   autoFocus = false,
+  readOnly = false,
+  inputRef,
 }: {
   label: string;
   value: string;
@@ -29,7 +34,15 @@ export function PasswordField({
    * screen reader reads it on request.
    */
   minimum?: number;
+  /** What the browser is told the box is for: the password already in use, or a new one being set. A password is never `off` here: a recovery key's box is `CredentialField`. */
+  autoComplete: "current-password" | "new-password";
+  /** Where the box sits: on a screen's plate (the lock screen, setup) or in the side panel, which has its own field, line and hint styles. */
+  look?: "plate" | "panel";
   autoFocus?: boolean;
+  /** The box can be read but not typed in, while what it held is being used: nothing typed meanwhile survives the answer. */
+  readOnly?: boolean;
+  /** The box itself, for a form that moves focus to the box its problem is about. */
+  inputRef?: Ref<HTMLInputElement>;
 }) {
   const id = useId();
   const [capsLock, setCapsLock] = useState(false);
@@ -45,33 +58,45 @@ export function PasswordField({
   const metWords = `${String(minimum)} characters or more`;
   const ruleWords =
     minimum !== undefined && typed > 0 ? `${(rule ?? "").replace(/\.$/, "")} · ${String(typed)} so far` : rule;
-  const described = [capsLock ? hint : null, error ? problem : null, rule ? ruleId : null].filter(Boolean).join(" ");
+  // A counting rule ("At least 12 characters · 8 so far") steps aside while its error shows, so one line says what is wrong; a sentence that says why the
+  // password is asked stays.
+  const showRule = Boolean(rule) && !(error && minimum !== undefined);
+  const described = [capsLock ? hint : null, error ? problem : null, showRule ? ruleId : null].filter(Boolean).join(" ");
+  const panel = look === "panel";
+  const ruleClass = panel ? "fhint" : "fu-hint";
   return (
-    <div>
-      <label htmlFor={id}>{label}</label>
+    <div className={panel ? "fbox" : undefined}>
+      <label htmlFor={id} className={panel ? "flab" : undefined}>
+        {label}
+      </label>
       <input
+        ref={inputRef}
         id={id}
-        className="inp"
+        className={panel ? "finp" : "inp"}
         type="password"
-        autoComplete="off"
+        autoComplete={autoComplete}
         spellCheck={false}
+        autoCorrect="off"
+        autoCapitalize="off"
         autoFocus={autoFocus}
+        readOnly={readOnly}
         value={value}
         aria-invalid={error ? true : undefined}
         aria-describedby={described === "" ? undefined : described}
         onChange={(event) => {
+          if (readOnly) return;
           onChange(event.currentTarget.value);
         }}
         onKeyDown={watch}
         onKeyUp={watch}
       />
       {error ? (
-        <p className="err" id={problem} role="alert">
+        <p className={panel ? "ferr" : "err"} id={problem} role="alert">
           {error}
         </p>
       ) : null}
-      {rule ? (
-        <p className={met ? "fu-hint ok" : "fu-hint"} id={ruleId}>
+      {showRule ? (
+        <p className={met ? `${ruleClass} ok` : ruleClass} id={ruleId}>
           {met ? (
             <>
               <CheckIcon />

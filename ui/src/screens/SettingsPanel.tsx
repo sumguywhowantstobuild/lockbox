@@ -7,13 +7,15 @@ import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
 import { SETTINGS_HINT } from "../olderCopiesWords";
-import { SETTINGS_OPEN_HINT } from "../openBackupWords";
+import { SETTINGS_OPEN_HINT, shownName } from "../openBackupWords";
 import {
   closeTool,
   loadOlderCopies,
   loadSettings,
   NOT_ON_THE_LIST,
   openBackup,
+  openChangePassword,
+  openNewRecoveryKey,
   openOlderCopies,
   saveSettings,
   startOpenBackup,
@@ -22,6 +24,7 @@ import {
   useOlderCopies,
   useOpenBackup,
   useRestore,
+  useSessions,
   useSettings,
   type SaveTicket,
   type SessionData,
@@ -136,12 +139,14 @@ function said(error: unknown, names?: { shortcut?: string }): string {
  * Settings (31a, 31b), from the side menu: the app's settings, for every vault, saved at once as each one changes. A change shows as it is
  * made and goes back to what is saved if the shell refuses it, with the refusal in words under its row. Saves go one after another (the store
  * sees to that), each as the whole settings. Start with Windows is not one of the settings the file keeps: it is the shell's own entry, read
- * when the panel opens and changed by its own command. "This vault" has Back up (a writable vault only) and Test a backup (any vault, a read-only
- * one too); the vault's other rows (password, export) and Help are not here until the plans that build them.
+ * when the panel opens and changed by its own command. "This vault" has Back up, Change password and New recovery key (a writable vault only) and Test a
+ * backup (any vault, a read-only one too); the vault's other row (export) and Help are not here until the plans that build them.
  */
 export function SettingsPanel({ data }: { data: SessionData }) {
   const id = useId();
   const saved = useSettings();
+  // With more than one vault (or backup) open, the section that is for the window's own vault says which it is (the design: "With two open, Add and Settings say which vault").
+  const several = useSessions().length > 1;
   // The picker of Restore a backup is open (or its steps are): a second press sends nothing.
   const restoring = useRestore() !== null;
   // The same for Open a backup: its picker is open (or its panel is, in this panel's place).
@@ -426,7 +431,7 @@ export function SettingsPanel({ data }: { data: SessionData }) {
       </section>
 
       <section className="gp">
-        <h3 className="gh">This vault</h3>
+        <h3 className="gh">{several ? `This vault: ${shownName(data)}` : "This vault"}</h3>
         <div className="grp">
           {data.readOnly ? null : (
             // A copy kept on another drive. Not in a vault opened from a backup, which has nothing of its own to back up.
@@ -490,6 +495,32 @@ export function SettingsPanel({ data }: { data: SessionData }) {
                 }}
               >
                 {`Older copies (${String(olderCount)})`}
+              </Button>
+            </SettingsRow>
+          )}
+          {data.readOnly ? null : (
+            // This vault's own password: not in a copy opened from a backup or an older copy, which nothing can be written to.
+            <SettingsRow label="Change password" hint={`Set a new password for ${data.name}.`} hintId={`${id}-password-hint`}>
+              <Button
+                aria-describedby={`${id}-password-hint`}
+                onClick={() => {
+                  openChangePassword(data.session);
+                }}
+              >
+                Change password
+              </Button>
+            </SettingsRow>
+          )}
+          {data.readOnly ? null : (
+            // This vault's own recovery key: not in a copy opened from a backup or an older copy, which nothing can be written to.
+            <SettingsRow label="New recovery key" hint={`Make a new recovery key for ${data.name}. The old one stops working.`} hintId={`${id}-key-hint`}>
+              <Button
+                aria-describedby={`${id}-key-hint`}
+                onClick={() => {
+                  openNewRecoveryKey(data.session);
+                }}
+              >
+                New recovery key
               </Button>
             </SettingsRow>
           )}

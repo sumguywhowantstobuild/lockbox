@@ -108,8 +108,14 @@ function checks({ scan }) {
         // Builds the tests while the other lanes run, so the quiet phase only runs them.
         cargo("build-tests", "test", "--locked", "--no-run"),
       ],
-      // The UI's tests read the built page, and the ipc test embeds it: build before both.
-      [ui("ui-lint", "run", "lint"), ui("ui-build", "run", "build"), ui("ui-tests", "test")],
+      // The UI's tests read the built page, and the ipc test embeds it: build before both. The shipped-page check
+      // builds its own copy in memory, so it runs with or without the scan.
+      [
+        ui("ui-lint", "run", "lint"),
+        ui("ui-build", "run", "build"),
+        ui("ui-tests", "test"),
+        { name: "shipped-page", cmd: process.execPath, args: ["scripts/shipped-page-check.mjs"] },
+      ],
       scanner,
     ],
     [rustTests],

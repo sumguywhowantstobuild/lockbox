@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ItemSummary } from "../api";
 import { ChevronsIcon, GeneratorIcon, ListIcon, LockIcon, PlusIcon, SearchIcon, SettingsIcon, SideMenuIcon, TrashIcon } from "../parts/Icon";
-import { Menu } from "../parts/Menu";
-import { VaultMark, type VaultLook } from "../parts/Pattern";
+import { Menu, type MenuRow } from "../parts/Menu";
+import { VaultMark, vaultLook, type VaultLook } from "../parts/Pattern";
 import {
   lockEverything,
   lockOneVault,
@@ -12,12 +12,21 @@ import {
   openTrash,
   selectFolder,
   showSession,
+  showVaultInExplorer,
+  startAddFolder,
+  startNewVault,
+  startUnlockStep,
   useSessions,
   useVaults,
   type SessionData,
 } from "../store";
 import { kindRow, shownName } from "../openBackupWords";
+import { useMode } from "../theme";
+import { listedName, LOCKED, NOT_AVAILABLE, placedName, UNLOCKED } from "../vaultWords";
+import { focusButton } from "../focus";
 import { NewFolderBox } from "./forms/FolderForm";
+import { RenameVaultBox } from "./RenameVault";
+import { RemoveVaultBox, UnavailableVaultBox } from "./VaultBoxes";
 
 /** A folder of the open vault, with how many items are in it. */
 export interface FolderEntry {
@@ -30,8 +39,8 @@ export interface FolderEntry {
 const TILES = ["t0", "t1", "t2", "t3", "t4"];
 
 /**
- * The side menu: which vault is open (its name opens the vault menu: each vault and whether it is open, a row for every open session that brings it to the front, and Lock for
- * the one on screen; an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
+ * The side menu: which vault is open (its name opens the vault menu: a row for every vault of the list, which brings an open one to the front and opens a locked one's unlock
+ * step, a row for every open backup and older copy, then New vault (setup's two steps, with Back) and Add existing vault folder, Lock for the one on screen, and Rename, Show in Explorer and Remove from this list for an open, writable, listed vault (18d, 18g: the menu closes and a small box opens in its place; an unavailable vault's row opens its own box, with Try again and Remove from list); an older copy's name says so, and a backup's is its file's), Search, All items, the folders with "New folder" under them (which becomes a name box), the Generator, the Trash with
  * its count, and Settings and Lock all side by side. It closes to a strip of icons; then each icon carries its name for a screen reader, and for a hint
  * when the pointer rests on it. The menu is only there while a vault is unlocked, so the Generator never shows on the lock screen.
  * A vault opened read-only has no "New folder".
@@ -54,28 +63,91 @@ export function SideMenu({
   const [closed, setClosed] = useState(false);
   // The name box "New folder" becomes. A lock takes the whole side menu, and the box with it.
   const [naming, setNaming] = useState(false);
-  // Each vault the list can reach, and whether it is open: the vault menu says it in words, as the list's line does.
-  const vaults = useVaults();
+  // 18d: the small box Rename becomes, in the vault menu's place. It is this vault's own: a switch or a lock takes the side menu, and the box with it.
+  const [renaming, setRenaming] = useState(false);
+  const vaultButton = useRef<HTMLButtonElement>(null);
+  // Task 9's two boxes, in the vault menu's place like Rename's: the one an unavailable vault's row opens (its Try again and Remove from list), and 18g, which asks before a
+  // vault leaves the list (for the vault on screen, or for the unavailable one the first box was about). They are this window's own: a lock takes the side menu, and them with it.
+  const [box, setBox] = useState<{ kind: "unavailable" | "remove"; id: number; name: string } | null>(null);
+  // Every vault of the list is one row of the vault menu, in the list's order (each once): an open one brings its window to the front, a locked one opens its own unlock
+  // step, an unavailable one opens its own box (Try again, Remove from list), and one whose details can't be read opens Ask 8 from the same step. Then the sessions that are not on the list
+  // (a backup, an older copy), in the order they were opened (a switch does not reorder them); a read-only one says what it is under its name.
+  const vaults = useVaults() ?? [];
   const sessions = useSessions();
-  const open = new Set(sessions.map((session) => session.vaultId));
-  // Each vault is in the menu once: an open one is a row below (the choice to bring it to the front), so the lines above are only the vaults that are not open, which say Locked.
-  const notes = (vaults ?? [])
-    .filter((vault) => vault.available && vault.name !== null && !open.has(vault.id))
-    .map((vault) => ({ name: vault.name ?? "", state: "Locked" }));
-  // Every open session is a row that brings it to the front, in the order they were unlocked or opened (a switch does not reorder them); a read-only one says what it is
-  // under its name. A locked session is gone from the page, so it has no row, and a locked vault of the list stays a note above.
-  const rows = [...sessions]
+  const mode = useMode();
+  // 18a: each row wears its vault's mark, in the colour and shape of its place on the list (as the vault strip's buttons and the lock screen's rows do), so two vaults of one
+  // colour still look different. The mode class sits beside the colour's so the colour resolves in the menu, which is drawn outside the window's own element. A session that
+  // is no listed vault's (a backup, an older copy) wears the read-only look, as its window does.
+  const markOf = (look: VaultLook) => <VaultMark points={look.points} className={`vprint mode-${mode} v-${look.accent}`} />;
+  // Two vaults that read alike say their place on the list too, as the strip does (the mark alone is a picture).
+  const listed: MenuRow[] = vaults.map((vault, place) => {
+    const session = sessions.find((one) => one.vaultId === vault.id);
+    const icon = markOf(vaultLook(place, false));
+    if (session !== undefined) {
+      return {
+        id: `vault:${String(vault.id)}`,
+        label: placedName(vaults, place, session.name),
+        // 18a's line under an open vault's name.
+        detail: kindRow(session.kind) ?? UNLOCKED,
+        icon,
+        checked: session.session === data.session,
+        onSelect: () => {
+          showSession(session.session);
+        },
+      };
+    }
+    if (!vault.available) {
+      return {
+        id: `vault:${String(vault.id)}`,
+        label: placedName(vaults, place),
+        detail: NOT_AVAILABLE,
+        icon,
+        checked: false,
+        onSelect: () => {
+          setBox({ kind: "unavailable", id: vault.id, name: listedName(vault) });
+        },
+      };
+    }
+    return {
+      id: `vault:${String(vault.id)}`,
+      label: placedName(vaults, place),
+      detail: LOCKED,
+      icon,
+      checked: false,
+      onSelect: () => {
+        startUnlockStep(vault.id);
+      },
+    };
+  });
+  const others: MenuRow[] = sessions
+    .filter((session) => !vaults.some((vault) => vault.id === session.vaultId))
     .sort((a, b) => a.opened - b.opened)
     .map((session) => ({
-      id: String(session.session),
+      id: `session:${String(session.session)}`,
       label: session.name,
       detail: kindRow(session.kind),
+      icon: markOf(vaultLook(0, true)),
       checked: session.session === data.session,
       onSelect: () => {
         showSession(session.session);
       },
     }));
+  const rows = [...listed, ...others];
   const onScreen = shownName(data);
+  // The row of the list the vault on screen is, for Show in Explorer and Remove (which name it as the list gave it); a session that is not on the list has none.
+  const onScreenRow = !data.readOnly && data.kind === "vault" && data.vaultId > 0 ? vaults.find((vault) => vault.id === data.vaultId) : undefined;
+  const boxRow = box === null ? undefined : vaults.find((vault) => vault.id === box.id);
+  // The row a box is about has left the list (removed elsewhere, or by this box's own Remove): the box has gone with it and can't close itself, so its state goes too, and focus is on
+  // the vault button instead of being lost.
+  const boxLost = box !== null && boxRow === undefined;
+  const [boxesLost, setBoxesLost] = useState(0);
+  if (boxLost) {
+    setBox(null);
+    setBoxesLost((count) => count + 1);
+  }
+  useEffect(() => {
+    if (boxesLost > 0) focusButton(".vhead");
+  }, [boxesLost]);
   // What a closed icon is called and said to be: the words it hides.
   const named = (name: string, count?: number) =>
     closed ? { "aria-label": count === undefined ? name : `${name}, ${String(count)} items`, title: name } : {};
@@ -95,17 +167,97 @@ export function SideMenu({
               <ChevronsIcon className="i vchev" />
             </>
           }
-          notes={notes}
+          triggerRef={vaultButton}
+          // 18a: from the vault button's left edge, so the menu opens beside the strip of vault buttons, not over it.
+          align="start"
           rows={rows}
           items={[
             {
+              label: "New vault",
+              // 18a draws its plus.
+              icon: <PlusIcon />,
+              onSelect: startNewVault,
+            },
+            {
+              label: "Add existing vault folder",
+              onSelect: () => {
+                startAddFolder("window");
+              },
+            },
+            {
               label: `Lock ${onScreen}`,
+              apart: true,
               onSelect: () => {
                 void lockOneVault(data.session);
               },
             },
+            // Only an open, writable vault of the list: a read-only copy, an older copy and a session that is not on the list get switch and Lock only. Show and Remove come
+            // right after Rename, as 18a draws them (the line that sets Delete apart waits for the version that has Delete).
+            ...(!data.readOnly && data.kind === "vault" && data.vaultId > 0
+              ? [
+                  {
+                    label: `Rename ${onScreen}`,
+                    onSelect: () => {
+                      setRenaming(true);
+                    },
+                  },
+                ]
+              : []),
+            ...(onScreenRow === undefined
+              ? []
+              : [
+                  {
+                    label: `Show ${onScreen} in Explorer`,
+                    onSelect: () => {
+                      void showVaultInExplorer({ list: onScreenRow.list, id: onScreenRow.id });
+                    },
+                  },
+                  {
+                    label: `Remove ${onScreen} from this list`,
+                    onSelect: () => {
+                      setBox({ kind: "remove", id: onScreenRow.id, name: onScreen });
+                    },
+                  },
+                ]),
           ]}
         />
+        {renaming ? (
+          <RenameVaultBox
+            data={data}
+            anchor={vaultButton}
+            onClose={() => {
+              setRenaming(false);
+            }}
+          />
+        ) : null}
+        {box?.kind === "unavailable" && boxRow !== undefined ? (
+          <UnavailableVaultBox
+            vault={boxRow}
+            name={box.name}
+            anchor={vaultButton}
+            onClose={() => {
+              setBox(null);
+            }}
+            onRemove={() => {
+              setBox({ kind: "remove", id: box.id, name: box.name });
+            }}
+          />
+        ) : null}
+        {box?.kind === "remove" && boxRow !== undefined ? (
+          <RemoveVaultBox
+            vault={boxRow}
+            name={box.name}
+            anchor={vaultButton}
+            onClose={() => {
+              setBox(null);
+            }}
+            onDone={() => {
+              // The vault on screen took its window with it (its lock shows the next vault, or the lock screen); any other vault leaves this window as it was.
+              setBox(null);
+              focusButton(".vhead");
+            }}
+          />
+        ) : null}
         <button
           type="button"
           className="rside"

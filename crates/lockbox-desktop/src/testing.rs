@@ -121,6 +121,15 @@ impl Events {
         lock(&self.close_asked).clone()
     }
 
+    /// Answers the question of the last `lockbox://close-asked` sent, through `shell` ([`Shell::close_answer`] with that
+    /// event's `question` ID; 0, which no question has, when none was sent).
+    pub fn answer_last_close(&self, shell: &Shell, go: bool) -> ShellResult<()> {
+        let question = lock(&self.close_asked)
+            .last()
+            .map_or(0, |event| event["question"].as_u64().unwrap_or(0));
+        shell.close_answer(question, go)
+    }
+
     /// Runs `hook` once, inside the next `busy` event: it may block or panic there.
     pub fn during_next_busy(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.on_busy) = Some(hook);
@@ -1076,6 +1085,13 @@ impl FakeVolumes {
         lock(&self.vanished).push(canonical(dir));
     }
 
+    /// From now on, the folder `dir` that [`vanish`](Self::vanish) made go is there again, as if its drive were plugged
+    /// back in.
+    pub fn back(&self, dir: &Path) {
+        let dir = canonical(dir);
+        lock(&self.vanished).retain(|gone| !crate::os::same_path(gone, &dir));
+    }
+
     /// The innermost mounted volume `path` is inside.
     fn mounted_at(&self, path: &Path) -> Option<(PathBuf, FakeVolume)> {
         lock(&self.mounted)
@@ -1728,6 +1744,13 @@ impl TestShell {
         }
     }
 
+    /// The page's answer to the close question the shell asked last ([`Shell::close_answer`] with that event's `question`
+    /// ID; 0, which no question has, when none was asked). For a test that answers "the question on screen"; a test about
+    /// which question an answer reaches names the ID itself.
+    pub fn answer_close(&self, go: bool) -> ShellResult<()> {
+        self.events.answer_last_close(&self.shell, go)
+    }
+
     /// The folder for the test's own vaults.
     pub fn vaults(&self) -> PathBuf {
         self.temp.path().join("vaults")
@@ -1797,6 +1820,11 @@ impl TestShell {
         let journal: serde_json::Value = serde_json::from_slice(&text).unwrap();
         assert_eq!(journal["version"], 1);
         serde_json::from_value(journal["entries"].clone()).unwrap()
+    }
+
+    /// The row the page would send for the vault `id`, on the list as it is now (listed or not).
+    pub fn vault(&self, id: u32) -> crate::registry::VaultRef {
+        self.shell.registry.vault_ref(id)
     }
 
     /// A new folder `name` in the test's temp folder, canonical (as a dialog's answer is made before use).

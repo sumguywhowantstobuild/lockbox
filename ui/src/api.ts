@@ -8,6 +8,7 @@ import {
   callPlain,
   open,
   type CaptureEvent,
+  type CloudProvider,
   type JobScope,
   type OperationId,
   type Opened,
@@ -36,6 +37,7 @@ export type {
   CaptureEvent,
   CloseAskedEvent,
   CloseReason,
+  CloudProvider,
   Confirm,
   JobKind,
   JobScope,
@@ -52,8 +54,15 @@ export type {
   Tagged,
 } from "./bridge";
 
-/** One vault on the list: no path, ever. `name` is null when its details cannot be read. */
+/** A row of the vault list as the shell names it: the list's identity and the vault's ID on it. Sent back as it came, never built from a bare ID. */
+export interface VaultRef {
+  list: number;
+  id: number;
+}
+
+/** One vault on the list: no path, ever. `list` is the identity of the list it was read from. `name` is null when its details cannot be read. */
 export interface VaultEntry {
+  list: number;
   id: number;
   name: string | null;
   available: boolean;
@@ -89,9 +98,6 @@ export interface CleanupView {
   failed: number;
 }
 
-/** The cloud service syncing a vault's folder: a fixed name from the shell, never a path. */
-export type CloudProvider = "OneDrive" | "GoogleDrive" | "Dropbox" | "Other";
-
 /**
  * What an unlock found, and so which of the app's questions to ask (Task 8): `header_mac_mismatch` is Ask 3 (answered with
  * `acceptHeader` or `lockVault`), `used_backup_header` Ask 9, `cloud` Ask 10, `cleanup.skipped_damaged` Ask 4 and
@@ -114,11 +120,29 @@ export interface UnlockView {
   recovery_unconfirmed: boolean;
 }
 
-/** A vault just created and unlocked, with its recovery key, shown once. The vault is marked "not confirmed" already. */
+/**
+ * A vault just created and unlocked, with its recovery key, shown once. The vault is marked "not confirmed" already.
+ * `issue` is the key's number (always 1, as a session's first), which `recoveryConfirmed` sends back to confirm this key.
+ * `vault_id` is the registry ID the shell gave the new vault on the list (1 or more): the session's vault from the start.
+ */
 export interface CreatedView {
   info: SessionInfo;
   recovery_key: string;
+  issue: number;
+  vault_id: number;
 }
+
+/** A new recovery key, shown once: its 24 words, and the number that names it for `recoveryConfirmed`. */
+export interface NewKeyView {
+  words: string;
+  issue: number;
+}
+
+/**
+ * What `recoveryConfirmed` answers: `Confirmed` when the key was the latest one made (its mark is cleared, 21f's permission
+ * ended), `Superseded` when a newer key has been made since (nothing changed, and the newer key is the one to confirm).
+ */
+export type Confirmation = "Confirmed" | "Superseded";
 
 export type ItemKind = "login" | "key" | "note" | "file" | "collection";
 
@@ -268,19 +292,74 @@ export function appInfo(): Promise<AppInfo> {
  * Unlocks the vault with `password` (about a second). Rejects with the shell's refusal (`wrong_password` among them)
  * or `StaleAnswer` when the vault locked again before the answer was read.
  */
-export async function unlockVault(id: number, password: string): Promise<Tagged<UnlockView>> {
-  const answer = await open<UnlockView>("unlock_vault", { id, password });
+export async function unlockVault(vault: VaultRef, password: string): Promise<Tagged<UnlockView>> {
+  const answer = await open<UnlockView>("unlock_vault", { vault: { list: vault.list, id: vault.id }, password });
   // `unlock_vault` answers a tagged view and never asks a question or opens a dialog.
   if (answer === "Dismissed" || "Confirm" in answer) throw new Error("unexpected answer to unlock_vault");
   return answer;
+}
+
+/** What `recover_check` answers: the key opens this vault's recovery slot and is held in Rust under `choice`; `header_changed` asks first (Ask 3's words), then `recoverFinish(.., true)`. */
+export interface RecoveryCheckView {
+  kind: "checked" | "header_changed";
+  choice: string;
+  vault_name: string;
+}
+
+/**
+ * Checks a typed recovery key against the vault's recovery slot (Forgot password, 28a): the key's form first (a typo or a word that is no listed word
+ * answers `core` `recovery_key_typo`, `recovery_key_word` with its `position`, or `recovery_key_count` with `found`, and nothing is derived), then that it opens
+ * this vault (`core` `wrong_password`: another vault's key or an old one). The key is held in the shell under `choice` for `recoverFinish`; nothing is written.
+ */
+export function recoverCheck(vault: VaultRef, recoveryKey: string): Promise<RecoveryCheckView> {
+  return callPlain<RecoveryCheckView>("recover_check", { vault: { list: vault.list, id: vault.id }, recovery_key: recoveryKey });
+}
+
+/**
+ * Takes the vault off the list; its folder stays. An open one is locked first (its lock event comes as for any lock). `busy` while it unlocks or a job of it runs;
+ * `not_found` for a row the list no longer has.
+ */
+export function forgetVault(vault: VaultRef): Promise<null> {
+  return callPlain<null>("forget_vault", { vault: { list: vault.list, id: vault.id } });
+}
+
+/**
+ * Opens the vault's folder in Explorer (Rust has the path; the page never does). `not_found` when the row or the folder is gone; `invalid_input` `folder` when the list
+ * entry isn't a plain folder.
+ */
+export function showVaultInExplorer(vault: VaultRef): Promise<null> {
+  return callPlain<null>("show_vault_in_explorer", { vault: { list: vault.list, id: vault.id } });
+}
+
+/**
+ * Sets the new password for the checked key's vault and opens it (28d): a new password under 12 characters is `password_too_short` (the choice is kept), a choice
+ * the shell no longer holds, or details that changed since the check, is `choice_expired` (check the key again), and a `header_changed` choice needs
+ * `acceptChangedHeader`. A lock after the password was written answers `locked_after_change` with the vault's registry ID, or is a stale answer.
+ */
+export async function recoverFinish(choice: string, newPassword: string, acceptChangedHeader: boolean): Promise<Tagged<UnlockView>> {
+  const answer = await open<UnlockView>("recover_finish", {
+    choice,
+    new_password: newPassword,
+    accept_changed_header: acceptChangedHeader,
+  });
+  // `recover_finish` answers `Done` only; it never asks or opens a dialog.
+  if (answer === "Dismissed" || "Confirm" in answer) throw new Error("unexpected answer to recover_finish");
+  return answer;
+}
+
+/** Lets the checked key go (Back, No to the changed header, leaving). A choice that is unknown or already gone is no error. */
+export async function recoverForget(choice: string): Promise<void> {
+  await callPlain<null>("recover_forget", { choice });
 }
 
 /**
  * Creates a vault named `name` with `password` in the default vaults folder, or in one the person picks
  * (`chooseFolder`), adds it to the list and unlocks it. The shell writes the "not confirmed" mark before the vault
  * exists; if the mark can't be written, no vault is made and this rejects (a state-file refusal, `what: "vault state"`).
- * A cloud-synced folder answers `{ Confirm: { CloudFolder: { token } } }` before anything is written: go on with
- * `createVaultConfirm(token)`. A closed folder picker answers `"Dismissed"`.
+ * A cloud-synced folder answers `{ Confirm: { CloudFolder: { token, provider } } }` before anything is written: go on with
+ * `createVaultConfirm(token)`. A closed folder picker answers `"Dismissed"`. Other refusals: `too_large` (`what: "vault list"`) when the list is full, with
+ * nothing written; `invalid_input` (`what: "vault not listed"`) when the vault was made but the list refused it and the folder could not be removed again; and
+ * `locked_after_change` (`what: "vault created"`, with the new vault's registry ID in `vault`) when a lock overtook a vault that was made and listed.
  */
 export function createVault(name: string, password: string, chooseFolder: boolean): Promise<Opened<CreatedView>> {
   return open<CreatedView>("create_vault", { name, password, choose_folder: chooseFolder });
@@ -306,18 +385,47 @@ export function addExistingVaultConfirm(token: string): Promise<Outcome<VaultEnt
 /**
  * A new recovery key for the unlocked vault, shown once; the old one stops working. The shell writes the "not
  * confirmed" mark before the vault's header changes, and makes no key if it can't (`what: "vault state"`). No password
- * is asked on this path (21f).
+ * is asked on this path (21f), so the shell makes the key only for a session that entered 21f (an unlock that read the
+ * mark, or a vault just created); any other is refused (`invalid_input`, what `"recovery key"`) and the step ends.
  */
-export function regenerateRecovery(vault: SessionRef): Promise<Tagged<string>> {
-  return call<string>("regenerate_recovery", { session: vault.session, generation: vault.generation });
+export function regenerateRecovery(vault: SessionRef): Promise<Tagged<NewKeyView>> {
+  return call<NewKeyView>("regenerate_recovery", { session: vault.session, generation: vault.generation });
 }
 
 /**
- * The key was typed back: clears the vault's "not confirmed" mark. Refused on a stale generation and on a read-only
+ * A new recovery key the person asks for from inside the vault (Settings): the same as `regenerateRecovery`, but the
+ * current password is checked in the same call, and a wrong one (`core` `wrong_password`) changes nothing. The key it
+ * makes is confirmed with `recoveryConfirmed`, by its `issue`.
+ */
+export function newRecoveryKey(vault: SessionRef, currentPassword: string): Promise<Tagged<NewKeyView>> {
+  return call<NewKeyView>("new_recovery_key", {
+    session: vault.session,
+    generation: vault.generation,
+    current_password: currentPassword,
+  });
+}
+
+/**
+ * Sets a new password, with the current one checked in the same call: a wrong current password (`wrong_password`) or a
+ * new one under 12 characters (`password_too_short`) changes nothing. A lock that came after the change landed answers
+ * `locked_after_change` with the vault's registry ID.
+ */
+export function changePassword(vault: SessionRef, currentPassword: string, newPassword: string): Promise<Tagged<null>> {
+  return call<null>("change_password", {
+    session: vault.session,
+    generation: vault.generation,
+    current_password: currentPassword,
+    new_password: newPassword,
+  });
+}
+
+/**
+ * The key `issue` was typed back: when it is the latest one made, clears the vault's "not confirmed" mark (`Confirmed`);
+ * when a newer key has been made since, nothing changes (`Superseded`). Refused on a stale generation and on a read-only
  * copy. Send it only after the typed-back groups matched.
  */
-export function recoveryConfirmed(vault: SessionRef): Promise<Tagged<null>> {
-  return call<null>("recovery_confirmed", { session: vault.session, generation: vault.generation });
+export function recoveryConfirmed(vault: SessionRef, issue: number): Promise<Tagged<Confirmation>> {
+  return call<Confirmation>("recovery_confirmed", { session: vault.session, generation: vault.generation, issue });
 }
 
 /**
@@ -327,6 +435,17 @@ export function recoveryConfirmed(vault: SessionRef): Promise<Tagged<null>> {
  */
 export function acceptHeader(vault: SessionRef): Promise<Tagged<null>> {
   return call<null>("accept_header", { session: vault.session, generation: vault.generation });
+}
+
+/**
+ * Renames the vault (18d): the name in its details changes, signed again; its folder keeps its old name. Refused as a backup is
+ * (`invalid_input`, what `"details changed"`, `"details unchecked"`, `"password copies disagree"` or `"recovery key copies disagree"`),
+ * for a name the engine won't keep (`core` `invalid_input`, what `"vault name"`: nothing but spaces, or over 200 characters), on a
+ * read-only copy (`read_only`) and a stale generation (`locked`). A rename that landed but whose answer a lock overtook answers
+ * `locked_after_change` with what `"vault name"` and the vault's registry ID.
+ */
+export function renameVault(vault: SessionRef, name: string): Promise<Tagged<null>> {
+  return call<null>("rename_vault", { session: vault.session, generation: vault.generation, name });
 }
 
 /**
@@ -368,10 +487,12 @@ export async function closeExplainedOk(): Promise<void> {
 /**
  * The answer to the question a close or a Quit asked while a job runs (`lockbox://close-asked`). `true` is Close anyway: the shell runs the old
  * path for the reason it asked about (close locks every vault, which cancels the jobs; Quit quits). `false` is Keep it running: nothing
- * changes. Either answer clears the question. Refused with `not_found` when none is pending (it was cleared by a lock, or answered already).
+ * changes. Either answer clears the question. `question` is the number the event carried: an answer names the question it is for. Refused with
+ * `not_found` when that question is not the pending one (it was cleared by a lock, answered already, or a newer one is pending, which the answer
+ * leaves alone).
  */
-export async function closeAnswer(go: boolean): Promise<null> {
-  return callPlain<null>("close_answer", { go });
+export async function closeAnswer(question: number, go: boolean): Promise<null> {
+  return callPlain<null>("close_answer", { question, go });
 }
 
 /**
@@ -386,7 +507,7 @@ export interface SavedView {
  * Saves the recovery key on screen as a PDF (21c, 21f). Rust opens the save dialog, refuses a vault folder and Lockbox's
  * own folder, and prints the page as it shows now: only the part marked `data-print-only` (see `print.css`), so the key
  * reaches the PDF through the printed page and never through this call. Answers `"Dismissed"` when the dialog is
- * closed, `{ Confirm: { CloudFolder: { token } } }` before anything is written to a cloud-synced folder (21e: go on with
+ * closed, `{ Confirm: { CloudFolder: { token, provider } } }` before anything is written to a cloud-synced folder (21e: go on with
  * `saveReadableConfirm(token)`, or call this again to pick another folder), or `{ Done: SavedView }`. Refused with
  * `busy` (`what: "printer"`) while a print of Lockbox's own runs, and `print_failed` (`what: "pdf"`) when no PDF came;
  * nothing is left on disk either way. A lock while it runs makes the answer stale: no file appears and no error shows.
@@ -659,7 +780,7 @@ export function openFile(vault: SessionRef, id: string, fileId: string, confirme
 
 /**
  * Saves a decrypted copy of the stored file where the person picks, in the Windows save dialog Rust opens (`"Dismissed"` when it is
- * closed). A cloud-synced folder answers `{ Confirm: { CloudFolder: { token } } }` first (`saveFileCopyConfirm` goes on with it). Allowed
+ * closed). A cloud-synced folder answers `{ Confirm: { CloudFolder: { token, provider } } }` first (`saveFileCopyConfirm` goes on with it). Allowed
  * in a vault opened from a backup. Refused as `damaged` for a file that does not decrypt.
  */
 export function saveFileCopy(vault: SessionRef, id: string, fileId: string, request: number): Promise<Tagged<Outcome<null>>> {
@@ -667,7 +788,7 @@ export function saveFileCopy(vault: SessionRef, id: string, fileId: string, requ
 }
 
 /**
- * The person's yes to saving the copy in a cloud-synced folder: `saveFileCopy` answered `{ Confirm: { CloudFolder: { token } } }` before
+ * The person's yes to saving the copy in a cloud-synced folder: `saveFileCopy` answered `{ Confirm: { CloudFolder: { token, provider } } }` before
  * decrypting or writing anything, and the shell parked the copy under the token. It goes on only while the vault is unlocked as it was
  * when asked; a token that is used, old, or dropped by a lock is `not_found`.
  */
@@ -1067,10 +1188,11 @@ export function dismissRestore(confirm: boolean): Promise<Outcome<null>> {
 /**
  * Unlocks the picked backup read-only (nothing is unpacked) with the typed text, as one box's (`password_or_key`), and answers what it is and where it
  * would go. The shell keeps the working credential beside the pick, so the page sends the text once. A wrong one is `core` `wrong_password` (or a recovery
- * key kind) and keeps the pick; a damaged backup is `core` `damaged`; a pick that is gone is `choice_expired`.
+ * key kind) and keeps the pick; a damaged backup is `core` `damaged`; a pick that is gone is `choice_expired`. The check is a launch-scoped job (`request`
+ * names it for `lockbox://job-started`, kind `restore_check`) that Cancel (`cancelOperation`) stops: it answers `cancelled` and keeps nothing new (the pick stays as it was).
  */
-export function restoreCheck(choice: string, credential: CredentialArg): Promise<RestoreChecked> {
-  return callPlain<RestoreChecked>("restore_check", { choice, credential });
+export function restoreCheck(choice: string, credential: CredentialArg, request: number): Promise<RestoreChecked> {
+  return callPlain<RestoreChecked>("restore_check", { choice, credential, request });
 }
 
 /** Opens the Windows picker (titled "Restore into this folder") for another parent folder; answers the new `RestoreChecked`, or `"Dismissed"` (the folder stays). Needs a checked pick, else `choice_expired`. */
@@ -1340,11 +1462,16 @@ export function captureState(): Promise<CaptureEvent | null> {
 }
 
 /**
- * Hands the copy to the unlocked vault `vault`: a lock of that vault lets it go. Refused `not_found` for an id that is not the
- * waiting copy's any more, and stale or foreign as every command.
+ * Hands the copy to the unlocked, writable vault `vault`: a lock of that vault lets it go, and Save is only for it. Refused `read_only`
+ * for a read-only session, `not_found` for an id that is not the waiting copy's any more, and stale or foreign as every command.
  */
 export function captureChoose(vault: SessionRef, captureId: string): Promise<Tagged<null>> {
   return call<null>("capture_choose", { session: vault.session, generation: vault.generation, capture_id: captureId });
+}
+
+/** Hands the copy to no vault (a locked one is chosen in the box): only a lock of every vault lets it go now. `not_found` for an old id. */
+export function captureUnchoose(captureId: string): Promise<null> {
+  return callPlain<null>("capture_unchoose", { capture_id: captureId });
 }
 
 /**
@@ -1358,8 +1485,8 @@ export function captureReveal(captureId: string): Promise<string> {
 /**
  * Saves the copy as a key (see `CaptureSave` and `CaptureSaved`), in one write; on success the shell clears the clipboard if asked,
  * and lets go of the copy (`gone`). A refusal writes nothing: `read_only`, `not_found` (the copy or the folder), `invalid_input`
- * (`what: "key name"`, `"capture value"` for a copy with nothing typed in its place, `"env twice"` for Replace finding the name
- * twice), `too_large` (`"title"`, `"value"`).
+ * (`what: "key name"`, `"capture value"` for a copy with nothing typed in its place, `"capture vault"` for a copy that is not handed to
+ * that vault at that generation, `"env twice"` for Replace finding the name twice), `too_large` (`"title"`, `"value"`).
  */
 export function captureSave(vault: SessionRef, save: CaptureSave): Promise<Tagged<CaptureSaved>> {
   return call<CaptureSaved>("capture_save", {
