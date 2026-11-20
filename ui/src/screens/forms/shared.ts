@@ -5,7 +5,8 @@ import type { FolderEntry } from "../SideMenu";
 /**
  * Whether `text` has a line break anywhere but its very start or end. A one-line box drops a break at either end (a pasted key
  * or password that ends with one is still that), but would join the lines of anything longer without a word, and a credential
- * must never change silently. The one check for every one-line box that takes a credential (a key's Value, a login's Password).
+ * must never change silently. The one check for every one-line box that takes a credential (a login's Password, the save box's
+ * Value; the key forms' Value keeps such a text whole instead, `ValueField`).
  */
 export function hasInnerLineBreak(text: string): boolean {
   return /[\r\n]/.test(text.replace(/^[\r\n]+|[\r\n]+$/g, ""));

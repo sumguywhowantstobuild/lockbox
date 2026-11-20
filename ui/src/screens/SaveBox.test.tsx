@@ -499,6 +499,48 @@ test("empty_box_says_so", async () => {
   expectNoValue();
 });
 
+test("the_typed_value_is_one_line_and_a_paste_or_drop_with_a_line_break_inside_is_stopped_in_words", async () => {
+  // The save box's Value box stays a one-line box (Task 10a changes the new-key and edit-key forms only): such a paste is stopped before the
+  // box can join the lines, and the words say so; the next change clears them. A break only at the start or end is left to the box.
+  await startUnlocked();
+  await press("empty");
+  const panel = await boxPanel();
+  const value = within(panel).getByLabelText<HTMLInputElement>("Value");
+  const ONE_LINE_ONLY = "That value has more than one line, so it wasn't pasted. A key's value is one line here.";
+  const paste = (text: string) => fireEvent.paste(value, { clipboardData: { getData: () => text } });
+  const drop = (text: string) => fireEvent.drop(value, { dataTransfer: { getData: () => text } });
+  let held = COPIED;
+  fireEvent.change(value, { target: { value: held } });
+  const change = () => {
+    held = held === COPIED ? OTHER : COPIED;
+    fireEvent.change(value, { target: { value: held } });
+  };
+  let tried = 0;
+  for (const shown of [false, true]) {
+    if (shown) fireEvent.click(within(panel).getByRole("button", { name: "Show" }));
+    expect(value.type).toBe(shown ? "text" : "password");
+    for (const text of ["line one\r\nline two", "line one\nline two", "\nline one\nline two\n", "a\rb"]) {
+      for (const how of [paste, drop]) {
+        expect(how(text), JSON.stringify(text)).toBe(false);
+        tried += 1;
+        expect(value.value).toBe(held);
+        expect((await within(panel).findByRole("alert")).textContent).toBe(ONE_LINE_ONLY);
+        change();
+        expect(within(panel).queryByRole("alert")).toBeNull();
+      }
+    }
+    for (const text of ["one-line-value\n", "\r\none-line-value\r\n", "one-line-value"]) {
+      expect(paste(text), JSON.stringify(text)).toBe(true);
+      expect(drop(text), JSON.stringify(text)).toBe(true);
+      expect(within(panel).queryByRole("alert")).toBeNull();
+    }
+  }
+  expect(tried).toBe(16);
+  // No box for lines came of it: the one box with that label is still the one-line input.
+  expect(within(panel).getAllByLabelText("Value")).toEqual([value]);
+  expect(value.tagName).toBe("INPUT");
+});
+
 test("too_large_says_so_and_takes_a_typed_value", async () => {
   await startUnlocked();
   await press("too_large");

@@ -43,7 +43,6 @@ const MULTI_PW = "demo-line-one\ndemo-line-two\r\n";
 const MULTI_KEY = "demo-key-line-one\ndemo-key-line-two";
 const MORE_THAN_ONE_LINE =
   "This value has more than one line, so it isn't shown here. Leave the box empty to keep it, or type a new one.";
-const ONE_LINE_ONLY = "That value has more than one line, so it wasn't pasted. A key's value is one line here.";
 const CHANGED_MEANWHILE = "This item changed while you were editing it. Nothing was saved. Cancel, then open it again to see the change.";
 
 function items(): FakeItem[] {
@@ -575,10 +574,10 @@ test("key_edit_changes_value", async () => {
   expect(labelsAndTitles()).not.toContain(BOT_TOKEN);
   await expectNoAxe(container);
 
-  // The paste rule of the new-key form holds in the same box: a line break inside is refused in the same words.
-  expect(pasteInto(value, "a\nb")).toBe(false);
-  expect(value.value).toBe(BOT_TOKEN);
-  expect((await within(form).findByRole("alert")).textContent).toBe(ONE_LINE_ONLY);
+  // A paste with no line break is left to the one-line box (one with a break, at the ends too, is kept whole:
+  // `MultiLineValue.test.tsx`).
+  expect(pasteInto(value, "one-line")).toBe(true);
+  expect(within(form).queryByRole("alert")).toBeNull();
   // A shown value is not natively copyable: a copy or a cut aimed at its box is stopped.
   fireEvent.click(within(form).getByRole("button", { name: "Show" }));
   expect(value.type).toBe("text");
@@ -647,11 +646,10 @@ test("a_key_with_a_line_break_in_its_value_keeps_it_when_only_the_name_changes",
   await waitFor(() => {
     expect(shell.revealed).toHaveLength(1);
   });
-  await act(async () => {
-    await Promise.resolve();
-  });
-  expect(inputOf(form, "Value").value).toBe("");
-  expect(within(form).getByText(MORE_THAN_ONE_LINE)).toBeTruthy();
+  // The value is held, hidden, in the box for lines (Task 10a): no one-line box, no words that it can't be shown, no line on the page.
+  const lines = await within(form).findByRole("textbox", { name: "Value" });
+  expect(lines.getAttribute("aria-readonly")).toBe("true");
+  expect(within(form).queryByText(MORE_THAN_ONE_LINE)).toBeNull();
   expect(document.body.textContent).not.toContain("demo-key-line-one");
   typeInto(form, "Name", "SPACED_KEY_RENAMED");
   saveForm(form);

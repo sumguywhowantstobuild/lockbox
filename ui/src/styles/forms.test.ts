@@ -39,6 +39,17 @@ test("a_password_rule_that_is_met_in_a_panel_shows_its_check_mark_in_the_vaults_
   expect(declarationsFor(".fhint.ok .i")).toMatch(/color: var\(--v\);/);
 });
 
+test("the_box_for_a_key_value_with_line_breaks_has_one_fixed_height_and_its_lines_cannot_be_selected", () => {
+  // Task 10a: hidden or shown, the box is the same size, so how tall it looks never tells how many lines the value has; it scrolls instead of
+  // growing. Its lines are not selectable (a native copy would skip the clipboard's marks, timer and clearing).
+  const box = declarationsFor(".finp.kbox");
+  expect(box).toMatch(/(^| )height: \d+px;/);
+  expect(box).not.toMatch(/min-height|max-height|height: auto|resize/);
+  expect(box).toMatch(/overflow-y: auto;/);
+  expect(box).toMatch(/white-space: pre-wrap;/);
+  expect(box).toMatch(/user-select: none;/);
+});
+
 test("a_list_in_a_settings_row_is_filled_with_no_edge_at_its_own_width_as_drawn", () => {
   // As 31a draws it: filled with the quiet pill's shade, no edge, as wide as its words. The review found the older outlined
   // rule for the row's wrapper still reaching the list and winning, so that rule is gone and the list has its own class.

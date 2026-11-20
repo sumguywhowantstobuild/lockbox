@@ -20,6 +20,7 @@ import {
 } from "../store";
 import { useValueGuard } from "../useValueGuard";
 import { AttachedFiles, FileRows } from "./FileActions";
+import { hasLineBreak } from "./forms/ValueField";
 import { CopyToVault } from "./OpenBackup";
 import type { FolderEntry } from "./SideMenu";
 
@@ -250,11 +251,19 @@ function EarlierPassword({
  * is stopped and Ctrl+C does what Copy key does, through the shell (`useValueGuard`). It is on the page only while it is
  * shown.
  */
-function RevealedValue({ value, name, onCopy }: { value: string; name: string; onCopy: () => void }) {
+function RevealedValue({ value, name, onCopy, keyValue = false }: { value: string; name: string; onCopy: () => void; keyValue?: boolean }) {
   const box = useRef<HTMLDivElement>(null);
   useValueGuard(box, onCopy);
   return (
-    <div ref={box} className="sec kval" role="textbox" aria-readonly="true" aria-label={name} tabIndex={0}>
+    <div
+      ref={box}
+      className="sec kval"
+      role="textbox"
+      aria-multiline={keyValue && hasLineBreak(value) ? true : undefined}
+      aria-readonly="true"
+      aria-label={name}
+      tabIndex={0}
+    >
       {value}
     </div>
   );
@@ -305,7 +314,7 @@ function SecretValue({
               <span className="sr">Hidden</span>
             </>
           ) : (
-            <RevealedValue value={value} name={boxName} onCopy={copyIt} />
+            <RevealedValue value={value} name={boxName} onCopy={copyIt} keyValue={field === "key_value"} />
           )}
           <div className="fact">
             <Button look="pill-main" onClick={copyIt}>

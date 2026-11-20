@@ -2908,6 +2908,26 @@
   font-family: "Geist Mono Variable", ui-monospace, monospace;
 }
 
+/* A key's value with line breaks (a private key file), in the new-key and edit-key forms: a read-only box of one fixed height, the same
+   whether the value is hidden (one row of dots) or shown (its lines, scrolling), so its shape never tells how many lines there are.
+   The lines are not selectable, since a native copy would skip the marks that keep them out of Windows' clipboard history. */
+.finp.kbox {
+  height: 132px;
+  padding: 10px 12px;
+  overflow-y: auto;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.finp.kbox .kdots {
+  color: var(--ink2);
+  letter-spacing: 0.09em;
+}
+
 /* A note's text: a taller box that grows downward only, its lines kept as typed. */
 .farea {
   height: auto;

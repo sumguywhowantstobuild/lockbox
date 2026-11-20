@@ -948,6 +948,22 @@ function readEnvText(text: string): { rows: EnvPasted[]; bad: number[] } {
   return { rows, bad };
 }
 
+/**
+ * A stand-in for the engine's `.env` writer (`env_file::write`, whose own tests prove it): `NAME=value` per line, a value of only
+ * letters, digits and `_-./:@+=,` bare, one with no quote or line break in single quotes, any other in double quotes with
+ * `\\`, `\"`, `\n`, `\r`, `\t` and `$` escaped. Line breaks are never turned into others.
+ */
+function writeEnvText(keys: readonly { title: string; value?: string }[]): string {
+  return keys
+    .map(({ title, value = "" }) => {
+      if (/^[A-Za-z0-9_\-./:@+=,]*$/.test(value)) return `${title}=${value}\n`;
+      if (!/['\r\n]/.test(value)) return `${title}='${value}'\n`;
+      const escaped = value.replace(/[\\"\n\r\t$]/g, (c) => ({ "\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t", $: "\\$" })[c] ?? c);
+      return `${title}="${escaped}"\n`;
+    })
+    .join("");
+}
+
 /** The live key items filed in `place` (a folder's id, or null for none), as the engine counts them. */
 function liveKeys(items: readonly FakeItem[], place: string | null): FakeItem[] {
   return items.filter((item) => item.kind === "key" && !(item.trashed ?? false) && (item.collection ?? null) === place);
@@ -2486,6 +2502,8 @@ export function installFakeShell(
         if (twice !== undefined) return tagged(sent.session, sent.generation, { Duplicate: { name: twice.title } });
         if (cmd === "env_copy") {
           envCopied.push(folder.id);
+          // The text is made and put on the clipboard in Rust: here it waits in the fake's clipboard, for a test to read.
+          clipboardText = writeEnvText(keysHere);
           return tagged(sent.session, sent.generation, "Done");
         }
         if (dismissPdf) {

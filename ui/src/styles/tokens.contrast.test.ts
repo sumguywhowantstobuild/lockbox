@@ -399,6 +399,12 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       // (the hint is the form hint above), and a note of the page's own (what the copy was, or that it changed) is the quiet words.
       check("copied value, hidden dots on its box", c("--ink2"), card, 4.5);
       check("copied value, shown, on its box", c("--ink"), card, 4.5);
+      // A key's value with line breaks (Task 10a), in the key forms: a read-only box with a field's edge on the panel, its dots while hidden, its
+      // lines in the ordinary text colour once shown, and the ring that marks the focused box (the box is reached by Tab, and a paste goes to it).
+      check("multi-line key value box, edge on the panel", c("--edge"), paper, 3);
+      check("multi-line key value box, hidden dots on its box", c("--ink2"), card, 4.5);
+      check("multi-line key value box, shown lines on its box", c("--ink"), card, 4.5);
+      check("multi-line key value box, focus ring on the panel", c("--ink"), paper, 3);
       check("clear the clipboard tick box on the panel", c("--v"), paper, 3);
       check("clear the clipboard words on the panel", c("--ink"), paper, 4.5);
       check("save box note on the panel", c("--ink2"), paper, 4.5);
