@@ -357,9 +357,15 @@ export interface FakeShell {
   /**
    * A close or a Quit while a job runs, as the shell asks it (Plan 4B Task 12): `lockbox://close-asked` goes out and the question is pending,
    * with nothing locked, hidden or cancelled, until `close_answer`. `running` is the kinds as the shell names them (distinct, in start order);
-   * `restoreWaiting` is a finished restore waiting for its yes at 24d (Task 13d), alone or beside jobs.
+   * `restoreWaiting` is a finished restore waiting for its yes at 24d (Task 13d), alone or beside jobs. Each call is a new question: the shell
+   * gives it the next number (1, 2, ...), which is in the event and is returned; `close_answer` must name it, and an answer naming another
+   * question is refused and leaves the pending one.
    */
-  askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean; restoreWaiting?: boolean }): void;
+  askClose(reason: "close" | "quit", options: { running: string[]; pastSwap?: boolean; restoreWaiting?: boolean }): number;
+  /** The shell says the pending question again (a second close or Quit, a reloaded page): the same event, with the same `question` number. Nothing if none is pending. */
+  repeatClose(): void;
+  /** How many `lockbox://close-asked` events the page's listener has been handed so far (every one, however it was sent). */
+  closeAskedHeard(): number;
   /** The shell's lock epoch changes (Lock all, Windows locking or sleeping, an idle lock): `lockbox://lock-epoch` goes out and a pending question is dropped. */
   changeLockEpoch(reason?: string): void;
   /** Whether a question is waiting for `close_answer`. */
@@ -1173,8 +1179,13 @@ export function installFakeShell(
   let heldSettings: (() => void)[] | undefined;
   // The handlers each event has, as `listen` was given them.
   const handlers = new Map<string, ((event: { payload: unknown }) => void)[]>();
+  // How many `lockbox://close-asked` events a listener was handed, by whatever sent them (a test checks a repeat really arrived).
+  let closeAskedHeard = 0;
   const emit = (event: string, payload: unknown): void => {
-    for (const handler of handlers.get(event) ?? []) handler({ payload });
+    for (const handler of handlers.get(event) ?? []) {
+      if (event === "lockbox://close-asked") closeAskedHeard += 1;
+      handler({ payload });
+    }
   };
   let launchNotices: object[] = [];
   let outputResets = 0;
@@ -1184,7 +1195,9 @@ export function installFakeShell(
   let hidden = false;
   let closeExplainedCalls = 0;
   // The question a close or a Quit asked and the shell is holding, what was answered, how often the app quit, and the lock epoch's number.
-  let pendingClose: "close" | "quit" | undefined;
+  // Each question gets its number from the shell (Plan 4C Task 12); a repeat of the pending one carries the same number.
+  let pendingClose: { reason: "close" | "quit"; question: number; event: Record<string, unknown> } | undefined;
+  let closeQuestions = 0;
   const closeAnswers: boolean[] = [];
   let quits = 0;
   let lockEpoch = 0;
@@ -3431,11 +3444,11 @@ export function installFakeShell(
         explained();
         return null;
       case "close_answer": {
-        const { go } = exactly(args, ["go"]);
-        if (typeof go !== "boolean") return refuse(MALFORMED);
-        // No question pending, or a second answer: refused, with nothing done.
-        if (pendingClose === undefined) return refuse({ code: "not_found" });
-        const reason = pendingClose;
+        const { question, go } = exactly(args, ["question", "go"]);
+        if (typeof go !== "boolean" || typeof question !== "number" || !Number.isSafeInteger(question)) return refuse(MALFORMED);
+        // No question pending, a second answer, or an answer to another question than the pending one: refused, with nothing done and the pending question kept.
+        if (pendingClose === undefined || pendingClose.question !== question) return refuse({ code: "not_found" });
+        const { reason } = pendingClose;
         pendingClose = undefined;
         closeAnswers.push(go);
         if (go && reason === "close") closeAsBefore();
@@ -4417,9 +4430,16 @@ export function installFakeShell(
     outputJournalResets: () => outputResets,
     closeWindow: closeAsBefore,
     askClose: (reason, { running: kinds, pastSwap = false, restoreWaiting = false }) => {
-      pendingClose = reason;
-      emit("lockbox://close-asked", { reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting });
+      closeQuestions += 1;
+      const event = { reason, running: kinds, past_swap: pastSwap, restore_waiting: restoreWaiting, question: closeQuestions };
+      pendingClose = { reason, question: closeQuestions, event };
+      emit("lockbox://close-asked", event);
+      return closeQuestions;
     },
+    repeatClose: () => {
+      if (pendingClose !== undefined) emit("lockbox://close-asked", pendingClose.event);
+    },
+    closeAskedHeard: () => closeAskedHeard,
     changeLockEpoch: bumpEpoch,
     pendingClose: () => pendingClose !== undefined,
     closeAnswers: () => [...closeAnswers],

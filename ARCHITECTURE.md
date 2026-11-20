@@ -401,26 +401,34 @@ close button and the tray's Quit first ask `AutoLock::running_kinds`, which list
 timer counts (each once, in start order), and `Restores::waiting`, which is true only in `RestoreState::Prepared` (a
 restore extracted, checked and waiting at 24d for the yes). With none running and none waiting, both do what they always
 did. With either, nothing is locked, hidden or cancelled: the page is sent `lockbox://close-asked` (`reason` close or
-quit, the kinds, `past_swap` and `restore_waiting`; the page shows a job's question before the waiting restore's) and the shell keeps
-one pending question, with the lock epoch it was asked in and what was sent. A Quit comes from the tray, so the window is shown first. A
-second close or Quit while it is pending sends the same event again (the first one's reason and payload; a Quit shows the window again), so a
-question the page never showed cannot leave Close and Quit dead; the page keeps one question, so a repeat changes nothing there
-(`a_second_close_sends_the_same_question_again`). A lock of all vaults (a new epoch) clears it. **When the last
+quit, the kinds, `past_swap`, `restore_waiting` and `question`; the page shows a job's question before the waiting restore's) and the shell keeps
+one pending question, with the lock epoch it was asked in and what was sent. `question` is the question's own ID, minted by the shell (a counter
+kept under the same lock as the pending question, counting up from 1 and never reused; a plain JSON number, far below 2^53 like the operation IDs
+and the lock epoch, and the page ignores one that is not a positive safe integer). A Quit comes from the tray, so the window is shown first. A
+second close or Quit while it is pending sends the same event again (the first one's reason, payload and ID; a Quit shows the window again), so a
+question the page never showed cannot leave Close and Quit dead; the page knows a repeat by its ID and changes nothing, and ignores the event of a
+question whose answer has settled or that is older than the newest it has shown, so a late echo cannot bring an answered question back; a question
+a lock cleared on the page before anyone answered it shows again if the shell repeats it, since the shell may still hold it
+(`a_second_close_sends_the_same_question_again`, `a_repeat_carries_the_same_id`, `a_repeated_event_after_its_answer_cannot_reopen_it`,
+`a_question_cleared_by_a_lock_before_an_answer_shows_again_when_the_shell_repeats_it`).
+A lock of all vaults (a new epoch) clears it. **When the last
 running operation ends while the question is pending in the current epoch, and no restore waits at 24d or is past its swap,
 the shell answers it as Close anyway itself** (`Shell::carry_on_close`): there is nothing left to cancel, so the close or
 Quit the person asked for goes ahead with no second press, and the page's own answer, if it comes after, is `NotFound`
-(`last_job_ending_carries_on_with_the_close`, `last_job_ending_carries_on_with_the_quit`). The auto-lock tells the shell through a
+(`the_last_job_ending_still_carries_on_with_the_close`, `last_job_ending_carries_on_with_the_quit`). The auto-lock tells the shell through a
 hook (`AutoLock::on_last_end`) that `Operations::end` calls with no lock of its own held; the hook only starts a thread
 (`lockbox-carry-on`, holding a `Weak` to the shell, which is why `Shell::new` returns an `Arc`), because the end can come from
 `LongOp`'s drop inside a lock's cancel or a lock hook and the go path waits for the lock hooks
 (`the_carry_on_does_not_run_on_the_ending_jobs_thread`). A thread that cannot start leaves the question pending. With anything
 still running or waiting the question stays as asked (`a_job_ending_with_another_running_keeps_the_question`,
 `a_restore_waiting_at_24d_keeps_the_question_when_its_copy_ends`). The page
-answers with `close_answer(go)`: `false` changes nothing, `true` runs the old path for the question's reason (a close:
+answers with `close_answer(question, go)`, naming the question it was given: `Shell::claim_close_answer` compares the ID and the
+lock epoch with the pending question's under the lock before it takes the question out, so an answer to an older question (answered or
+dropped) is `NotFound` and leaves a newer one pending (`a_stale_answer_is_refused_and_leaves_the_newer_question_answerable`). `false` changes nothing, `true` runs the old path for the question's reason (a close:
 `close_window`, whose lock cancels the jobs, ends a waiting restore and which still shows 5b on a first close; a Quit: the shutdown within 2 s,
 which also waits, inside that bound, for the waiting restore's clean-up so its staging folder and journal are gone before the exit
-(`quitting_removes_the_staging_folder_and_journal_before_it_returns`), then the exit through `MainWindow::exit_app`). Either answer uses the question up, and an answer with none pending is
-`NotFound`. `past_swap` is the engine's flag from `PreparedRestore::swap_flag`, which goes on when the restore's journal
+(`quitting_removes_the_staging_folder_and_journal_before_it_returns`), then the exit through `MainWindow::exit_app`). Either answer uses the question up, and an answer with none pending (or for
+another question) is `NotFound`. `past_swap` is the engine's flag from `PreparedRestore::swap_flag`, which goes on when the restore's journal
 says `swapping` (the point from which a cancel no longer counts) and is kept in `RestoreState::Committing`: a restore
 there finishes, or is undone by recovery at the next launch, whatever is answered. Windows ending the session never
 asks (its path is the shutdown, as before).

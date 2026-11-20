@@ -59,27 +59,29 @@ pub(super) async fn close_explained_ok(
     .await
 }
 
-/// `close_answer`: the one field, and nothing else (no session, no generation, no reason: the shell knows which question
-/// it asked).
+/// `close_answer`: the question's ID (the one `lockbox://close-asked` carried) and the answer, and nothing else (no
+/// session, no generation, no reason: the shell knows which question it asked).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CloseAnswer {
+    question: u64,
     go: bool,
 }
 
 /// The answer to the close or Quit question ([`Shell::close_answer`]): `go` runs the old path (cancel the jobs, then lock
-/// and hide, or Quit), `go: false` changes nothing; either answer uses the question up. Refused as `not_found` when none
-/// is pending (never asked, already answered, or cleared by a lock of all vaults). It takes no session and no generation
-/// (it reads and writes no vault). On the blocking pool: the close path waits for the lock hooks.
+/// and hide, or Quit), `go: false` changes nothing; either answer uses the question up. Refused as `not_found` when
+/// `question` is not the pending one (never asked, already answered, cleared by a lock of all vaults, or an answer to
+/// an older question than the one pending, which it leaves pending). It takes no session and no generation (it reads and
+/// writes no vault). On the blocking pool: the close path waits for the lock hooks.
 #[tauri::command]
 pub(super) async fn close_answer(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<()> {
-    let CloseAnswer { go } = args(&request)?;
+    let CloseAnswer { question, go } = args(&request)?;
     // Claimed here, when the answer arrives, not inside the blocking task: work queued behind other work must still
     // belong to the question it answered, never to one asked after it ([`Shell::claim_close_answer`]).
-    let question = shell.claim_close_answer()?;
+    let question = shell.claim_close_answer(question)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.answer_claimed(question, go)).await
 }
@@ -219,11 +221,12 @@ mod tests {
         assert_eq!(ts.window.hides(), 1);
     }
 
-    /// The question's answer through the real command (Task 12): `null` for both answers, and the old close runs only on
-    /// `go: true`. It takes no session and no generation (it reads and writes no vault), so the stale-generation,
-    /// foreign-ID and read-only refusals of the other commands do not apply; it refuses what has no question pending
-    /// (never asked, already answered, or cleared by a lock of all vaults) as `not_found`, and any body that is not
-    /// exactly `{ go: boolean }` as a malformed request, before anything runs.
+    /// The question's answer through the real command (Task 12; Plan 4C Task 12 gave the question its own ID): `null` for
+    /// both answers, and the old close runs only on `go: true`. It takes no session and no generation (it reads and
+    /// writes no vault), so the stale-generation, foreign-ID and read-only refusals of the other commands do not apply;
+    /// it refuses what has no question pending (never asked, already answered, or cleared by a lock of all vaults) and
+    /// an answer to any question but the pending one as `not_found`, the pending one left as it was, and any body that is
+    /// not exactly `{ question: number, go: boolean }` as a malformed request, before anything runs.
     #[test]
     fn close_answer_answers_null_and_refuses_when_no_question_is_pending() {
         let ts = TestShell::new();
@@ -240,26 +243,34 @@ mod tests {
 
         // No question pending: refused either way, and nothing runs.
         assert_eq!(
-            invoke(&main, "close_answer", json!({ "go": true })),
+            invoke(&main, "close_answer", json!({ "question": 1, "go": true })),
             not_found
         );
         assert_eq!(
-            invoke(&main, "close_answer", json!({ "go": false })),
+            invoke(&main, "close_answer", json!({ "question": 1, "go": false })),
             not_found
         );
         assert_eq!(ts.window.hides(), 0);
         assert!(!token.is_cancelled());
 
-        // A malformed body does nothing, and leaves the question pending.
+        // A malformed body does nothing, and leaves the question pending. The question's number is the one the event
+        // carried (the shell's first is 1).
         ts.shell.close_or_ask();
+        assert_eq!(ts.events.close_asked()[0]["question"], json!(1));
         for bad in [
             json!({}),
-            json!({ "go": "yes" }),
-            json!({ "go": 1 }),
-            json!({ "go": null }),
-            json!({ "go": true, "session": 1 }),
-            json!({ "go": true, "generation": 1 }),
-            json!({ "go": true, "reason": "quit" }),
+            json!({ "go": true }),
+            json!({ "question": 1 }),
+            json!({ "question": 1, "go": "yes" }),
+            json!({ "question": 1, "go": 1 }),
+            json!({ "question": 1, "go": null }),
+            json!({ "question": "1", "go": true }),
+            json!({ "question": -1, "go": true }),
+            json!({ "question": 1.5, "go": true }),
+            json!({ "question": null, "go": true }),
+            json!({ "question": 1, "go": true, "session": 1 }),
+            json!({ "question": 1, "go": true, "generation": 1 }),
+            json!({ "question": 1, "go": true, "reason": "quit" }),
         ] {
             assert_eq!(
                 invoke(&main, "close_answer", bad.clone()),
@@ -270,22 +281,39 @@ mod tests {
         assert!(!token.is_cancelled());
         assert_eq!(ts.window.hides(), 0);
 
+        // Another question's number answers nothing, and the pending question stays.
+        assert_eq!(
+            invoke(&main, "close_answer", json!({ "question": 2, "go": true })),
+            not_found
+        );
+        assert!(!token.is_cancelled());
+        assert_eq!(ts.window.hides(), 0);
+
         // Keep it running: `null`, nothing changed, the question used up.
         assert_eq!(
-            invoke(&main, "close_answer", json!({ "go": false })),
+            invoke(&main, "close_answer", json!({ "question": 1, "go": false })),
             Ok(Value::Null)
         );
         assert!(!token.is_cancelled());
         assert_eq!(ts.window.hides(), 0);
         assert_eq!(
-            invoke(&main, "close_answer", json!({ "go": false })),
+            invoke(&main, "close_answer", json!({ "question": 1, "go": false })),
             not_found
         );
 
-        // Close anyway: `null`, the job cancelled, the vault locked, the window hidden; a second answer is refused.
+        // The next close is the question after it, with the next number; the first one's number cannot answer it.
         ts.shell.close_or_ask();
+        assert_eq!(ts.events.close_asked()[1]["question"], json!(2));
         assert_eq!(
-            invoke(&main, "close_answer", json!({ "go": true })),
+            invoke(&main, "close_answer", json!({ "question": 1, "go": true })),
+            not_found
+        );
+        assert!(!token.is_cancelled());
+        assert_eq!(ts.window.hides(), 0);
+
+        // Close anyway: `null`, the job cancelled, the vault locked, the window hidden; a second answer is refused.
+        assert_eq!(
+            invoke(&main, "close_answer", json!({ "question": 2, "go": true })),
             Ok(Value::Null)
         );
         assert!(token.is_cancelled());
@@ -295,7 +323,7 @@ mod tests {
             crate::session::SessionState::Locked
         );
         assert_eq!(
-            invoke(&main, "close_answer", json!({ "go": true })),
+            invoke(&main, "close_answer", json!({ "question": 2, "go": true })),
             not_found
         );
         assert_eq!(ts.events.close_asked().len(), 2);

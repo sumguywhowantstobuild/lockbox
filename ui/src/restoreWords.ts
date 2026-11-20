@@ -10,8 +10,8 @@ export const SAY_RESTORE = "A restore keeps your current vault beside the restor
 /** 24c's line under the bar. */
 export const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this.";
 
-/** 24d's second line. */
-export const WAITS = "This waits for your answer, however long you take. Only Windows locking or sleeping cancels it.";
+/** 24d's second line. It names what ends a waiting restore (spec 7.4): Lock all, Close anyway (closing Lockbox), and Windows locking or sleeping. An idle lock does not. */
+export const WAITS = "This waits for your answer, however long you take. Lock all, closing Lockbox, or Windows locking or sleeping cancels it.";
 
 /** The words of the folder step's refusals, for the drives a vault can't live on: the engine's four whats are one answer to the person. */
 const DRIVE_WHATS: ReadonlySet<string> = new Set(["removable drive", "network drive", "drive type not supported", "file system not supported"]);

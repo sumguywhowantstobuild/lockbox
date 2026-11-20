@@ -488,10 +488,12 @@ export async function closeExplainedOk(): Promise<void> {
 /**
  * The answer to the question a close or a Quit asked while a job runs (`lockbox://close-asked`). `true` is Close anyway: the shell runs the old
  * path for the reason it asked about (close locks every vault, which cancels the jobs; Quit quits). `false` is Keep it running: nothing
- * changes. Either answer clears the question. Refused with `not_found` when none is pending (it was cleared by a lock, or answered already).
+ * changes. Either answer clears the question. `question` is the number the event carried: an answer names the question it is for. Refused with
+ * `not_found` when that question is not the pending one (it was cleared by a lock, answered already, or a newer one is pending, which the answer
+ * leaves alone).
  */
-export async function closeAnswer(go: boolean): Promise<null> {
-  return callPlain<null>("close_answer", { go });
+export async function closeAnswer(question: number, go: boolean): Promise<null> {
+  return callPlain<null>("close_answer", { question, go });
 }
 
 /**

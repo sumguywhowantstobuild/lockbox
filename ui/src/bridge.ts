@@ -285,14 +285,18 @@ export type CloseReason = "close" | "quit";
 /**
  * `lockbox://close-asked`: a close or a Quit arrived while a job runs or a restore waits, and nothing is locked, hidden or cancelled until the question is
  * answered (`close_answer`). `running` is the kinds of jobs, each once, in the order they began; `past_swap` is a restore that can no longer be
- * cancelled; `restore_waiting` is a finished restore waiting for its yes at 24d (nothing may run: closing ends it). Fixed names and flags only: no
- * vault, path or item.
+ * cancelled; `restore_waiting` is a finished restore waiting for its yes at 24d (nothing may run: closing ends it). `question` is the question's own
+ * number, minted by the shell (1, 2, 3, ..., never reused; a repeat of the pending question carries the same one) and sent back with the answer, so
+ * an answer reaches only the question it was given for. A counter that starts at 1 and counts questions, so it stays far below 2^53, as the shell's
+ * other counters do (`OperationId`, a lock epoch); the page still ignores one that is not a positive safe integer. Fixed names, flags and the number
+ * only: no vault, path or item.
  */
 export interface CloseAskedEvent {
   reason: CloseReason;
   running: JobKind[];
   past_swap: boolean;
   restore_waiting: boolean;
+  question: number;
 }
 
 /** Listens for `lockbox://close-asked`: handed over as it came (it holds no vault data, so it has no generation). */

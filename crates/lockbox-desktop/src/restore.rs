@@ -4457,7 +4457,7 @@ mod tests {
                 shell.close_or_ask();
                 let asked = events.close_asked();
                 let hides = window.hides();
-                let answered = shell.close_answer(false);
+                let answered = events.answer_last_close(&shell, false);
                 *inside.borrow_mut() = Some((state, asked, hides, answered));
             }),
         );
@@ -4474,7 +4474,8 @@ mod tests {
                 "reason": "close",
                 "running": ["restore_check"],
                 "past_swap": false,
-                "restore_waiting": false
+                "restore_waiting": false,
+                "question": 1
             })]
         );
         assert_eq!(hides, 0, "nothing was hidden while the question stood");
@@ -4773,28 +4774,32 @@ mod tests {
         let view = prepared(&ts, &backup, &parent);
         assert!(!ts.shell.restore.past_swap());
         assert!(ts.shell.ask_before_closing(CloseReason::Close));
-        assert_eq!(ts.shell.close_answer(false), Ok(()));
+        assert_eq!(ts.answer_close(false), Ok(()));
 
         // Committing, before the journal says `swapping`, then after it.
-        let (shell, once) = (Arc::clone(&ts.shell), Cell::new(true));
+        let (shell, events, once) = (
+            Arc::clone(&ts.shell),
+            Arc::clone(&ts.events),
+            Cell::new(true),
+        );
         failpoint::observe(
             "restore.before_swapping",
             Box::new(move || {
                 if once.replace(false) {
                     assert!(!shell.restore.past_swap());
                     assert!(shell.ask_before_closing(CloseReason::Close));
-                    assert_eq!(shell.close_answer(false), Ok(()));
+                    assert_eq!(events.answer_last_close(&shell, false), Ok(()));
                 }
             }),
         );
-        let shell = Arc::clone(&ts.shell);
+        let (shell, events) = (Arc::clone(&ts.shell), Arc::clone(&ts.events));
         failpoint::observe(
             "restore.after_journal",
             Box::new(move || {
                 assert!(shell.restore.past_swap());
                 assert!(shell.ask_before_closing(CloseReason::Quit));
                 // Answered: a question left pending would be carried on when the commit ends (Task 14).
-                assert_eq!(shell.close_answer(false), Ok(()));
+                assert_eq!(events.answer_last_close(&shell, false), Ok(()));
             }),
         );
         let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
@@ -4803,9 +4808,9 @@ mod tests {
         assert_eq!(
             ts.events.close_asked(),
             [
-                waiting_question("close"),
-                json!({ "reason": "close", "running": ["restore"], "past_swap": false, "restore_waiting": false }),
-                json!({ "reason": "quit", "running": ["restore"], "past_swap": true, "restore_waiting": false }),
+                waiting_question(1, "close"),
+                json!({ "reason": "close", "running": ["restore"], "past_swap": false, "restore_waiting": false, "question": 2 }),
+                json!({ "reason": "quit", "running": ["restore"], "past_swap": true, "restore_waiting": false, "question": 3 }),
             ]
         );
         // The swap went through whatever was asked, and nothing was lost.
@@ -4848,7 +4853,7 @@ mod tests {
         assert!(dir.is_dir() && !ts.shell.paths.journal.exists());
         assert!(staging_in(&parent).is_empty());
         assert_eq!(ts.window.exits(), 1, "the Quit did not go ahead");
-        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(true), Err(ShellError::NotFound));
         assert_eq!(ts.window.exits(), 1);
     }
 
@@ -4910,16 +4915,20 @@ mod tests {
             "the app exited before the restored vault was on the list"
         );
         assert_eq!(listed.len(), 2);
-        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(true), Err(ShellError::NotFound));
     }
 
     // -----------------------------------------------------------------------------------------------------------
     // Task 13d: closing while a restore waits for its answer (24d).
     // -----------------------------------------------------------------------------------------------------------
 
-    /// What the page is sent when a close or Quit finds a finished restore waiting and no job running.
-    fn waiting_question(reason: &str) -> Value {
-        json!({ "reason": reason, "running": [], "past_swap": false, "restore_waiting": true })
+    /// What the page is sent when a close or Quit finds a finished restore waiting and no job running, as question
+    /// number `question` (the shell counts its questions from 1).
+    fn waiting_question(question: u64, reason: &str) -> Value {
+        json!({
+            "reason": reason, "running": [], "past_swap": false, "restore_waiting": true,
+            "question": question
+        })
     }
 
     /// An open vault, a backup of it, and a restore of that backup waiting at 24d, with the window's first-close
@@ -4966,7 +4975,7 @@ mod tests {
 
         ts.shell.close_or_ask();
 
-        assert_eq!(ts.events.close_asked(), [waiting_question("close")]);
+        assert_eq!(ts.events.close_asked(), [waiting_question(1, "close")]);
         assert_eq!(ts.window.hides(), 0);
         assert_eq!(ts.window.forwards(), 0, "a close has the window up already");
         assert!(ts.events.locked().is_empty());
@@ -4986,7 +4995,8 @@ mod tests {
         ts.shell.close_or_ask();
         assert_eq!(
             ts.events.close_asked(),
-            [waiting_question("close"), waiting_question("close")]
+            [waiting_question(1, "close"), waiting_question(1, "close")],
+            "the same question, with the same ID"
         );
         assert_eq!(ts.window.hides(), 0);
         assert!(ts.shell.restore.waiting());
@@ -5000,7 +5010,7 @@ mod tests {
 
         assert!(ts.shell.ask_before_closing(CloseReason::Quit));
 
-        assert_eq!(ts.events.close_asked(), [waiting_question("quit")]);
+        assert_eq!(ts.events.close_asked(), [waiting_question(1, "quit")]);
         assert_eq!(ts.window.forwards(), 1, "a Quit shows the window first");
         assert_eq!(ts.window.exits(), 0);
         assert!(ts.shell.restore.waiting());
@@ -5034,7 +5044,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ));
         });
-        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.answer_close(true), Ok(()));
         ended(&ts);
 
         assert_eq!(
@@ -5051,7 +5061,7 @@ mod tests {
             ts.shell.restore_commit(view.restore, REQUEST).err(),
             CANCELLED
         );
-        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(true), Err(ShellError::NotFound));
 
         // The same for a Quit.
         let Waiting {
@@ -5062,7 +5072,7 @@ mod tests {
             ..
         } = a_restore_waiting();
         assert!(ts.shell.ask_before_closing(CloseReason::Quit));
-        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.answer_close(true), Ok(()));
         ended(&ts);
         assert_eq!(ts.window.exits(), 1);
         assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
@@ -5082,20 +5092,21 @@ mod tests {
         } = a_restore_waiting();
         ts.shell.close_or_ask();
 
-        assert_eq!(ts.shell.close_answer(false), Ok(()));
+        assert_eq!(ts.answer_close(false), Ok(()));
 
         assert!(ts.shell.restore.waiting());
         assert_eq!(ts.window.hides(), 0);
         assert!(ts.events.locked().is_empty());
         assert_eq!(staging_in(&parent).len(), 1);
         assert!(ts.shell.paths.journal.exists());
-        assert_eq!(ts.shell.close_answer(false), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(false), Err(ShellError::NotFound));
         ts.shell.close_or_ask();
         assert_eq!(
             ts.events.close_asked(),
-            [waiting_question("close"), waiting_question("close")]
+            [waiting_question(1, "close"), waiting_question(2, "close")],
+            "the answered question is gone, so the next close is a new one"
         );
-        assert_eq!(ts.shell.close_answer(false), Ok(()));
+        assert_eq!(ts.answer_close(false), Ok(()));
 
         let restored = ts.shell.restore_commit(view.restore, REQUEST).unwrap();
         assert!(restored.before_restore);
@@ -5181,7 +5192,7 @@ mod tests {
         assert_eq!(ts.window.hides(), 1);
         assert_eq!(ts.shell.sessions.list()[0].state, SessionState::Locked);
         assert!(ts.events.locked().iter().any(|(id, _, _)| *id == s));
-        assert_eq!(ts.shell.close_answer(true), Err(ShellError::NotFound));
+        assert_eq!(ts.answer_close(true), Err(ShellError::NotFound));
     }
 
     /// A waiting restore and a running job make one question that names both; its yes cancels the job and ends the
@@ -5200,11 +5211,12 @@ mod tests {
         assert_eq!(
             ts.events.close_asked(),
             [json!({
-                "reason": "close", "running": ["backup"], "past_swap": false, "restore_waiting": true
+                "reason": "close", "running": ["backup"], "past_swap": false, "restore_waiting": true,
+                "question": 1
             })]
         );
 
-        assert_eq!(ts.shell.close_answer(true), Ok(()));
+        assert_eq!(ts.answer_close(true), Ok(()));
         ended(&ts);
         assert!(token.is_cancelled());
         assert!(staging_in(&parent).is_empty() && !ts.shell.paths.journal.exists());
@@ -5232,11 +5244,7 @@ mod tests {
         assert!(ts.shell.restore.waiting(), "the waiting restore ended");
         assert_eq!(staging_in(&parent).len(), 1);
         assert!(ts.shell.paths.journal.exists());
-        assert_eq!(
-            ts.shell.close_answer(false),
-            Ok(()),
-            "the question was gone"
-        );
+        assert_eq!(ts.answer_close(false), Ok(()), "the question was gone");
     }
 
     /// The destination is locked with the restore's reason before the first rename.

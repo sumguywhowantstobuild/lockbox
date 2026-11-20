@@ -121,6 +121,15 @@ impl Events {
         lock(&self.close_asked).clone()
     }
 
+    /// Answers the question of the last `lockbox://close-asked` sent, through `shell` ([`Shell::close_answer`] with that
+    /// event's `question` ID; 0, which no question has, when none was sent).
+    pub fn answer_last_close(&self, shell: &Shell, go: bool) -> ShellResult<()> {
+        let question = lock(&self.close_asked)
+            .last()
+            .map_or(0, |event| event["question"].as_u64().unwrap_or(0));
+        shell.close_answer(question, go)
+    }
+
     /// Runs `hook` once, inside the next `busy` event: it may block or panic there.
     pub fn during_next_busy(&self, hook: Box<dyn FnOnce() + Send>) {
         *lock(&self.on_busy) = Some(hook);
@@ -1733,6 +1742,13 @@ impl TestShell {
             );
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// The page's answer to the close question the shell asked last ([`Shell::close_answer`] with that event's `question`
+    /// ID; 0, which no question has, when none was asked). For a test that answers "the question on screen"; a test about
+    /// which question an answer reaches names the ID itself.
+    pub fn answer_close(&self, go: bool) -> ShellResult<()> {
+        self.events.answer_last_close(&self.shell, go)
     }
 
     /// The folder for the test's own vaults.

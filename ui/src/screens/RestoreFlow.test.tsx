@@ -34,7 +34,7 @@ const WRONG = "Wrong password. It needs the one from the day this backup was mad
 const EXPIRED = "That choice has expired. Pick the backup again.";
 const CANCELLED = "The restore was cancelled. Your vault is as it was.";
 const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this.";
-const WAITS = "This waits for your answer, however long you take. Only Windows locking or sleeping cancels it.";
+const WAITS = "This waits for your answer, however long you take. Lock all, closing Lockbox, or Windows locking or sleeping cancels it.";
 const NO_SPACE = "Not enough space. This needs 1.2 GB, and that drive has 400 MB free.";
 const WRONG_DRIVE = "A vault can't live on a removable, FAT32 or network drive. Choose a folder on this PC.";
 const TOO_MANY = "There are too many older copies of this vault. Delete some, then restore again.";
@@ -460,6 +460,17 @@ test("a_refusal_that_comes_after_the_job_began_and_one_that_comes_before_are_bot
   press("Restore");
   await heading("This restore can't go ahead");
   expect(onScreen(WRONG_DRIVE)).toBeTruthy();
+});
+
+// Plan 4C Task 12: Close anyway at the close question ends a waiting restore too (spec 7.4), so 24d no longer says "only Windows". An idle lock does
+// not end it, and the words do not say it does. These are Ariel's words, pinned beside the copy the other tests use.
+test("twenty_four_d_says_what_cancels_it", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  await toTheReplaceQuestion();
+  expect(screen.getByText("This waits for your answer, however long you take. Lock all, closing Lockbox, or Windows locking or sleeping cancels it.")).toBeTruthy();
+  expect(document.body.textContent).not.toContain("Only Windows");
+  expect(document.body.textContent).not.toMatch(/idle/i);
 });
 
 test("replace_question_says_the_current_one_is_kept", async () => {

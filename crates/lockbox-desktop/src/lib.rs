@@ -422,7 +422,8 @@ mod tests {
         assert_eq!(
             ts.events.close_asked(),
             [serde_json::json!({
-                "reason": "close", "running": ["backup"], "past_swap": false, "restore_waiting": false
+                "reason": "close", "running": ["backup"], "past_swap": false, "restore_waiting": false,
+                "question": 1
             })]
         );
         wait_until("the close's thread never ended", || {
@@ -434,7 +435,7 @@ mod tests {
         assert!(ts.events.locked().is_empty());
 
         // Close anyway: the old path, which cancels the job, locks and hides.
-        ts.shell.close_answer(true).unwrap();
+        ts.answer_close(true).unwrap();
         assert!(token.is_cancelled());
         assert_eq!(state_of(&ts, family), SessionState::Locked);
         assert_eq!(ts.window.hides(), 1);

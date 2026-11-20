@@ -563,7 +563,7 @@ fn close_answer_is_granted_to_the_main_window_only() {
     let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
         .build()
         .expect("the probe window builds");
-    let body = || InvokeBody::Json(json!({ "go": false }));
+    let body = || InvokeBody::Json(json!({ "question": 1, "go": false }));
     match invoke(&main, APP_ORIGIN, cmd, body()) {
         Err(Value::String(answer)) if answer.contains("state not managed") => {}
         answer => panic!("{cmd} did not reach its handler: {answer:?}"),
@@ -597,6 +597,7 @@ fn close_asked_goes_to_the_main_window_only() {
         running: vec![JobKind::Import, JobKind::Restore],
         past_swap: true,
         restore_waiting: false,
+        question: 7,
     });
 
     let heard: Vec<Value> = heard_main
@@ -608,7 +609,8 @@ fn close_asked_goes_to_the_main_window_only() {
     assert_eq!(
         heard,
         [json!({
-            "reason": "quit", "running": ["import", "restore"], "past_swap": true, "restore_waiting": false
+            "reason": "quit", "running": ["import", "restore"], "past_swap": true, "restore_waiting": false,
+            "question": 7
         })]
     );
     assert!(
