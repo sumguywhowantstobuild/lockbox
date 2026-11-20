@@ -7,9 +7,10 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
 import { messageFor, messageText } from "../messages";
-import { chooseSaveVault, debugState, resetStoreForTests, saveCapture, unlockInBox } from "../store";
+import { chooseSaveVault, debugState, makeNewRecoveryKey, openNewRecoveryKey, refreshVaults, resetStoreForTests, saveCapture, startRestore, unlockInBox } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import {
+  BACKUP_PASSWORD,
   CAPTURE_VAULT,
   FOLDER,
   FOLDER_2,
@@ -2211,21 +2212,270 @@ test("save_box_vault_choice_has_no_axe_violations", async () => {
 
 // ---- Plan 4C Task 10, fix round ----
 
-test("a_second_press_while_a_locked_vault_is_chosen_hands_the_new_copy_to_no_vault_too", async () => {
+// ---- Plan 4C Task 10b: the box never changes the vault by itself ----
+
+/** The Vault list's box in the page, found through the DOM so a hidden (modal) page is not missed. */
+function boxDom(): HTMLElement {
+  const found = document.querySelector<HTMLElement>(".boxlayer aside");
+  if (found === null) throw new Error("no box on the page");
+  return found;
+}
+
+/** What the box draws besides the Vault list and its one line: nothing of the vault, so none of these may be in it (looked for in the DOM, not by role). */
+function expectNothingToSave(panel: HTMLElement, why: string) {
+  expect(panel.querySelector('input[type="text"]'), `${why}: no Name`).toBeNull();
+  expect(panel.querySelectorAll('[role="combobox"]'), `${why}: only the Vault list`).toHaveLength(1);
+  expect(panel.querySelector('input[type="password"]'), `${why}: no password`).toBeNull();
+  expect(panel.querySelector('button[type="submit"], .pbar .pill-main'), `${why}: no Save and no Unlock`).toBeNull();
+  expect(panel.querySelector(".cval"), `${why}: no copied value`).toBeNull();
+}
+
+const STEP_WORDS = (name: string) => `${name} needs a step before it can be used. Switch to it to finish, then save.`;
+/** The read-only line names the vault it is about (the alert is read alone by a screen reader), then says the existing words. */
+const READ_ONLY_WORDS = `Archive: ${messageText(messageFor({ code: "read_only" }))}`;
+
+test("a_chosen_vault_that_opens_read_only_keeps_the_choice_on_screen_or_behind", async () => {
+  const list = (): FakeVault[] => [
+    { id: 7, name: "My vault", items: withKey() },
+    { id: 9, name: "Archive", items: sampleItems(), readOnly: true },
+    { id: 12, name: "Third", items: sampleItems() },
+  ];
+  for (const how of ["behind", "switched to", "host locked"]) {
+    again();
+    await openAll(list(), [], "My vault");
+    await press({ text: COPIED });
+    const panel = await boxPanel();
+    await chooseVault(panel, "Archive");
+    unlockWith(panel, "Archive");
+    await waitFor(() => {
+      expect(shell.sessionOf(9)?.unlocked).toBe(true);
+    });
+    expect((await within(panel).findByRole("alert")).textContent, how).toBe(READ_ONLY_WORDS);
+    if (how === "switched to") fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    if (how === "host locked") {
+      await act(async () => {
+        shell.lock(liveOf(7).session);
+        await Promise.resolve();
+      });
+    }
+    await waitFor(() => {
+      expect(debugState().sessions.at(-1)?.vaultId, how).toBe(how === "behind" ? 7 : 9);
+    });
+    // On screen or behind: the box is on Archive still, says why, and nothing was handed to another vault.
+    const now = boxDom();
+    expect(now.querySelector('[role="combobox"]')?.textContent, how).toBe("Archive");
+    expect(now.querySelector('[role="alert"]')?.textContent, how).toBe(READ_ONLY_WORDS);
+    expectNothingToSave(now, how);
+    expect(sent("capture_choose"), how).toHaveLength(1);
+    expect(sent("capture_save"), how).toEqual([]);
+    expect(shell.captureSlot()?.chosen, how).toBeNull();
+    expect(debugState().capture?.choice, how).toMatchObject({ kind: "locked", vault: 9 });
+  }
+});
+
+test("a_chosen_open_vault_that_starts_waiting_on_a_step_keeps_the_choice_and_offers_no_save", async () => {
+  const panel = await boxOverTwoOpen();
+  await chooseVault(panel, "Home");
+  await waitFor(() => {
+    expect(shell.captureSlot()?.chosen).toBe(liveOf(8).session);
+  });
+  typeName(panel, "TYPED_BEFORE");
+  const before = sent("capture_choose").length;
+  // Home, chosen and open behind the window, starts waiting on a new recovery key (asked of it while it was behind).
+  act(() => {
+    openNewRecoveryKey(liveOf(8).session);
+    void makeNewRecoveryKey(liveOf(8).session, PASSWORD);
+  });
+  await waitFor(() => {
+    expect(boxDom().querySelector('[role="alert"]')?.textContent).toBe(STEP_WORDS("Home"));
+  });
+  expect(boxDom().querySelector('[role="combobox"]')?.textContent).toBe("Home");
+  expectNothingToSave(boxDom(), "starts waiting");
+  // The choice stayed, nothing else was handed the copy, and nothing was saved.
+  expect(sent("capture_choose")).toHaveLength(before);
+  expect(sent("capture_save")).toEqual([]);
+  expect(shell.captureSlot()?.chosen).toBe(liveOf(8).session);
+  expect(debugState().capture?.choice).toEqual({ kind: "open", session: liveOf(8).session });
+});
+
+test("switching_to_a_chosen_vault_that_waits_on_a_step_shows_no_save_controls", async () => {
+  // Archive's details were changed outside Lockbox (Ask 3): it opens waiting, behind the window.
+  await openAll([{ id: 7, name: "My vault", items: withKey() }, { id: 9, name: "Archive", items: sampleItems(), headerChanged: true }], [], "My vault");
+  await press({ text: COPIED });
+  const panel = await boxPanel();
+  await chooseVault(panel, "Archive");
+  unlockWith(panel, "Archive");
+  expect((await within(panel).findByRole("alert")).textContent).toBe(STEP_WORDS("Archive"));
+  // The person does as the line says and switches to it: it is the window on screen now, with its own question, and the box has not moved or opened.
+  fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+  await waitFor(() => {
+    expect(debugState().sessions.at(-1)?.vaultId).toBe(9);
+  });
+  const now = boxDom();
+  expect(now.querySelector('[role="combobox"]')?.textContent).toBe("Archive");
+  expect(now.querySelector('[role="alert"]')?.textContent).toBe(STEP_WORDS("Archive"));
+  expectNothingToSave(now, "switched to");
+  expect(sent("capture_choose")).toHaveLength(1);
+  expect(sent("capture_save")).toEqual([]);
+  expect(shell.captureSlot()?.chosen).toBeNull();
+  expect(debugState().capture?.choice).toMatchObject({ kind: "locked", vault: 9 });
+});
+
+test("a_chosen_vault_that_leaves_the_list_or_goes_unavailable_says_so_and_waits_for_a_pick", async () => {
+  for (const how of ["unavailable", "left the list"]) {
+    again();
+    const panel = await boxOverOneOpen();
+    await chooseVault(panel, "Archive");
+    await act(async () => {
+      if (how === "unavailable") shell.setAvailable(9, false);
+      else await invoke("forget_vault", { vault: { list: shell.listIdentity(), id: 9 } });
+      await refreshVaults();
+    });
+    await waitFor(() => {
+      expect(boxDom().querySelector('[role="alert"]')?.textContent, how).toBe("Archive can't be reached now. Choose another vault.");
+    });
+    const now = boxDom();
+    expect(now.querySelector('[role="combobox"]')?.textContent, how).toBe("Archive");
+    expectNothingToSave(now, how);
+    expect(sent("capture_choose"), how).toHaveLength(1);
+    expect(shell.captureSlot()?.chosen, how).toBeNull();
+    expect(debugState().capture?.choice, how).toMatchObject({ kind: "locked", vault: 9 });
+    // Only the person's own pick moves it: My vault, and then a save goes there.
+    await pickVault(now, "My vault");
+    await waitFor(() => {
+      expect(shell.captureSlot()?.chosen).toBe(liveOf(7).session);
+    });
+    const open = await boxPanel();
+    expect(vaultBox(open).textContent, how).toBe("My vault");
+    typeName(open, "PICKED_KEY");
+    fireEvent.click(saveButton(open));
+    await waitFor(() => {
+      expect(stored().some((item) => item.title === "PICKED_KEY")).toBe(true);
+    });
+  }
+});
+
+test("focus_goes_to_the_vault_list_when_a_blocked_state_removes_the_focused_control", async () => {
+  // A password field that has the focus goes when the unlock comes back read-only.
+  const locked = await (async () => {
+    await openAll([{ id: 7, name: "My vault", items: withKey() }, { id: 9, name: "Archive", items: sampleItems(), readOnly: true }], [], "My vault");
+    await press({ text: COPIED });
+    return boxPanel();
+  })();
+  await chooseVault(locked, "Archive");
+  const field = passwordBox(locked, "Archive");
+  fireEvent.change(field, { target: { value: PASSWORD } });
+  field.focus();
+  expect(document.activeElement).toBe(field);
+  fireEvent.click(within(locked).getByRole("button", { name: "Unlock and continue" }));
+  await within(locked).findByRole("alert");
+  expect(document.activeElement).toBe(vaultBox(locked));
+
+  // The Name box that has the focus goes when the chosen vault starts waiting on a step.
+  again();
+  const open = await boxOverTwoOpen();
+  await chooseVault(open, "Home");
+  nameBox(open).focus();
+  expect(document.activeElement).toBe(nameBox(open));
+  act(() => {
+    openNewRecoveryKey(liveOf(8).session);
+    void makeNewRecoveryKey(liveOf(8).session, PASSWORD);
+  });
+  await waitFor(() => {
+    expect(boxDom().querySelector('[role="alert"]')).not.toBeNull();
+  });
+  expect(document.activeElement).toBe(vaultBox(boxDom()));
+
+  // Focus that is somewhere else is left there.
+  again();
+  const away = await boxOverTwoOpen();
+  await chooseVault(away, "Home");
+  const outside = screen.getByRole("searchbox", { name: "Filter this list" });
+  outside.focus();
+  act(() => {
+    openNewRecoveryKey(liveOf(8).session);
+    void makeNewRecoveryKey(liveOf(8).session, PASSWORD);
+  });
+  await waitFor(() => {
+    expect(boxDom().querySelector('[role="alert"]')).not.toBeNull();
+  });
+  expect(document.activeElement).toBe(outside);
+});
+
+test("a_second_press_with_the_first_unbind_held_ends_unbound_and_the_old_vaults_lock_leaves_the_box", async () => {
   const panel = await boxOverOneOpen();
+  await waitFor(() => {
+    expect(shell.captureSlot()?.chosen).toBe(liveOf(7).session);
+  });
+  const mine = liveOf(7).session;
+  const release = shell.holdCaptureUnchoose();
   await chooseVault(panel, "Archive");
   const first = shell.captureSlot()?.id;
-  expect(sent("capture_unchoose")).toEqual([{ capture_id: first }]);
+  await waitFor(() => {
+    expect(sent("capture_unchoose")).toEqual([{ capture_id: first }]);
+  });
+  // The shell has not heard it: it still holds the copy for My vault, and the page does not call the copy unbound yet.
+  expect(shell.captureSlot()?.chosen).toBe(mine);
+  expect(debugState().capture?.chosen).toBe(mine);
+  // A second press replaces the copy, which keeps that binding in the shell; the page asks again for the new copy (that one held too, so the in-between can be seen).
+  const releaseSecond = shell.holdCaptureUnchoose();
   await press({ text: OTHER });
   const second = shell.captureSlot()?.id;
   expect(second).not.toBe(first);
-  // The copy that replaced it is told the same: an unchoose that was still out for the old one finds nothing, and the shell must not stay bound to the old vault.
+  expect(shell.captureSlot()?.chosen).toBe(mine);
   await waitFor(() => {
     expect(sent("capture_unchoose").at(-1)).toEqual({ capture_id: second });
   });
+  // Neither has reached the shell: it holds the replacement for My vault, and the page still counts it as handed to My vault (its lock would end it there too).
+  expect(shell.captureSlot()?.chosen).toBe(mine);
+  expect(debugState().capture?.chosen).toBe(mine);
+  releaseSecond();
+  await waitFor(() => {
+    expect(shell.captureSlot()?.chosen).toBeNull();
+  });
+  await waitFor(() => {
+    expect(debugState().capture?.chosen).toBeNull();
+  });
+  // The first, now let through, finds nothing: it changes nothing.
+  release();
+  await settle();
+  expect(shell.captureSlot()?.id).toBe(second);
+  expect(debugState().capture?.id).toBe(second);
+  // The old vault's lock leaves the copy and the box (the lock screen has it, with the copy still waiting).
+  await act(async () => {
+    shell.lock(mine);
+    await Promise.resolve();
+  });
+  expect(shell.captureSlot()?.id).toBe(second);
+  expect(debugState().capture?.id).toBe(second);
+  expect(debugState().capture?.choice).toMatchObject({ kind: "locked", vault: 9 });
+});
+
+test("no_save_or_choose_is_sent_for_another_vault_unless_the_person_picks_it", async () => {
+  await openAll([{ id: 7, name: "My vault", items: withKey() }, { id: 9, name: "Archive", items: sampleItems(), readOnly: true }], [], "My vault");
+  await press({ text: COPIED });
+  const panel = await boxPanel();
+  await chooseVault(panel, "Archive");
+  unlockWith(panel, "Archive");
+  await within(panel).findByRole("alert");
+  const chooses = sent("capture_choose").length;
+  // A second copy, a list read again, and the vault coming to the front change nothing about where the copy is for.
+  await press({ text: OTHER });
+  await act(async () => {
+    await refreshVaults();
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+  await settle();
+  expect(sent("capture_choose")).toHaveLength(chooses);
+  expect(sent("capture_save")).toEqual([]);
+  expect(boxDom().querySelector('[role="combobox"]')?.textContent).toBe("Archive");
   expect(shell.captureSlot()?.chosen).toBeNull();
-  expect(screen.getByRole("complementary", { name: PAGE_WORDS })).toBe(panel);
-  expect(passwordBox(panel, "Archive")).toBeTruthy();
+  // The person's own pick is the one thing that moves it, and then one hand-over goes for that vault with the new copy.
+  await pickVault(boxDom(), "My vault");
+  await waitFor(() => {
+    expect(sent("capture_choose")).toHaveLength(chooses + 1);
+  });
+  expect(sent("capture_choose").at(-1)).toEqual({ ...liveOf(7), capture_id: shell.captureSlot()?.id });
 });
 
 test("an_in_box_unlock_that_opens_read_only_keeps_the_box_on_that_vault_and_says_why", async () => {
@@ -2239,7 +2489,8 @@ test("an_in_box_unlock_that_opens_read_only_keeps_the_box_on_that_vault_and_says
   });
   // The existing words, in the box's line; the box stays on Archive and offers nothing to save into it.
   const alert = await within(panel).findByRole("alert");
-  expect(alert.textContent).toBe(messageText(messageFor({ code: "read_only" })));
+  expect(alert.textContent).toBe(READ_ONLY_WORDS);
+  expect(alert.textContent).toContain(messageText(messageFor({ code: "read_only" })));
   expect(vaultBox(panel).textContent).toBe("Archive");
   expect(within(panel).queryByLabelText("Name")).toBeNull();
   expect(within(panel).queryByRole("button", { name: "Save" })).toBeNull();
@@ -2285,4 +2536,167 @@ test("an_in_box_unlock_that_opens_waiting_on_a_step_keeps_the_box_on_that_vault_
     expect(shell.captureSlot()?.chosen, one.how).toBeNull();
     expect(debugState().sessions.at(-1)?.vaultId, one.how).toBe(7);
   }
+});
+
+// ---- Plan 4C Task 10b, fix round ----
+
+test("a_replacement_list_that_reuses_an_id_and_a_name_does_not_redirect_the_choice", async () => {
+  const panel = await boxOverOneOpen();
+  await chooseVault(panel, "Archive");
+  const oldList = shell.listIdentity();
+  // The vault list is replaced, and its Archive has the number the old Archive had, and its name: another vault.
+  await act(async () => {
+    shell.replaceVaultList([
+      { id: 7, name: "My vault", items: withKey() },
+      { id: 9, name: "Archive", items: sampleItems() },
+    ]);
+    await refreshVaults();
+  });
+  await waitFor(() => {
+    expect(boxDom().querySelector('[role="alert"]')?.textContent).toBe("Archive can't be reached now. Choose another vault.");
+  });
+  expect(debugState().capture?.choice).toMatchObject({ kind: "locked", vault: 9, list: oldList });
+  expectNothingToSave(boxDom(), "replaced list");
+  // The new list's Archive, unlocked from the strip, is its own vault: the copy is not handed to it and the choice is not promoted onto it.
+  fireEvent.click(screen.getByRole("button", { name: "Archive, locked" }));
+  const field = await screen.findByLabelText("Password for Archive");
+  fireEvent.change(field, { target: { value: PASSWORD } });
+  fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+  await waitFor(() => {
+    expect(shell.sessionOf(9)?.unlocked).toBe(true);
+  });
+  await settle();
+  expect(sent("capture_choose")).toHaveLength(1);
+  expect(shell.captureSlot()?.chosen).toBeNull();
+  expect(debugState().capture?.choice).toMatchObject({ kind: "locked", vault: 9, list: oldList });
+  expect(boxDom().querySelector('[role="alert"]')?.textContent).toBe("Archive can't be reached now. Choose another vault.");
+  expect(sent("capture_save")).toEqual([]);
+});
+
+test("a_blocked_vault_never_gets_a_save_even_from_an_open_question_or_a_queued_one", async () => {
+  // An open name question, and the chosen vault starts waiting on a step.
+  const home = homeVault({
+    items: [
+      { id: HOME_ONLY, kind: "collection", title: "Only in Home" },
+      { id: OPENAI, kind: "key", title: "OPENAI_API_KEY", value: "old-in-home", modified_at: "2026-10-01T09:00:00Z" },
+    ],
+  });
+  await openAll([{ id: 7, name: "My vault", items: withKey() }, home], ["Home"], "My vault");
+  await press({ text: COPIED });
+  const panel = await boxPanel();
+  await chooseVault(panel, "Home");
+  typeName(panel, "OPENAI_API_KEY");
+  fireEvent.click(saveButton(panel));
+  await screen.findByRole("dialog");
+  const saves = sent("capture_save").length;
+  act(() => {
+    openNewRecoveryKey(liveOf(8).session);
+    void makeNewRecoveryKey(liveOf(8).session, PASSWORD);
+  });
+  await waitFor(() => {
+    expect(boxDom().querySelector('[role="alert"]')?.textContent).toBe(STEP_WORDS("Home"));
+  });
+  // The question goes with the choice's becoming blocked, and a save asked for anyway sends nothing.
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  const asked = { captureId: shell.captureSlot()?.id ?? "", name: "OPENAI_API_KEY", collection: null, onClash: "replace", clearClipboard: true, typed: null } as const;
+  await expect(saveCapture(liveOf(8).session, asked, "Home")).resolves.toBe("stale");
+  expect(sent("capture_save")).toHaveLength(saves);
+  expect((home.items ?? []).find((item) => item.title === "OPENAI_API_KEY")?.value).toBe("old-in-home");
+
+  // A Save that was queued, and a locked vault picked while the unbinding fails: the vault the shell still holds the copy for is not the choice.
+  again();
+  const locked = await boxOverOneOpen();
+  await waitFor(() => {
+    expect(shell.captureSlot()?.chosen).toBe(liveOf(7).session);
+  });
+  shell.refuseNext("capture_unchoose", { code: "busy" });
+  await chooseVault(locked, "Archive");
+  await settle();
+  expect(debugState().capture?.chosen).toBe(liveOf(7).session);
+  const queued = { captureId: shell.captureSlot()?.id ?? "", name: "QUEUED_KEY", collection: null, onClash: "ask", clearClipboard: true, typed: null } as const;
+  await expect(saveCapture(liveOf(7).session, queued, "My vault")).resolves.toBe("stale");
+  expect(sent("capture_save")).toEqual([]);
+  expect(stored().some((item) => item.title === "QUEUED_KEY")).toBe(false);
+});
+
+test("unlocking_a_restored_vault_keeps_the_choice_the_box_has", async () => {
+  await start({ vaults: [{ id: 7, name: "My vault", items: withKey() }, homeVault()] });
+  shell.restoreIs({ replaces: true });
+  await press({ text: COPIED });
+  await screen.findByRole("heading", { level: 1, name: PAGE_WORDS });
+  // Home is the vault chosen for the copy when a restore of My vault comes between.
+  act(() => {
+    chooseSaveVault({ kind: "locked", vault: 8, list: shell.listIdentity() });
+  });
+  await act(async () => {
+    await startRestore();
+  });
+  await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+  fireEvent.change(screen.getByLabelText("Password or recovery key from when it was made"), { target: { value: BACKUP_PASSWORD } });
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { level: 1, name: "Where it goes" });
+  fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+  await screen.findByRole("heading", { level: 1, name: "Replace your vault with this?" });
+  fireEvent.click(screen.getByRole("button", { name: "Replace" }));
+  await screen.findByRole("heading", { level: 1, name: "My vault is restored" });
+  fireEvent.change(screen.getByLabelText(/^Password from /), { target: { value: BACKUP_PASSWORD } });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+  await screen.findByRole("heading", { level: 1, name: "All items" });
+  // The restored vault is open, and the box is still on Home with its password: nothing was handed to the restored vault.
+  const panel = await boxPanel();
+  expect(vaultBox(panel).textContent).toBe("Home");
+  expect(passwordBox(panel, "Home")).toBeTruthy();
+  expect(debugState().capture?.choice).toMatchObject({ kind: "locked", vault: 8 });
+  expect(sent("capture_choose")).toEqual([]);
+  expect(shell.captureSlot()?.chosen).toBeNull();
+});
+
+test("a_password_typed_before_its_vault_becomes_unavailable_is_gone_when_the_vault_comes_back", async () => {
+  const panel = await boxOverOneOpen();
+  await chooseVault(panel, "Archive");
+  fireEvent.change(passwordBox(panel, "Archive"), { target: { value: "half-typed-5" } });
+  expect(passwordBox(panel, "Archive").value).toBe("half-typed-5");
+  await act(async () => {
+    shell.setAvailable(9, false);
+    await refreshVaults();
+  });
+  await waitFor(() => {
+    expect(boxDom().querySelector('[role="alert"]')?.textContent).toBe("Archive can't be reached now. Choose another vault.");
+  });
+  expect(boxDom().querySelector('input[type="password"]')).toBeNull();
+  expectNoValue("half-typed-5");
+  await act(async () => {
+    shell.setAvailable(9, true);
+    await refreshVaults();
+  });
+  await waitFor(() => {
+    expect(boxDom().querySelector('input[type="password"]')).not.toBeNull();
+  });
+  expect(passwordBox(boxDom(), "Archive").value).toBe("");
+  expectNoValue("half-typed-5");
+});
+
+test("the_vault_list_keeps_keyboard_focus_when_the_offers_change_while_the_box_is_blocked", async () => {
+  const panel = await boxOverTwoLocked();
+  await chooseVault(panel, "Archive");
+  await act(async () => {
+    shell.setAvailable(9, false);
+    await refreshVaults();
+  });
+  await waitFor(() => {
+    expect(boxDom().querySelector('[role="alert"]')).not.toBeNull();
+  });
+  const before = vaultBox(boxDom());
+  before.focus();
+  expect(document.activeElement).toBe(before);
+  // Another vault leaves the list: the Vault list is made anew, with the same line under it, and keeps the focus.
+  await act(async () => {
+    await invoke("forget_vault", { vault: { list: shell.listIdentity(), id: 12 } });
+    await refreshVaults();
+  });
+  await waitFor(() => {
+    expect(vaultBox(boxDom())).not.toBe(before);
+  });
+  expect(before.isConnected).toBe(false);
+  expect(document.activeElement).toBe(vaultBox(boxDom()));
 });

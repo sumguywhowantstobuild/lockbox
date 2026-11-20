@@ -456,6 +456,8 @@ export type SaveChoice = { kind: "open"; session: number } | { kind: "locked"; v
 export interface SaveOption {
   value: string;
   label: string;
+  /** The vault's name alone, as the box's lines say it (the label adds its place on the list when two names are alike). */
+  name: string;
   choice: SaveChoice;
 }
 
@@ -478,8 +480,10 @@ export interface CaptureView {
   chosen: number | null;
   /** Counts the boxes: new when a copy comes with none waiting, the same for a copy that replaces a waiting one. The box is keyed by it. */
   opening: number;
-  /** The vault chosen in the box; `null` until a window is on screen to start from (8b). Carried to a copy that replaces this one. */
+  /** The vault chosen in the box; `null` until a window is on screen to start from (8b). Carried to a copy that replaces this one. Only the person's own pick changes it. */
   choice: SaveChoice | null;
+  /** The chosen vault's name, kept with the choice: the box's lines say it even when the vault has left the list. */
+  choiceName: string | null;
 }
 
 /** One unlocked vault. */
@@ -488,6 +492,11 @@ export interface SessionData {
   generation: number;
   /** The vault's place on the registry's list. A session that is no listed vault's (an older copy, a backup) has `NOT_ON_THE_LIST`. */
   vaultId: number;
+  /**
+   * The identity of the registry list `vaultId` belongs to (`VaultEntry.list`): a registry ID is only a vault within its own list, and a replaced list may give an ID to another
+   * vault. `0` for a session that is on no list.
+   */
+  vaultList: number;
   /** A backup's is the backup file's name without its ending; an older copy keeps its vault's name (the header says "older copy" beside it). */
   name: string;
   readOnly: boolean;
@@ -914,11 +923,9 @@ export function dropSession(session: number): void {
  * Unlocks the vault and reads its list. `"opened"` when the list is on the page; `"stale"` when the vault locked again
  * before an answer was read, which is not an error. A refusal (a wrong password) is thrown for the lock screen to say.
  */
-export async function unlock(vault: api.VaultRef, password: string): Promise<"opened" | "stale"> {
+export async function unlock(vault: api.VaultRef, password: string, keepsChoice = false): Promise<"opened" | "stale"> {
   // The lock screen's add said its refusal until the next unlock: this is it.
   if (state.addRefusal !== null) set({ ...state, addRefusal: null });
-  // With a copy waiting (8b), this unlock is the one for the save: the vault that opens becomes the box's choice, whatever it had chosen before.
-  if (state.capture !== null && state.capture.choice !== null) set({ ...state, capture: { ...state.capture, choice: null } });
   let answer;
   try {
     answer = await api.unlockVault(vault, password);
@@ -928,7 +935,10 @@ export async function unlock(vault: api.VaultRef, password: string): Promise<"op
     if (error instanceof api.StaleAnswer || refusedAsLocked(error)) return "stale";
     throw error;
   }
-  return publishUnlock(answer, vault.id);
+  // With a copy waiting (8b), this unlock is the one for the save: the vault that opens becomes the box's choice, whatever it had chosen before. Only once the
+  // password was right: a refusal changes nothing. A restore's unlock (`keepsChoice`) is not the person choosing a vault for the copy, so the choice stays.
+  if (!keepsChoice && state.capture !== null && state.capture.choice !== null) set({ ...state, capture: { ...state.capture, choice: null, choiceName: null } });
+  return publishUnlock(answer, vault.id, "front", false, vault.list);
 }
 
 /**
@@ -944,6 +954,7 @@ function publishUnlock(
   vaultId: number,
   place: "front" | "behind" = "front",
   endsStep = false,
+  list?: number,
 ): Promise<"opened" | "stale"> {
   const { info } = answer.data;
   // The recovery key of this vault was made and never confirmed by picking: the page goes straight to a new one (21f), before it
@@ -959,7 +970,7 @@ function publishUnlock(
     leftover: answer.data.cleanup.orphans_quarantined,
     spareDetails: answer.data.used_backup_header,
     cloud: answer.data.cloud,
-  });
+  }, list);
   // The vault is open: what the lock screen was still saying about it (a restore finished, a change saved before a lock) has been read. What it said
   // about another vault waits for that vault's own unlock.
   set({
@@ -986,12 +997,16 @@ function newRecord(
   info: { name: string; read_only: boolean; kind: api.SessionKind },
   recovery: RecoveryStep | null,
   asks: SessionAsks = NO_ASKS,
+  list?: number,
 ): SessionData {
   sessionsOpened += 1;
+  // The list the vault was opened from: the one the caller sent its row of, else the list the page holds the vault on (a session on no list has `0`).
+  const vaultList = list ?? (vaultId <= 0 ? 0 : (state.vaults?.find((entry) => entry.id === vaultId)?.list ?? state.vaults?.[0]?.list ?? 0));
   return {
     session: answer.session,
     generation: answer.generation,
     vaultId,
+    vaultList,
     name: info.name,
     readOnly: info.read_only,
     kind: info.kind,
@@ -1132,6 +1147,9 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
   set({ ...state, sessions: withFront(state.sessions, record), newVault: null });
   void loadItems(record);
   const list = await refreshVaults();
+  // Now the list says which list the new vault is on.
+  const listed = state.vaults?.find((entry) => entry.id === vaultId);
+  if (listed !== undefined) update(record.session, (current) => ({ ...current, vaultList: listed.list }));
   // The list could not be read again (the old one is kept): the vault that was made is put on it all the same, so the menu and the lock screen have it.
   if (list === null && vaultId > 0 && !(state.vaults ?? []).some((vault) => vault.id === vaultId)) {
     // Its list is the one the other entries came from; with none held there is no identity to give it, and `0` is one no list has (a send for it is `not_found`, never another vault).
@@ -2939,7 +2957,7 @@ export async function unlockInStep(opening: number, password: string): Promise<"
     }
     return "opened";
   }
-  return publishUnlock(answer, vault, waiting === null || waiting.stay ? "behind" : "front", waiting !== null);
+  return publishUnlock(answer, vault, waiting === null || waiting.stay ? "behind" : "front", waiting !== null, step.list);
 }
 
 /** A lock epoch (Lock all, an idle lock, Windows locking or sleeping): every vault is about to lock, so the step has no window to go back to. */
@@ -3608,7 +3626,7 @@ export async function unlockRestored(password: string): Promise<"opened" | "stal
     // eslint-disable-next-line @typescript-eslint/only-throw-error -- a refusal is a plain object, as the shell's are
     throw { code: "not_found" };
   }
-  const result = await unlock({ list: row.list, id: row.id }, password);
+  const result = await unlock({ list: row.list, id: row.id }, password, true);
   if (result === "opened" && state.restore?.opening === opening) set({ ...state, restore: null });
   return result;
 }
@@ -5555,7 +5573,7 @@ let captureOpenings = 0;
  * shell calls the vault locked until a hand-over is done. Hand-overs go one at a time: two on the shell's pool could land out of order, so one asked while another
  * is out waits for it, and only the last asked is then sent (`handTicket`).
  */
-let choosing: { id: string; out: boolean; failed: boolean; done: Promise<boolean> } | null = null;
+let choosing: { id: string; kind: "choose" | "unchoose"; out: boolean; failed: boolean; done: Promise<boolean> } | null = null;
 
 /** The number of the last hand-over asked: a waiting one that is no longer the last is not sent. */
 let handTicket = 0;
@@ -5651,24 +5669,29 @@ function takeCapture(event: unknown): void {
       chosen: before?.chosen ?? null,
       opening: before?.opening ?? captureOpenings,
       choice: before?.choice ?? null,
+      choiceName: before?.choiceName ?? null,
     },
   });
+  // The shell keeps a copy's binding when another replaces it. With a locked vault chosen, `seatCapture` asks the shell again for this copy while the page still counts
+  // it as handed to a vault (an unchoose still out for the copy that went answers `not_found` and changes nothing here).
   seatCapture();
-  // The shell keeps a copy's binding when another replaces it. An unchoose still out for the copy that went answers `not_found` and changes nothing, so when a locked
-  // vault is chosen the new copy is handed to no vault itself; otherwise the shell could stay bound to the vault chosen before, and its lock would close the box.
-  if (before !== null && state.capture?.id === id && state.capture.choice?.kind === "locked") handOver(id, { kind: "unchoose" });
 }
 
 /** Whether two choices are the same vault: the same open session, or the same locked listed vault. */
 function sameChoice(a: SaveChoice | null, b: SaveChoice | null): boolean {
   if (a === null || b === null) return a === b;
   if (a.kind === "open") return b.kind === "open" && a.session === b.session;
-  return b.kind === "locked" && a.vault === b.vault;
+  return b.kind === "locked" && a.vault === b.vault && a.list === b.list;
 }
 
-/** The value a choice has in the box's Vault list (`SaveOption.value`). */
+/** Whether an open session is the vault `id` of registry list `list`: an ID is only a vault within its own list. */
+function isListed(session: SessionData, list: number, id: number): boolean {
+  return session.vaultId === id && session.vaultList === list;
+}
+
+/** The value a choice has in the box's Vault list (`SaveOption.value`): an open session, or a listed vault by its list and ID. */
 export function saveChoiceValue(choice: SaveChoice): string {
-  return choice.kind === "open" ? `s:${String(choice.session)}` : `v:${String(choice.vault)}`;
+  return choice.kind === "open" ? `s:${String(choice.session)}` : `v:${String(choice.list)}:${String(choice.vault)}`;
 }
 
 /** Whether an open vault is waiting on a step the design says shows nothing of the vault yet: its recovery key (21f, 29b) or Ask 3 (its details changed outside Lockbox). */
@@ -5676,15 +5699,31 @@ function waitsOnStep(entry: SessionData): boolean {
   return entry.recovery !== null || entry.asks.detailsChanged;
 }
 
+/** Whether an open session can take the copy now: writable and not waiting on a step. */
+function ready(session: SessionData): boolean {
+  return !session.readOnly && !waitsOnStep(session);
+}
+
 /**
- * Why a vault opened in the save box can't take the copy, or `null` when it can (or is not open): it is read-only (the existing `read_only` words), or it waits on a step.
- * The box stays on that vault and says it.
+ * Why the vault chosen in the box can't take the copy now, or `null` when it can (or it is a locked one to unlock): `read_only` (it is open and read-only, on screen or
+ * behind), `step` (it is open and waiting on a step: its recovery key, or Ask 3), or `gone` (a locked one that left the list or can't be reached). The box stays on that
+ * vault, says why, and offers no Save; only the person's own pick moves it. A locked choice whose vault is open and ready returns `null`: the store settles it onto the session.
  */
-export function boxBlock(vault: number, sessions: readonly SessionData[]): "read_only" | "step" | null {
-  const open = sessions.find((one) => one.vaultId === vault);
-  if (open === undefined) return null;
-  if (open.readOnly) return "read_only";
-  return waitsOnStep(open) ? "step" : null;
+export function boxBlock(choice: SaveChoice, sessions: readonly SessionData[], vaults: readonly VaultEntry[] | null): "read_only" | "step" | "gone" | null {
+  const open = choice.kind === "open" ? sessions.find((one) => one.session === choice.session) : sessions.find((one) => isListed(one, choice.list, choice.vault));
+  if (open !== undefined) return open.readOnly ? "read_only" : waitsOnStep(open) ? "step" : null;
+  if (choice.kind === "open" || vaults === null) return null;
+  const listed = vaults.find((entry) => entry.list === choice.list && entry.id === choice.vault);
+  return listed === undefined || !listed.available || listed.details_damaged || listed.name === null ? "gone" : null;
+}
+
+/** The name the box says a choice by: the open session's (renamed since it was listed), the list's for a locked one, else the one kept (`fallback`) when it is gone. */
+function choiceNameOf(choice: SaveChoice, sessions: readonly SessionData[], vaults: readonly VaultEntry[] | null, fallback: string | null): string {
+  if (choice.kind === "open") return sessions.find((one) => one.session === choice.session)?.name ?? fallback ?? "";
+  const open = sessions.find((one) => isListed(one, choice.list, choice.vault));
+  if (open !== undefined) return open.name;
+  const listed = vaults?.find((entry) => entry.list === choice.list && entry.id === choice.vault);
+  return listed?.name ?? fallback ?? "";
 }
 
 /**
@@ -5692,34 +5731,55 @@ export function boxBlock(vault: number, sessions: readonly SessionData[]): "read
  * that is writable, or a locked one (it is unlocked in the box). One that is unavailable, whose details can't be read or that is open read-only is not a choice, and
  * neither is a writable session that is not on the list unless it is the one on screen. Two labels alike say their place on the list ("Home, 2 of 3", as the vault
  * strip does). Before the list has come, only the window on screen is offered. An open vault behind the window that is waiting on a step (its recovery key, 21f
- * and 29b, or Ask 3) shows nothing of itself until the step is done, so it is not offered either. `keep` is the box's own choice: a locked vault that has been
- * unlocked in the box and so is open now, but is read-only or waiting on a step, stays on offer as that locked entry, so the box stays on it and says why instead of
- * falling back to another vault without a word (`waitingOn` says which).
+ * and 29b, or Ask 3) shows nothing of itself until the step is done, so it is not offered either. `keep` is the box's own choice, with the name kept for it: the box never
+ * moves it by itself, so it is always on offer as its own entry, whatever became of its vault (open but read-only or waiting on a step, on screen or behind; left the
+ * list; unavailable), where the vault's own row would be skipped or would stand for another choice. A locked choice whose vault is open and ready is left to the open
+ * session, which the store settles it onto.
  */
 export function saveChoices(
   front: SessionData | undefined,
   sessions: readonly SessionData[],
   vaults: readonly VaultEntry[] | null,
-  keep: SaveChoice | null = null,
+  keep: { choice: SaveChoice; name: string } | null = null,
 ): SaveOption[] {
-  const found: { choice: SaveChoice; name: string; place: number | null }[] = [];
+  // A vault is its list's identity and its ID together: a replaced list may give an ID to another vault.
+  type Vault = { list: number; id: number };
+  const found: { choice: SaveChoice; name: string; place: number | null; vault: Vault | null }[] = [];
   const list = vaults ?? [];
+  const same = (one: Vault | null, other: Vault) => one !== null && one.list === other.list && one.id === other.id;
   if (front !== undefined && !front.readOnly) {
-    const at = list.findIndex((entry) => entry.id === front.vaultId);
-    found.push({ choice: { kind: "open", session: front.session }, name: front.name, place: at < 0 ? null : at + 1 });
+    const own = { list: front.vaultList, id: front.vaultId };
+    const at = list.findIndex((entry) => same(own, entry));
+    found.push({ choice: { kind: "open", session: front.session }, name: front.name, place: at < 0 ? null : at + 1, vault: own });
   }
   list.forEach((entry, at) => {
-    if (entry.id === front?.vaultId || !entry.available || entry.details_damaged || entry.name === null) return;
-    const open = sessions.find((one) => one.vaultId === entry.id);
-    if (open === undefined) found.push({ choice: { kind: "locked", vault: entry.id, list: entry.list }, name: listedName(entry), place: at + 1 });
-    else if (!open.readOnly && !waitsOnStep(open)) found.push({ choice: { kind: "open", session: open.session }, name: open.name, place: at + 1 });
-    else if (keep?.kind === "locked" && keep.vault === entry.id) found.push({ choice: keep, name: listedName(entry), place: at + 1 });
+    if ((front !== undefined && isListed(front, entry.list, entry.id)) || !entry.available || entry.details_damaged || entry.name === null) return;
+    const open = sessions.find((one) => isListed(one, entry.list, entry.id));
+    const vault = { list: entry.list, id: entry.id };
+    if (open === undefined) found.push({ choice: { kind: "locked", vault: entry.id, list: entry.list }, name: listedName(entry), place: at + 1, vault });
+    else if (ready(open)) found.push({ choice: { kind: "open", session: open.session }, name: open.name, place: at + 1, vault });
   });
+  if (keep !== null) {
+    const chosen = keep.choice;
+    const own = chosen.kind === "open" ? sessions.find((one) => one.session === chosen.session) : undefined;
+    const vault: Vault | null = chosen.kind === "locked" ? { list: chosen.list, id: chosen.vault } : own === undefined ? null : { list: own.vaultList, id: own.vaultId };
+    const at = vault === null ? -1 : list.findIndex((entry) => same(vault, entry));
+    const kept = { choice: keep.choice, name: keep.name, place: at < 0 ? null : at + 1, vault };
+    const there = vault === null ? -1 : found.findIndex((one) => same(one.vault, vault));
+    if (there < 0) found.push(kept);
+    else if (!sameChoice(found[there]?.choice ?? null, keep.choice)) {
+      // The vault has a row of its own that is not the choice: a locked choice whose vault is open and ready becomes that session (the store settles it); any other
+      // is kept as the entry the person chose in that row's place.
+      const session = vault === null ? undefined : sessions.find((one) => isListed(one, vault.list, vault.id));
+      if (session === undefined || !ready(session)) found[there] = kept;
+    }
+  }
   return found.map((one) => {
     const alike = found.filter((other) => other.name === one.name).length > 1;
     return {
       value: saveChoiceValue(one.choice),
       label: alike && one.place !== null ? `${one.name}, ${String(one.place)} of ${String(list.length)}` : one.name,
+      name: one.name,
       choice: one.choice,
     };
   });
@@ -5733,49 +5793,56 @@ function closePanelFor(session: number): void {
 /**
  * Puts a waiting copy in front of the person, and settles the vault it is for. With no window on screen there is nothing to do: the lock screen shows the step
  * (8b), and `unlock` comes back here. The first time a window is on screen the box starts on the first vault it offers (the window on screen when it can take a
- * key, else the first listed vault that can), and the panel of that window closes. A choice that is no longer offered (a vault that went unavailable, or left the
- * list) falls back to the first one the same way. A locked choice whose vault is open now and writable becomes that session. An open choice is handed to the shell
- * (`capture_choose`) once for its session and generation; a locked one is handed to none (the shell was told by `chooseSaveVault`). With nothing to offer at all,
- * the copy is let go and "This vault is read-only." is said, as before. Safe to call again: nothing is sent twice for the same.
+ * key, else the first listed vault that can), and the panel of that window closes. After that the box never moves the choice by itself (Task 10b): when the vault
+ * chosen can't take the copy (read-only, waiting on a step, left the list, unavailable, on screen or behind) the choice stays, the box says why and offers no Save, and
+ * nothing is handed to another vault; only the person's own pick (`chooseSaveVault`) changes it. The one thing done on its own is to settle a locked choice onto its
+ * vault's session once that is open and ready. An open choice is handed to the shell (`capture_choose`) once for its session and generation. A locked one is handed to
+ * none: if the page still counts the copy as handed to a vault (the shell has not answered that it was let go for this copy), the unchoose is asked, once at a time.
+ * With nothing to offer at the first seat the copy is let go and "This vault is read-only." is said, as before. Safe to call again: nothing is sent twice for the same.
  */
 function seatCapture(): void {
   const capture = state.capture;
   const front = state.sessions.at(-1);
   if (capture === null || front === undefined) return;
-  const offered = saveChoices(front, state.sessions, state.vaults, capture.choice);
   let choice = capture.choice;
-  if (choice?.kind === "locked") {
-    // Its vault is open and can take a key: the choice is that session. One that is open but can't (read-only, or waiting on a step) stays the locked entry, which
-    // `saveChoices` keeps on offer: the box stays on it and says why, and nothing is handed over.
-    const vault = choice.vault;
-    const opened = state.sessions.find((one) => one.vaultId === vault);
-    if (opened !== undefined && boxBlock(vault, state.sessions) === null) choice = { kind: "open", session: opened.session };
-  }
-  if (choice === null || !offered.some((one) => sameChoice(one.choice, choice))) {
-    const first = offered[0];
+  let name = capture.choiceName;
+  if (choice === null) {
+    // The first seat: the first vault the box offers.
+    const first = saveChoices(front, state.sessions, state.vaults, null)[0];
     if (first === undefined) {
       sayFailure(front.session, { code: "read_only" });
       endCapture(true);
       return;
     }
-    if (capture.choice === null && first.choice.kind === "open" && first.choice.session === front.session) closePanelFor(front.session);
+    if (first.choice.kind === "open" && first.choice.session === front.session) closePanelFor(front.session);
     choice = first.choice;
+    name = first.name;
+  } else if (choice.kind === "locked") {
+    // Its vault is open now and can take a key: the choice is that session. Anything else (still locked, or open but unable) stays as it is.
+    const { vault, list } = choice;
+    const opened = state.sessions.find((one) => isListed(one, list, vault));
+    if (opened !== undefined && boxBlock(choice, state.sessions, state.vaults) === null) {
+      choice = { kind: "open", session: opened.session };
+      name = opened.name;
+    }
   }
   const now = state.capture;
   if (now === null) return;
+  // The name is kept with the choice, and follows the vault's own (a rename) while it can be read.
+  name = choiceNameOf(choice, state.sessions, state.vaults, name);
+  const entry = choice.kind === "open" ? sessionOf(choice.session) : undefined;
+  const bound = choice.kind === "open" ? (entry?.session ?? now.chosen) : now.chosen;
+  if (!sameChoice(now.choice, choice) || now.choiceName !== name || now.chosen !== bound) set({ ...state, capture: { ...now, choice, choiceName: name, chosen: bound } });
   if (choice.kind === "locked") {
-    // Handed to no vault: a locked one is chosen. If the shell holds the copy for another vault (a choice that fell back), it is told to let that go.
-    const wasBound = now.chosen !== null;
-    if (!sameChoice(now.choice, choice) || wasBound) set({ ...state, capture: { ...now, choice, chosen: null } });
-    if (wasBound) {
+    // Handed to no vault. The page counts the copy as unbound only once the shell has answered for this copy's id (`unchooseCapture`), so until then a lock of the vault it
+    // was handed to still ends it here as it does there, and a copy that replaced it (which keeps the binding in the shell) is asked again.
+    if (state.capture?.chosen !== null && !unchoosing(now.id)) {
       chooseSent = null;
       handOver(now.id, { kind: "unchoose" });
     }
     return;
   }
-  const entry = sessionOf(choice.session);
   if (entry === undefined) return;
-  if (!sameChoice(now.choice, choice) || now.chosen !== entry.session) set({ ...state, capture: { ...now, choice, chosen: entry.session } });
   const sent = `${now.id}:${String(entry.session)}:${String(entry.generation)}`;
   if (chooseSent === sent) return;
   chooseSent = sent;
@@ -5795,14 +5862,13 @@ export function settleSaveChoice(): void {
 export function chooseSaveVault(choice: SaveChoice): void {
   const capture = state.capture;
   if (capture === null || sameChoice(capture.choice, choice)) return;
-  if (choice.kind === "open") {
-    set({ ...state, capture: { ...capture, choice } });
-    seatCapture();
-    return;
-  }
+  // The name goes with the choice, from the entry the person picked in the list.
+  const name = saveChoices(state.sessions.at(-1), state.sessions, state.vaults, capture.choice === null ? null : { choice: capture.choice, name: capture.choiceName ?? "" }).find((one) =>
+    sameChoice(one.choice, choice),
+  )?.name;
   chooseSent = null;
-  set({ ...state, capture: { ...capture, choice, chosen: null } });
-  handOver(capture.id, { kind: "unchoose" });
+  set({ ...state, capture: { ...capture, choice, choiceName: name ?? choiceNameOf(choice, state.sessions, state.vaults, null) } });
+  seatCapture();
 }
 
 /** What a hand-over asks of the shell: the copy for one session at one generation, or for none. */
@@ -5816,7 +5882,13 @@ function handOver(id: string, what: HandOver): void {
   handTicket += 1;
   const ticket = handTicket;
   const before = choosing?.id === id ? choosing.done : Promise.resolve(true);
-  const mine: { id: string; out: boolean; failed: boolean; done: Promise<boolean> } = { id, out: true, failed: false, done: Promise.resolve(true) };
+  const mine: { id: string; kind: "choose" | "unchoose"; out: boolean; failed: boolean; done: Promise<boolean> } = {
+    id,
+    kind: what.kind,
+    out: true,
+    failed: false,
+    done: Promise.resolve(true),
+  };
   mine.done = (async () => {
     let worked = false;
     try {
@@ -5855,6 +5927,11 @@ function handingOver(id: string): boolean {
   return choosing?.id === id && choosing.out;
 }
 
+/** Whether the hand-over asked last for copy `id` is an unchoose that is still out. */
+function unchoosing(id: string): boolean {
+  return choosing?.id === id && choosing.out && choosing.kind === "unchoose";
+}
+
 /**
  * `capture_choose`: tells the shell which vault the copy was handed to, and answers whether that worked. A lock the page missed takes the
  * vault off; an old id means the shell has let go or replaced the copy (its `gone` or a new copy is on its way), so the box goes quietly;
@@ -5888,7 +5965,11 @@ async function unchooseCapture(id: string): Promise<boolean> {
     await api.captureUnchoose(id);
   } catch (error) {
     if (refusedWith(error, "not_found") && state.capture?.id === id) endCapture(false);
+    return true;
   }
+  // The shell has answered for this copy: only now is it unbound here. (An answer for a copy that was replaced since is not about the one on screen.)
+  const now = state.capture;
+  if (now?.id === id && now.choice?.kind === "locked" && now.chosen !== null) set({ ...state, capture: { ...now, chosen: null } });
   return true;
 }
 
@@ -5974,6 +6055,10 @@ export async function saveCapture(session: number, save: api.CaptureSave, where:
     seatCapture();
     return { failed: NOT_HANDED_OVER };
   }
+  // The choice as it is now, right before sending: this vault, open, writable and not waiting on a step. A vault that has become blocked (an open name question
+  // outlived it), or that is no longer the choice (a Save queued while another vault was picked and the shell's unbinding failed), is sent nothing.
+  const choice = capture.choice;
+  if (choice?.kind !== "open" || choice.session !== session || !ready(entry)) return "stale";
   const { generation } = entry;
   try {
     const answer = await api.captureSave({ session, generation }, save);
@@ -6078,7 +6163,7 @@ export async function unlockInBox(opening: number, choice: Extract<SaveChoice, {
     seatCapture();
     return "opened";
   }
-  return publishUnlock(answer, choice.vault, "behind");
+  return publishUnlock(answer, choice.vault, "behind", false, choice.list);
 }
 
 /** Opens the search (Ctrl+F, Ctrl+K): the one search, empty. It does nothing when there is no vault open, or one is open already. */

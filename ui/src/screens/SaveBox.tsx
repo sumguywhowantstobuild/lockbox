@@ -25,7 +25,6 @@ import {
   type SessionData,
 } from "../store";
 import { useValueGuard } from "../useValueGuard";
-import { listedName } from "../vaultWords";
 import { ClearClipboardBox } from "./forms/ClearClipboard";
 import { NAME_RULE, refusedTheName } from "./forms/KeyForm";
 import { folderChoices, NO_FOLDER } from "./forms/shared";
@@ -184,7 +183,11 @@ export function SaveBox({ host }: { host: SessionData | null }) {
   const focused = useRef(false);
   /** An unlock was sent from the box: the open look that follows takes focus to its first field. */
   const focusAfterUnlock = useRef(false);
-  const wasLocked = useRef(false);
+  const wasClosed = useRef(false);
+  const wasBlocked = useRef(false);
+  const vaultPlace = useRef<HTMLDivElement>(null);
+  /** The Vault list has the focus (or had it when it was made anew), so the box it is made again as gets it. */
+  const vaultFocused = useRef(false);
 
   // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping) wipes what is secret and typed here, even before the vaults' own locks are heard.
   const epoch = useLockEpoch();
@@ -201,11 +204,26 @@ export function SaveBox({ host }: { host: SessionData | null }) {
   }
 
   const front = sessions.at(-1);
-  const offered = saveChoices(front, sessions, vaults, capture?.choice ?? null);
-  // The vault chosen, as the list has it: the store's choice when it is on offer, else the first on offer (the store settles it in an effect, below).
-  const chosenValue = capture === null || capture.choice === null ? "" : saveChoiceValue(capture.choice);
-  const current = offered.find((one) => one.value === chosenValue) ?? offered[0];
+  const kept = capture === null || capture.choice === null ? null : { choice: capture.choice, name: capture.choiceName ?? "" };
+  const offered = saveChoices(front, sessions, vaults, kept);
+  // The vault chosen, as the list has it. The box never moves the choice by itself: it is always on offer as its own entry (a locked choice whose vault has just opened
+  // and is ready is the open session's entry for a moment, until the store settles it), and there is no other vault to fall back on.
+  const chosenValue = kept === null ? "" : saveChoiceValue(kept.choice);
+  // A vault is its list's identity and its ID together (a replaced list may give an ID to another vault).
+  const keptLocked = kept?.choice.kind === "locked" ? kept.choice : null;
+  const opened = keptLocked === null ? undefined : sessions.find((one) => one.vaultId === keptLocked.vault && one.vaultList === keptLocked.list);
+  const current =
+    kept === null
+      ? undefined
+      : (offered.find((one) => one.value === chosenValue) ??
+        offered.find((one) => one.choice.kind === "open" && opened !== undefined && one.choice.session === opened.session));
   const currentValue = current?.value ?? "";
+  // Why the chosen vault can't take the copy (read-only, waiting on a step, left the list or unavailable), on screen or behind: the box says it and offers no Save.
+  const block = current === undefined ? null : boxBlock(current.choice, sessions, vaults);
+  // A blocked vault has no password field and no name question: a password typed before it was blocked is gone with its field (it is not there when the vault comes
+  // back), and a question about a name is closed (Replace and Keep both would save into a vault that can't take the key).
+  if (block !== null && password !== "") setPassword("");
+  if (block !== null && asked !== null) setAsked(null);
 
   // Another vault chosen: what was typed for the last one's password, and what was said about it, goes.
   const [seenChoice, setSeenChoice] = useState(currentValue);
@@ -219,7 +237,9 @@ export function SaveBox({ host }: { host: SessionData | null }) {
 
   const drawn = host !== null;
   const ready = current !== undefined;
-  const locked = current?.choice.kind === "locked";
+  // Asking for the password of a locked vault, or the open look; a blocked vault is neither (the Vault list and one line say why).
+  const locked = current?.choice.kind === "locked" && block === null;
+  const closed = current?.choice.kind !== "open" || block !== null;
   const hasValue = capture?.state === "value";
   const offersAgain = offered.map((one) => one.value).join(",");
 
@@ -258,27 +278,48 @@ export function SaveBox({ host }: { host: SessionData | null }) {
 
   // The vault was unlocked in the box: the open look comes back, and its first field takes focus.
   useEffect(() => {
-    const unlockedNow = wasLocked.current && !locked;
-    wasLocked.current = locked;
+    const unlockedNow = wasClosed.current && !closed;
+    wasClosed.current = closed;
     if (!unlockedNow || !focusAfterUnlock.current || !drawn) return;
     focusAfterUnlock.current = false;
     (hasValue ? nameBox : valueBox).current?.focus();
-  }, [locked, drawn, hasValue]);
+  }, [closed, drawn, hasValue]);
+
+  // The Vault list is made anew when the vaults on offer change, and keyboard focus that was on the old one goes to the new one.
+  const selectKey = offered
+    .map((one) => one.value)
+    .sort()
+    .join(",");
+  useEffect(() => {
+    if (!vaultFocused.current) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body) vaultPlace.current?.querySelector<HTMLElement>('[role="combobox"]')?.focus();
+  }, [selectKey]);
+
+  // A blocked state takes the password field or the open look's fields away: focus that was in one of them (it is on the page's body now) goes to the Vault list, which
+  // is what the line under it is about. Focus that is somewhere else is left there.
+  useEffect(() => {
+    const entered = block !== null && !wasBlocked.current;
+    wasBlocked.current = block !== null;
+    if (!entered || !drawn) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body) vaultPlace.current?.querySelector<HTMLElement>('[role="combobox"]')?.focus();
+  }, [block, drawn]);
 
   if (capture === null || current === undefined || host === null) return null;
 
   const choice = current.choice;
-  const lockedEntry = choice.kind === "locked" ? vaults?.find((entry) => entry.id === choice.vault) : undefined;
   const chosenSession = choice.kind === "open" ? sessions.find((entry) => entry.session === choice.session) : undefined;
-  if (choice.kind === "locked" ? lockedEntry === undefined : chosenSession === undefined) return null;
-  // A vault unlocked in the box that is open now but can't take the key: the box stays on it and says why (no fallback to another vault, nothing to unlock or save).
-  const block = choice.kind === "locked" ? boxBlock(choice.vault, sessions) : null;
+  if (block === null && choice.kind === "open" && chosenSession === undefined) return null;
   const blockWords =
-    block === null || lockedEntry === undefined
+    block === null
       ? null
       : block === "read_only"
-        ? messageText(messageFor({ code: "read_only" }))
-        : `${listedName(lockedEntry)} needs a step before it can be used. Switch to it to finish, then save.`;
+        ? // The existing words, after the vault's name: the alert is read alone by a screen reader, and has to say which vault (the session's form, for Ariel to change).
+          `${current.name}: ${messageText(messageFor({ code: "read_only" }))}`
+        : block === "step"
+          ? `${current.name} needs a step before it can be used. Switch to it to finish, then save.`
+          : `${current.name} can't be reached now. Choose another vault.`;
 
   // The vault on screen is the one the window's own folder and the `.env` offer belong to.
   const onScreen = chosenSession?.session === host.session;
@@ -293,7 +334,7 @@ export function SaveBox({ host }: { host: SessionData | null }) {
   const folderName = folders.find((entry) => entry.id === place)?.name;
   // What the message after the save says: the vault on screen as ever ("<name> saved in <folder>", or in the vault with no folder); another vault is named too.
   const where = onScreen ? (folderName ?? vaultName) : folderName === undefined ? vaultName : `${folderName}, ${vaultName}`;
-  const clash = asked !== null && asked.captureId === capture.id && asked.vault === currentValue ? asked : null;
+  const clash = asked !== null && block === null && asked.captureId === capture.id && asked.vault === currentValue ? asked : null;
 
   const cancel = () => {
     cancelCapture();
@@ -378,8 +419,9 @@ export function SaveBox({ host }: { host: SessionData | null }) {
 
   const onSubmit = (event: SyntheticEvent) => {
     event.preventDefault();
+    // A blocked vault has no password to send and nothing to save into: Enter does nothing there.
     if (locked) void unlockHere();
-    else void save("ask");
+    else if (!closed) void save("ask");
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -415,7 +457,7 @@ export function SaveBox({ host }: { host: SessionData | null }) {
           <p role="status" className={capture.changed ? "cnote" : "sr"}>
             {capture.changed ? CHANGED : ""}
           </p>
-          {locked ? null : hasValue ? (
+          {closed ? null : hasValue ? (
             <>
               <CopiedValue key={`${capture.id}:${currentValue}`} captureId={capture.id} />
               {capture.envKeys === null || !onScreen ? null : (
@@ -450,14 +492,30 @@ export function SaveBox({ host }: { host: SessionData | null }) {
               />
             </>
           )}
-          <div className="fbox" key="vault">
+          <div
+            className="fbox"
+            key="vault"
+            ref={vaultPlace}
+            onFocus={() => {
+              vaultFocused.current = true;
+            }}
+            onBlur={(event) => {
+              // Focus that went to another control is gone from the list. Focus that went nowhere may be the list being made anew (its old box was taken away): it is
+              // the list's own again unless the old box is still on the page a moment later.
+              if (event.relatedTarget !== null) {
+                vaultFocused.current = false;
+                return;
+              }
+              const was = event.target;
+              window.setTimeout(() => {
+                if (was.isConnected) vaultFocused.current = false;
+              }, 0);
+            }}
+          >
             {/* Made anew when the vaults on offer change (a locked one that was unlocked becomes an open one, with another value): the list part puts a value that has
                 left its items back to the first it ever had, and would call `onValueChange` for it as if the person had chosen it. */}
             <Select
-              key={offered
-                .map((one) => one.value)
-                .sort()
-                .join(",")}
+              key={selectKey}
               label="Vault"
               items={offered.map((one) => ({ value: one.value, label: one.label }))}
               value={currentValue}
@@ -472,7 +530,7 @@ export function SaveBox({ host }: { host: SessionData | null }) {
             <div ref={passwordPlace}>
               <PasswordField
                 look="panel"
-                label={`Password for ${lockedEntry === undefined ? "" : listedName(lockedEntry)}`}
+                label={`Password for ${current.name}`}
                 autoComplete="current-password"
                 value={password}
                 onChange={(next) => {

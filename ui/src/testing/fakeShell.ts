@@ -468,6 +468,11 @@ export interface FakeShell {
    */
   holdCaptureChoose(): () => void;
   /**
+   * Holds the next `capture_unchoose` (that one only) until `release` is called, and does it then: until it is done the shell still holds the copy for the vault it was
+   * handed to, and a press that replaces the copy keeps that binding (`fill`). Later ones go through.
+   */
+  holdCaptureUnchoose(): () => void;
+  /**
    * Every stored-file command that got as far as working on a file, in order (`open_file`, `save_file_copy`, `add_file`,
    * `attach_file`, `replace_file`), with the ids it was sent. A refused one, a question (a program file asks first) and a
    * closed dialog are not here. No path is ever in it: the page sends none.
@@ -699,6 +704,11 @@ export interface FakeShell {
   openedVaults: number[];
   /** The identity of the vault list now (what each `list_vaults` entry says in `list`): a new list (`start_new_vault_list`) has another. */
   listIdentity(): number;
+  /**
+   * The vault list is replaced by another (as when a damaged list was started over and the vaults added back): it has a new identity, and `next` are the vaults on it, whose
+   * IDs may be numbers the old list used for other vaults. Vaults that are open stay open, as they do in the shell. Nothing is sent to the page; it reads the list again.
+   */
+  replaceVaultList(next: FakeVault[]): void;
   /** The vault's folder or drive is there again (`true`) or isn't (`false`): the list says `available` from then on. Nothing is sent to the page. */
   setAvailable(vaultId: number, available: boolean): void;
   /** The vault's drive goes while it is open: it is `available: false` from now, and its session (when open) locks alone with the reason `drive_gone`, with the event. */
@@ -1263,6 +1273,7 @@ export function installFakeShell(
   let heldCaptureReveal: (() => void)[] | undefined;
   let heldCaptureState: (() => void)[] | undefined;
   let heldCaptureChoose: (() => void)[] | undefined;
+  let heldCaptureUnchoose: (() => void)[] | undefined;
   let captureRevealed = 0;
   // Stored files: what the commands did, the picker's next choice, a closed dialog, the hold, and the opened copies left behind.
   const fileOps: FakeShell["fileOps"] = [];
@@ -3940,6 +3951,21 @@ export function installFakeShell(
         });
       });
     }
+    if (cmd === "capture_unchoose" && heldCaptureUnchoose !== undefined) {
+      // The next one only, and done when released: until then the shell still holds the copy for the vault it was handed to, and a copy that replaces it inherits that.
+      const waiting = heldCaptureUnchoose;
+      heldCaptureUnchoose = undefined;
+      return new Promise((resolve, reject) => {
+        waiting.push(() => {
+          try {
+            resolve(answer(cmd, args));
+          } catch (error) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+            reject(error);
+          }
+        });
+      });
+    }
     if (heldFiles !== undefined && Object.hasOwn(OPERATION, cmd)) {
       // The vault is working from the moment the command arrives; the answer is decided when it is let go.
       const waiting = heldFiles;
@@ -4407,6 +4433,11 @@ export function installFakeShell(
     },
     openedVaults,
     listIdentity: () => listId,
+    replaceVaultList: (next) => {
+      listId += 1;
+      vaults.splice(0, vaults.length, ...next);
+      lastId = Math.max(0, ...vaults.map((v) => v.id));
+    },
     setAvailable: (vaultId, available) => {
       const found = vaults.find((v) => v.id === vaultId);
       if (found !== undefined) found.available = available;
@@ -4800,6 +4831,14 @@ export function installFakeShell(
       heldCaptureChoose = waiting;
       return () => {
         heldCaptureChoose = undefined;
+        for (const release of waiting) release();
+      };
+    },
+    holdCaptureUnchoose: () => {
+      const waiting: (() => void)[] = [];
+      heldCaptureUnchoose = waiting;
+      return () => {
+        heldCaptureUnchoose = undefined;
         for (const release of waiting) release();
       };
     },
