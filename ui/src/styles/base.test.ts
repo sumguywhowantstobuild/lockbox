@@ -16,6 +16,14 @@ function declarationsFor(selector: string): string | undefined {
   return undefined;
 }
 
+test("password_boxes_show_no_browser_reveal_or_clear_button", () => {
+  // Found at 4C Task 13: WebView2 drew its own eye in a password box once typed in, unlike Lockbox's own Show buttons. Every password box
+  // reveals only through Lockbox's controls, so the browser's reveal and clear buttons are hidden everywhere.
+  for (const selector of ["input::-ms-reveal", "input::-ms-clear"]) {
+    expect(declarationsFor(selector)?.replace(/\s+/g, " "), selector).toMatch(/display: none/);
+  }
+});
+
 test("html_body_and_root_are_as_tall_as_the_window", () => {
   for (const selector of ["html", "body", "#root"]) {
     const declarations = declarationsFor(selector);

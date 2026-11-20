@@ -40,7 +40,7 @@ const SECRETS = [PASSWORD, WRONG_ONE, "MU-typed"];
 
 const OLD_KEY_WORDS = "The old recovery key stops working for this vault. Backups you already made still need the old key.";
 const LIMIT_WORDS =
-  "Changing the password doesn't lock out an old copy. Anyone who has an old copy of this vault's details (an earlier copy of its folder, or an old backup) and its old password or recovery key can read your current and future items and files, if they get copies of them.";
+  "Making a new recovery key doesn't lock out an old copy. Anyone who has an old copy of this vault's details (an earlier copy of its folder, or an old backup) and its old password or recovery key can read your current and future items and files, if they get copies of them.";
 const WRONG_CURRENT = "That isn't the current password.";
 const EMPTY = "Type the password first.";
 const KEY_HEADING = "Your new recovery key";
@@ -319,9 +319,11 @@ test("new_key_asks_the_current_password_and_says_the_old_key_stops_working_here"
     "Cancel",
     "Make a new key",
   ]);
-  // The old key stops working here, and old backups still need it; spec 5.3's limit in full, as 27a says it.
-  expect(within(panel).getByText(OLD_KEY_WORDS)).toBeTruthy();
-  expect(within(panel).getByText(LIMIT_WORDS)).toBeTruthy();
+  // The old key stops working here, and old backups still need it; spec 5.3's limit in full, said of a new key (not a password change), in one note
+  // as 27a's.
+  expect(within(panel).getByRole("note").textContent).toBe(`${OLD_KEY_WORDS} ${LIMIT_WORDS}`);
+  expect(LIMIT_WORDS).toMatch(/^Making a new recovery key doesn't lock out an old copy\./);
+  expect(within(panel).queryByText(/Changing the password/)).toBeNull();
   expect(LIMIT_WORDS).toMatch(/old copy of this vault's details/);
   expect(LIMIT_WORDS).toMatch(/old password or recovery key/);
   expect(LIMIT_WORDS).toMatch(/current and future items and files/);
@@ -346,10 +348,19 @@ test("wrong_current_password_is_said_and_nothing_changes", async () => {
   const vaults = mine();
   await unlocked(vaults);
   const panel = await openForm();
+  // Empty: said on the box, and focus goes to it.
+  submit(panel);
+  expect(within(panel).getByRole("alert").textContent).toBe(EMPTY);
+  expect(document.activeElement).toBe(within(panel).getByLabelText("Current password"));
   typeInto(panel, WRONG_ONE);
+  within(panel).getByRole("button", { name: "Make a new key" }).focus();
   submit(panel);
   const alert = await within(panel).findByRole("alert");
   expect(alert.textContent).toBe(WRONG_CURRENT);
+  // Focus goes to the box the refusal is about.
+  await waitFor(() => {
+    expect(document.activeElement).toBe(within(panel).getByLabelText("Current password"));
+  });
   // On the field itself, which is empty again.
   expect(within(panel).getByLabelText("Current password").getAttribute("aria-invalid")).toBe("true");
   expect(fields(panel).map((box) => box.value)).toEqual([""]);
@@ -1130,6 +1141,30 @@ test("done_offers_a_fresh_backup", async () => {
   expect(sent("backup_vault")).toEqual([]);
   // The offer is made once: Settings opened again shows the form as new, and no offer is waiting.
   expect(debugState().sessions[0]?.newKey).toBeNull();
+});
+
+test("the_key_screen_starts_on_its_heading_and_the_offers_answer_returns_to_settings", async () => {
+  for (const answer of ["Not now", "Escape"] as const) {
+    fresh();
+    await unlocked();
+    const key = await toTheKey();
+    // 29b: focus is on the screen's heading when the key shows, as on every other step, not left on nothing.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByRole("heading", { level: 1, name: KEY_HEADING }));
+    });
+    await toTheQuestions();
+    pickAllRight(key);
+    const dialog = await screen.findByRole("dialog", { name: OFFER_TITLE });
+    if (answer === "Not now") fireEvent.click(within(dialog).getByRole("button", { name: "Not now" }));
+    else fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: OFFER_TITLE })).toBeNull();
+    });
+    // 29c's answer puts focus back on Settings, which opened the flow.
+    await waitFor(() => {
+      expect(document.activeElement, answer).toBe(within(side()).getByRole("button", { name: "Settings" }));
+    });
+  }
 });
 
 test("ask_2_now_shows_new_recovery_key_for_its_vault", async () => {

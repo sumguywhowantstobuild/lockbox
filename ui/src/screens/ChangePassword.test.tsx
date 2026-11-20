@@ -212,9 +212,10 @@ test("change_password_states_the_backup_limit", async () => {
   await unlocked();
   const panel = await openForm();
   // Existing backups still need the old details, and spec 5.3's limit in full: an old copy of the details with the old password or key reads
-  // current and future items and files, if it gets copies of them.
-  expect(within(panel).getByText(BACKUPS_WORDS)).toBeTruthy();
-  expect(within(panel).getByText(LIMIT_WORDS)).toBeTruthy();
+  // current and future items and files, if it gets copies of them. As 27a draws it: one note, the backup sentence first, then the limit.
+  const note = within(panel).getByRole("note");
+  expect(note.textContent).toBe(`${BACKUPS_WORDS} ${LIMIT_WORDS}`);
+  expect(within(panel).getAllByRole("note")).toHaveLength(1);
   expect(LIMIT_WORDS).toMatch(/old copy of this vault's details/);
   expect(LIMIT_WORDS).toMatch(/old password or recovery key/);
   expect(LIMIT_WORDS).toMatch(/current and future items and files/);
@@ -251,6 +252,95 @@ test("short_or_mismatched_new_password_is_said_on_the_form", async () => {
   submit(panel);
   await screen.findByRole("dialog", { name: OFFER_TITLE });
   expect(sent("change_password")).toHaveLength(1);
+});
+
+test("a_short_new_password_is_said_once", async () => {
+  await unlocked();
+  const panel = await openForm();
+  // Typing shows the rule with its count; once the form says the password is too short, that one line is all there is under the box.
+  typeInto(panel, "New password", "MU-short");
+  expect(within(panel).getByText("At least 12 characters · 8 so far")).toBeTruthy();
+  fill(panel, PASSWORD, "MU-short", "MU-short");
+  submit(panel);
+  expect(within(panel).getAllByText(TOO_SHORT)).toHaveLength(1);
+  expect(within(panel).queryByText(/so far$/)).toBeNull();
+  const box = within(panel).getByLabelText("New password");
+  // The box points at the error alone while it shows.
+  const described = (box.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
+  expect(described).toEqual([TOO_SHORT]);
+  // Typed again, the error goes and the rule with its count comes back.
+  typeInto(panel, "New password", "MU-shorter");
+  expect(within(panel).queryAllByRole("alert")).toEqual([]);
+  expect(within(panel).getByText("At least 12 characters · 10 so far")).toBeTruthy();
+});
+
+test("focus_goes_to_the_box_the_form_is_about", async () => {
+  await unlocked();
+  let panel = await openForm();
+  // A page-side problem: focus moves to the first box that has one, from wherever the Enter was pressed.
+  fill(panel, PASSWORD, "MU-short", "MU-short");
+  within(panel).getByLabelText("New password again").focus();
+  submit(panel);
+  expect(document.activeElement).toBe(within(panel).getByLabelText("New password"));
+  fill(panel, PASSWORD, NEW, NEW_2);
+  within(panel).getByLabelText("Current password").focus();
+  submit(panel);
+  expect(document.activeElement).toBe(within(panel).getByLabelText("New password again"));
+  // The shell's wrong current password: said on Current password, and focus goes there (the box with the error), not left in the last box.
+  fill(panel, WRONG_ONE, NEW);
+  within(panel).getByLabelText("New password again").focus();
+  submit(panel);
+  await within(panel).findByRole("alert");
+  await waitFor(() => {
+    expect(document.activeElement).toBe(within(panel).getByLabelText("Current password"));
+  });
+  // An empty current password is the first box with a problem.
+  fill(panel, "", NEW);
+  within(panel).getByLabelText("New password again").focus();
+  submit(panel);
+  expect(document.activeElement).toBe(within(panel).getByLabelText("Current password"));
+  // The shell's own refusal of the new password (it counts as the engine does) puts focus on New password.
+  shell.refuseNext("change_password", { code: "core", kind: "password_too_short", min: 12 });
+  fill(panel, PASSWORD, NEW);
+  within(panel).getByLabelText("New password again").focus();
+  submit(panel);
+  await within(panel).findByRole("alert");
+  await waitFor(() => {
+    expect(document.activeElement).toBe(within(panel).getByLabelText("New password"));
+  });
+  // A refusal about the form as a whole moves no focus: it stays where the person was.
+  shell.refuseNext("change_password", { code: "io", what: "disk full" });
+  fill(panel, PASSWORD, NEW);
+  const again = within(panel).getByLabelText("New password again");
+  again.focus();
+  submit(panel);
+  await within(panel).findByRole("alert");
+  expect(document.activeElement).toBe(again);
+  // A form opened afresh starts on its heading, as before.
+  fresh();
+  await unlocked();
+  panel = await openForm();
+  expect(document.activeElement).toBe(within(panel).getByRole("heading", { level: 2, name: "Change password" }));
+});
+
+test("the_offers_answer_puts_focus_back_on_settings", async () => {
+  for (const answer of ["Not now", "Escape"] as const) {
+    fresh();
+    await unlocked();
+    const panel = await openForm();
+    fill(panel, PASSWORD, NEW);
+    submit(panel);
+    const dialog = await screen.findByRole("dialog", { name: OFFER_TITLE });
+    if (answer === "Not now") fireEvent.click(within(dialog).getByRole("button", { name: "Not now" }));
+    else fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: OFFER_TITLE })).toBeNull();
+    });
+    // The form and Settings are gone, so focus goes to the button that opened them, not to nothing.
+    await waitFor(() => {
+      expect(document.activeElement, answer).toBe(within(side()).getByRole("button", { name: "Settings" }));
+    });
+  }
 });
 
 test("the_count_matches_the_core_with_combining_and_non_bmp_characters", async () => {

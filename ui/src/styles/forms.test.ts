@@ -20,6 +20,15 @@ test("a_label_with_a_button_beside_it_sits_as_drawn_above_its_box", () => {
   expect(declarationsFor(".flrow .flab")).toMatch(/margin: 0 0 0 2px;/);
 });
 
+test("the_backup_note_on_the_password_forms_is_a_soft_box_as_drawn", () => {
+  // 27a draws the backup sentence and the limit as one paragraph of ordinary weight in a soft box (4C Task 13, V8); high contrast gives it an edge.
+  const note = declarationsFor(".caveat");
+  expect(note).toMatch(/background: var\(--well\);/);
+  expect(note).toMatch(/border: 1px solid transparent;/);
+  expect(note).toMatch(/color: var\(--ink\);/);
+  expect(note).not.toMatch(/font-weight/);
+});
+
 test("the_recovery_key_sits_in_a_soft_grey_box_as_drawn", () => {
   // Found at stage 7 (21c): the key was in a white box with a dark edge; drawn as a soft grey box with a hairline round it.
   const box = declarationsFor(".fu-key");

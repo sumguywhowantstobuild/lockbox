@@ -589,6 +589,10 @@ test("back_from_new_vault_returns_to_the_vault_on_screen", async () => {
   expect(sent("create_vault")).toEqual([]);
   expect(foundOnPage(SECRETS)).toEqual([]);
   expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7, 8]);
+  // Focus goes back to the vault menu's button, which opened the form, not to the page's heading.
+  await waitFor(() => {
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Home, vault menu" }));
+  });
 
   // Escape is Cancel too, and the form opened again starts empty.
   await toTheForm();
@@ -597,6 +601,9 @@ test("back_from_new_vault_returns_to_the_vault_on_screen", async () => {
   fireEvent.change(passwordBox(), { target: { value: TYPED } });
   fireEvent.keyDown(passwordBox(), { key: "Escape" });
   await screen.findByRole("button", { name: "Home, vault menu" });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Home, vault menu" }));
+  });
   expect(foundOnPage(SECRETS)).toEqual([]);
   expect(sent("create_vault")).toEqual([]);
 });

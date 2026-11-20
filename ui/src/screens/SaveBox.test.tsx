@@ -1619,6 +1619,8 @@ test("a_failed_unlock_inside_the_box_keeps_the_copy_and_the_choice", async () =>
   unlockWith(panel, "Archive", "not the password");
   // The reason is said under the field, in the design's words; the field is empty, the box and its choice are as they were, the copy waits.
   expect((await within(panel).findByRole("alert")).textContent).toBe("Wrong password.");
+  // The sentence that says why a password is asked stays beside the refusal (only a counting rule steps aside for its error).
+  expect(within(panel).getByText("A locked vault's folders can't be read until you unlock it.")).toBeTruthy();
   expect(passwordBox(panel, "Archive").value).toBe("");
   expect(vaultBox(panel).textContent).toBe("Archive");
   expect(screen.getByRole("complementary", { name: PAGE_WORDS })).toBe(panel);

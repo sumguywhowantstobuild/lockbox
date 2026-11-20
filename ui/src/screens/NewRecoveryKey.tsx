@@ -7,7 +7,7 @@ import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
 import { Panel } from "../parts/Panel";
 import { PasswordField } from "../parts/PasswordField";
-import { LIMIT, OFFER_TITLE } from "../passwordWords";
+import { LIMIT_NEW_KEY, OFFER_TITLE } from "../passwordWords";
 import { clearNewKeyProblem, closeNewRecoveryKey, finishNewKey, makeNewRecoveryKey, type NewKeyFlow, type SessionData } from "../store";
 
 // A new recovery key (29a, and 29c after it), on the session whose Settings or Ask 2 opened it. The form asks for the current password and says what the new key
@@ -30,6 +30,8 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<NewKeyFlow, { p
   const heading = useRef<HTMLHeadingElement>(null);
   const [current, setCurrent] = useState("");
   const [empty, setEmpty] = useState<string | null>(null);
+  // The box, so a problem about it (empty, or the shell's wrong password) puts focus where the error is, as on 27a.
+  const currentBox = useRef<HTMLInputElement>(null);
   // The field can't be typed in while a key is asked for: what is typed meanwhile would outlive the answer, a refusal's included.
   const sending = flow.sending;
   // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping, even when this vault's own `locked` event has not come) wipes what is typed.
@@ -61,6 +63,7 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<NewKeyFlow, { p
     if (flow.sending) return;
     if (current === "") {
       setEmpty(messageText(messageFor({ code: "invalid_input", what: "password is empty" })));
+      currentBox.current?.focus();
       return;
     }
     setEmpty(null);
@@ -74,6 +77,10 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<NewKeyFlow, { p
   const refusal = flow.problem === null ? null : messageText(messageFor(flow.problem.error));
   const aboutCurrent = flow.problem?.field === "current" ? refusal : null;
   const aboutForm = flow.problem?.field === "form" ? refusal : null;
+  const refusedField = flow.problem?.field ?? null;
+  useEffect(() => {
+    if (refusedField === "current") currentBox.current?.focus();
+  }, [refusedField, flow.problem]);
 
   return (
     <Panel
@@ -98,6 +105,7 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<NewKeyFlow, { p
           look="panel"
           autoComplete="current-password"
           label="Current password"
+          inputRef={currentBox}
           readOnly={sending}
           value={current}
           error={empty ?? aboutCurrent}
@@ -113,8 +121,9 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<NewKeyFlow, { p
           </p>
         )}
       </form>
-      <p className="fhint">{OLD_KEY_STOPS}</p>
-      <p className="fwarn">{LIMIT}</p>
+      <p className="caveat" role="note">
+        {`${OLD_KEY_STOPS} ${LIMIT_NEW_KEY}`}
+      </p>
     </Panel>
   );
 }
@@ -126,22 +135,22 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<NewKeyFlow, { p
  */
 export function NewRecoveryKeyDone({ data }: { data: SessionData }) {
   const later = useRef<HTMLButtonElement>(null);
+  // Not now (or Escape) leaves nothing open, so focus goes back to Settings, which opened the flow. Back up now's panel takes focus itself.
+  const notNow = () => {
+    finishNewKey(data.session, false);
+    focusBack("settings");
+  };
   return (
     <Dialog
       open={data.newKey?.phase === "done"}
       onOpenChange={(open) => {
-        if (!open) finishNewKey(data.session, false);
+        if (!open) notNow();
       }}
       title={OFFER_TITLE}
       description={NEW_KEY_OFFER}
       initialFocus={later}
     >
-      <Button
-        ref={later}
-        onClick={() => {
-          finishNewKey(data.session, false);
-        }}
-      >
+      <Button ref={later} onClick={notNow}>
         Not now
       </Button>
       <Button

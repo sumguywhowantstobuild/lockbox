@@ -390,10 +390,9 @@ test("a_mismatched_confirmation_sends_nothing", async () => {
 test("the_new_password_screen_states_the_backup_limit", async () => {
   await forgot();
   await toNewPassword();
-  // Old backups and old copies still open with the old password, and spec 5.3's limit in full, as 27a says it.
-  expect(screen.getByText(BACKUPS_WORDS)).toBeTruthy();
-  expect(screen.getByText(OLD_COPIES_WORDS)).toBeTruthy();
-  expect(screen.getByText(LIMIT_WORDS)).toBeTruthy();
+  // Old backups and old copies still open with the old password, and spec 5.3's limit in full, as 27a says it: one note, in that order.
+  expect(screen.getByRole("note").textContent).toBe(`${BACKUPS_WORDS} ${OLD_COPIES_WORDS} ${LIMIT_WORDS}`);
+  expect(screen.getAllByRole("note")).toHaveLength(1);
   expect(LIMIT_WORDS).toMatch(/old copy of this vault's details/);
   expect(LIMIT_WORDS).toMatch(/old password or recovery key/);
   expect(LIMIT_WORDS).toMatch(/current and future items and files/);

@@ -1,6 +1,7 @@
 import "@fontsource-variable/geist/index.css";
 import "@fontsource-variable/geist-mono/index.css";
 import { useEffect, useState } from "react";
+import { focusButton } from "./focus";
 import { LockboxParts } from "./parts/LockboxParts";
 import { PortalContainerProvider } from "./parts/Portal";
 import { vaultLook } from "./parts/Pattern";
@@ -46,6 +47,12 @@ import "./styles/components.css";
 import "./styles/short-window.css";
 import "./styles/high-contrast.css";
 import "./styles/print.css";
+
+/** Cancel or Escape on the new vault's form inside the window: the window that was on screen is back, and focus goes to the vault menu that opened the form. */
+function leaveNewVaultToMenu(): void {
+  leaveNewVault();
+  focusButton(".vhead");
+}
 
 /**
  * The whole app: first-time setup while there is no vault, the lost-list screen while the list of vaults is damaged, the lock screen while none is open, the main window of the
@@ -95,7 +102,7 @@ export default function App() {
     // A vault whose recovery key was not typed back yet shows that step and nothing of the vault (21c, 21d, 21f, and 29b for a key asked for from Settings).
     // Keyed by session: switching to another vault unmounts this one's window, so a form left behind sends nothing and its typed text is gone. The unlock step of
     // another vault, and the form of a new vault, are keyed by their opening, so a step opened again starts empty.
-    if (newVault !== null) screen = <CreateVault key={`new-${String(newVault.opening)}`} inside onBack={leaveNewVault} />;
+    if (newVault !== null) screen = <CreateVault key={`new-${String(newVault.opening)}`} inside onBack={leaveNewVaultToMenu} />;
     else if (addFolder?.phase === "cloud") screen = <AddFolderStep key={String(addFolder.opening)} step={addFolder} />;
     else if (unlockStep !== null) screen = <UnlockStep key={String(unlockStep.opening)} step={unlockStep} />;
     else if (active.recovery === null) {

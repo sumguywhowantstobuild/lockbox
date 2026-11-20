@@ -108,6 +108,12 @@ body {
   stroke-linejoin: round;
 }
 
+/* A password is shown only through Lockbox's own Show buttons: WebView2's reveal eye and clear cross never appear in a box. */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .app *,
   .layer,

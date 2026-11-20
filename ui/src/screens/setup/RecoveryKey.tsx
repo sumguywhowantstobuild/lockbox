@@ -73,7 +73,8 @@ export function RecoveryKey({ data }: { data: SessionData }) {
 
   if (step.phase !== "show") return null;
   const { key, unfinished, voluntary, missed } = step;
-  const back = step.back === true;
+  // The heading takes focus when the key comes back after the questions, and when 29b replaces the New recovery key panel (whose button went with it).
+  const back = step.back === true || voluntary;
   // A key made for a vault that already exists (29b) has its own headings and no setup step line; 21c and 21f keep theirs.
   const title = voluntary ? NEW_KEY_HEADING : unfinished ? "Finish your recovery key" : "Save your recovery key";
   const words = wordsOf(key);

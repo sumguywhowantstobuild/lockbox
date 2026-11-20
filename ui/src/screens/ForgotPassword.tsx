@@ -264,9 +264,9 @@ function Steps({ flow }: { flow: Flow }) {
             {aboutForm}
           </p>
         )}
-        <p className="fu-hint">{BACKUPS_NEED_OLD_DETAILS}</p>
-        <p className="fu-hint">{OLD_COPIES_NEED_OLD_PASSWORD}</p>
-        <p className="fu-lose">{LIMIT}</p>
+        <p className="caveat" role="note">
+          {`${BACKUPS_NEED_OLD_DETAILS} ${OLD_COPIES_NEED_OLD_PASSWORD} ${LIMIT}`}
+        </p>
         <div className="fu-row">
           <button type="submit" className="prim" aria-disabled={sending ? true : undefined}>
             Set new password

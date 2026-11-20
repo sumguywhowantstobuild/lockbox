@@ -46,6 +46,10 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<PasswordChange,
   const [next, setNext] = useState("");
   const [again, setAgain] = useState("");
   const [problems, setProblems] = useState<Problems>(NONE);
+  // The boxes, so focus can go to the one a problem is about (a keyboard or screen reader user starts where the error is).
+  const currentBox = useRef<HTMLInputElement>(null);
+  const nextBox = useRef<HTMLInputElement>(null);
+  const againBox = useRef<HTMLInputElement>(null);
   // The fields can't be typed in while a change is out: what is typed meanwhile would outlive the answer, a refusal's included.
   const sending = flow.sending;
   // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping, even when this vault's own `locked` event has not come) wipes what is typed.
@@ -83,7 +87,11 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<PasswordChange,
       again: next !== again ? MISMATCH : null,
     };
     setProblems(found);
-    if (found.current !== null || found.next !== null || found.again !== null) return;
+    const first = found.current !== null ? currentBox : found.next !== null ? nextBox : found.again !== null ? againBox : null;
+    if (first !== null) {
+      first.current?.focus();
+      return;
+    }
     // The passwords go once, and are gone from here as they go: the fields are empty whatever comes back.
     const sentCurrent = current;
     const sentNext = next;
@@ -101,6 +109,12 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<PasswordChange,
   const mended = () => {
     if (flow.problem !== null) clearPasswordProblem(session);
   };
+  // A refusal of the shell about a box puts focus on that box once it is said (the boxes are empty again by then).
+  const refusedField = flow.problem?.field ?? null;
+  useEffect(() => {
+    if (refusedField === "current") currentBox.current?.focus();
+    else if (refusedField === "new") nextBox.current?.focus();
+  }, [refusedField, flow.problem]);
 
   return (
     <Panel
@@ -125,6 +139,7 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<PasswordChange,
           look="panel"
           autoComplete="current-password"
           label="Current password"
+          inputRef={currentBox}
           readOnly={sending}
           value={current}
           error={problems.current ?? aboutCurrent}
@@ -138,6 +153,7 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<PasswordChange,
           look="panel"
           autoComplete="new-password"
           label="New password"
+          inputRef={nextBox}
           readOnly={sending}
           rule="At least 12 characters."
           minimum={MIN_PASSWORD}
@@ -153,6 +169,7 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<PasswordChange,
           look="panel"
           autoComplete="new-password"
           label="New password again"
+          inputRef={againBox}
           readOnly={sending}
           value={again}
           error={problems.again}
@@ -167,8 +184,9 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<PasswordChange,
           </p>
         )}
       </form>
-      <p className="fhint">{BACKUPS_NEED_OLD_DETAILS}</p>
-      <p className="fwarn">{LIMIT}</p>
+      <p className="caveat" role="note">
+        {`${BACKUPS_NEED_OLD_DETAILS} ${LIMIT}`}
+      </p>
     </Panel>
   );
 }
@@ -180,11 +198,16 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<PasswordChange,
  */
 export function ChangePasswordDone({ data }: { data: SessionData }) {
   const later = useRef<HTMLButtonElement>(null);
+  // Not now (or Escape) leaves nothing open, so focus goes back to Settings, which opened the flow. Back up now's panel takes focus itself.
+  const notNow = () => {
+    finishPasswordChange(data.session, false);
+    focusBack("settings");
+  };
   return (
     <Dialog
       open={data.passwordChange?.phase === "done"}
       onOpenChange={(open) => {
-        if (!open) finishPasswordChange(data.session, false);
+        if (!open) notNow();
       }}
       title={OFFER_TITLE}
       description={OFFER}
@@ -192,9 +215,7 @@ export function ChangePasswordDone({ data }: { data: SessionData }) {
     >
       <Button
         ref={later}
-        onClick={() => {
-          finishPasswordChange(data.session, false);
-        }}
+        onClick={notNow}
       >
         Not now
       </Button>

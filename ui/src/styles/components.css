@@ -2538,6 +2538,19 @@
   overflow-wrap: anywhere;
 }
 
+/* What a password or key change leaves as it was (27a, 28d, 29a): the backup sentence and spec 5.3's limit as one paragraph in a soft box, as drawn. The
+   transparent edge shows in high contrast, where the fill is dropped. */
+.caveat {
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--well);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 /* A sentence in the panel that has to be read before something is deleted (the originals stay; keep the files that did not go in). */
 .fwarn {
   margin: 12px 2px 0;
