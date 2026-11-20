@@ -288,6 +288,10 @@ test("a_folder_in_a_cloud_folder_asks_and_cancel_goes_back_to_what_do_you_have",
   shell.cloudNext();
   press("A vault folder");
   await heading("This folder is synced to the cloud");
+  // Stage 7's S1: the safe answer has the focus, and the step's own heading focus doesn't take it back.
+  await waitFor(() => {
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Choose another" }));
+  });
   press("Cancel");
   await heading("What do you have?");
   shell.cloudNext();

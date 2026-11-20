@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../../App";
 import { messageFor, messageText } from "../../messages";
@@ -846,6 +846,22 @@ test("cloud_folder_asks_before_creating", async () => {
   const sent = shell.calls.filter((call) => call.cmd === "create_vault_confirm");
   expect(sent).toHaveLength(1);
   expect(sent[0]?.args).toEqual({ token: expect.stringMatching(/^create-token-/) as unknown });
+});
+
+test("the_first_screens_cloud_question_takes_focus_to_choose_another_and_is_read_with_it", async () => {
+  start([]);
+  await toTheForm();
+  fill();
+  shell.cloudNext();
+  click("Create vault");
+  await screen.findByRole("heading", { level: 1, name: "This folder is synced to the cloud" });
+  // Stage 7's S1: the safe answer has the focus, so an extra Enter never makes the vault in a cloud folder.
+  const safe = screen.getByRole("button", { name: "Choose another" });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(safe);
+  });
+  const described = safe.getAttribute("aria-describedby") ?? "";
+  expect(document.getElementById(described)?.textContent).toContain("Lockbox doesn't support vaults in cloud folders.");
 });
 
 test("cloud_folder_choose_another_asks_for_the_picker", async () => {

@@ -439,23 +439,41 @@ test("a_cloud_folder_that_is_confirmed_makes_the_vault_with_the_token", async ()
   expect(foundOnPage([NEW])).toEqual([]);
 });
 
-// The warning replaces the form on the same screen, so the button that was pressed is gone: focus goes to Continue anyway (the screen reader reads its name, and the
-// warning, which the button is described by), and back to the password box on the way back, which is where the person types again.
-test("the_cloud_warning_takes_focus_to_continue_anyway_and_is_read_with_it", async () => {
+// The warning replaces the form on the same screen, so the button that was pressed is gone: focus goes to the safe answer, Choose another (stage 7's S1: an extra
+// Enter must not make the vault in a cloud folder), which the warning describes so a screen reader reads both; back to the password box on the way back.
+test("the_cloud_warning_takes_focus_to_choose_another_and_is_read_with_it", async () => {
   await unlocked([vault(7, "My vault")]);
   await toTheForm();
   fill("Home", NEW);
   shell.cloudNext();
   create();
   await cloudWarning();
-  const go = screen.getByRole("button", { name: "Continue anyway" });
+  const safe = screen.getByRole("button", { name: "Choose another" });
   await waitFor(() => {
-    expect(document.activeElement).toBe(go);
+    expect(document.activeElement).toBe(safe);
   });
   // The warning is read with the button: it is the button's description.
-  const described = go.getAttribute("aria-describedby") ?? "";
+  const described = safe.getAttribute("aria-describedby") ?? "";
   expect(described).not.toBe("");
   expect(document.getElementById(described)?.textContent).toBe(CLOUD_WARNING);
+  // Pressing it is Choose another, never the vault in the cloud folder.
+  fireEvent.click(safe);
+  await screen.findByRole("button", { name: "Continue" });
+  expect(sent("create_vault_confirm")).toEqual([]);
+});
+
+test("the_cloud_question_of_an_add_from_the_menu_takes_focus_to_its_safe_answer", async () => {
+  await unlocked([vault(7, "My vault")]);
+  shell.offerExisting(vault(9, "Old vault"));
+  shell.cloudNext();
+  await chooseAction("Add existing vault folder");
+  await screen.findByRole("heading", { level: 1, name: "This folder is synced to the cloud" });
+  const safe = screen.getByRole("button", { name: "Choose another" });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(safe);
+  });
+  const described = safe.getAttribute("aria-describedby") ?? "";
+  expect(document.getElementById(described)?.textContent).toContain("Lockbox doesn't support vaults in cloud folders.");
 });
 
 test("cancel_and_choose_another_on_the_cloud_warning_give_focus_to_the_password_box", async () => {

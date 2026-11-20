@@ -77,15 +77,16 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
   useEffect(() => {
     if (inside) nameBox.current?.focus();
   }, [inside]);
-  // 18c replaces the form on the same screen (inside), so the button that was pressed is gone and focus would drop to the page: it goes to Continue anyway, which is
-  // described by the warning so a screen reader reads both, and back to the password box on the way back, where the person types again.
+  // 18c replaces the form on the same screen (inside), so the button that was pressed is gone and focus would drop to the page: it goes to the safe answer, Choose
+  // another (stage 7's S1: an extra Enter must never make the vault in a cloud folder), which is described by the warning so a screen reader reads both, and back to
+  // the password box on the way back, where the person types again.
   const warningId = useId();
-  const continueAnyway = useRef<HTMLButtonElement>(null);
+  const safeAnswer = useRef<HTMLButtonElement>(null);
   const warning = inside && token !== null;
   // Set when the person leaves the warning (any of its three buttons): the form that comes back focuses its password box as it appears.
   const [leftWarning, setLeftWarning] = useState(false);
   useEffect(() => {
-    if (warning && !busy) continueAnyway.current?.focus();
+    if (warning && !busy) safeAnswer.current?.focus();
   }, [warning, busy]);
   const back = () => {
     if (busy) return;
@@ -180,9 +181,11 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
             {/* Where the path was drawn, the folder's place in words, as 18b says it: the page never has the path. */}
             <span className="fu-hint fu-where">{asked?.picked === true ? IN_THE_PICKED_FOLDER : IN_THE_USUAL_FOLDER}</span>
             <button
+              ref={safeAnswer}
               type="button"
               className="lnk"
               disabled={busy}
+              aria-describedby={warningId}
               onClick={() => {
                 setLeftWarning(true);
                 setChooseFolder(true);
@@ -198,11 +201,9 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
         </div>
         <div className="fu-row">
           <button
-            ref={continueAnyway}
             type="button"
             className="prim"
             disabled={busy}
-            aria-describedby={warningId}
             onClick={() => {
               setLeftWarning(true);
               void go(() => confirmCreateVault(token));
