@@ -501,7 +501,7 @@ is kept until that cleanup has worked); the existing vault is untouched. A journ
   (`app_data_dir()`, `%APPDATA%\<identifier>`, `%LOCALAPPDATA%\<identifier>`), which the uninstaller can delete, and
   never in the Roaming profile (tested).
 - **Vault registry:** the list of known vault locations is kept in `%LOCALAPPDATA%\Lockbox\vaults.json` (locations
-  only, no secrets). "Add existing vault folder" adds one.
+  and each vault's last-known name, which the lock screen shows anyway; no secrets). "Add existing vault folder" adds one.
 - For writable sessions, `.lock` is held with an **OS exclusive file lock** (`LockFileEx`) while the vault is open. A stale `.lock` without a
   held lock (after a crash) is ignored and re-locked.
 - **Supported:** local, fixed NTFS drives. **Refused in v1:** removable drives (drives Windows reports as removable,

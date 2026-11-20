@@ -1,9 +1,11 @@
 //! The vault list (spec §6.10): the folders of the vaults Lockbox knows, in `vaults.json` in the state folder.
-//! Locations only, no secrets: `{ "version": 2, "list": <u64>, "last_id": <u32>, "vaults": [ { "id": <u32>, "path":
-//! "<absolute>" } ] }`. `list` is the list's own random identity and `last_id` the highest ID the list ever gave, so an
-//! ID is never given twice within a list, and a row of an older list (before "Start a new list") names nothing on a new
-//! one. The page names a vault by [`VaultRef`] (the identity and the ID); its path never leaves Rust. Version 1 (no
-//! identity, no mark) is read, and rewritten as version 2 at its first read.
+//! Locations and names only, no secrets: `{ "version": 2, "list": <u64>, "last_id": <u32>, "vaults": [ { "id": <u32>,
+//! "path": "<absolute>", "name": "<last-known name>" } ] }`; a row's `name` is optional (a row never named has none, and
+//! so has every row an older build wrote) and is the vault's name from its header, kept so a row whose folder is gone
+//! still says which vault it is. `list` is the list's own random identity and `last_id` the highest ID the list ever
+//! gave, so an ID is never given twice within a list, and a row of an older list (before "Start a new list") names
+//! nothing on a new one. The page names a vault by [`VaultRef`] (the identity and the ID); its path never leaves Rust.
+//! Version 1 (no identity, no mark) is read, and rewritten as version 2 at its first read.
 
 use std::fmt;
 use std::io;
@@ -129,11 +131,34 @@ struct WrittenFile<'a> {
     vaults: &'a [Stored],
 }
 
+/// A row as `vaults.json` holds it. No `Debug`: a path and a name must not reach a log (R5).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
     id: u32,
     path: PathBuf,
+    /// The vault's last-known name, from its header: kept so a row whose folder is gone (a drive taken away) still
+    /// says which vault it is. Not secret (the lock screen shows it before any password); absent for a row that was
+    /// never named (the folder held no readable header) and in every file written before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+/// The most characters of a vault's name the engine keeps (`lockbox-core`'s naming rule).
+const MAX_NAME_CHARS: usize = 200;
+
+/// Whether `name` is one the engine keeps: something besides spaces, at most [`MAX_NAME_CHARS`] characters.
+fn is_keepable_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.chars().count() <= MAX_NAME_CHARS
+}
+
+/// A name a vault's header gave for a row that differs from the one the row kept, to be written if the row still keeps
+/// `before` when it is written (see [`Registry::keep_names`]). No `Debug`: a path and a name must not reach a log (R5).
+struct SampledName {
+    id: u32,
+    path: PathBuf,
+    before: Option<String>,
+    name: String,
 }
 
 /// The list as read and checked. `list` is `None` only when there is no file yet: the first add draws one.
@@ -180,33 +205,60 @@ impl Registry {
     /// Every vault on the list, in the order they were added. A damaged list is refused
     /// (`Core(Damaged { what: "vault list" })`), never shown as empty.
     pub fn list(&self) -> ShellResult<Vec<VaultEntry>> {
+        let (list, entries, sampled) = self.sample_list()?;
+        if let Some(list) = list {
+            self.keep_names(list, &sampled);
+        }
+        Ok(entries)
+    }
+
+    /// The first half of [`list`](Self::list): reads the list, then each folder's header, and answers the list's
+    /// identity (`None` for an empty list, which has no entry to carry one), the entries, and the names the headers
+    /// gave that differ from the ones kept, each with the kept name it was compared with.
+    fn sample_list(&self) -> ShellResult<(Option<u64>, Vec<VaultEntry>, Vec<SampledName>)> {
         let Loaded { list, vaults, .. } = self.load()?;
-        // An empty list has no entry to carry an identity.
         let Some(list) = list else {
-            return Ok(Vec::new());
+            return Ok((None, Vec::new(), Vec::new()));
         };
-        Ok(vaults
-            .into_iter()
+        let mut sampled = Vec::new();
+        let entries = vaults
+            .iter()
             .map(|stored| {
-                self.entry(
-                    VaultRef {
-                        list,
+                let vault = VaultRef {
+                    list,
+                    id: stored.id,
+                };
+                let (entry, header_name) =
+                    self.read_entry(vault, &stored.path, stored.name.as_deref());
+                if let Some(name) = header_name.filter(|name| stored.name.as_ref() != Some(name)) {
+                    sampled.push(SampledName {
                         id: stored.id,
-                    },
-                    &stored.path,
-                )
+                        path: stored.path.clone(),
+                        before: stored.name.clone(),
+                        name,
+                    });
+                }
+                entry
             })
-            .collect())
+            .collect();
+        Ok((Some(list), entries, sampled))
     }
 
     /// Adds the vault folder `path` (canonical: a local drive's verbatim path, `\\?\C:\..`) and returns its place on the
     /// list; a folder already on the list keeps its ID. A new ID is one more than the highest the list ever gave
     /// (`last_id`), saved in the same write. `TooLarge` once the list holds [`MAX_VAULTS`], or when it would grow
     /// larger than it can be read back. A damaged list is refused and left as it is.
+    ///
+    /// A new row keeps the vault's name, read from its header (none when the header cannot be read). A folder already
+    /// listed is left as it is: its kept name is brought up to date by [`entry`](Self::entry) and
+    /// [`list`](Self::list), which only write a name over the one they read, so a sample taken here, before the lock,
+    /// could never overwrite a newer name.
     pub fn add(&self, path: &Path) -> ShellResult<VaultRef> {
         if !on_local_drive(path) || path.to_str().is_none() {
             return Err(ShellError::InvalidInput { what: "folder" });
         }
+        // Read before the list's lock is taken: a header on a slow drive must not hold the list.
+        let name = read_vault_name(path).ok().filter(|n| is_keepable_name(n));
         let edit = lock(&self.edits);
         let Loaded {
             list,
@@ -231,6 +283,7 @@ impl Registry {
         vaults.push(Stored {
             id,
             path: path.to_path_buf(),
+            name,
         });
         self.save(list, id, &vaults)?;
         Ok(VaultRef { list, id })
@@ -254,6 +307,69 @@ impl Registry {
             .ok_or(ShellError::NotFound)?;
         vaults.remove(at);
         self.save(vault.list, last_id, &vaults)
+    }
+
+    /// Keeps `name` as the last-known name of the vault `id` whose folder is `path` (a rename that is in effect). The
+    /// row is found, under the list's lock, by its ID and its folder together: an ID that a new list (after "Start a
+    /// new list") gave to another folder is `NotFound`, and that row is left alone. The caller treats a failure as best
+    /// effort: `NotFound`, `InvalidInput` for a name the list would not read back, and the write's own error; the next
+    /// [`list`](Self::list) brings the name up to date from the header anyway.
+    pub fn remember_name(&self, id: u32, path: &Path, name: &str) -> ShellResult<()> {
+        if !is_keepable_name(name) {
+            return Err(ShellError::InvalidInput { what: "vault name" });
+        }
+        let edit = lock(&self.edits);
+        let Loaded {
+            list,
+            last_id,
+            mut vaults,
+        } = self.load_locked(&edit)?;
+        let list = list.ok_or(ShellError::NotFound)?;
+        let row = vaults
+            .iter_mut()
+            .find(|v| v.id == id && same_path(&v.path, path))
+            .ok_or(ShellError::NotFound)?;
+        if row.name.as_deref() == Some(name) {
+            return Ok(());
+        }
+        row.name = Some(name.to_owned());
+        self.save(list, last_id, &vaults)
+    }
+
+    /// Writes the names `sampled` into the file, best effort, as a compare-and-swap: the list is read again under the
+    /// lock and a sample is written only into the row with its ID and folder whose kept name is still the one the
+    /// sample was compared with. A row removed, one that now names another folder, and one whose name changed since the
+    /// header was read (a rename landed in between) are left alone, so an older sample never overwrites a newer name; a
+    /// write that fails changes no answer and the next list tries again.
+    fn keep_names(&self, list: u64, sampled: &[SampledName]) {
+        if sampled.is_empty() {
+            return;
+        }
+        let edit = lock(&self.edits);
+        let Ok(Loaded {
+            list: now,
+            last_id,
+            mut vaults,
+        }) = self.load_locked(&edit)
+        else {
+            return;
+        };
+        if now != Some(list) {
+            return;
+        }
+        let mut written = false;
+        for sample in sampled {
+            let row = vaults
+                .iter_mut()
+                .find(|v| v.id == sample.id && same_path(&v.path, &sample.path));
+            if let Some(row) = row.filter(|row| row.name == sample.before) {
+                row.name = Some(sample.name.clone());
+                written = true;
+            }
+        }
+        if written {
+            let _ = self.save(list, last_id, &vaults);
+        }
     }
 
     /// Starts the vault list over when it is damaged (the first screen's "Start a new list", Ask 12): the damaged file
@@ -344,19 +460,62 @@ impl Registry {
         room_for_one(&self.load()?.vaults)
     }
 
-    /// One vault as the page lists it: the row `vault` and its folder `path`.
+    /// One vault as the page lists it: the row `vault` and its folder `path`. Its name is the header's when that can be
+    /// read, else the name the list kept; a header name that differs from the kept one is written (best effort).
     pub fn entry(&self, vault: VaultRef, path: &Path) -> VaultEntry {
-        let name = read_vault_name(path).ok();
+        let (entry, sampled) = self.sample_entry(vault, path);
+        if let Some(sampled) = sampled {
+            self.keep_names(vault.list, &[sampled]);
+        }
+        entry
+    }
+
+    /// The first half of [`entry`](Self::entry): the entry, and the header's name when it differs from the kept one.
+    fn sample_entry(&self, vault: VaultRef, path: &Path) -> (VaultEntry, Option<SampledName>) {
+        let kept = self
+            .load()
+            .ok()
+            .filter(|loaded| loaded.list == Some(vault.list))
+            .and_then(|loaded| {
+                loaded
+                    .vaults
+                    .into_iter()
+                    .find(|v| v.id == vault.id && same_path(&v.path, path))
+            })
+            .and_then(|v| v.name);
+        let (entry, header_name) = self.read_entry(vault, path, kept.as_deref());
+        let sampled = header_name
+            .filter(|name| kept.as_ref() != Some(name))
+            .map(|name| SampledName {
+                id: vault.id,
+                path: path.to_path_buf(),
+                before: kept,
+                name,
+            });
+        (entry, sampled)
+    }
+
+    /// The entry for a row, and the name its header gave when that is one the list can keep. `kept` is the row's kept
+    /// name, shown when the header gives none.
+    fn read_entry(
+        &self,
+        vault: VaultRef,
+        path: &Path,
+        kept: Option<&str>,
+    ) -> (VaultEntry, Option<String>) {
+        let header_name = read_vault_name(path).ok();
         // Damaged is what the engine says of the header files (corrupt or too large, every copy that is there): not a
         // folder with no vault in it, and not a header another program is holding or the disk would not give up.
-        let details_damaged = name.is_none() && header_is_damaged(path);
-        VaultEntry {
+        let details_damaged = header_name.is_none() && header_is_damaged(path);
+        let keepable = header_name.clone().filter(|name| is_keepable_name(name));
+        let entry = VaultEntry {
             list: vault.list,
             id: vault.id,
-            name,
+            name: header_name.or_else(|| kept.map(str::to_owned)),
             available: self.volumes.exists(path).unwrap_or(false),
             details_damaged,
-        }
+        };
+        (entry, keepable)
     }
 
     /// [`load_locked`](Self::load_locked) under the list's own lock, for a caller that holds none.
@@ -394,6 +553,9 @@ impl Registry {
             && ids.len() == vaults.len()
             && ids.first().is_none_or(|&lowest| lowest >= 1)
             && vaults.iter().all(|v| on_local_drive(&v.path))
+            && vaults
+                .iter()
+                .all(|v| v.name.as_deref().is_none_or(is_keepable_name))
             && list.is_none_or(|list| (1..=MAX_LIST).contains(&list))
             && (list.is_none() || last_id >= highest);
         if !valid {
@@ -452,7 +614,9 @@ mod tests {
     use std::fs;
 
     use lockbox_core::internals::fsio::testutil::TempDir;
-    use lockbox_core::internals::header::{HEADER_BACKUP, HEADER_FILE};
+    use lockbox_core::internals::header::{
+        HEADER_BACKUP, HEADER_FILE, parse_header, serialize_header,
+    };
     use serde_json::json;
 
     use super::*;
@@ -596,6 +760,7 @@ mod tests {
                 .map(|at| Stored {
                     id: at as u32 + 1,
                     path: long(at),
+                    name: None,
                 })
                 .collect::<Vec<_>>();
             let file = WrittenFile {
@@ -651,7 +816,8 @@ mod tests {
         .map(|path| json!({ "version": 1, "vaults": [ { "id": 1, "path": path } ] }).to_string());
         for text in [
             json!({ "version": 1, "vaults": [], "extra": 1 }).to_string(), // unknown field
-            json!({ "version": 1, "vaults": [ { "id": 1, "path": a, "name": "x" } ] }).to_string(),
+            json!({ "version": 1, "vaults": [ { "id": 1, "path": a, "nickname": "x" } ] })
+                .to_string(),
             json!({ "version": 2, "vaults": [] }).to_string(), // no identity, no mark
             json!({ "version": 2, "last_id": 0, "vaults": [] }).to_string(),
             json!({ "version": 2, "list": 5, "vaults": [] }).to_string(),
@@ -1061,6 +1227,347 @@ mod tests {
         );
         assert!(!details_damaged(&good));
         assert!(details_damaged(&bad));
+    }
+
+    // ---- Each row keeps the vault's last-known name (Plan 4C, Task 9b) ----
+
+    /// A new vault named `name` in `parent`, closed: its canonical folder.
+    fn new_vault(parent: &Path, name: &str) -> PathBuf {
+        heavy(|| {
+            let created =
+                lockbox_core::Vault::create(parent, name, "correct horse battery").unwrap();
+            fs::canonicalize(created.vault.dir()).unwrap()
+        })
+    }
+
+    /// Changes the vault's name in both header files, outside Lockbox.
+    fn rename_outside(dir: &Path, name: &str) {
+        let mut header = parse_header(&fs::read(dir.join(HEADER_FILE)).unwrap()).unwrap();
+        header.name = name.to_owned();
+        let bytes = serialize_header(&header);
+        fs::write(dir.join(HEADER_FILE), &bytes).unwrap();
+        fs::write(dir.join(HEADER_BACKUP), &bytes).unwrap();
+    }
+
+    /// The `name` each row of the file holds (`None`: the row has none), in file order.
+    fn kept_names(registry: &Registry) -> Vec<Option<String>> {
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&registry.file).unwrap()).unwrap();
+        written["vaults"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| row["name"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    fn some(name: &str) -> Option<String> {
+        Some(name.to_owned())
+    }
+
+    #[test]
+    fn the_list_keeps_each_vaults_name_and_shows_it_when_the_folder_is_gone() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let (home, work) = (new_vault(&vaults, "Home"), new_vault(&vaults, "Work"));
+        let list = registry.add(&home).unwrap().list;
+        registry.add(&work).unwrap();
+        // Written when each was added, and in the same place as its path.
+        assert_eq!(kept_names(&registry), [some("Home"), some("Work")]);
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&registry.file).unwrap()).unwrap();
+        assert_eq!(
+            written["vaults"][0],
+            json!({ "id": 1, "path": home, "name": "Home" })
+        );
+
+        // Work's folder goes (its drive is gone): the row still says its name.
+        let away = temp.path().join("away");
+        fs::create_dir(&away).unwrap();
+        fs::rename(&work, away.join("work")).unwrap();
+        assert_eq!(
+            registry.list(),
+            Ok(vec![
+                entry(list, 1, Some("Home"), true),
+                entry(list, 2, Some("Work"), false)
+            ])
+        );
+        // `entry` (the row of a vault just added) says the same.
+        assert_eq!(
+            registry.entry(VaultRef { list, id: 2 }, &work),
+            entry(list, 2, Some("Work"), false)
+        );
+        // The name is kept: it is written once, not rewritten at each read.
+        assert_eq!(kept_names(&registry), [some("Home"), some("Work")]);
+
+        // A folder with no vault in it has no name to keep, and its row has none.
+        let plain = folder(&temp, "plain");
+        registry.add(&plain).unwrap();
+        assert_eq!(kept_names(&registry)[2], None);
+        assert_eq!(registry.list().unwrap()[2].name, None);
+    }
+
+    /// Adding a folder that is already listed writes nothing (a name read before the list's lock could be older than the
+    /// one kept); the row's `entry`, which the add's answer uses, brings the kept name up to date when the header can
+    /// be read, and keeps it when it cannot.
+    #[test]
+    fn adding_a_listed_folder_again_writes_nothing_and_its_entry_refreshes_the_name() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let home = new_vault(&vaults, "Home");
+        let first = registry.add(&home).unwrap();
+        rename_outside(&home, "Home 2");
+        let before = fs::read(&registry.file).unwrap();
+        assert_eq!(registry.add(&home), Ok(first), "the same row");
+        assert_eq!(fs::read(&registry.file).unwrap(), before, "nothing written");
+        assert_eq!(kept_names(&registry), [some("Home")]);
+        assert_eq!(registry.entry(first, &home).name.as_deref(), Some("Home 2"));
+        assert_eq!(kept_names(&registry), [some("Home 2")]);
+        fs::write(home.join(HEADER_FILE), b"damaged").unwrap();
+        fs::write(home.join(HEADER_BACKUP), b"damaged").unwrap();
+        assert_eq!(registry.add(&home), Ok(first));
+        assert_eq!(registry.entry(first, &home).name.as_deref(), Some("Home 2"));
+        assert_eq!(kept_names(&registry), [some("Home 2")], "kept");
+    }
+
+    /// A header name read before a rename landed never overwrites the rename: a sample is written only into a row that
+    /// still keeps the name it was compared with. The two halves are run apart, with the rename between them, as a list
+    /// read that is still going when a rename lands would run them.
+    #[test]
+    fn a_name_read_before_a_rename_never_overwrites_it() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let home = new_vault(&vaults, "Home");
+        let row = registry.add(&home).unwrap();
+        rename_outside(&home, "Home 2");
+
+        // A list read: it sees the header's "Home 2" against the kept "Home".
+        let (list, _, sampled) = registry.sample_list().unwrap();
+        assert_eq!(
+            sampled.len(),
+            1,
+            "the header's name differs from the kept one"
+        );
+        // A rename lands before the list read writes its sample.
+        assert_eq!(registry.remember_name(1, &home, "Home 3"), Ok(()));
+        registry.keep_names(list.unwrap(), &sampled);
+        assert_eq!(kept_names(&registry), [some("Home 3")], "the rename stays");
+
+        // The same for one row's entry.
+        let (_, sampled) = registry.sample_entry(row, &home);
+        let sampled = sampled.expect("the header's name differs from the kept one");
+        assert_eq!(registry.remember_name(1, &home, "Home 4"), Ok(()));
+        registry.keep_names(row.list, &[sampled]);
+        assert_eq!(kept_names(&registry), [some("Home 4")], "the rename stays");
+
+        // Nothing in between: the same sample is written.
+        let (_, sampled) = registry.sample_entry(row, &home);
+        registry.keep_names(row.list, &[sampled.expect("it differs")]);
+        assert_eq!(kept_names(&registry), [some("Home 2")], "written");
+    }
+
+    /// Ask 8's row: both header copies are damaged, so the folder gives no name, and the row says the kept one.
+    #[test]
+    fn an_unreadable_header_shows_the_kept_name() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let home = new_vault(&vaults, "Home");
+        let list = registry.add(&home).unwrap().list;
+        fs::write(home.join(HEADER_FILE), b"damaged").unwrap();
+        fs::write(home.join(HEADER_BACKUP), b"damaged").unwrap();
+        assert_eq!(
+            registry.list(),
+            Ok(vec![VaultEntry {
+                details_damaged: true,
+                ..entry(list, 1, Some("Home"), true)
+            }])
+        );
+        assert_eq!(kept_names(&registry), [some("Home")]);
+    }
+
+    #[test]
+    fn a_list_read_refreshes_a_kept_name_that_changed_outside() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let (home, work) = (new_vault(&vaults, "Home"), new_vault(&vaults, "Work"));
+        let list = registry.add(&home).unwrap().list;
+        registry.add(&work).unwrap();
+        rename_outside(&home, "Home, renamed");
+        // The answer is the header's name, and the file is brought up to date; the other row is left as it was.
+        assert_eq!(
+            registry.list(),
+            Ok(vec![
+                entry(list, 1, Some("Home, renamed"), true),
+                entry(list, 2, Some("Work"), true)
+            ])
+        );
+        assert_eq!(kept_names(&registry), [some("Home, renamed"), some("Work")]);
+        // Ids, paths and the list's identity are as they were.
+        assert_eq!(registry.entries(), vec![(1, home), (2, work)]);
+        assert_eq!(identity(&registry), list);
+    }
+
+    #[test]
+    fn a_row_without_a_name_reads_and_one_too_long_or_blank_is_damaged() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let base = fs::canonicalize(temp.path()).unwrap();
+        let a = base.join("a");
+        let file = |name: serde_json::Value| {
+            json!({ "version": 2, "list": 5, "last_id": 1,
+                    "vaults": [ { "id": 1, "path": a, "name": name } ] })
+            .to_string()
+        };
+
+        // Every file written before this task has rows without a name, and reads.
+        let without = json!({ "version": 2, "list": 5, "last_id": 1,
+                              "vaults": [ { "id": 1, "path": a } ] })
+        .to_string();
+        write_list(&registry, without.as_bytes());
+        assert_eq!(registry.list(), Ok(vec![entry(5, 1, None, false)]));
+        // 200 characters of any width are kept, as the engine keeps them; spaces round a name too.
+        let mut fine = 0;
+        for name in ["é".repeat(200), "x".repeat(200), " Home ".to_owned()] {
+            write_list(&registry, file(json!(name)).as_bytes());
+            let listed = registry.list().expect("a name the engine keeps reads");
+            assert_eq!(listed[0].name.as_deref(), Some(name.as_str()));
+            fine += 1;
+        }
+        assert_eq!(fine, 3, "every kept name was run");
+
+        let mut refused = 0;
+        for name in [
+            json!(""),
+            json!("   "),
+            json!("\t\n"),
+            json!("x".repeat(201)),
+            json!("é".repeat(201)),
+            json!(5),
+            json!(["Home"]),
+        ] {
+            let text = file(name);
+            write_list(&registry, text.as_bytes());
+            assert_eq!(registry.list(), Err(damaged()), "{text}");
+            assert_eq!(registry.add(&folder(&temp, "b")), Err(damaged()), "{text}");
+            assert_eq!(fs::read(&registry.file).unwrap(), text.as_bytes(), "kept");
+            refused += 1;
+        }
+        assert_eq!(refused, 7, "every refused name was run");
+    }
+
+    /// A write that fails changes no answer and no file; the next list tries again.
+    #[test]
+    fn a_failed_name_write_changes_no_answer() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let home = new_vault(&vaults, "Home");
+        let list = registry.add(&home).unwrap().list;
+        rename_outside(&home, "Home 2");
+        let before = fs::read(&registry.file).unwrap();
+
+        // Others may read the list but not replace it: the write cannot land.
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&registry.file)
+            .unwrap();
+        assert_eq!(
+            registry.list(),
+            Ok(vec![entry(list, 1, Some("Home 2"), true)]),
+            "the answer is as it would be"
+        );
+        assert_eq!(
+            registry.entry(VaultRef { list, id: 1 }, &home),
+            entry(list, 1, Some("Home 2"), true)
+        );
+        assert!(
+            registry.remember_name(1, &home, "Another").is_err(),
+            "the hold works"
+        );
+        assert_eq!(fs::read(&registry.file).unwrap(), before, "file kept");
+        drop(held);
+
+        // The next list writes it.
+        assert_eq!(registry.list().unwrap()[0].name.as_deref(), Some("Home 2"));
+        assert_eq!(kept_names(&registry), [some("Home 2")]);
+    }
+
+    #[test]
+    fn remember_name_changes_one_row_and_refuses_what_the_list_would_not_read() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let (home, work) = (new_vault(&vaults, "Home"), new_vault(&vaults, "Work"));
+        registry.add(&home).unwrap();
+        registry.add(&work).unwrap();
+        assert_eq!(registry.remember_name(2, &work, "Work 2"), Ok(()));
+        assert_eq!(kept_names(&registry), [some("Home"), some("Work 2")]);
+        // An ID not on the list changes nothing; a name the list would call damaged is not written.
+        let before = fs::read(&registry.file).unwrap();
+        assert_eq!(
+            registry.remember_name(9, &home, "Other"),
+            Err(ShellError::NotFound)
+        );
+        for name in [String::new(), "  ".to_owned(), "x".repeat(201)] {
+            assert!(registry.remember_name(1, &home, &name).is_err());
+        }
+        assert_eq!(fs::read(&registry.file).unwrap(), before);
+        assert_eq!(registry.list().unwrap().len(), 2, "still reads");
+    }
+
+    /// A list started over gives an ID to another folder; a rename that looked its row up before then names that ID
+    /// and its own folder, and the row that now holds the ID is left alone.
+    #[test]
+    fn remember_name_leaves_a_row_that_now_names_another_folder() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let (home, work) = (new_vault(&vaults, "Home"), new_vault(&vaults, "Work"));
+        assert_eq!(registry.add(&home).map(|v| v.id), Ok(1));
+        // The list is damaged and started over, and Work is added first: it now holds ID 1.
+        write_list(&registry, DAMAGED_BYTES);
+        registry.start_new_list().unwrap();
+        assert_eq!(registry.add(&work).map(|v| v.id), Ok(1));
+        let before = fs::read(&registry.file).unwrap();
+        // Home's rename (ID 1 when the hook looked it up) must not name Work's row.
+        assert_eq!(
+            registry.remember_name(1, &home, "Home, renamed"),
+            Err(ShellError::NotFound)
+        );
+        assert_eq!(fs::read(&registry.file).unwrap(), before, "file kept");
+        assert_eq!(kept_names(&registry), [some("Work")]);
+        // The folder the row does name can rename it, in another letter case too.
+        let upper = PathBuf::from(work.to_string_lossy().to_uppercase());
+        assert_eq!(registry.remember_name(1, &upper, "Work 2"), Ok(()));
+        assert_eq!(kept_names(&registry), [some("Work 2")]);
+    }
+
+    #[test]
+    fn forget_takes_the_name_with_the_row() {
+        let temp = TempDir::new();
+        let registry = registry(&temp);
+        let vaults = folder(&temp, "vaults");
+        let (home, work) = (new_vault(&vaults, "Home"), new_vault(&vaults, "Work"));
+        let first = registry.add(&home).unwrap();
+        registry.add(&work).unwrap();
+        let text = |registry: &Registry| fs::read_to_string(&registry.file).unwrap();
+        assert!(text(&registry).contains("Home"), "the name was kept");
+        assert_eq!(registry.forget(first), Ok(()));
+        let after = text(&registry);
+        assert!(!after.contains("Home"), "the name went with the row");
+        assert!(after.contains("Work"), "the other row keeps its name");
+        // Added back, the row is new: its name is read again from the header.
+        assert_eq!(registry.add(&home).map(|v| v.id), Ok(3));
+        assert_eq!(kept_names(&registry), [some("Work"), some("Home")]);
     }
 
     /// A version 1 list is read as it is (IDs and paths), gets an identity and a mark, and is rewritten as version 2

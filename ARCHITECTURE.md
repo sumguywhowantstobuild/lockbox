@@ -320,7 +320,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries; also `save_name`, the lighter name rule for a folder's saved files (only what Windows refuses, what could leave the folder, or a direction control that makes an executable read as a document is changed) |
 | `restore.rs` | One restore at a time: the five steps (pick, password check, folder, copy, swap), its state machine, launch recovery, pre-restore copies and their checks |
 | `locations.rs` | Where a vault may live: drive type, file system, links on the way, forbidden folders, cloud folders |
-| `registry.rs` | The vault list (`vaults.json`, version 2): locations only, no secrets; a random list identity and a highest-ID mark, so a row is named by list and ID (`VaultRef`), an ID is never given twice on one list, and a row from before Ask 12's new list names nothing; version 1 reads and is rewritten as 2 |
+| `registry.rs` | The vault list (`vaults.json`, version 2): locations and each vault's last-known name, no secrets (the name is read from the header, kept at add, rename and each list read, shown when the folder or header is gone, and removed with its row); a random list identity and a highest-ID mark, so a row is named by list and ID (`VaultRef`), an ID is never given twice on one list, and a row from before Ask 12's new list names nothing; version 1 reads and is rewritten as 2 |
 | `settings.rs` | The app-wide settings with their bounds (`settings.json`): idle time, clipboard delay, theme, the save shortcut (two modifiers, a letter, digit or F1 to F12, never Ctrl with C, V or X) and capture protection |
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
@@ -496,7 +496,8 @@ since the backup unpacks into a new folder beside it (the existing new-folder qu
 vault list tells the page which vaults Ask 8 is for: `VaultEntry.details_damaged` is true exactly when the folder holds a
 header file (`vault.json` or `vault.json.bak`) and every copy there is refused by the engine as damaged (corrupt or too
 large: `lockbox_core::header_is_damaged`); an empty folder, one with no header files, a header another program holds (a
-sharing violation) and a newer vault have no name either but are not damaged (`both_headers_unreadable_listed_without_a_name`,
+sharing violation) and a newer vault have no name from the header either but are not damaged; each such row shows the
+name the list kept for it, or none when it never had one (`both_headers_unreadable_listed_with_the_kept_name`,
 `a_listed_folder_with_no_vault_in_it_lists_the_same_way`, `a_header_held_by_another_program_is_not_damage`). While the
 pick's folder is still the damaged vault's own parent (Choose another has not moved it), `restore_prepare` never uses the
 engine's same-vault rule, which would find a healthy copy of the backup's vault there (the sibling an earlier Ask 8 restore

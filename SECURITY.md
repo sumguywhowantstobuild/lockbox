@@ -307,7 +307,10 @@ in the code with a `shortcut:` comment.
   gives the defaults), turn capture protection off or change the save shortcut (`settings.json`; a shortcut the
   Settings screen would refuse, or any other value out of range, gives the defaults), remove a vault's "recovery key not
   confirmed" note (a damaged `vault-state.json` also reads as having none), or empty the output journal so a leftover
-  stays. They hold no secrets. Show in Explorer never runs a listed place through the shell's "open": it checks the
+  stays. They hold no secrets. `vaults.json` keeps each vault's last-known name beside its folder path, so a vault whose
+  folder or drive is gone still shows its name on the lock screen. The name is not secret (the lock screen shows it before
+  any password, read from the header without the key), but a vault on a removable drive leaves its name on the PC after
+  the drive goes, as its path already does; Remove from list takes the name away with the row. Show in Explorer never runs a listed place through the shell's "open": it checks the
   listed place is a plain folder (not a file, a link or a junction), then starts `explorer.exe` from the Windows folder
   by its full path with that folder as its one argument. Explorer looks the argument up again itself, after the check,
   so a program running as you could swap the folder for something else in between, or list a spelling that Windows

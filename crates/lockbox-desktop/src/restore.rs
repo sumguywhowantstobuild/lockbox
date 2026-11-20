@@ -6464,10 +6464,11 @@ mod tests {
         assert!(ts.shell.restore.is_idle());
     }
 
-    /// A vault with both header copies damaged lists with no name, as available and with its details damaged: the page's
-    /// trigger for Ask 8.
+    /// A vault with both header copies damaged lists as available and with its details damaged (the page's trigger for
+    /// Ask 8), and with no name of its own: the row says the name the list kept (Task 9b), or none when it never had one
+    /// (`a_listed_folder_with_no_vault_in_it_lists_the_same_way`).
     #[test]
-    fn both_headers_unreadable_listed_without_a_name() {
+    fn both_headers_unreadable_listed_with_the_kept_name() {
         let ts = TestShell::new();
         let (s, _) = ts.open_vault("Clients");
         let dir = vault_dir(&ts);
@@ -6483,12 +6484,13 @@ mod tests {
         let listed = first();
         assert_eq!(
             (listed.id, listed.name.as_deref(), listed.available),
-            (1, None, true)
+            (1, Some("Clients"), true),
+            "the kept name"
         );
         assert!(listed.details_damaged);
         assert_eq!(
             serde_json::to_value(&listed).unwrap(),
-            json!({ "list": listed.list, "id": 1, "name": null, "available": true, "details_damaged": true })
+            json!({ "list": listed.list, "id": 1, "name": "Clients", "available": true, "details_damaged": true })
         );
         // Header files that are there but unreadable count whichever copy is left, and a lost copy does not clear it.
         fs::remove_file(dir.join("vault.json")).unwrap();
@@ -6724,7 +6726,8 @@ mod tests {
             .open(dir.join("vault.json"))
             .unwrap();
         let listed = ts.shell.registry.list().unwrap().remove(0);
-        assert_eq!(listed.name, None);
+        // No header can be read, so the name is the kept one (Task 9b); busy is still not damage.
+        assert_eq!(listed.name.as_deref(), Some("Clients"));
         assert!(listed.available);
         assert!(!listed.details_damaged, "busy is not damaged");
         drop(held);

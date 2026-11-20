@@ -663,6 +663,112 @@ test("a_list_that_cannot_be_read_on_try_again_says_so_in_words", async () => {
   expect(document.body.textContent).not.toContain("SENTINEL");
 });
 
+// ---- 30b's row says the vault's name (Task 9b) ----
+
+/** The declarations of the rule written as exactly `selector { ... }` in the stylesheet (comments already taken out), as a map; `null` when there is no such rule. */
+function declarations(selector: string): Map<string, string> | null {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const found = new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`).exec(CSS);
+  if (found === null) return null;
+  const body = found[1] ?? "";
+  return new Map(
+    body
+      .split(";")
+      .map((line) => line.trim())
+      .filter((line) => line !== "")
+      .map((line): [string, string] => {
+        const at = line.indexOf(":");
+        return [line.slice(0, at).trim(), line.slice(at + 1).trim()];
+      }),
+  );
+}
+
+test("an_unavailable_vault_shows_its_name_with_try_again_and_remove_beside_it", async () => {
+  // The list kept the name of a vault whose folder is gone: the row says it, as 30b draws it, and not "A vault that can't be read".
+  const { container } = await lockScreen([vault(7, "My vault"), vault(8, "Home", { available: false })]);
+  const row = rowOf("Home");
+  expect(screen.queryByText("A vault that can't be read")).toBeNull();
+  // The row's parts in 30b's order: the mark, the name with its line in one column, then the two links, and the status line last.
+  const parts = [...row.children].map((part) => `${part.tagName.toLowerCase()}.${part.getAttribute("class") ?? ""}`);
+  expect(parts).toEqual(["svg.vmini", "span.vgrow", "button.lnk", "button.lnk", "p.vstill"]);
+  const column = row.querySelector(".vgrow") as HTMLElement;
+  expect([...column.children].map((part) => `${part.tagName}:${part.textContent}`)).toEqual(["B:Home", `SMALL:${UNAVAILABLE_LINE}`]);
+  expect([...row.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["Try again", "Remove from list"]);
+  expect(row.lastElementChild?.getAttribute("role")).toBe("status");
+  // A layout takes no inline style.
+  expect(container.querySelector("[style]")).toBeNull();
+
+  // The layout, as the stylesheet draws it (a browser lays it out, jsdom does not): the row wraps, but the name's column asks for little, so the links fit beside it on the
+  // plate's 440px (344 inside its padding) and wrap under only when the plate is narrower; the status line takes a line of its own, last.
+  const off = declarations(".vbtn.off");
+  expect(off?.get("flex-wrap")).toBe("wrap");
+  const grow = declarations(".vgrow");
+  const basis = /^1 1 ([\d.]+)em$/.exec(grow?.get("flex") ?? "");
+  expect(basis, `the name's column is "flex: 1 1 <a few em>", not its whole line's width (flex: ${grow?.get("flex") ?? "none"})`).not.toBeNull();
+  // At 14px, a basis up to 8em (112) leaves room for the mark (36), three gaps of 12 (36), and the two links at 13px, each at most 5em and breaking onto two lines when its
+  // words need it (about 58 and 65): 36 + 36 + 112 + 58 + 65 = 307, inside 318 (the row's 344 less its padding and border). A browser measures it (the session did, at 1280 by 800 and
+  // 1093 by 534); this only keeps the declarations that measurement was made with.
+  expect(Number(basis?.[1])).toBeLessThanOrEqual(8);
+  expect(grow?.get("min-width")).toBe("0");
+  expect(grow?.get("overflow-wrap")).toBe("break-word");
+  const links = declarations(".vbtn.off .lnk");
+  expect([links?.get("height"), links?.get("max-width"), links?.get("font-size")]).toEqual(["auto", "5em", "13px"]);
+  const still = declarations(".vstill");
+  expect(still?.get("flex")).toBe("1 0 100%");
+  await expectNoAxe(container);
+});
+
+test("remove_from_an_unavailable_row_names_the_vault", async () => {
+  // 18g from the lock screen's row: the sentence names the vault the list kept the name of.
+  await lockScreen([vault(7, "My vault"), vault(8, "Home", { available: false })]);
+  fireEvent.click(within(rowOf("Home")).getByRole("button", { name: "Remove from list" }));
+  const box = await findRemoveBox();
+  expect(box.querySelector("p")?.textContent).toBe(removeWords("Home"));
+  expect(box.textContent).not.toContain("A vault that can't be read");
+  pressIn(box, "Cancel");
+  await boxGone();
+  cleanup();
+
+  // The vault menu's unavailable row and box say it too, and its Remove goes through 18g with the name.
+  resetStoreForTests();
+  invoke.mockReset();
+  listen.mockReset();
+  await unlocked([vault(7, "My vault"), vault(8, "Home", { available: false })]);
+  const menu = await openVaultMenu();
+  expect((rowsOf(menu)[1] as HTMLElement).textContent).toBe("HomeNot available");
+  fireEvent.click(rowsOf(menu)[1] as HTMLElement);
+  const unavailable = await screen.findByRole("dialog", { name: "Home is unavailable" });
+  expect(unavailable.querySelector("p")?.textContent).toBe("Home is unavailable: its folder or drive isn't there.");
+  pressIn(unavailable, "Remove from list");
+  expect((await findRemoveBox()).querySelector("p")?.textContent).toBe(removeWords("Home"));
+});
+
+test("a_row_the_list_never_named_says_a_vault_that_cant_be_read", async () => {
+  // No name was ever kept (the folder never gave one): the row, 18g and the menu's box all say the old words.
+  const NAMELESS = "A vault that can't be read";
+  await lockScreen([vault(7, "My vault"), vault(8, null, { available: false })]);
+  const row = rowOf(NAMELESS);
+  expect(within(row).getByText(NAMELESS).tagName).toBe("B");
+  expect(within(row).getByText(UNAVAILABLE_LINE)).toBeTruthy();
+  expect(within(row).getAllByRole("button").map((button) => button.textContent)).toEqual(["Try again", "Remove from list"]);
+  fireEvent.click(within(row).getByRole("button", { name: "Remove from list" }));
+  const box = await findRemoveBox();
+  expect(box.querySelector("p")?.textContent).toBe(removeWords(NAMELESS));
+  pressIn(box, "Cancel");
+  await boxGone();
+  cleanup();
+
+  resetStoreForTests();
+  invoke.mockReset();
+  listen.mockReset();
+  await unlocked([vault(7, "My vault"), vault(8, null, { available: false })]);
+  const menu = await openVaultMenu();
+  expect((rowsOf(menu)[1] as HTMLElement).textContent).toBe(`${NAMELESS}Not available`);
+  fireEvent.click(rowsOf(menu)[1] as HTMLElement);
+  const unavailable = await screen.findByRole("dialog", { name: `${NAMELESS} is unavailable` });
+  expect(unavailable.querySelector("p")?.textContent).toBe(`${NAMELESS} is unavailable: its folder or drive isn't there.`);
+});
+
 test("add_existing_vault_folder_from_the_lock_screen", async () => {
   await lockScreen([vault(7, "My vault")]);
   const links = screen.getAllByRole("button").map((button) => button.textContent);
@@ -949,6 +1055,28 @@ test("ask_8_from_the_lock_screen_offers_show_and_remove", async () => {
   await screen.findByLabelText("Password for My vault");
   expect(sent("forget_vault")).toEqual([{ vault: { list, id: 9 } }]);
   expect(debugState().vaults?.map((one) => one.id)).toEqual([7]);
+});
+
+test("ask_8_says_the_kept_name_of_a_named_vault_whose_details_are_damaged", async () => {
+  // The list kept the name (Task 9b): Ask 8's row, its actions and the Remove confirmation say it, not the nameless words.
+  await lockScreen([vault(9, "Home", { detailsDamaged: true }), vault(7, "My vault")]);
+  const list = shell.listIdentity();
+  expect(screen.queryByText("A vault that can't be read")).toBeNull();
+  fireEvent.click(screen.getByRole("radio", { name: /Home/ }));
+  await screen.findByRole("heading", { level: 1, name: "Home can't be opened" });
+  const ask = screen.getAllByRole("button").map((button) => button.textContent);
+  expect(ask.slice(ask.indexOf("Restore a backup"))).toEqual(["Restore a backup", "Back", "Show Home in Explorer", "Remove Home from this list"]);
+  fireEvent.click(screen.getByRole("button", { name: "Show Home in Explorer" }));
+  await waitFor(() => {
+    expect(sent("show_vault_in_explorer")).toEqual([{ vault: { list, id: 9 } }]);
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Remove Home from this list" }));
+  const box = await findRemoveBox();
+  expect(box.querySelector("p")?.textContent).toBe(removeWords("Home"));
+  expect(document.body.textContent).not.toContain("A vault that can't be read");
+  pressIn(box, "Remove");
+  await screen.findByLabelText("Password for My vault");
+  expect(sent("forget_vault")).toEqual([{ vault: { list, id: 9 } }]);
 });
 
 // ---- Words, looks and the look of every box ----

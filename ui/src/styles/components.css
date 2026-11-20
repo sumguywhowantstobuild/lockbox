@@ -141,12 +141,23 @@
 }
 
 /* A vault whose folder or drive isn't there (30b): no choice, so no pointer and no tint; it is quiet by its words and its mark (the muted ink, which reads as well as any),
-   not by fading, since Try again and Remove from list sit in it. It wraps so a narrow plate puts the two links under the name, and the line that says a Try again found
+   not by fading, since Try again and Remove from list sit in it. The mark, the name with its line and the two links share one line, as 30b draws them: the plate is 440px
+   wide at every window size, so each link is narrow and breaks onto two lines when its words need it ("Remove / from list", as the picture has it), which leaves the
+   name's line two lines, not four. The row wraps only when the plate is narrower than that (the links then go under the name), and the line that says a Try again found
    it still missing is the row's own last line. */
 .vbtn.off {
   flex-wrap: wrap;
   row-gap: 0;
   cursor: default;
+}
+
+.vbtn.off .lnk {
+  height: auto;
+  min-height: 24px;
+  max-width: 5em;
+  padding: 2px 0;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .vbtn.off:hover,
@@ -162,9 +173,12 @@
   stroke: var(--ink2);
 }
 
+/* The name's column: it asks for little (about 8 characters' width) and takes what the links leave, so the links stay beside it until the plate is too narrow for both. A
+   word too long for the column breaks rather than push the links out. */
 .vgrow {
-  flex: 1 1 auto;
+  flex: 1 1 8em;
   min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .vstill {

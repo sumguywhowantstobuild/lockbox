@@ -1012,7 +1012,7 @@ impl Shell {
     /// writes answers `LockedAfterChange { what: "vault name", vault }`. A write that came back as an error after
     /// `vault.json` landed (the engine's `commit` read it back and made the new name live) is a success: the name is in
     /// effect and not secret, and the next writable unlock repairs `.bak`. Whenever the name is in effect, the session
-    /// is listed under it.
+    /// is listed under it, and the vault list keeps it as the vault's last-known name (best effort).
     pub fn rename_vault(
         &self,
         session: SessionId,
@@ -1038,6 +1038,15 @@ impl Shell {
             });
         if matches!(answer, Ok(_) | Err(ShellError::LockedAfterChange { .. })) {
             self.sessions.set_name(session, &name);
+            // The vault list keeps the name for a row whose folder goes away. Only a vault on the list has an ID (a
+            // backup or an older copy has none and leaves the list alone); a failed write changes no answer, and
+            // logs nothing (R5): the next list brings the name up to date from the header.
+            // The row is named by its ID and the session's folder together, so a list that was started over in
+            // between, and gave that ID to another vault, is left alone.
+            let listed = self.registry_id_of(session);
+            if let (true, Some(location)) = (listed != 0, self.sessions.location_of(session)) {
+                let _ = self.registry.remember_name(listed, location.path(), &name);
+            }
         }
         answer
     }
@@ -5923,6 +5932,190 @@ mod tests {
         );
         rename(&ts, session, generation, "Work").unwrap();
         assert_eq!(read_vault_name(&dir).unwrap(), "Work");
+    }
+
+    // ---- An unavailable vault keeps its name (Plan 4C, Task 9b) ----
+
+    /// The `name` the vault list's file holds for the vault `id` (`None`: no name kept), read from the file itself.
+    fn kept_name(ts: &TestShell, id: u32) -> Option<String> {
+        let written: Value =
+            serde_json::from_slice(&fs::read(&ts.shell.paths.registry).unwrap()).unwrap();
+        let rows = written["vaults"].as_array().expect("rows");
+        let row = rows.iter().find(|row| row["id"] == id).expect("listed");
+        row["name"].as_str().map(str::to_owned)
+    }
+
+    /// A rename is kept by the list for that vault alone, so its row says the new name when the folder is gone, and a
+    /// second vault of the same name keeps its own.
+    #[test]
+    fn a_rename_updates_the_kept_name() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let (other, _) = confirmed_session(&ts, "Family");
+        let (id, other_id) = (registry_id(&ts, session), registry_id(&ts, other));
+        assert_eq!(kept_name(&ts, id).as_deref(), Some("Family"));
+
+        rename(&ts, session, generation, "Work").unwrap();
+        assert_eq!(kept_name(&ts, id).as_deref(), Some("Work"));
+        assert_eq!(kept_name(&ts, other_id).as_deref(), Some("Family"));
+
+        // The folder goes: the row says the name it was renamed to.
+        let dir = folder_of(&ts, session);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        fs::rename(&dir, ts.temp.path().join("moved away")).unwrap();
+        let row = ts
+            .shell
+            .registry
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap();
+        assert_eq!((row.name.as_deref(), row.available), (Some("Work"), false));
+    }
+
+    /// A lock that overtook the rename after it landed: the name is in effect, so the list keeps it.
+    #[test]
+    fn a_rename_a_lock_overtook_after_it_landed_updates_the_kept_name() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let id = registry_id(&ts, session);
+        lock_at(&ts, "write_headers.before_second");
+        let answer = rename(&ts, session, generation, "Work");
+        failpoint::disarm_all();
+        assert!(matches!(
+            answer,
+            Err(ShellError::LockedAfterChange {
+                what: "vault name",
+                ..
+            })
+        ));
+        assert_eq!(kept_name(&ts, id).as_deref(), Some("Work"));
+    }
+
+    /// A rename that changed nothing (refused, or a lock that came first) leaves the kept name as it was.
+    #[test]
+    fn a_rename_that_changed_nothing_leaves_the_kept_name() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let id = registry_id(&ts, session);
+        assert!(rename(&ts, session, generation, "   ").is_err());
+        failpoint::arm("write_headers.before_first");
+        assert!(rename(&ts, session, generation, "Work").is_err());
+        failpoint::disarm_all();
+        assert_eq!(kept_name(&ts, id).as_deref(), Some("Family"));
+    }
+
+    /// A backup (a read-only session) and a copy of a vault that is not on the list have no row, so a rename leaves
+    /// the list's file as it is, byte for byte, and the listed vault's kept name too.
+    #[test]
+    fn a_rename_of_a_backup_or_older_copy_leaves_the_list_alone() {
+        let ts = TestShell::new();
+        let (id, dir, _) = registered(&ts);
+        let before = fs::read(&ts.shell.paths.registry).unwrap();
+        assert_eq!(kept_name(&ts, id).as_deref(), Some("Family"));
+
+        // An older copy of the vault's folder, opened as its own writable session: not on the list.
+        let copy = ts.vaults().join("older copy");
+        copy_folder(&dir, &copy);
+        let copy = fs::canonicalize(&copy).unwrap();
+        let vault = heavy(|| Vault::unlock_with_password(&copy, PW)).unwrap().0;
+        let (session, generation) = session_over(&ts, vault);
+        assert_eq!(ts.shell.registry_id_of(session), 0, "not listed");
+        rename(&ts, session, generation, "Older").unwrap();
+        assert_eq!(read_vault_name(&copy).unwrap(), "Older", "it was renamed");
+        assert_eq!(fs::read(&ts.shell.paths.registry).unwrap(), before);
+        ts.shell.sessions.lock_all(LockReason::Manual);
+
+        // A backup opened read-only: the rename is refused and the list is not touched.
+        let (session, generation) = confirmed_session(&ts, "Work");
+        let work_id = registry_id(&ts, session);
+        let backup = ts.folder("Backups").join("Work.lockbox-backup");
+        ts.dialogs.answer(Some(backup.clone()));
+        done(
+            heavy(|| ts.shell.backup_vault(session, generation, 1))
+                .unwrap()
+                .data,
+        );
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let opened = ts.open_backup_read_only(
+            &backup,
+            super::super::backup::CredentialArg::Password(secret(PW)),
+        );
+        assert!(opened.data.read_only);
+        let list_now = fs::read(&ts.shell.paths.registry).unwrap();
+        assert_eq!(
+            rename(&ts, opened.session, opened.generation, "Backup name").err(),
+            Some(ShellError::ReadOnly)
+        );
+        assert_eq!(fs::read(&ts.shell.paths.registry).unwrap(), list_now);
+        assert_eq!(kept_name(&ts, work_id).as_deref(), Some("Work"));
+    }
+
+    /// The list's file cannot be written (held, so it cannot be replaced): the rename answers as it did before, its
+    /// name is in effect, the file is as it was, and the next list brings the kept name up to date.
+    #[test]
+    fn a_failed_name_write_changes_no_answer() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let id = registry_id(&ts, session);
+        let before = fs::read(&ts.shell.paths.registry).unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&ts.shell.paths.registry)
+            .unwrap();
+        let answer =
+            rename(&ts, session, generation, "Work").expect("a rename the list could not note");
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            json!({ "session": session.0, "generation": generation, "data": null })
+        );
+        assert_eq!(
+            session_line(&ts, session),
+            ("Work".to_owned(), SessionState::Unlocked)
+        );
+        assert_eq!(read_vault_name(&folder_of(&ts, session)).unwrap(), "Work");
+        // (the hold works: the write was refused)
+        assert_eq!(fs::read(&ts.shell.paths.registry).unwrap(), before);
+        assert_eq!(kept_name(&ts, id).as_deref(), Some("Family"));
+        // A list answers the header's name all the same, and cannot write it either.
+        assert_eq!(listed_name(&ts, id).as_deref(), Some("Work"));
+        assert_eq!(fs::read(&ts.shell.paths.registry).unwrap(), before);
+
+        drop(held);
+        assert_eq!(listed_name(&ts, id).as_deref(), Some("Work"));
+        assert_eq!(kept_name(&ts, id).as_deref(), Some("Work"), "tried again");
+    }
+
+    /// Ask 8's row: neither header copy can be read, so the vault's own name is not there, and the row says the name
+    /// the list kept (the last one, after a rename).
+    #[test]
+    fn an_unreadable_header_shows_the_kept_name() {
+        let ts = TestShell::new();
+        let (session, generation) = confirmed_session(&ts, "Family");
+        let id = registry_id(&ts, session);
+        let dir = folder_of(&ts, session);
+        rename(&ts, session, generation, "Work").unwrap();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        fs::write(dir.join(HEADER_FILE), b"damaged").unwrap();
+        fs::write(dir.join(HEADER_BACKUP), b"damaged").unwrap();
+        let row = ts
+            .shell
+            .registry
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap();
+        assert_eq!(
+            (row.name.as_deref(), row.available, row.details_damaged),
+            (Some("Work"), true, true)
+        );
+        // The unlock of such a row is still refused as before: the name is only for showing.
+        assert!(heavy(|| ts.shell.unlock_vault(ts.vault(id), secret(PW))).is_err());
     }
 
     // ---- Remove, Show in Explorer and unavailable vaults (Plan 4C, Task 9) ----
