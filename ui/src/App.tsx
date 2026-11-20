@@ -12,6 +12,7 @@ import { MainWindow } from "./screens/MainWindow";
 import { OpenBackupSteps } from "./screens/OpenBackup";
 import { RestoreFlow } from "./screens/RestoreFlow";
 import { RestoreNotices } from "./screens/RestoreNotices";
+import { SaveBox } from "./screens/SaveBox";
 import { AddFolderStep } from "./screens/setup/AddFolderStep";
 import { CreateVault } from "./screens/setup/CreateVault";
 import { FirstRun } from "./screens/setup/FirstRun";
@@ -25,6 +26,7 @@ import {
   startNotices,
   startStore,
   useAddFolder,
+  useCaptureOpening,
   useForgot,
   useMoveIn,
   useNewVault,
@@ -52,7 +54,8 @@ import "./styles/print.css";
  * finish, below an open restore; Open a backup begun from the lock screen (25a) does the same below those; moving to a new computer (26a to 26c) takes the place of the
  * first screen and the lock screen in the same way, and so does Forgot password (28a to 28e), which also stays over the vault its new password opens until 28e is answered. The
  * store starts listening for locks before anything asks the shell for anything. The first close of the window is explained
- * over whichever of these is up (5b). Light or dark follows the theme chosen in Settings, and Windows' own setting for System.
+ * over whichever of these is up (5b). The save box (8a to 8e) is the app's: a waiting copy mounts it here, above the screen, and it is drawn over a vault's main
+ * window (see `boxHost`). Light or dark follows the theme chosen in Settings, and Windows' own setting for System.
  */
 export default function App() {
   const mode = useMode();
@@ -86,6 +89,8 @@ export default function App() {
   const look = vaultLook(position, stepping || making ? false : (active?.readOnly ?? false));
 
   let screen;
+  // Whether the screen is a vault's main window: the one place the save box is drawn over.
+  let onWindow = false;
   if (active !== undefined) {
     // A vault whose recovery key was not typed back yet shows that step and nothing of the vault (21c, 21d, 21f, and 29b for a key asked for from Settings).
     // Keyed by session: switching to another vault unmounts this one's window, so a form left behind sends nothing and its typed text is gone. The unlock step of
@@ -93,8 +98,10 @@ export default function App() {
     if (newVault !== null) screen = <CreateVault key={`new-${String(newVault.opening)}`} inside onBack={leaveNewVault} />;
     else if (addFolder?.phase === "cloud") screen = <AddFolderStep key={String(addFolder.opening)} step={addFolder} />;
     else if (unlockStep !== null) screen = <UnlockStep key={String(unlockStep.opening)} step={unlockStep} />;
-    else if (active.recovery === null) screen = <MainWindow key={String(active.session)} data={active} look={look} />;
-    else if (active.recovery.phase === "pick") screen = <PickWords data={active} />;
+    else if (active.recovery === null) {
+      screen = <MainWindow key={String(active.session)} data={active} look={look} />;
+      onWindow = true;
+    } else if (active.recovery.phase === "pick") screen = <PickWords data={active} />;
     else screen = <RecoveryKey data={active} />;
   } else if (listDamaged) {
     // The list of vaults can't be read (Ask 12): its own screen, with the way out, instead of the lock screen's red sentence.
@@ -126,6 +133,12 @@ export default function App() {
   // Forgot password (28a to 28e) is the app's too, begun from the lock screen: it takes the window above the lock screen and, at 28e, above the vault the new
   // password just opened, until its offer is answered.
   const forgetting = useForgot() !== null;
+  // The save box (8a to 8e) is the app's, not a window's: it is mounted by its copy and drawn over whichever vault's main window is on screen, so a lock of the vault
+  // under it, a switch, or the lock screen showing neither takes it nor loses what was typed in it. It is not drawn (and what is secret in it is wiped) while any
+  // other screen or flow has the window.
+  const boxOpening = useCaptureOpening();
+  const covered = (restoring && moveIn?.step !== "here") || notice || openingFromLock || movingIn || forgetting;
+  const boxHost = onWindow && !covered ? (active ?? null) : null;
 
   return (
     <LockboxParts>
@@ -144,6 +157,7 @@ export default function App() {
           ) : (
             screen
           )}
+          {boxOpening === null ? null : <SaveBox key={`box-${String(boxOpening)}`} host={boxHost} />}
           <FirstClose />
           <CloseQuestion />
         </div>

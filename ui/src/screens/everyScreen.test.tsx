@@ -143,6 +143,19 @@ async function pressTheShortcut() {
   });
 }
 
+/** Picks `name` in the save box's Vault list. */
+async function chooseInBox(panel: HTMLElement, name: string) {
+  const list = within(panel).getByRole("combobox", { name: "Vault" });
+  fireEvent.pointerDown(list, { button: 0 });
+  fireEvent.click(list);
+  const option = (await screen.findAllByRole("option")).find((one) => one.textContent === name);
+  fireEvent.pointerDown(option as HTMLElement);
+  fireEvent.click(option as HTMLElement);
+  await waitFor(() => {
+    expect(within(panel).getByRole("combobox", { name: "Vault" }).textContent).toBe(name);
+  });
+}
+
 // ---- The screens ----
 
 interface Case {
@@ -1032,6 +1045,29 @@ const CASES: Case[] = [
       await unlocked();
       await pressTheShortcut();
       await screen.findByRole("complementary", { name: "Save what you copied" });
+    },
+  },
+  {
+    name: "Save what you copied, with a Vault list of two (Task 10)",
+    shows: [],
+    reach: async () => {
+      start([vault(), vault({ id: 8, name: "Home", items: items() })]);
+      await unlockIt();
+      await pressTheShortcut();
+      const panel = await screen.findByRole("complementary", { name: "Save what you copied" });
+      await within(panel).findByRole("combobox", { name: "Vault" });
+    },
+  },
+  {
+    name: "Save what you copied, a locked vault chosen in the box (8b in the box)",
+    shows: [],
+    reach: async () => {
+      start([vault(), vault({ id: 8, name: "Home", items: items() })]);
+      await unlockIt();
+      await pressTheShortcut();
+      const panel = await screen.findByRole("complementary", { name: "Save what you copied" });
+      await chooseInBox(panel, "Home");
+      await within(panel).findByLabelText("Password for Home");
     },
   },
   {

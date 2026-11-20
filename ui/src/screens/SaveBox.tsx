@@ -1,18 +1,36 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type SyntheticEvent } from "react";
 import type { OnClash } from "../api";
 import { focusBack } from "../focus";
+import { useLockEpoch } from "../jobs";
 import { messageFor, messageText } from "../messages";
 import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
 import { Panel } from "../parts/Panel";
+import { PasswordField } from "../parts/PasswordField";
 import { Select } from "../parts/Select";
-import { abandonCapture, cancelCapture, captureAsEnv, revealCapture, saveCapture, useCapture, type SessionData } from "../store";
+import {
+  cancelCapture,
+  captureAsEnv,
+  chooseSaveVault,
+  revealCapture,
+  saveCapture,
+  saveChoices,
+  saveChoiceValue,
+  settleSaveChoice,
+  boxBlock,
+  unlockInBox,
+  useCapture,
+  useSessions,
+  useVaults,
+  type SessionData,
+} from "../store";
+import { useValueGuard } from "../useValueGuard";
+import { listedName } from "../vaultWords";
 import { ClearClipboardBox } from "./forms/ClearClipboard";
 import { NAME_RULE, refusedTheName } from "./forms/KeyForm";
-import { folderChoices, NO_FOLDER, useFocusOnOpen } from "./forms/shared";
+import { folderChoices, NO_FOLDER } from "./forms/shared";
 import { MANY_LINES, ValueField } from "./forms/ValueField";
-import { useValueGuard } from "../useValueGuard";
-import type { FolderEntry } from "./SideMenu";
+import { foldersOf } from "./SideMenu";
 
 /** What the box says at its top when a later press found a different value: what was typed stays. */
 const CHANGED = "The copied value changed. What you typed is kept.";
@@ -20,6 +38,9 @@ const CHANGED = "The copied value changed. What you typed is kept.";
 /** What the box says when the clipboard held no text (an image, say), or more than a key can hold. */
 const NOTHING_COPIED = "Nothing to save was copied. Paste or type the value here.";
 const TOO_BIG = "What you copied is too big to save as a key. Paste or type the value here.";
+
+/** What the unlock step in the box says under its password (8b's words). */
+const LOCKED_RULE = "A locked vault's folders can't be read until you unlock it.";
 
 /** "3 keys", "1 key". */
 function keysWords(count: number): string {
@@ -49,9 +70,9 @@ function ShownValue({ value }: { value: string }) {
 
 /**
  * The copied value's row (8a): its dots, and Show, which asks the shell for the value by the copy's id. The value lives in this part's own
- * state and nowhere else. It is made for one copy (`key` is the copy's id where it is used): a new copy, the copy going, a lock and the
- * panel closing all take this part away, and an answer that comes to a part that is gone is dropped, so a value never outlives the copy
- * it was asked for.
+ * state and nowhere else. It is made for one copy and one vault chosen (`key` is both where it is used): a new copy, another vault chosen, the copy
+ * going, a lock and the panel closing all take this part away, and an answer that comes to a part that is gone is dropped, so a value never outlives
+ * the copy it was asked for.
  */
 function CopiedValue({ captureId }: { captureId: string }) {
   const label = useId();
@@ -119,71 +140,175 @@ function CopiedValue({ captureId }: { captureId: string }) {
 }
 
 /**
- * The save box (8a, and 8c when nothing was copied): what the shortcut copied, to be named and saved as a key. The shell holds the copy and the page
- * only its id; the value comes on Show, to the row that asked. Name, Vault (the one open, as text), Folder and "Clear the clipboard after saving".
- * When the clipboard held no text, or too much, there is no copied value to show: a Value box takes what is pasted or typed in its place (8c), and
- * the clear does not apply. Save asks the shell once, which stops at a name that is taken (8d: Replace, Keep both with the name it would use, Cancel).
- * Saved, the box closes, the new key opens, and the message says where it went and what became of the clipboard. Cancel, the close button, Escape and
- * another panel taking the place all let the copy go. A new copy while the box is open keeps what was typed and chosen and says the value changed.
- * A lock, or the shell letting the copy go, takes the box with nothing said.
+ * The save box (8a, and 8c when nothing was copied): what the shortcut copied, to be named and saved as a key. It is the app's, not a window's: it is mounted by its
+ * copy above whichever screen is up and drawn over a vault's main window (`host` is that window, or `null` while another screen has it, when it draws nothing and
+ * what is secret in it is wiped), so a lock of the vault under it, a switch, or the lock screen does not take it. The shell holds the copy and the page only its
+ * id; the value comes on Show, to the row that asked. The order is the design's: the Vault to save into (the one on screen first, then every other vault that can take
+ * a key), its password if it is locked (8b's content in the panel: nothing else is drawn until it is unlocked, and what was typed is kept), then Name, Folder (the
+ * chosen vault's, since folders are encrypted) and "Clear the clipboard after saving", then Save. When the clipboard held no text, or too much, there is no
+ * copied value to show: a Value box takes what is pasted or typed in its place (8c), and the clear does not apply. Save asks the shell once, which stops at a name that
+ * is taken (8d: Replace, Keep both with the name it would use, Cancel). Saved, the box closes and says where it went; into the vault on screen the new key opens, into
+ * another the window stays as it is. Cancel, the close button, Escape and another panel taking the window's place let the copy go. A new copy while the box is
+ * open keeps what was typed and chosen and says the value changed. A lock of the vault chosen, or of every vault, or the shell letting the copy go, takes the box
+ * with nothing said; a lock of any other vault leaves it.
  */
-export function SaveBox({ data, folders }: { data: SessionData; folders: readonly FolderEntry[] }) {
+export function SaveBox({ host }: { host: SessionData | null }) {
   const capture = useCapture();
+  const sessions = useSessions();
+  const vaults = useVaults();
   const formId = useId();
   const [name, setName] = useState("");
   const [typed, setTyped] = useState("");
-  const [picked, setPicked] = useState(data.folder ?? NO_FOLDER);
+  /** The folder picked, and the vault it was picked in: a vault chosen after it takes the pick away. */
+  const [picked, setPicked] = useState<{ vault: string; folder: string } | null>(null);
   const [clear, setClear] = useState(true);
-  /** A save, or the reading as a `.env`, is on its way: a second press does nothing. */
+  /** A save, an unlock, or the reading as a `.env`, is on its way: a second press does nothing. */
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [nameMarked, setNameMarked] = useState(false);
+  /** The password of the locked vault chosen. It is the box's own state and nowhere else, wiped as it is sent. */
+  const [password, setPassword] = useState("");
+  const [unlockProblem, setUnlockProblem] = useState<string | null>(null);
   /**
-   * The name that is taken, and the one Keep both would give, for the copy `captureId`: the question (8d) is open while this is set and that is
-   * still the copy on screen. It is a question about one value; when another copy takes its place it is gone, and Replace needs a fresh Save.
+   * The name that is taken, and the one Keep both would give, for the copy `captureId` and the vault `vault` (its value in the list): the question (8d) is open while
+   * this is set and both are still the ones on screen. It is a question about one value in one vault; when another copy takes its place, or another vault is chosen,
+   * it is gone, and Replace needs a fresh Save.
    */
-  const [asked, setAsked] = useState<{ captureId: string; name: string; savedAs: string } | null>(null);
+  const [asked, setAsked] = useState<{ captureId: string; vault: string; name: string; savedAs: string } | null>(null);
   const nameBox = useRef<HTMLInputElement>(null);
   const valueBox = useRef<HTMLInputElement>(null);
-  // Focus goes to the name when there is a copied value; the vault is already known. With nothing copied, to the Value box.
-  const [opensOnName] = useState(capture?.state === "value");
+  const passwordPlace = useRef<HTMLDivElement>(null);
   const mounted = useRef(true);
   const shown = useRef<string | null>(null);
+  /** Focus went to the first field when the box was first drawn. */
+  const focused = useRef(false);
+  /** An unlock was sent from the box: the open look that follows takes focus to its first field. */
+  const focusAfterUnlock = useRef(false);
+  const wasLocked = useRef(false);
 
-  useFocusOnOpen(opensOnName ? nameBox : valueBox);
+  // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping) wipes what is secret and typed here, even before the vaults' own locks are heard.
+  const epoch = useLockEpoch();
+  const [seenEpoch, setSeenEpoch] = useState(epoch);
+  if (seenEpoch !== epoch) {
+    setSeenEpoch(epoch);
+    setPassword("");
+    setTyped("");
+  }
+  // While another screen has the window the box is not drawn, and nothing secret waits in it: neither a typed password nor a typed key value.
+  if (host === null && (password !== "" || typed !== "")) {
+    setPassword("");
+    setTyped("");
+  }
+
+  const front = sessions.at(-1);
+  const offered = saveChoices(front, sessions, vaults, capture?.choice ?? null);
+  // The vault chosen, as the list has it: the store's choice when it is on offer, else the first on offer (the store settles it in an effect, below).
+  const chosenValue = capture === null || capture.choice === null ? "" : saveChoiceValue(capture.choice);
+  const current = offered.find((one) => one.value === chosenValue) ?? offered[0];
+  const currentValue = current?.value ?? "";
+
+  // Another vault chosen: what was typed for the last one's password, and what was said about it, goes.
+  const [seenChoice, setSeenChoice] = useState(currentValue);
+  if (seenChoice !== currentValue) {
+    setSeenChoice(currentValue);
+    setPassword("");
+    setUnlockProblem(null);
+    setProblem(null);
+    setNameMarked(false);
+  }
+
+  const drawn = host !== null;
+  const ready = current !== undefined;
+  const locked = current?.choice.kind === "locked";
+  const hasValue = capture?.state === "value";
+  const offersAgain = offered.map((one) => one.value).join(",");
 
   useEffect(() => {
     shown.current = capture?.id ?? null;
   });
 
-  // The box going some way the box itself did not end (another panel took its place): the copy is let go. React runs an effect's cleanup and
-  // its setup again as a trial in development, with this same box, so only a box that is still gone a moment later has left.
+  // The vaults on offer changed under the choice (one went unavailable, a window was switched): the store settles it, and hands the copy over again if it moved.
+  useEffect(() => {
+    settleSaveChoice();
+  }, [offersAgain, currentValue]);
+
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      window.setTimeout(() => {
-        if (!mounted.current && shown.current !== null) abandonCapture(shown.current);
-      }, 0);
     };
   }, []);
 
-  if (capture === null) return null;
+  // Focus goes to the first field when the box is first drawn: the name when there is a copied value (the vault is already known), the Value box with nothing
+  // copied, the password when the first vault is a locked one. A menu that opened the box gives focus back to its own button as it closes, which can come after
+  // this, so it is taken once more a moment later if it has gone elsewhere.
+  useEffect(() => {
+    if (!drawn || !ready || focused.current) return;
+    focused.current = true;
+    const field = (): HTMLElement | null | undefined =>
+      locked ? passwordPlace.current?.querySelector("input") : hasValue ? nameBox.current : valueBox.current;
+    field()?.focus();
+    const again = window.setTimeout(() => {
+      if (document.activeElement === document.body || document.activeElement?.closest('.addb, [aria-label="More for this folder"]') != null) field()?.focus();
+    }, 0);
+    return () => {
+      window.clearTimeout(again);
+    };
+  }, [drawn, ready, locked, hasValue]);
 
-  // A folder that has gone while the box was open is no longer a choice: the save goes to no folder unless another is picked.
-  const folder = picked === NO_FOLDER || folders.some((entry) => entry.id === picked) ? picked : NO_FOLDER;
+  // The vault was unlocked in the box: the open look comes back, and its first field takes focus.
+  useEffect(() => {
+    const unlockedNow = wasLocked.current && !locked;
+    wasLocked.current = locked;
+    if (!unlockedNow || !focusAfterUnlock.current || !drawn) return;
+    focusAfterUnlock.current = false;
+    (hasValue ? nameBox : valueBox).current?.focus();
+  }, [locked, drawn, hasValue]);
+
+  if (capture === null || current === undefined || host === null) return null;
+
+  const choice = current.choice;
+  const lockedEntry = choice.kind === "locked" ? vaults?.find((entry) => entry.id === choice.vault) : undefined;
+  const chosenSession = choice.kind === "open" ? sessions.find((entry) => entry.session === choice.session) : undefined;
+  if (choice.kind === "locked" ? lockedEntry === undefined : chosenSession === undefined) return null;
+  // A vault unlocked in the box that is open now but can't take the key: the box stays on it and says why (no fallback to another vault, nothing to unlock or save).
+  const block = choice.kind === "locked" ? boxBlock(choice.vault, sessions) : null;
+  const blockWords =
+    block === null || lockedEntry === undefined
+      ? null
+      : block === "read_only"
+        ? messageText(messageFor({ code: "read_only" }))
+        : `${listedName(lockedEntry)} needs a step before it can be used. Switch to it to finish, then save.`;
+
+  // The vault on screen is the one the window's own folder and the `.env` offer belong to.
+  const onScreen = chosenSession?.session === host.session;
+  const folders = foldersOf(chosenSession?.items ?? []);
+  // A folder that has gone while the box was open is no longer a choice: the save goes to no folder unless another is picked. Before one is picked, the vault on
+  // screen starts on the folder shown, and another vault on "No folder".
+  const start = onScreen ? (host.folder ?? NO_FOLDER) : NO_FOLDER;
+  const wanted = picked?.vault === currentValue ? picked.folder : start;
+  const folder = wanted === NO_FOLDER || folders.some((entry) => entry.id === wanted) ? wanted : NO_FOLDER;
   const place = folder === NO_FOLDER ? null : folder;
-  const where = folders.find((entry) => entry.id === place)?.name ?? data.name;
-  const hasValue = capture.state === "value";
-  const clash = asked !== null && asked.captureId === capture.id ? asked : null;
+  const vaultName = chosenSession?.name ?? "";
+  const folderName = folders.find((entry) => entry.id === place)?.name;
+  // What the message after the save says: the vault on screen as ever ("<name> saved in <folder>", or in the vault with no folder); another vault is named too.
+  const where = onScreen ? (folderName ?? vaultName) : folderName === undefined ? vaultName : `${folderName}, ${vaultName}`;
+  const clash = asked !== null && asked.captureId === capture.id && asked.vault === currentValue ? asked : null;
 
   const cancel = () => {
     cancelCapture();
     focusBack("add");
   };
 
+  const choose = (value: string) => {
+    const next = offered.find((one) => one.value === value);
+    if (next === undefined) return;
+    focusAfterUnlock.current = false;
+    chooseSaveVault(next.choice);
+  };
+
   const save = async (onClash: OnClash) => {
-    if (busy) return;
+    if (busy || chosenSession === undefined) return;
     const trimmed = name.trim();
     if (trimmed === "") {
       setProblem("Type a name first.");
@@ -195,8 +320,9 @@ export function SaveBox({ data, folders }: { data: SessionData; folders: readonl
     setProblem(null);
     setNameMarked(false);
     const sentFor = capture.id;
+    const sentIn = currentValue;
     const done = await saveCapture(
-      data.session,
+      chosenSession.session,
       { captureId: sentFor, name: trimmed, collection: place, onClash, clearClipboard: hasValue && clear, typed: hasValue ? null : typed },
       where,
     );
@@ -213,7 +339,7 @@ export function SaveBox({ data, folders }: { data: SessionData; folders: readonl
     }
     if ("clash" in done) {
       // The name is taken (or the number the person was shown is not free any more): the question opens, or shows the next free name.
-      setAsked({ captureId: sentFor, name: trimmed, savedAs: done.clash });
+      setAsked({ captureId: sentFor, vault: sentIn, name: trimmed, savedAs: done.clash });
       return;
     }
     setAsked(null);
@@ -225,15 +351,35 @@ export function SaveBox({ data, folders }: { data: SessionData; folders: readonl
     if (busy) return;
     setBusy(true);
     setProblem(null);
-    const done = await captureAsEnv(data.session, capture.id, folder);
+    const done = await captureAsEnv(host.session, capture.id, folder);
     if (!mounted.current) return;
     setBusy(false);
     if (typeof done === "object") setProblem(messageText(messageFor(done.failed)));
   };
 
+  // The unlock for the vault chosen: the text goes once, and is gone from here as it goes, so the field is empty whatever comes back (a wrong password shows an
+  // empty field with the reason). The vault opens behind the window on screen, and the box goes on in it.
+  const unlockHere = async () => {
+    if (busy || password === "" || choice.kind !== "locked") return;
+    const text = password;
+    setPassword("");
+    setUnlockProblem(null);
+    setBusy(true);
+    focusAfterUnlock.current = true;
+    try {
+      await unlockInBox(capture.opening, choice, text);
+    } catch (refusal) {
+      focusAfterUnlock.current = false;
+      if (mounted.current) setUnlockProblem(messageText(messageFor(refusal)));
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
+
   const onSubmit = (event: SyntheticEvent) => {
     event.preventDefault();
-    void save("ask");
+    if (locked) void unlockHere();
+    else void save("ask");
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -245,7 +391,7 @@ export function SaveBox({ data, folders }: { data: SessionData; folders: readonl
   };
 
   return (
-    <>
+    <div className="boxlayer">
       <Panel
         title="Save what you copied"
         onClose={cancel}
@@ -253,9 +399,15 @@ export function SaveBox({ data, folders }: { data: SessionData; folders: readonl
         footer={
           <>
             <Button onClick={cancel}>Cancel</Button>
-            <Button look="pill-main" type="submit" form={formId} aria-disabled={busy ? true : undefined}>
-              Save
-            </Button>
+            {blockWords !== null ? null : locked ? (
+              <Button look="pill-main" type="submit" form={formId} disabled={busy || password === ""}>
+                Unlock and continue
+              </Button>
+            ) : (
+              <Button look="pill-main" type="submit" form={formId} aria-disabled={busy ? true : undefined}>
+                Save
+              </Button>
+            )}
           </>
         }
       >
@@ -263,10 +415,10 @@ export function SaveBox({ data, folders }: { data: SessionData; folders: readonl
           <p role="status" className={capture.changed ? "cnote" : "sr"}>
             {capture.changed ? CHANGED : ""}
           </p>
-          {hasValue ? (
+          {locked ? null : hasValue ? (
             <>
-              <CopiedValue key={capture.id} captureId={capture.id} />
-              {capture.envKeys === null ? null : (
+              <CopiedValue key={`${capture.id}:${currentValue}`} captureId={capture.id} />
+              {capture.envKeys === null || !onScreen ? null : (
                 <div className="fbox">
                   <p className="cnote">{`This looks like a .env file with ${keysWords(capture.envKeys)}.`}</p>
                   <Button
@@ -298,43 +450,82 @@ export function SaveBox({ data, folders }: { data: SessionData; folders: readonl
               />
             </>
           )}
-          <div className="fbox">
-            <label className="flab" htmlFor={`${formId}-name`}>
-              Name
-            </label>
-            <input
-              ref={nameBox}
-              id={`${formId}-name`}
-              className="finp m"
-              type="text"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="OPENAI_API_KEY"
-              value={name}
-              aria-invalid={nameMarked ? true : undefined}
-              aria-describedby={[`${formId}-name-hint`, nameMarked ? `${formId}-problem` : null].filter(Boolean).join(" ")}
-              onChange={(event) => {
-                setName(event.currentTarget.value);
-              }}
+          <div className="fbox" key="vault">
+            {/* Made anew when the vaults on offer change (a locked one that was unlocked becomes an open one, with another value): the list part puts a value that has
+                left its items back to the first it ever had, and would call `onValueChange` for it as if the person had chosen it. */}
+            <Select
+              key={offered
+                .map((one) => one.value)
+                .sort()
+                .join(",")}
+              label="Vault"
+              items={offered.map((one) => ({ value: one.value, label: one.label }))}
+              value={currentValue}
+              onValueChange={choose}
             />
-            <p className="fhint" id={`${formId}-name-hint`}>
-              {NAME_RULE}
+          </div>
+          {blockWords !== null ? (
+            <p className="err" role="alert">
+              {blockWords}
             </p>
-          </div>
-          <div className="fbox">
-            <label className="flab" htmlFor={`${formId}-vault`}>
-              Vault
-            </label>
-            <input id={`${formId}-vault`} className="finp" type="text" readOnly value={data.name} />
-          </div>
-          <div className="fbox">
-            <Select label="Folder" items={folderChoices(folders, data.folder)} value={folder} onValueChange={setPicked} />
-          </div>
-          {hasValue ? <ClearClipboardBox checked={clear} onChange={setClear} /> : null}
-          {problem === null ? null : (
-            <p className="err" id={`${formId}-problem`} role="alert">
-              {problem}
-            </p>
+          ) : locked ? (
+            <div ref={passwordPlace}>
+              <PasswordField
+                look="panel"
+                label={`Password for ${lockedEntry === undefined ? "" : listedName(lockedEntry)}`}
+                autoComplete="current-password"
+                value={password}
+                onChange={(next) => {
+                  setPassword(next);
+                  setUnlockProblem(null);
+                }}
+                error={unlockProblem}
+                rule={LOCKED_RULE}
+                readOnly={busy}
+              />
+            </div>
+          ) : (
+            <>
+              <div className="fbox">
+                <label className="flab" htmlFor={`${formId}-name`}>
+                  Name
+                </label>
+                <input
+                  ref={nameBox}
+                  id={`${formId}-name`}
+                  className="finp m"
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="OPENAI_API_KEY"
+                  value={name}
+                  aria-invalid={nameMarked ? true : undefined}
+                  aria-describedby={[`${formId}-name-hint`, nameMarked ? `${formId}-problem` : null].filter(Boolean).join(" ")}
+                  onChange={(event) => {
+                    setName(event.currentTarget.value);
+                  }}
+                />
+                <p className="fhint" id={`${formId}-name-hint`}>
+                  {NAME_RULE}
+                </p>
+              </div>
+              <div className="fbox">
+                <Select
+                  label="Folder"
+                  items={folderChoices(folders, onScreen ? host.folder : null)}
+                  value={folder}
+                  onValueChange={(next) => {
+                    setPicked({ vault: currentValue, folder: next });
+                  }}
+                />
+              </div>
+              {hasValue ? <ClearClipboardBox checked={clear} onChange={setClear} /> : null}
+              {problem === null ? null : (
+                <p className="err" id={`${formId}-problem`} role="alert">
+                  {problem}
+                </p>
+              )}
+            </>
           )}
         </form>
       </Panel>
@@ -371,6 +562,6 @@ export function SaveBox({ data, folders }: { data: SessionData; folders: readonl
           Replace
         </Button>
       </Dialog>
-    </>
+    </div>
   );
 }

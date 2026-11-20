@@ -1305,6 +1305,28 @@ impl Sessions {
         f()
     }
 
+    /// [`Sessions::publish`] for a writable session only: `ReadOnly` for a read-only one (after `NotFound` for a foreign
+    /// ID and `Locked` for a stale generation), in the same step that finds the session. The check reads the session's
+    /// handle and takes no lock of the vault, so a long change under way never makes it `Busy`.
+    pub fn publish_writable<T>(
+        &self,
+        id: SessionId,
+        generation: u64,
+        f: impl FnOnce() -> ShellResult<T>,
+    ) -> ShellResult<T> {
+        let gate = {
+            let mut inner = self.inner();
+            let (gate, live) = inner.live(id, generation)?;
+            live.handle.writable()?;
+            Arc::clone(gate)
+        };
+        let _attempt = lock(&gate.publish);
+        if !gate.is(generation) {
+            return Err(ShellError::Locked);
+        }
+        f()
+    }
+
     /// Starts a Remove of the vault at `location` from the vault list, in one step under the sessions mutex: `Busy` when
     /// an open of `location` is under way or a Remove of it already is; otherwise `location` is held in `removing` (an
     /// open of it answers `Busy` from now on) until the [`Removal`] is dropped. `has_jobs` is asked of the session
@@ -2738,6 +2760,91 @@ mod tests {
             !ran.load(Ordering::SeqCst),
             "a publish after the lock never runs"
         );
+    }
+
+    /// `publish_writable` is `publish` for a writable session only: a read-only one answers `ReadOnly`, a stale generation
+    /// `Locked` and a foreign ID `NotFound`, and in each the attempt never runs. The writable check does not take the
+    /// vault's lock, so a long change under way does not make it `Busy`; and the attempt is under the same guard, so a
+    /// lock waits for it and a lock before it refuses it.
+    #[test]
+    fn publish_writable_runs_only_for_a_writable_session_in_its_generation() {
+        let parent = TempDir::new();
+        let (_, sessions) = sessions();
+        let (id, generation, dir) = open_writable(&sessions, parent.path());
+        let copy = parent.path().join("Family.read-only");
+        copy_folder(&dir, &copy);
+        let (read_only, read_only_generation) = open_read_only(&sessions, &copy);
+        let ran = AtomicBool::new(false);
+        let attempt = || {
+            ran.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+
+        assert_eq!(
+            sessions
+                .publish_writable(read_only, read_only_generation, attempt)
+                .err(),
+            Some(ShellError::ReadOnly)
+        );
+        assert_eq!(
+            sessions.publish_writable(id, generation + 1, attempt).err(),
+            Some(ShellError::Locked)
+        );
+        assert_eq!(
+            sessions
+                .publish_writable(SessionId(id.0 + 100), generation, attempt)
+                .err(),
+            Some(ShellError::NotFound)
+        );
+        assert!(!ran.load(Ordering::SeqCst), "a refused attempt ran");
+
+        // A long change under way: still answered, not `Busy`.
+        let (held, is_held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let answered = thread::scope(|s| {
+            let sessions = &sessions;
+            let holder = s.spawn(move || {
+                sessions.write_long(id, generation, |_, _| {
+                    held.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(30)).unwrap();
+                    Ok(())
+                })
+            });
+            is_held
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the change started");
+            let answered = sessions.publish_writable(id, generation, attempt);
+            release.send(()).unwrap();
+            assert!(holder.join().unwrap().is_ok());
+            answered
+        });
+        assert_eq!(answered, Ok(()));
+        assert!(ran.swap(false, Ordering::SeqCst), "the attempt did not run");
+
+        // The same guard as `publish`: a lock waits for the attempt under way, and an attempt after the lock never runs.
+        let entered = Meet::default();
+        let finished = AtomicBool::new(false);
+        let finished_first = thread::scope(|s| {
+            let publishing = s.spawn(|| {
+                sessions.publish_writable(id, generation, || {
+                    entered.wait();
+                    thread::sleep(Duration::from_millis(50));
+                    finished.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            });
+            entered.wait();
+            sessions.lock(id, LockReason::Manual);
+            let finished_first = finished.load(Ordering::SeqCst);
+            assert_eq!(publishing.join().unwrap(), Ok(()));
+            finished_first
+        });
+        assert!(finished_first, "the lock did not wait for the attempt");
+        assert_eq!(
+            sessions.publish_writable(id, generation, attempt).err(),
+            Some(ShellError::Locked)
+        );
+        assert!(!ran.load(Ordering::SeqCst), "an attempt after the lock ran");
     }
 
     /// Logs what each step of a lock can observe.

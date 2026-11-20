@@ -25,6 +25,12 @@ pub(crate) const CAPTURE_VALUE: ShellError = ShellError::InvalidInput {
     what: "capture value",
 };
 
+/// `capture_save` was given a session the capture is not handed to (no vault chosen, another one chosen, or the chosen
+/// vault at another generation): nothing is written and the slot is kept.
+pub(crate) const CAPTURE_VAULT: ShellError = ShellError::InvalidInput {
+    what: "capture vault",
+};
+
 /// What `capture_save` does when a live key of the name is already in the place.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -125,26 +131,38 @@ impl Shell {
         self.capture.state()
     }
 
-    /// Hands the capture to the session's vault: its lock empties the slot. Recorded inside the session's publish guard, so
-    /// a lock of that vault either refuses first or waits for this and then empties the slot through its hook.
+    /// Hands the capture to the session's vault (writable only: `ReadOnly` otherwise), at the generation it is unlocked in:
+    /// its lock empties the slot, and a save is for it alone. Recorded inside the session's publish guard, so a lock of
+    /// that vault either refuses first or waits for this and then empties the slot through its hook. The writable check
+    /// takes no lock of the vault, so a long change in it never makes the hand-over `Busy`.
     pub fn capture_choose(
         &self,
         session: SessionId,
         generation: u64,
         capture_id: &str,
     ) -> ShellResult<Tagged<()>> {
-        self.sessions.publish(session, generation, || {
-            self.capture.choose(capture_id, session)
+        self.sessions.publish_writable(session, generation, || {
+            self.capture.choose(capture_id, session, generation)
         })?;
         self.still_current(session, generation, ())
     }
 
-    /// The copied value (trimmed), for Reveal: only once a vault is chosen, and only while that vault is unlocked.
+    /// Hands the capture to no vault (the page chose a locked one in the box): only a lock of every vault empties the slot
+    /// now. `NotFound` for an id that is not the slot's.
+    pub fn capture_unchoose(&self, capture_id: &str) -> ShellResult<()> {
+        self.capture.unchoose(capture_id)
+    }
+
+    /// The copied value (trimmed), for Reveal: only once a vault is chosen, and only while that vault is unlocked in the
+    /// generation the capture was handed to it at.
     pub fn capture_reveal(&self, capture_id: &str) -> ShellResult<Zeroizing<String>> {
         let (chosen, value) = self.capture.reveal(capture_id)?;
         // Its lock empties the slot, but a Reveal between the two must not show the value.
         let unlocked = self.sessions.unlocked();
-        match unlocked.iter().any(|(session, _, _)| *session == chosen) {
+        match unlocked
+            .iter()
+            .any(|(session, generation, _)| (*session, *generation) == chosen)
+        {
             true => Ok(value),
             false => Err(ShellError::Locked),
         }
@@ -153,7 +171,8 @@ impl Shell {
     /// Saves the copied value as a key named `what.name` in `what.collection`, in Rust: the value never crosses.
     ///
     /// Refused first for the name (as a new key's), then for a session that is locked, stale, not ours or read-only, then
-    /// for a capture id that is not the slot's, then for the typed value. A clash with a live key answers
+    /// for a capture id that is not the slot's, then for a session the capture is not handed to ([`CAPTURE_VAULT`]: none
+    /// chosen, another one, or this one at another generation), then for the typed value. A clash with a live key answers
     /// [`CaptureSaved::Clash`] and writes nothing. The clipboard is cleared only after the write succeeded, against the
     /// text the slot holds, and then the slot empties: a save that does not write leaves both as they were.
     pub fn capture_save(
@@ -174,7 +193,9 @@ impl Shell {
         at_most(&name, MAX_TITLE, "title")?;
         check_key_name(&name)?;
         self.live_writable(session, generation)?;
-        let (state, raw) = self.capture.snapshot(capture_id)?;
+        let (state, raw) = self
+            .capture
+            .snapshot_bound(capture_id, session, generation)?;
         let value = match (state, &raw, typed) {
             (CaptureState::Value, Some(raw), None) => Zeroizing::new(raw.trim().to_owned()),
             (CaptureState::Empty | CaptureState::TooLarge, _, Some(typed))
@@ -255,7 +276,7 @@ struct SessionArgs {
     capture_id: String,
 }
 
-/// `capture_reveal` and `capture_cancel`.
+/// `capture_unchoose`, `capture_reveal` and `capture_cancel`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IdArgs {
@@ -299,6 +320,16 @@ pub(super) async fn capture_choose(
     } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.capture_choose(session, generation, &capture_id)).await
+}
+
+/// Hands the slot to no vault: a lock of every vault is what empties it now.
+#[tauri::command]
+pub(super) async fn capture_unchoose(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<()> {
+    let IdArgs { capture_id } = args(&request)?;
+    shell.capture_unchoose(&capture_id)
 }
 
 /// The copied value, once, for Reveal.
@@ -381,6 +412,7 @@ mod tests {
     use super::*;
     use crate::capture::CaptureState;
     use crate::error::Outcome;
+    use crate::os::Clock;
     use crate::session::{Location, LockReason, OpenStep, Opened};
     use crate::testing::{TEST_PASSWORD, TestShell, heavy};
 
@@ -472,7 +504,20 @@ mod tests {
         }
     }
 
+    /// A save as the page makes it: the capture is handed to the session first. A refusal of that hand-over (a stale,
+    /// foreign or read-only session, an old id) is left to the save, which refuses the same session its own way.
     fn save(
+        ts: &TestShell,
+        (s, g): (SessionId, u64),
+        id: &str,
+        what: SaveWhat,
+    ) -> ShellResult<Tagged<CaptureSaved>> {
+        let _ = ts.shell.capture_choose(s, g, id);
+        ts.shell.capture_save(s, g, id, what)
+    }
+
+    /// A save with no hand-over of its own: it saves into whatever the capture is handed to.
+    fn save_as_bound(
         ts: &TestShell,
         (s, g): (SessionId, u64),
         id: &str,
@@ -579,6 +624,295 @@ mod tests {
         assert_eq!(ts.shell.capture_reveal(&id).err(), NOT_FOUND);
     }
 
+    fn gone_event(id: &str) -> Value {
+        json!({ "capture_id": id, "state": "gone", "changed": false, "env_keys": null })
+    }
+
+    /// The capture goes to the vault chosen last: a Save into the other one is refused with nothing written, and only the
+    /// lock of the chosen vault empties the slot (one `gone`); the lock of the one first chosen leaves it.
+    #[test]
+    fn capture_choose_moves_the_slot_to_the_new_vault_and_its_lock_empties_it() {
+        let ts = TestShell::new();
+        let a = ts.open_vault("Family");
+        let b = ts.open_vault("Work");
+        // A holds one key, so a read that returned nothing would not pass for "nothing was written".
+        key(&ts, a.0, a.1, "OLD_A", "old-a", None);
+        let id = press(&ts, COPIED);
+        ts.shell.capture_choose(a.0, a.1, &id).unwrap();
+        ts.shell.capture_choose(b.0, b.1, &id).unwrap();
+
+        let asked = what("API_KEY", None, OnClash::Ask, true);
+        assert_eq!(save_as_bound(&ts, a, &id, asked).err(), Some(CAPTURE_VAULT));
+        assert_eq!(
+            keys_in(&ts, a.0, a.1, None),
+            [triple("OLD_A", "old-a", "kept notes")],
+            "a key was written into A"
+        );
+        assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED));
+
+        ts.shell.sessions.lock(a.0, LockReason::Manual);
+        assert_eq!(
+            state_of(&ts),
+            Some(CaptureState::Value),
+            "the lock of the vault first chosen emptied the slot"
+        );
+        assert_eq!(ts.shell.capture_reveal(&id).unwrap().as_str(), COPIED);
+
+        let before = ts.events.captures().len();
+        ts.shell.sessions.lock(b.0, LockReason::Manual);
+        assert_eq!(state_of(&ts), None);
+        assert_eq!(ts.events.captures()[before..], [gone_event(&id)]);
+        assert_eq!(ts.shell.capture.alive_texts(), 0);
+    }
+
+    /// A save goes into the vault the capture is handed to and no other: with none chosen, with another chosen, and after
+    /// `capture_unchoose` it is refused as `CAPTURE_VAULT`, with nothing written, the clipboard never opened and the slot
+    /// kept; with the right one chosen it writes.
+    #[test]
+    fn save_box_saves_into_the_chosen_vault_only() {
+        let ts = TestShell::new();
+        let a = ts.open_vault("Family");
+        let b = ts.open_vault("Work");
+        key(&ts, a.0, a.1, "OLD_A", "old-a", None);
+        let id = press(&ts, COPIED);
+        ts.clipboard.take_events();
+        let before = ts.events.captures().len();
+        let ask = || what("API_KEY", None, OnClash::Ask, true);
+        let nothing_happened = |when: &str| {
+            assert_eq!(
+                keys_in(&ts, a.0, a.1, None),
+                [triple("OLD_A", "old-a", "kept notes")],
+                "{when}: A changed"
+            );
+            assert_eq!(
+                keys_in(&ts, b.0, b.1, None),
+                Vec::new(),
+                "{when}: B changed"
+            );
+            assert_eq!(
+                ts.clipboard.take_events(),
+                Vec::<&str>::new(),
+                "{when}: the clipboard was opened"
+            );
+            assert_eq!(ts.clipboard.text().as_deref(), Some(COPIED), "{when}");
+            assert_eq!(state_of(&ts), Some(CaptureState::Value), "{when}");
+            assert_eq!(ts.events.captures().len(), before, "{when}: said something");
+        };
+
+        for at in [a, b] {
+            assert_eq!(
+                save_as_bound(&ts, at, &id, ask()).err(),
+                Some(CAPTURE_VAULT)
+            );
+        }
+        nothing_happened("no vault chosen");
+
+        ts.shell.capture_choose(b.0, b.1, &id).unwrap();
+        assert_eq!(save_as_bound(&ts, a, &id, ask()).err(), Some(CAPTURE_VAULT));
+        nothing_happened("bound to B, saved into A");
+
+        ts.shell.capture_unchoose(&id).unwrap();
+        assert_eq!(save_as_bound(&ts, b, &id, ask()).err(), Some(CAPTURE_VAULT));
+        nothing_happened("unchosen, saved into B");
+
+        ts.shell.capture_choose(b.0, b.1, &id).unwrap();
+        let (_, name, clipboard) = saved(save_as_bound(&ts, b, &id, ask()));
+        assert_eq!(
+            (name.as_str(), clipboard),
+            ("API_KEY", ClipboardAfter::Cleared)
+        );
+        assert_eq!(
+            keys_in(&ts, b.0, b.1, None),
+            [triple("API_KEY", COPIED, "")]
+        );
+        assert_eq!(
+            keys_in(&ts, a.0, a.1, None),
+            [triple("OLD_A", "old-a", "kept notes")]
+        );
+        assert_eq!(state_of(&ts), None);
+    }
+
+    /// The binding is checked after the name, the session (locked, stale, foreign, read-only) and the capture id, and
+    /// before the typed value: each refusal is its own, and a refusal for the binding never hides a better one.
+    #[test]
+    fn capture_save_is_refused_in_the_agreed_order() {
+        let ts = TestShell::new();
+        ts.open_vault("Seed");
+        let (r, gr) = read_only_session(&ts);
+        let a = ts.open_vault("Family");
+        // A holds one key, so a read that returned nothing would not pass for "nothing was written".
+        key(&ts, a.0, a.1, "OLD_A", "old-a", None);
+        let id = press(&ts, COPIED);
+        let ask = |name: &str| what(name, None, OnClash::Ask, false);
+
+        // Not handed to anyone: a bad name, a stale, foreign or read-only session and an old id are each their own refusal.
+        assert_eq!(
+            save_as_bound(&ts, a, &id, ask("not a name")).err(),
+            Some(ShellError::from(check_key_name("not a name").unwrap_err()))
+        );
+        assert_eq!(
+            save_as_bound(&ts, (a.0, a.1 + 1), &id, ask("K")).err(),
+            LOCKED
+        );
+        assert_eq!(
+            save_as_bound(&ts, (SessionId(a.0.0 + 100), a.1), &id, ask("K")).err(),
+            NOT_FOUND
+        );
+        assert_eq!(save_as_bound(&ts, (r, gr), &id, ask("K")).err(), READ_ONLY);
+        let old = "f".repeat(32);
+        assert_eq!(save_as_bound(&ts, a, &old, ask("K")).err(), NOT_FOUND);
+
+        // The binding comes before the typed value: unbound, a value typed over a captured one is refused for the binding;
+        // bound, for the value.
+        let mut typed = ask("K");
+        typed.typed = Some(Zeroizing::new("x".to_owned()));
+        assert_eq!(save_as_bound(&ts, a, &id, typed).err(), Some(CAPTURE_VAULT));
+        ts.shell.capture_choose(a.0, a.1, &id).unwrap();
+        let mut typed = ask("K");
+        typed.typed = Some(Zeroizing::new("x".to_owned()));
+        assert_eq!(save_as_bound(&ts, a, &id, typed).err(), Some(CAPTURE_VALUE));
+        assert_eq!(
+            keys_in(&ts, a.0, a.1, None),
+            [triple("OLD_A", "old-a", "kept notes")],
+            "a refused save wrote a key"
+        );
+        assert_eq!(state_of(&ts), Some(CaptureState::Value));
+        assert_clean(&CAPTURE_VAULT, "K");
+    }
+
+    /// A lock of the vault on screen (the one the box was opened over) leaves a capture handed to another vault: the slot
+    /// stays, nothing is said, and the save into the other vault still works.
+    #[test]
+    fn a_lock_of_the_host_vault_leaves_a_capture_bound_to_another() {
+        let ts = TestShell::new();
+        let host = ts.open_vault("Family");
+        let b = ts.open_vault("Work");
+        let id = press(&ts, COPIED);
+        ts.shell.capture_choose(b.0, b.1, &id).unwrap();
+        let before = ts.events.captures().len();
+
+        ts.shell.sessions.lock(host.0, LockReason::Manual);
+
+        assert_eq!(state_of(&ts), Some(CaptureState::Value));
+        assert_eq!(ts.events.captures().len(), before, "a `gone` was sent");
+        let ask = what("API_KEY", None, OnClash::Ask, false);
+        assert_eq!(saved(save_as_bound(&ts, b, &id, ask)).1, "API_KEY");
+        assert_eq!(
+            keys_in(&ts, b.0, b.1, None),
+            [triple("API_KEY", COPIED, "")]
+        );
+    }
+
+    /// A read-only session and a vault that went (its drive) are refused as choices, each with its own answer, and a
+    /// refused choice leaves the capture handed to the vault it was: the slot is still there and Reveal still shows it.
+    #[test]
+    fn capture_choose_refuses_read_only_and_unavailable_vaults() {
+        let ts = TestShell::new();
+        ts.open_vault("Seed");
+        let (r, gr) = read_only_session(&ts);
+        let a = ts.open_vault("Family");
+        let b = ts.open_vault("Work");
+        let id = press(&ts, COPIED);
+        ts.shell.capture_choose(a.0, a.1, &id).unwrap();
+        let still_a = |what: &str| {
+            assert_eq!(state_of(&ts), Some(CaptureState::Value), "{what}");
+            assert_eq!(
+                ts.shell.capture_reveal(&id).unwrap().as_str(),
+                COPIED,
+                "{what}"
+            );
+        };
+
+        assert_eq!(ts.shell.capture_choose(r, gr, &id).err(), READ_ONLY);
+        still_a("a read-only session was chosen");
+
+        // Work's folder goes away: its session is locked on its own, and stays on the list.
+        let work_dir = ts.shell.registry.entries()[2].1.clone();
+        ts.volumes.vanish(&work_dir);
+        ts.shell.autolock.tick(ts.clock.now());
+        ts.shell.autolock.wait_probe();
+        assert_eq!(ts.shell.capture_choose(b.0, b.1, &id).err(), LOCKED);
+        still_a("an unavailable vault was chosen");
+
+        // And the slot really is bound to A: a save into A works.
+        let ask = what("API_KEY", None, OnClash::Ask, false);
+        assert_eq!(saved(save_as_bound(&ts, a, &id, ask)).1, "API_KEY");
+    }
+
+    /// `capture_unchoose` hands the capture to no vault: the lock of the vault it was handed to leaves it (only a lock of
+    /// every vault empties it now); an old id is `NotFound` and unbinds nothing, not even a newer capture that kept the
+    /// binding from a second press.
+    #[test]
+    fn capture_unchoose_lets_the_old_vaults_lock_leave_it() {
+        let ts = TestShell::new();
+        let a = ts.open_vault("Family");
+        let id = press(&ts, COPIED);
+        ts.shell.capture_choose(a.0, a.1, &id).unwrap();
+        let newer = press(&ts, "Other-value-1");
+        assert_ne!(id, newer);
+        assert_eq!(ts.shell.capture_unchoose(&id).err(), NOT_FOUND);
+        assert_eq!(
+            ts.shell.capture_reveal(&newer).unwrap().as_str(),
+            "Other-value-1",
+            "an old id unbound the newer capture"
+        );
+
+        ts.shell.capture_unchoose(&newer).unwrap();
+        assert_eq!(ts.shell.capture_reveal(&newer).err(), LOCKED);
+        ts.shell.sessions.lock(a.0, LockReason::Manual);
+        assert_eq!(
+            state_of(&ts),
+            Some(CaptureState::Value),
+            "the lock of the old vault emptied the slot"
+        );
+
+        // Unchoosing again is quiet; a lock of every vault still empties it.
+        ts.shell.capture_unchoose(&newer).unwrap();
+        let before = ts.events.captures().len();
+        ts.shell.lock_all();
+        assert_eq!(state_of(&ts), None);
+        assert_eq!(ts.events.captures()[before..], [gone_event(&newer)]);
+        assert_eq!(ts.shell.capture_unchoose(&newer).err(), NOT_FOUND);
+        assert_eq!(ts.shell.capture_unchoose("nope").err(), NOT_FOUND);
+    }
+
+    /// A long change in a vault never makes the hand-over `Busy`: the choice looks at the session's handle and takes no
+    /// lock of the vault.
+    #[test]
+    fn capture_choose_never_waits_for_a_long_change() {
+        let ts = TestShell::new();
+        let a = ts.open_vault("Family");
+        let id = press(&ts, COPIED);
+        let (held, is_held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let shell = &ts.shell;
+        let answer = std::thread::scope(|scope| {
+            let holder = scope.spawn(move || {
+                shell.sessions.write_long(a.0, a.1, |_, _| {
+                    held.send(()).unwrap();
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(30))
+                        .unwrap();
+                    Ok(())
+                })
+            });
+            is_held
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the change started");
+            let answer = shell.capture_choose(a.0, a.1, &id);
+            release.send(()).unwrap();
+            assert!(holder.join().unwrap().is_ok());
+            answer
+        });
+        // `Busy` is what a hand-over that waited for the vault would answer after the short wait.
+        assert_eq!(answer.err(), None, "the hand-over was refused");
+        assert_eq!(
+            ts.shell.capture_reveal(&id).unwrap().as_str(),
+            COPIED,
+            "the capture was not handed over"
+        );
+    }
+
     /// An old capture id is refused by every command that takes one, and nothing it asked for happens: after a second press
     /// the first id is not the slot's any more (the save box that held it must not save the new value under a name the
     /// person typed for the old one, or show it).
@@ -594,6 +928,7 @@ mod tests {
         let writes = || keys_in(&ts, s, g, None);
 
         assert_eq!(ts.shell.capture_choose(s, g, &old).err(), NOT_FOUND);
+        assert_eq!(ts.shell.capture_unchoose(&old).err(), NOT_FOUND);
         assert_eq!(ts.shell.capture_reveal(&old).err(), NOT_FOUND);
         let asked = what("API_KEY", None, OnClash::Replace, true);
         assert_eq!(save(&ts, (s, g), &old, asked).err(), NOT_FOUND);
@@ -959,6 +1294,7 @@ mod tests {
 
         let (r, gr) = read_only_session(&ts);
         let again = press(&ts, COPIED);
+        assert_eq!(ts.shell.capture_choose(r, gr, &again).err(), READ_ONLY);
         assert_eq!(save(&ts, (r, gr), &again, ask()).err(), READ_ONLY);
         assert_eq!(ts.shell.capture_env(r, gr, &again).err(), READ_ONLY);
         assert_eq!(
@@ -1511,6 +1847,7 @@ mod tests {
         ] {
             assert_eq!(parse::<SessionArgs>(&body(bad)).err(), Some(MALFORMED));
         }
+        // `capture_unchoose` takes `IdArgs`: the id and nothing else.
         assert!(parse::<IdArgs>(&body(json!({ "capture_id": id }))).is_ok());
         for bad in [
             json!({}),
@@ -1548,6 +1885,11 @@ mod tests {
             serde_json::to_value(CAPTURE_VALUE).unwrap(),
             json!({ "code": "invalid_input", "what": "capture value" })
         );
+        assert_eq!(
+            serde_json::to_value(CAPTURE_VAULT).unwrap(),
+            json!({ "code": "invalid_input", "what": "capture vault" })
+        );
+        assert_ne!(CAPTURE_VAULT, CAPTURE_VALUE);
         assert_eq!(
             serde_json::to_value(crate::capture::CaptureState::TooLarge).unwrap(),
             json!("too_large")

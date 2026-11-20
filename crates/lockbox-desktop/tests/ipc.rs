@@ -440,6 +440,7 @@ fn capture_commands_are_granted_to_the_main_window_only() {
     let commands = [
         "capture_state",
         "capture_choose",
+        "capture_unchoose",
         "capture_reveal",
         "capture_save",
         "capture_cancel",

@@ -609,7 +609,6 @@
 
 .win {
   --gut: clamp(20px, 2.6vw, 36px);
-  --pw: clamp(340px, 30vw, 420px);
   position: relative;
   display: flex;
   height: 100%;
@@ -1647,6 +1646,24 @@
 .le-or {
   padding: 0 4px;
   color: var(--ink2);
+}
+
+/* ---- The save box's layer ---- */
+
+/* The save box is the app's, not a window's: it is drawn over whichever window is on screen, so a lock of the vault under it, a switch, or the lock screen
+   does not take it. The layer covers the app and lets every click through but the ones on the panel. clip, as .win and .stage: focus moving into the sliding
+   panel can't scroll the app sideways (styles/panels.test.ts). The panel's own place (top, right, bottom) is the same as in the stage, since the layer starts
+   where the stage does. */
+.boxlayer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  overflow: clip;
+  pointer-events: none;
+}
+
+.boxlayer > .panel {
+  pointer-events: auto;
 }
 
 /* ---- The panel from the right ---- */

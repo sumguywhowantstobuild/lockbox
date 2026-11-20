@@ -101,6 +101,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         env::env_save_file,
         capture::capture_state,
         capture::capture_choose,
+        capture::capture_unchoose,
         capture::capture_reveal,
         capture::capture_save,
         capture::capture_cancel,

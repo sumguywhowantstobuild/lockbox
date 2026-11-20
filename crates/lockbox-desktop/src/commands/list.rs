@@ -69,6 +69,7 @@ pub const COMMANDS: &[&str] = &[
     "env_save_file",
     "capture_state",
     "capture_choose",
+    "capture_unchoose",
     "capture_reveal",
     "capture_save",
     "capture_cancel",

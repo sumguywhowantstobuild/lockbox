@@ -121,6 +121,8 @@ export const MESSAGES: Record<string, Words> = {
   "code:invalid_input:no keys": { title: "This folder has no keys.", body: "Add a key first." },
   // A copied key saved with the shortcut (Task 18): the copy was empty or too big, and nothing was typed in its place.
   "code:invalid_input:capture value": { title: "Paste or type the value first.", body: "" },
+  // The save box (Plan 4C Task 10): the copy was not handed to the vault the box saves into (the shell holds it to the vault chosen in the box). The words are the session's, for Ariel to change.
+  "code:invalid_input:capture vault": { title: "That vault wasn't ready for the save.", body: "Press Save again." },
   // Settings (Task 20): the save shortcut, and Start with Windows. `{shortcut}` is the combination the page tried, put in by the page.
   "code:invalid_input:shortcut": {
     title: "Use at least two of Ctrl, Shift and Alt, with a letter, a digit or F1 to F12.",
@@ -291,6 +293,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "backup: wrong vault",
   "being deleted",
   "capture value",
+  "capture vault",
   "chunk",
   "clipboard",
   "clipboard delay",

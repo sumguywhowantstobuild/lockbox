@@ -18,6 +18,7 @@ import {
   setForm,
   setSearchQuery,
   startSaveAll,
+  useCaptureWaiting,
   useForm,
   useSessions,
   useVaults,
@@ -48,7 +49,6 @@ import { OpenBackupPanel } from "./OpenBackup";
 import { Ready } from "./setup/Ready";
 import { ItemPanel } from "./ItemPanel";
 import { SaveAllCloudQuestion, SaveAllFiles, SaveAllLeft } from "./SaveAllFiles";
-import { SaveBox } from "./SaveBox";
 import { SearchPanel } from "./SearchPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
@@ -73,6 +73,8 @@ function lockedLine(names: readonly string[]): string | null {
 export function MainWindow({ data, look }: { data: SessionData; look: VaultLook }) {
   const vaults = useVaults();
   const sessions = useSessions();
+  // The save box is up (the app's: it is drawn over this window, see `App`): the list makes room for its panel, and the window's own panels wait.
+  const boxUp = useCaptureWaiting();
   const filter = useForm(data.session, FILTER);
   const kind = useKind(data.session);
   const sort = useSort(data.session);
@@ -247,7 +249,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
     <div className="win">
       <VaultStrip data={data} />
       <SideMenu data={data} look={look} folders={folders} total={items.length} trashed={inTrash.length} />
-      <div className={panel === null && data.tool === null ? "stage" : "stage open"}>
+      <div className={panel === null && data.tool === null && !boxUp ? "stage" : "stage open"}>
         <main className="mainpane">
           <div className="tb">
             <span className="tb-t" aria-hidden="true">
@@ -423,62 +425,65 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             )}
           </div>
         </main>
-        {panel === "item" && data.openItem !== null ? (
-          <ItemPanel
-            // One panel is one session's, at one generation, for one item: another session's item with the same ID is a new panel, with a new form.
-            key={`${String(data.session)}:${String(data.generation)}:${data.openItem.id}`}
-            data={data}
-            folders={folders}
-            folderNames={folderNames}
-            onClose={() => {
-              void selectItem(data.session, null);
-            }}
-          />
-        ) : null}
-        {panel === "trash" && picked !== undefined ? <TrashPanel key={picked.id} data={data} summary={picked} items={everything} /> : null}
-        {data.tool?.kind === "new_login" ? (
-          <LoginForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} title={data.tool.title} />
-        ) : null}
-        {data.tool?.kind === "new_key" ? (
-          <KeyForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
-        ) : null}
-        {data.tool?.kind === "new_note" ? (
-          <NoteForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
-        ) : null}
-        {data.tool?.kind === "paste_env" ? (
-          <EnvPaste
-            key={`${String(data.session)}:${String(data.generation)}:${String(data.tool.opening)}`}
-            data={data}
-            folders={folders}
-            initialRows={data.tool.rows}
-            initialFolder={data.tool.folder}
-          />
-        ) : null}
-        {data.tool?.kind === "save_box" ? (
-          // Not keyed by the copy: a new copy while the box is open keeps what was typed and chosen.
-          <SaveBox key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
-        ) : null}
-        {data.tool?.kind === "edit" ? (
-          <EditForm
-            key={`${String(data.session)}:${String(data.generation)}:${data.tool.summary.id}`}
-            data={data}
-            folders={folders}
-            summary={data.tool.summary}
-            detail={data.tool.detail}
-          />
-        ) : null}
-        {data.tool?.kind === "add_files" ? <AddFiles key={`${String(data.session)}:${String(data.generation)}:${String(data.addFiles?.opening)}`} data={data} folders={folders} /> : null}
-        {data.tool?.kind === "save_all" ? <SaveAllFiles key={`${String(data.session)}:${String(data.generation)}:${String(data.saveAll?.opening)}`} data={data} /> : null}
-        {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
-        {data.tool?.kind === "settings" ? <SettingsPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
-        {data.tool?.kind === "backup" ? <BackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
-        {data.tool?.kind === "older_copies" ? <OlderCopiesPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
-        {data.tool?.kind === "test_backup" ? (
-          <TestBackupPanel key={`${String(data.session)}:${String(data.generation)}:${String(data.test?.opening)}`} data={data} />
-        ) : null}
-        {data.tool?.kind === "open_backup" ? <OpenBackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
-        {data.tool?.kind === "change_password" ? <ChangePasswordPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
-        {data.tool?.kind === "new_recovery_key" ? <NewRecoveryKeyPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+        {/* While the save box is up (the app's, drawn over this window) the window's own panels are not drawn: their records stay, and they are back when it ends. */}
+        {boxUp ? null : (
+          <>
+            {panel === "item" && data.openItem !== null ? (
+              <ItemPanel
+                // One panel is one session's, at one generation, for one item: another session's item with the same ID is a new panel, with a new form.
+                key={`${String(data.session)}:${String(data.generation)}:${data.openItem.id}`}
+                data={data}
+                folders={folders}
+                folderNames={folderNames}
+                onClose={() => {
+                  void selectItem(data.session, null);
+                }}
+              />
+            ) : null}
+            {panel === "trash" && picked !== undefined ? <TrashPanel key={picked.id} data={data} summary={picked} items={everything} /> : null}
+            {data.tool?.kind === "new_login" ? (
+              <LoginForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} title={data.tool.title} />
+            ) : null}
+            {data.tool?.kind === "new_key" ? (
+              <KeyForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
+            ) : null}
+            {data.tool?.kind === "new_note" ? (
+              <NoteForm key={`${String(data.session)}:${String(data.generation)}`} data={data} folders={folders} />
+            ) : null}
+            {data.tool?.kind === "paste_env" ? (
+              <EnvPaste
+                key={`${String(data.session)}:${String(data.generation)}:${String(data.tool.opening)}`}
+                data={data}
+                folders={folders}
+                initialRows={data.tool.rows}
+                initialFolder={data.tool.folder}
+              />
+            ) : null}
+            {data.tool?.kind === "edit" ? (
+              <EditForm
+                key={`${String(data.session)}:${String(data.generation)}:${data.tool.summary.id}`}
+                data={data}
+                folders={folders}
+                summary={data.tool.summary}
+                detail={data.tool.detail}
+              />
+            ) : null}
+            {data.tool?.kind === "add_files" ? (
+              <AddFiles key={`${String(data.session)}:${String(data.generation)}:${String(data.addFiles?.opening)}`} data={data} folders={folders} />
+            ) : null}
+            {data.tool?.kind === "save_all" ? <SaveAllFiles key={`${String(data.session)}:${String(data.generation)}:${String(data.saveAll?.opening)}`} data={data} /> : null}
+            {data.tool?.kind === "generator" ? <GeneratorPage key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+            {data.tool?.kind === "settings" ? <SettingsPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+            {data.tool?.kind === "backup" ? <BackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+            {data.tool?.kind === "older_copies" ? <OlderCopiesPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+            {data.tool?.kind === "test_backup" ? (
+              <TestBackupPanel key={`${String(data.session)}:${String(data.generation)}:${String(data.test?.opening)}`} data={data} />
+            ) : null}
+            {data.tool?.kind === "open_backup" ? <OpenBackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+            {data.tool?.kind === "change_password" ? <ChangePasswordPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+            {data.tool?.kind === "new_recovery_key" ? <NewRecoveryKeyPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+          </>
+        )}
       </div>
       {/* The window's own: messages sit at the foot of the whole window, whatever is open beside the side menu. */}
       <ToastStack />

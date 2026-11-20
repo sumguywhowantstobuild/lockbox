@@ -1460,11 +1460,16 @@ export function captureState(): Promise<CaptureEvent | null> {
 }
 
 /**
- * Hands the copy to the unlocked vault `vault`: a lock of that vault lets it go. Refused `not_found` for an id that is not the
- * waiting copy's any more, and stale or foreign as every command.
+ * Hands the copy to the unlocked, writable vault `vault`: a lock of that vault lets it go, and Save is only for it. Refused `read_only`
+ * for a read-only session, `not_found` for an id that is not the waiting copy's any more, and stale or foreign as every command.
  */
 export function captureChoose(vault: SessionRef, captureId: string): Promise<Tagged<null>> {
   return call<null>("capture_choose", { session: vault.session, generation: vault.generation, capture_id: captureId });
+}
+
+/** Hands the copy to no vault (a locked one is chosen in the box): only a lock of every vault lets it go now. `not_found` for an old id. */
+export function captureUnchoose(captureId: string): Promise<null> {
+  return callPlain<null>("capture_unchoose", { capture_id: captureId });
 }
 
 /**
@@ -1478,8 +1483,8 @@ export function captureReveal(captureId: string): Promise<string> {
 /**
  * Saves the copy as a key (see `CaptureSave` and `CaptureSaved`), in one write; on success the shell clears the clipboard if asked,
  * and lets go of the copy (`gone`). A refusal writes nothing: `read_only`, `not_found` (the copy or the folder), `invalid_input`
- * (`what: "key name"`, `"capture value"` for a copy with nothing typed in its place, `"env twice"` for Replace finding the name
- * twice), `too_large` (`"title"`, `"value"`).
+ * (`what: "key name"`, `"capture value"` for a copy with nothing typed in its place, `"capture vault"` for a copy that is not handed to
+ * that vault at that generation, `"env twice"` for Replace finding the name twice), `too_large` (`"title"`, `"value"`).
  */
 export function captureSave(vault: SessionRef, save: CaptureSave): Promise<Tagged<CaptureSaved>> {
   return call<CaptureSaved>("capture_save", {

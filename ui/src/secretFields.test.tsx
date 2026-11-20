@@ -2,7 +2,7 @@
 // (`autocomplete`: "off" for a recovery key or a box that takes either, "current-password" or "new-password" for a password). One parameterised test
 // reaches each of them through the real App, as a person would, and fails for a listed screen that draws no field. A second reads the sources, so a
 // field in a file nobody listed fails too. Each later task that adds a field adds its screen to the list here.
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import { resetStoreForTests } from "./store";
@@ -262,6 +262,32 @@ const PLACES: Place[] = [
       const menu = await screen.findByRole("menu");
       fireEvent.click(within(menu).getByRole("menuitem", { name: "New vault" }));
       await screen.findByRole("heading", { level: 1, name: "New vault" });
+    },
+  },
+  {
+    screen: "The save box, unlocking the vault chosen in it (Task 10)",
+    fields: ["current-password"],
+    reach: async () => {
+      start([...mine(), { id: 8, name: "Home", items: sampleItems() }]);
+      const field = await screen.findByLabelText(/^Password for /);
+      fireEvent.change(field, { target: { value: PASSWORD } });
+      fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+      await screen.findByRole("heading", { level: 1, name: "All items", hidden: true });
+      await waitFor(() => {
+        expect(shell.calls.some((call) => call.cmd === "capture_state")).toBe(true);
+      });
+      await act(async () => {
+        shell.press({ text: "demo-copied-for-the-field-check" });
+        await Promise.resolve();
+      });
+      const panel = await screen.findByRole("complementary", { name: "Save what you copied" });
+      const list = within(panel).getByRole("combobox", { name: "Vault" });
+      fireEvent.pointerDown(list, { button: 0 });
+      fireEvent.click(list);
+      const option = (await screen.findAllByRole("option")).find((one) => one.textContent === "Home");
+      fireEvent.pointerDown(option as HTMLElement);
+      fireEvent.click(option as HTMLElement);
+      await within(panel).findByLabelText("Password for Home");
     },
   },
 ];

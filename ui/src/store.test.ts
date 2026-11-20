@@ -14,12 +14,15 @@ import {
   openNewLogin,
   openSearch,
   resetStoreForTests,
+  saveChoices,
   selectItem,
   setForm,
   startNotices,
   startStore,
   unlock,
+  type SessionData,
 } from "./store";
+import type { VaultEntry } from "./api";
 import { installFakeShell, itemId, LOCKED, PASSWORD, sampleItems, type FakeShell } from "./testing/fakeShell";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
@@ -438,4 +441,117 @@ test("first_close_notice_sets_and_clears_5b_and_is_never_asked_for_at_launch", a
     shell.sendEvent({ kind: "first_close", explain: false });
   });
   expect(debugState().notices.firstClose).toBe(false);
+});
+
+// ---- The save box's choices (Plan 4C Task 10) ----
+
+/** A session's record with only what `saveChoices` reads. */
+function open(vaultId: number, name: string, options: { readOnly?: boolean; session?: number } = {}): SessionData {
+  return {
+    session: options.session ?? vaultId + 100,
+    generation: 1,
+    vaultId,
+    name,
+    readOnly: options.readOnly ?? false,
+    kind: "vault",
+    opened: vaultId,
+    recovery: null,
+    asks: { detailsChanged: false },
+  } as unknown as SessionData;
+}
+
+/** The same session waiting on a step: its recovery key (21f, 29b) or Ask 3. */
+function waiting(session: SessionData, on: "recovery" | "details"): SessionData {
+  return on === "recovery"
+    ? ({ ...session, recovery: { phase: "making" } } as unknown as SessionData)
+    : ({ ...session, asks: { detailsChanged: true } } as unknown as SessionData);
+}
+
+function listed(id: number, name: string | null, options: { available?: boolean; damaged?: boolean } = {}): VaultEntry {
+  return { list: 5, id, name, available: options.available ?? true, details_damaged: options.damaged ?? false };
+}
+
+const labelsOf = (options: { label: string }[]): string[] => options.map((one) => one.label);
+
+test("save_choices_puts_the_vault_on_screen_first_then_the_list_in_order", () => {
+  const vaults = [listed(1, "One"), listed(2, "Two"), listed(3, "Three")];
+  const sessions = [open(3, "Three"), open(2, "Two")];
+  const options = saveChoices(sessions.at(-1), sessions, vaults);
+  expect(options.map((one) => [one.value, one.label])).toEqual([
+    ["s:102", "Two"],
+    ["v:1", "One"],
+    ["s:103", "Three"],
+  ]);
+  expect(options.map((one) => one.choice)).toEqual([
+    { kind: "open", session: 102 },
+    { kind: "locked", vault: 1, list: 5 },
+    { kind: "open", session: 103 },
+  ]);
+});
+
+test("save_choices_leaves_out_what_cannot_take_a_key", () => {
+  // An unavailable vault, one whose details are damaged, an open read-only one and one that can't be read at all are no choices.
+  const vaults = [listed(1, "One"), listed(2, "Gone", { available: false }), listed(3, "Hurt", { damaged: true }), listed(4, "Ref"), listed(5, null), listed(6, "Six")];
+  const sessions = [open(4, "Ref", { readOnly: true }), open(1, "One")];
+  expect(labelsOf(saveChoices(sessions.at(-1), sessions, vaults))).toEqual(["One", "Six"]);
+  // A read-only window on screen is not offered itself: the first vault that can be saved into is.
+  const readOnly = [open(1, "One"), open(4, "Ref", { readOnly: true })];
+  expect(labelsOf(saveChoices(readOnly.at(-1), readOnly, vaults))).toEqual(["One", "Six"]);
+  expect(saveChoices(readOnly.at(-1), readOnly, [listed(4, "Ref")])).toEqual([]);
+});
+
+test("save_choices_before_the_list_has_come_offers_only_the_window_on_screen", () => {
+  const sessions = [open(1, "One")];
+  expect(labelsOf(saveChoices(sessions.at(-1), sessions, null))).toEqual(["One"]);
+  const readOnly = [open(1, "One", { readOnly: true })];
+  expect(saveChoices(readOnly.at(-1), readOnly, null)).toEqual([]);
+  expect(saveChoices(undefined, [], [listed(1, "One")])).toEqual([{ value: "v:1", label: "One", choice: { kind: "locked", vault: 1, list: 5 } }]);
+});
+
+test("save_choices_says_the_place_on_the_list_of_vaults_with_one_name", () => {
+  const vaults = [listed(1, "Twin"), listed(2, "Other"), listed(3, "Twin")];
+  const sessions = [open(3, "Twin")];
+  expect(labelsOf(saveChoices(sessions.at(-1), sessions, vaults))).toEqual(["Twin, 3 of 3", "Twin, 1 of 3", "Other"]);
+});
+
+test("save_choices_names_an_open_vault_by_its_session_and_a_locked_one_by_the_list", () => {
+  const renamed = open(1, "Renamed since listed");
+  expect(labelsOf(saveChoices(renamed, [renamed], [listed(1, "Old name"), listed(2, "Locked one")]))).toEqual(["Renamed since listed", "Locked one"]);
+});
+
+test("a_writable_session_that_is_not_listed_is_offered_only_while_on_screen", () => {
+  const stray = open(-1, "Not on the list", { session: 9 });
+  const behind = [stray, open(1, "One")];
+  expect(labelsOf(saveChoices(behind.at(-1), behind, [listed(1, "One")]))).toEqual(["One"]);
+  const front = [open(1, "One"), stray];
+  expect(labelsOf(saveChoices(front.at(-1), front, [listed(1, "One")]))).toEqual(["Not on the list", "One"]);
+});
+
+test("a_vault_open_behind_and_waiting_on_a_step_is_not_offered", () => {
+  const vaults = [listed(1, "One"), listed(2, "Two"), listed(3, "Three")];
+  for (const on of ["recovery", "details"] as const) {
+    const sessions = [waiting(open(2, "Two"), on), open(3, "Three"), open(1, "One")];
+    expect(labelsOf(saveChoices(sessions.at(-1), sessions, vaults)), on).toEqual(["One", "Three"]);
+  }
+  // The window on screen is offered whatever it waits on: its own step is what is drawn.
+  const front = [open(1, "One"), waiting(open(2, "Two"), "recovery")];
+  expect(labelsOf(saveChoices(front.at(-1), front, vaults))).toEqual(["Two", "One", "Three"]);
+});
+
+test("a_locked_choice_whose_vault_is_open_but_cannot_take_a_key_stays_on_offer_as_that_entry", () => {
+  const vaults = [listed(1, "One"), listed(2, "Two")];
+  const keep = { kind: "locked", vault: 2, list: 5 } as const;
+  const cases = [open(2, "Two", { readOnly: true }), waiting(open(2, "Two"), "recovery"), waiting(open(2, "Two"), "details")];
+  for (const behind of cases) {
+    const sessions = [behind, open(1, "One")];
+    expect(saveChoices(sessions.at(-1), sessions, vaults, keep).map((one) => one.choice)).toEqual([{ kind: "open", session: 101 }, keep]);
+    // Without the box's choice it is not offered at all.
+    expect(labelsOf(saveChoices(sessions.at(-1), sessions, vaults))).toEqual(["One"]);
+  }
+  // A vault that can take a key is the open session, not the locked entry.
+  const usable = [open(2, "Two"), open(1, "One")];
+  expect(saveChoices(usable.at(-1), usable, vaults, keep).map((one) => one.choice)).toEqual([
+    { kind: "open", session: 101 },
+    { kind: "open", session: 102 },
+  ]);
 });

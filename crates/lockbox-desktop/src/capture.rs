@@ -4,7 +4,9 @@
 //!
 //! The slot empties (and the page is told `gone`) when the capture is saved, cancelled or handed to a paste, when every
 //! vault locks (a lock of all vaults, the window's close, idle, Windows' lock and sleep, Quit: each runs the lock hooks
-//! with `None`, even with no vault open) and when the vault it was handed to locks. A second press replaces it.
+//! with `None`, even with no vault open) and when the vault it was handed to locks. A second press replaces it. The
+//! hand-over is to a session at the generation it was unlocked in: a save is held to that pair, and a page that chose a
+//! locked vault in the box takes it back (`unchoose`), leaving only a lock of every vault to empty the slot.
 //!
 //! The slot's mutex is held for the replacing and the emptying and for the events they send, so the page hears of a
 //! capture and of its end in the order they happened. It is never held across the clipboard or the vault.
@@ -15,6 +17,7 @@ use lockbox_core::env_file;
 use serde::Serialize;
 use zeroize::Zeroizing;
 
+use crate::commands::capture::CAPTURE_VAULT;
 use crate::commands::items::MAX_KEY_VALUE;
 use crate::error::{ShellError, ShellResult};
 use crate::lock;
@@ -143,6 +146,9 @@ impl Drop for Held {
     }
 }
 
+/// The vault a capture is handed to: the session and the generation it was unlocked in.
+pub(crate) type Bound = (SessionId, u64);
+
 /// What the slot holds. No `Debug`: it holds the copied text (R5).
 struct Slot {
     id: [u8; 16],
@@ -151,8 +157,9 @@ struct Slot {
     state: CaptureState,
     /// [`Sessions::epoch`] as it was before the clipboard read began.
     epoch: u64,
-    /// The vault the page handed the capture to: its lock empties the slot.
-    chosen: Option<SessionId>,
+    /// The vault the page handed the capture to, as its session and the generation it was unlocked in: a lock of that
+    /// session empties the slot, and a save or a Reveal is for exactly that pair.
+    chosen: Option<Bound>,
     env_keys: Option<u32>,
 }
 
@@ -250,14 +257,21 @@ impl Capture {
 
     /// Records the vault the capture goes to. Run inside that session's publish guard, so a lock of it cannot slip in
     /// between: it either refuses first, or waits and then runs its hook, which empties the slot.
-    pub(crate) fn choose(&self, id: &str, session: SessionId) -> ShellResult<()> {
-        Self::current(&mut lock(&self.slot), id)?.chosen = Some(session);
+    pub(crate) fn choose(&self, id: &str, session: SessionId, generation: u64) -> ShellResult<()> {
+        Self::current(&mut lock(&self.slot), id)?.chosen = Some((session, generation));
         Ok(())
     }
 
-    /// The vault the capture was handed to and the value (trimmed), for Reveal: `NotFound` for an old id and for a slot
-    /// that holds no value, `Locked` when no vault was chosen.
-    pub(crate) fn reveal(&self, id: &str) -> ShellResult<(SessionId, Zeroizing<String>)> {
+    /// Hands the capture to no vault (a locked one is chosen in the box): only a lock of every vault empties the slot
+    /// now. `NotFound` for an old id, which unbinds nothing.
+    pub(crate) fn unchoose(&self, id: &str) -> ShellResult<()> {
+        Self::current(&mut lock(&self.slot), id)?.chosen = None;
+        Ok(())
+    }
+
+    /// The session and generation the capture was handed to and the value (trimmed), for Reveal: `NotFound` for an old id
+    /// and for a slot that holds no value, `Locked` when no vault was chosen.
+    pub(crate) fn reveal(&self, id: &str) -> ShellResult<(Bound, Zeroizing<String>)> {
         let mut slot = lock(&self.slot);
         let held = Self::current(&mut slot, id)?;
         let Some(value) = held.value() else {
@@ -274,6 +288,27 @@ impl Capture {
     ) -> ShellResult<(CaptureState, Option<Zeroizing<String>>)> {
         let mut slot = lock(&self.slot);
         let held = Self::current(&mut slot, id)?;
+        let raw = held
+            .text
+            .as_ref()
+            .map(|held| Zeroizing::new(held.text.to_string()));
+        Ok((held.state, raw))
+    }
+
+    /// [`Capture::snapshot`] for a save into `session` at `generation`: in the same hold of the slot's mutex, `NotFound`
+    /// for an id that is not the slot's, then `Err(CAPTURE_VAULT)` unless the capture is handed to exactly that session at
+    /// exactly that generation. The check and the copy are one step, so a hand-over cannot change between them.
+    pub(crate) fn snapshot_bound(
+        &self,
+        id: &str,
+        session: SessionId,
+        generation: u64,
+    ) -> ShellResult<(CaptureState, Option<Zeroizing<String>>)> {
+        let mut slot = lock(&self.slot);
+        let held = Self::current(&mut slot, id)?;
+        if held.chosen != Some((session, generation)) {
+            return Err(CAPTURE_VAULT);
+        }
         let raw = held
             .text
             .as_ref()
@@ -310,7 +345,7 @@ impl Capture {
             let mut slot = lock(&capture.slot);
             let goes = slot.as_ref().is_some_and(|held| match only {
                 None => held.epoch < sessions.epoch(),
-                Some(locked) => held.chosen == Some(locked),
+                Some(locked) => held.chosen.is_some_and(|(session, _)| session == locked),
             });
             if !goes {
                 return;
@@ -634,6 +669,57 @@ mod tests {
             "Other-value-1",
             "the new capture lost the chosen vault"
         );
+        assert_eq!(
+            ts.shell
+                .capture
+                .snapshot_bound(&again, s, g)
+                .map(|(state, _)| state),
+            Ok(CaptureState::Value),
+            "the new capture lost the generation it was handed over at"
+        );
+    }
+
+    /// The binding is the session and the generation it was handed over at: a save's check passes for exactly that pair,
+    /// is `NotFound` for an id that is not the slot's (whatever the pair) and fails for the vault, never the id, when
+    /// nothing is chosen, after `unchoose`, for another session and for the same session at another generation.
+    #[test]
+    fn the_binding_holds_the_session_and_the_generation() {
+        let ts = TestShell::new();
+        let (s, g) = ts.open_vault("Family");
+        copy_and_press(&ts, COPIED);
+        let old = last_id(&ts);
+        copy_and_press(&ts, "Other-value-1");
+        let id = last_id(&ts);
+        let bound = |id: &str, session: SessionId, generation: u64| {
+            ts.shell
+                .capture
+                .snapshot_bound(id, session, generation)
+                .map(|(state, text)| (state, text.map(|text| text.as_str().to_owned())))
+        };
+        let other = SessionId(s.0 + 1);
+
+        assert_eq!(bound(&id, s, g), Err(CAPTURE_VAULT), "nothing chosen yet");
+        ts.shell.capture.choose(&old, s, g).unwrap_err();
+        assert_eq!(
+            bound(&id, s, g),
+            Err(CAPTURE_VAULT),
+            "an old id bound the newer capture"
+        );
+        ts.shell.capture.choose(&id, s, g).unwrap();
+        let raw = Some("Other-value-1".to_owned());
+        assert_eq!(bound(&id, s, g), Ok((CaptureState::Value, raw)));
+        assert_eq!(bound(&id, s, g + 1), Err(CAPTURE_VAULT));
+        assert_eq!(bound(&id, other, g), Err(CAPTURE_VAULT));
+        assert_eq!(bound(&old, s, g), Err(ShellError::NotFound));
+        assert_eq!(bound("", s, g), Err(ShellError::NotFound));
+
+        ts.shell.capture.unchoose(&id).unwrap();
+        assert_eq!(bound(&id, s, g), Err(CAPTURE_VAULT), "after unchoose");
+        assert_eq!(ts.shell.capture.unchoose(&old), Err(ShellError::NotFound));
+        // The same session handed over again at a later generation: the earlier generation is refused.
+        ts.shell.capture.choose(&id, s, g + 1).unwrap();
+        assert_eq!(bound(&id, s, g), Err(CAPTURE_VAULT));
+        assert!(bound(&id, s, g + 1).is_ok());
     }
 
     /// Whatever the clipboard holds, a press never panics and nothing the page is told shows a value.
@@ -910,6 +996,7 @@ mod tests {
         copy_and_press(&ts, COPIED);
         let id = last_id(&ts);
         let before = captures(&ts).len();
+        ts.shell.capture_choose(s, g, &id).unwrap();
         ts.shell
             .capture_save(s, g, &id, save_what("API_KEY"))
             .unwrap();

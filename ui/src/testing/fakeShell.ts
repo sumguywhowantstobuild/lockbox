@@ -444,8 +444,8 @@ export interface FakeShell {
   clipboard(): string | null;
   /** The next clipboard clear (a save's, or the paste panel's) errors: the answer is `failed`, and the text stays. */
   failClipboardClearNext(): void;
-  /** The slot the shell holds, as the page can only know it by asking: its id, state and the vault it was handed to. `null` for none. */
-  captureSlot(): { id: string; state: string; chosen: number | null } | null;
+  /** The slot the shell holds, as the page can only know it by asking: its id, state and the vault it was handed to (session and generation). `null` for none. */
+  captureSlot(): { id: string; state: string; chosen: number | null; chosenGeneration: number | null } | null;
   /** Empties the slot as a lock of its vault does: `lockbox://capture` with `gone` is sent. */
   emptyCaptureSlot(): void;
   /** Empties the slot and says nothing, as when the page missed the `gone` event: the next command about it is `not_found`. */
@@ -970,8 +970,13 @@ interface FakeSlot {
   id: string;
   text: string | null;
   state: "value" | "empty" | "too_large";
+  /** The session the copy is handed to, with its generation (`capture_choose`), or `null` for none. Save and Reveal are held to both. */
   chosen: number | null;
+  chosenGeneration: number | null;
 }
+
+/** What the shell sends when `capture_save` is given a session the copy is not handed to (none chosen, another one, or the chosen one at another generation). */
+export const CAPTURE_VAULT = { code: "invalid_input", what: "capture vault" };
 
 /** What the engine sends for a file that does not decrypt (`Damaged { what: "file" }`), and for an item that holds no files. */
 export const FILE_DAMAGED = { code: "core", kind: "damaged", what: "file" };
@@ -2251,15 +2256,26 @@ export function installFakeShell(
         return slot === undefined ? null : slotEvent(slot, false);
       case "capture_choose": {
         const sent = exactly(args, ["session", "generation", "capture_id"]) as { session: number; generation: number; capture_id: string };
-        vaultFor(sent.session, sent.generation);
+        const vault = vaultFor(sent.session, sent.generation);
+        // A read-only vault can't take a key: it is never a choice.
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
         slot.chosen = sent.session;
+        slot.chosenGeneration = sent.generation;
         return tagged(sent.session, sent.generation, null);
+      }
+      case "capture_unchoose": {
+        const sent = exactly(args, ["capture_id"]) as { capture_id: string };
+        if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
+        slot.chosen = null;
+        slot.chosenGeneration = null;
+        return null;
       }
       case "capture_reveal": {
         const sent = exactly(args, ["capture_id"]) as { capture_id: string };
         if (slot?.id !== sent.capture_id || slot.text === null || slot.state !== "value") return refuse({ code: "not_found" });
-        if (slot.chosen === null || live.get(slot.chosen)?.unlocked !== true) return refuse(LOCKED);
+        const chosen = slot.chosen === null ? undefined : live.get(slot.chosen);
+        if (chosen?.unlocked !== true || chosen.generation !== slot.chosenGeneration) return refuse(LOCKED);
         captureRevealed += 1;
         // The value saved and shown is the text with its surrounding spaces and line breaks dropped.
         return slot.text.trim();
@@ -2293,6 +2309,8 @@ export function installFakeShell(
         const vault = vaultFor(sent.session, sent.generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
         if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
+        // Only into the vault the copy is handed to, at the generation it was handed to.
+        if (slot.chosen !== sent.session || slot.chosenGeneration !== sent.generation) return refuse(CAPTURE_VAULT);
         const name = sent.name;
         const place = sent.collection;
         const onClash = sent.on_clash;
@@ -4742,7 +4760,7 @@ export function installFakeShell(
       const id = `${(0xca97).toString(16)}${pressesMade.toString(16).padStart(28, "0")}`;
       const before = slot;
       const value = (made: FakeSlot | undefined) => (made?.state === "value" ? (made.text ?? "").trim() : null);
-      const next: FakeSlot = { id, text: state === "value" ? text : null, state, chosen: before?.chosen ?? null };
+      const next: FakeSlot = { id, text: state === "value" ? text : null, state, chosen: before?.chosen ?? null, chosenGeneration: before?.chosenGeneration ?? null };
       // A copy was waiting and its value differs from this one's.
       const changed = before !== undefined && value(before) !== value(next);
       slot = next;
@@ -4755,7 +4773,7 @@ export function installFakeShell(
     failClipboardClearNext: () => {
       failClear = true;
     },
-    captureSlot: () => (slot === undefined ? null : { id: slot.id, state: slot.state, chosen: slot.chosen }),
+    captureSlot: () => (slot === undefined ? null : { id: slot.id, state: slot.state, chosen: slot.chosen, chosenGeneration: slot.chosenGeneration }),
     emptyCaptureSlot: emptySlot,
     forgetCaptureSlot: () => {
       slot = undefined;
