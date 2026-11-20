@@ -1,5 +1,6 @@
 import { useId, useRef, useState, type ReactNode } from "react";
 import type { CloudProvider } from "../api";
+import { providerName } from "../cloudWords";
 import { messageFor, messageText } from "../messages";
 import { Button } from "../parts/Button";
 import { Dialog } from "../parts/Dialog";
@@ -12,6 +13,7 @@ import {
   openChangePassword,
   retryOpenFiles,
   setOutputRecordAside,
+  showVaultFolder,
   startOpenBackup,
   startRestore,
   useLockNote,
@@ -28,14 +30,6 @@ import { shortcutText } from "../shortcut";
 // is not drawn, and a sentence that names one waits with it. Words come from fixed text, the vault's own name and a
 // count, never from a refusal's own text: a refusal goes through `messageFor`.
 
-/** What the person calls each cloud service; the shell sends a fixed spelling (`GoogleDrive`). */
-const PROVIDER: Record<CloudProvider, string> = {
-  OneDrive: "OneDrive",
-  GoogleDrive: "Google Drive",
-  Dropbox: "Dropbox",
-  Other: "A cloud service",
-};
-
 /** Ask 3's message after its first sentence, which names the vault. */
 const DETAILS_CHANGED =
   "Its name, or other details kept beside your items, don't match what Lockbox last saved. Moving a vault or restoring a backup doesn't cause this. If you edited that file yourself, accept it. If you didn't, lock it and check your PC first; restoring a backup you trust is the safer way back. Backups stay off until you accept.";
@@ -43,9 +37,9 @@ const DETAILS_CHANGED =
 /** What Ask 3 says is wrong, in the design's words: also the first sentences of an older copy's warning. */
 const DETAILS_DIFFER = "Its name, or other details kept beside your items, don't match what Lockbox last saved.";
 
-/** Ask 9's words: what an unlock from the spare copy of the details means, and what to do about it (the design's, word for word). */
-const SPARE_DETAILS =
-  "Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password.";
+/** Ask 9's words: what an unlock from the spare copy of the details means (its heading, as drawn), and what to do about it (the design's, word for word). */
+const SPARE_TITLE = "Opened from the backup copy of this vault's details";
+const SPARE_DETAILS = "If you changed this vault's password recently, it may need your previous password.";
 const CHANGE_AGAIN = "Change the password again now that it's open.";
 
 /** The one word that fits one or many. */
@@ -59,18 +53,27 @@ function count(n: number, one: string, many: string): string {
  * "Close" hears which banner it closes.
  */
 function Notice({
+  title,
   text,
   actions,
   children,
 }: {
+  /** A heading over the words, where the design draws one (Ask 9): it is said with them to each button. */
+  title?: string;
   text: string;
   /** `main` is the way out the words point to, drawn filled. */
   actions: { name: string; onPress: () => void; disabled?: boolean; main?: boolean }[];
   children?: ReactNode;
 }) {
   const words = useId();
+  const heading = useId();
   return (
     <div className="ask">
+      {title === undefined ? null : (
+        <h2 className="ask-t" id={heading}>
+          {title}
+        </h2>
+      )}
       <p id={words}>{text}</p>
       {children}
       {actions.length === 0 ? null : (
@@ -79,7 +82,7 @@ function Notice({
             <Button
               key={action.name}
               look={action.main === true ? "pill-main" : "pill"}
-              aria-describedby={words}
+              aria-describedby={title === undefined ? words : `${heading} ${words}`}
               disabled={action.disabled}
               onClick={action.onPress}
             >
@@ -140,8 +143,8 @@ export function DetailsChangedAsk({ data }: { data: SessionData }) {
 /**
  * The banners an unlock raises over the list: Ask 4 (items that can't be read), Ask 5 (leftover files, the count only: the
  * sentences about "these files" and their date and size need the list, which 4B builds, and so does Delete them all),
- * Ask 9 (opened from the spare details; its Change password opens the form for this vault, and the change answers it)
- * and Ask 10 (a cloud folder). Each closes with its button and comes back at the next unlock.
+ * Ask 9 (opened from the spare details, under its heading; its Change password opens the form for this vault, and the change answers it)
+ * and Ask 10 (a cloud folder, with Show in Explorer). Each closes with its button and comes back at the next unlock.
  */
 export function VaultBanners({ data }: { data: SessionData }) {
   const { asks, session } = data;
@@ -191,6 +194,7 @@ export function VaultBanners({ data }: { data: SessionData }) {
       {asks.spareDetails && open("spare") ? (
         // The design's words in full, with Later and Change password. A vault that can't be changed (opened read-only) can't be told to change its password.
         <Notice
+          title={SPARE_TITLE}
           text={`${SPARE_DETAILS}${data.readOnly ? "" : ` ${CHANGE_AGAIN}`}`}
           actions={[
             { name: "Later", onPress: close("spare") },
@@ -217,13 +221,51 @@ export function VaultBanners({ data }: { data: SessionData }) {
           actions={[{ name: "Close", onPress: close("details") }]}
         />
       ) : null}
-      {cloud !== null && open("cloud") ? (
-        <Notice
-          text={`${PROVIDER[cloud]} syncs ${data.name}'s folder. Lockbox doesn't support vaults in cloud folders. To stop this message, move the vault to a folder on this PC.`}
-          actions={[{ name: "Keep it there", onPress: close("cloud") }]}
-        />
-      ) : null}
+      {cloud !== null && open("cloud") ? <CloudAsk data={data} provider={cloud} onKeep={close("cloud")} /> : null}
     </>
+  );
+}
+
+/**
+ * Ask 10, a vault in a cloud folder: the design's words, and its two buttons, "Keep it there" (closes it until the next unlock) and "Show in Explorer", which asks the shell to
+ * open this vault's folder by its place on the list (the page never has a path), so the person can move it; the banner stays, since the folder is still synced. A vault that is
+ * on no list (a backup, an older copy) has no folder to show. A refusal is said in words in the banner, and the next press takes it away.
+ */
+function CloudAsk({ data, provider, onKeep }: { data: SessionData; provider: CloudProvider; onKeep: () => void }) {
+  const [refusal, setRefusal] = useState<string | null>(null);
+  const showing = useRef(false);
+  const listed = data.vaultId > 0 && data.vaultList > 0;
+  const show = async () => {
+    if (showing.current) return;
+    showing.current = true;
+    setRefusal(null);
+    const done = await showVaultFolder({ list: data.vaultList, id: data.vaultId });
+    showing.current = false;
+    if (done !== "done") setRefusal(messageText(messageFor(done.failed)));
+  };
+  return (
+    <Notice
+      text={`${providerName(provider)} syncs ${data.name}'s folder. Lockbox doesn't support vaults in cloud folders. To stop this message, move the vault to a folder on this PC.`}
+      actions={[
+        { name: "Keep it there", onPress: onKeep },
+        ...(listed
+          ? [
+              {
+                name: "Show in Explorer",
+                onPress: () => {
+                  void show();
+                },
+              },
+            ]
+          : []),
+      ]}
+    >
+      {refusal === null ? null : (
+        <p className="err" role="alert">
+          {refusal}
+        </p>
+      )}
+    </Notice>
   );
 }
 

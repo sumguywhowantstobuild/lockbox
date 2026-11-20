@@ -43,7 +43,8 @@ function said(message: Message): string {
  * The unlock step of one more vault while another is open (the vault menu, the vault strip and Copy to a vault bring it): the lock screen's own look and form, for the one
  * vault the step was opened for, with Back (and Escape) to the window that was on screen. The password is typed once and goes with the vault's registry ID; it is wiped from
  * the box as it is sent (so a refusal, "Wrong password.", shows an empty box), by Back, and by every lock epoch, and Ask 16 (kept for that vault alone) is said above the box.
- * A vault whose details can't be read has Ask 8 here instead of a box, as on the lock screen. The vaults that are open are not touched by anything here.
+ * A vault whose details can't be read has Ask 8 here instead of a box, as on the lock screen. The vaults that are open are not touched by anything here. "Forgot password?"
+ * opens 28a for this vault, as on the lock screen; its Back gives this step back, and the vault its new password opens ends the step. Show and Remove are a second line.
  */
 export function UnlockStep({ step }: { step: UnlockStepOf }) {
   const vaults = useVaults();
@@ -133,12 +134,31 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
             <button type="submit" className="prim" disabled={busy || password === ""}>
               Unlock
             </button>
+            {/* Design task 1: "Forgot password?" goes to task 28, here as on the lock screen, for this vault. The flow takes the window; its Back gives this step back.
+                Not on Copy to a vault's step (`stay`), whose way out is the copy's window, as the lock screen has none while a copy waits; not while an unlock is out. */}
+            {step.stay ? null : (
+              <button
+                type="button"
+                className="lnk"
+                disabled={busy}
+                onClick={() => {
+                  setPassword("");
+                  setError(null);
+                  startForgot(vault.id);
+                }}
+              >
+                Forgot password?
+              </button>
+            )}
             <button type="button" className="lnk" onClick={back}>
               Back
             </button>
-            <VaultLinks vault={vault} onRemoved={removed} onProblem={setLinkProblem} />
           </div>
         </form>
+        {/* Show and Remove: a second line under the form, whose words line up with the form's edge, as the lock screen's second line does. */}
+        <p className="lalt">
+          <VaultLinks vault={vault} onRemoved={removed} onProblem={setLinkProblem} />
+        </p>
         {linkProblem === null ? null : (
           <p className="err" role="alert">
             {linkProblem}
@@ -350,7 +370,8 @@ export function LockScreen() {
         {/* The rows show from two vaults on, and for any vault that can't be reached, even when it is the only one: its row is where Try again and Remove from list are (30b). */}
         {list.length > 1 || list.some((vault) => !vault.available) ? (
           <fieldset className="vlist">
-            <legend className="sr">Vault</legend>
+            {/* The save step names the choice on screen, as 8b draws it ("Vault", in the field labels' look); the plain lock screen names it for a screen reader only. */}
+            <legend className={capture === null ? "sr" : "flab"}>Vault</legend>
             {list.map((vault, index) =>
               vault.available ? (
                 // Its own colour (the mode class beside it, so the variables resolve here) and its own shape.

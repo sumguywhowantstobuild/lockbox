@@ -86,7 +86,7 @@ export function RemoveVaultBox({
       }}
     >
       <Popover.Portal container={container}>
-        <Popover.Positioner className="layer" anchor={anchor} sideOffset={6} align="center">
+        <Popover.Positioner className="layer" anchor={anchor} sideOffset={6} align="start">
           <Popover.Popup className="menu mwide" role="alertdialog" aria-label="Remove vault from this list" initialFocus={cancel}>
             <div className="mbox">
               <Popover.Description render={<p className="mwarn" />}>{removeSentence(name, leavesFirstScreen)}</Popover.Description>
@@ -180,7 +180,7 @@ export function UnavailableVaultBox({
       }}
     >
       <Popover.Portal container={container}>
-        <Popover.Positioner className="layer" anchor={anchor} sideOffset={6} align="center">
+        <Popover.Positioner className="layer" anchor={anchor} sideOffset={6} align="start">
           <Popover.Popup className="menu mwide" aria-label={`${name} is unavailable`} initialFocus={tryAgain}>
             <div className="mbox">
               <p className="mwarn">{unavailableSentence(name)}</p>

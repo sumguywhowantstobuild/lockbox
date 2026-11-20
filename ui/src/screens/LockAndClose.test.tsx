@@ -34,6 +34,12 @@ beforeEach(() => {
 const MINE: FakeVault = { id: 7, name: "My vault", items: sampleItems() };
 const HOME: FakeVault = { id: 8, name: "Home", items: sampleItems() };
 
+/** A vault's menu row by its name: an open vault's row reads "<name>Unlocked" (its status line, 4C Task 13b), so either way finds it. */
+function rowName(name: string | RegExp): string | RegExp | ((read: string) => boolean) {
+  if (typeof name !== "string") return name;
+  return (read) => read === name || read === `${name}Unlocked`;
+}
+
 /** The app on its lock screen with `vaults`, then My vault unlocked through the screen as a person would. */
 async function unlocked(vaults: FakeVault[] = [{ ...MINE }, { ...HOME }]) {
   shell = installFakeShell(invoke, listen, vaults);
@@ -95,9 +101,9 @@ test("lock_this_vault_from_its_menu", async () => {
     expect(within(menu).queryByText(later), String(later)).toBeNull();
   }
   // Each listed vault says whether it is open; the menu's own words say the same to a screen reader.
-  // An open vault is one row (chosen, and said "checked"); a vault that is not open is a row that says Locked. Each vault appears once.
-  expect(within(menu).queryByText("Unlocked")).toBeNull();
-  expect(within(menu).getByRole("menuitemradio", { name: "My vault" }).getAttribute("aria-checked")).toBe("true");
+  // Every vault is one row with its state under its name: an open vault (chosen, and said "checked") says Unlocked, one that is not open says Locked. Each vault appears once.
+  expect(within(menu).getByText("Unlocked")).toBeTruthy();
+  expect(within(menu).getByRole("menuitemradio", { name: rowName("My vault") }).getAttribute("aria-checked")).toBe("true");
   expect(within(menu).getByText("Locked")).toBeTruthy();
   expect(within(menu).getByRole("menuitemradio", { name: "HomeLocked" }).getAttribute("aria-checked")).toBe("false");
   // No style element: the policy refuses one. (The parts place themselves by script, which is allowed; the markup of
@@ -147,8 +153,8 @@ test("lock_all_returns_to_lock_screen", async () => {
   });
   // The vault opened last is the one on screen.
   const menu = await openVaultMenu("Home");
-  expect(within(menu).queryAllByText("Unlocked")).toHaveLength(0);
-  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vault", "Home"]);
+  expect(within(menu).queryAllByText("Unlocked")).toHaveLength(2);
+  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked"]);
   expect(within(menu).getAllByRole("menuitemradio").map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => {
@@ -379,17 +385,17 @@ test("locked_vault_line_on_the_list", async () => {
   // The menu agrees with the line: every vault is one row, in the list's order (once, with no line of notes): the open one, the locked one that says Locked, and the
   // one that can't be reached, which says so.
   expect(menu.querySelectorAll(".mnote")).toHaveLength(0);
-  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vault", "HomeLocked", "A vault that can't be readNot available"]);
+  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked", "A vault that can't be readNot available"]);
   expect(within(menu).getByRole("group", { name: "Vaults" })).toBeTruthy();
   // The state is in words, not in colour alone.
-  expect(menu.querySelectorAll(".mi .ms")).toHaveLength(2);
+  expect(menu.querySelectorAll(".mi .ms")).toHaveLength(3);
 });
 
 test("locked_vault_line_names_how_many_when_there_are_several", async () => {
   await unlocked([{ ...MINE }, { ...HOME }, { id: 9, name: "Work", items: [] }]);
   expect(screen.getByText("2 other vaults are locked, so their items aren't listed.")).toBeTruthy();
   const menu = await openVaultMenu();
-  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vault", "HomeLocked", "WorkLocked"]);
+  expect(within(menu).getAllByRole("menuitemradio").map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked", "WorkLocked"]);
 });
 
 test("the_vault_menu_keeps_its_action_in_reach_with_many_vaults", async () => {

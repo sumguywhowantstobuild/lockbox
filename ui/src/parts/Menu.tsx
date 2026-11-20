@@ -36,6 +36,8 @@ export interface MenuRow {
   detail?: string;
   checked: boolean;
   onSelect: () => void;
+  /** A picture before the name (the vault menu's: each vault's own mark, in its colour, as drawn in 18a). Hidden from a screen reader. */
+  icon?: ReactNode;
 }
 
 /**
@@ -57,6 +59,7 @@ export function Menu({
   popupLabel,
   triggerClassName = "pill",
   triggerRef,
+  align,
 }: {
   label: string;
   icon?: ReactNode;
@@ -67,6 +70,11 @@ export function Menu({
   triggerClassName?: string;
   /** The button that opens the menu, for a box that opens where the menu was and gives focus back to it (Rename vault). */
   triggerRef?: Ref<HTMLButtonElement>;
+  /**
+   * Where the menu lines up with its button: by default a menu of choices lines up with its right edge and any other is centred under it. The vault menu passes
+   * `start`, so it opens from the vault button's left edge, beside the strip of vault buttons rather than over it (18a).
+   */
+  align?: "start" | "center" | "end";
 }) {
   const container = usePortalContainer();
   const chosen = items.find((item) => item.checked === true);
@@ -106,6 +114,7 @@ export function Menu({
                   className="mi"
                   onClick={row.onSelect}
                 >
+                  {row.icon}
                   <span className="mtwo">
                     <span className="mt">{row.label}</span>
                     {row.detail === undefined ? null : <span className="ms">{row.detail}</span>}
@@ -137,7 +146,7 @@ export function Menu({
         {icon ?? label}
       </BaseMenu.Trigger>
       <BaseMenu.Portal container={container}>
-        <BaseMenu.Positioner className="layer" sideOffset={6} align={choices ? "end" : "center"}>
+        <BaseMenu.Positioner className="layer" sideOffset={6} align={align ?? (choices ? "end" : "center")}>
           <BaseMenu.Popup className={popupClass} aria-label={popupLabel}>
             {entries}
           </BaseMenu.Popup>

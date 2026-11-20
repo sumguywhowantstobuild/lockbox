@@ -1,8 +1,11 @@
 import { useEffect, useId, useRef, useState, type SyntheticEvent } from "react";
 import { useLockEpoch } from "../../jobs";
 import { messageFor, messageText } from "../../messages";
+import type { CloudProvider } from "../../api";
 import {
-  CLOUD_WARNING,
+  cloudWarning,
+  IN_THE_PICKED_FOLDER,
+  IN_THE_USUAL_FOLDER,
   NAME_HINT,
   NEW_VAULT_HEADING,
   PLACE_REFUSALS,
@@ -56,6 +59,8 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
   const vaults = useVaults();
   const placePoints = vaultLook((vaults ?? []).length, false).points;
   const [token, setToken] = useState<string | null>(null);
+  // What 18c says with the token: the service the shell found, and whether the folder was the person's pick or the usual one.
+  const [asked, setAsked] = useState<{ provider: CloudProvider; picked: boolean } | null>(null);
   // A second press before the first has an answer must not create a second vault.
   const running = useRef(false);
   // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping, even before the vaults' own locks are heard) wipes what is typed.
@@ -98,7 +103,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
     return messageText(messageFor(notListed ? { code: "page", kind: "vault_not_listed_inside" } : refusal));
   };
 
-  const go = async (run: () => Promise<SetupResult>) => {
+  const go = async (run: () => Promise<SetupResult>, picked = false) => {
     if (running.current) return;
     running.current = true;
     setBusy(true);
@@ -111,8 +116,10 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
         setAgain("");
       }
       setToken(typeof result === "object" ? result.confirm : null);
+      setAsked(typeof result === "object" ? { provider: result.provider, picked } : null);
     } catch (refusal) {
       setToken(null);
+      setAsked(null);
       const place =
         typeof refusal === "object" &&
         refusal !== null &&
@@ -143,7 +150,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
       setPassword("");
       setAgain("");
     }
-    void go(() => createVault(sentName, sentPassword, sentFolder));
+    void go(() => createVault(sentName, sentPassword, sentFolder), sentFolder);
   };
 
   if (token !== null && !inside) {
@@ -152,7 +159,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
         busy={busy}
         step="Step 1 of 2"
         onContinue={() => void go(() => confirmCreateVault(token))}
-        onChooseAnother={() => void go(() => createVault(name.trim(), password, true))}
+        onChooseAnother={() => void go(() => createVault(name.trim(), password, true), true)}
         onCancel={() => {
           setToken(null);
         }}
@@ -170,6 +177,8 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
         <div>
           <span className="fu-lab">{WHERE_IT_LIVES}</span>
           <div className="fu-row">
+            {/* Where the path was drawn, the folder's place in words, as 18b says it: the page never has the path. */}
+            <span className="fu-hint fu-where">{asked?.picked === true ? IN_THE_PICKED_FOLDER : IN_THE_USUAL_FOLDER}</span>
             <button
               type="button"
               className="lnk"
@@ -184,7 +193,7 @@ export function CreateVault({ onBack, inside = false }: { onBack: () => void; in
             </button>
           </div>
           <p className="fu-sub strong" id={warningId}>
-            {CLOUD_WARNING}
+            {cloudWarning(asked?.provider ?? "Other")}
           </p>
         </div>
         <div className="fu-row">

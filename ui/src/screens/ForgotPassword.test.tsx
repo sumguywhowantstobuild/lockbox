@@ -8,6 +8,7 @@ import { messageFor } from "../messages";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { fakeKey, FAKE_WORDS, installFakeShell, PASSWORD, sampleItems, type FakeShell, type FakeVault } from "../testing/fakeShell";
+import { readBeside } from "../testing/files";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -919,4 +920,30 @@ test("forgot_password_screens_have_no_axe_violations", async () => {
   await screen.findByRole("heading", { level: 1, name: OFFER_TITLE });
   await expectNoAxe(container);
   expect(container.querySelectorAll("style, [style]")).toHaveLength(0);
+});
+
+// ---- Plan 4C Task 13b ----
+
+test("the_side_line_stops_saying_the_key_can_open_the_vault_once_it_is_open", async () => {
+  await forgot();
+  // 28a to 28d: the dark side says what the steps are for.
+  const promise = "The recovery key you saved when you made this vault can open it again.";
+  expect(document.querySelector(".say")?.textContent).toBe(promise);
+  await toNewPassword();
+  expect(document.querySelector(".say")?.textContent).toBe(promise);
+  typeNew(NEW);
+  setPassword();
+  // 28e: the vault is open, so the side no longer promises to open it; it says where things stand (the session's words).
+  await screen.findByRole("heading", { level: 1, name: OFFER_TITLE });
+  expect(screen.queryByText(promise)).toBeNull();
+  expect(document.querySelector(".say")?.textContent).toBe("Your new password is set.");
+});
+
+test("i_dont_have_my_recovery_key_lines_up_with_the_form", async () => {
+  await forgot();
+  // 28a: everything on the form starts at its left edge, as drawn; the quiet button on its own line is as wide as its words, not stretched and centred.
+  expect(screen.getByRole("button", { name: NO_KEY_LINK }).classList.contains("fu-other")).toBe(true);
+  const sheet = readBeside(import.meta.url, "../styles/components.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = [...sheet.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find((one) => (one[1] ?? "").split(",").some((part) => part.trim() === ".fu-other"));
+  expect(rule?.[2]?.replace(/\s+/g, " ")).toMatch(/align-self: flex-start/);
 });

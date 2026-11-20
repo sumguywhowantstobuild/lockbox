@@ -48,7 +48,7 @@ const OLD_COPIES_NEED_OLD_PASSWORD = "Older copies of this vault still open with
 const CHANGED_DESCRIPTION =
   "Its name, or other details kept beside your items, don't match what Lockbox last saved. If you edited that file yourself, accept them and go on. If you didn't, say No and check your PC first; restoring a backup you trust is the safer way back.";
 
-/** What the polite place says once the new password is set. */
+/** What the polite place says once the new password is set, and the dark side's line on 28e (the session's words). */
 const SAID_DONE = "Your new password is set.";
 
 /** Which screen the flow is on, as a key: focus goes to its heading when this changes, and what was typed does not outlive it. */
@@ -318,7 +318,8 @@ function Steps({ flow }: { flow: Flow }) {
 
   return (
     <>
-      <Frame say={SAY_FORGOT}>{steps}</Frame>
+      {/* Once the vault is open (28e) the side no longer promises the key can open it: it says where things stand. */}
+      <Frame say={flow.phase === "done" ? SAID_DONE : SAY_FORGOT}>{steps}</Frame>
       <ChangedDetails open={flow.phase === "changed"} name={checkedName} />
       {/* Always on the page, so a change in it is spoken: the message stack that says these things in the main window is not here. */}
       <div role="status" className="live">

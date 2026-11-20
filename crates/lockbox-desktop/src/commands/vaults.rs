@@ -343,11 +343,11 @@ impl Shell {
                 what: "not a vault folder",
             });
         }
-        if check.cloud.is_some() && !cloud_confirmed {
+        if let (Some(provider), false) = (check.cloud, cloud_confirmed) {
             // Parked once the creation lock is released: parking drops expired choices, which may hold a vault.
             drop(creating);
             let token = self.sessions.pending().put(PendingChoice::AddVault { dir });
-            return Ok(Outcome::Confirm(Confirm::CloudFolder { token }));
+            return Ok(Outcome::Confirm(Confirm::CloudFolder { token, provider }));
         }
         let vault = self.registry.add(&dir)?;
         drop(creating);
@@ -433,15 +433,16 @@ impl Shell {
         let check = self.check_location(&parent)?;
         // The folder as checked, from here on.
         let parent = check.path;
-        if check.cloud.is_some() && !cloud_confirmed {
+        if let (Some(provider), false) = (check.cloud, cloud_confirmed) {
             let choice = PendingChoice::CreateVault {
                 parent,
                 name,
                 password,
             };
-            return Ok(OpenStep::Ask(choice, |token| Confirm::CloudFolder {
-                token,
-            }));
+            return Ok(OpenStep::Ask(
+                choice,
+                Box::new(move |token| Confirm::CloudFolder { token, provider }),
+            ));
         }
         // One creation at a time, from the room check to the new vault's place on the list (see `creating`).
         let creating = self.creating();
@@ -1601,6 +1602,62 @@ mod tests {
         assert!(ts.shell.sessions.list().is_empty());
     }
 
+    /// Plan 4C Task 13b: the cloud question names the provider the check found, so 18c can say "OneDrive syncs this
+    /// folder"; the page reads it in this JSON shape (`ui/src/api.create.test.ts`), a fixed name and never a path.
+    #[test]
+    fn cloud_question_names_the_provider_in_its_json() {
+        for (name, provider, said) in [
+            ("OneDrive - Personal", CloudProvider::OneDrive, "OneDrive"),
+            ("Google Drive", CloudProvider::GoogleDrive, "GoogleDrive"),
+            ("Dropbox", CloudProvider::Dropbox, "Dropbox"),
+            ("Nextcloud", CloudProvider::Other, "Other"),
+        ] {
+            let ts = TestShell::new();
+            let synced = ts.vaults();
+            ts.volumes.add_sync_root_named(&synced, name);
+            ts.dialogs.answer(Some(synced.clone()));
+            let asked = ts.shell.create_vault("Family".into(), secret(PW), true);
+            let Ok(Outcome::Confirm(Confirm::CloudFolder {
+                provider: found, ..
+            })) = &asked
+            else {
+                panic!("a cloud folder asks first");
+            };
+            assert_eq!(*found, provider, "{name}");
+            let json = serde_json::to_value(asked.unwrap()).unwrap();
+            assert_eq!(
+                json["Confirm"]["CloudFolder"]["provider"],
+                json!(said),
+                "{name}"
+            );
+            assert!(json["Confirm"]["CloudFolder"]["token"].is_string());
+            // The question holds the token and the provider's name, nothing else: no path can reach the page in it.
+            let mut keys: Vec<&String> = json["Confirm"]["CloudFolder"]
+                .as_object()
+                .expect("the question is an object")
+                .keys()
+                .collect();
+            keys.sort();
+            assert_eq!(keys, ["provider", "token"], "{name}");
+            assert_eq!(json.as_object().map(|top| top.len()), Some(1));
+
+            // Adding an existing vault folder asks the same way.
+            let added = TestShell::new();
+            let created = heavy(|| Vault::create(&added.vaults(), "Family", PW)).unwrap();
+            let dir = created.vault.dir().to_path_buf();
+            drop(created);
+            added.volumes.add_sync_root_named(&added.vaults(), name);
+            added.dialogs.answer(Some(dir));
+            let Ok(Outcome::Confirm(Confirm::CloudFolder {
+                provider: found, ..
+            })) = added.shell.add_existing_vault()
+            else {
+                panic!("a cloud folder asks first");
+            };
+            assert_eq!(found, provider, "{name}");
+        }
+    }
+
     #[test]
     fn cloud_folder_needs_confirmation() {
         let ts = TestShell::new();
@@ -1608,7 +1665,7 @@ mod tests {
         ts.volumes.add_sync_root(&synced);
         ts.dialogs.answer(Some(synced.clone()));
         let answer = ts.shell.create_vault("Family".into(), secret(PW), true);
-        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) = answer else {
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token, .. })) = answer else {
             panic!("a cloud folder asks first");
         };
         assert_eq!(fs::read_dir(&synced).unwrap().count(), 0, "nothing created");
@@ -1776,7 +1833,7 @@ mod tests {
         let ask = || {
             ts.dialogs.answer(Some(synced.clone()));
             let answer = ts.shell.create_vault("Work".into(), secret(PW), true);
-            let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) = answer else {
+            let Ok(Outcome::Confirm(Confirm::CloudFolder { token, .. })) = answer else {
                 panic!("a cloud folder asks first");
             };
             token
@@ -2094,7 +2151,7 @@ mod tests {
         fs::create_dir(&synced).unwrap();
         ts.volumes.add_sync_root(&synced);
         ts.dialogs.answer(Some(synced));
-        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) =
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token, .. })) =
             ts.shell.create_vault("Work".into(), secret(PW), true)
         else {
             panic!("a cloud folder asks first");
@@ -2324,7 +2381,7 @@ mod tests {
         fs::create_dir(&synced).unwrap();
         ts.volumes.add_sync_root(&synced);
         ts.dialogs.answer(Some(synced.clone()));
-        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) =
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token, .. })) =
             ts.shell.create_vault("Work".into(), secret(PW), true)
         else {
             panic!("a cloud folder asks first");
@@ -3753,7 +3810,7 @@ mod tests {
         ts.volumes.add_sync_root(&ts.vaults());
         let ask = || {
             ts.dialogs.answer(Some(dir.clone()));
-            let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) =
+            let Ok(Outcome::Confirm(Confirm::CloudFolder { token, .. })) =
                 ts.shell.add_existing_vault()
             else {
                 panic!("a cloud folder asks first");
@@ -3785,7 +3842,7 @@ mod tests {
         // A token for another question is used up and refused, and its choice dropped.
         ts.dialogs.answer(Some(ts.vaults()));
         let asked = ts.shell.create_vault("Work".into(), secret(PW), true);
-        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) = asked else {
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token, .. })) = asked else {
             panic!("a cloud folder asks first");
         };
         assert_eq!(
@@ -3978,7 +4035,7 @@ mod tests {
         ts.volumes.add_sync_root(&synced);
         ts.dialogs.answer(Some(synced.clone()));
         let answer = ts.shell.create_vault("Family".into(), secret(PW), true);
-        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) = answer else {
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token, .. })) = answer else {
             panic!("a cloud folder asks first");
         };
         assert!(
@@ -5175,7 +5232,7 @@ mod tests {
         ts.volumes.add_sync_root(&synced);
         ts.dialogs.answer(Some(synced));
         let asked = ts.shell.create_vault("Work".into(), secret(PW), true);
-        let Ok(Outcome::Confirm(Confirm::CloudFolder { token })) = asked else {
+        let Ok(Outcome::Confirm(Confirm::CloudFolder { token, .. })) = asked else {
             panic!("a cloud folder asks first");
         };
         let confirmed = done(heavy(|| ts.shell.create_vault_confirm(&token)).unwrap());

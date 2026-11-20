@@ -45,6 +45,12 @@ const THEN_RENAME = {
   recovery: "Make a new recovery key for this vault, then rename it.",
 };
 
+/** A vault's menu row by its name: an open vault's row reads "<name>Unlocked" (its status line, 4C Task 13b), so either way finds it. */
+function rowName(name: string | RegExp): string | RegExp | ((read: string) => boolean) {
+  if (typeof name !== "string") return name;
+  return (read) => read === name || read === `${name}Unlocked`;
+}
+
 function vault(id: number, name: string | null, extra: Partial<FakeVault> = {}): FakeVault {
   return { id, name, items: sampleItems(), ...extra };
 }
@@ -115,7 +121,7 @@ async function allOpen(list: FakeVault[]) {
 /** A vault of the menu brought to the front. */
 async function switchTo(name: string) {
   const menu = await openVaultMenu();
-  fireEvent.click(within(menu).getByRole("menuitemradio", { name }));
+  fireEvent.click(within(menu).getByRole("menuitemradio", { name: rowName(name) }));
   await screen.findByRole("button", { name: `${name}, vault menu` });
 }
 
@@ -210,7 +216,7 @@ test("rename_from_the_vault_menu_saves_and_shows_the_new_name_everywhere", async
     expect(document.activeElement).toBe(head);
   });
   const again = await openVaultMenu();
-  expect(rowsOf(again).map((row) => row.textContent)).toEqual(["Family", "Home"]);
+  expect(rowsOf(again).map((row) => row.textContent)).toEqual(["FamilyUnlocked", "HomeUnlocked"]);
   expect(within(again).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
     "New vault",
     "Add existing vault folder",
@@ -265,13 +271,13 @@ test("the_box_opens_where_the_menu_was_and_is_not_a_centred_dialog", async () =>
     expect(screen.queryByRole("menu")).toBeNull();
   });
   const box = await openBox("Home");
-  // The same layer, class and anchoring as the vault menu's own box: below the vault head button, centred on it.
+  // The same layer, class and anchoring as the vault menu's own box: below the vault head button, from its left edge, beside the vault strip (18a).
   const positioner = box.parentElement as HTMLElement;
   expect(positioner.classList.contains("layer")).toBe(true);
   expect(box.classList.contains("menu")).toBe(true);
   expect(box.classList.contains("mwide")).toBe(true);
   expect(place(positioner)).toEqual(place(menuPositioner));
-  expect(place(positioner)).toEqual(["bottom", "center"]);
+  expect(place(positioner)).toEqual(["bottom", "start"]);
   // Not the app's centred dialog (a scrim and a titled card).
   expect(document.querySelector(".scrim")).toBeNull();
   expect(box.classList.contains("dlg")).toBe(false);
@@ -453,7 +459,7 @@ test("a_lock_before_or_after_the_write_says_nothing_and_the_lock_screen_has_what
     // The menu's row for the locked vault says what the disk says.
     const menu = await openVaultMenu();
     await waitFor(() => {
-      expect(rowsOf(menu).map((row) => row.textContent), how).toEqual(["My vault", `${kept}Locked`]);
+      expect(rowsOf(menu).map((row) => row.textContent), how).toEqual(["My vaultUnlocked", `${kept}Locked`]);
     });
     expect(debugState().vaults?.map((one) => one.name), how).toEqual(["My vault", kept]);
   }
@@ -624,4 +630,87 @@ test("rename_screens_have_no_axe_violations", async () => {
   await expectNoAxe(box);
   expect(box.querySelectorAll("[style]")).toHaveLength(0);
   expect(container.querySelectorAll("style")).toHaveLength(0);
+});
+
+// ---- Plan 4C Task 13b: a refusal that says what to do first offers it, as Ask 2 does ----
+
+test("a_rename_refused_for_one_of_the_backup_reasons_offers_the_way_forward", async () => {
+  const cases: { name: string; refuse?: object; header?: boolean; button: string; opens: () => Promise<unknown> }[] = [
+    {
+      name: "recovery key copies disagree",
+      refuse: RECOVERY_KEY_COPIES_DISAGREE,
+      button: "New recovery key",
+      opens: () => screen.findByRole("complementary", { name: "New recovery key" }),
+    },
+    {
+      name: "password copies disagree",
+      refuse: PASSWORD_COPIES_DISAGREE,
+      button: "Change password",
+      opens: () => screen.findByRole("complementary", { name: "Change password" }),
+    },
+    {
+      name: "details changed",
+      header: true,
+      button: "See the change",
+      opens: () => screen.findByRole("dialog", { name: "Home's details were changed outside Lockbox." }),
+    },
+  ];
+  for (const one of cases) {
+    cleanup();
+    resetStoreForTests();
+    invoke.mockReset();
+    listen.mockReset();
+    const home = vault(8, "Home");
+    await allOpen([vault(7, "My vault"), home]);
+    await openBox("Home");
+    home.headerChanged = one.header ?? false;
+    if (one.refuse !== undefined) shell.refuseNext("rename_vault", one.refuse);
+    rename("Home", "Cabin");
+    await boxSays();
+    // The box offers what its words ask for (Ask 2's button for the same reason), beside Cancel; Rename waits for a new name.
+    const box = screen.getByRole("dialog", { name: "Rename vault" });
+    expect(within(box).getAllByRole("button").map((button) => button.textContent), one.name).toEqual(["Cancel", one.button]);
+    // A new name takes the offer away and gives Rename back.
+    fireEvent.change(nameBox("Home"), { target: { value: "Cabin, again" } });
+    expect(within(box).getAllByRole("button").map((button) => button.textContent), one.name).toEqual(["Cancel", "Rename"]);
+    if (one.refuse !== undefined) shell.refuseNext("rename_vault", one.refuse);
+    press("Rename");
+    await boxSays();
+    // The offer closes the box and opens that form or question for this vault, the one on screen; nothing was renamed.
+    press(one.button);
+    await boxGone();
+    await one.opens();
+    expect(home.name, one.name).toBe("Home");
+    // Still Home's window under it (behind a dialog, the page is hidden from a screen reader).
+    expect(screen.getByRole("button", { name: "Home, vault menu", hidden: true })).toBeTruthy();
+  }
+
+  // Details that couldn't be checked: Lock this vault, as Ask 2 offers.
+  cleanup();
+  resetStoreForTests();
+  invoke.mockReset();
+  listen.mockReset();
+  await allOpen([vault(7, "My vault"), vault(8, "Home")]);
+  await openBox("Home");
+  shell.refuseNext("rename_vault", DETAILS_UNCHECKED);
+  rename("Home", "Cabin");
+  await boxSays();
+  press("Lock this vault");
+  await boxGone();
+  await waitFor(() => {
+    expect(shell.sessionOf(8)?.unlocked ?? false).toBe(false);
+  });
+  expect(shell.sessionOf(7)?.unlocked).toBe(true);
+
+  // Any other refusal offers nothing more: Cancel and Rename, to try again.
+  cleanup();
+  resetStoreForTests();
+  invoke.mockReset();
+  listen.mockReset();
+  await allOpen([vault(7, "My vault"), vault(8, "Home")]);
+  await openBox("Home");
+  shell.refuseNext("rename_vault", { code: "busy", what: "operation in progress" });
+  rename("Home", "Cabin");
+  await boxSays();
+  expect(within(screen.getByRole("dialog", { name: "Rename vault" })).getAllByRole("button").map((button) => button.textContent)).toEqual(["Cancel", "Rename"]);
 });

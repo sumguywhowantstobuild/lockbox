@@ -39,12 +39,19 @@ beforeEach(() => {
 const NEW = "MU-new passphrase 2026";
 const TYPED = "MU-typed in the step";
 const ASK16 = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
-const ASK9 =
-  "Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
+const ASK9_HEADING = "Opened from the backup copy of this vault's details";
+// The banner's body, under its heading (4C Task 13b).
+const ASK9 = "If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
 const BACKUP = "My vault 2026-10-02";
 const OLDER = "My vault.before-restore";
 const NOWHERE = "Unlock a vault first, then copy into it.";
 const LABEL = "Password or recovery key from when it was made";
+
+/** A vault's menu row by its name: an open vault's row reads "<name>Unlocked" (its status line, 4C Task 13b), so either way finds it. */
+function rowName(name: string | RegExp): string | RegExp | ((read: string) => boolean) {
+  if (typeof name !== "string") return name;
+  return (read) => read === name || read === `${name}Unlocked`;
+}
 
 function vault(id: number, name: string | null, extra: Partial<FakeVault> = {}): FakeVault {
   return { id, name, items: sampleItems(), ...extra };
@@ -104,7 +111,7 @@ function rowsOf(menu: HTMLElement): HTMLElement[] {
 /** The vault menu's row (by its name as it reads: "Home" for an open vault, "HomeLocked" for a locked one) chosen. */
 async function chooseRow(name: string | RegExp): Promise<void> {
   const menu = await openVaultMenu();
-  fireEvent.click(within(menu).getByRole("menuitemradio", { name }));
+  fireEvent.click(within(menu).getByRole("menuitemradio", { name: rowName(name) }));
   await waitFor(() => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
@@ -221,7 +228,7 @@ test("a_locked_vault_is_a_row_that_opens_its_unlock_step", async () => {
   // Every vault of the list is a row, in the list's order: the open one marked, the locked one saying so in words. No line of notes is left.
   expect(menu.querySelectorAll(".mnote")).toHaveLength(0);
   const rows = rowsOf(menu);
-  expect(rows.map((row) => row.textContent)).toEqual(["My vault", "HomeLocked"]);
+  expect(rows.map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked"]);
   expect(rows.map((row) => row.getAttribute("aria-checked"))).toEqual(["true", "false"]);
   expect(within(menu).getByRole("group", { name: "Vaults" })).toBeTruthy();
   // Choosing the locked row sends nothing: its own unlock step comes, for that vault alone.
@@ -232,9 +239,9 @@ test("a_locked_vault_is_a_row_that_opens_its_unlock_step", async () => {
   expect(field().getAttribute("type")).toBe("password");
   expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Unlock" })).toBeTruthy();
-  // It is the step of one vault: no list of vaults to choose from, no recovery steps, and Home's own colour.
+  // It is the step of one vault: no list of vaults to choose from, Forgot password? for this vault (in the row with Unlock and Back), and Home's own colour.
   expect(screen.queryByRole("radio")).toBeNull();
-  expect(screen.queryByRole("button", { name: "Forgot password?" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Forgot password?" })).toBeTruthy();
   expect(document.querySelector(".app")?.classList.contains(`v-${vaultLook(1, false).accent}`)).toBe(true);
   // The vault that was open is still open, with no command sent for it.
   expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7]);
@@ -265,7 +272,7 @@ test("unlocking_a_second_vault_keeps_the_first_open", async () => {
   expect(foundOnPage([PASSWORD])).toEqual([]);
   // Back in the menu both are open, Home marked.
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "Home"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked"]);
   expect(rowsOf(menu).map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
 });
 
@@ -313,7 +320,7 @@ test("back_during_an_unlock_in_flight_never_replaces_the_screen_later", async ()
   expect(screen.getByRole("button", { name: "My vault, vault menu" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Home, vault menu" })).toBeNull();
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "Home", "WorkLocked"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked", "WorkLocked"]);
   expect(rowsOf(menu).map((row) => row.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => {
@@ -350,10 +357,11 @@ test("the_unlocked_vault_comes_on_screen_and_the_menu_marks_it", async () => {
   expect(vaultLook(2, false).points).toBe(6);
   let menu = await openVaultMenu();
   const selected = rowsOf(menu).find((row) => row.getAttribute("aria-checked") === "true");
-  expect(selected?.textContent).toBe("Work");
-  // The selected row is marked with a check mark, not by colour alone.
-  expect(selected?.querySelector("svg")).not.toBeNull();
-  expect(rowsOf(menu).filter((row) => row.querySelector("svg") !== null)).toHaveLength(1);
+  expect(selected?.textContent).toBe("WorkUnlocked");
+  // The selected row is marked with a check mark, not by colour alone: it has one more mark than the rows beside it, which each carry only their own aria-hidden mark.
+  const marks = rowsOf(menu).map((row) => row.querySelectorAll("svg").length);
+  expect(marks.filter((count) => count === Math.min(...marks) + 1)).toHaveLength(1);
+  expect(selected?.querySelectorAll("svg").length).toBe(Math.min(...marks) + 1);
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => {
     expect(screen.queryByRole("menu")).toBeNull();
@@ -369,7 +377,7 @@ test("the_unlocked_vault_comes_on_screen_and_the_menu_marks_it", async () => {
   expect(root()?.classList.contains("v-old")).toBe(true);
   expect(markOnScreen()).toBe(markOf(4));
   menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "Home", "Work", `${BACKUP}Backup`]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked", "WorkUnlocked", `${BACKUP}Backup`]);
   expect(rowsOf(menu).map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "false", "false", "true"]);
 });
 
@@ -472,6 +480,7 @@ test("a_form_left_by_a_switch_sends_nothing", { timeout: 20_000 }, async () => {
   fireEvent.click(within(again).getByRole("button", { name: "Cancel" }));
 
   // Ask 9 (Home's details came from the spare copy): the question is Home's own, and the form it opens is left by a switch like any other.
+  expect(screen.getByRole("heading", { level: 2, name: ASK9_HEADING })).toBeTruthy();
   expect(screen.getByText(ASK9)).toBeTruthy();
   await switchTo("My vault");
   expect(screen.queryByText(ASK9)).toBeNull();
@@ -675,7 +684,7 @@ test("rows_for_read_only_older_copies_and_sessions_not_on_the_list_offer_switch_
   await openTheBackup();
   // On the backup: the list's vaults first (the open one, the locked one), then the sessions that are not on the list, in the order they were opened.
   let menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "HomeLocked", "My vaultOlder copy", `${BACKUP}Backup`]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked", "My vaultOlder copy", `${BACKUP}Backup`]);
   expect(rowsOf(menu).map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "false", "false", "true"]);
   // The menu's own actions are New vault and Add existing vault folder (Task 7), which belong to no session, and Lock for the session on screen.
   expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["New vault", "Add existing vault folder", `Lock ${BACKUP}`]);
@@ -691,7 +700,7 @@ test("rows_for_read_only_older_copies_and_sessions_not_on_the_list_offer_switch_
 test("a_vault_with_unreadable_details_opens_ask_8_from_its_row", async () => {
   await unlocked([vault(7, "My vault"), vault(8, null, { detailsDamaged: true })]);
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "A vault that can't be readLocked"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "A vault that can't be readLocked"]);
   fireEvent.click(rowsOf(menu)[1] as HTMLElement);
   // Ask 8, with no password box: Restore a backup for that vault, and Back to the vault on screen.
   await screen.findByRole("heading", { level: 1, name: "This vault can't be opened" });
@@ -707,7 +716,7 @@ test("an_unavailable_vault_stays_a_row_marked_so", async () => {
   await unlocked([vault(7, "My vault"), vault(8, "Home", { available: false })]);
   const menu = await openVaultMenu();
   const rows = rowsOf(menu);
-  expect(rows.map((row) => row.textContent)).toEqual(["My vault", "HomeNot available"]);
+  expect(rows.map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeNot available"]);
   // Choosing it opens its own box (Task 9: Try again, Remove from list) and closes the menu; it opens no unlock step, and nothing is sent.
   expect(rows[1]?.getAttribute("aria-disabled")).toBeNull();
   fireEvent.click(rows[1] as HTMLElement);
@@ -767,7 +776,7 @@ test("vault_strip_two_named_alike_tells_them_apart", async () => {
   expect(first).not.toBe(second);
   // The vault menu tells them apart as it always could: by the order of the list, and the locked one's word.
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "My vaultLocked"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "My vaultLocked"]);
 });
 
 test("the_strip_has_a_look_for_every_state", () => {
@@ -1013,7 +1022,7 @@ test("switch_screens_have_no_axe_violations", async () => {
   // The side menu with its strip, and the vault menu with locked, open, unavailable and unreadable rows.
   await expectNoAxe(container);
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "HomeLocked", "A vault that can't be readLocked", "AwayNot available"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked", "A vault that can't be readLocked", "AwayNot available"]);
   await expectNoAxe(menu);
   fireEvent.keyDown(menu, { key: "Escape" });
   await waitFor(() => {

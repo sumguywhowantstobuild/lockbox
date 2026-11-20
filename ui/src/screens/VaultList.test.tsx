@@ -5,7 +5,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
-import { debugState, refreshVaults, removeVault, resetStoreForTests, sayOnLockScreen, tryVaultAgain } from "../store";
+import { debugState, refreshVaults, removeVault, resetStoreForTests, sayOnLockScreen, startUnlockStep, tryVaultAgain } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { installFakeShell, PASSWORD, sampleItems, type FakeOlderCopy, type FakeShell, type FakeVault } from "../testing/fakeShell";
 import { readBeside } from "../testing/files";
@@ -339,7 +339,7 @@ test("remove_that_locked_the_vault_but_failed_to_write_leaves_it_locked_and_list
   expect(debugState().vaults?.map((one) => one.id)).toEqual([7, 8]);
   // It is a locked vault of the list, as any other: its row opens its unlock step.
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "HomeLocked"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked"]);
 });
 
 // ---- Show in Explorer (18a) ----
@@ -400,7 +400,7 @@ test("show_and_remove_come_on_the_unlock_step_of_a_locked_row_not_in_the_menu", 
   const menu = await openVaultMenu();
   // Only the vault on screen has them in the menu; a locked row opens its unlock step.
   expect(actionsOf(menu)).toEqual(["New vault", "Add existing vault folder", "Lock My vault", "Rename My vault", "Show My vault in Explorer", "Remove My vault from this list"]);
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "HomeLocked"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked"]);
 });
 
 // ---- The unavailable vault in the vault menu ----
@@ -492,7 +492,7 @@ test("a_row_that_leaves_the_list_under_the_unavailable_box_closes_it_and_gives_f
   expect(debugState().vaults?.map((one) => one.id)).toEqual([7, 8]);
   expect(screen.queryByRole("dialog")).toBeNull();
   const again = await openVaultMenu();
-  expect(rowsOf(again).map((row) => row.textContent)).toEqual(["My vault", "HomeNot available"]);
+  expect(rowsOf(again).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeNot available"]);
 });
 
 test("the_unavailable_box_says_a_refused_read_and_a_row_that_has_gone", async () => {
@@ -529,7 +529,7 @@ test("a_drive_that_goes_while_a_vault_is_open_reads_unavailable_at_once", async 
   // Home locked alone; My vault was on screen behind it and stays open.
   expect(debugState().sessions.map((one) => one.vaultId)).toEqual([7]);
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "HomeNot available"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeNot available"]);
 });
 
 // ---- The lock screen (30a, 30b) ----
@@ -973,7 +973,7 @@ test("the_unlock_step_and_ask_8_offer_show_and_remove", async () => {
   // The unlock step of the second Home: Back first, then Show and Remove, in 18a's words, as quiet links.
   await toTheStepOf("Home", 1);
   const links = screen.getAllByRole("button").map((button) => button.textContent);
-  expect(links.slice(links.indexOf("Unlock"))).toEqual(["Unlock", "Back", "Show Home in Explorer", "Remove Home from this list"]);
+  expect(links.slice(links.indexOf("Unlock"))).toEqual(["Unlock", "Forgot password?", "Back", "Show Home in Explorer", "Remove Home from this list"]);
   for (const name of ["Show Home in Explorer", "Remove Home from this list"]) {
     expect(screen.getByRole("button", { name }).className).toBe("lnk");
   }
@@ -1139,4 +1139,132 @@ test("vault_list_screens_have_no_axe_violations", async () => {
   await act(async () => {
     await refreshVaults();
   });
+});
+
+// ---- Plan 4C Task 13b: the vault menu and the unlock step as drawn ----
+
+test("the_vault_menu_rows_carry_each_vaults_mark_and_whether_it_is_open", async () => {
+  await unlocked([vault(7, "My vault"), vault(8, "Home"), vault(9, "Away", { available: false })]);
+  const menu = await openVaultMenu();
+  const rows = rowsOf(menu);
+  // 18a: a line under every name says how the vault stands: Unlocked for one that is open, Locked for one that is not (and Not available as before).
+  expect(rows.map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeLocked", "AwayNot available"]);
+  // Each row wears its vault's mark, in the colour and shape of its place on the list (as the vault strip's buttons do), so two vaults of one colour still differ.
+  const marks = rows.map((row) => row.querySelector("svg.vprint"));
+  for (const mark of marks) {
+    expect(mark, "every row has its mark").not.toBeNull();
+    expect(mark?.getAttribute("aria-hidden")).toBe("true");
+    expect([...(mark?.classList ?? [])].some((name) => name.startsWith("mode-")), "the mark carries the mode, so its colour resolves in the menu").toBe(true);
+  }
+  expect(marks.map((mark) => ["v-work", "v-home"].find((name) => mark?.classList.contains(name)))).toEqual(["v-work", "v-home", "v-work"]);
+  expect(new Set(marks.map((mark) => mark?.querySelector("path")?.getAttribute("d"))).size).toBe(3);
+  // New vault has its plus, a picture only: the item is still named by its words.
+  const add = within(menu).getByRole("menuitem", { name: "New vault" });
+  expect(add.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  expect(within(menu).getByRole("menuitem", { name: "Add existing vault folder" }).querySelector("svg")).toBeNull();
+});
+
+test("the_vault_menu_and_its_boxes_open_beside_the_vault_strip", async () => {
+  await unlocked([vault(7, "My vault"), vault(8, "Home")]);
+  // 18a, 18d, 18g: the menu and the boxes that open in its place start at the vault button's left edge, so they open beside the strip of vault buttons, never over it.
+  const menu = await openVaultMenu();
+  expect(menu.getAttribute("data-align")).toBe("start");
+  fireEvent.click(within(menu).getByRole("menuitem", { name: "Rename My vault" }));
+  const rename = await screen.findByRole("dialog", { name: "Rename vault" });
+  expect(rename.getAttribute("data-align")).toBe("start");
+  fireEvent.keyDown(rename, { key: "Escape" });
+  await boxGone();
+  await chooseAction("Remove My vault from this list");
+  expect((await findRemoveBox()).getAttribute("data-align")).toBe("start");
+  pressIn(removeBox(), "Cancel");
+  await boxGone();
+  // The unavailable vault's box (Task 9) opens in the same place.
+  cleanup();
+  resetStoreForTests();
+  invoke.mockReset();
+  listen.mockReset();
+  await unlocked([vault(7, "My vault"), vault(8, "Home", { available: false })]);
+  const again = await openVaultMenu();
+  fireEvent.click(rowsOf(again).find((row) => row.textContent === "HomeNot available") as HTMLElement);
+  const unavailable = await screen.findByRole("dialog");
+  expect(unavailable.getAttribute("data-align")).toBe("start");
+});
+
+test("the_unlock_step_has_forgot_password_for_its_vault", async () => {
+  await unlocked([vault(7, "My vault"), vault(8, "Home")]);
+  await toTheStepOf("Home");
+  // Design task 1: "Forgot password?" goes to task 28, here as on the lock screen, for the vault the step is for.
+  fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
+  await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
+  expect(screen.getByText("Type the recovery key you saved for Home.")).toBeTruthy();
+  // Back gives the unlock step back, its box empty and focused; the vault that was open stays open.
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
+  await focusIs(screen.getByLabelText("Password for Home"), "the box takes focus again");
+  expect(shell.sessionOf(7)?.unlocked).toBe(true);
+  // A password typed in the step is wiped as Forgot password? leaves it: not in the box when the step comes back, on the page or in the store.
+  const typed = "MU-typed in the unlock step";
+  fireEvent.change(screen.getByLabelText("Password for Home"), { target: { value: typed } });
+  fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
+  await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
+  expect(JSON.stringify(debugState())).not.toContain(typed);
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
+  expect(screen.getByLabelText<HTMLInputElement>("Password for Home").value).toBe("");
+  expect([...document.querySelectorAll("input")].some((box) => box.value.includes(typed))).toBe(false);
+  expect(document.body.textContent).not.toContain(typed);
+  // Through to a new password: Home opens with it, and once 28e is answered it is on screen, with no unlock step left behind.
+  fireEvent.click(screen.getByRole("button", { name: "Forgot password?" }));
+  await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
+  fireEvent.change(screen.getByLabelText("Recovery key"), { target: { value: shell.recoveryKeyOf(8) } });
+  fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { level: 1, name: "Choose a new password" });
+  fireEvent.change(screen.getByLabelText("New password"), { target: { value: "MU-new passphrase 2026" } });
+  fireEvent.change(screen.getByLabelText("New password again"), { target: { value: "MU-new passphrase 2026" } });
+  fireEvent.click(screen.getByRole("button", { name: "Set new password" }));
+  await screen.findByRole("heading", { level: 1, name: "Make a fresh backup now?" });
+  fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+  await screen.findByRole("button", { name: "Home, vault menu" });
+  expect(screen.queryByRole("heading", { level: 1, name: "Unlock Home" })).toBeNull();
+  expect(debugState().unlockStep).toBeNull();
+  // The recovery left nothing for the lock screen to choose later.
+  expect(debugState().unlockPick).toBeNull();
+});
+
+test("copy_to_a_vaults_unlock_step_has_no_forgot_password", async () => {
+  // Copy to a vault's step (`stay`) gives the window that asked back once the vault opens; recovering a password is not that way out, as the lock screen has no
+  // Forgot password? while a copy waits for its vault.
+  await unlocked([vault(7, "My vault"), vault(8, "Home")]);
+  act(() => {
+    startUnlockStep(8, true);
+  });
+  await screen.findByRole("heading", { level: 1, name: "Unlock Home" });
+  expect(screen.queryByRole("button", { name: "Forgot password?" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
+});
+
+test("forgot_password_waits_while_the_steps_unlock_is_out", async () => {
+  await unlocked([vault(7, "My vault"), vault(8, "Home")]);
+  await toTheStepOf("Home");
+  // An unlock that is out may open the vault: the recovery, which needs it locked, is not begun meanwhile.
+  const release = shell.holdUnlock();
+  fireEvent.change(screen.getByLabelText("Password for Home"), { target: { value: PASSWORD } });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "Forgot password?" }).hasAttribute("disabled")).toBe(true);
+  });
+  release();
+  await screen.findByRole("button", { name: "Home, vault menu" });
+});
+
+test("the_unlock_steps_links_line_up_with_its_form", async () => {
+  await unlocked([vault(7, "My vault"), vault(8, "Home")]);
+  await toTheStepOf("Home");
+  // Unlock, Forgot password? and Back are the form's row; Show and Remove a second line under it whose words line up with the form's edge, as the lock screen's are.
+  const row = screen.getByRole("button", { name: "Unlock" }).parentElement as HTMLElement;
+  expect(row.className).toBe("lacts");
+  expect(within(row).getAllByRole("button").map((button) => button.textContent)).toEqual(["Unlock", "Forgot password?", "Back"]);
+  const second = screen.getByRole("button", { name: "Show Home in Explorer" }).parentElement as HTMLElement;
+  expect(second.className).toBe("lalt");
+  expect(within(second).getAllByRole("button").map((button) => button.textContent)).toEqual(["Show Home in Explorer", "Remove Home from this list"]);
 });

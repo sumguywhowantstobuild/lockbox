@@ -8,6 +8,7 @@ import {
   callPlain,
   open,
   type CaptureEvent,
+  type CloudProvider,
   type JobScope,
   type OperationId,
   type Opened,
@@ -36,6 +37,7 @@ export type {
   CaptureEvent,
   CloseAskedEvent,
   CloseReason,
+  CloudProvider,
   Confirm,
   JobKind,
   JobScope,
@@ -95,9 +97,6 @@ export interface CleanupView {
   skipped_damaged: number;
   failed: number;
 }
-
-/** The cloud service syncing a vault's folder: a fixed name from the shell, never a path. */
-export type CloudProvider = "OneDrive" | "GoogleDrive" | "Dropbox" | "Other";
 
 /**
  * What an unlock found, and so which of the app's questions to ask (Task 8): `header_mac_mismatch` is Ask 3 (answered with
@@ -357,7 +356,7 @@ export async function recoverForget(choice: string): Promise<void> {
  * Creates a vault named `name` with `password` in the default vaults folder, or in one the person picks
  * (`chooseFolder`), adds it to the list and unlocks it. The shell writes the "not confirmed" mark before the vault
  * exists; if the mark can't be written, no vault is made and this rejects (a state-file refusal, `what: "vault state"`).
- * A cloud-synced folder answers `{ Confirm: { CloudFolder: { token } } }` before anything is written: go on with
+ * A cloud-synced folder answers `{ Confirm: { CloudFolder: { token, provider } } }` before anything is written: go on with
  * `createVaultConfirm(token)`. A closed folder picker answers `"Dismissed"`. Other refusals: `too_large` (`what: "vault list"`) when the list is full, with
  * nothing written; `invalid_input` (`what: "vault not listed"`) when the vault was made but the list refused it and the folder could not be removed again; and
  * `locked_after_change` (`what: "vault created"`, with the new vault's registry ID in `vault`) when a lock overtook a vault that was made and listed.
@@ -508,7 +507,7 @@ export interface SavedView {
  * Saves the recovery key on screen as a PDF (21c, 21f). Rust opens the save dialog, refuses a vault folder and Lockbox's
  * own folder, and prints the page as it shows now: only the part marked `data-print-only` (see `print.css`), so the key
  * reaches the PDF through the printed page and never through this call. Answers `"Dismissed"` when the dialog is
- * closed, `{ Confirm: { CloudFolder: { token } } }` before anything is written to a cloud-synced folder (21e: go on with
+ * closed, `{ Confirm: { CloudFolder: { token, provider } } }` before anything is written to a cloud-synced folder (21e: go on with
  * `saveReadableConfirm(token)`, or call this again to pick another folder), or `{ Done: SavedView }`. Refused with
  * `busy` (`what: "printer"`) while a print of Lockbox's own runs, and `print_failed` (`what: "pdf"`) when no PDF came;
  * nothing is left on disk either way. A lock while it runs makes the answer stale: no file appears and no error shows.
@@ -781,7 +780,7 @@ export function openFile(vault: SessionRef, id: string, fileId: string, confirme
 
 /**
  * Saves a decrypted copy of the stored file where the person picks, in the Windows save dialog Rust opens (`"Dismissed"` when it is
- * closed). A cloud-synced folder answers `{ Confirm: { CloudFolder: { token } } }` first (`saveFileCopyConfirm` goes on with it). Allowed
+ * closed). A cloud-synced folder answers `{ Confirm: { CloudFolder: { token, provider } } }` first (`saveFileCopyConfirm` goes on with it). Allowed
  * in a vault opened from a backup. Refused as `damaged` for a file that does not decrypt.
  */
 export function saveFileCopy(vault: SessionRef, id: string, fileId: string, request: number): Promise<Tagged<Outcome<null>>> {
@@ -789,7 +788,7 @@ export function saveFileCopy(vault: SessionRef, id: string, fileId: string, requ
 }
 
 /**
- * The person's yes to saving the copy in a cloud-synced folder: `saveFileCopy` answered `{ Confirm: { CloudFolder: { token } } }` before
+ * The person's yes to saving the copy in a cloud-synced folder: `saveFileCopy` answered `{ Confirm: { CloudFolder: { token, provider } } }` before
  * decrypting or writing anything, and the shell parked the copy under the token. It goes on only while the vault is unlocked as it was
  * when asked; a token that is used, old, or dropped by a lock is `not_found`.
  */

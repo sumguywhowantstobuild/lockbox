@@ -1434,14 +1434,17 @@ impl Shell {
             fs::create_dir_all(wanted)?;
         }
         let check = self.check_location(wanted)?;
-        if check.cloud.is_some() && !cloud_confirmed {
+        if let (Some(provider), false) = (check.cloud, cloud_confirmed) {
             let question = RestoreChoice {
                 pick: pick.clone(),
                 destination,
                 cloud_confirmed: false,
                 asked: Asked::Cloud,
             };
-            return self.park(question, epoch, |token| Confirm::CloudFolder { token });
+            return self.park(question, epoch, move |token| Confirm::CloudFolder {
+                token,
+                provider,
+            });
         }
         // Ask 8's restore, still beside the damaged vault it was started from, makes a new folder and nothing else: the
         // engine's same-vault rule would find a healthy vault of the backup's ID there (the sibling an earlier restore
@@ -2967,8 +2970,10 @@ mod tests {
         let cloud = ts.folder("Cloud");
         ts.volumes.add_sync_root(&cloud);
 
-        let Outcome::Confirm(Confirm::CloudFolder { token }) =
-            prepare(&ts, &backup, &cloud).unwrap()
+        let Outcome::Confirm(Confirm::CloudFolder {
+            token,
+            provider: crate::locations::CloudProvider::Other,
+        }) = prepare(&ts, &backup, &cloud).unwrap()
         else {
             panic!("not asked");
         };
@@ -2987,7 +2992,7 @@ mod tests {
                 what: "restore answer"
             })
         );
-        let Outcome::Confirm(Confirm::CloudFolder { token }) =
+        let Outcome::Confirm(Confirm::CloudFolder { token, .. }) =
             prepare(&ts, &backup, &cloud).unwrap()
         else {
             panic!("not asked again");
@@ -3056,7 +3061,7 @@ mod tests {
         // A question waits in Pending; a lock of all vaults drops it.
         let cloud = ts.folder("Cloud");
         ts.volumes.add_sync_root(&cloud);
-        let Outcome::Confirm(Confirm::CloudFolder { token }) =
+        let Outcome::Confirm(Confirm::CloudFolder { token, .. }) =
             prepare(&ts, &backup, &cloud).unwrap()
         else {
             panic!("not asked");
@@ -3828,7 +3833,8 @@ mod tests {
         let others = ts.shell.sessions.pending().len();
 
         let choice = chosen(&ts, &backup, &cloud);
-        let Outcome::Confirm(Confirm::CloudFolder { token: asked }) = copy(&ts, &choice).unwrap()
+        let Outcome::Confirm(Confirm::CloudFolder { token: asked, .. }) =
+            copy(&ts, &choice).unwrap()
         else {
             panic!("not asked");
         };
@@ -3977,7 +3983,8 @@ mod tests {
         let others = ts.shell.sessions.pending().len();
 
         let choice = chosen(&ts, &backup, &cloud);
-        let Outcome::Confirm(Confirm::CloudFolder { token: asked }) = copy(&ts, &choice).unwrap()
+        let Outcome::Confirm(Confirm::CloudFolder { token: asked, .. }) =
+            copy(&ts, &choice).unwrap()
         else {
             panic!("not asked");
         };
@@ -4002,7 +4009,8 @@ mod tests {
 
         // A pick forgotten between the question and the yes: the yes is told so, and nothing is written.
         let choice = chosen(&ts, &backup, &cloud);
-        let Outcome::Confirm(Confirm::CloudFolder { token: asked }) = copy(&ts, &choice).unwrap()
+        let Outcome::Confirm(Confirm::CloudFolder { token: asked, .. }) =
+            copy(&ts, &choice).unwrap()
         else {
             panic!("not asked again");
         };

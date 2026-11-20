@@ -1,6 +1,9 @@
 // The words for a vault of the list that the vault menu and the vault strip say, beside its name (Plan 4C Task 6). The page's own: the design draws no screen for them.
 import type { VaultEntry } from "./api";
 
+/** What an open vault says under its name in the vault menu (18a's words). */
+export const UNLOCKED = "Unlocked";
+
 /** What a locked vault says under its name in the vault menu, and in the strip's button. */
 export const LOCKED = "Locked";
 

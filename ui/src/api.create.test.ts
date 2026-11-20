@@ -58,3 +58,13 @@ test("the_refusals_of_a_create_pass_through_as_the_plain_objects_the_shell_sends
     await expect(api.createVault("Family", PASSWORD, false)).rejects.toEqual(refusal);
   }
 });
+
+test("a_create_in_a_cloud_folder_asks_first_and_names_the_service", async () => {
+  // The question in the exact shape the shell sends (Rust: `cloud_question_names_the_provider_in_its_json`, Plan 4C Task 13b): the token to say yes with, and the
+  // service the location check found, a fixed name and never a path.
+  const madeUp = "fedcba9876543210".repeat(2);
+  const asked = { Confirm: { CloudFolder: { token: madeUp, provider: "OneDrive" } } };
+  invoke.mockResolvedValueOnce(asked);
+  await expect(api.createVault("Family", PASSWORD, true)).resolves.toEqual(asked);
+  expect(invoke).toHaveBeenLastCalledWith("create_vault", { name: "Family", password: PASSWORD, choose_folder: true });
+});

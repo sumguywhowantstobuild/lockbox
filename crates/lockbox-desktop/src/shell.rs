@@ -22,7 +22,9 @@ use crate::clipboard::Clipboard;
 use crate::commands::env;
 use crate::error::{ShellError, ShellResult};
 use crate::jobs::{CloseAsked, CloseReason, JobStarted, LockEpochEvent, ProgressEvent};
-use crate::locations::{LocationCheck, check_location, cloud_provider_of, is_within};
+use crate::locations::{
+    CloudProvider, LocationCheck, check_location, cloud_provider_of, is_within,
+};
 use crate::lock;
 use crate::open::{OpenFolders, RemoveReport};
 use crate::os::{HotkeyTaken, KnownFolder, Os};
@@ -101,7 +103,8 @@ fn carry_on_off_this_thread(shell: &Weak<Shell>) {
 /// needs the user's yes first. Either way, the canonical destination.
 pub(crate) enum Checked {
     Ready(PathBuf),
-    Cloud(PathBuf),
+    /// A folder a cloud provider syncs, with the provider the check found (for the question to name).
+    Cloud(PathBuf, CloudProvider),
 }
 
 pub struct Shell {
@@ -694,9 +697,10 @@ impl Shell {
             let folder = dest
                 .parent()
                 .ok_or(ShellError::InvalidInput { what: "file name" })?;
-            if cloud_provider_of(self.os.volumes.as_ref(), self.os.env.as_ref(), folder)?.is_some()
+            if let Some(provider) =
+                cloud_provider_of(self.os.volumes.as_ref(), self.os.env.as_ref(), folder)?
             {
-                return Ok(Checked::Cloud(dest));
+                return Ok(Checked::Cloud(dest, provider));
             }
         }
         Ok(Checked::Ready(dest))

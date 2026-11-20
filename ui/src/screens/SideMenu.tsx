@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ItemSummary } from "../api";
 import { ChevronsIcon, GeneratorIcon, ListIcon, LockIcon, PlusIcon, SearchIcon, SettingsIcon, SideMenuIcon, TrashIcon } from "../parts/Icon";
 import { Menu, type MenuRow } from "../parts/Menu";
-import { VaultMark, type VaultLook } from "../parts/Pattern";
+import { VaultMark, vaultLook, type VaultLook } from "../parts/Pattern";
 import {
   lockEverything,
   lockOneVault,
@@ -21,7 +21,8 @@ import {
   type SessionData,
 } from "../store";
 import { kindRow, shownName } from "../openBackupWords";
-import { listedName, LOCKED, NOT_AVAILABLE } from "../vaultWords";
+import { useMode } from "../theme";
+import { listedName, LOCKED, NOT_AVAILABLE, UNLOCKED } from "../vaultWords";
 import { focusButton } from "../focus";
 import { NewFolderBox } from "./forms/FolderForm";
 import { RenameVaultBox } from "./RenameVault";
@@ -73,13 +74,21 @@ export function SideMenu({
   // (a backup, an older copy), in the order they were opened (a switch does not reorder them); a read-only one says what it is under its name.
   const vaults = useVaults() ?? [];
   const sessions = useSessions();
-  const listed: MenuRow[] = vaults.map((vault) => {
+  const mode = useMode();
+  // 18a: each row wears its vault's mark, in the colour and shape of its place on the list (as the vault strip's buttons and the lock screen's rows do), so two vaults of one
+  // colour still look different. The mode class sits beside the colour's so the colour resolves in the menu, which is drawn outside the window's own element. A session that
+  // is no listed vault's (a backup, an older copy) wears the read-only look, as its window does.
+  const markOf = (look: VaultLook) => <VaultMark points={look.points} className={`vprint mode-${mode} v-${look.accent}`} />;
+  const listed: MenuRow[] = vaults.map((vault, place) => {
     const session = sessions.find((one) => one.vaultId === vault.id);
+    const icon = markOf(vaultLook(place, false));
     if (session !== undefined) {
       return {
         id: `vault:${String(vault.id)}`,
         label: session.name,
-        detail: kindRow(session.kind),
+        // 18a's line under an open vault's name.
+        detail: kindRow(session.kind) ?? UNLOCKED,
+        icon,
         checked: session.session === data.session,
         onSelect: () => {
           showSession(session.session);
@@ -91,6 +100,7 @@ export function SideMenu({
         id: `vault:${String(vault.id)}`,
         label: listedName(vault),
         detail: NOT_AVAILABLE,
+        icon,
         checked: false,
         onSelect: () => {
           setBox({ kind: "unavailable", id: vault.id, name: listedName(vault) });
@@ -101,6 +111,7 @@ export function SideMenu({
       id: `vault:${String(vault.id)}`,
       label: listedName(vault),
       detail: LOCKED,
+      icon,
       checked: false,
       onSelect: () => {
         startUnlockStep(vault.id);
@@ -114,6 +125,7 @@ export function SideMenu({
       id: `session:${String(session.session)}`,
       label: session.name,
       detail: kindRow(session.kind),
+      icon: markOf(vaultLook(0, true)),
       checked: session.session === data.session,
       onSelect: () => {
         showSession(session.session);
@@ -155,10 +167,14 @@ export function SideMenu({
             </>
           }
           triggerRef={vaultButton}
+          // 18a: from the vault button's left edge, so the menu opens beside the strip of vault buttons, not over it.
+          align="start"
           rows={rows}
           items={[
             {
               label: "New vault",
+              // 18a draws its plus.
+              icon: <PlusIcon />,
               onSelect: startNewVault,
             },
             {

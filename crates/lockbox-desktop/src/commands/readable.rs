@@ -213,7 +213,7 @@ impl Shell {
         let cancel = self.live_writable(session, generation)?;
         let dest = match self.checked_output(dest, cloud_confirmed)? {
             Checked::Ready(dest) => dest,
-            Checked::Cloud(dest) => {
+            Checked::Cloud(dest, provider) => {
                 let token = self.sessions.pending().put(PendingChoice::Readable {
                     session,
                     generation,
@@ -223,7 +223,7 @@ impl Shell {
                 return self.still_current(
                     session,
                     generation,
-                    Outcome::Confirm(Confirm::CloudFolder { token }),
+                    Outcome::Confirm(Confirm::CloudFolder { token, provider }),
                 );
             }
         };
@@ -751,7 +751,11 @@ mod tests {
         ts.volumes.add_sync_root(dest.parent().unwrap());
         ts.dialogs.answer(Some(dest.clone()));
         let Ok(Tagged {
-            data: Outcome::Confirm(Confirm::CloudFolder { token }),
+            data:
+                Outcome::Confirm(Confirm::CloudFolder {
+                    token,
+                    provider: crate::locations::CloudProvider::Other,
+                }),
             ..
         }) = ts.shell.save_readable(s, g, ReadableJob::recovery_pdf())
         else {
@@ -788,7 +792,7 @@ mod tests {
         ts.volumes.add_sync_root(dest.parent().unwrap());
         ts.dialogs.answer(Some(dest.clone()));
         let Ok(Tagged {
-            data: Outcome::Confirm(Confirm::CloudFolder { token }),
+            data: Outcome::Confirm(Confirm::CloudFolder { token, .. }),
             ..
         }) = ts.shell.save_readable(s, g, ReadableJob::recovery_pdf())
         else {

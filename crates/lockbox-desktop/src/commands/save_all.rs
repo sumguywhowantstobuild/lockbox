@@ -295,7 +295,7 @@ impl Shell {
         let pending = self.sessions.pending();
         let dir = match self.checked_output(&chosen.join(PLACEHOLDER), cloud_confirmed)? {
             Checked::Ready(checked) => folder_of(checked)?,
-            Checked::Cloud(checked) => {
+            Checked::Cloud(checked, provider) => {
                 // The question holds the folder and no files: a plan can't be started from it.
                 let token = pending.put(PendingChoice::SaveAll {
                     session,
@@ -304,7 +304,7 @@ impl Shell {
                     dest: folder_of(checked)?,
                     files: Vec::new(),
                 });
-                let ask = Outcome::Confirm(Confirm::CloudFolder { token });
+                let ask = Outcome::Confirm(Confirm::CloudFolder { token, provider });
                 return self.still_current(session, generation, ask);
             }
         };
@@ -378,7 +378,7 @@ impl Shell {
         let planned = pending.peek_save_all(choice)?;
         let (session, generation) = (planned.session, planned.generation);
         // The cloud question was answered before the plan was made, so the cloud check is not asked again.
-        let (Checked::Ready(checked) | Checked::Cloud(checked)) =
+        let (Checked::Ready(checked) | Checked::Cloud(checked, _)) =
             self.checked_output(&planned.dest.join(PLACEHOLDER), true)?;
         let dir = folder_of(checked)?;
         let (entries, parent) = self
@@ -2189,7 +2189,11 @@ mod tests {
     fn cloud_token(ts: &TestShell, s: SessionId, g: u64, folder: &str, dest: &Path) -> Token {
         ts.dialogs.answer(Some(dest.to_path_buf()));
         let Ok(Tagged {
-            data: Outcome::Confirm(Confirm::CloudFolder { token }),
+            data:
+                Outcome::Confirm(Confirm::CloudFolder {
+                    token,
+                    provider: crate::locations::CloudProvider::Other,
+                }),
             ..
         }) = ts.shell.save_all_files(s, g, folder)
         else {

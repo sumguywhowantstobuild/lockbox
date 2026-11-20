@@ -56,6 +56,9 @@ export interface Leaves {
   before_restore: string | null;
 }
 
+/** The cloud service syncing a folder: a fixed name from the shell, never a path. */
+export type CloudProvider = "OneDrive" | "GoogleDrive" | "Dropbox" | "Other";
+
 /**
  * A question the user answers before the command goes on. Each command that asks adds its variant. `Executable` has
  * no token: it is confirmed by sending `open_file` again with `confirmed_executable`. `MissingFiles` has none
@@ -67,7 +70,8 @@ export interface Leaves {
  * ran, and this is what it found.
  */
 export type Confirm =
-  | { CloudFolder: { token: string } }
+  /** `provider` is the service the shell's location check found, a fixed name (never a path), for the question to name (18c). */
+  | { CloudFolder: { token: string; provider: CloudProvider } }
   | { HeaderChanged: { token: string } }
   | "Executable"
   | { MissingFiles: { names: string[] } }

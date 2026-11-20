@@ -298,6 +298,28 @@ test("forgot_password_is_not_offered_while_a_copy_waits_for_its_vault", async ()
   expect(screen.queryByRole("button", { name: "Forgot password?" })).toBeNull();
 });
 
+test("the_save_steps_vaults_are_a_group_named_vault_on_screen", async () => {
+  // 8b draws a "Vault" label over the choice of vault, as the in-window save box has (4C Task 13b): on the save step the group's name shows, in the field labels'
+  // look; on the plain lock screen it is still there for a screen reader, and not shown.
+  shell = installFakeShell(invoke, listen, [
+    { id: 7, name: "My vault", items: sampleItems() },
+    { id: 8, name: "Home", items: sampleItems() },
+  ]);
+  render(<App />);
+  const plain = await screen.findByRole("group", { name: "Vault" });
+  expect(plain.querySelector("legend")?.className).toBe("sr");
+  await vi.waitFor(() => {
+    expect(shell.calls.some((call) => call.cmd === "capture_state")).toBe(true);
+  });
+  await act(async () => {
+    shell.press({ text: "MU-copied value" });
+    await Promise.resolve();
+  });
+  await screen.findByRole("heading", { level: 1, name: "Save what you copied" });
+  const group = screen.getByRole("group", { name: "Vault" });
+  expect(group.querySelector("legend")?.className).toBe("flab");
+});
+
 test("restore_a_backup_is_a_second_line_under_the_form_and_opens_the_first_step", async () => {
   const { container } = await show([{ id: 7, name: "My vault", items: sampleItems() }]);
   const form = container.querySelector("form") as HTMLFormElement;

@@ -332,6 +332,7 @@ drop checks and bridge tests stay.
 | A pasted `.env` | UI → Rust | Once, on paste; the box empties at once and shows rows with names only |
 | Paths | Rust → UI | Shown for the person to read (a saved export's folder, Ask 7). Never accepted back |
 | A generated password | Rust → UI | As it does today, for display |
+| The cloud service syncing a folder | Rust → UI | A fixed name (OneDrive, Google Drive, Dropbox, or "another"), never a path: at unlock (Ask 10) and with every cloud-folder question, so 18c can name it |
 
 ### The app's questions
 

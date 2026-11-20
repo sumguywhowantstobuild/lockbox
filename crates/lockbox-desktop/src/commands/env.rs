@@ -1923,7 +1923,8 @@ mod tests {
         ts.dialogs.answer(Some(dest.clone()));
 
         let answer = ts.shell.env_save_file(s, g, &prod).unwrap();
-        let EnvOut::Saved(Outcome::Confirm(Confirm::CloudFolder { token })) = answer.data else {
+        let EnvOut::Saved(Outcome::Confirm(Confirm::CloudFolder { token, .. })) = answer.data
+        else {
             panic!("a cloud folder asks first");
         };
         assert_eq!(
@@ -1977,7 +1978,8 @@ mod tests {
         ts.volumes.add_sync_root(&docs);
         ts.dialogs.answer(Some(dest.clone()));
         let answer = ts.shell.env_save_file(s, g, &work).unwrap();
-        let EnvOut::Saved(Outcome::Confirm(Confirm::CloudFolder { token })) = answer.data else {
+        let EnvOut::Saved(Outcome::Confirm(Confirm::CloudFolder { token, .. })) = answer.data
+        else {
             panic!("a cloud folder asks first");
         };
         key(&ts, s, g, "KEY", "2", Some(&work));

@@ -59,3 +59,13 @@ test("not_found_busy_and_folder_refusals_pass_through_as_the_plain_objects", asy
   }
   expect(invoke).toHaveBeenCalledTimes(refusals.length * 2);
 });
+
+test("add_existing_vault_in_a_cloud_folder_asks_first_and_names_the_service", async () => {
+  // The question in the exact shape the shell sends (Rust: `cloud_question_names_the_provider_in_its_json`, Plan 4C Task 13b): the token and the service, never a path.
+  // Save a copy, Save as PDF or .env, Save all files and a restore's prepare send the same shape (their Rust tests check the provider); the page names it only in 18c.
+  const madeUp = "00112233445566778899aabbccddeeff";
+  const asked = { Confirm: { CloudFolder: { token: madeUp, provider: "Dropbox" } } };
+  invoke.mockResolvedValueOnce(asked);
+  await expect(api.addExistingVault()).resolves.toEqual(asked);
+  expect(invoke).toHaveBeenLastCalledWith("add_existing_vault", {});
+});

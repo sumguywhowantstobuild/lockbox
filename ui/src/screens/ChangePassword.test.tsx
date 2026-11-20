@@ -38,8 +38,9 @@ const WRONG_CURRENT = "That isn't the current password.";
 const TOO_SHORT = "At least 12 characters.";
 const MISMATCH = "The two new passwords don't match.";
 const ASK16 = "Your new password was saved, but the vault locked before Lockbox could say so. Unlock with the new one.";
-const ASK9 =
-  "Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
+const ASK9_HEADING = "Opened from the backup copy of this vault's details";
+// The banner's body, under its heading (4C Task 13b).
+const ASK9 = "If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
 
 function vault(id: number, name: string, extra: Partial<FakeVault> = {}): FakeVault {
   return { id, name, items: sampleItems(), ...extra };
@@ -136,7 +137,7 @@ async function switchTo(name: string, at?: number) {
   fireEvent.click(opener);
   const menu = await screen.findByRole("menu");
   const rows = within(menu).getAllByRole("menuitemradio");
-  const row = at === undefined ? rows.find((one) => one.textContent === name) : rows[at];
+  const row = at === undefined ? rows.find((one) => one.textContent === name || one.textContent === `${name}Unlocked`) : rows[at];
   if (row === undefined) throw new Error(`no row for ${name}`);
   fireEvent.click(row);
   await waitFor(() => {
@@ -764,6 +765,8 @@ test("ask_9_and_ask_2_now_show_change_password_for_their_vault", async () => {
   // Ask 9: the design's words in full, with Later and Change password. It opens the form for the vault the question is about.
   const vaults = [vault(7, "My vault"), vault(8, "Home", { usedBackupHeader: true })];
   await allOpen(vaults);
+  // The banner has its heading and its words as two elements.
+  expect(screen.getByRole("heading", { level: 2, name: ASK9_HEADING })).toBeTruthy();
   expect(screen.getByText(ASK9)).toBeTruthy();
   const notice = screen.getByText(ASK9).closest(".ask") as HTMLElement;
   expect(within(notice).getAllByRole("button").map((button) => button.textContent)).toEqual(["Later", "Change password"]);
@@ -821,7 +824,7 @@ test("change_password_hidden_on_a_read_only_vault", async () => {
   const settings = await screen.findByRole("complementary", { name: "Settings" });
   expect(within(settings).queryByRole("button", { name: "Change password" })).toBeNull();
   expect(within(settings).queryByText(/change password/i)).toBeNull();
-  const notice = screen.getByText(/^Opened from the backup copy of this vault's details/).closest(".ask") as HTMLElement;
+  const notice = screen.getByRole("heading", { level: 2, name: ASK9_HEADING }).closest(".ask") as HTMLElement;
   expect(within(notice).queryByRole("button", { name: "Change password" })).toBeNull();
   expect(notice.textContent).not.toContain("Change the password again");
   act(() => {

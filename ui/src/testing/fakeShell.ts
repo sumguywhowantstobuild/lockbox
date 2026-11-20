@@ -290,7 +290,7 @@ export interface FakeShell {
   /** Whether the vault carries the "not confirmed" mark. */
   unconfirmed(vaultId: number): boolean;
   /** The next create or add-existing asks about a cloud folder first, as the shell does. */
-  cloudNext(): void;
+  cloudNext(provider?: "OneDrive" | "GoogleDrive" | "Dropbox" | "Other"): void;
   /** The next create or new key finds the mark can't be written: nothing is made, the shell refuses. */
   refuseMarkNext(): void;
   /** The next key the shell makes is this one (a test of a key with a repeated word needs one the fake would not make). */
@@ -1249,7 +1249,8 @@ export function installFakeShell(
   let chosenIssue: number | undefined;
   /** What each session holds about its keys, as the shell's `KeyState` does: 21f's permission, and the last key's number. */
   const keyStates = new Map<number, { may: boolean; last: number }>();
-  let cloud = false;
+  // The service the next create or add-existing finds syncing its folder (`cloudNext`), or `null` for none.
+  let cloud: "OneDrive" | "GoogleDrive" | "Dropbox" | "Other" | null = null;
   let refuseMark = false;
   let dismissPicker = false;
   let existing: FakeVault | undefined;
@@ -2093,12 +2094,13 @@ export function installFakeShell(
           dismissPicker = false;
           return "Dismissed";
         }
-        if (cloud) {
-          cloud = false;
+        if (cloud !== null) {
+          const provider = cloud;
+          cloud = null;
           nextToken += 1;
           const token = `create-token-${String(nextToken)}`;
           pendingCreates.set(token, { name, password });
-          return { Confirm: { CloudFolder: { token } } };
+          return { Confirm: { CloudFolder: { token, provider } } };
         }
         return created(name, password);
       }
@@ -2116,12 +2118,13 @@ export function installFakeShell(
           return "Dismissed";
         }
         if (existing === undefined) return refuse({ code: "invalid_input", what: "not a vault folder" });
-        if (cloud) {
-          cloud = false;
+        if (cloud !== null) {
+          const provider = cloud;
+          cloud = null;
           nextToken += 1;
           const token = `add-token-${String(nextToken)}`;
           pendingAdds.add(token);
-          return { Confirm: { CloudFolder: { token } } };
+          return { Confirm: { CloudFolder: { token, provider } } };
         }
         return added();
       }
@@ -2272,7 +2275,7 @@ export function installFakeShell(
           nextToken += 1;
           const token = `pdf-token-${String(nextToken)}`;
           pendingPdfs.set(token, { session, generation, envFolder: null });
-          return tagged(session, generation, { Confirm: { CloudFolder: { token } } });
+          return tagged(session, generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
         }
         pdfs.push(SAVED_FOLDER);
         return tagged(session, generation, { Done: { folder: SAVED_FOLDER } });
@@ -2531,7 +2534,7 @@ export function installFakeShell(
           nextToken += 1;
           const token = `env-file-token-${String(nextToken)}`;
           pendingPdfs.set(token, { session: sent.session, generation: sent.generation, envFolder: folder.id });
-          return tagged(sent.session, sent.generation, { Saved: { Confirm: { CloudFolder: { token } } } });
+          return tagged(sent.session, sent.generation, { Saved: { Confirm: { CloudFolder: { token, provider: "Other" } } } });
         }
         envFiles.push(folder.id);
         return tagged(sent.session, sent.generation, { Saved: { Done: { folder: SAVED_FOLDER } } });
@@ -2567,7 +2570,7 @@ export function installFakeShell(
           nextToken += 1;
           const token = `copy-token-${String(nextToken)}`;
           pendingPdfs.set(token, { session: sent.session, generation: sent.generation, envFolder: null, copy: { id: sent.id, file_id: sent.file_id } });
-          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token } } });
+          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
         }
         if ((vault.damagedFiles ?? []).includes(sent.file_id)) return refuse(FILE_DAMAGED);
         fileOps.push({ cmd, id: sent.id, file_id: sent.file_id });
@@ -2967,7 +2970,7 @@ export function installFakeShell(
           nextToken += 1;
           const token = `save-all-token-${String(nextToken)}`;
           parkedSaves.set(token, { session: sent.session, generation: sent.generation, folder: sent.folder });
-          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token } } });
+          return tagged(sent.session, sent.generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
         }
         return planSave(sent.session, sent.generation, vault, sent.folder);
       }
@@ -3828,7 +3831,7 @@ export function installFakeShell(
         const token = `restore-token-${String(nextToken)}`;
         restoreAsked.set(token, sent.choice);
         return Promise.resolve({
-          Confirm: kind === "cloud" ? { CloudFolder: { token } } : { NewFolder: { suggested: `${checked.name} (restored)`, token } },
+          Confirm: kind === "cloud" ? { CloudFolder: { token, provider: "Other" } } : { NewFolder: { suggested: `${checked.name} (restored)`, token } },
         });
       }
       return restoreCopy(sent.choice, request);
@@ -4319,8 +4322,8 @@ export function installFakeShell(
       return vault === undefined ? undefined : keys.get(vault);
     },
     unconfirmed: (vaultId) => vaults.find((v) => v.id === vaultId)?.unconfirmed ?? false,
-    cloudNext: () => {
-      cloud = true;
+    cloudNext: (provider = "Other") => {
+      cloud = provider;
     },
     refuseMarkNext: () => {
       refuseMark = true;

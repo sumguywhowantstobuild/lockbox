@@ -180,7 +180,8 @@ pub trait Notifier: Send + Sync {
 #[allow(clippy::large_enum_variant)]
 pub enum OpenStep<X> {
     Session(Location, Opened, X),
-    Ask(PendingChoice, fn(Token) -> Confirm),
+    /// A question first: the choice to park, and how to ask it once parked (it may name what the check found).
+    Ask(PendingChoice, Box<dyn FnOnce(Token) -> Confirm + Send>),
 }
 
 /// What [`Sessions::open`] answers: `Outcome<Tagged<(SessionInfo, Option<X>)>>`, the session and `X` when the
@@ -2436,7 +2437,7 @@ mod tests {
                     locked.wait();
                     Ok(OpenStep::<()>::Ask(
                         PendingChoice::Test(Some(Box::new(vault))),
-                        ask,
+                        Box::new(ask),
                     ))
                 })
             });
@@ -2451,7 +2452,10 @@ mod tests {
 
         // Not raced: a question whose token is taken once.
         let answer = sessions.open(Some(location), None, |_| {
-            Ok(OpenStep::<()>::Ask(PendingChoice::Test(None), ask))
+            Ok(OpenStep::<()>::Ask(
+                PendingChoice::Test(None),
+                Box::new(ask),
+            ))
         });
         let Ok(Outcome::Confirm(Confirm::HeaderChanged { token })) = answer else {
             panic!("the open asks first");
@@ -2478,9 +2482,10 @@ mod tests {
         };
         let answer = sessions.open(None, Some(change), |_| {
             sessions.lock_all(LockReason::Manual);
-            Ok(OpenStep::<()>::Ask(PendingChoice::Test(None), |token| {
-                Confirm::HeaderChanged { token }
-            }))
+            Ok(OpenStep::<()>::Ask(
+                PendingChoice::Test(None),
+                Box::new(|token| Confirm::HeaderChanged { token }),
+            ))
         });
         assert_eq!(answer.err(), Some(ShellError::Locked));
         assert_eq!(sessions.pending().len(), 0);

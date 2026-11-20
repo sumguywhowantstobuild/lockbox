@@ -48,6 +48,12 @@ const NAME_HINT = "The name isn't encrypted, so don't put secrets in it.";
 const CLOUD_WARNING = "A cloud service syncs this folder. Lockbox doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway.";
 const SECRETS = [PASSWORD, NEW, TYPED, PENDING, "MU-wrong"];
 
+/** A vault's menu row by its name: an open vault's row reads "<name>Unlocked" (its status line, 4C Task 13b), so either way finds it. */
+function rowName(name: string | RegExp): string | RegExp | ((read: string) => boolean) {
+  if (typeof name !== "string") return name;
+  return (read) => read === name || read === `${name}Unlocked`;
+}
+
 function vault(id: number, name: string | null, extra: Partial<FakeVault> = {}): FakeVault {
   return { id, name, items: sampleItems(), ...extra };
 }
@@ -91,7 +97,7 @@ async function chooseAction(name: string): Promise<void> {
 
 async function chooseRow(name: string | RegExp): Promise<void> {
   const menu = await openVaultMenu();
-  fireEvent.click(within(menu).getByRole("menuitemradio", { name }));
+  fireEvent.click(within(menu).getByRole("menuitemradio", { name: rowName(name) }));
   await waitFor(() => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
@@ -283,7 +289,7 @@ test("new_vault_from_the_menu_runs_setups_two_steps", async () => {
   expect(shell.unconfirmed(8)).toBe(false);
   // Both vaults are on the menu, open, and the new one is the one on screen.
   const after = await openVaultMenu();
-  expect(rowsOf(after).map((row) => row.textContent)).toEqual(["My vault", "Home"]);
+  expect(rowsOf(after).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked"]);
   expect(rowsOf(after).map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
 });
 
@@ -302,7 +308,7 @@ test("the_new_session_carries_the_id_from_the_answer", async () => {
   expect(debugState().vaults?.find((entry) => entry.id === 8)).toEqual({ list: shell.listIdentity(), id: 8, name: "Home", available: true, details_damaged: false });
   await confirmKey(8);
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "Home"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked"]);
   expect(rowsOf(menu).map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true"]);
 });
 
@@ -323,7 +329,7 @@ test("the_new_session_takes_its_own_id_when_another_vault_was_listed_at_once", a
   ]);
   await confirmKey(8);
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "Home", "Other window's vaultLocked"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked", "Other window's vaultLocked"]);
   expect(rowsOf(menu).map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "true", "false"]);
 });
 
@@ -354,7 +360,7 @@ test("the_other_vaults_stay_open_through_creation", async () => {
   await confirmKey(9);
   // All three are open on the menu; the first one is exactly as it was, and switching to it shows its items.
   const menu = await openVaultMenu();
-  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vault", "Home", "Work"]);
+  expect(rowsOf(menu).map((row) => row.textContent)).toEqual(["My vaultUnlocked", "HomeUnlocked", "WorkUnlocked"]);
   fireEvent.click(rowsOf(menu)[0] as HTMLElement);
   await screen.findByRole("button", { name: "My vault, vault menu" });
   expect(screen.getByRole("heading", { level: 1, name: "All items" })).toBeTruthy();
@@ -871,4 +877,40 @@ test("the_inside_new_vault_form_draws_its_places_pattern", async () => {
   resetStoreForTests();
   render(<CreateVault onBack={() => undefined} />);
   expect(drawn()).toBe(pattern(9));
+});
+
+// ---- Plan 4C Task 13b: 18c names the service and says where the folder is ----
+
+test("the_cloud_warning_names_the_service_the_shell_found_and_where_the_folder_is", async () => {
+  await unlocked([vault(7, "My vault")]);
+  await toTheForm();
+  const names = [
+    ["OneDrive", "OneDrive"],
+    ["GoogleDrive", "Google Drive"],
+    ["Dropbox", "Dropbox"],
+    ["Other", "A cloud service"],
+  ] as const;
+  for (const [provider, said] of names) {
+    fill("Home", NEW);
+    shell.cloudNext(provider);
+    create();
+    await screen.findByRole("button", { name: "Continue anyway" });
+    // 18c's words, with the service by its everyday name ("A cloud service" only when the shell can't name it), never the shell's spelling.
+    const warning = `${said} syncs this folder. Lockbox doesn't support vaults in cloud folders. Choose a folder on this PC, or continue anyway.`;
+    expect(screen.getByText(warning), provider).toBeTruthy();
+    expect(document.body.textContent).not.toContain("GoogleDrive");
+    // Where the path was drawn, the folder's place in words (as 18b says it), beside Choose another: here the usual folder.
+    const place = screen.getByText("Kept in your Lockbox Vaults folder.");
+    expect(place.parentElement?.contains(screen.getByRole("button", { name: "Choose another" }))).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await screen.findByRole("button", { name: "Continue" });
+  }
+  // A folder the person picked says so.
+  fireEvent.click(screen.getByRole("button", { name: "Choose another" }));
+  fill("Home", NEW);
+  shell.cloudNext("OneDrive");
+  create();
+  await screen.findByRole("button", { name: "Continue anyway" });
+  expect(screen.getByText("Kept in the folder you picked.")).toBeTruthy();
+  expect(screen.queryByText("Kept in your Lockbox Vaults folder.")).toBeNull();
 });

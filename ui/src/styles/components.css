@@ -383,6 +383,8 @@
 /* A quiet button on its own line under the sentence that offers it (18c's Choose another): its words line up with the
    sentence's, the hover tint reaching into the margin. */
 .fu-other {
+  /* As wide as its words: in the steps' column a button would stretch to the column's width and centre them (28a). */
+  align-self: flex-start;
   margin: 0 0 0 -8px;
 }
 
@@ -2121,6 +2123,12 @@
   color: var(--ink2);
 }
 
+/* A vault's mark before its name in the vault menu, as drawn (18a): 28px, in the vault's own colour (its row's mark carries the vault's classes). */
+.mi .vprint {
+  width: 28px;
+  height: 28px;
+}
+
 /* A menu that opens with lines saying how things stand (the vault menu: each vault, and Unlocked or Locked). */
 .menu.mwide {
   display: flex;
@@ -2340,6 +2348,20 @@
 
 .asks:empty {
   display: none;
+}
+
+/* Over a vault's list the banners are the list's width, as Ask 9 is drawn, so they line up with each other and with the rows under them; the lock screen's keep their column. */
+.lscroll > .asks {
+  max-width: none;
+}
+
+/* A banner's heading, where the design draws one (Ask 9): the banner's own size, bold, the words under it. */
+.ask-t {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--ink);
 }
 
 /* A banner is words, with its buttons below: the card's colour and an edge, the text colour for the words. */

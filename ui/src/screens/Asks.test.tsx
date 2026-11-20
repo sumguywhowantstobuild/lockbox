@@ -346,14 +346,32 @@ test("ask5_banner_closes_with_no_delete", async () => {
 test("ask9_later_closes_it", async () => {
   const { container } = start([vault({ usedBackupHeader: true })]);
   await unlockIt();
-  // The design's words in full, now that the screen the last sentence sends the person to exists (4C Task 3), and its two buttons in the design's order.
-  const words =
-    "Opened from the backup copy of this vault's details. If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
-  expect(await screen.findByText(words)).toBeTruthy();
+  // The design's words in full, now that the screen the last sentence sends the person to exists (4C Task 3), and its two buttons in the design's order. As drawn
+  // (Ask 9), the first sentence is the banner's heading and the rest is under it (4C Task 13b).
+  const heading = await screen.findByRole("heading", { level: 2, name: "Opened from the backup copy of this vault's details" });
+  const words = "If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
+  expect(screen.getByText(words)).toBeTruthy();
+  const banner = heading.closest(".ask") as HTMLElement;
+  expect(banner.contains(screen.getByText(words))).toBe(true);
+  // Each button is described by the heading and the words, so a screen reader that reaches one hears what it answers.
+  const later = within(banner).getByRole("button", { name: "Later" });
+  const described = (later.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
+  expect(described).toEqual(["Opened from the backup copy of this vault's details", words]);
   expect(buttonNames().filter((name) => name === "Later" || name === "Change password")).toEqual(["Later", "Change password"]);
   await expectNoAxe(container);
   fireEvent.click(screen.getByRole("button", { name: "Later" }));
   expect(screen.queryByText(words)).toBeNull();
+});
+
+test("the_vault_windows_banners_are_the_lists_width", () => {
+  // Ask 9 was drawn as wide as the list under it (4C Task 13b); every banner over the list is, so they line up with each other and the list. The lock screen's
+  // banners keep their column.
+  const sheet = readBeside(import.meta.url, "../styles/components.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = [...sheet.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find((one) => (one[1] ?? "").split(",").some((part) => part.trim() === ".lscroll > .asks"));
+  expect(rule?.[2]?.replace(/\s+/g, " ")).toMatch(/max-width: none/);
+  // The heading is the banner's own size, bold, not a page heading's.
+  const title = [...sheet.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find((one) => (one[1] ?? "").split(",").some((part) => part.trim() === ".ask-t"));
+  expect(title?.[2]?.replace(/\s+/g, " ")).toMatch(/font-size: 14px.*font-weight: 600|font-weight: 600.*font-size: 14px/);
 });
 
 test("ask10_names_the_provider", async () => {
@@ -373,11 +391,31 @@ test("ask10_names_the_provider", async () => {
     expect(await screen.findByText(words), provider).toBeTruthy();
     // The provider is named by its everyday name, never the shell's own spelling.
     expect(container.textContent).not.toContain("GoogleDrive");
-    expect(screen.queryByRole("button", { name: "Show in Explorer" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Keep it there" }));
     expect(screen.queryByText(words)).toBeNull();
     unmount();
   }
+});
+
+test("ask10_shows_its_vaults_folder_in_explorer", async () => {
+  // The design's table: "Keep it there, Show in Explorer", now that 4C built Show in Explorer (4C Task 13b). It asks the shell to open this vault's folder, by its
+  // place on the list (the page never has a path); the banner stays, since the folder is still synced.
+  start([vault({ cloud: "OneDrive" })]);
+  await unlockIt();
+  await screen.findByText(/^OneDrive syncs My vault's folder\./);
+  expect(buttonNames().filter((name) => name === "Keep it there" || name === "Show in Explorer")).toEqual(["Keep it there", "Show in Explorer"]);
+  fireEvent.click(screen.getByRole("button", { name: "Show in Explorer" }));
+  await waitFor(() => {
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === "show_vault_in_explorer").map(([, args]) => args as unknown)).toEqual([{ vault: { list: shell.listIdentity(), id: 7 } }]);
+  });
+  expect(shell.openedVaults).toEqual([7]);
+  expect(screen.getByText(/^OneDrive syncs My vault's folder\./)).toBeTruthy();
+  // A refusal is said in words in the banner, never the shell's own text.
+  shell.explorerFailsNext();
+  fireEvent.click(screen.getByRole("button", { name: "Show in Explorer" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toBe("Lockbox couldn't reach that folder or file. Check that the drive is connected, then try again.");
+  expect(alert.closest(".ask")?.textContent).toContain("OneDrive syncs My vault's folder.");
 });
 
 test("ask11_set_aside_calls_reset", async () => {

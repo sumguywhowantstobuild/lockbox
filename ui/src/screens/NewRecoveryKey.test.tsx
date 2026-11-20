@@ -297,7 +297,7 @@ async function switchTo(name: string, at?: number) {
   fireEvent.click(opener);
   const menu = await screen.findByRole("menu");
   const rows = within(menu).getAllByRole("menuitemradio");
-  const row = at === undefined ? rows.find((one) => one.textContent === name) : rows[at];
+  const row = at === undefined ? rows.find((one) => one.textContent === name || one.textContent === `${name}Unlocked`) : rows[at];
   if (row === undefined) throw new Error(`no row for ${name}`);
   fireEvent.click(row);
   await waitFor(() => {

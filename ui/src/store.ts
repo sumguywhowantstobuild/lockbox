@@ -1085,12 +1085,12 @@ export type SetupResult =
   | "stale"
   /** The person closed the folder picker. */
   | "dismissed"
-  /** A cloud-synced folder: nothing is done until the person says yes, with this token. */
-  | { confirm: string };
+  /** A cloud-synced folder: nothing is done until the person says yes, with this token. `provider` is the service the shell found, for 18c to name. */
+  | { confirm: string; provider: api.CloudProvider };
 
-/** Pulls the token out of a cloud-folder question, or refuses any other question (none is expected here). */
-function cloudToken(question: api.Confirm): string {
-  if (typeof question === "object" && "CloudFolder" in question) return question.CloudFolder.token;
+/** Pulls the token and the service out of a cloud-folder question, or refuses any other question (none is expected here). */
+function cloudQuestion(question: api.Confirm): { confirm: string; provider: api.CloudProvider } {
+  if (typeof question === "object" && "CloudFolder" in question) return { confirm: question.CloudFolder.token, provider: question.CloudFolder.provider };
   // eslint-disable-next-line @typescript-eslint/only-throw-error -- a refusal is a plain object, as the shell's are
   throw UNEXPECTED;
 }
@@ -1129,7 +1129,7 @@ async function finishCreate(run: () => Promise<api.Opened<api.CreatedView>>): Pr
     throw error;
   }
   if (answer === "Dismissed") return "dismissed";
-  if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
+  if ("Confirm" in answer) return cloudQuestion(answer.Confirm);
   const { info, recovery_key, issue, vault_id } = answer.data;
   // The vault's place on the list is the registry ID the shell gave it, from the answer itself, never found by comparing lists: another vault may have been
   // listed at the same moment (an add in another window). An answer without a whole number above 0 leaves the record with the stand-in `-1`.
@@ -1171,7 +1171,7 @@ export function confirmAddExistingVault(token: string): Promise<SetupResult> {
 async function finishAdd(run: () => Promise<api.Outcome<VaultEntry>>): Promise<SetupResult> {
   const answer = await run();
   if (answer === "Dismissed") return "dismissed";
-  if ("Confirm" in answer) return { confirm: cloudToken(answer.Confirm) };
+  if ("Confirm" in answer) return cloudQuestion(answer.Confirm);
   const list = await refreshVaults();
   // 26c: the vault's own name, from the entry the shell answered with.
   const { id, name } = answer.Done;
@@ -2348,6 +2348,16 @@ export function seeTheChange(session: number): void {
   update(session, (current) =>
     current.backup?.phase === "refused" ? { ...current, backup: null, asks: { ...current.asks, detailsChanged: true, detailsError: null } } : current,
   );
+}
+
+/**
+ * The rename box's "See the change" (4C Task 13b): the shell refused the rename because this vault's details were changed outside Lockbox, so Ask 3 opens for it, as Ask 2's
+ * button does for a backup. A vault opened read-only has nothing to accept.
+ */
+export function openDetailsChanged(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  update(session, (current) => ({ ...current, asks: { ...current.asks, detailsChanged: true, detailsError: null } }));
 }
 
 /** Says how a backup ended, where the person is: in the panel when it is still open, else as a message. Nothing for a vault that locked. */
@@ -3753,7 +3763,8 @@ export function startForgot(vault: number): void {
 export function closeForgot(): void {
   const flow = state.forgot;
   if (flow === null || flow.sending || flow.phase === "done") return;
-  set({ ...state, forgot: null, unlockPick: flow.vault });
+  // Begun from a vault's unlock step (another vault open), Back gives that step back as it was, and leaves the lock screen nothing to choose later.
+  set({ ...state, forgot: null, unlockPick: state.sessions.length === 0 ? flow.vault : state.unlockPick });
   if (flow.choice !== null) forgetRecovery(flow.choice);
 }
 
@@ -3871,8 +3882,9 @@ export async function finishRecovery(newPassword: string): Promise<void> {
     }));
     return;
   }
-  // The password is set and the vault is open: published as an unlock publishes it, and 28e shows over it.
-  void publishUnlock(answer, vault);
+  // The password is set and the vault is open: published as an unlock publishes it, and 28e shows over it. Begun from that vault's unlock step (another vault open),
+  // the vault comes to the front and the step it was begun from goes, as an unlock from the step ends it.
+  void publishUnlock(answer, vault, "front", state.unlockStep?.vault === vault);
   moveForgot(opening, run, () => ({ phase: "done", sending: false, choice: null, session: answer.session }));
 }
 

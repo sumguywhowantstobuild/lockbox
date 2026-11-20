@@ -6,6 +6,7 @@
 use lockbox_core::CoreError;
 use serde::Serialize;
 
+use crate::locations::CloudProvider;
 use crate::pending::Token;
 use crate::restore::{Leaves, RestoreNotice};
 
@@ -194,8 +195,12 @@ pub enum Outcome<T> {
 /// same command again with its flag set. Each task adds the variants it needs.
 #[derive(Serialize)]
 pub enum Confirm {
-    /// The folder is synced by a cloud provider, which Lockbox does not support (spec §6.10): go on anyway?
-    CloudFolder { token: Token },
+    /// The folder is synced by a cloud provider, which Lockbox does not support (spec §6.10): go on anyway? `provider`
+    /// is the one the location check found, a fixed name (never a path), so the question can name it (18c).
+    CloudFolder {
+        token: Token,
+        provider: CloudProvider,
+    },
     /// The vault's header was changed outside Lockbox (spec §5.2): accept it before the recovery goes on.
     HeaderChanged { token: Token },
     /// The stored file is of a type that can run code (spec §7.2): open it anyway? Confirmed by sending `open_file`
