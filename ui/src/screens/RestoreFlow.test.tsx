@@ -173,7 +173,7 @@ test("backup_first_then_password_or_key", async () => {
   const choice = shell.restorePickTokens()[0];
   expect(choice).toMatch(/^[0-9a-f]{32}$/);
   await toTheFolder();
-  expect(sent("restore_check")).toEqual([{ choice, credential: { password_or_key: BACKUP_PASSWORD } }]);
+  expect(sent("restore_check")).toEqual([{ choice, credential: { password_or_key: BACKUP_PASSWORD }, request: expect.any(Number) as number }]);
   expect(shell.restorePicks()).toEqual([{ name: BACKUP_NAME, size: 1_288_490_188, checked: true }]);
 });
 
@@ -1107,6 +1107,87 @@ test("the_first_step_cancel_lets_the_file_go", async () => {
   await screen.findByLabelText(/^Password for /);
   expect(sent("forget_restore_pick")).toEqual([{ choice }]);
   expect(shell.restorePicks()).toEqual([]);
+});
+
+// Plan 4C Task 11: the check at 24a is a job the shell tells the page of (`restore_check`, under the request the page sent), and Cancel stops it.
+test("cancel_at_24a_stops_the_running_check_by_its_request", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  const choice = shell.restorePickTokens()[0];
+  const release = shell.holdRestoreCheck();
+  type(BACKUP_PASSWORD);
+  press("Continue");
+  await waitFor(() => {
+    expect(shell.runningLaunchJobs()).toHaveLength(1);
+  });
+  const job = theJob();
+  // A launch-scoped job of its own kind, under the number the page sent.
+  expect(job.kind).toBe("restore_check");
+  expect(job.scope.type).toBe("launch");
+  expect(sent("restore_check")).toEqual([{ choice, credential: { password_or_key: BACKUP_PASSWORD }, request: job.request }]);
+  // The page has heard of it (the event came as the command began), so Cancel names the operation the shell gave.
+  expect(sent("cancel_operation")).toEqual([]);
+  press("Cancel");
+  await screen.findByLabelText(/^Password for /);
+  await waitFor(() => {
+    expect(sent("cancel_operation")).toEqual([{ operation: job.operation, scope: job.scope }]);
+  });
+  // The check is stopped in the shell, and nothing it would have found is kept; the file is let go as Cancel always does.
+  expect(shell.runningLaunchJobs()).toEqual([]);
+  expect(sent("forget_restore_pick")).toEqual([{ choice }]);
+  expect(shell.restorePicks()).toEqual([]);
+  act(() => {
+    release();
+  });
+  await act(async () => {
+    await new Promise((done) => window.setTimeout(done, 10));
+  });
+  // The late answer changes nothing on screen.
+  expect(screen.queryByRole("heading", { level: 1, name: "Where it goes" })).toBeNull();
+  expect(sent("cancel_operation")).toHaveLength(1);
+});
+
+test("cancel_before_the_job_started_event_is_matched_by_request", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  const release = shell.holdRestoreCheck();
+  // The command has begun in the shell, but its `job-started` has not reached the page.
+  const arrive = shell.holdJobStarted();
+  type(BACKUP_PASSWORD);
+  press("Continue");
+  await waitFor(() => {
+    expect(sent("restore_check")).toHaveLength(1);
+  });
+  const job = theJob();
+  press("Cancel");
+  await screen.findByLabelText(/^Password for /);
+  // The stop cannot name an operation yet, so it waits for the event, which names its request.
+  expect(sent("cancel_operation")).toEqual([]);
+  expect(shell.runningLaunchJobs()).toHaveLength(1);
+  act(() => {
+    arrive();
+  });
+  await waitFor(() => {
+    expect(sent("cancel_operation")).toEqual([{ operation: job.operation, scope: job.scope }]);
+  });
+  // And the work in the shell stopped.
+  expect(shell.runningLaunchJobs()).toEqual([]);
+  act(() => {
+    release();
+  });
+});
+
+test("cancel_after_the_check_answered_sends_no_stop", async () => {
+  await onTheLockScreen();
+  await restoreFromTheLockScreen();
+  await toTheFolder();
+  expect(sent("restore_check")).toHaveLength(1);
+  press("Back");
+  await heading("Restore a backup");
+  press("Cancel");
+  await screen.findByLabelText(/^Password for /);
+  // The job was over when the answer came: nothing is left to stop.
+  expect(sent("cancel_operation")).toEqual([]);
 });
 
 test("no_command_carries_a_path_or_a_name_the_page_chose", async () => {

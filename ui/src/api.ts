@@ -1187,10 +1187,11 @@ export function dismissRestore(confirm: boolean): Promise<Outcome<null>> {
 /**
  * Unlocks the picked backup read-only (nothing is unpacked) with the typed text, as one box's (`password_or_key`), and answers what it is and where it
  * would go. The shell keeps the working credential beside the pick, so the page sends the text once. A wrong one is `core` `wrong_password` (or a recovery
- * key kind) and keeps the pick; a damaged backup is `core` `damaged`; a pick that is gone is `choice_expired`.
+ * key kind) and keeps the pick; a damaged backup is `core` `damaged`; a pick that is gone is `choice_expired`. The check is a launch-scoped job (`request`
+ * names it for `lockbox://job-started`, kind `restore_check`) that Cancel (`cancelOperation`) stops: it answers `cancelled` and keeps nothing new (the pick stays as it was).
  */
-export function restoreCheck(choice: string, credential: CredentialArg): Promise<RestoreChecked> {
-  return callPlain<RestoreChecked>("restore_check", { choice, credential });
+export function restoreCheck(choice: string, credential: CredentialArg, request: number): Promise<RestoreChecked> {
+  return callPlain<RestoreChecked>("restore_check", { choice, credential, request });
 }
 
 /** Opens the Windows picker (titled "Restore into this folder") for another parent folder; answers the new `RestoreChecked`, or `"Dismissed"` (the folder stays). Needs a checked pick, else `choice_expired`. */

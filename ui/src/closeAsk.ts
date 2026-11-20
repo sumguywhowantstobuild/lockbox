@@ -13,6 +13,7 @@ const KINDS: ReadonlySet<string> = new Set<JobKind>([
   "backup",
   "test",
   "restore",
+  "restore_check",
   "open_backup",
   "open",
   "replace",

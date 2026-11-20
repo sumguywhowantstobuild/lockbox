@@ -754,7 +754,7 @@ fn restore_commands_are_granted_to_the_main_window_only() {
         ("restore_pick", json!({ "choice": null, "vault": null })),
         (
             "restore_check",
-            json!({ "choice": hex, "credential": { "password_or_key": "x" } }),
+            json!({ "choice": hex, "credential": { "password_or_key": "x" }, "request": 1 }),
         ),
         ("restore_choose_folder", json!({ "choice": hex })),
         ("restore_prepare", json!({ "choice": hex, "request": 1 })),

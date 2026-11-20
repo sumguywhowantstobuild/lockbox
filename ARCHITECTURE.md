@@ -506,11 +506,16 @@ damaged folder's, and is refused ("vault already here", as the engine refuses a 
 folder) when such a sibling is there (`a_second_ask_8_restore_never_replaces_the_first_sibling`,
 `ask_8_from_a_renamed_folder_goes_to_the_default_folder`). Ask 4's vault opens, so it keeps the same-vault rule.
 `restore_check` takes the typed
-text (`{ "password_or_key": text }`: a well-formed key is tried as a key, then as a password), opens the backup read-only
+text (`{ "password_or_key": text }`: a well-formed key is tried as a key, then as a password) and the page's `request`, opens the backup read-only
 without unpacking it (`ReadOnlyVault::open_backup`), and keeps the credential that worked (`Attempts::run_keeping`), the
 vault's name and ID, the day it was made (`backup_created_at` read in the PC's zone, `Clock::utc_offset_secs`) and the
-usual folder (`<Profile>\Lockbox Vaults`) in the pick; it is not a job, and a wrong password leaves the pick unchecked and
-held. `restore_choose_folder` (needs a checked pick) opens "Restore into this folder" starting in the pick's folder and
+usual folder (`<Profile>\Lockbox Vaults`) in the pick. It is a launch-scoped job of kind `restore_check` (`begin_launch_job`,
+begun with the page's `request` after the credential has been read: `job-started`, idle time paused, counted by the close
+question, no progress) whose own stop, a child of the launch token, is what `open_backup` is given: Cancel at 24a
+(`cancel_operation`) ends it as `Cancelled`, and a good result found cancelled just before it would be kept is discarded
+with its credential. A refusal or a Stop keeps nothing new and leaves the pick held as it was (an earlier check stays,
+exactly as after a wrong password); 24a's Cancel leaves the restore and lets the file go. A lock of all vaults drops the
+pick (`Locked`). `restore_choose_folder` (needs a checked pick) opens "Restore into this folder" starting in the pick's folder and
 moves the pick there, the credential kept (in the pending table only: across the dialog the call holds the folder it starts
 in and a use guard, `RestorePickUse::release_checked`, and takes the pick again after it, `ChoiceExpired` if it is gone, so
 a lock wipes the credential while the dialog is open). Both answer `RestoreChecked { name, made, folder_shown, usual,

@@ -50,6 +50,8 @@ pub enum JobKind {
     Backup,
     Test,
     Restore,
+    /// 24a's check of the picked backup: it opens it read-only with the typed credential, and nothing is unpacked.
+    RestoreCheck,
     OpenBackup,
     Open,
     Replace,
@@ -67,15 +69,19 @@ impl JobKind {
             JobKind::Backup => "backup",
             JobKind::Test => "test_backup",
             JobKind::Restore => "restore",
+            JobKind::RestoreCheck => "restore_check",
             JobKind::OpenBackup => "open_backup",
             JobKind::Open => "open",
             JobKind::CopyItem => "copy_item",
         }
     }
 
-    /// Whether the page is sent progress for it: the jobs with a bar of their own.
+    /// Whether the page is sent progress for it: the jobs with a bar of their own (24a has none for its check).
     fn reports_progress(self) -> bool {
-        !matches!(self, JobKind::Open | JobKind::Replace | JobKind::CopyItem)
+        !matches!(
+            self,
+            JobKind::Open | JobKind::Replace | JobKind::CopyItem | JobKind::RestoreCheck
+        )
     }
 }
 
@@ -397,6 +403,7 @@ mod tests {
             (JobKind::Backup, "backup"),
             (JobKind::Test, "test"),
             (JobKind::Restore, "restore"),
+            (JobKind::RestoreCheck, "restore_check"),
             (JobKind::OpenBackup, "open_backup"),
             (JobKind::Open, "open"),
             (JobKind::Replace, "replace"),

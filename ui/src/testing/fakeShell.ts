@@ -591,7 +591,10 @@ export interface FakeShell {
   restoreIs(found: Partial<{ name: string; made: string | null; replaces: boolean; keptAs: string }>): void;
   /** Lets the shell forget every held restore pick at once, as five minutes do. */
   expireRestorePicks(): void;
-  /** Holds every `restore_check` until `release` is called, as unlocking the backup takes a moment: the answer is decided at release. */
+  /**
+   * Holds every `restore_check` until `release` is called, as unlocking the backup takes a moment: its job (kind `restore_check`, scope `launch`) runs from the
+   * moment the command arrives, and the answer is decided at release (a Cancel in between leaves `cancelled`, the pick kept and nothing found).
+   */
   holdRestoreCheck(): () => void;
   /** Holds every restore copy (`restore_prepare`, `restore_prepare_confirm`) until `release` is called: its job (kind `restore`, scope `launch`) runs from the moment it starts. */
   holdRestoreCopy(): () => void;
@@ -2723,7 +2726,8 @@ export function installFakeShell(
         return { Done: { choice: token, file_name: file.name, size: file.size } };
       }
       case "restore_check": {
-        const sent = exactly(args, ["choice", "credential"]);
+        // Decided as the check ends (`restoreCheckCommand` begins the job and calls this): the request names the job, and is checked there.
+        const sent = exactly(args, ["choice", "credential", "request"]);
         const credential = sent.credential;
         if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
         const text = (credential as { password_or_key?: unknown }).password_or_key;
@@ -3658,6 +3662,63 @@ export function installFakeShell(
     reject(error);
   };
 
+  /**
+   * 24a's check of the picked backup, as the shell does it: the arguments are checked and the credential read as one box's; a pick that is not held is
+   * `choice_expired`, before anything; only then does the job begin (launch-scoped, kind `restore_check`, `lockbox://job-started` under the page's
+   * request, no progress). It ends when the answer is decided (held until released with `holdRestoreCheck`): a Cancel answers `cancelled` and keeps the pick
+   * and no result; otherwise the answer is the check's own (a wrong password, damage, or what was found).
+   */
+  const restoreCheckCommand = (args: unknown): Promise<unknown> => {
+    const sent = exactly(args, ["choice", "credential", "request"]);
+    const request = requestOf(sent);
+    const credential = sent.credential;
+    if (typeof credential !== "object" || credential === null || Object.keys(credential).join() !== "password_or_key") return refuse(MALFORMED);
+    if (typeof (credential as { password_or_key?: unknown }).password_or_key !== "string" || typeof sent.choice !== "string") return refuse(MALFORMED);
+    if (!restoreHeld.has(sent.choice)) return refuse(CHOICE_EXPIRED);
+    const epoch = lockEpoch;
+    nextOperation += 1;
+    const job: RunningJob = {
+      request,
+      operation: nextOperation,
+      scope: { type: "launch", epoch },
+      kind: "restore_check",
+      done: 0,
+      total: 0,
+      cancel: () => undefined,
+    };
+    running.set(job.operation, job);
+    const startedEvent = { request, operation: job.operation, scope: job.scope, kind: job.kind };
+    if (heldStarts === undefined) emit("lockbox://job-started", startedEvent);
+    else heldStarts.push(() => {
+      emit("lockbox://job-started", startedEvent);
+    });
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const end = (cancelled: boolean): void => {
+        if (settled) return;
+        settled = true;
+        running.delete(job.operation);
+        if (cancelled) {
+          // The pick stays, and what the check would have found is not kept.
+          rejectPlain(reject, { code: "cancelled" });
+          return;
+        }
+        try {
+          resolve(answer("restore_check", args));
+        } catch (error) {
+          rejectPlain(reject, error as object);
+        }
+      };
+      job.cancel = () => {
+        end(true);
+      };
+      if (heldRestoreChecks === undefined) end(false);
+      else heldRestoreChecks.push(() => {
+        end(false);
+      });
+    });
+  };
+
   /** One long step of a restore as a launch-scoped job of kind `restore`: `job-started` goes out as the command begins, as it does for a test. */
   const restoreJob = (request: number, total: number, pastTheSwap: boolean): { job: RunningJob; epoch: number } => {
     const epoch = lockEpoch;
@@ -3911,18 +3972,14 @@ export function installFakeShell(
         });
       }
     }
-    if (cmd === "restore_check" && heldRestoreChecks !== undefined) {
-      // Unlocking the backup takes a moment: it is decided when it is let go.
-      const waiting = heldRestoreChecks;
-      return new Promise((resolve, reject) => {
-        waiting.push(() => {
-          try {
-            resolve(answer(cmd, args));
-          } catch (error) {
-            rejectPlain(reject, error as object);
-          }
-        });
-      });
+    if (cmd === "restore_check") {
+      // A job of its own; unlocking the backup takes a moment when it is held: it is decided when it is let go.
+      try {
+        return restoreCheckCommand(args);
+      } catch (error) {
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
+        return Promise.reject(error);
+      }
     }
     if ((cmd === "test_backup_pick" || cmd === "open_backup_pick" || cmd === "restore_pick") && heldPicker !== undefined) {
       // The picker stays open: the pick is made when it closes.

@@ -171,7 +171,7 @@ trusted than Rust.
   exceptions: an unlock runs to its end (see "Unlocking cannot be cancelled inside the engine"), and a restore whose swap
   has started finishes or rolls back.
 - **Long operations pause the idle timer** (adding files, Save a copy, Save all files, Open, Replace file, copying an
-  item, backup, test a backup, open a backup, restore) and keep the PC awake, and time
+  item, backup, test a backup, open a backup, the check of a backup picked for a restore, restore) and keep the PC awake, and time
   spent in them does not count. Windows lock and sleep still cancel them. A question waiting for your answer does not
   pause anything, and one exception to what a lock drops: a finished restore waiting for your answer survives an idle
   lock (see "A finished restore waits through an idle lock").

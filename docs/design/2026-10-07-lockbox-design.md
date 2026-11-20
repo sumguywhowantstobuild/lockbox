@@ -611,7 +611,7 @@ combination, among them Bitwarden's browser extension, which fills a login with 
 ### 7.4 Locking (concurrency contract)
 - **Idle** means no keyboard or mouse input anywhere in Windows for the configured minutes. **While a long operation the
   user started is running** (adding files, Save a copy, Save all, Open, Replace file, copying an item, backup, test a backup, open a backup,
-  restore), the idle timer is paused, the UI shows why, and
+  the check of a backup picked for a restore, restore), the idle timer is paused, the UI shows why, and
   Lockbox asks Windows to stay awake (`SetThreadExecutionState`). Paused means time spent in a long operation does not
   count: after it ends, idle time counts from its end. **Windows lock, sleep and hibernate always lock all vaults
   immediately**, cancelling such operations. Signing out, switching user and a remote-desktop disconnect count as
@@ -652,7 +652,9 @@ combination, among them Bitwarden's browser extension, which fills a login with 
   all vaults still cancels it: Lock all, the window's close, Windows locking or sleeping, and the app closing. Before it
   is finished, the backup is picked first and the password typed for it is checked then (the backup is opened, not
   unpacked) and kept in Rust, in the choice held for the pick, until the copy finishes: any lock of all vaults, an idle
-  one included, drops that choice.
+  one included, drops that choice. That check is a long operation of its own, with its own stop: Cancel ends it, and a good
+  result found cancelled just before it would be kept is discarded. The shell keeps the pick as it was (an earlier check
+  stays, as after a wrong password), while 24a's Cancel leaves the restore and lets the file go.
   **Each long operation has its own stop,** linked to the session's, and an operation ID says which: Cancel stops that
   operation and leaves others in the vault running, and a lock stops them all. A credential change or a new vault that a lock interrupts after it was written says so ("changed, but locked before it
   could be shown") instead of plain "locked".

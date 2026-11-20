@@ -228,6 +228,7 @@ export type JobKind =
   | "backup"
   | "test"
   | "restore"
+  | "restore_check"
   | "open_backup"
   | "open"
   | "replace"

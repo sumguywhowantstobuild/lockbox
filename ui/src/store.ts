@@ -305,7 +305,7 @@ export interface RestoreFlow {
   problem: unknown;
   /** What the checked backup is and where it would go (24b, and the date 24e names). `null` before the check. */
   checked: api.RestoreChecked | null;
-  /** The number the copy's or the swap's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
+  /** The number the check's, the copy's or the swap's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
   request: number | null;
   /** The token a question waits under (`cloud`, `name`), and the name suggested for a new folder (`name`). */
   token: string | null;
@@ -3374,28 +3374,35 @@ export async function pickAnotherRestore(): Promise<void> {
 /**
  * Continue, pressed on 24a with the text typed: sends the choice and the text as one box's (`password_or_key`) and nothing else. The screen wipes its box as
  * it calls this; the shell keeps the working credential beside the pick. A wrong password (or any refusal) comes back to 24a with its words and the file
- * still picked; a choice the shell no longer holds takes the file away. The backup opened, 24b follows.
+ * still picked; a choice the shell no longer holds takes the file away. The backup opened, 24b follows. The check is a job the shell tells the page
+ * of (`request`): Cancel at 24a (`closeRestore`) stops it by that number, even before the shell's `job-started` has arrived.
  */
 export async function checkRestore(credential: string): Promise<void> {
   const flow = state.restore;
   if (flow === null || flow.phase !== "pick" || flow.busy || flow.choice === null || credential === "") return;
   const { opening, choice } = flow;
-  const run = moveRestore(opening, flow.run, () => ({ phase: "checking", problem: null }));
-  if (run === null) return;
+  const request = nextRequest();
+  const run = moveRestore(opening, flow.run, () => ({ phase: "checking", problem: null, request }));
+  if (run === null) {
+    releaseRequest(request);
+    return;
+  }
   let checked: api.RestoreChecked | { refused: unknown };
   try {
-    const answer = await api.restoreCheck(choice, { password_or_key: credential });
+    const answer = await api.restoreCheck(choice, { password_or_key: credential }, request);
     checked = typeof answer === "object" && typeof (answer as { name?: unknown }).name === "string" ? answer : { refused: UNEXPECTED };
   } catch (error) {
     checked = { refused: error };
+  } finally {
+    releaseRequest(request);
   }
   if ("refused" in checked) {
     const { refused } = checked;
     const gone = refusedWith(refused, "choice_expired") || refusedAsLocked(refused);
-    moveRestore(opening, run, () => (gone ? noFile(TEST_CHOICE_EXPIRED) : { phase: "pick", problem: refused }));
+    moveRestore(opening, run, () => (gone ? noFile(TEST_CHOICE_EXPIRED) : { phase: "pick", problem: refused, request: null }));
   } else {
     const found = checked;
-    moveRestore(opening, run, () => ({ phase: "where", checked: found, problem: null }));
+    moveRestore(opening, run, () => ({ phase: "where", checked: found, problem: null, request: null }));
   }
 }
 
@@ -3600,14 +3607,15 @@ export function backToRestoreFolder(): void {
 }
 
 /**
- * Cancel, on any step that has one: the restore goes. A copy that runs is stopped, the shell lets the pick go, and a finished copy that was not swapped is
- * let go. Nothing of the vault changes. Where the flow had come from is what the app shows next.
+ * Cancel, on any step that has one: the restore goes. A check at 24a or a copy that runs is stopped (by its request, as every job's Cancel is), the shell
+ * lets the pick go, and a finished copy that was not swapped is let go. Nothing of the vault changes. Where the flow had come from is what the app shows
+ * next.
  */
 export function closeRestore(): void {
   const flow = state.restore;
   if (flow === null) return;
   set({ ...state, restore: null });
-  if (flow.phase === "copying" && flow.request !== null) cancelRequest(flow.request);
+  if ((flow.phase === "copying" || flow.phase === "checking") && flow.request !== null) cancelRequest(flow.request);
   if (flow.choice !== null) forgetRestoreStray(flow.choice);
   if (flow.prepared !== null && flow.restored === null && flow.phase !== "swapping") void api.restoreDiscard(flow.prepared.restore).catch(() => undefined);
 }
