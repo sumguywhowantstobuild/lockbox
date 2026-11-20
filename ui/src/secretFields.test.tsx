@@ -292,9 +292,12 @@ const PLACES: Place[] = [
   },
 ];
 
-/** Every box where a vault's password or a recovery key is typed, shown or hidden: hidden ones by type, and any other by what its label says. */
-function secretBoxes(): HTMLInputElement[] {
-  return Array.from(document.querySelectorAll("input")).filter(
+/**
+ * Every box where a vault's password or a recovery key is typed, shown or hidden, one line or several (forgot password's key box): hidden ones by type, and
+ * any other by what its label says.
+ */
+function secretBoxes(): (HTMLInputElement | HTMLTextAreaElement)[] {
+  return Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")).filter(
     (box) => box.type === "password" || /password|recovery key/i.test(box.labels?.[0]?.textContent ?? ""),
   );
 }
@@ -337,4 +340,12 @@ test("every_file_that_draws_a_secret_field_is_on_the_list", () => {
     .filter((path) => /type=("password"|\{[^}]*"password")/.test(readBeside(import.meta.url, `./${path}`)))
     .sort();
   expect(drawers).toEqual([...parts, ...items].sort());
+  // A box of several lines has no hidden type to find it by, so every file that draws one is named here: the recovery key's box (forgot password's 28a),
+  // reached by its case above, and the three that take an item's own text (a note, an edited item's note, pasted `.env` lines). A new one fails until it is
+  // put on one side or the other.
+  const areas = listBelow(import.meta.url, "./")
+    .filter((path) => /\.tsx$/.test(path) && !/\.test\.tsx$/.test(path))
+    .filter((path) => readBeside(import.meta.url, `./${path}`).includes("<textarea"))
+    .sort();
+  expect(areas).toEqual(["parts/RecoveryKeyField.tsx", "screens/EnvPaste.tsx", "screens/forms/EditForm.tsx", "screens/forms/NoteForm.tsx"]);
 });

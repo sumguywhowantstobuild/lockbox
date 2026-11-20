@@ -87,8 +87,8 @@ function fresh() {
   listen.mockReset();
 }
 
-function keyBox(): HTMLInputElement {
-  return screen.getByLabelText<HTMLInputElement>("Recovery key");
+function keyBox(): HTMLTextAreaElement {
+  return screen.getByLabelText<HTMLTextAreaElement>("Recovery key");
 }
 
 function typeKey(text: string) {
@@ -136,9 +136,14 @@ function withWord(key: string, index: number, word: string): string {
 function foundOnPage(secrets: string[]): string[] {
   const found: string[] = [];
   const held = JSON.stringify(debugState());
-  const words = document.body.textContent;
+  // A text area's text is its own value (React keeps its default text equal to it), so it counts as the field, not as the page's words.
+  const page = document.body.cloneNode(true) as HTMLElement;
+  for (const area of page.querySelectorAll("textarea")) area.remove();
+  const words = page.textContent;
   for (const secret of secrets) {
-    for (const box of document.querySelectorAll("input")) if (box.value.includes(secret)) found.push(`a field holds ${secret}`);
+    for (const box of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")) {
+      if (box.value.includes(secret)) found.push(`a field holds ${secret}`);
+    }
     if (held.includes(secret)) found.push(`the store holds ${secret}`);
     if (words.includes(secret)) found.push(`the page says ${secret}`);
   }
@@ -152,13 +157,15 @@ function alerts(): string[] {
 test("forgot_password_link_opens_28a", async () => {
   const list = mine();
   await forgot(list);
-  // 28a: the recovery key's box, for the vault chosen, hidden to begin with and named by its label. Nothing is sent by opening it.
+  // 28a: the recovery key's box, for the vault chosen, as drawn: several lines, the words shown as typed (Ariel's call, Task 13c), named by its label and
+  // described by the line under it. Nothing is sent by opening it.
   expect(screen.getByText("Type the recovery key you saved for My vault.")).toBeTruthy();
   const box = keyBox();
-  expect(box.type).toBe("password");
+  expect(box.tagName).toBe("TEXTAREA");
   expect(box.value).toBe("");
+  const described = (box.getAttribute("aria-describedby") ?? "").split(" ");
+  expect(described.map((id) => document.getElementById(id)?.textContent)).toEqual(["The 24 words you saved when this key was made."]);
   expect(screen.getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual([
-    "Show what you typed",
     "Continue",
     "Back",
     NO_KEY_LINK,
@@ -202,19 +209,24 @@ test("a_typo_says_so", async () => {
   const typo = withWord(shell.recoveryKeyOf(7), 3, "amber");
   expect(typo).not.toBe(shell.recoveryKeyOf(7));
   sendKey(typo);
-  // The spec's words (5.2), word for word, on the box; the box is empty.
+  // The spec's words (5.2), word for word, on the box; the key stays in it to be corrected (Task 13c), and the box has the focus.
   await waitFor(() => {
     expect(alerts()).toEqual([TYPO]);
   });
-  expect(keyBox().value).toBe("");
+  expect(keyBox().value).toBe(typo);
+  expect(keyBox().readOnly).toBe(false);
+  expect(document.activeElement).toBe(keyBox());
   expect(keyBox().getAttribute("aria-invalid")).toBe("true");
   // One command, with the key as typed in snake_case, and no choice was made.
   expect(sent("recover_check")).toEqual([{ vault: { list: shell.listIdentity(), id: 7 }, recovery_key: typo }]);
   expect(shell.recoveryChoiceTokens()).toEqual([]);
-  expect(foundOnPage([typo])).toEqual([]);
-  // Typing again takes the line away.
-  typeKey("a");
+  // Only the box holds it: not the store, and not the page's words.
+  expect(foundOnPage([typo])).toEqual([`a field holds ${typo}`]);
+  // Mending the word takes the line away, and the mended key goes.
+  typeKey(shell.recoveryKeyOf(7));
   expect(alerts()).toEqual([]);
+  press("Continue");
+  await screen.findByRole("heading", { level: 1, name: NEW_HEADING });
 });
 
 test("a_word_not_in_the_list_names_its_number", async () => {
@@ -223,7 +235,7 @@ test("a_word_not_in_the_list_names_its_number", async () => {
   await waitFor(() => {
     expect(alerts()).toEqual([WORD_7]);
   });
-  expect(keyBox().value).toBe("");
+  expect(keyBox().value).toBe(withWord(shell.recoveryKeyOf(7), 6, "notaword"));
   expect(shell.recoveryChoiceTokens()).toEqual([]);
 });
 
@@ -234,11 +246,14 @@ test("a_wrong_count_says_how_many", async () => {
     expect(alerts()).toEqual([COUNT_23]);
   });
   expect(shell.recoveryChoiceTokens()).toEqual([]);
+  expect(keyBox().value).toBe(shell.recoveryKeyOf(7).split(" ").slice(0, 23).join(" "));
   // A word too many is a count too.
   sendKey(`${shell.recoveryKeyOf(7)} ${FAKE_WORDS[0] ?? ""}`);
   await waitFor(() => {
     expect(alerts()).toEqual(["That's 25 words; a recovery key has 24. Check none are missing or doubled."]);
   });
+  expect(screen.queryByRole("heading", { level: 1, name: NEW_HEADING })).toBeNull();
+  expect(keyBox().value).toBe(`${shell.recoveryKeyOf(7)} ${FAKE_WORDS[0] ?? ""}`);
 });
 
 test("another_or_old_key_says_it_doesnt_open_this_vault", async () => {
@@ -249,7 +264,7 @@ test("another_or_old_key_says_it_doesnt_open_this_vault", async () => {
   await waitFor(() => {
     expect(alerts()).toEqual(["This key doesn't open My vault."]);
   });
-  expect(keyBox().value).toBe("");
+  expect(keyBox().value).toBe(shell.recoveryKeyOf(8));
   expect(shell.recoveryChoiceTokens()).toEqual([]);
   // A key that was this vault's once (fakeKey(47) is My vault's own, and the other vault's is another).
   sendKey(fakeKey(3));
@@ -280,7 +295,7 @@ test("a_refusal_the_shell_gives_for_the_check_is_said_in_its_own_words", async (
   await waitFor(() => {
     expect(alerts()).toEqual(["Lockbox can't read part of this vault. It may be damaged. A backup can bring it back."]);
   });
-  expect(keyBox().value).toBe("");
+  expect(keyBox().value).toBe(shell.recoveryKeyOf(7));
   // Never the shell's own text.
   fresh();
   await forgot();
@@ -465,6 +480,8 @@ test("changed_header_asks_first_then_sets_the_password", async () => {
   // Ask 3's words, for the vault the key opened: the question comes first, before the new password, and nothing is written meanwhile.
   const dialog = await screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
   expect(within(dialog).getByText(CHANGED_WORDS)).toBeTruthy();
+  // The key was accepted: it is gone from 28a's box under the question.
+  expect(foundOnPage([shell.recoveryKeyOf(7)])).toEqual([]);
   expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual(["No", "Yes"]);
   expect(sent("recover_finish")).toEqual([]);
   expect(list[0]?.password).toBeUndefined();
@@ -583,7 +600,8 @@ test("a_check_pending_when_the_flow_is_opened_again_does_not_keep_the_old_choice
 });
 
 test("forgot_password_wipes_the_typed_secrets_pending_refused_back_and_locked", async () => {
-  // Pending: the field, the page and the store are clear the moment the key is sent, before the answer comes.
+  // Pending: the key stays in its box, read-only, until the answer (Task 13c: a refused key is kept to be mended), and nowhere else; the box is clear the
+  // moment the key is accepted.
   await forgot();
   const key = shell.recoveryKeyOf(7);
   typeKey(key);
@@ -594,12 +612,12 @@ test("forgot_password_wipes_the_typed_secrets_pending_refused_back_and_locked", 
   await waitFor(() => {
     expect(sent("recover_check")).toHaveLength(1);
   });
-  expect(keyBox().value).toBe("");
-  expect(foundOnPage([key])).toEqual([]);
-  // While it is out the box can't be typed in (what is typed meanwhile would outlive a refusal), and a second press sends nothing.
+  expect(keyBox().value).toBe(key);
+  expect(foundOnPage([key])).toEqual([`a field holds ${key}`]);
+  // While it is out the box can't be typed in (what is typed meanwhile would not be what was checked), and a second press sends nothing.
   expect(keyBox().readOnly).toBe(true);
-  typeKey(key);
-  expect(keyBox().value).toBe("");
+  typeKey("MU-typed meanwhile");
+  expect(keyBox().value).toBe(key);
   press("Continue");
   expect(sent("recover_check")).toHaveLength(1);
   act(() => {
@@ -625,16 +643,49 @@ test("forgot_password_wipes_the_typed_secrets_pending_refused_back_and_locked", 
   await screen.findByRole("heading", { level: 1, name: OFFER_TITLE });
   expect(foundOnPage([NEW, key])).toEqual([]);
 
-  // Refused (28a): empty box with the reason.
-  fresh();
-  await forgot();
-  const wrong = withWord(shell.recoveryKeyOf(7), 3, "amber");
-  sendKey(wrong);
-  await waitFor(() => {
-    expect(alerts()).toEqual([TYPO]);
+  // Refused (28a): the key stays in the box with the reason, and only there; then it goes as any typed key does: the window losing focus, hiding, a lock,
+  // and Back.
+  const refused = async () => {
+    fresh();
+    await forgot();
+    const wrong = withWord(shell.recoveryKeyOf(7), 3, "amber");
+    sendKey(wrong);
+    await waitFor(() => {
+      expect(alerts()).toEqual([TYPO]);
+    });
+    expect(foundOnPage([wrong])).toEqual([`a field holds ${wrong}`]);
+    return wrong;
+  };
+  let wrong = await refused();
+  act(() => {
+    window.dispatchEvent(new Event("blur"));
   });
-  expect(keyBox().value).toBe("");
   expect(foundOnPage([wrong])).toEqual([]);
+  // The refusal was about the key that went: it goes too, so the box isn't said to hold a typo when it holds nothing.
+  expect(alerts()).toEqual([]);
+  wrong = await refused();
+  const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  try {
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+  } finally {
+    hidden.mockRestore();
+  }
+  expect(foundOnPage([wrong])).toEqual([]);
+  wrong = await refused();
+  await act(async () => {
+    shell.changeLockEpoch("manual");
+    await Promise.resolve();
+  });
+  expect(foundOnPage([wrong])).toEqual([]);
+  wrong = await refused();
+  press("Back");
+  await screen.findByLabelText(/^Password for /);
+  expect(foundOnPage([wrong])).toEqual([]);
+  fireEvent.click(screen.getByRole("button", { name: LINK }));
+  await screen.findByRole("heading", { level: 1, name: KEY_HEADING });
+  expect(keyBox().value).toBe("");
 
   // Refused (28d): a refusal of the finish takes the choice with it, so the person is back at the key with empty boxes and the reason.
   fresh();
@@ -742,6 +793,11 @@ test("an_expired_choice_goes_back_to_the_key_with_its_words", async () => {
   expect(keyBox().value).toBe("");
   expect(list[0]?.password).toBeUndefined();
   expect(foundOnPage([NEW])).toEqual([]);
+  // Its words are about what to do, over an empty box: leaving the window and coming back keeps them.
+  act(() => {
+    window.dispatchEvent(new Event("blur"));
+  });
+  expect(alerts()).toEqual([EXPIRED]);
   // The right key again, and it goes through.
   await toNewPassword();
   typeNew(NEW);

@@ -3792,8 +3792,9 @@ export function clearForgotProblem(): void {
 }
 
 /**
- * 28a's Continue, with the key typed: sends the vault's registry ID and the text, once, and nothing else. The screen wipes its box as it calls this. The key's own
- * refusals (a typo, a word that is no listed word, a wrong count) and every other refusal come back to 28a with their words, the box empty; the shell's
+ * 28a's Continue, with the key typed: sends the vault's registry ID and the text, once, and nothing else. The screen keeps the key in its box, read-only, until
+ * the answer. The key's own refusals (a typo, a word that is no listed word, a wrong count) and every other refusal come back to 28a with their words, the key
+ * still in the box to be mended (Plan 4C Task 13c); an accepted key moves the flow on, and the screen wipes it; the shell's
  * `wrong_password` is the page's "doesn't open this vault", since it is the same to the person for another vault's key and an old one. A key that opens
  * the vault goes to 28d, or to the question about details changed outside Lockbox first when the shell says so.
  */

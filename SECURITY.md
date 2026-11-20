@@ -156,7 +156,10 @@ trusted than Rust.
   set. A short new password or no yes to a changed header keeps it; a typo or a wrong key holds nothing. Before it writes
   anything the finish checks again that the folder is the listed one and that both header files and the key are as the
   check saw them; if not, the answer is "choice expired". A vault that is unlocked cannot be recovered this way (its
-  password is changed from the open vault). The page empties the box the moment the key is sent.
+  password is changed from the open vault). The box shows the words as they are typed, so they can be read back against
+  the written copy. The page keeps the key in its box, read-only, until the check answers; a refused key (a typo, a word
+  that is not a key word, a wrong count, another vault's key) stays there to be corrected, and the box is emptied when
+  the window loses focus or hides, at any lock, on Back, and once the key is accepted.
 - **The window.** It navigates only within the app, opens no other windows and downloads nothing. Tauri's drag-and-drop
   handler and WebView2's external drop are off, and the page cancels drops as well, so dropped files reach neither the
   page nor Rust. The app does not start if WebView2 cannot confirm that. WebView2's autofill is off and the webview runs
@@ -255,7 +258,8 @@ in the code with a `shortcut:` comment.
   if it is a well-formed key that turns out wrong, tries it as a password too (text that is not a well-formed key is
   tried as a password only, with no typo words); it is wiped when the try ends, and the page empties the box after
   every send, a wrong password included (unlike the unlock form). The recovery key box of "forgot password" is sent
-  once, to the check; the key then lives in Rust in the held recovery choice. The same box of "Restore a backup" is sent once, to
+  once, to the check; the key then lives in Rust in the held recovery choice, and on the page in its box until the check
+  answers, or after a refusal until the box is emptied (see "A recovery key typed for 'forgot password'"). The same box of "Restore a backup" is sent once, to
   the check; the credential that worked then lives in Rust, in the held pick, until the copy finishes or the pick is
   dropped (see "A backup picked to be restored"). *Accepted:* wiping the buffers would mean replacing Tauri's transport.
 - **Webview memory is not wiped.** Values typed or shown in the window live in WebView2's memory until the browser engine

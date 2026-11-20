@@ -2973,6 +2973,14 @@
   resize: vertical;
 }
 
+/* Forgot password's recovery key box (28a): four lines to begin with, growing with what is typed, so a whole key (five or six lines at the form's width)
+   shows without scrolling and can be read against the saved copy. Where `field-sizing` is not known its four rows scroll. */
+.farea.fkey {
+  min-height: calc(4lh + 20px);
+  field-sizing: content;
+  resize: none;
+}
+
 .finp[aria-invalid="true"] {
   box-shadow: inset 0 0 0 1px var(--danger);
 }

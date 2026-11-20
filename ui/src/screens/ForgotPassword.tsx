@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { useLockEpoch } from "../jobs";
 import { messageFor, messageText } from "../messages";
 import { Button } from "../parts/Button";
-import { CredentialField } from "../parts/CredentialField";
 import { Dialog } from "../parts/Dialog";
 import { PasswordField } from "../parts/PasswordField";
+import { RecoveryKeyField } from "../parts/RecoveryKeyField";
 import { BACKUPS_NEED_OLD_DETAILS, LIMIT, MIN_PASSWORD, MISMATCH, OFFER, OFFER_TITLE, TOO_SHORT } from "../passwordWords";
 import {
   answerChangedDetails,
@@ -23,10 +23,11 @@ import {
 import { Frame } from "./setup/Frame";
 
 // Forgot password (28a to 28e). Full-screen steps on the first-use screens' two-sided frame, shown by the app above whatever else it would show: the flow is the
-// app's and not a vault's, so 28e still shows once the vault it opened is on screen under it. The recovery key is typed in one box and sent once; the shell
-// keeps it, checked, under a choice. The new password is typed twice, sent once with that choice, and the vault opens. What is typed is this screen's own state:
-// it is wiped as it is sent, on every lock epoch, when the step changes, and when the window loses focus or hides. Every refusal goes through `messageFor`,
-// and the screens never show an error's own text.
+// app's and not a vault's, so 28e still shows once the vault it opened is on screen under it. The recovery key is typed in one box, shown, and sent once; the
+// shell keeps it, checked, under a choice. The new password is typed twice, sent once with that choice, and the vault opens. What is typed is this screen's own
+// state: the passwords are wiped as they are sent; the key stays in its box until the check answers, and after a refusal (a typo, another vault's key), to be
+// mended (Ariel's call, Plan 4C Task 13c), and goes once it is accepted. Everything typed is wiped on every lock epoch, when the step changes, and when the
+// window loses focus or hides. Every refusal goes through `messageFor`, and the screens never show an error's own text.
 
 /** What the dark side of the frame says on every step. */
 const SAY_FORGOT = "The recovery key you saved when you made this vault can open it again.";
@@ -60,7 +61,7 @@ function viewOf(flow: Flow): string {
  * The steps, or nothing while the flow is not begun:
  *
  * - **28a:** the recovery key's box, Continue and Back (the lock screen again), and "I don't have my recovery key". **28b** is the same screen with what was wrong
- *   said under the box (a typo, a word that is no listed word, a wrong count, a key that doesn't open this vault), the box empty.
+ *   said under the box (a typo, a word that is no listed word, a wrong count, a key that doesn't open this vault), the key still in it and the focus on it.
  * - **28c:** no key: plainly, nobody can get in, unless a backup opens with details the person still has, with Restore a backup.
  * - **The question** about details changed outside Lockbox, over 28a, when the key's vault says so: No lets the key go, Yes goes on to the new password.
  * - **28d:** the new password twice (with its count), what existing backups and older copies still need, and the limit in spec 5.3.
@@ -96,24 +97,33 @@ function Steps({ flow }: { flow: Flow }) {
     setAgain("");
     setProblems(NONE);
   };
-  // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping) wipes what is typed, and the boxes are drawn anew so Show goes back to hidden.
+  // Every lock epoch (Lock all, an idle lock, Windows locking or sleeping) wipes what is typed, and the password boxes are drawn anew so Show goes back to
+  // hidden (the key box shows its words and has no Show).
   const epoch = useLockEpoch();
   const [seenEpoch, setSeenEpoch] = useState(epoch);
   if (seenEpoch !== epoch) {
     setSeenEpoch(epoch);
     wipe();
   }
-  // What is typed belongs to the step it was typed at: it goes when the flow moves to another screen.
+  // What is typed belongs to the step it was typed at: it goes when the flow moves on. The question about changed details counts, though it shows over 28a:
+  // the key it asks about was accepted, so it is gone from the box under it.
   const view = viewOf(flow);
-  const [seenView, setSeenView] = useState(view);
-  if (seenView !== view) {
-    setSeenView(view);
+  const [seenPhase, setSeenPhase] = useState(flow.phase);
+  if (seenPhase !== flow.phase) {
+    setSeenPhase(flow.phase);
     wipe();
   }
   // With no vault open there is no session and so no lock event: what is typed here (a key or a password, kept while a typo is mended) must not sit in its box
-  // while the person has gone, the PC locked (Win+L), or the window hidden.
+  // while the person has gone, the PC locked (Win+L), or the window hidden. A refusal about the key that was in the box goes with it (typing clears a refusal,
+  // so one showing over typed text is about that text): the person who left to read their saved copy comes back to an empty box, not to "a typo" in nothing.
+  // A refusal over an empty box (an expired choice: type the key again) stays.
+  const typedNow = useRef(typed);
+  useEffect(() => {
+    typedNow.current = typed;
+  }, [typed]);
   useEffect(() => {
     const leave = () => {
+      if (typedNow.current !== "") clearForgotProblem();
       setTyped("");
       setNext("");
       setAgain("");
@@ -133,6 +143,14 @@ function Steps({ flow }: { flow: Flow }) {
   useEffect(() => {
     heading.current?.focus();
   }, [view]);
+  // A refused key is mended where it is: when the check answers with a refusal, the focus goes to the box that still holds the key, as the password forms put
+  // it on the box a refusal is about. A refusal that comes another way (an expired choice from 28d) is a new screen, and its heading has the focus.
+  const keyBox = useRef<HTMLTextAreaElement>(null);
+  const wasChecking = useRef(flow.checking);
+  useEffect(() => {
+    if (wasChecking.current && !flow.checking && flow.phase === "key" && flow.problem !== null) keyBox.current?.focus();
+    wasChecking.current = flow.checking;
+  }, [flow.checking, flow.phase, flow.problem]);
 
   let steps;
   if (view === "key") {
@@ -141,10 +159,9 @@ function Steps({ flow }: { flow: Flow }) {
     const submit = (event: SyntheticEvent) => {
       event.preventDefault();
       if (off) return;
-      // The key goes once, and is gone from here as it goes: the box is empty whatever comes back.
-      const text = typed;
-      setTyped("");
-      void checkRecoveryKey(text);
+      // The key goes once. It stays in the box, read-only, until the answer: a refusal leaves it there to be mended, and an accepted key moves the flow on,
+      // which wipes it.
+      void checkRecoveryKey(typed);
     };
     steps = (
       <form className="fu" onSubmit={submit} noValidate>
@@ -152,21 +169,19 @@ function Steps({ flow }: { flow: Flow }) {
           Forgot password?
         </h1>
         <p className="fu-sub">{`Type the recovery key you saved for ${forName}.`}</p>
-        <div>
-          <CredentialField
-            key={epoch}
-            label={KEY_LABEL}
-            value={typed}
-            readOnly={flow.checking}
-            onChange={(value) => {
-              if (flow.checking) return;
-              setTyped(value);
-              clearForgotProblem();
-            }}
-            error={said}
-          />
-          <p className="fu-hint">{KEY_HINT}</p>
-        </div>
+        <RecoveryKeyField
+          ref={keyBox}
+          label={KEY_LABEL}
+          hint={KEY_HINT}
+          value={typed}
+          readOnly={flow.checking}
+          onChange={(value) => {
+            if (flow.checking) return;
+            setTyped(value);
+            clearForgotProblem();
+          }}
+          error={said}
+        />
         <div className="fu-row">
           <button type="submit" className="prim" aria-disabled={off ? true : undefined}>
             Continue
