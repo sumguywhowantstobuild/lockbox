@@ -282,10 +282,13 @@ test("a_cloud_folder_asks_first_and_yes_goes_on_with_the_same_plan", async () =>
   await pressSaveAll();
   const dialog = await screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
   expect(within(dialog).getByText("These files would be uploaded unprotected.")).toBeTruthy();
-  // Nothing was started or written, and the safe answer has the first focus.
+  // Nothing was started or written, and the safe answer has the first focus. The dialog moves it there a moment after it shows, so it is waited for, as
+  // every other question's first focus is: on a loaded machine the dialog can be found before the move (failed under load twice in full sets).
   expect(sent("save_all_start")).toEqual([]);
   expect(shell.savedToDisk).toEqual([]);
-  expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Pick another folder" }));
+  await waitFor(() => {
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Pick another folder" }));
+  });
   fireEvent.click(within(dialog).getByRole("button", { name: "Save here anyway" }));
   await screen.findByRole("complementary", { name: "4 files saved" });
   expect(sent("save_all_files_confirm")).toEqual([{ token: expect.stringMatching(/^[A-Za-z0-9-]+$/) as string }]);
