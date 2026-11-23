@@ -88,7 +88,23 @@ export type Tool =
   /** Change password (27a, 27b), for this vault, from Settings, Ask 9 or Ask 2. Where it is, is `SessionData.passwordChange`; what is typed is the form's own state. */
   | { kind: "change_password" }
   /** A new recovery key (29a), for this vault, from Settings or Ask 2. Where it is, is `SessionData.newKey`; what is typed is the form's own state. */
-  | { kind: "new_recovery_key" };
+  | { kind: "new_recovery_key" }
+  /** Export to a readable file (34a to 34c), for this vault, from Settings. Where it is, is `SessionData.exportFlow`; what is typed is the form's own state. */
+  | { kind: "export" };
+
+/**
+ * Where an export of this vault is (34a, the cloud question of 34b, and 34c after it), or `null` when none is begun. Like `NewKeyFlow` it lives in the
+ * session's record, so it belongs to its vault: a switch leaves it as it is, a lock takes it, and an answer that comes for one vault lands in that vault's
+ * record. The vault's password is never here: what is typed is the form's own state, wiped as it is sent. The file's own folder is only text to say, and
+ * is never sent back.
+ */
+export type ExportFlow =
+  /** The form. `sending`: the password is out and has no answer yet (Windows' dialog is open, or the file is being written), so a second press does nothing. `problem`: what the last try was refused with. */
+  | { phase: "ask"; sending: boolean; problem: PasswordProblem | null }
+  /** The cloud question: the folder picked is synced to the cloud. `token` is the choice the shell parked, for Continue and Pick another folder; Cancel lets it go. */
+  | { phase: "cloud"; token: string; sending: boolean }
+  /** The file was written: 34c. `folder` is where, to say; `summary` holds counts and titles, never a value. */
+  | { phase: "done"; folder: string; summary: api.ExportSummary };
 
 /**
  * Where a new recovery key the person asked for is (29a, and 29c after it), or `null` when none is begun. Like `PasswordChange` it lives in the session's
@@ -560,6 +576,8 @@ export interface SessionData {
   passwordChange: PasswordChange | null;
   /** A new recovery key, begun from Settings or Ask 2 and not put away: see {@link NewKeyFlow}. The key it makes is `recovery`. */
   newKey: NewKeyFlow | null;
+  /** An export of this vault, begun from Settings and not put away: see {@link ExportFlow}. */
+  exportFlow: ExportFlow | null;
 }
 
 /** One batch of files, from the pick to its end. The paths stay in Rust: the page holds names and sizes for display, and the choice (a token). */
@@ -1039,6 +1057,7 @@ function newRecord(
     operations: [],
     passwordChange: null,
     newKey: null,
+    exportFlow: null,
   };
 }
 
@@ -1316,8 +1335,23 @@ async function printCommand<T>(session: number, run: (vault: api.SessionRef) => 
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
   const { generation } = entry;
+  let request: Promise<T>;
   try {
-    const answer = await run({ session, generation });
+    request = run({ session, generation });
+  } catch (error) {
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the refusal is passed on as it came
+    request = Promise.reject(error);
+  }
+  return settled(session, generation, request);
+}
+
+/**
+ * What `printCommand` does with a command already sent in `generation`: its answer, or `"stale"` for a lock (see above); any other refusal is thrown. It takes
+ * the promise itself, so a caller that sent a secret holds no closure over it while the answer is awaited.
+ */
+async function settled<T>(session: number, generation: number, request: Promise<T>): Promise<T | "stale"> {
+  try {
+    const answer = await request;
     return stillOpen(session, generation) ? answer : "stale";
   } catch (error) {
     // A stale answer says the bridge has seen a later generation than this call began in, as a `locked` refusal does: a session the
@@ -1334,7 +1368,7 @@ async function printCommand<T>(session: number, run: (vault: api.SessionRef) => 
  * five minutes as well as at a lock, so it says nothing of a lock. A real lock is heard as the lock event, or as the `locked` refusal of
  * the next command, and takes the session then. Carries only the words' key, never anything the shell sent.
  */
-function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired"): Error {
+function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired" | "export_expired"): Error {
   return Object.assign(new Error(kind), { code: "page", kind });
 }
 
@@ -1345,7 +1379,7 @@ function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired" | "file_co
  * off the page and comes back as `"stale"`: nothing is said. A session that is still live had only an old question: the page's refusal
  * (`expiredQuestion`) is thrown to say so. If the lookup itself fails another way, that failure is thrown to be said, and the session stays.
  */
-async function whyNotFound(session: number, kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired"): Promise<"stale"> {
+async function whyNotFound(session: number, kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired" | "export_expired"): Promise<"stale"> {
   const seen = await printCommand(session, (vault) => api.listItems(vault));
   if (seen === "stale") return "stale";
   throw expiredQuestion(kind);
@@ -2288,6 +2322,180 @@ export async function makeNewRecoveryKey(session: number, currentPassword: strin
     if ((issueOf(current.recovery) ?? 0) >= issue) return closed;
     return { ...closed, recovery: { phase: "show", key: words, issue, unfinished: false, voluntary: true, missed: false } };
   });
+}
+
+// ---- Export to a readable file (Plan 4D Task 2: 34a to 34c) ----
+//
+// Asked for from inside a writable vault, with the vault's password checked in the same call. The form (34a) is the vault's own, as the new recovery key's is: what is
+// typed lives in the form and is wiped as it is sent. Rust opens Windows' save dialog, refuses a vault's folder and Lockbox's own, and writes the CSV; the page hears
+// the folder to say, counts, and the titles of the rows whose values have line breaks, and nothing else of the vault. A cloud-synced folder asks first (34b) by a
+// token the shell parked: Continue and Pick another folder send that token alone, never the password, and Cancel lets it go. The file's folder is never sent back.
+
+/** Whether an export's command is out and has no answer yet, so the panel can't be put away and a second press sends nothing. */
+function exportIsOut(flow: ExportFlow | null): boolean {
+  return flow !== null && flow.phase !== "done" && flow.sending;
+}
+
+/** Opens the Export form (34a) in the vault's panel. Not in a read-only copy, which the page never exports. An export that is out keeps its place. */
+export function openExport(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const out = exportIsOut(entry.exportFlow);
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "export" },
+    exportFlow: out ? current.exportFlow : { phase: "ask", sending: false, problem: null },
+  }));
+}
+
+/** Closes the panel (Cancel, Close panel, Escape, or Done after 34c). What was typed goes with it, and a cloud question's token. An export that is out goes on. */
+export function closeExport(session: number): void {
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "export" ? null : current.tool,
+    exportFlow: exportIsOut(current.exportFlow) ? current.exportFlow : null,
+  }));
+}
+
+/** The person has begun to mend the form: what the last refusal said goes. */
+export function clearExportProblem(session: number): void {
+  update(session, (current) =>
+    current.exportFlow?.phase === "ask" && current.exportFlow.problem !== null ? { ...current, exportFlow: { ...current.exportFlow, problem: null } } : current,
+  );
+}
+
+/** Escape on the cloud question: the token is let go and nothing is written. The form is back, empty. A question whose answer is out stays. */
+export function cancelExportQuestion(session: number): void {
+  update(session, (current) =>
+    current.exportFlow?.phase === "cloud" && !current.exportFlow.sending
+      ? { ...current, exportFlow: { phase: "ask", sending: false, problem: null } }
+      : current,
+  );
+}
+
+/** What the shell's answer to an export command leaves for the panel: the form again (a closed dialog), the cloud question, or 34c. */
+function exportStep(outcome: api.Outcome<api.SavedView>): ExportFlow {
+  if (outcome === "Dismissed") return { phase: "ask", sending: false, problem: null };
+  if ("Done" in outcome) {
+    const summary = outcome.Done.export;
+    // An export is always answered with its summary; one without is not an answer the page knows, and says nothing of what was written.
+    if (summary === undefined) return { phase: "ask", sending: false, problem: { field: "form", error: UNEXPECTED } };
+    return { phase: "done", folder: outcome.Done.folder, summary };
+  }
+  if (typeof outcome.Confirm === "object" && "CloudFolder" in outcome.Confirm) {
+    return { phase: "cloud", token: outcome.Confirm.CloudFolder.token, sending: false };
+  }
+  return { phase: "ask", sending: false, problem: { field: "form", error: UNEXPECTED } };
+}
+
+/**
+ * Sends one of the export's three commands for a session whose flow is in phase `from`, and lands the answer in that vault's record:
+ *
+ * - **Dismissed, a cloud folder, or the file written:** the form again, the cloud question, or 34c (`exportStep`).
+ * - **A lock** (the bridge's stale answer, a `locked` refusal, or a lock epoch that began before the answer landed): nothing is said and nothing is shown; the vault goes.
+ * - **A refusal:** said on the form, with the field empty and the shell having written nothing: the wrong password on its own field, any other (a vault's folder, the
+ *   state folder, a busy vault) on the form. A cloud question's yes or Pick another folder that finds nothing parked (`not_found`) asks the shell about the session
+ *   first (`whyNotFound`): a lock says nothing, a live session had only an old question.
+ */
+function beginExport(session: number, from: "ask" | "cloud"): { generation: number; epoch: number } | null {
+  const entry = sessionOf(session);
+  const flow = entry?.exportFlow;
+  if (entry === undefined || entry.readOnly || flow === null || flow === undefined || flow.phase === "done" || flow.phase !== from || flow.sending) return null;
+  update(session, (current) => ({
+    ...current,
+    exportFlow: flow.phase === "ask" ? { phase: "ask", sending: true, problem: null } : { ...flow, sending: true },
+  }));
+  // The lock epoch the export is sent in: a lock that starts before the reply lands can reach the page before this vault's own `locked` event.
+  return { generation: entry.generation, epoch: currentLockEpoch() };
+}
+
+/**
+ * Lands the answer of an export command that is already sent (by `beginExport`'s caller, in one call, so no closure over a typed password is left to wait for the
+ * answer): the lock epoch is checked before either a result or a refusal is handled, and again after the lookup a cloud question's `not_found` makes.
+ *
+ * - **Dismissed, a cloud folder, or the file written:** the form again, the cloud question, or 34c (`exportStep`).
+ * - **A lock** (the bridge's stale answer, a `locked` refusal, or a lock epoch that began before the answer landed, whether it is a result or a refusal): nothing is
+ *   said and nothing is shown; the vault goes.
+ * - **A refusal:** said on the form, with the field empty and the shell having written nothing: the wrong password on its own field, any other (a vault's folder, the
+ *   state folder, a busy vault) on the form. A cloud question's yes or Pick another folder that finds nothing parked (`not_found`) asks the shell about the session
+ *   first (`whyNotFound`): a lock says nothing, a live session had only an old question.
+ */
+async function landExport(
+  session: number,
+  begun: { generation: number; epoch: number },
+  from: "ask" | "cloud",
+  request: Promise<api.Tagged<api.Outcome<api.SavedView>>>,
+): Promise<void> {
+  const { generation, epoch } = begun;
+  let answer;
+  let refused = false;
+  let failure: unknown;
+  try {
+    answer = await settled(session, generation, request);
+  } catch (error) {
+    refused = true;
+    failure = error;
+  }
+  // A lock epoch that began before the answer landed beats whatever it says, a refusal as much as a result.
+  if (currentLockEpoch() !== epoch) {
+    dropIfStillOpen(session, generation);
+    return;
+  }
+  if (refused) {
+    if (from === "cloud" && refusedWith(failure, "not_found")) {
+      try {
+        // A lock leaves nothing to say; a live session had only a question that waited too long.
+        await whyNotFound(session, "export_expired");
+        return;
+      } catch (found) {
+        failure = found;
+      }
+      if (currentLockEpoch() !== epoch) {
+        dropIfStillOpen(session, generation);
+        return;
+      }
+    }
+    if (!stillOpen(session, generation)) return;
+    const wrong = refusedWith(failure, "core") && (failure as { kind?: unknown }).kind === "wrong_password";
+    const problem: PasswordProblem = wrong ? { field: "current", error: WRONG_CURRENT } : { field: "form", error: failure };
+    update(session, (current) => ({ ...current, exportFlow: { phase: "ask", sending: false, problem } }));
+    return;
+  }
+  if (answer === undefined || answer === "stale") return;
+  const next = exportStep(answer.data);
+  update(session, (current) => ({ ...current, exportFlow: next }));
+}
+
+/**
+ * Exports the vault (34a's "Choose where it goes"): the password is sent to the shell in this one call and is held by nothing here afterwards: no closure, retry or
+ * callback is left behind, only the promise of the answer is awaited. The session is the one the form was opened in. A second press while an export is out sends
+ * nothing.
+ */
+export function exportVault(session: number, password: string): Promise<void> {
+  const begun = beginExport(session, "ask");
+  if (begun === null) return Promise.resolve();
+  const request = api.exportVault({ session, generation: begun.generation }, password);
+  return landExport(session, begun, "ask", request);
+}
+
+/** The cloud question's Continue: the shell goes on with the folder it parked, by its token. No password is sent. */
+export function continueExport(session: number): Promise<void> {
+  const flow = sessionOf(session)?.exportFlow;
+  if (flow?.phase !== "cloud") return Promise.resolve();
+  const begun = beginExport(session, "cloud");
+  if (begun === null) return Promise.resolve();
+  return landExport(session, begun, "cloud", api.saveReadableConfirm(flow.token));
+}
+
+/** The cloud question's Pick another folder: the shell lets that folder go and opens its dialog afresh, by the token alone. No password is sent. */
+export function pickAnotherExportFolder(session: number): Promise<void> {
+  const flow = sessionOf(session)?.exportFlow;
+  if (flow?.phase !== "cloud") return Promise.resolve();
+  const begun = beginExport(session, "cloud");
+  if (begun === null) return Promise.resolve();
+  return landExport(session, begun, "cloud", api.exportRepick(flow.token));
 }
 
 // ---- Back up a vault (Plan 4B Task 3: 22a to 22d, Ask 1 and Ask 2) ----

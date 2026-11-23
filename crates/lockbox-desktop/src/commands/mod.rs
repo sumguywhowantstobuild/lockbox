@@ -7,6 +7,8 @@ pub mod backup;
 mod batch;
 pub mod capture;
 pub mod env;
+#[cfg(test)]
+mod export_tests;
 pub mod files;
 mod generator;
 pub mod items;
@@ -93,6 +95,8 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         jobs::cancel_operation,
         readable::save_recovery_pdf,
         readable::save_readable_confirm,
+        readable::export_csv,
+        readable::export_repick,
         readable::list_printers,
         readable::print_recovery_key,
         env::env_read,

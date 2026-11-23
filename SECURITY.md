@@ -67,7 +67,7 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 The Rust core (Plans 1 and 2), the desktop shell (Plan 3), the daily-use screens (4A) and the backup, restore, files and
 long-job screens (4B) and the vault and password screens (4C: change password, forgot password, a new recovery key,
-several vaults open, a new vault, rename, remove and add back) exist. Export, and emptying the trash, come in 4D. If you
+several vaults open, a new vault, rename, remove and add back) exist, and export (4D). Emptying the trash comes in 4D. If you
 lose both the password and the recovery key, nothing opens the vault, or a backup made since you last changed them.
 
 | Requirement | State |
@@ -75,7 +75,7 @@ lose both the password and the recovery key, nothing opens the vault, or a backu
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the last screens (4D) |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export (a CSV in Bitwarden's layout, after the current password is checked in the same call) is written the same way |
 | R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box when the vault it would save to locks, or every vault does (a lock of another vault leaves it) |
 | R7 Documented limits | This file |
@@ -98,7 +98,9 @@ trusted than Rust.
   the page. Paths go to the page as text, for showing only and never accepted back, in four cases: a restore that cannot
   finish (its notice, and the question before dismissing it), the folder a restore will use, the folder Save all files
   is about to write to (and later saved to), and a readable file Lockbox saved where you chose (the recovery key's PDF,
-  a saved `.env`). Stored links are opened from Rust, and only for `http`
+  a saved `.env`, an export). An export's answer carries only counts, the titles of items whose values hold line breaks
+  (already shown in the vault) and that folder; no exported value reaches the page. Stored links are opened from Rust,
+  and only for `http`
   and `https`.
 - **A backup picked to be tested.** "Test a backup" asks for the file first and holds its path in Rust under a one-time
   token; the page gets the token, the file's name and its size, never the path, and the path is in no error or event.

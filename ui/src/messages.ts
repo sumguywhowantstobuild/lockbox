@@ -192,6 +192,8 @@ export const MESSAGES: Record<string, Words> = {
   },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
+  // The export's cloud question, left open past the shell's five minutes. The words are the session's, for Ariel to change.
+  "page:export_expired": { title: "That took too long, so nothing was saved. Choose Export again.", body: "" },
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
   "page:save_all_expired": { title: "That took too long, so nothing was saved. Choose Save all files again.", body: "" },
   "page:output_expired": { title: "Lockbox can't open that folder now.", body: "Open it from Windows." },

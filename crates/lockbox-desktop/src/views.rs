@@ -216,12 +216,28 @@ pub struct SearchResults {
     pub busy: Vec<SessionId>,
 }
 
-/// Where a readable file was saved (`save_recovery_pdf`, `save_readable_confirm`): the folder that holds it, as the
-/// user's own path, for the page to show. No command takes it back (spec 4.1: the page never receives a path it can
-/// send back).
+/// Where a readable file was saved (`save_recovery_pdf`, `save_readable_confirm`, `export_csv`): the folder that holds
+/// it, as the user's own path, for the page to show. No command takes it back (spec 4.1: the page never receives a path
+/// it can send back). An export's answer also carries its counts ([`ExportSummary`]); the PDF's and the `.env` file's
+/// carry none and serialise as `{ "folder": ... }` alone.
 #[derive(Serialize)]
 pub struct SavedView {
     pub folder: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export: Option<ExportSummary>,
+}
+
+/// What an export to a readable CSV wrote, for the page to tell the person: how many items are rows, how many stored
+/// files were left out (the CSV holds no files), how many of the vault's items could not be read (they are not in the
+/// file: the same ones `list_items` shows as damaged), and the titles of the rows whose password, key value or notes hold
+/// a line break (another app may change those values when it reads the file). Titles are the person's own, shown in the
+/// vault already; no value crosses. No `Debug`: a title is item content (R5).
+#[derive(Serialize)]
+pub struct ExportSummary {
+    pub items: u32,
+    pub left_out_files: u32,
+    pub unreadable: u32,
+    pub line_breaks: Vec<String>,
 }
 
 /// The printers Lockbox can print to (`list_printers`), by the names Windows shows, and the default one when it is

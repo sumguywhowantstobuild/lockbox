@@ -61,6 +61,8 @@ pub const COMMANDS: &[&str] = &[
     "cancel_operation",
     "save_recovery_pdf",
     "save_readable_confirm",
+    "export_csv",
+    "export_repick",
     "list_printers",
     "print_recovery_key",
     "env_read",

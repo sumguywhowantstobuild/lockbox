@@ -6,6 +6,7 @@ import { Button } from "../parts/Button";
 import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
+import { exportHint } from "../exportWords";
 import { SETTINGS_HINT } from "../olderCopiesWords";
 import { SETTINGS_OPEN_HINT, shownName } from "../openBackupWords";
 import {
@@ -15,6 +16,7 @@ import {
   NOT_ON_THE_LIST,
   openBackup,
   openChangePassword,
+  openExport,
   openNewRecoveryKey,
   openOlderCopies,
   saveSettings,
@@ -139,8 +141,8 @@ function said(error: unknown, names?: { shortcut?: string }): string {
  * Settings (31a, 31b), from the side menu: the app's settings, for every vault, saved at once as each one changes. A change shows as it is
  * made and goes back to what is saved if the shell refuses it, with the refusal in words under its row. Saves go one after another (the store
  * sees to that), each as the whole settings. Start with Windows is not one of the settings the file keeps: it is the shell's own entry, read
- * when the panel opens and changed by its own command. "This vault" has Back up, Change password and New recovery key (a writable vault only) and Test a
- * backup (any vault, a read-only one too); the vault's other row (export) and Help are not here until the plans that build them.
+ * when the panel opens and changed by its own command. "This vault" has Back up, Export, Change password and New recovery key (a writable vault only) and Test a
+ * backup (any vault, a read-only one too); Help is not here until the plan that builds it.
  */
 export function SettingsPanel({ data }: { data: SessionData }) {
   const id = useId();
@@ -495,6 +497,19 @@ export function SettingsPanel({ data }: { data: SessionData }) {
                 }}
               >
                 {`Older copies (${String(olderCount)})`}
+              </Button>
+            </SettingsRow>
+          )}
+          {data.readOnly ? null : (
+            // This vault's items as a readable file: not in a copy opened from a backup or an older copy (copying items out of a backup is 25's own way).
+            <SettingsRow label="Export" hint={exportHint(data.name)} hintId={`${id}-export-hint`}>
+              <Button
+                aria-describedby={`${id}-export-hint`}
+                onClick={() => {
+                  openExport(data.session);
+                }}
+              >
+                Export
               </Button>
             </SettingsRow>
           )}

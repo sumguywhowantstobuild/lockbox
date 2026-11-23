@@ -875,6 +875,54 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "Export: the warning and the vault's password, with the line a wrong password puts on it (34a)",
+    shows: ["ExportFlow#ExportPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Export", settings);
+      const panel = await screen.findByRole("complementary", { name: "Export" });
+      fireEvent.change(within(panel).getByLabelText("Password for My vault"), { target: { value: "MU-not the one" } });
+      click("Choose where it goes", panel);
+      await within(panel).findByRole("alert");
+    },
+  },
+  {
+    name: "Export: a vault's folder refused, and a cloud folder's question (34b)",
+    shows: ["ExportFlow#ExportPanel"],
+    reach: async () => {
+      await unlocked();
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Export", settings);
+      const panel = await screen.findByRole("complementary", { name: "Export" });
+      shell.refuseNext("export_csv", { code: "core", kind: "invalid_input", what: "destination in a vault folder" });
+      fireEvent.change(within(panel).getByLabelText("Password for My vault"), { target: { value: PASSWORD } });
+      click("Choose where it goes", panel);
+      await within(panel).findByRole("alert");
+      shell.cloudPdfNext();
+      fireEvent.change(within(panel).getByLabelText("Password for My vault"), { target: { value: PASSWORD } });
+      click("Choose where it goes", panel);
+      return screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+    },
+  },
+  {
+    name: "Export: delete the file afterwards, with the items whose values have line breaks (34c)",
+    shows: ["ExportFlow#ExportPanel"],
+    reach: async () => {
+      await unlocked({ items: [...items(), { id: itemId(40), kind: "note", title: "Two line note", collection: null, notes: "first\nsecond" }] });
+      click("Settings", side());
+      const settings = await screen.findByRole("complementary", { name: "Settings" });
+      click("Export", settings);
+      const panel = await screen.findByRole("complementary", { name: "Export" });
+      fireEvent.change(within(panel).getByLabelText("Password for My vault"), { target: { value: PASSWORD } });
+      click("Choose where it goes", panel);
+      const done = await screen.findByRole("complementary", { name: "Exported" });
+      await within(done).findByRole("listitem");
+    },
+  },
+  {
     name: "A backup open: Copy to a vault and the question about the files it lacks (25b to 25d)",
     shows: ["OpenBackup#CopyToVault"],
     reach: async () => {

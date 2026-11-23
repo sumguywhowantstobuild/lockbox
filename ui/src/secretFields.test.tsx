@@ -212,6 +212,15 @@ const PLACES: Place[] = [
     },
   },
   {
+    screen: "Export, the vault's password (34a)",
+    fields: ["current-password"],
+    reach: async () => {
+      await unlocked();
+      fireEvent.click(within(await settings()).getByRole("button", { name: "Export" }));
+      await screen.findByRole("complementary", { name: "Export" });
+    },
+  },
+  {
     screen: "Forgot password, the recovery key (28a)",
     fields: ["off"],
     reach: async () => {

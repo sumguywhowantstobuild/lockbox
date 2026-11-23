@@ -65,6 +65,8 @@
     "allow-cancel-operation",
     "allow-save-recovery-pdf",
     "allow-save-readable-confirm",
+    "allow-export-csv",
+    "allow-export-repick",
     "allow-list-printers",
     "allow-print-recovery-key",
     "allow-env-read",

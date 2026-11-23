@@ -29,6 +29,7 @@ import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, OpenFilesAsk, ShortcutAsk, VaultBanners } from "./Asks";
 import { BackupPanel, BackupRefusedAsk } from "./BackupFlow";
 import { ChangePasswordDone, ChangePasswordPanel } from "./ChangePassword";
+import { ExportPanel } from "./ExportFlow";
 import { NewRecoveryKeyDone, NewRecoveryKeyPanel } from "./NewRecoveryKey";
 import { TestBackupPanel } from "./TestBackup";
 import { BackupReminder } from "./BackupReminder";
@@ -482,6 +483,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             {data.tool?.kind === "open_backup" ? <OpenBackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
             {data.tool?.kind === "change_password" ? <ChangePasswordPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
             {data.tool?.kind === "new_recovery_key" ? <NewRecoveryKeyPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+            {data.tool?.kind === "export" ? <ExportPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
           </>
         )}
       </div>

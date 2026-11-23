@@ -13,7 +13,6 @@
 //! `ShellError`.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Weak};
@@ -30,7 +29,7 @@ use tauri::ipc::Request;
 use zeroize::Zeroizing;
 
 use super::items::{MAX_KEY_VALUE, MAX_TITLE, at_most, collection_id, item_id};
-use super::readable::ReadableJob;
+use super::readable::{ReadableJob, is_certainly_gone};
 use super::{args, blocking};
 use crate::capture::ClipboardAfter;
 use crate::error::{Outcome, ShellError, ShellResult};
@@ -322,13 +321,13 @@ thread_local! {
 
 /// Tests only: runs `hook` once, the next time this thread reaches `step`.
 #[cfg(test)]
-fn at(step: &'static str, hook: impl FnOnce() + 'static) {
+pub(super) fn at(step: &'static str, hook: impl FnOnce() + 'static) {
     AT.with(|hooks| hooks.borrow_mut().push((step, Box::new(hook))));
 }
 
 /// Tests only: the point `step` is reached.
 #[cfg(test)]
-fn reached(step: &str) {
+pub(super) fn reached(step: &str) {
     let hook = AT.with(|hooks| {
         let mut hooks = hooks.borrow_mut();
         let found = hooks.iter().position(|(name, _)| *name == step);
@@ -481,7 +480,7 @@ fn save_rows(
 /// Makes `bytes` the new hidden file `path`, which must not exist (spec 7.2: a crash while it is written leaves nothing in
 /// plain sight). The attribute is cleared just before the move, since Windows keeps it on the file moved into place, as the
 /// engine's own export does; a crash in the instant between the two leaves the temp visible until the next launch sweeps it.
-fn write_new(path: &Path, bytes: &[u8]) -> lockbox_core::Result<()> {
+pub(super) fn write_new(path: &Path, bytes: &[u8]) -> lockbox_core::Result<()> {
     let mut file = create_hidden_file(path)?;
     file.write_all(bytes)?;
     Ok(())
@@ -742,7 +741,7 @@ impl Shell {
         }));
         if let Err(error) = published {
             // The move is the last thing that can fail before it happens; if the temp is gone, it happened.
-            match fs::symlink_metadata(&temp).is_err() {
+            match is_certainly_gone(&temp) {
                 true => journal.clear(&temp),
                 false => self.discard_env_temp(&temp),
             }
@@ -751,13 +750,14 @@ impl Shell {
         journal.clear(&temp);
         let saved = SavedView {
             folder: shown(docs),
+            export: None,
         };
         self.still_current(session, generation, Outcome::Done(saved))
     }
 
-    /// Removes the `.env` file's temp by the launch sweep's own rules (no link on the way, Lockbox's own name); what cannot
-    /// be removed now stays in the journal for the next launch.
-    fn discard_env_temp(&self, temp: &Path) {
+    /// Removes a readable file's temp (the `.env` file's, the CSV's) by the launch sweep's own rules (no link on the way,
+    /// Lockbox's own name); what cannot be removed now stays in the journal for the next launch.
+    pub(super) fn discard_env_temp(&self, temp: &Path) {
         self.outputs.remove_leftover(temp, LAUNCH_OPEN_TRIES);
     }
 }
@@ -868,6 +868,7 @@ pub(super) async fn env_save_file(
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::fs;
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2410,6 +2411,7 @@ mod tests {
         );
         let saved = EnvOut::Saved(Outcome::Done(SavedView {
             folder: "C:\\Docs".to_owned(),
+            export: None,
         }));
         assert_eq!(
             serde_json::to_value(saved).unwrap(),

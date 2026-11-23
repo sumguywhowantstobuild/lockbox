@@ -501,6 +501,43 @@ export async function closeAnswer(question: number, go: boolean): Promise<null> 
  */
 export interface SavedView {
   folder: string;
+  /** Only an export has this: what it holds and what it left out. A saved PDF or `.env` file has none. */
+  export?: ExportSummary;
+}
+
+/**
+ * What an export wrote, in counts and titles only (never a value): the rows written, the stored files left out (every file on a live item), and the
+ * titles of the rows whose password, key value or notes have a line break, which another app's importer may change. The titles are the vault's own,
+ * which the person already sees in it.
+ */
+export interface ExportSummary {
+  items: number;
+  left_out_files: number;
+  line_breaks: string[];
+  /** How many of the vault's items couldn't be read (the item list's `damaged`): they aren't in the file, and the export is not refused for them. */
+  unreadable: number;
+}
+
+/**
+ * Exports the vault to a readable CSV file (34a to 34c). The vault's password is checked in the same call, and is sent once: it is the page's only
+ * secret here, and nothing else of the vault crosses. Rust opens the save dialog, refuses a vault's folder and Lockbox's own folder (`core`
+ * `invalid_input`, what `"destination in a vault folder"`; `invalid_input`, what `"state folder"`), and writes the file only once the place is
+ * approved. Answers `"Dismissed"` when the dialog is closed, `{ Confirm: { CloudFolder: { token, provider } } }` before anything is built for a
+ * cloud-synced folder (go on with `saveReadableConfirm(token)`, or `exportRepick(token)` to pick another folder), or `{ Done: SavedView }` with
+ * `export` set. A wrong password is refused as `core` `wrong_password` and writes nothing; a read-only session as `read_only`; a lock while it runs
+ * makes the answer stale: no file, no error.
+ */
+export function exportVault(vault: SessionRef, password: string): Promise<Tagged<Outcome<SavedView>>> {
+  return call<Outcome<SavedView>>("export_csv", { session: vault.session, generation: vault.generation, password });
+}
+
+/**
+ * Pick another folder, at the export's cloud question: the parked choice is used up (that folder is left untouched) and the dialog opens again, with
+ * every check on the new answer. It carries the token alone: the password is not sent again. Answers as `exportVault` does; `not_found` when the
+ * question is gone (a lock, or five minutes).
+ */
+export function exportRepick(token: string): Promise<Tagged<Outcome<SavedView>>> {
+  return call<Outcome<SavedView>>("export_repick", { token });
 }
 
 /**

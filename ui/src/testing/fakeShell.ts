@@ -221,6 +221,32 @@ export function sampleItems(): FakeItem[] {
   ];
 }
 
+/** What an export says it wrote (`ExportSummary` in `views.rs`): counts and titles, never a value. */
+export interface FakeExport {
+  items: number;
+  left_out_files: number;
+  line_breaks: string[];
+  /** The vault's damaged items (the same count the item list's `damaged` shows), which aren't in the file. */
+  unreadable: number;
+}
+
+/**
+ * What the shell's export works out from a vault (the frozen connection): the rows are the live logins, notes and keys (not the trashed, not the ones being deleted
+ * for good); `left_out_files` counts every stored file on a live item, a file item's and any other item's alike; `line_breaks` names the rows, in order, whose
+ * password, key value or notes hold a CR or an LF; `unreadable` is the vault's damaged items.
+ */
+function exportSummary(items: FakeItem[], unreadable: number): FakeExport {
+  const live = items.filter((item) => !(item.trashed ?? false) && !(item.purging ?? false));
+  const rows = live.filter((item) => item.kind === "login" || item.kind === "note" || item.kind === "key");
+  const broken = (text: string | undefined) => text !== undefined && /[\r\n]/.test(text);
+  return {
+    items: rows.length,
+    left_out_files: live.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0),
+    line_breaks: rows.filter((row) => broken(row.password) || broken(row.value) || broken(row.notes)).map((row) => row.title),
+    unreadable,
+  };
+}
+
 /**
  * What the shell's `ItemSummary.site` holds (`views.rs`): the host of a login's first website and nothing else of the
  * address, or null when there is none, it does not parse, or it is not an `http` or `https` one.
@@ -318,10 +344,12 @@ export interface FakeShell {
   holdStartNewList(): () => void;
   /** The folders a recovery key PDF was saved in, in order (a PDF the shell never wrote is not here). */
   pdfs: string[];
-  /** The next Save as PDF, or Save as .env file, is closed without a choice. */
+  /** The next Save as PDF, Save as .env file, or export's dialog (`export_csv`, `export_repick`) is closed without a choice. */
   dismissPdfNext(): void;
-  /** The next Save as PDF, or Save as .env file, finds a cloud-synced folder and asks first. Each call is one more question. */
+  /** The next Save as PDF, Save as .env file, or export's dialog finds a cloud-synced folder and asks first. Each call is one more question. */
   cloudPdfNext(): void;
+  /** What each export that was written said it held (`export_csv`, or its cloud question's yes): a refusal, a closed dialog or a question not yet answered is not here. */
+  exports: FakeExport[];
   /** The next Save as PDF or Print is refused with this. */
   refusePrintNext(error: object): void;
   /** Holds every print command's answer, and a `.env` file's, until `release` is called (the PDF is still being made, the job is on its way). */
@@ -1292,7 +1320,30 @@ export function installFakeShell(
   const printed: string[] = [];
   // The save a cloud question parked: its session and generation, to go on with it (`save_readable_confirm`), and the folder
   // of a `.env` file (null for the recovery key's PDF).
-  const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null; copy?: { id: string; file_id: string } }>();
+  const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null; copy?: { id: string; file_id: string }; exported?: boolean }>();
+  // The exports the shell wrote (Plan 4D Task 2): what each said it held and left out. A closed dialog, a refusal or a cloud question not yet answered is not here.
+  const exportsWritten: FakeExport[] = [];
+  /** The CSV is "written": the summary (counts and titles) is worked out from the vault's live items, and the answer carries it beside the folder. */
+  const writeExport = (vault: FakeVault) => {
+    const summary = exportSummary(vault.items ?? [], vault.unreadable ?? 0);
+    exportsWritten.push(summary);
+    return { Done: { folder: SAVED_FOLDER, export: summary } };
+  };
+  /** The save dialog an export opens (after the password was checked): closed, a cloud-synced folder (asks first, nothing built), or a folder that is written to. */
+  const exportDialog = (session: number, generation: number, vault: FakeVault) => {
+    if (dismissPdf) {
+      dismissPdf = false;
+      return tagged(session, generation, "Dismissed");
+    }
+    if (cloudPdf > 0) {
+      cloudPdf -= 1;
+      nextToken += 1;
+      const token = `export-token-${String(nextToken)}`;
+      pendingPdfs.set(token, { session, generation, envFolder: null, exported: true });
+      return tagged(session, generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
+    }
+    return tagged(session, generation, writeExport(vault));
+  };
   // The pasted `.env`s the shell holds, by token: their rows, values included, which never leave the fake.
   const envPastes = new Map<string, { session: number; generation: number; rows: EnvPasted[]; text: string }>();
   let heldEnvRead: (() => void)[] | undefined;
@@ -2285,10 +2336,33 @@ export function installFakeShell(
         const parked = pendingPdfs.get(token);
         if (parked === undefined) return refuse({ code: "not_found" });
         pendingPdfs.delete(token);
-        vaultFor(parked.session, parked.generation);
+        const vault = vaultFor(parked.session, parked.generation);
+        // An export's yes builds and writes the CSV now, with the summary beside the folder.
+        if (parked.exported ?? false) return tagged(parked.session, parked.generation, writeExport(vault));
         if (parked.envFolder === null) pdfs.push(SAVED_FOLDER);
         else envFiles.push(parked.envFolder);
         return tagged(parked.session, parked.generation, { Done: { folder: SAVED_FOLDER } });
+      }
+      case "export_csv": {
+        const sent = exactly(args, ["session", "generation", "password"]) as { session: number; generation: number; password: unknown };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (typeof sent.password !== "string") return refuse(MALFORMED);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The password is checked in this call, before any dialog: a wrong one opens nothing and writes nothing.
+        if (sent.password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        return exportDialog(sent.session, sent.generation, vault);
+      }
+      case "export_repick": {
+        const { token } = exactly(args, ["token"]) as { token: string };
+        const parked = pendingPdfs.get(token);
+        // Only an export's question is Pick another folder's to answer; the choice is used up either way.
+        if (parked === undefined || !(parked.exported ?? false)) {
+          pendingPdfs.delete(token);
+          return refuse({ code: "not_found" });
+        }
+        pendingPdfs.delete(token);
+        const vault = vaultFor(parked.session, parked.generation);
+        return exportDialog(parked.session, parked.generation, vault);
       }
       case "env_read": {
         const sent = exactly(args, ["session", "generation", "text"]) as { session: number; generation: number; text: unknown };
@@ -4013,7 +4087,12 @@ export function installFakeShell(
     }
     if (
       heldPrint !== undefined &&
-      (cmd === "save_recovery_pdf" || cmd === "print_recovery_key" || cmd === "save_readable_confirm" || cmd === "env_save_file")
+      (cmd === "save_recovery_pdf" ||
+        cmd === "print_recovery_key" ||
+        cmd === "save_readable_confirm" ||
+        cmd === "env_save_file" ||
+        cmd === "export_csv" ||
+        cmd === "export_repick")
     ) {
       // Decided when released, as the shell does: a lock in between leaves no file, and the answer is a refusal.
       const waiting = heldPrint;
@@ -4386,6 +4465,7 @@ export function installFakeShell(
       };
     },
     pdfs,
+    exports: exportsWritten,
     dismissPdfNext: () => {
       dismissPdf = true;
     },
