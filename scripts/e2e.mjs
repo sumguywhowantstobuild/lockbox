@@ -20,7 +20,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -316,6 +316,29 @@ export async function runSpecs(ctx) {
 // ---- the run ------------------------------------------------------------------------------------------------------
 
 /**
+ * Copies a run's logs out of its own folder into `dest` before the folder is removed: the files of `logs/` and each test's
+ * `driver.log` (as `<test>-driver.log`). Nothing else: the web-view data and the vault folder stay behind. Returns the
+ * line to say.
+ */
+export function keepRunLogs(runRoot, dest) {
+  mkdirSync(dest, { recursive: true });
+  const kept = [];
+  const logs = join(runRoot, "logs");
+  for (const entry of existsSync(logs) ? readdirSync(logs, { withFileTypes: true }) : []) {
+    if (!entry.isFile()) continue;
+    copyFileSync(join(logs, entry.name), join(dest, entry.name));
+    kept.push(entry.name);
+  }
+  for (const entry of readdirSync(runRoot, { withFileTypes: true })) {
+    const driverLog = join(runRoot, entry.name, "driver.log");
+    if (!entry.isDirectory() || entry.name === "logs" || !existsSync(driverLog)) continue;
+    copyFileSync(driverLog, join(dest, `${entry.name}-driver.log`));
+    kept.push(`${entry.name}-driver.log`);
+  }
+  return [kept.length > 0 ? `e2e: the run's logs are kept in ${dest} (${kept.join(", ")})` : "e2e: the run left no logs to keep"];
+}
+
+/**
  * One run. `steps` and `stateOptions` are replaced only in tests. Returns `{ code, lines }`: 0 passed, 1 failed, 2 refused
  * before anything was started or changed.
  */
@@ -425,6 +448,15 @@ export async function runE2e({ env = process.env, specs = [], edgedriver, stateO
       } catch (error) {
         say(`e2e: the real state could not be put back (${error.message}); run: node e2e/lib/state.mjs recover`);
         code = 1;
+      }
+    }
+    // On the CI job, a run that did not pass keeps its logs (never the web-view data) in target/e2e-logs/run, which the
+    // job uploads: the run's own folder is about to go, and with it the only record of why.
+    if (ci && code !== 0) {
+      try {
+        for (const line of keepRunLogs(runRoot, join(root, "target", "e2e-logs", "run"))) say(line);
+      } catch (error) {
+        say(`e2e: the run's logs could not be kept (${error.message})`);
       }
     }
     try {

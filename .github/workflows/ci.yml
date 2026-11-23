@@ -193,3 +193,14 @@ jobs:
           & (Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe') --version
       - name: End-to-end tests
         run: node scripts/e2e.mjs
+      # A run that did not pass leaves its build and test logs in target/e2e-logs (made-up test state only, never the
+      # web-view data), kept for a week to read why.
+      - name: Keep the end-to-end logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-logs
+          path: target/e2e-logs
+          retention-days: 7
+          if-no-files-found: ignore
+          overwrite: true

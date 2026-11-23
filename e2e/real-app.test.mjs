@@ -39,7 +39,7 @@ const PERMITTED_COMMANDS = [
   "copy_item_to", "restore_pick", "restore_check", "restore_choose_folder", "forget_restore_pick", "restore_prepare",
   "restore_prepare_confirm", "restore_commit", "restore_discard", "restore_notice", "retry_restore_recovery", "dismiss_restore",
   "list_pre_restore", "delete_pre_restore", "open_pre_restore_read_only", "generate_password", "generate_passphrase",
-  "copy_generated", "get_settings", "set_settings", "get_startup", "set_startup",
+  "copy_generated", "get_settings", "set_settings", "get_startup", "set_startup", "open_help",
 ];
 
 const readJson = (...parts) => JSON.parse(readFileSync(join(...parts), "utf8"));
@@ -274,20 +274,111 @@ test("a_normal_launch_opens_no_debugging_port", { skip: SKIP, timeout: 120_000 }
   }
 });
 
+/** The app's, the web view's and the drivers' processes now, with their command lines: one line each. */
+function driverProcesses() {
+  try {
+    const running = app.snapshotProcesses().filter((entry) => /^(lockbox-desktop|msedgewebview2|msedgedriver|tauri-driver)\.exe$/i.test(entry.name));
+    const lines = app.commandLines(running.map((entry) => entry.pid));
+    return running.map((entry) => `  ${entry.pid} (parent ${entry.ppid}) ${entry.name}: ${(lines.get(entry.pid) ?? "?").slice(0, 1500)}`).join("\n") || "  (none)";
+  } catch (error) {
+    return `  (could not be read: ${error.message})`;
+  }
+}
+
+/**
+ * The files under `dir` as paths relative to it, level by level (so a folder's own files come before what is deep inside
+ * its subfolders), three levels deep and at most `cap` of them, with a last line when the list was cut; and every file
+ * named DevToolsActivePort six levels deep, found or not: the file msedgedriver waits for.
+ */
+function filesUnder(dir, cap = 80) {
+  const out = [];
+  const ready = [];
+  let cut = false;
+  let level = [{ path: dir, rel: "" }];
+  for (let depth = 1; depth <= 6 && level.length > 0; depth += 1) {
+    const next = [];
+    for (const folder of level) {
+      let entries;
+      try {
+        entries = readdirSync(folder.path, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const rel = folder.rel ? `${folder.rel}${sep}${entry.name}` : entry.name;
+        if (entry.name === "DevToolsActivePort") ready.push(rel);
+        if (depth <= 3) {
+          if (out.length < cap) out.push(entry.isDirectory() ? `${rel}${sep}` : rel);
+          else cut = true;
+        }
+        if (entry.isDirectory()) next.push({ path: join(folder.path, entry.name), rel });
+      }
+    }
+    level = next;
+  }
+  if (cut) out.push(`(cut at ${cap} entries)`);
+  out.push(ready.length > 0 ? `DevToolsActivePort: ${ready.join("; ")}` : "DevToolsActivePort: none, six levels deep");
+  return out;
+}
+
+/**
+ * What a driven launch that made no session left behind, to read in the failure: the processes seen while the driver
+ * waited, the processes now, the end of the driver's log (tauri-driver's, msedgedriver's and the app's own output) and
+ * what is in the run's temp folder. Made-up test state only; nothing secret is in any of it.
+ */
+function drivenLaunchReport(folders, whileWaiting) {
+  let logTail;
+  try {
+    logTail = readFileSync(folders.log, "utf8").split(/\r?\n/).slice(-40).join("\n");
+  } catch (error) {
+    logTail = `(could not be read: ${error.message})`;
+  }
+  return [
+    `processes while the driver waited:\n${whileWaiting ?? "  (the answer came first)"}`,
+    `processes now:\n${driverProcesses()}`,
+    `the driver's log, last 40 lines:\n${logTail}`,
+    `the run's temp folder (${folders.temp}):\n${filesUnder(folders.temp).map((path) => `  ${path}`).join("\n")}`,
+    `the run's web-view folder (${folders.webview}):\n${filesUnder(folders.webview).map((path) => `  ${path}`).join("\n")}`,
+  ].join("\n\n");
+}
+
 test("the_driver_attaches_only_to_the_instance_it_started", { skip: SKIP, timeout: 180_000 }, async (t) => {
   const exe = setting("LOCKBOX_E2E_APP");
   const folders = runFolder("driven");
   const handle = await app.startLockbox({ tauriDriver: setting("LOCKBOX_E2E_TAURI_DRIVER"), nativeDriver: setting("LOCKBOX_E2E_NATIVE_DRIVER"), tempDir: folders.temp, webviewDir: folders.webview, logFile: folders.log });
   const base = `http://127.0.0.1:${handle.port}`;
   let session;
+  let passed = false;
   try {
-    const response = await fetch(`${base}/session`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ capabilities: { alwaysMatch: { "tauri:options": { application: exe } } } }),
-    });
-    const body = await response.json();
-    assert.equal(response.status, 200, `a session was made (${JSON.stringify(body).slice(0, 200)})`);
+    // a look at the processes 20 seconds into the wait, read only when no session is made
+    let whileWaiting;
+    const look = setTimeout(() => {
+      whileWaiting = driverProcesses();
+    }, 20_000);
+    let status;
+    let text;
+    try {
+      const response = await fetch(`${base}/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ capabilities: { alwaysMatch: { "tauri:options": { application: exe } } } }),
+      });
+      status = response.status;
+      text = await response.text();
+    } catch (error) {
+      text = `(no answer: ${error.message})`;
+    } finally {
+      clearTimeout(look);
+    }
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = undefined;
+    }
+    if (status !== 200 || body?.value?.sessionId === undefined) {
+      assert.fail(`a session was made: ${String(status)} (${text.slice(0, 300)})\n\n${drivenLaunchReport(folders, whileWaiting)}`);
+    }
     session = body.value.sessionId;
     const caps = body.value.capabilities;
     if (process.env.LOCKBOX_E2E_OFFSCREEN === "1") {
@@ -334,9 +425,12 @@ test("the_driver_attaches_only_to_the_instance_it_started", { skip: SKIP, timeou
       left = app.treeOf([appRoot], app.snapshotProcesses());
     }
     assert.equal(left.length, 0, "ending the session closed the app and its web view");
+    passed = true;
   } finally {
     if (session) await fetch(`${base}/session/${session}`, { method: "DELETE" }).catch(() => {});
     const outcome = app.stopLockbox(handle);
-    assert.deepEqual(outcome.remaining, [], "the driver and what it started are stopped");
+    // after a failure, a leftover is said and the failure itself stays the one reported
+    if (passed) assert.deepEqual(outcome.remaining, [], "the driver and what it started are stopped");
+    else if (outcome.remaining.length > 0) t.diagnostic(`left running after the failure: ${outcome.remaining.join(", ")}`);
   }
 });

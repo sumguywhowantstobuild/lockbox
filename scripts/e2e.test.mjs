@@ -776,3 +776,26 @@ test("arguments_are_read_as_documented", () => {
   assert.match(e2e.parseArgs(["--nope"], {}).error, /unknown argument/);
   assert.match(e2e.parseArgs(["..\\..\\x"], {}).error, /spec name/);
 });
+
+test("a_failed_ci_run_keeps_its_logs_and_nothing_else", () => {
+  const holder = mkdtempSync(join(tmpdir(), "lockbox-e2e-keep-"));
+  try {
+    const runRoot = join(holder, "run");
+    for (const dir of ["logs", "driven/temp/scoped_dir1/EBWebView", "normal/webview", "vaults"]) mkdirSync(join(runRoot, dir), { recursive: true });
+    writeFileSync(join(runRoot, "logs", "real-app.tap"), "TAP");
+    writeFileSync(join(runRoot, "logs", "tauri-driver.log"), "driver");
+    writeFileSync(join(runRoot, "driven", "driver.log"), "driven driver");
+    writeFileSync(join(runRoot, "driven", "temp", "scoped_dir1", "EBWebView", "Local State"), "web view data");
+    writeFileSync(join(runRoot, "vaults", "made-up.lbx"), "vault");
+    const dest = join(holder, "kept");
+    const [line] = e2e.keepRunLogs(runRoot, dest);
+    assert.deepEqual(readdirSync(dest).sort(), ["driven-driver.log", "real-app.tap", "tauri-driver.log"], "only the logs are kept");
+    assert.equal(readFileSync(join(dest, "driven-driver.log"), "utf8"), "driven driver");
+    assert.match(line, /kept in/);
+    const empty = join(holder, "empty");
+    mkdirSync(empty);
+    assert.deepEqual(e2e.keepRunLogs(empty, join(holder, "kept-empty")), ["e2e: the run left no logs to keep"]);
+  } finally {
+    rmSync(holder, { recursive: true, force: true });
+  }
+});
