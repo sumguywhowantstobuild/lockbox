@@ -447,7 +447,7 @@ export interface FakeShell {
    */
   holdNewItem(): () => void;
   /**
-   * Holds every answer of `trash_item`, `restore_item`, `delete_collection` and `purge_item` until `release` is called: the
+   * Holds every answer of `trash_item`, `restore_item`, `delete_collection`, `purge_item` and `empty_trash` until `release` is called: the
    * change is made when the command arrives, as the shell writes it, and the answer is read later, so a lock or another click in
    * between leaves an answer tagged with the generation from before.
    */
@@ -3452,6 +3452,57 @@ export function installFakeShell(
         outOfTrash(item);
         return tagged(session, generation, null);
       }
+      case "old_trash": {
+        // The ids in the trash for `days` days or more, by the clock the page runs on; a read-only vault is refused, as the shell does.
+        const { session, generation, days } = exactly(args, ["session", "generation", "days"]) as {
+          session: number;
+          generation: number;
+          days: number;
+        };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const cutoff = Date.now() - days * 86_400_000;
+        const old = (vault.items ?? []).filter(
+          (item) => (item.trashed ?? false) && Date.parse(item.trashedAt ?? "2026-11-01T09:00:00Z") <= cutoff,
+        );
+        return tagged(
+          session,
+          generation,
+          old.map((item) => item.id),
+        );
+      }
+      case "empty_trash": {
+        // Everything in this vault's trash goes (the vault's own list is changed in place, as `purge_item` removes one); a
+        // read-only vault is refused. The answer is a count, as the shell's is.
+        // With `older_than_days` (the old group's button) only what has been there that many days or more, by the clock the page runs on.
+        const given = typeof args === "object" && args !== null && "older_than_days" in args;
+        // `expected` is how many items the question said would go: another number deletes nothing and says the trash changed.
+        const { session, generation, older_than_days, expected } = exactly(
+          args,
+          given ? ["session", "generation", "expected", "older_than_days"] : ["session", "generation", "expected"],
+        ) as {
+          session: number;
+          generation: number;
+          expected: number;
+          older_than_days?: number;
+        };
+        if ((given && !Number.isInteger(older_than_days)) || !Number.isInteger(expected)) return refuse(MALFORMED);
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const all = vault.items ?? [];
+        const cutoff = Date.now() - (older_than_days ?? 0) * 86_400_000;
+        const goes = (item: FakeItem | undefined) =>
+          (item?.trashed ?? false) && (!given || Date.parse(item?.trashedAt ?? "2026-11-01T09:00:00Z") <= cutoff);
+        if (all.filter(goes).length !== expected) return tagged(session, generation, { Done: { purged: 0, trash_changed: true } });
+        let purged = 0;
+        for (let at = all.length - 1; at >= 0; at -= 1) {
+          if (goes(all[at])) {
+            all.splice(at, 1);
+            purged += 1;
+          }
+        }
+        return tagged(session, generation, { Done: { purged, trash_changed: false } });
+      }
       case "generate_password": {
         const { options } = exactly(args, ["options"]) as { options: unknown };
         const given = exactly(options, ["length", "lowercase", "uppercase", "digits", "symbols", "avoid_ambiguous"]) as {
@@ -4322,7 +4373,7 @@ export function installFakeShell(
         });
       }
       if (
-        (cmd === "trash_item" || cmd === "restore_item" || cmd === "delete_collection" || cmd === "purge_item") &&
+        (cmd === "trash_item" || cmd === "restore_item" || cmd === "delete_collection" || cmd === "purge_item" || cmd === "empty_trash") &&
         heldTrash !== undefined
       ) {
         const release = heldTrash;

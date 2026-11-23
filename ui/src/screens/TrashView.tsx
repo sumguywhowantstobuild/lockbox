@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { ItemKind, ItemSummary } from "../api";
 import { deletedText } from "../format";
 import { Button } from "../parts/Button";
@@ -6,7 +6,7 @@ import { Clip } from "../parts/Clip";
 import { Dialog } from "../parts/Dialog";
 import { KindIcon } from "../parts/Icon";
 import { Panel } from "../parts/Panel";
-import { pickTrashed, purgeTrashed, restoreTrashed, type SessionData } from "../store";
+import { emptyTrash, OLD_TRASH_DAYS, pickTrashed, purgeTrashed, restoreTrashed, type SessionData } from "../store";
 import type { SortChoice } from "./ListTools";
 
 /** The line under the title: nothing is removed by the app on its own. */
@@ -42,17 +42,25 @@ export function wentWith(items: readonly ItemSummary[], folder: string): number 
   ).length;
 }
 
+/** 32a's group of the items that have been in the Trash 30 days or more. */
+const OLD_GROUP = "In the trash 30 days or more";
+
 /**
- * The Trash view (13b): the line that says nothing leaves by itself, then one row for each item in the trash the toolbar's Filter and
- * kind let through, in the order chosen (by kind: folders first, then the one deleted last first, the items that went with a folder
- * among them). A row says its kind, its title and when it was deleted ("Deleted 2 days ago"; a folder's reads "Folder · deleted 2
- * days ago"). No Add or copy buttons here, and nothing in it is removed by time. An empty Trash says so.
+ * The Trash view (13b, 32a): the line that says nothing leaves by itself, the Empty trash button when the vault has a trash to empty (`bar`),
+ * then one row for each item in the trash the toolbar's Filter and kind let through, in the order chosen (by kind: folders first, then the
+ * one deleted last first, the items that went with a folder among them). A row says its kind, its title and when it was deleted ("Deleted 2
+ * days ago"; a folder's reads "Folder · deleted 2 days ago"). When some of the rows have been there 30 days or more (`old`, from the shell)
+ * they are a group of their own, first, with the pill that deletes them (`oldPill`) in its header, and the rest are "Newer"; with none, one
+ * list. No Add or copy buttons here, and nothing in it is removed by time. An empty Trash says so.
  */
 export function TrashView({
   items,
   sort,
   openId,
   onOpen,
+  old,
+  bar,
+  oldPill,
 }: {
   /** The items in the trash the list shows (folders included), after the Filter and the kind. */
   items: readonly ItemSummary[];
@@ -60,53 +68,193 @@ export function TrashView({
   sort: SortChoice;
   openId: string | null;
   onOpen: (id: string) => void;
+  /** The ids the shell says have been in the trash 30 days or more; empty for a vault that is read-only or not yet answered. */
+  old: readonly string[];
+  /** The Empty trash button, or nothing. */
+  bar?: ReactNode;
+  /** The pill in the old group's header ("Delete these N permanently"), or nothing. */
+  oldPill?: ReactNode;
 }) {
   // When the view opened: "deleted 2 days ago" is said from this.
   const [now] = useState(() => new Date());
   const rows = [...items].sort(ORDER[sort]);
+  const oldIds = new Set(old);
+  const longAgo = rows.filter((item) => oldIds.has(item.id));
+  const newer = rows.filter((item) => !oldIds.has(item.id));
+  const row = (item: ItemSummary) => {
+    const when = deletedText(item.trashed_at ?? "", now);
+    const detail =
+      item.kind === "collection"
+        ? ["Folder", when].filter((part) => part !== "").join(" · ")
+        : when === ""
+          ? ""
+          : `${when.charAt(0).toUpperCase()}${when.slice(1)}`;
+    return (
+      <li key={item.id} className={item.id === openId ? "lrow on" : "lrow"}>
+        <button
+          type="button"
+          className="rgo"
+          aria-current={item.id === openId ? "true" : undefined}
+          onClick={() => {
+            onOpen(item.id);
+          }}
+        >
+          <span className={`ktile ${TILE[item.kind]}`}>
+            <KindIcon kind={item.kind} />
+          </span>
+          {/* Spaces between the parts, so the name a screen reader gets reads as words (flex ignores them). */}
+          <span className="sr">{`${KIND_WORD[item.kind]}:`}</span>{" "}
+          <span className="rn">
+            <Clip className={item.kind === "key" ? "rname m" : "rname"} text={item.title} />
+          </span>{" "}
+          <Clip className="rdet" text={detail} />
+        </button>
+      </li>
+    );
+  };
   return (
     <>
       <p className="lnote">{NOTHING_REMOVED}</p>
+      {bar}
       {rows.length === 0 ? (
         <div className="grp lempty">
           <p className="le-t">Trash is empty.</p>
         </div>
       ) : (
         <div className="lgroups">
-          <ul className="grp lgrp">
-            {rows.map((item) => {
-              const when = deletedText(item.trashed_at ?? "", now);
-              const detail =
-                item.kind === "collection"
-                  ? ["Folder", when].filter((part) => part !== "").join(" · ")
-                  : when === ""
-                    ? ""
-                    : `${when.charAt(0).toUpperCase()}${when.slice(1)}`;
-              return (
-                <li key={item.id} className={item.id === openId ? "lrow on" : "lrow"}>
-                  <button
-                    type="button"
-                    className="rgo"
-                    aria-current={item.id === openId ? "true" : undefined}
-                    onClick={() => {
-                      onOpen(item.id);
-                    }}
-                  >
-                    <span className={`ktile ${TILE[item.kind]}`}>
-                      <KindIcon kind={item.kind} />
-                    </span>
-                    {/* Spaces between the parts, so the name a screen reader gets reads as words (flex ignores them). */}
-                    <span className="sr">{`${KIND_WORD[item.kind]}:`}</span>{" "}
-                    <span className="rn">
-                      <Clip className={item.kind === "key" ? "rname m" : "rname"} text={item.title} />
-                    </span>{" "}
-                    <Clip className="rdet" text={detail} />
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+          {longAgo.length === 0 ? (
+            <ul className="grp lgrp">{rows.map(row)}</ul>
+          ) : (
+            <>
+              <section>
+                {/* As drawn (32a): the heading and its count at the left, the pill that deletes the group at the right. */}
+                <div className="sechbar">
+                  <h2 className="sech">
+                    {OLD_GROUP}
+                    <span>{longAgo.length}</span>
+                  </h2>
+                  {oldPill}
+                </div>
+                <ul className="grp lgrp">{longAgo.map(row)}</ul>
+              </section>
+              {newer.length === 0 ? null : (
+                <section>
+                  <h2 className="sech">
+                    Newer
+                    <span>{newer.length}</span>
+                  </h2>
+                  <ul className="grp lgrp">{newer.map(row)}</ul>
+                </section>
+              )}
+            </>
+          )}
         </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Empty trash (32a, 32b): the button above the Trash's rows, and its question. The question says how many items go, that their attached
+ * files go too, that it can't be undone and that backups already made still hold them, with Cancel focused first; a yes asks the shell to
+ * empty this vault's whole trash (never the rows a Filter left on screen). The count is the vault's whole trash when the question was
+ * opened. The question belongs to the session and generation it was opened for: the window gives this a key made of both, so a switch to
+ * another vault or a lock takes it away, and the store sends nothing for a generation that has gone. A read-only vault has none.
+ */
+export function EmptyTrash({ data, count }: { data: SessionData; count: number }) {
+  return (
+    <div className="trashbar">
+      <AskToDelete data={data} count={count} button="Empty trash" yes="Empty trash" />
+    </div>
+  );
+}
+
+/**
+ * The old group's pill (32a, "Delete these N permanently"): the same question as Empty trash's with the old group's count, and a yes asks
+ * the shell to delete only what has been in the Trash 30 days or more (`older_than_days`), never the newer ones. The count is the vault's
+ * whole old group, whatever a Filter hides. Bound to its vault and generation as Empty trash is; a read-only vault has none.
+ */
+export function DeleteOld({ data, count }: { data: SessionData; count: number }) {
+  return (
+    <AskToDelete
+      data={data}
+      count={count}
+      button={count === 1 ? "Delete this item permanently" : `Delete these ${String(count)} permanently`}
+      yes="Delete permanently"
+      olderThanDays={OLD_TRASH_DAYS}
+    />
+  );
+}
+
+/** A button and the question it opens (32b), shared by Empty trash and the old group's pill: Cancel focused first, a filled red yes. */
+function AskToDelete({
+  data,
+  count,
+  button,
+  yes,
+  olderThanDays,
+}: {
+  data: SessionData;
+  count: number;
+  button: string;
+  yes: string;
+  olderThanDays?: number;
+}) {
+  // How many items the question was opened over; `null` while it is shut.
+  const [asking, setAsking] = useState<number | null>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  // The count the window shows now, for a question that has to be asked again.
+  const latest = useRef(count);
+  useEffect(() => {
+    latest.current = count;
+  }, [count]);
+  const { session, generation } = data;
+  const many = asking !== null && asking !== 1;
+  return (
+    <>
+      <Button
+        onClick={() => {
+          setAsking(count);
+        }}
+      >
+        {button}
+      </Button>
+      {asking === null ? null : (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setAsking(null);
+          }}
+          title={`Delete ${many ? `${String(asking)} items` : "1 item"} for good?`}
+          description={`${many ? "Their" : "Its"} attached files go too. This can't be undone. Backups you already made still hold ${many ? "them" : "it"}.`}
+          initialFocus={cancel}
+        >
+          <Button
+            ref={cancel}
+            onClick={() => {
+              setAsking(null);
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            look="danger"
+            onClick={() => {
+              // The count the question showed goes with the yes: a trash of another size at the call deletes nothing, and the question
+              // comes back with the new count.
+              const expected = asking;
+              setAsking(null);
+              void (async () => {
+                if ((await emptyTrash(session, generation, expected, olderThanDays)) !== "changed") return;
+                // One turn for the window to show the list read again, then the question again, if there is still something to ask about.
+                await new Promise((resolve) => window.setTimeout(resolve, 0));
+                if (latest.current > 0) setAsking(latest.current);
+              })();
+            }}
+          >
+            {yes}
+          </Button>
+        </Dialog>
       )}
     </>
   );

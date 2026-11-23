@@ -357,6 +357,40 @@ fn export_commands_are_granted_to_the_main_window_only() {
     assert_eq!(checked, commands.len());
 }
 
+/// `empty_trash` (Plan 4D, Task 3) is listed, granted to the main window and reaches its handler from it; another window
+/// and a remote origin are refused by the ACL, before the handler. It takes a session and its generation and nothing else:
+/// no item IDs (the trash is read in Rust, at the call). Its body, the exact JSON of its answer and its stale-generation,
+/// foreign-session and read-only refusals are checked in `commands::items`'s own tests.
+#[test]
+fn empty_trash_is_granted_to_the_main_window_only() {
+    let cmd = "empty_trash";
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+    assert!(
+        granted.contains(&"allow-empty-trash"),
+        "allow-empty-trash is not granted"
+    );
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    let body = || InvokeBody::Json(json!({}));
+    // Past the ACL and inside the handler: this test app keeps no shell state.
+    match invoke(&main, APP_ORIGIN, cmd, body()) {
+        Err(Value::String(answer)) if answer.contains("state not managed") => {}
+        answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+    }
+    assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+    assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
 /// The five Save all commands (Plan 4B, Task 11) are listed, granted to the main window and reach their handler from it;
 /// another window and a remote origin are refused by the ACL, before the handler. None takes a path: a folder is picked
 /// by Rust, and the summary's folder is opened through a handle (their bodies are checked in `commands::save_all`'s own

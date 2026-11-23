@@ -1393,6 +1393,26 @@
   margin-top: 4px;
 }
 
+/* The Trash's old group header (32a): the heading at the left, the pill that deletes the group at the right. */
+.sechbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 4px 2px 8px;
+}
+
+.lgroups > section .sechbar .sech {
+  margin: 0;
+}
+
+/* Empty trash (32a): the one button at the right, above the Trash's rows, as drawn. */
+.trashbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 8px;
+}
+
 .grp {
   position: relative;
   margin: 0;

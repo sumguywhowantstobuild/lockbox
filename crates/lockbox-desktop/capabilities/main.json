@@ -42,6 +42,7 @@
     "allow-delete-collection",
     "allow-purge-item",
     "allow-old-trash",
+    "allow-empty-trash",
     "allow-search-all",
     "allow-open-url",
     "allow-list-orphans",

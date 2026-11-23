@@ -10,17 +10,19 @@ use std::sync::Arc;
 use lockbox_core::Vault;
 use lockbox_core::ids::ItemId;
 use lockbox_core::item::{Item, ItemKind};
-use lockbox_core::{ReadOnlyVault, Result as CoreResult, SearchHit};
+use lockbox_core::{CoreError, ReadOnlyVault, Result as CoreResult, SearchHit};
 use serde::Deserialize;
 use tauri::ipc::Request;
 use tauri::{State, Url};
 use zeroize::Zeroizing;
 
 use super::{args, blocking};
-use crate::error::{ShellError, ShellResult};
+use crate::error::{Outcome, ShellError, ShellResult};
 use crate::session::{SessionId, SessionState, Tagged, VaultRef};
 use crate::shell::Shell;
-use crate::views::{ItemDetail, ItemList, OrphanView, SearchHitView, SearchResults, web_url};
+use crate::views::{
+    EmptiedView, ItemDetail, ItemList, OrphanView, SearchHitView, SearchResults, web_url,
+};
 
 /// The page's limits (`TooLarge`), in bytes; the engine's own 1 MiB item cap stays behind them.
 pub(super) const MAX_TITLE: usize = 1024;
@@ -70,6 +72,17 @@ const NO_SUCH_EARLIER: ShellError = ShellError::InvalidInput {
 /// Tests only: the last step of a read that returns item data, after the vault work and before the answer.
 #[cfg(test)]
 const READ_DONE: &str = "shell.items.read_done";
+
+/// Tests only: the step before each item `empty_trash` deletes, where a test can restore, trash or lock between two items.
+#[cfg(test)]
+const EMPTY_TRASH_STEP: &str = "shell.items.empty_trash_step";
+
+/// The step before each item `empty_trash` deletes.
+fn empty_trash_step() -> ShellResult<()> {
+    #[cfg(test)]
+    lockbox_core::internals::fsio::failpoint::check(EMPTY_TRASH_STEP)?;
+    Ok(())
+}
 
 /// The last step of a read that returns item data: a test can lock the vault here (§9: nothing read before a lock is
 /// returned after it).
@@ -655,7 +668,7 @@ impl Shell {
         self.change_item(session, generation, id, Vault::purge_item)
     }
 
-    /// The items in the trash for more than `days` days, for "Delete permanently?" (spec §6.1). Lists only: Lockbox
+    /// The items in the trash for `days` days or more, for "Delete permanently?" (spec §6.1). Lists only: Lockbox
     /// never purges by itself.
     pub fn old_trash(
         &self,
@@ -666,6 +679,97 @@ impl Shell {
         self.sessions.read(session, generation, |vault, _| {
             let old = writable(&vault)?.trash_older_than(days);
             Ok(old.iter().map(ItemId::to_hex).collect())
+        })
+    }
+
+    /// Deletes for good what is in the vault's trash, once the page has asked the person. The trash is read once, at
+    /// the call; then each item goes through [`Vault::purge_item`] (marked first, then deleted, so a crash leaves
+    /// cleanup at unlock able to finish only the marked one), each in a write of its own for this same generation:
+    /// an item restored or already gone meanwhile is skipped, and a lock or a new generation stops the rest (what went
+    /// stays gone, what was not begun is untouched). A real error is returned at once, never swallowed. A writable
+    /// session only. The answer is only a count. With `older_than_days` (the old group's "Delete these N permanently") only the
+    /// items in the trash that many days or more go: the cutoff is fixed once, here, and an item is purged only if it is
+    /// still in the trash with a deletion time at or before it.
+    pub fn empty_trash(
+        &self,
+        session: SessionId,
+        generation: u64,
+        expected: u32,
+        older_than_days: Option<u32>,
+    ) -> ShellResult<Tagged<Outcome<EmptiedView>>> {
+        self.empty_trash_by(
+            session,
+            generation,
+            expected,
+            older_than_days.map(Vault::trash_cutoff),
+        )
+    }
+
+    /// [`empty_trash`](Self::empty_trash) with the cutoff already fixed once, at the call (a test gives an exact one): `None` is the whole trash.
+    fn empty_trash_by(
+        &self,
+        session: SessionId,
+        generation: u64,
+        expected: u32,
+        cutoff: Option<String>,
+    ) -> ShellResult<Tagged<Outcome<EmptiedView>>> {
+        // In the trash, and, with a cutoff, since then or before.
+        let goes = |item: &Item| match &cutoff {
+            Some(cutoff) => Vault::trashed_by(item, cutoff),
+            None => item.trashed_at.is_some(),
+        };
+        // Each item with the deletion time it had at the call: an item restored and trashed again has another one.
+        let trash: Vec<(ItemId, Option<String>)> = self
+            .sessions
+            .write(session, generation, |vault, _| {
+                Ok(vault
+                    .items()
+                    .filter(|item| goes(item))
+                    .map(|item| (item.id, item.trashed_at.clone()))
+                    .collect())
+            })?
+            .data;
+        // The question the person answered named how many would go. Another number (an item trashed since, or one that has
+        // aged past the cutoff) and nothing is deleted: the page reads the list again and asks again.
+        if u32::try_from(trash.len()) != Ok(expected) {
+            return Ok(Tagged {
+                session,
+                generation,
+                data: Outcome::Done(EmptiedView {
+                    purged: 0,
+                    trash_changed: true,
+                }),
+            });
+        }
+        let mut purged: u32 = 0;
+        for (id, stamp) in trash {
+            empty_trash_step()?;
+            let went = self.sessions.write(session, generation, |vault, _| {
+                // Still the entry the call saw? A restored item stays, so does one trashed again since (another deletion time),
+                // and one that is gone is not this call's to count.
+                let in_trash = match vault.get_item(&id) {
+                    Ok(item) => item.trashed_at == stamp,
+                    Err(CoreError::NotFound) => false,
+                    Err(error) => return Err(error.into()),
+                };
+                if in_trash {
+                    vault.purge_item(&id)?;
+                }
+                Ok(in_trash)
+            })?;
+            purged += u32::from(went.data);
+        }
+        // A lock after the last deletion answers `Locked`, as a read does (spec 7.4).
+        if !self.unlocked().contains(&(session, generation)) {
+            return Err(ShellError::Locked);
+        }
+        Ok(Tagged {
+            session,
+            generation,
+            data: Outcome::Done(EmptiedView {
+                purged,
+                trash_changed: false,
+            }),
         })
     }
 
@@ -818,6 +922,18 @@ struct UpdateItem {
     session: SessionId,
     generation: u64,
     edit: ItemEdit,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyTrashArgs {
+    session: SessionId,
+    generation: u64,
+    /// Only the items in the trash this many days or more (the old group's "Delete these N permanently"); left out, the whole trash.
+    #[serde(default)]
+    older_than_days: Option<u32>,
+    /// How many items the question the person answered said would go: a call that finds another number deletes nothing.
+    expected: u32,
 }
 
 #[derive(Deserialize)]
@@ -985,6 +1101,21 @@ pub(super) async fn purge_item(
     } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.purge_item(session, generation, &id)).await
+}
+
+#[tauri::command]
+pub(super) async fn empty_trash(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<Outcome<EmptiedView>>> {
+    let EmptyTrashArgs {
+        session,
+        generation,
+        older_than_days,
+        expected,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.empty_trash(session, generation, expected, older_than_days)).await
 }
 
 #[tauri::command]
@@ -2078,6 +2209,626 @@ mod tests {
         let (s, g) = (unlocked.session, unlocked.generation);
         assert_eq!(ts.shell.old_trash(s, g, 30).unwrap().data, [old]);
         assert_eq!(ts.shell.list_items(s, g).unwrap().data.items.len(), 2);
+    }
+
+    // ---- Empty the trash (task 32)
+
+    /// `count` notes in the trash, titled `MU-trash-<n>`: their IDs, in the order `empty_trash` takes them (the order of
+    /// the IDs, which is the engine's own).
+    fn trashed_notes(
+        ts: &TestShell,
+        session: SessionId,
+        generation: u64,
+        count: usize,
+    ) -> Vec<String> {
+        let mut ids: Vec<String> = (0..count)
+            .map(|n| {
+                let id = note_in(ts, session, generation, &format!("MU-trash-{n}"), None);
+                ts.shell.trash_item(session, generation, &id).unwrap();
+                id
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// How many items an `empty_trash` answer says it deleted.
+    fn purged(answer: ShellResult<Tagged<Outcome<EmptiedView>>>) -> u32 {
+        match answer.unwrap().data {
+            Outcome::Done(view) => view.purged,
+            _ => panic!("emptying the trash asks nothing"),
+        }
+    }
+
+    /// Whether the `n`th vault still holds the item's file.
+    fn on_disk(ts: &TestShell, n: usize, id: &str) -> bool {
+        item_file(ts, n, id).exists()
+    }
+
+    /// The first vault locked and opened again from its folder: its session and generation, and what the cleanup at
+    /// unlock did.
+    fn reopened(ts: &TestShell) -> (SessionId, u64, usize) {
+        let (registry_id, _) = ts.shell.registry.entries()[0].clone();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let unlocked = heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), secret(PW))).unwrap();
+        (
+            unlocked.session,
+            unlocked.generation,
+            unlocked.data.cleanup.purges_finished,
+        )
+    }
+
+    /// The first vault with each item's deletion time set by hand (`stamps`: ID, timestamp), sealed with the vault's own key and
+    /// opened again from disk: its session and generation.
+    fn trashed_on(ts: &TestShell, stamps: &[(&String, &str)]) -> (SessionId, u64) {
+        let (_, dir) = ts.shell.registry.entries()[0].clone();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let (vault_id, key) = vault_key(&dir);
+        for (id, stamp) in stamps {
+            let item_id = ItemId::from_hex(id).unwrap();
+            let path = item_file(ts, 0, id);
+            let mut item = open_item(&fs::read(&path).unwrap(), &item_id, &vault_id, &key).unwrap();
+            item.trashed_at = Some((*stamp).to_owned());
+            fs::write(&path, seal_item(&item, &vault_id, &key).unwrap()).unwrap();
+        }
+        let (s, g, _) = reopened(ts);
+        (s, g)
+    }
+
+    /// Only the items in the trash at or before the cutoff go: one a second after it stays, one at it and one before it go, a live
+    /// item stays; and by a number of days, the clock now decides.
+    #[test]
+    fn empty_trash_older_than_purges_only_the_old_items() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let live = note_in(&ts, s, g, "MU-live", None);
+        let trashed = trashed_notes(&ts, s, g, 3);
+        let (before, at, after) = (&trashed[0], &trashed[1], &trashed[2]);
+        let (s, g) = trashed_on(
+            &ts,
+            &[
+                (before, "2026-05-31T23:59:59Z"),
+                (at, "2026-06-01T00:00:00Z"),
+                (after, "2026-06-01T00:00:01Z"),
+            ],
+        );
+        let answer = ts
+            .shell
+            .empty_trash_by(s, g, 2, Some("2026-06-01T00:00:00Z".to_owned()));
+        assert_eq!(
+            purged(answer),
+            2,
+            "the one before the cutoff and the one at it"
+        );
+        assert!(!on_disk(&ts, 0, before) && !on_disk(&ts, 0, at));
+        let list = listed(&ts, s, g);
+        assert_eq!(
+            row(&list, after)["trashed"],
+            json!(true),
+            "a second newer stays in the trash"
+        );
+        assert_eq!(row(&list, &live)["trashed"], json!(false));
+        assert_eq!(list.as_array().unwrap().len(), 2);
+    }
+
+    /// By days, the clock now is the cutoff: an item trashed in 2020 goes, one trashed just now and a live one stay.
+    #[test]
+    fn empty_trash_by_days_goes_by_the_clock_now() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let live = note_in(&ts, s, g, "MU-live", None);
+        let trashed = trashed_notes(&ts, s, g, 2);
+        let (s, g) = trashed_on(&ts, &[(&trashed[0], "2020-01-01T00:00:00Z")]);
+        let answer = ts.shell.empty_trash(s, g, 1, Some(30));
+        assert_eq!(purged(answer), 1);
+        assert!(!on_disk(&ts, 0, &trashed[0]));
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &trashed[1])["trashed"], json!(true));
+        assert_eq!(row(&list, &live)["trashed"], json!(false));
+        // The whole trash is still what no number of days asks for.
+        assert_eq!(purged(ts.shell.empty_trash(s, g, 1, None)), 1);
+    }
+
+    /// An old item restored and trashed again while the call runs is newer now: it stays.
+    #[test]
+    fn an_item_retrashed_during_an_old_only_empty_stays() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 3);
+        let (s, g) = trashed_on(
+            &ts,
+            &[
+                (&ids[0], "2020-01-01T00:00:00Z"),
+                (&ids[1], "2020-01-01T00:00:00Z"),
+                (&ids[2], "2020-01-01T00:00:00Z"),
+            ],
+        );
+        let (shell, steps) = (Arc::clone(&ts.shell), Rc::new(Cell::new(0)));
+        let again = ids[1].clone();
+        failpoint::observe(
+            EMPTY_TRASH_STEP,
+            Box::new(move || {
+                steps.set(steps.get() + 1);
+                // The step before the second deletion: the middle item comes back and goes to the trash again, so it is new.
+                if steps.get() == 2 {
+                    shell.restore_item(s, g, &again).unwrap();
+                    shell.trash_item(s, g, &again).unwrap();
+                }
+            }),
+        );
+        let answer = ts.shell.empty_trash(s, g, 3, Some(30));
+        failpoint::disarm_all();
+        assert_eq!(
+            purged(answer),
+            2,
+            "the retrashed one is skipped, not counted"
+        );
+        assert!(!on_disk(&ts, 0, &ids[0]) && !on_disk(&ts, 0, &ids[2]));
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &ids[1])["trashed"], json!(true));
+        assert_eq!(list.as_array().unwrap().len(), 1);
+    }
+
+    /// The count the question named is a precondition, checked against the trash at the call before the first deletion: another
+    /// number (an item trashed since the question was asked, or one that aged past the cutoff) deletes nothing, writes nothing,
+    /// and says the trash changed; the right number goes ahead.
+    #[test]
+    fn empty_trash_with_another_count_deletes_nothing() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 3);
+        let changed = |answer: ShellResult<Tagged<Outcome<EmptiedView>>>| match answer.unwrap().data
+        {
+            Outcome::Done(view) => (view.purged, view.trash_changed),
+            _ => panic!("emptying the trash asks nothing"),
+        };
+        // The whole trash: the question said 2, there are 3 (a third item went to the trash meanwhile), and the other way round.
+        let (answer, writes) = item_writes(|| changed(ts.shell.empty_trash(s, g, 2, None)));
+        assert_eq!((answer, writes), ((0, true), 0));
+        let (answer, writes) = item_writes(|| changed(ts.shell.empty_trash(s, g, 4, None)));
+        assert_eq!((answer, writes), ((0, true), 0));
+        for id in &ids {
+            assert!(on_disk(&ts, 0, id));
+        }
+        // Old only: one was old when asked, two are now (a newer one aged past the cutoff meanwhile): nothing goes.
+        let (s, g) = trashed_on(
+            &ts,
+            &[
+                (&ids[0], "2020-01-01T00:00:00Z"),
+                (&ids[1], "2020-01-02T00:00:00Z"),
+            ],
+        );
+        let (answer, writes) = item_writes(|| changed(ts.shell.empty_trash(s, g, 1, Some(30))));
+        assert_eq!((answer, writes), ((0, true), 0));
+        for id in &ids {
+            assert!(on_disk(&ts, 0, id));
+        }
+        // The right number: it goes ahead, and says nothing changed.
+        assert_eq!(changed(ts.shell.empty_trash(s, g, 2, Some(30))), (2, false));
+        assert_eq!(changed(ts.shell.empty_trash(s, g, 1, None)), (1, false));
+    }
+
+    /// The real command, through the real handler and a real shell: it forwards `older_than_days` and `expected`, so the old
+    /// group's button deletes only the old item, a wrong count deletes nothing, and a call without the count is refused. (The
+    /// integration test in `tests/ipc.rs` has no shell to give the handler, so this is where the adapter is reached.)
+    #[test]
+    fn the_real_command_forwards_the_days_and_the_count_to_the_shell() {
+        use tauri::ipc::CallbackFn;
+        use tauri::test::{INVOKE_KEY, get_ipc_response, mock_builder};
+        use tauri::webview::InvokeRequest;
+        use tauri::{Manager, WebviewWindow};
+
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 2);
+        let (s, g) = trashed_on(&ts, &[(&ids[0], "2020-01-01T00:00:00Z")]);
+        let app = mock_builder()
+            .invoke_handler(crate::commands::handler())
+            .build(tauri::generate_context!())
+            .expect("the app builds");
+        assert!(app.manage(Arc::clone(&ts.shell)));
+        let main = crate::window::main_window(app.handle()).expect("the main window builds");
+        let invoke = |window: &WebviewWindow<_>, body: Value| -> Result<Value, Value> {
+            let request = InvokeRequest {
+                cmd: "empty_trash".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "http://tauri.localhost".parse().unwrap(),
+                body: InvokeBody::Json(body),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.into(),
+            };
+            get_ipc_response(window, request).map(|body| body.deserialize().expect("a JSON answer"))
+        };
+        let reply = |purged: u32, trash_changed: bool| json!({ "session": s.0, "generation": g, "data": { "Done": { "purged": purged, "trash_changed": trash_changed } } });
+
+        // Without the count: refused, nothing deleted.
+        let no_count = json!({ "session": s.0, "generation": g, "older_than_days": 30 });
+        assert_eq!(
+            invoke(&main, no_count),
+            Err(json!({ "code": "invalid_input", "what": "request" }))
+        );
+        // A wrong count with the days: nothing deleted, and it says so.
+        let wrong =
+            json!({ "session": s.0, "generation": g, "expected": 2, "older_than_days": 30 });
+        assert_eq!(invoke(&main, wrong), Ok(reply(0, true)));
+        assert!(on_disk(&ts, 0, &ids[0]) && on_disk(&ts, 0, &ids[1]));
+        // The old group's button: the days reach the shell, so the newer item survives.
+        let old_only =
+            json!({ "session": s.0, "generation": g, "expected": 1, "older_than_days": 30 });
+        assert_eq!(invoke(&main, old_only), Ok(reply(1, false)));
+        assert!(!on_disk(&ts, 0, &ids[0]) && on_disk(&ts, 0, &ids[1]));
+        // Without the days it is the whole trash.
+        let whole = json!({ "session": s.0, "generation": g, "expected": 1 });
+        assert_eq!(invoke(&main, whole), Ok(reply(1, false)));
+        assert!(!on_disk(&ts, 0, &ids[1]));
+        // The vault's folder is removed with the test's: it must be closed first.
+        ts.shell.lock_all();
+    }
+
+    /// An item restored and trashed again while the whole trash is emptied has a new deletion time: it stays. (The times are
+    /// set by hand, a long time ago, so the new one differs; a restore and a new trash inside one second share a time, which
+    /// the item's whole-second timestamp cannot tell apart.)
+    #[test]
+    fn an_item_retrashed_during_empty_trash_stays() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 3);
+        let (s, g) = trashed_on(
+            &ts,
+            &[
+                (&ids[0], "2020-01-01T00:00:00Z"),
+                (&ids[1], "2020-01-02T00:00:00Z"),
+                (&ids[2], "2020-01-03T00:00:00Z"),
+            ],
+        );
+        let (shell, steps) = (Arc::clone(&ts.shell), Rc::new(Cell::new(0)));
+        let again = ids[1].clone();
+        failpoint::observe(
+            EMPTY_TRASH_STEP,
+            Box::new(move || {
+                steps.set(steps.get() + 1);
+                if steps.get() == 2 {
+                    shell.restore_item(s, g, &again).unwrap();
+                    shell.trash_item(s, g, &again).unwrap();
+                }
+            }),
+        );
+        let answer = ts.shell.empty_trash(s, g, 3, None);
+        failpoint::disarm_all();
+        assert_eq!(
+            purged(answer),
+            2,
+            "the retrashed one is skipped, not counted"
+        );
+        assert!(!on_disk(&ts, 0, &ids[0]) && !on_disk(&ts, 0, &ids[2]));
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &ids[1])["trashed"], json!(true));
+        assert_eq!(list.as_array().unwrap().len(), 1);
+    }
+
+    /// Review Focus 3: the trash at the call goes, and nothing else: not a live item, not an item trashed after the call,
+    /// not another vault's trash.
+    #[test]
+    fn empty_trash_purges_only_the_trash_at_the_call() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let live = login(&ts, s, g, "MU-live");
+        let gone = trashed_notes(&ts, s, g, 3);
+        let late = note_in(&ts, s, g, "MU-late", None);
+        let (other, go) = open_vault(&ts, "Work");
+        let theirs = trashed_notes(&ts, other, go, 2);
+
+        // The item is trashed after the call began: at the step before the first deletion.
+        let shell = Arc::clone(&ts.shell);
+        let trash_late = late.clone();
+        failpoint::observe(
+            EMPTY_TRASH_STEP,
+            Box::new(move || {
+                shell.trash_item(s, g, &trash_late).unwrap();
+            }),
+        );
+        let answer = ts.shell.empty_trash(s, g, 3, None);
+        failpoint::disarm_all();
+        assert_eq!(purged(answer), 3);
+
+        for id in &gone {
+            assert!(!on_disk(&ts, 0, id), "a trashed item is deleted for good");
+        }
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &live)["trashed"], json!(false));
+        assert_eq!(
+            row(&list, &late)["trashed"],
+            json!(true),
+            "trashed after the call"
+        );
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        // Another vault's trash is its own.
+        for id in &theirs {
+            assert!(on_disk(&ts, 1, id));
+        }
+        assert_eq!(listed(&ts, other, go).as_array().unwrap().len(), 2);
+        // An empty trash is a call that deletes nothing, and says so.
+        assert_eq!(purged(ts.shell.empty_trash(other, go, 2, None)), 2);
+        assert_eq!(purged(ts.shell.empty_trash(other, go, 0, None)), 0);
+    }
+
+    /// The exact JSON the page gets: one count, and nothing else.
+    #[test]
+    fn empty_trash_answers_with_a_count_and_nothing_else() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        trashed_notes(&ts, s, g, 2);
+        let answer = ts.shell.empty_trash(s, g, 2, None).unwrap();
+        assert_eq!(
+            serde_json::to_value(answer).unwrap(),
+            json!({ "session": s.0, "generation": g, "data": { "Done": { "purged": 2, "trash_changed": false } } })
+        );
+        // By days it answers the same shape: a count, here of nothing (everything left is new, and none is old).
+        trashed_notes(&ts, s, g, 1);
+        let answer = ts.shell.empty_trash(s, g, 0, Some(30)).unwrap();
+        assert_eq!(
+            serde_json::to_value(answer).unwrap(),
+            json!({ "session": s.0, "generation": g, "data": { "Done": { "purged": 0, "trash_changed": false } } })
+        );
+        // A trash that is not the size asked about deletes nothing and says so, in the same shape.
+        let answer = ts.shell.empty_trash(s, g, 5, None).unwrap();
+        assert_eq!(
+            serde_json::to_value(answer).unwrap(),
+            json!({ "session": s.0, "generation": g, "data": { "Done": { "purged": 0, "trash_changed": true } } })
+        );
+        // Its request has the session, its generation, the count the question said and, only for the old group's button, a number of
+        // days: no item, no other field, and no call without the count.
+        let body = |value: Value| InvokeBody::Json(value);
+        let good = json!({ "session": 1, "generation": 1, "expected": 3 });
+        assert!(parse::<EmptyTrashArgs>(&body(good.clone())).is_ok());
+        assert_eq!(
+            parse::<EmptyTrashArgs>(&body(json!({ "session": 1, "generation": 1 }))).err(),
+            Some(MALFORMED)
+        );
+        for wrong_count in [json!("3"), json!(-1), json!(3.5)] {
+            let mut wrong = good.clone();
+            wrong["expected"] = wrong_count;
+            assert_eq!(parse::<EmptyTrashArgs>(&body(wrong)).err(), Some(MALFORMED));
+        }
+        let mut by_days = good.clone();
+        by_days["older_than_days"] = json!(30);
+        assert!(parse::<EmptyTrashArgs>(&body(by_days.clone())).is_ok());
+        for wrong_days in [json!("30"), json!(-1), json!(30.5)] {
+            let mut wrong = good.clone();
+            wrong["older_than_days"] = wrong_days;
+            assert_eq!(parse::<EmptyTrashArgs>(&body(wrong)).err(), Some(MALFORMED));
+        }
+        for extra in ["id", "days", "ids"] {
+            for base in [good.clone(), by_days.clone()] {
+                let mut wrong = base;
+                wrong[extra] = json!("MU-extra");
+                assert_eq!(parse::<EmptyTrashArgs>(&body(wrong)).err(), Some(MALFORMED));
+            }
+        }
+    }
+
+    /// Review Focus 3: two items attach one blob and one of them goes: the blob stays, whole, after a reopen from disk.
+    #[test]
+    fn empty_trash_keeps_shared_attachment_bytes() {
+        const BYTES: &[u8] = b"MU-shared-attachment-bytes";
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let (doomed, file) = ts.stored_file(s, g, "MU-shared.bin", BYTES);
+        let keeper = note_in(&ts, s, g, "MU-keeper", None);
+        let doomed_id = ItemId::from_hex(&doomed).unwrap();
+        let refs = ts
+            .shell
+            .sessions
+            .read(s, g, |vault, _| {
+                let VaultRef::Writable(vault) = vault else {
+                    panic!("a writable vault");
+                };
+                Ok(vault.get_item(&doomed_id)?.attachments.clone())
+            })
+            .unwrap()
+            .data;
+        // The keeper attaches the same blob: written by hand, sealed with the vault's own key.
+        let (_, dir) = ts.shell.registry.entries()[0].clone();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let (vault_id, key) = vault_key(&dir);
+        let keeper_id = ItemId::from_hex(&keeper).unwrap();
+        let path = item_file(&ts, 0, &keeper);
+        let mut item = open_item(&fs::read(&path).unwrap(), &keeper_id, &vault_id, &key).unwrap();
+        item.attachments = refs;
+        fs::write(&path, seal_item(&item, &vault_id, &key).unwrap()).unwrap();
+        let (s, g, _) = reopened(&ts);
+
+        ts.shell.trash_item(s, g, &doomed).unwrap();
+        assert_eq!(purged(ts.shell.empty_trash(s, g, 1, None)), 1);
+        assert!(!on_disk(&ts, 0, &doomed));
+
+        // From disk again: the blob is there and the keeper's file reads back whole.
+        let (s, g, _) = reopened(&ts);
+        assert!(dir.join("files").join(format!("{file}.blob")).exists());
+        let dest = ts.temp.path().join("MU-read-back.bin");
+        let file_id = lockbox_core::ids::FileId::from_hex(&file).unwrap();
+        ts.shell
+            .sessions
+            .read(s, g, |vault, cancel| {
+                let VaultRef::Writable(vault) = vault else {
+                    panic!("a writable vault");
+                };
+                vault.export_file(
+                    &keeper_id,
+                    &file_id,
+                    &dest,
+                    &lockbox_core::blob::NoJournal,
+                    cancel,
+                    &NoProgress,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), BYTES);
+    }
+
+    /// An item restored between two deletions stays; the later item that was in the trash at the call still goes.
+    #[test]
+    fn an_item_restored_during_empty_trash_stays() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 3);
+        let (first, middle, last) = (&ids[0], ids[1].clone(), &ids[2]);
+
+        let (shell, steps) = (Arc::clone(&ts.shell), Rc::new(Cell::new(0)));
+        let restore = middle.clone();
+        failpoint::observe(
+            EMPTY_TRASH_STEP,
+            Box::new(move || {
+                steps.set(steps.get() + 1);
+                // The step before the second deletion: the middle item is restored.
+                if steps.get() == 2 {
+                    shell.restore_item(s, g, &restore).unwrap();
+                }
+            }),
+        );
+        let answer = ts.shell.empty_trash(s, g, 3, None);
+        failpoint::disarm_all();
+        assert_eq!(
+            purged(answer),
+            2,
+            "the restored one is skipped, not counted"
+        );
+
+        assert!(!on_disk(&ts, 0, first) && !on_disk(&ts, 0, last));
+        assert!(on_disk(&ts, 0, &middle));
+        let list = listed(&ts, s, g);
+        assert_eq!(row(&list, &middle)["trashed"], json!(false));
+        assert_eq!(list.as_array().unwrap().len(), 1);
+    }
+
+    /// A lock between two deletions stops the rest: what went stays gone, what was not begun is byte for byte as it was.
+    #[test]
+    fn a_lock_during_empty_trash_stops_between_items() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 3);
+        let before: Vec<Vec<u8>> = ids
+            .iter()
+            .map(|id| fs::read(item_file(&ts, 0, id)).unwrap())
+            .collect();
+
+        let (shell, steps) = (Arc::clone(&ts.shell), Rc::new(Cell::new(0)));
+        failpoint::observe(
+            EMPTY_TRASH_STEP,
+            Box::new(move || {
+                steps.set(steps.get() + 1);
+                // The step before the second deletion: a real lock completes here.
+                if steps.get() == 2 {
+                    shell.sessions.lock(s, LockReason::Manual);
+                }
+            }),
+        );
+        let answer = ts.shell.empty_trash(s, g, 3, None);
+        failpoint::disarm_all();
+        assert_eq!(answer.err(), Some(ShellError::Locked));
+
+        assert!(
+            !on_disk(&ts, 0, &ids[0]),
+            "the first one went before the lock"
+        );
+        for (id, bytes) in ids.iter().zip(&before).skip(1) {
+            assert_eq!(
+                &fs::read(item_file(&ts, 0, id)).unwrap(),
+                bytes,
+                "untouched"
+            );
+        }
+        // Opened again, the rest are still in the trash, none of them marked.
+        let (s, g, finished) = reopened(&ts);
+        assert_eq!(finished, 0, "no purge was left half done");
+        let list = listed(&ts, s, g);
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        for id in &ids[1..] {
+            assert_eq!(row(&list, id)["trashed"], json!(true));
+            assert_eq!(row(&list, id)["purging"], json!(false));
+        }
+    }
+
+    /// A crash after an item is marked leaves that one item for the cleanup at unlock, and the cleanup finishes only it.
+    #[test]
+    fn empty_trash_interrupted_finishes_only_the_marked_item() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 3);
+
+        failpoint::arm("purge.after_mark");
+        let answer = ts.shell.empty_trash(s, g, 3, None);
+        failpoint::disarm_all();
+        // A real I/O error is returned, not swallowed, and the loop stops there.
+        assert!(
+            matches!(answer.err(), Some(ShellError::Core(view)) if view.kind == "io"),
+            "an I/O error is returned"
+        );
+        for id in &ids {
+            assert!(on_disk(&ts, 0, id), "nothing was removed before the mark");
+        }
+
+        let (s, g, finished) = reopened(&ts);
+        assert_eq!(finished, 1, "the cleanup finished the marked item");
+        let list = listed(&ts, s, g);
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        assert!(!on_disk(&ts, 0, &ids[0]));
+        for id in &ids[1..] {
+            assert_eq!(row(&list, id)["trashed"], json!(true));
+            assert_eq!(row(&list, id)["purging"], json!(false), "never started");
+        }
+    }
+
+    /// A read-only copy of a vault with a trash is refused, and nothing is written.
+    #[test]
+    fn empty_trash_refused_on_a_read_only_session() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 2);
+        let (r, gr) = read_only_session(&ts);
+        let (answer, writes) = item_writes(|| ts.shell.empty_trash(r, gr, 2, None).err());
+        assert_eq!(answer, Some(ShellError::ReadOnly));
+        assert_eq!(writes, 0);
+        for id in &ids {
+            assert!(on_disk(&ts, 0, id));
+        }
+    }
+
+    #[test]
+    fn empty_trash_refused_with_a_stale_generation() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 2);
+        let (answer, writes) = item_writes(|| ts.shell.empty_trash(s, g + 1, 2, None).err());
+        assert_eq!(answer, Some(ShellError::Locked));
+        assert_eq!(writes, 0);
+        // And the old generation after a lock.
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        let (answer, writes) = item_writes(|| ts.shell.empty_trash(s, g, 2, None).err());
+        assert_eq!(answer, Some(ShellError::Locked));
+        assert_eq!(writes, 0);
+        for id in &ids {
+            assert!(on_disk(&ts, 0, id));
+        }
+    }
+
+    #[test]
+    fn empty_trash_refused_for_a_foreign_session() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let ids = trashed_notes(&ts, s, g, 2);
+        let (answer, writes) = item_writes(|| {
+            ts.shell
+                .empty_trash(SessionId(s.0 + 1000), g, 2, None)
+                .err()
+        });
+        assert_eq!(answer, Some(ShellError::NotFound));
+        assert_eq!(writes, 0);
+        for id in &ids {
+            assert!(on_disk(&ts, 0, id));
+        }
     }
 
     /// The orphans listed are the quarantined files, and only unreferenced ones are deleted.

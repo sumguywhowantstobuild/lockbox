@@ -9,7 +9,7 @@
 // session it was for is gone.
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
-import { batchHasFocus, focusList, takeJobFocus } from "./focus";
+import { batchHasFocus, focusList, focusListIfLost, takeJobFocus } from "./focus";
 import { resetCloseAskForTests, startCloseAsk } from "./closeAsk";
 import { awayMessage, partialWords, refusalWords, wasClean } from "./addFilesWords";
 import { spokenEnd } from "./saveAllWords";
@@ -578,6 +578,11 @@ export interface SessionData {
   newKey: NewKeyFlow | null;
   /** An export of this vault, begun from Settings and not put away: see {@link ExportFlow}. */
   exportFlow: ExportFlow | null;
+  /**
+   * The ids the shell last said have been in the Trash 30 days or more (`old_trash`), for the Trash view's own group. Empty until it has
+   * answered and for a read-only vault, which is never asked. The list is only a way to group rows: an id no longer in the Trash is ignored.
+   */
+  oldTrash: readonly string[];
 }
 
 /** One batch of files, from the pick to its end. The paths stay in Rust: the page holds names and sizes for display, and the choice (a token). */
@@ -1058,6 +1063,7 @@ function newRecord(
     passwordChange: null,
     newKey: null,
     exportFlow: null,
+    oldTrash: [],
   };
 }
 
@@ -1488,6 +1494,8 @@ async function loadItems(record: SessionData, options: { quiet?: boolean } = {})
       };
       return orphaned ? { ...endReveals(next), openItem: null } : next;
     });
+    // The Trash view groups what is old: read again whenever its list is.
+    if (sessionOf(session)?.trash === true) void loadOldTrash(session);
     return "opened";
   } catch (error) {
     // A lock that overtook the question: the bridge says so, and so does the shell ("locked"). If the page never heard
@@ -1497,6 +1505,32 @@ async function loadItems(record: SessionData, options: { quiet?: boolean } = {})
     if (!latest() || options.quiet === true) return "opened";
     update(session, (entry) => ({ ...entry, loadError: error }));
     return "opened";
+  }
+}
+
+/** How long an item has been in the Trash when the Trash view lists it as old, in days (the design's "30 days or more"). */
+export const OLD_TRASH_DAYS = 30;
+
+/** The number of the latest `old_trash` asked of each session: an older answer that comes after a newer one is dropped. */
+const oldTrashRuns = new Map<number, number>();
+
+/**
+ * Asks the shell which items have been in the Trash 30 days or more and keeps their ids for the Trash view's group. A read-only vault is not
+ * asked (it can delete nothing). The group is only a way to sort rows, so a refusal says nothing: the Trash stays one list. A lock drops the
+ * answer.
+ */
+async function loadOldTrash(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const { generation } = entry;
+  const run = (oldTrashRuns.get(session) ?? 0) + 1;
+  oldTrashRuns.set(session, run);
+  try {
+    const answer = await api.oldTrash({ session, generation }, OLD_TRASH_DAYS);
+    if (!stillOpen(session, generation) || oldTrashRuns.get(session) !== run) return;
+    update(session, (current) => ({ ...current, oldTrash: answer.data }));
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
   }
 }
 
@@ -4470,6 +4504,7 @@ export function selectFolder(session: number, folder: string | null): void {
 /** Shows the Trash view in place of the list, and closes the panel and any form (the Trash has nothing to add). */
 export function openTrash(session: number): void {
   update(session, (entry) => ({ ...endReveals(entry), folder: null, trash: true, openItem: null, tool: null }));
+  void loadOldTrash(session);
 }
 
 /**
@@ -5543,6 +5578,55 @@ export async function purgeTrashed(session: number, id: string): Promise<void> {
   if (stillThere) update(session, (current) => ({ ...endReveals(current), openItem: null }));
   say(session, "Deleted for good");
   if (stillThere) focusList();
+}
+
+/**
+ * Empty trash, once the person said yes in the question (32b): everything in this vault's Trash goes for good, one item at a time in Rust,
+ * which reads the Trash at the call (the page sends no item). The question belongs to the session and generation it was opened for: a
+ * vault that has since locked or been unlocked again, or a read-only one, sends nothing. The list is read again, a panel whose item went
+ * closes, and what is said follows what is left in the refreshed Trash: "Trash emptied" when nothing is, else how many went and how many
+ * remain. A lock meanwhile says nothing; a refusal (a disk error partway, a busy vault) is said as a message, and the list shows what is
+ * left. `expected` is the count the question said: when the Trash was another size at the call nothing was deleted, the page says so in a
+ * plain message (no alarm), reads the old group again, and answers `"changed"` so the question can be asked again with the new count.
+ * With `olderThanDays` (the old group's "Delete these N permanently", 32a: 30) only what has been in the Trash that many days or more goes.
+ */
+export async function emptyTrash(
+  session: number,
+  generation: number,
+  expected: number,
+  olderThanDays?: number,
+): Promise<"done" | "changed" | "stale"> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly || entry.generation !== generation) return "stale";
+  const done = await change(session, (vault) => api.emptyTrash(vault, expected, olderThanDays));
+  if (done === "stale") return "stale";
+  if ("failed" in done) {
+    sayFailure(session, done.failed);
+    return "done";
+  }
+  const outcome = done.done.data;
+  if (typeof outcome !== "object" || !("Done" in outcome)) {
+    sayFailure(session, UNEXPECTED);
+    return "done";
+  }
+  const { purged, trash_changed: changed } = outcome.Done;
+  if (changed) {
+    // The list was read again by `change`; the old group is read again too, so the new question has the new count.
+    await loadOldTrash(session);
+    if (!stillOpen(session, generation)) return "stale";
+    say(session, "The Trash changed, so nothing was deleted. Check the new count and answer again.");
+    return "changed";
+  }
+  const left = (sessionOf(session)?.items ?? []).filter((item) => item.trashed).length;
+  if (purged === 0) {
+    say(session, olderThanDays !== undefined ? "Nothing old was left to delete" : left === 0 ? "Nothing was left in the Trash" : `Nothing was deleted. ${String(left)} still in the Trash.`);
+  } else {
+    say(session, left === 0 ? "Trash emptied" : `${String(purged)} deleted for good. ${String(left)} still in the Trash.`);
+  }
+  // The button the question came from may be gone with the Trash: if focus fell with it, it goes to the list, unless the person has moved
+  // to another vault; focus the person put elsewhere meanwhile stays.
+  if (state.sessions.at(-1)?.session === session && sessionOf(session)?.trash === true) focusListIfLost();
+  return "done";
 }
 
 /** What making a folder came to: its id, a lock meanwhile (nothing to say), or the shell's refusal to say under the box. */

@@ -240,6 +240,15 @@ pub struct ExportSummary {
     pub line_breaks: Vec<String>,
 }
 
+/// What emptying the trash did (`empty_trash`): how many items this call deleted for good, and whether it stopped at the
+/// start because the trash was not the size the person was asked about (`trash_changed`: nothing was deleted, and the page
+/// reads the list again and asks again). Only counts; an item that was restored or already gone meanwhile is not counted.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct EmptiedView {
+    pub purged: u32,
+    pub trash_changed: bool,
+}
+
 /// The printers Lockbox can print to (`list_printers`), by the names Windows shows, and the default one when it is
 /// among them. Printers that write a file through a save box of their own are left out. No vault data.
 #[derive(Serialize)]

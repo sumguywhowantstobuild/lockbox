@@ -38,6 +38,7 @@ pub const COMMANDS: &[&str] = &[
     "delete_collection",
     "purge_item",
     "old_trash",
+    "empty_trash",
     "search_all",
     "open_url",
     "list_orphans",

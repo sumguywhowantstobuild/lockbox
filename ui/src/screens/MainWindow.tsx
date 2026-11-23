@@ -53,7 +53,7 @@ import { SaveAllCloudQuestion, SaveAllFiles, SaveAllLeft } from "./SaveAllFiles"
 import { SearchPanel } from "./SearchPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
-import { TrashPanel, TrashView } from "./TrashView";
+import { DeleteOld, EmptyTrash, TrashPanel, TrashView } from "./TrashView";
 import { VaultStrip } from "./VaultStrip";
 
 /** The words for the vaults that are not open, so the list does not look as if their items were missing. */
@@ -240,6 +240,20 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                   ? "no_kind"
                   : "list";
   const narrowed = (state === "list" || (state === "trash" && inView.length > 0)) && !(needle === "" && kind === "all");
+  // Empty trash (32a): offered when this writable vault has a trash, whatever the Filter hides: the question is about the whole trash. Its key
+  // is the session and generation, so a switch or a lock takes the question away with its vault.
+  const emptyBar =
+    data.trash && !data.readOnly && data.items !== null && inTrash.length > 0 ? (
+      <EmptyTrash key={`${String(data.session)}:${String(data.generation)}`} data={data} count={inTrash.length} />
+    ) : null;
+  // "Delete these N permanently" (32a) in the old group's header: N is the vault's whole old group, whatever the Filter hides, and it is
+  // offered only where the Trash can be changed. Bound to its vault and generation like the button above.
+  const oldIds = new Set(data.oldTrash);
+  const oldCount = inTrash.filter((item) => oldIds.has(item.id)).length;
+  const oldPill =
+    data.trash && !data.readOnly && data.items !== null && oldCount > 0 ? (
+      <DeleteOld key={`${String(data.session)}:${String(data.generation)}`} data={data} count={oldCount} />
+    ) : null;
   // What narrowing left, for a screen reader, when it left nothing: the card below says it on screen, and this says it as it changes.
   let leftNothing: string | null = null;
   if (state === "no_match") leftNothing = `Nothing here matches “${word}”. ${holder} has ${itemCount(inView.length)}.`;
@@ -340,6 +354,8 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             <div className="lsay sr" aria-live="polite" aria-atomic="true">
               {said}
             </div>
+            {/* A Filter that leaves no row in the Trash still leaves the Trash to empty: the button is above the card that says so. */}
+            {state === "no_match" || state === "no_kind" ? emptyBar : null}
             {state === "problem" && problem !== null ? (
               <p className="err" role="alert">
                 {problem.title} {problem.body}
@@ -356,6 +372,9 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 onOpen={(id) => {
                   pickTrashed(data.session, id);
                 }}
+                old={data.readOnly ? [] : data.oldTrash}
+                bar={emptyBar}
+                oldPill={oldPill}
               />
             ) : state === "ready" ? (
               <Ready>{data.readOnly ? null : <EmptyAdd session={data.session} folder={data.folder} />}</Ready>

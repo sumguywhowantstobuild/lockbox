@@ -740,6 +740,35 @@ export function purgeItem(vault: SessionRef, id: string): Promise<Tagged<null>> 
   return call<null>("purge_item", { session: vault.session, generation: vault.generation, id });
 }
 
+/**
+ * The ids of the items that have been in the trash for `days` days or more, for the Trash view's "Delete permanently?" group. It lists
+ * and removes nothing. Asked only of a writable vault: a read-only one is refused as `read_only`.
+ */
+export function oldTrash(vault: SessionRef, days: number): Promise<Tagged<string[]>> {
+  return call<string[]>("old_trash", { session: vault.session, generation: vault.generation, days });
+}
+
+/**
+ * What emptying the trash did: how many items it deleted for good (one restored or already gone meanwhile is not counted), and
+ * `trash_changed`: the trash was not the size the question said, so nothing was deleted and the page asks again.
+ */
+export interface EmptiedView {
+  purged: number;
+  trash_changed: boolean;
+}
+
+/**
+ * Deletes everything in the vault's trash for good, once the person said yes. It sends no item: Rust reads the trash at the call and
+ * deletes item by item, so what is restored or trashed again meanwhile stays, and a lock stops the rest (`locked`). `expected` is the
+ * count the question said would go: a trash of another size at the call deletes nothing (`trash_changed`). With `olderThanDays` (the old
+ * group's button sends 30) only what has been in the trash that many days or more goes, the cutoff fixed at the call. Refused as
+ * `read_only` in a vault opened from a backup; a real disk error is `core` with its kind.
+ */
+export function emptyTrash(vault: SessionRef, expected: number, olderThanDays?: number): Promise<Tagged<Outcome<EmptiedView>>> {
+  const body = { session: vault.session, generation: vault.generation, expected };
+  return call<Outcome<EmptiedView>>("empty_trash", olderThanDays === undefined ? body : { ...body, older_than_days: olderThanDays });
+}
+
 /** The generator's options for a password, as the engine takes them (`length` is 8 to 128). */
 export interface PasswordOptions {
   length: number;

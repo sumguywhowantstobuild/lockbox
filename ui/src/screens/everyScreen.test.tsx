@@ -79,6 +79,13 @@ async function unlocked(extra: Partial<FakeVault> = {}) {
   await unlockIt();
 }
 
+/** The sample vault with an item that went to the trash long ago, whatever the day: the Trash has its 30-days group. */
+async function unlockedWithAnOldTrash() {
+  await unlocked({
+    items: [...items(), { id: itemId(80), kind: "note", title: "Old note in the trash", trashed: true, trashedAt: "2000-01-01T09:00:00Z" }],
+  });
+}
+
 function click(name: string | RegExp, within_: HTMLElement = document.body) {
   fireEvent.click(within(within_).getByRole("button", { name }));
 }
@@ -1241,6 +1248,39 @@ const CASES: Case[] = [
       await screen.findByRole("heading", { level: 1, name: "Trash" });
       fireEvent.click(screen.getByRole("button", { name: /^Login:\s*Old login in the trash/ }));
       await screen.findByRole("complementary", { name: "Old login in the trash" });
+    },
+  },
+  {
+    name: "The Trash with its old group and Empty trash (32a)",
+    shows: ["TrashView#TrashView"],
+    reach: async () => {
+      await unlockedWithAnOldTrash();
+      click(/^Trash\s+\d+$/, side());
+      await screen.findByRole("heading", { level: 1, name: "Trash" });
+      await screen.findByRole("heading", { level: 2, name: /^In the trash 30 days or more/ });
+      await screen.findByRole("button", { name: "Empty trash" });
+    },
+  },
+  {
+    name: "Empty trash asks first (32b)",
+    shows: ["TrashView#EmptyTrash"],
+    reach: async () => {
+      await unlockedWithAnOldTrash();
+      click(/^Trash\s+\d+$/, side());
+      await screen.findByRole("heading", { level: 1, name: "Trash" });
+      click("Empty trash");
+      return screen.findByRole("dialog", { name: /^Delete \d+ items for good\?$/ });
+    },
+  },
+  {
+    name: "The old group's pill asks first (32a)",
+    shows: ["TrashView#DeleteOld"],
+    reach: async () => {
+      await unlockedWithAnOldTrash();
+      click(/^Trash\s+\d+$/, side());
+      await screen.findByRole("heading", { level: 1, name: "Trash" });
+      click(/^Delete (these \d+|this item) permanently$/);
+      return screen.findByRole("dialog", { name: /^Delete \d+ items? for good\?$/ });
     },
   },
   {

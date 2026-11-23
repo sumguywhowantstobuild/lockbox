@@ -72,6 +72,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         items::delete_collection,
         items::purge_item,
         items::old_trash,
+        items::empty_trash,
         items::search_all,
         items::open_url,
         items::list_orphans,
