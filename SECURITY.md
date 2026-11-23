@@ -35,7 +35,9 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 ## What Lockbox does not protect against
 
-- **Malware on your PC while a vault is unlocked.** It can read whatever Lockbox can read.
+- **Malware on your PC while a vault is unlocked.** It can read whatever Lockbox can read. A program running as you can
+  also start Lockbox with WebView2's debugging settings and read what the window shows; Lockbox's end-to-end tests
+  drive the real app this way.
 - **Someone who has your password or recovery key.**
 - **A weak password.** The core insists on at least 12 characters when a password is set, but a guessable password is
   still guessable. Argon2id makes each guess costly; it cannot make a poor password good.

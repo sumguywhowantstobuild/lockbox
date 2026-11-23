@@ -142,3 +142,54 @@ jobs:
         env:
           LOCKBOX_SEMGREP: semgrep
         run: node scripts/scan.mjs
+
+  # End-to-end tests on the real app: the shipped (release) build, driven through tauri-driver and the image's Edge
+  # WebDriver. Not a required check (branch protection is not changed): a failure shows on the run and is fixed
+  # first, but it does not block a merge. After the Rust job, so a build that is already broken is not built again.
+  e2e:
+    name: "End-to-end: the real app (windows)"
+    needs: rust
+    runs-on: windows-2025-vs2026
+    # A first run has no cache and builds the app from nothing.
+    timeout-minutes: 60
+    env:
+      # The marker only this job sets: it skips the swap of a fresh runner's state and allows the clipboard steps. The
+      # generic CI=true grants neither.
+      LOCKBOX_E2E_CI: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ui/.node-version
+      # The app embeds the built page, so the page's dependencies come first (scripts/e2e.mjs builds it).
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci --ignore-scripts
+      - name: Install end-to-end dependencies
+        working-directory: e2e
+        run: npm ci --ignore-scripts
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # tauri-driver is built once and kept: the key names its version, so a new version is a new cache.
+      - name: Cache tauri-driver
+        id: tauri-driver
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/tauri-driver.exe
+          key: tauri-driver-2.1.0-${{ runner.os }}
+      - name: Install tauri-driver
+        if: steps.tauri-driver.outputs.cache-hit != 'true'
+        run: cargo install tauri-driver --locked --version 2.1.0
+      # The driver and the web-view runtime must share a major version; the run refuses otherwise, and says both.
+      - name: Show the web-view runtime and the Edge WebDriver versions
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          "WebView2 runtime: $((Get-ItemProperty $key -ErrorAction SilentlyContinue).pv)"
+          "EDGEWEBDRIVER: $env:EDGEWEBDRIVER"
+          & (Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe') --version
+      - name: End-to-end tests
+        run: node scripts/e2e.mjs

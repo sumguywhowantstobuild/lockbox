@@ -80,3 +80,33 @@ beside the default vault folder in your profile, which every terminal sees alike
 private copy refuses to recover and says to run recover from a terminal inside the app. Recovery only renames folders
 back and deletes only its own sentinel and journal files. Its tests
 (`scripts/state-swap.test.mjs`) run on temporary folders only and are part of `node --test "scripts/*.test.mjs"`.
+
+## End-to-end tests on the real app
+`node scripts/e2e.mjs [spec]` builds the release app (the page, then `cargo build -p lockbox-desktop --release --locked
+--features custom-protocol`), then drives it through `tauri-driver` and Microsoft Edge WebDriver with WebdriverIO, on a
+test state swapped in as above. It refuses to start while any `lockbox-desktop.exe` runs. One-time setup:
+
+1. `npm ci --ignore-scripts` in `e2e/` (WebdriverIO's packages stay in that folder).
+2. `cargo install tauri-driver --locked --version 2.1.0`. The run looks for it in `%CARGO_HOME%\bin` (set
+   `LOCKBOX_TAURI_DRIVER` to a full path to use another).
+3. Download the Microsoft Edge WebDriver whose first three version parts equal your WebView2 runtime's (the registry
+   value `pv` under `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`),
+   check its download against Microsoft's publisher signature, and pass it as `node scripts/e2e.mjs --edgedriver
+   <full path to msedgedriver.exe>` (or set `LOCKBOX_EDGEDRIVER`). The run refuses, naming both versions, when they
+   differ. On the GitHub job the image's own driver (`EDGEWEBDRIVER`) is used.
+
+The run keeps the app's window off your screen, uses a vault folder it makes in the temp folder (never the default vault
+folder), and puts the real folders back when it ends; if it is cut short, `node e2e/lib/state.mjs recover` does. The
+test state of the run stays beside the real folders as `<folder>.test-<run>` (the run prints where; nothing it parked is
+ever deleted, since someone may have opened Lockbox meanwhile), so delete those by hand when you are done. Only the
+run's own folder in the temp folder is deleted. A second run started while one is going is refused and leaves the first
+alone. The run sends one mouse event that moves nothing, because Lockbox's idle lock counts the session's input and would
+otherwise lock a vault that nobody has touched for minutes. The steps that use the clipboard run on the GitHub job (which
+sets `LOCKBOX_E2E_CI=1`; the generic `CI=true` changes nothing here) and, on a PC, only with `LOCKBOX_E2E_PC_FREE=1`
+(they replace what is on your clipboard); the run says which steps it skipped. The auto-lock step needs a minute with no
+input at the PC and waits up to about four and a half minutes for it; if the PC was in use throughout, that step is
+skipped and says so, and if the PC was quiet for over a minute and the vault did not lock, it fails. On the GitHub job
+a skipped step fails the run and the lock must come within a minute plus 25 seconds. The job (`End-to-end: the real app`)
+is not a required check.
+`scripts/e2e.test.mjs` tests the runner on temporary folders (part of `node --test "scripts/*.test.mjs"`);
+`e2e/real-app.test.mjs`, run by the script, checks the built app itself.

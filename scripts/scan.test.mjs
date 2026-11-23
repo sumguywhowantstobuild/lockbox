@@ -55,12 +55,12 @@ test("all tools clean -> exit 0 and CLEAN", () => {
 });
 
 test("gitleaks finding -> exit 1, shown without the secret value", () => {
-  const leak = [{ RuleID: "generic-api-key", File: "src/a.rs", StartLine: 3, Secret: "hunter2-visible" }]; // gitleaks:allow (fake value)
+  const leak = [{ RuleID: "generic-api-key", File: "src/a.rs", StartLine: 3, Secret: "fake-value-visible" }]; // gitleaks:allow (fake value)
   const { code, out } = run({ FAKE_GITLEAKS_EXIT: "1", FAKE_GITLEAKS_REPORT: JSON.stringify(leak) });
   assert.equal(code, 1);
   assert.match(out, /generic-api-key/);
   assert.match(out, /src\/a\.rs:3/);
-  assert.doesNotMatch(out, /hunter2/);
+  assert.doesNotMatch(out, /fake-value/);
 });
 
 test("semgrep missing -> exit 2 and INCOMPLETE", () => {
@@ -94,7 +94,7 @@ test("missing Cargo.lock -> exit 2, dependencies would go unchecked", () => {
   assert.match(out, /INCOMPLETE: osv-scanner needs Cargo\.lock, which is missing/);
 });
 
-test("osv_reads_ui_lockfile: osv-scanner is given ui/package-lock.json next to Cargo.lock", () => {
+test("osv_reads_ui_lockfile: osv-scanner is given ui/package-lock.json and e2e/package-lock.json next to Cargo.lock", () => {
   // A one-off osv stand-in that records the arguments it was called with, then behaves like the clean fake.
   const dir = mkdtempSync(join(tmpdir(), "lockbox-scan-"));
   try {
@@ -112,7 +112,7 @@ fake("OSV");
     assert.equal(code, 0);
     const args = JSON.parse(readFileSync(argsFile, "utf8"));
     const lockfiles = args.flatMap((a, i) => (a === "-L" ? [args[i + 1]] : []));
-    assert.deepEqual(lockfiles, ["Cargo.lock", "ui/package-lock.json"]);
+    assert.deepEqual(lockfiles, ["Cargo.lock", "ui/package-lock.json", "e2e/package-lock.json"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -122,6 +122,12 @@ test("missing_ui_lockfile_fails: ui/package.json without its lockfile -> exit 2"
   const { code, out } = run({ LOCKBOX_UI_LOCK: "no/such/package-lock.json" });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: osv-scanner needs ui\/package-lock\.json, which is missing/);
+});
+
+test("missing_e2e_lockfile_fails: e2e/package.json without its lockfile -> exit 2", () => {
+  const { code, out } = run({ LOCKBOX_E2E_LOCK: "no/such/package-lock.json" });
+  assert.equal(code, 2);
+  assert.match(out, /INCOMPLETE: osv-scanner needs e2e\/package-lock\.json, which is missing/);
 });
 
 test("semgrep scan errors -> exit 2, files it could not scan are not clean", () => {
