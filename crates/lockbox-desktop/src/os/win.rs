@@ -108,8 +108,9 @@ use super::signals::{DeviceHeader, HOTKEY_IDS, classify, wants_device_header};
 use super::{
     CLIPBOARD_FAILED, CLIPBOARD_TOO_LARGE, ClipboardCalls, ClipboardSteps, Clock, Dialogs,
     DriveType, Env, Hotkey, HotkeyTaken, IdleSource, InstalledPrinter, InstalledPrinters,
-    KnownFolder, Launcher, MainWindow, Os, OsSignal, PRINTERS_UNREADABLE, Power, PrintCalls,
-    PrintDone, PrintFailed, PrintSteps, Shortcut, StartupEntry, ThreadTimer, Volumes,
+    KnownFolder, Launcher, MainWindow, NoticeAnswer, Os, OsSignal, PRINTERS_UNREADABLE, Power,
+    PrintCalls, PrintDone, PrintFailed, PrintSteps, Shortcut, StartupEntry, StartupNotice,
+    StartupWords, ThreadTimer, Volumes,
 };
 use crate::error::ShellResult;
 use crate::startup::{self, StartupState};
@@ -1862,6 +1863,39 @@ impl<R: Runtime> Dialogs for WinDialogs<R> {
     }
 }
 
+/// The notice shown when Lockbox can't start: rfd's `MessageDialog` (Windows' task dialog, which the app's Common
+/// Controls 6 manifest allows), with an error icon and two buttons of our own words, over no window: at this point the
+/// main window may not exist. Shown on the calling thread, which waits for the person.
+pub struct WinStartupNotice;
+
+/// What rfd's answer to the notice means: only the first button's own text, exactly, is "Open the guide". Everything
+/// else is the second button, or a dialog the person closed from the title bar or with Esc, or one Windows could not
+/// show (rfd answers `Cancel` for all of those).
+fn notice_answer(answer: rfd::MessageDialogResult, words: &StartupWords) -> NoticeAnswer {
+    match answer {
+        rfd::MessageDialogResult::Custom(text) if text == words.open_guide => {
+            NoticeAnswer::OpenGuide
+        }
+        rfd::MessageDialogResult::Custom(text) if text == words.close => NoticeAnswer::Close,
+        _ => NoticeAnswer::Dismissed,
+    }
+}
+
+impl StartupNotice for WinStartupNotice {
+    fn show(&self, words: &StartupWords) -> NoticeAnswer {
+        let answer = rfd::MessageDialog::new()
+            .set_title(words.title)
+            .set_description(words.text)
+            .set_level(rfd::MessageLevel::Error)
+            .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                words.open_guide.to_owned(),
+                words.close.to_owned(),
+            ))
+            .show();
+        notice_answer(answer, words)
+    }
+}
+
 /// Posted by [`SignalThread::keep_awake`]: wparam 1 asks Windows to stay awake, 0 lets it sleep again. The window
 /// answers with the thread's previous execution state.
 const KEEP_AWAKE: u32 = WM_APP + 1;
@@ -2677,6 +2711,42 @@ mod tests {
 
     /// The deadline for every wait in these tests: a slow or stuck window fails a test instead of hanging it.
     const WAIT: Duration = Duration::from_secs(1);
+
+    /// What rfd's `MessageDialog` answers for the startup notice's buttons, read as the notice's answer: only the first
+    /// button's own text means "Open the guide". The second button, the title bar's close, Esc and a dialog Windows
+    /// could not show (all `Cancel`), and anything unexpected, never open the browser.
+    #[test]
+    fn the_notice_opens_the_guide_only_for_its_first_button() {
+        use rfd::MessageDialogResult as Answer;
+        let words = crate::launch::CANT_START;
+        let cases = [
+            (
+                Answer::Custom(words.open_guide.to_owned()),
+                NoticeAnswer::OpenGuide,
+            ),
+            (Answer::Custom(words.close.to_owned()), NoticeAnswer::Close),
+            (Answer::Cancel, NoticeAnswer::Dismissed),
+            (Answer::Ok, NoticeAnswer::Dismissed),
+            (Answer::Yes, NoticeAnswer::Dismissed),
+            (Answer::No, NoticeAnswer::Dismissed),
+            (Answer::Custom(String::new()), NoticeAnswer::Dismissed),
+            (
+                Answer::Custom("open the guide".to_owned()),
+                NoticeAnswer::Dismissed,
+            ),
+            (
+                Answer::Custom("Open the guide ".to_owned()),
+                NoticeAnswer::Dismissed,
+            ),
+        ];
+        let mut tried = 0;
+        for (answer, expected) in cases {
+            let said = format!("{answer:?}");
+            assert_eq!(notice_answer(answer, &words), expected, "{said}");
+            tried += 1;
+        }
+        assert_eq!(tried, 9);
+    }
 
     /// What Show in Explorer starts: Explorer by its full path from the Windows folder (never a search of `PATH`,
     /// never the listed path itself as the program), and exactly one argument, the folder as the person knows it,

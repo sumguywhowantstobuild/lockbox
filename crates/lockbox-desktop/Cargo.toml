@@ -25,8 +25,11 @@ zeroize = { version = "1.9", features = ["serde"] }
 # The clipboard (spec §7.3), called from Rust only (`os::win`): one opening per write or clear, its formats marking
 # a copy to stay out of clipboard history and cloud sync. No feature needed.
 clipboard-win = "5.4.3"
-# File dialogs, called from Rust only (`os::win`). Its Windows backend needs no feature.
-rfd = { version = "0.17.2", default-features = false }
+# File dialogs and the notice shown when Lockbox can't start, called from Rust only (`os::win`). The file dialogs need no
+# feature. `common-controls-v6`: the notice's two buttons of our own words are a task dialog (`TaskDialogIndirect`),
+# which needs Common Controls 6, as the app's manifest and the test programs' (`build.rs`) have it; without the
+# feature the notice would be a plain box whose buttons are not ours.
+rfd = { version = "0.17.2", default-features = false, features = ["common-controls-v6"] }
 webview2-com = "0.39.1"
 windows-core = { version = "0.62", default-features = false }
 # The hidden window that hears Windows lock, sleep, sign-out, shutdown and drive removal (`os::win`): the engine's

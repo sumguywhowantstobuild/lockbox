@@ -843,6 +843,37 @@ pub trait Launcher: Send + Sync {
     fn open_folder(&self, folder: &Path) -> io::Result<()>;
 }
 
+/// The words of a notice shown before the app has a window: all fixed text, never an error, a path or a name (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupWords {
+    /// The title bar's text.
+    pub title: &'static str,
+    /// What the notice says.
+    pub text: &'static str,
+    /// The first button: the one that opens the guide.
+    pub open_guide: &'static str,
+    /// The second button.
+    pub close: &'static str,
+}
+
+/// What the person did with the notice ([`StartupNotice`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeAnswer {
+    /// Pressed the button that opens the guide.
+    OpenGuide,
+    /// Pressed the other button.
+    Close,
+    /// Closed it from the title bar or with Esc, or it could not be shown at all.
+    Dismissed,
+}
+
+/// The one notice Lockbox shows when it can't start ([`launch::cant_start`](crate::launch::cant_start)): a message with
+/// two buttons and an error icon, over no window (there may be none). Waits for the person. Only an answer of
+/// [`NoticeAnswer::OpenGuide`] means the first button was pressed; anything unclear is [`NoticeAnswer::Dismissed`].
+pub trait StartupNotice: Send + Sync {
+    fn show(&self, words: &StartupWords) -> NoticeAnswer;
+}
+
 /// Whether `a` and `b` name the same path as the file system compares names: component by component (so a trailing
 /// separator changes nothing), each on Windows ordinal and ignoring case, with Windows' own case table (not Unicode
 /// lowercasing, which merges names Windows keeps apart); elsewhere exactly.
