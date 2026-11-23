@@ -2,11 +2,17 @@
 //
 //   node scripts/check.mjs           every check, the security scan included
 //   node scripts/check.mjs --no-scan every check but the scan (it needs gitleaks, semgrep and osv-scanner)
+//   node scripts/check.mjs --short <areas>
+//                                    the whole first phase, then only the Rust tests of the areas named: `engine`,
+//                                    `desktop`, `ui`, or two of them joined by a comma (`desktop,ui`, `engine,ui`).
+//                                    `engine` and `desktop` together, `all`, or `--short` alone run every check. The
+//                                    scan always runs here; the release build and the other tests run in CI.
 //
 // Two phases. The first runs three lanes at once: Rust's format and lint checks, then a build of the tests; the UI's
 // lint, build and tests; the scripts' tests and the scan. The second runs the Rust tests with the machine otherwise
 // idle, because a few of them time how long a lock takes. A lane stops at its first failure; the other lanes go on.
-// Each step's output is in target/check-logs/<step>.log, and the exit code is 1 when any step failed.
+// Each step's output is in target/check-logs/<step>.log, and the exit code is 1 when any step failed (2 when the
+// arguments were refused, with nothing run).
 
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync } from "node:fs";
@@ -81,20 +87,64 @@ export function summary(results) {
   return lines.join("\n");
 }
 
-/** The checks CI runs, as phases of lanes. */
-function checks({ scan }) {
+const AREAS = ["engine", "desktop", "ui"];
+
+/**
+ * Reads the command line: `{ scan, areas }`, where `areas` is null for every check or the set of areas whose Rust tests
+ * run; or `{ error, code: 2 }` when the arguments are refused, so nothing runs on a guess.
+ */
+export function parseArgs(argv) {
+  const refuse = (error) => ({ error, code: 2 });
+  let scan = true;
+  let short = false;
+  let list;
+  for (const arg of argv) {
+    if (arg === "--no-scan") scan = false;
+    else if (arg === "--short" && !short) short = true;
+    else if (short && list === undefined && !arg.startsWith("-")) list = arg;
+    else return refuse(`unknown argument: ${arg}`);
+  }
+  if (!short) return { scan, areas: null };
+  if (!scan) return refuse("the short check always runs the scan; --no-scan goes only with every check");
+  if (list === undefined || list === "all") return { scan, areas: null };
+  const areas = new Set(list.split(","));
+  const unknown = [...areas].filter((a) => !AREAS.includes(a));
+  if (unknown.length > 0) return refuse(`unknown area: ${unknown.map((a) => JSON.stringify(a)).join(", ")}; ` +
+    `use ${AREAS.join(", ")} or all`);
+  // The engine's tests and the desktop's together are most of the full set, and a change touching both is no time to
+  // leave anything out.
+  if (areas.has("engine") && areas.has("desktop")) return { scan, areas: null };
+  return { scan, areas };
+}
+
+/** The checks CI runs, as phases of lanes: every check, or with `areas`, the first phase and those areas' tests. */
+export function checks({ scan, areas = null }) {
   const cargo = (name, ...args) => ({ name, cmd: "cargo", args });
   const ui = (name, ...args) => ({ name, cmd: "npm", args, cwd: join(root, "ui"), shell: true });
   // `--no-fail-fast`: one failing test program doesn't hide the others' results.
-  const rustTests = [
-    cargo("rust-tests", "test", "--locked", "--no-fail-fast"),
-    // The engine's internal-only tests, as CI runs them (its unit tests already ran above).
-    cargo("engine-internal", "test", "-p", "lockbox-core", "--locked", "--no-fail-fast", "--features",
-      "test-internals", "--test", "*"),
-    cargo("ipc", "test", "-p", "lockbox-desktop", "--locked", "--features", "custom-protocol", "--test", "ipc"),
-    // The app as shipped, the built UI embedded, as CI builds it.
-    cargo("release-build", "build", "-p", "lockbox-desktop", "--release", "--locked", "--features", "custom-protocol"),
-  ];
+  // The engine's internal-only tests, as CI runs them (its unit tests run in `rust-tests` or `engine-tests`).
+  const engineInternal = cargo("engine-internal", "test", "-p", "lockbox-core", "--locked", "--no-fail-fast",
+    "--features", "test-internals", "--test", "*");
+  // CI's "Bridge tests (release configuration)": the checks only the shipped configuration compiles.
+  const ipc = cargo("ipc", "test", "-p", "lockbox-desktop", "--locked", "--features", "custom-protocol", "--test",
+    "ipc");
+  const rustTests = areas === null
+    ? [
+      cargo("rust-tests", "test", "--locked", "--no-fail-fast"),
+      engineInternal,
+      ipc,
+      // The app as shipped, the built UI embedded, as CI builds it.
+      cargo("release-build", "build", "-p", "lockbox-desktop", "--release", "--locked", "--features",
+        "custom-protocol"),
+    ]
+    : [
+      ...(areas.has("engine")
+        ? [cargo("engine-tests", "test", "-p", "lockbox-core", "--locked", "--no-fail-fast"), engineInternal]
+        : []),
+      ...(areas.has("desktop")
+        ? [cargo("desktop-tests", "test", "-p", "lockbox-desktop", "--locked", "--no-fail-fast"), ipc]
+        : []),
+    ];
   // Node expands the pattern itself, as CI's step does.
   const scanner = [{ name: "script-tests", cmd: process.execPath, args: ["--test", "scripts/*.test.mjs"] }];
   if (scan) scanner.push({ name: "scan", cmd: process.execPath, args: ["scripts/scan.mjs"] });
@@ -118,16 +168,24 @@ function checks({ scan }) {
       ],
       scanner,
     ],
-    [rustTests],
+    ...(rustTests.length > 0 ? [[rustTests]] : []),
   ];
 }
 
 async function main() {
-  const scan = !process.argv.includes("--no-scan");
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.error) {
+    console.error(`check: ${parsed.error}; nothing ran`);
+    process.exitCode = parsed.code;
+    return;
+  }
   const logDir = join(root, "target", "check-logs");
   const started = Date.now();
-  const results = await runPhases(checks({ scan }), logDir);
+  const results = await runPhases(checks(parsed), logDir);
   console.log(summary(results));
+  if (parsed.areas !== null) {
+    console.log(`short check (${[...parsed.areas].join(",")}): the release build and the other areas' tests run in CI`);
+  }
   console.log(`total ${((Date.now() - started) / 1000).toFixed(0)} s; logs in ${logDir}`);
   process.exitCode = results.every((r) => r.code === 0) ? 0 : 1;
 }

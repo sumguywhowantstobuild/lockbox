@@ -33,6 +33,17 @@ Run the same checks CI runs, in one command that runs them side by side where it
 node scripts/check.mjs
 ```
 
+For a change that touches one part, a short check runs every format, lint, UI and script check and the security scan,
+then only the Rust tests of the parts named: `engine` (`crates/lockbox-core`), `desktop` (`crates/lockbox-desktop`,
+with the bridge tests in the release configuration) or `ui` (no Rust tests); join two with a comma, as in `desktop,ui`.
+`engine` and `desktop` together, `all`, or `--short` alone run every check. The short check always runs the scan, so
+it refuses `--no-scan`. When unsure which tests cover a change, run every check. CI runs the full set, the release
+build included, on every push.
+
+```
+node scripts/check.mjs --short ui
+```
+
 The same checks one by one:
 
 ```

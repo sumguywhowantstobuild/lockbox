@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { runPhases, summary } from "./check.mjs";
+import { checks, parseArgs, runPhases, summary } from "./check.mjs";
 
 /** A step that prints `name` and exits with `code`, after `ms`. */
 const step = (name, code = 0, ms = 0) => ({
@@ -87,3 +89,119 @@ test("a command that cannot start is a failure, not a crash", () =>
     assert.equal(results[0].code, 127);
     assert.match(readFileSync(join(dir, "missing.log"), "utf8"), /could not start/);
   }));
+
+// The short check by area. Each step is compared as one command line, so a changed word anywhere shows.
+const line = (s) => [s.cmd === process.execPath ? "node" : s.cmd, ...s.args].join(" ");
+const phaseLines = (phases, i) => (phases[i] ?? []).flat().map(line);
+const firstPhase = [
+  "cargo fmt --all --check",
+  "cargo clippy --locked --all-targets -- -D warnings",
+  "cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings",
+  "cargo test --locked --no-run",
+  "npm run lint",
+  "npm run build",
+  "npm test",
+  "node scripts/shipped-page-check.mjs",
+  "node --test scripts/*.test.mjs",
+  "node scripts/scan.mjs",
+];
+const fullSecondPhase = [
+  "cargo test --locked --no-fail-fast",
+  "cargo test -p lockbox-core --locked --no-fail-fast --features test-internals --test *",
+  "cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc",
+  "cargo build -p lockbox-desktop --release --locked --features custom-protocol",
+];
+const planFor = (...argv) => {
+  const parsed = parseArgs(argv);
+  assert.equal(parsed.error, undefined, `refused: ${parsed.error}`);
+  return checks(parsed);
+};
+
+test("short_check_always_runs_the_whole_first_phase", () => {
+  for (const argv of [[], ["--short", "engine"], ["--short", "desktop"], ["--short", "ui"], ["--short", "desktop,ui"],
+    ["--short", "engine,ui"], ["--short"], ["--short", "all"]]) {
+    assert.deepEqual(phaseLines(planFor(...argv), 0), firstPhase, argv.join(" "));
+  }
+});
+
+test("short_engine_runs_the_engine_tests_only", () => {
+  assert.deepEqual(phaseLines(planFor("--short", "engine"), 1), [
+    "cargo test -p lockbox-core --locked --no-fail-fast",
+    "cargo test -p lockbox-core --locked --no-fail-fast --features test-internals --test *",
+  ]);
+});
+
+test("short_desktop_runs_the_desktop_and_bridge_tests", () => {
+  const second = phaseLines(planFor("--short", "desktop"), 1);
+  assert.deepEqual(second, [
+    "cargo test -p lockbox-desktop --locked --no-fail-fast",
+    "cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc",
+  ]);
+  assert.ok(!second.some((l) => l.includes("--release")), "the release build runs on GitHub, not in the short check");
+});
+
+test("short_desktop_and_ui_or_engine_and_ui_add_nothing_for_the_ui", () => {
+  assert.deepEqual(phaseLines(planFor("--short", "desktop,ui"), 1), phaseLines(planFor("--short", "desktop"), 1));
+  assert.deepEqual(phaseLines(planFor("--short", "engine,ui"), 1), phaseLines(planFor("--short", "engine"), 1));
+});
+
+test("short_ui_runs_no_rust_tests", () => {
+  assert.deepEqual(phaseLines(planFor("--short", "ui"), 1), []);
+});
+
+test("engine_and_desktop_together_is_the_full_set", () => {
+  const full = planFor();
+  for (const areas of ["engine,desktop", "engine,desktop,ui", "desktop,engine"]) {
+    assert.deepEqual(planFor("--short", areas), full, areas);
+  }
+});
+
+test("short_with_no_area_or_all_is_the_full_set", () => {
+  const full = planFor();
+  assert.deepEqual(phaseLines(full, 1), fullSecondPhase);
+  assert.deepEqual(planFor("--short"), full);
+  assert.deepEqual(planFor("--short", "all"), full);
+});
+
+test("the desktop bridge step is CI's bridge step exactly", () => {
+  const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  // The step's `run:` is the first one after its name; found nowhere, the comparison would prove nothing.
+  const match = ci.match(/- name: Bridge tests \(release configuration\)\n(?:[ \t]+(?!- |run: ).*\n)*?[ \t]+run: (.+)/);
+  assert.ok(match, "ci.yml has no 'Bridge tests (release configuration)' step with a run line");
+  const bridge = phaseLines(planFor("--short", "desktop"), 1).find((l) => l.includes("custom-protocol"));
+  assert.equal(bridge, match[1].trim());
+  assert.ok(phaseLines(planFor(), 1).includes(match[1].trim()), "the full set runs the same bridge step");
+});
+
+test("short_refuses_no_scan", () => {
+  for (const argv of [["--short", "ui", "--no-scan"], ["--no-scan", "--short"]]) {
+    const parsed = parseArgs(argv);
+    assert.equal(parsed.code, 2, argv.join(" "));
+    assert.match(parsed.error, /scan/);
+  }
+});
+
+test("a refused command line exits 2 with its reason and runs nothing", () => {
+  const script = fileURLToPath(new URL("./check.mjs", import.meta.url));
+  const run = spawnSync(process.execPath, [script, "--short", "ui", "--no-scan"], { encoding: "utf8" });
+  assert.equal(run.status, 2);
+  assert.match(run.stderr, /always runs the scan.*nothing ran/);
+  // No step's verdict and no summary: the run stopped before the first phase.
+  assert.equal(run.stdout, "");
+});
+
+test("unknown_area_is_refused", () => {
+  for (const argv of [["--short", "docs"], ["--short", "ui,"], ["--short", "UI"], ["ui"], ["--quick"],
+    ["--short", "ui", "engine"], ["--short", "--short"]]) {
+    const parsed = parseArgs(argv);
+    assert.equal(parsed.code, 2, argv.join(" "));
+    assert.ok(parsed.error, argv.join(" "));
+  }
+});
+
+test("the full set without the scan still parses as before", () => {
+  const parsed = parseArgs(["--no-scan"]);
+  assert.equal(parsed.error, undefined);
+  assert.ok(!phaseLines(checks(parsed), 0).includes("node scripts/scan.mjs"));
+  assert.deepEqual(phaseLines(checks(parsed), 1), fullSecondPhase);
+});
