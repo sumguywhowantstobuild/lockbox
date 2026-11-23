@@ -454,13 +454,15 @@ test("a_locked_vault_is_named_in_a_line", async () => {
 
 test("an_empty_vault_says_so", async () => {
   const { container } = await unlocked([{ id: 7, name: "My vault", items: [] }]);
-  // 21g: what it is, and what to do first. Nothing here leads to a screen a later task builds.
+  // 21g: what it is, and what to do first.
   expect(screen.getByText("Your vault is empty")).toBeTruthy();
-  expect(screen.getByText("What to do first: add a login, or a key, a note or a file.")).toBeTruthy();
-  // Add is right there too (Task 12): the three kinds that can be made, and nothing from a later task.
+  expect(
+    screen.getByText("What to do first: add a login, or a key, a note or a file. Once it holds things you'd miss, make a backup from Settings."),
+  ).toBeTruthy();
+  // Add is right there too (Task 12): the kinds that can be made, and Help (`Help.test.tsx`).
   const list = screen.getByRole("main").querySelector<HTMLElement>(".lscroll");
   expect(list).not.toBeNull();
-  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
+  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env", "Help"]);
   await expectNoAxe(container);
 });
 

@@ -3,6 +3,7 @@ import * as api from "../api";
 import { focusBack } from "../focus";
 import { messageFor, messageText } from "../messages";
 import { Button } from "../parts/Button";
+import { ChevronRightIcon } from "../parts/Icon";
 import { Panel } from "../parts/Panel";
 import { Select, type SelectChoice } from "../parts/Select";
 import { keyCodeOf, shortcutText } from "../shortcut";
@@ -17,6 +18,7 @@ import {
   openBackup,
   openChangePassword,
   openExport,
+  openHelp,
   openNewRecoveryKey,
   openOlderCopies,
   saveSettings,
@@ -142,7 +144,7 @@ function said(error: unknown, names?: { shortcut?: string }): string {
  * made and goes back to what is saved if the shell refuses it, with the refusal in words under its row. Saves go one after another (the store
  * sees to that), each as the whole settings. Start with Windows is not one of the settings the file keeps: it is the shell's own entry, read
  * when the panel opens and changed by its own command. "This vault" has Back up, Export, Change password and New recovery key (a writable vault only) and Test a
- * backup (any vault, a read-only one too); Help is not here until the plan that builds it.
+ * backup (any vault, a read-only one too). "About" has the version and Help, which opens the guide in the browser.
  */
 export function SettingsPanel({ data }: { data: SessionData }) {
   const id = useId();
@@ -593,6 +595,17 @@ export function SettingsPanel({ data }: { data: SessionData }) {
         <h3 className="gh">About</h3>
         <div className="grp">
           <SettingsRow label="Lockbox">{version === null ? null : <span className="fval">{`Version ${version}`}</span>}</SettingsRow>
+          {/* The guide, in the browser (task 36). Every vault has it, a read-only one too: it opens nothing of the vault's. */}
+          <button
+            type="button"
+            className="srow sgo"
+            onClick={() => {
+              void openHelp(data.session);
+            }}
+          >
+            <span className="slab">Help</span>
+            <ChevronRightIcon />
+          </button>
         </div>
       </section>
     </Panel>

@@ -435,12 +435,11 @@ test("word_secret_kept_from_notes", async () => {
 test("empty_vault_says_so_with_add", async () => {
   const { container } = await unlocked([{ id: 7, name: "My vault", items: [] }]);
   expect(screen.getByText("Your vault is empty")).toBeTruthy();
-  // 3e: Add is right there, as drawn: the four kinds, then a whole .env after "or". Help comes with its own task.
+  // 3e: Add is right there, as drawn: the four kinds, then a whole .env after "or"; Help is the link under them (21g, `Help.test.tsx`).
   const list = screen.getByRole("main").querySelector<HTMLElement>(".lscroll");
   expect(list).not.toBeNull();
   const buttons = within(list as HTMLElement).getAllByRole("button");
-  expect(buttons.map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
-  expect(within(list as HTMLElement).queryByRole("button", { name: /^Help/ })).toBeNull();
+  expect(buttons.map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env", "Help"]);
   await expectNoAxe(container);
 
   // A button opens that kind's form, and closing it gives focus back to the button that opened it.
@@ -498,7 +497,8 @@ test("a_vault_opened_from_a_backup_has_no_add_in_its_empty_places", async () => 
   await unlocked([{ id: 7, name: "My vault", readOnly: true, items: [] }]);
   expect(screen.getByText("Your vault is empty")).toBeTruthy();
   const list = screen.getByRole("main").querySelector<HTMLElement>(".lscroll") as HTMLElement;
-  expect(within(list).queryAllByRole("button")).toEqual([]);
+  // Nothing can be added to it, and Help (which writes nothing) is still there.
+  expect(within(list).getAllByRole("button").map((button) => button.textContent)).toEqual(["Help"]);
   expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
 });
 

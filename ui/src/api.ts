@@ -1368,6 +1368,14 @@ export function openUrl(vault: SessionRef, id: string, index: number): Promise<T
   return call<null>("open_url", { session: vault.session, generation: vault.generation, id, index });
 }
 
+/**
+ * Help (task 36): asks the shell to open the guide in the default browser. It takes nothing and sends nothing: the address is the shell's
+ * own, so the page never holds, builds or sends one. Refused with the shell's usual `io` refusal when the browser can't be started.
+ */
+export function openHelp(): Promise<null> {
+  return callPlain<null>("open_help", {});
+}
+
 /** What 2c's Clear now found: Lockbox's copy taken off, nothing of Lockbox's left to clear, or the clipboard held by another app. */
 export type ClearNow = "cleared" | "gone" | "busy";
 

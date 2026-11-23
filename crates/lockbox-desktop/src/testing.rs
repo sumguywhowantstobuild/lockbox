@@ -1292,6 +1292,8 @@ pub struct FakeLauncher {
     opened_folders: Mutex<Vec<PathBuf>>,
     /// Run once, inside the next launch, before it returns.
     on_open: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The next link launch fails.
+    fail_next_url: AtomicBool,
     /// The next file launch fails.
     fail_next_file: AtomicBool,
     /// The next folder launch fails.
@@ -1322,6 +1324,11 @@ impl FakeLauncher {
         *lock(&self.on_open) = Some(hook);
     }
 
+    /// The next link launch fails, as when no browser can be started. The link is still recorded, as it was handed over.
+    pub fn fail_next_url(&self) {
+        self.fail_next_url.store(true, Ordering::SeqCst);
+    }
+
     /// The next file launch fails, as when no app takes the file's type.
     pub fn fail_next_file(&self) {
         self.fail_next_file.store(true, Ordering::SeqCst);
@@ -1339,7 +1346,10 @@ impl Launcher for FakeLauncher {
     fn open_url(&self, url: &tauri::Url) -> io::Result<()> {
         lock(&self.opened).push(url.as_str().to_owned());
         self.run_hook();
-        Ok(())
+        match self.fail_next_url.swap(false, Ordering::SeqCst) {
+            true => Err(io::Error::other("no browser")),
+            false => Ok(()),
+        }
     }
 
     fn open_file(&self, file: &Path) -> io::Result<()> {

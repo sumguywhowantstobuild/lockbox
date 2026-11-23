@@ -265,6 +265,11 @@ export const MESSAGES: Record<string, Words> = {
     title: "Lockbox couldn't reach that folder or file.",
     body: "Check that the drive is connected, then try again.",
   },
+  // Help: the launcher could not start the browser (task 36). The design gives no words for it; they are the session's, for Ariel to change.
+  "core:io:guide": {
+    title: "Lockbox couldn't open the guide.",
+    body: "Check that this PC has a web browser, then try again.",
+  },
 };
 
 /**
@@ -329,6 +334,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "folder changed",
   "folder is open",
   "folder name",
+  "guide",
   "header changed on disk",
   "id",
   "idle time",

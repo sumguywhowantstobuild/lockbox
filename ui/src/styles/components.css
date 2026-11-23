@@ -1655,6 +1655,16 @@
   color: var(--ink2);
 }
 
+/* 21g's sentence wraps at the drawn measure, not the card's whole width. */
+.le-first {
+  max-width: 420px;
+}
+
+/* Help, a link on a line of its own under the buttons: its own padding is taken back so its words line up with the ones above (as in the first-use rows). */
+.lempty .le-a .lnk {
+  margin-left: -8px;
+}
+
 /* Add, right there in an empty vault or folder: a button for each kind that can be made. */
 .le-a {
   display: flex;
@@ -3471,6 +3481,35 @@
 
 .srow + .srow {
   border-top: 1px solid var(--line);
+}
+
+/* A row that goes somewhere else (31a's Help): the whole row is the button, its arrow at the right. It lies on the card, so its tints are
+   measured on the card (`tokens.contrast.test.ts`). */
+.srow.sgo {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.srow.sgo:last-child {
+  border-radius: 0 0 16px 16px;
+}
+
+.srow.sgo:hover {
+  background: var(--hov);
+}
+
+.srow.sgo:active {
+  background: var(--prs);
+}
+
+.srow.sgo .i {
+  color: var(--ink2);
 }
 
 .swords {

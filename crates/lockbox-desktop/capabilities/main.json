@@ -110,6 +110,7 @@
     "allow-get-settings",
     "allow-set-settings",
     "allow-get-startup",
-    "allow-set-startup"
+    "allow-set-startup",
+    "allow-open-help"
   ]
 }

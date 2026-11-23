@@ -107,4 +107,5 @@ pub const COMMANDS: &[&str] = &[
     "set_settings",
     "get_startup",
     "set_startup",
+    "open_help",
 ];

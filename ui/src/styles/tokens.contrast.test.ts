@@ -614,6 +614,14 @@ test("text_and_state_pairs_hold_in_light_and_dark", () => {
       check("test result values on the card", c("--ink"), card, 4.5);
       check("test result sentence on the panel", c("--ink2"), paper, 4.5);
       check("damaged backup sentence on the panel", c("--danger"), paper, 4.5);
+
+      // Help (task 36). The empty vault's link lies on the card (`.lempty`), and Settings' row is a button on the group's card: the words at
+      // rest, hovered and pressed (the tint laid over the card), and the arrow at the end of the row, which says it goes somewhere else.
+      for (const [state, fill] of [["rest", card], ["hover", over(c("--hov"), card)], ["pressed", over(c("--prs"), card)]] as const) {
+        check(`empty vault's Help link words, ${state}`, c("--ink"), fill, 4.5);
+        check(`settings Help row words, ${state}`, c("--ink"), fill, 4.5);
+        check(`settings Help row arrow, ${state}`, c("--ink2"), fill, 3);
+      }
     }
   }
 

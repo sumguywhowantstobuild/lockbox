@@ -47,6 +47,11 @@ export function ChevronDownIcon() {
   return <Drawing d="M7 10l5 5 5-5" className="i chev-down" />;
 }
 
+/** A right arrow: a row that goes somewhere else (31a's Help, which opens the guide in the browser). */
+export function ChevronRightIcon() {
+  return <Drawing d="M9 6l6 6-6 6" className="i" />;
+}
+
 /** The up-down mark of a choice list, and after the vault's name (its button opens a menu: drawn "My vault ⌃⌄"). */
 export function ChevronsIcon({ className = "i" }: { className?: string }) {
   return <Drawing d="M8 10l4-4 4 4M8 14l4 4 4-4" className={className} />;

@@ -11,6 +11,7 @@ pub mod env;
 mod export_tests;
 pub mod files;
 mod generator;
+pub mod guide;
 pub mod items;
 mod jobs;
 mod list;
@@ -140,7 +141,8 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         settings::get_settings,
         settings::set_settings,
         settings::get_startup,
-        settings::set_startup
+        settings::set_startup,
+        guide::open_help
     ]
 }
 

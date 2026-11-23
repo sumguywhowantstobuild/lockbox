@@ -4656,6 +4656,31 @@ export async function openSite(session: number, id: string, index: number): Prom
   if (typeof done === "object") set({ ...state, toast: { kind: "failed", session, error: done.failed } });
 }
 
+/** The latest press of Help, and the failure Help itself last put on screen (so a retry takes away that one and no other message). */
+let helpPress = 0;
+let helpFailure: Toast | null = null;
+
+/**
+ * Help (21g, 31a): asks the shell to open the guide. It sends nothing. A refusal is said through `messageFor`, like every refusal (the launcher's own
+ * `io` error has Help's words in the table). It is said only if it is still news: this press is the latest, and the vault it was pressed in is still
+ * open in the generation it was pressed in and is the one on screen. Pressing again takes away Help's own earlier failure, and nothing else.
+ */
+export async function openHelp(session: number): Promise<void> {
+  const generation = sessionOf(session)?.generation;
+  if (generation === undefined) return;
+  helpPress += 1;
+  const press = helpPress;
+  if (helpFailure !== null && state.toast === helpFailure) set({ ...state, toast: null });
+  helpFailure = null;
+  try {
+    await api.openHelp();
+  } catch (error) {
+    if (press !== helpPress || !stillOpen(session, generation) || state.sessions.at(-1)?.session !== session) return;
+    helpFailure = { kind: "failed", session, error };
+    set({ ...state, toast: helpFailure });
+  }
+}
+
 /** What a change the shell writes came to: done, the vault locked meanwhile (nothing to say), or the shell's refusal. */
 type Changed<T> = { done: T } | "stale" | { failed: unknown };
 
@@ -6691,6 +6716,8 @@ export function debugState(): StoreState {
 
 /** For tests: back to a page that has just opened. */
 export function resetStoreForTests(): void {
+  helpPress = 0;
+  helpFailure = null;
   started = undefined;
   noticesStarted = undefined;
   captureStarted = undefined;

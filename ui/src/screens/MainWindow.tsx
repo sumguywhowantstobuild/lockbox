@@ -377,7 +377,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 oldPill={oldPill}
               />
             ) : state === "ready" ? (
-              <Ready>{data.readOnly ? null : <EmptyAdd session={data.session} folder={data.folder} />}</Ready>
+              <Ready session={data.session} writable={!data.readOnly}>{data.readOnly ? null : <EmptyAdd session={data.session} folder={data.folder} />}</Ready>
             ) : state === "empty" ? (
               <div className="grp lempty">
                 <p className="le-t">

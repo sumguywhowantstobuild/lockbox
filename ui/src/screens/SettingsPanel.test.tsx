@@ -744,15 +744,19 @@ test("no_password_links_until_their_plans", async () => {
     "Export",
     "Change password",
     "New recovery key",
+    // 31a's Help, from task 36 (`Help.test.tsx`).
+    "Help",
   ]);
 });
 
-test("help_link_hidden_until_the_address_exists", async () => {
+// Help is a button that asks the shell, never a link the page could point anywhere: it has no address of its own, and nothing is asked until it is pressed.
+test("help_in_settings_is_a_button_and_asks_for_nothing_until_pressed", async () => {
   const { panel } = await opened();
   expect(within(panel).queryByRole("link")).toBeNull();
-  expect(within(panel).queryByText(/help/i)).toBeNull();
-  expect(within(panel).queryByRole("button", { name: /help/i })).toBeNull();
+  expect(within(panel).getByRole("button", { name: "Help" })).toBeTruthy();
+  expect(panel.querySelector("a[href]")).toBeNull();
   expect(commands("open_url")).toEqual([]);
+  expect(commands("open_help")).toEqual([]);
 });
 
 test("shows_the_saved_shortcut_and_changing_it_listens_for_the_next_keys", async () => {

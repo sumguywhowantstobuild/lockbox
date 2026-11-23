@@ -58,6 +58,13 @@ test("in_high_contrast_the_filled_answer_stands_out_and_card_rows_have_one_line_
   expect(declarationsFor(HIGH_CONTRAST, ".app .dgr + .dgr")).toMatch(/border-top: 1px solid CanvasText/);
 });
 
+// 21g as drawn: the empty vault's sentence wraps at about 420px (not the card's whole width), and the Help link lines up with the words above it
+// (its own 8px of padding is taken back, as in the first-use rows).
+test("the_empty_vaults_sentence_has_the_drawn_measure_and_its_help_link_lines_up", () => {
+  expect(declarationsFor(COMPONENTS, ".le-first")).toMatch(/max-width: 420px/);
+  expect(declarationsFor(COMPONENTS, ".lempty .le-a .lnk")).toMatch(/margin-left: -8px/);
+});
+
 test("a_card_rows_focus_ring_stays_inside_it", () => {
   expect(declarationsFor(COMPONENTS, ".dgr:focus-visible")).toMatch(/outline-offset: -2px/);
 });

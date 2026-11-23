@@ -543,6 +543,10 @@ export interface FakeShell {
   openedFolders: string[];
   /** The next `show_output_in_explorer` fails to open the folder (`{ code: "io" }`). */
   explorerFailsNext(): void;
+  /** How many times `open_help` reached the shell, which opens only its own fixed address (the body is `{}`, nothing else). */
+  helpOpened: () => number;
+  /** The next `open_help` fails to start the browser (the shell's usual `io` refusal, which carries no address). */
+  helpFailsNext(): void;
   /** How many summary handles the shell holds now (one per finished Save all files, until `close_output`, a lock or `dropParkedChoices`). */
   heldOutputs(): number;
   /**
@@ -1384,6 +1388,8 @@ export function installFakeShell(
   let goneNames: string[] = [];
   let changeAfterPlan = false;
   let explorerFails = false;
+  let helpCount = 0;
+  let helpFails = false;
   // Test a backup (Task 4): the backups the shell holds paths of, by choice (the password each was made with is the shell's own), the next pick, what a test
   // finds, a damage to find once, the holds a test can put on the picker and on the test, and the backup the last `backup_vault` wrote.
   const testHeld = new Map<string, { name: string; size: number; password: string }>();
@@ -2064,6 +2070,16 @@ export function installFakeShell(
       case "app_info":
         exactly(args ?? {}, []);
         return { version: "1.2.3" };
+      case "open_help":
+        // The shell takes no input at all: any field is a malformed request, and nothing is opened.
+        // The body is checked as sent: `null` is no `{}` (the real command refuses it too), so a call without one counts no launch.
+        exactly(args, []);
+        helpCount += 1;
+        if (helpFails) {
+          helpFails = false;
+          return refuse({ code: "core", kind: "io", what: "guide" });
+        }
+        return null;
       case "unlock_vault": {
         const { vault: row, password } = exactly(args, ["vault", "password"]);
         const vault = vaultRefOf(row);
@@ -4776,6 +4792,10 @@ export function installFakeShell(
     openedFolders,
     explorerFailsNext: () => {
       explorerFails = true;
+    },
+    helpOpened: () => helpCount,
+    helpFailsNext: () => {
+      helpFails = true;
     },
     heldOutputs: () => outputs.size,
     holdFiles: () => {
