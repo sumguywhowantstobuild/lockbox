@@ -66,3 +66,17 @@ because one of them reads the built style sheet (it fails, saying to build first
 
 `node scripts/scan.mjs` runs the security scanners (secrets, risky code, vulnerable dependencies); see
 [docs/SETUP.md](docs/SETUP.md#security-scan) for what it reports and how to handle a finding.
+
+## Running the app against a test state
+A local end-to-end or hands-on run must never touch your own Lockbox data. `e2e/lib/state.mjs` renames the app's
+state folders, its web-view folders and the default vault folder aside (each gets a sentinel file naming the run), puts a
+test state in their place, and renames everything back when the run ends. It finds those folders through Windows
+(and refuses if `%LOCALAPPDATA%`, `%APPDATA%` or `%USERPROFILE%` say something else), refuses while any
+`lockbox-desktop.exe` runs, refuses a folder that is a link or junction, and runs one command at a time. If a run is cut short (a crash, a closed terminal), put
+everything back from any later terminal with `node e2e/lib/state.mjs recover`; `node e2e/lib/state.mjs status` says
+what is set aside. A run started from a packaged app (one installed as an MSIX package) swaps that app's private copy
+of AppData, which is the copy the app under test opens too, and `status` names it. The swap's journal and lock sit
+beside the default vault folder in your profile, which every terminal sees alike; a terminal that cannot see that
+private copy refuses to recover and says to run recover from a terminal inside the app. Recovery only renames folders
+back and deletes only its own sentinel and journal files. Its tests
+(`scripts/state-swap.test.mjs`) run on temporary folders only and are part of `node --test "scripts/*.test.mjs"`.
