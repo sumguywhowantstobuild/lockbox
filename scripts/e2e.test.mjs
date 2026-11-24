@@ -696,6 +696,35 @@ test("tree_of_ignores_a_reused_parent_and_a_reused_id", () => {
   assert.deepEqual(app.treeOf([{ pid: 100, created: FILE_TIME(11) }], snapshot), [], "a root whose creation time differs is not ours");
 });
 
+test("stop_tree_keeps_stopping_a_child_whose_parent_was_stopped_first", () => {
+  // app 100 -> web view 101 -> renderer 102; 200 is a bystander. The first stop of 101 fails; 100 and 102 stop.
+  let alive = [proc(100, 4, 10), proc(101, 100, 11), proc(102, 101, 12), proc(200, 4, 5)];
+  let refusals = 1;
+  const kill = (pid) => {
+    if (pid === 101 && refusals > 0) {
+      refusals -= 1;
+      return;
+    }
+    alive = alive.filter((p) => p.pid !== pid);
+  };
+  const outcome = app.stopTree([{ pid: 100, created: FILE_TIME(10) }], { snapshot: () => alive, kill });
+  assert.deepEqual(outcome.remaining, [], "nothing of the tree is reported left");
+  assert.deepEqual(alive.map((p) => p.pid), [200], "the orphaned child was stopped on the next pass; the bystander still runs");
+  assert.deepEqual(outcome.killed.filter((pid) => pid === 101).length, 2, "the child was tried again after its parent was gone");
+});
+
+test("stop_tree_does_not_follow_a_reused_id_of_a_stopped_child", () => {
+  // 101 is stopped; its process ID is then reused by an unrelated program created later, with no parent in the tree.
+  let alive = [proc(100, 4, 10), proc(101, 100, 11)];
+  const kill = (pid) => {
+    alive = alive.filter((p) => p.pid !== pid);
+    if (pid === 100) alive.push(proc(101, 4, 50, "someone-else.exe"));
+  };
+  const outcome = app.stopTree([{ pid: 100, created: FILE_TIME(10) }], { snapshot: () => alive, kill });
+  assert.deepEqual(outcome.remaining, []);
+  assert.equal(alive.some((p) => p.pid === 101 && p.created === FILE_TIME(50)), true, "the program that reused the ID still runs");
+});
+
 test("the_driver_attaches_only_to_the_instance_it_started", () => {
   const driver = { pid: 100, created: FILE_TIME(10) };
   // driver 100 -> edge driver 101 -> app 102 -> web view 103 (debugging port 49700); a second, foreign instance 500 -> 501 on port 49701

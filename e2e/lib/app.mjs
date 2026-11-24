@@ -104,15 +104,19 @@ function killPid(pid) {
 
 /**
  * Stops the processes of `roots` and everything below them, deepest first, by process ID, and looks again until none is
- * left (a process may start another while it is being stopped). Returns `{ killed, remaining }`, both lists of IDs.
+ * left (a process may start another while it is being stopped). Every process found is kept as a root of the later
+ * looks, by ID and creation time, so a child that outlives its stopped parent is still found and a reused ID is not.
+ * Returns `{ killed, remaining }`, both lists of IDs.
  */
 export function stopTree(roots, { snapshot = snapshotProcesses, kill = killPid, rounds = 6 } = {}) {
   const killed = [];
+  const known = new Map(roots.map((root) => [`${root.pid}@${root.created}`, root]));
   let remaining = [];
   for (let round = 0; round < rounds; round += 1) {
-    remaining = treeOf(roots, snapshot());
+    remaining = treeOf([...known.values()], snapshot());
     if (remaining.length === 0) break;
     for (const entry of remaining) {
+      known.set(`${entry.pid}@${entry.created}`, { pid: entry.pid, created: entry.created });
       kill(entry.pid);
       killed.push(entry.pid);
     }
