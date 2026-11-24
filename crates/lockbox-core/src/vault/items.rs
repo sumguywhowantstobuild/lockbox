@@ -434,15 +434,35 @@ impl Vault {
         Ok(members.len())
     }
 
-    /// Items that have been in the trash for more than `days` days. Lists only.
+    /// Items that have been in the trash for `days` days or more (the design's "30 days or more"). Lists only.
     pub fn trash_older_than(&self, days: u32) -> Vec<ItemId> {
-        // String order is time order: Lockbox writes every timestamp in this one fixed UTC format.
-        let cutoff = rfc3339_utc(now_secs().saturating_sub(u64::from(days) * SECS_PER_DAY));
+        self.trash_older_than_at(days, now_secs())
+    }
+
+    /// [`trash_older_than`](Self::trash_older_than) at the clock `now` (seconds), so a test can fix the time.
+    fn trash_older_than_at(&self, days: u32, now: u64) -> Vec<ItemId> {
+        let cutoff = Self::trash_cutoff_at(days, now);
         self.items
             .values()
-            .filter(|i| i.trashed_at.as_deref().is_some_and(|t| t < cutoff.as_str()))
+            .filter(|i| Self::trashed_by(i, &cutoff))
             .map(|i| i.id)
             .collect()
+    }
+
+    /// The moment `days` days before now, in the format every stored timestamp has: fixed once by a call that goes
+    /// by it, so the same cutoff both picks the items and holds each of them again before it is acted on.
+    pub fn trash_cutoff(days: u32) -> String {
+        Self::trash_cutoff_at(days, now_secs())
+    }
+
+    fn trash_cutoff_at(days: u32, now: u64) -> String {
+        rfc3339_utc(now.saturating_sub(u64::from(days) * SECS_PER_DAY))
+    }
+
+    /// Whether `item` is in the trash with a deletion time at or before `cutoff` ("30 days or more"). String order is
+    /// time order: Lockbox writes every timestamp in this one fixed UTC format.
+    pub fn trashed_by(item: &Item, cutoff: &str) -> bool {
+        item.trashed_at.as_deref().is_some_and(|t| t <= cutoff)
     }
 }
 
@@ -996,6 +1016,71 @@ mod tests {
         assert_eq!(vault.items().count(), 3, "listing never removes");
         assert!(vault.get_item(&live).unwrap().trashed_at.is_none());
         assert!(vault.get_item(&old).is_ok());
+    }
+
+    /// "30 days or more" (the design's wording): an item trashed exactly 30 days ago is listed, one a second short of
+    /// it is not, one a second past it is. The clock is fixed, so the seconds are exact.
+    #[test]
+    fn trash_older_than_counts_thirty_days_or_more() {
+        let (_parent, mut vault) = new_vault();
+        let under = vault.new_item(ItemKind::Note, "under", None).unwrap();
+        let at = vault.new_item(ItemKind::Note, "at", None).unwrap();
+        let over = vault.new_item(ItemKind::Note, "over", None).unwrap();
+        let live = vault.new_item(ItemKind::Note, "live", None).unwrap();
+        for id in [&under, &at, &over] {
+            vault.trash_item(id).unwrap();
+        }
+        let now = 1_800_000_000_u64;
+        let thirty = 30 * SECS_PER_DAY;
+        let trashed = |vault: &mut Vault, id: &ItemId, secs: u64| {
+            vault.items.get_mut(id).unwrap().trashed_at = Some(rfc3339_utc(secs));
+        };
+        trashed(&mut vault, &under, now - thirty + 1);
+        trashed(&mut vault, &at, now - thirty);
+        trashed(&mut vault, &over, now - thirty - 1);
+
+        let mut listed = vault.trash_older_than_at(30, now);
+        listed.sort();
+        let mut want = vec![at, over];
+        want.sort();
+        assert_eq!(
+            listed, want,
+            "exactly at and one second over, not one second under"
+        );
+        assert!(!listed.contains(&under) && !listed.contains(&live));
+        // A longer wait leaves all three out, and a shorter one lets the one a second short in.
+        assert!(vault.trash_older_than_at(31, now).is_empty());
+        assert_eq!(vault.trash_older_than_at(29, now).len(), 3);
+        assert_eq!(vault.items().count(), 4, "listing never removes");
+    }
+
+    /// The cutoff one call fixes ("`days` days or more") and the test an item is held to: the same rule as the listing,
+    /// at the second, so a deletion that goes by a cutoff and the list that offered it agree.
+    #[test]
+    fn a_trash_cutoff_is_fixed_once_and_applies_the_or_more_rule() {
+        let (_parent, mut vault) = new_vault();
+        let id = vault.new_item(ItemKind::Note, "n", None).unwrap();
+        vault.trash_item(&id).unwrap();
+        let now = 1_800_000_000_u64;
+        let cutoff = Vault::trash_cutoff_at(30, now);
+        assert_eq!(cutoff, rfc3339_utc(now - 30 * SECS_PER_DAY));
+        let mut item = vault.get_item(&id).unwrap().clone();
+        for (secs, listed) in [
+            (now - 30 * SECS_PER_DAY - 1, true),
+            (now - 30 * SECS_PER_DAY, true),
+            (now - 30 * SECS_PER_DAY + 1, false),
+        ] {
+            item.trashed_at = Some(rfc3339_utc(secs));
+            assert_eq!(Vault::trashed_by(&item, &cutoff), listed, "{secs}");
+            vault.items.insert(id, item.clone());
+            assert_eq!(vault.trash_older_than_at(30, now).contains(&id), listed);
+        }
+        // Not in the trash: never by any cutoff.
+        item.trashed_at = None;
+        assert!(!Vault::trashed_by(&item, &cutoff));
+        assert!(!Vault::trashed_by(&item, "9999-12-31T23:59:59Z"));
+        // The cutoff for the clock now is the one `trash_older_than` uses.
+        assert!(Vault::trash_cutoff(30).as_str() < rfc3339_utc(now_secs()).as_str());
     }
 
     #[test]

@@ -27,6 +27,22 @@ export function focusList(): void {
   }, 0);
 }
 
+/**
+ * [`focusList`](focusList) for a change that may have taken the focused control off the page (the Empty trash button when the Trash
+ * empties), and only then: one turn later, if focus is still on a control the page has, the person has moved on (to the Filter, say,
+ * while the answer was on its way) and focus stays where they put it. A focus that fell to the top of the page, or to something no
+ * longer on it, goes to the list.
+ */
+export function focusListIfLost(): void {
+  window.setTimeout(() => {
+    const now = document.activeElement;
+    const lost = now === null || now === document.body || !now.isConnected;
+    if (!lost) return;
+    const target = document.querySelector<HTMLElement>(".lgroups .rgo") ?? document.querySelector<HTMLElement>("h1.big");
+    target?.focus();
+  }, 0);
+}
+
 /** Focus goes to the control `selector` finds (one turn later, as above), or `fallback` runs when it is not there any more. */
 export function focusButton(selector: string, fallback?: () => void): void {
   window.setTimeout(() => {

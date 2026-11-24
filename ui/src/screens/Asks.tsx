@@ -11,6 +11,8 @@ import {
   dismissShortcutNotice,
   lockThisVault,
   openChangePassword,
+  openLeftover,
+  retryLeftover,
   retryOpenFiles,
   setOutputRecordAside,
   showVaultFolder,
@@ -41,6 +43,9 @@ const DETAILS_DIFFER = "Its name, or other details kept beside your items, don't
 const SPARE_TITLE = "Opened from the backup copy of this vault's details";
 const SPARE_DETAILS = "If you changed this vault's password recently, it may need your previous password.";
 const CHANGE_AGAIN = "Change the password again now that it's open.";
+
+/** Ask 5's list refused by the shell: this opens the banner's words, and the refusal's own words follow. */
+export const LIST_FAILED = "Lockbox couldn't list the leftover files.";
 
 /** The one word that fits one or many. */
 function count(n: number, one: string, many: string): string {
@@ -141,8 +146,8 @@ export function DetailsChangedAsk({ data }: { data: SessionData }) {
 }
 
 /**
- * The banners an unlock raises over the list: Ask 4 (items that can't be read), Ask 5 (leftover files, the count only: the
- * sentences about "these files" and their date and size need the list, which 4B builds, and so does Delete them all),
+ * The banners an unlock raises over the list: Ask 4 (items that can't be read), Ask 5 (leftover files: the count, and See them, which
+ * opens the "Leftover files" view with the design's note, the list and Delete them all; while that view is open the banner steps aside),
  * Ask 9 (opened from the spare details, under its heading; its Change password opens the form for this vault, and the change answers it)
  * and Ask 10 (a cloud folder, with Show in Explorer). Each closes with its button and comes back at the next unlock.
  */
@@ -153,6 +158,7 @@ export function VaultBanners({ data }: { data: SessionData }) {
     closeBanner(session, banner);
   };
   const cloud = asks.cloud;
+  const failedList = !data.readOnly && data.leftover.phase === "failed";
   return (
     <>
       {asks.unreadable > 0 && open("unreadable") ? (
@@ -185,10 +191,40 @@ export function VaultBanners({ data }: { data: SessionData }) {
           ]}
         />
       ) : null}
-      {asks.leftover > 0 && open("leftover") ? (
+      {(asks.leftover > 0 || failedList) && open("leftover") && !data.leftoverView ? (
+        // The count, and See them (the view lists the files, with the design's note and its two buttons). A read-only copy can neither delete nor restore, so it only says the count.
+        // When the shell refused the list, the refusal is said in words with Try again, so files that wait are never hidden by a failure: the words are the session's, for Ariel to change.
         <Notice
-          text={`${String(asks.leftover)} ${count(asks.leftover, "leftover file has no item that uses it.", "leftover files have no item that uses them.")}`}
-          actions={[{ name: "Close", onPress: close("leftover") }]}
+          text={
+            data.leftover.phase === "failed" && !data.readOnly
+              ? `${LIST_FAILED} ${messageText(messageFor(data.leftover.error))}`
+              : `${String(asks.leftover)} ${count(asks.leftover, "leftover file has no item that uses it.", "leftover files have no item that uses them.")}`
+          }
+          actions={[
+            ...(data.readOnly || asks.leftover === 0
+              ? []
+              : [
+                  {
+                    name: "See them",
+                    main: !failedList,
+                    onPress: () => {
+                      openLeftover(session);
+                    },
+                  },
+                ]),
+            ...(failedList
+              ? [
+                  {
+                    name: "Try again",
+                    main: asks.leftover === 0,
+                    onPress: () => {
+                      retryLeftover(session);
+                    },
+                  },
+                ]
+              : []),
+            { name: "Close", onPress: close("leftover") },
+          ]}
         />
       ) : null}
       {asks.spareDetails && open("spare") ? (

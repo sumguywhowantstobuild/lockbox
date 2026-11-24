@@ -42,6 +42,7 @@
     "allow-delete-collection",
     "allow-purge-item",
     "allow-old-trash",
+    "allow-empty-trash",
     "allow-search-all",
     "allow-open-url",
     "allow-list-orphans",
@@ -65,6 +66,8 @@
     "allow-cancel-operation",
     "allow-save-recovery-pdf",
     "allow-save-readable-confirm",
+    "allow-export-csv",
+    "allow-export-repick",
     "allow-list-printers",
     "allow-print-recovery-key",
     "allow-env-read",
@@ -107,6 +110,7 @@
     "allow-get-settings",
     "allow-set-settings",
     "allow-get-startup",
-    "allow-set-startup"
+    "allow-set-startup",
+    "allow-open-help"
   ]
 }

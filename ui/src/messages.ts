@@ -192,6 +192,8 @@ export const MESSAGES: Record<string, Words> = {
   },
   "page:file_copy_expired": { title: "That took too long, so nothing was saved. Press Save a copy again.", body: "" },
   "page:env_file_expired": { title: "That took too long, so nothing was saved. Choose Save as .env file again.", body: "" },
+  // The export's cloud question, left open past the shell's five minutes. The words are the session's, for Ariel to change.
+  "page:export_expired": { title: "That took too long, so nothing was saved. Choose Export again.", body: "" },
   // Save all files: the shell let go of the plan (after its few minutes) before the yes or the start came, or Show in Explorer found its handle gone.
   "page:save_all_expired": { title: "That took too long, so nothing was saved. Choose Save all files again.", body: "" },
   "page:output_expired": { title: "Lockbox can't open that folder now.", body: "Open it from Windows." },
@@ -224,6 +226,14 @@ export const MESSAGES: Record<string, Words> = {
   },
   "core:too_large": { title: "That is too big for Lockbox to keep.", body: "" },
   "core:invalid_input": { title: "Lockbox can't use that.", body: "Check what you entered and try again." },
+  // Delete them all on the leftover files (Ask 5). The files the person was shown are not the files the vault has now (one came, or went), so nothing was
+  // deleted and the list is read again; and an item that can't be read may be the one that uses a file, so nothing is deleted at all while Ask 4 stands. The
+  // words are the session's, for Ariel to change.
+  "core:invalid_input:leftover files changed": { title: "The leftover files changed.", body: "Look at the list again, then delete." },
+  "core:invalid_input:unreadable items": {
+    title: "Some items in this vault can't be read, so Lockbox is keeping these files until that's sorted.",
+    body: "",
+  },
   // A key's name is a variable name, since a `.env` file is where keys go out: the engine refuses any other.
   "core:invalid_input:key name": {
     title: "That isn't a name Lockbox can use for a key.",
@@ -262,6 +272,11 @@ export const MESSAGES: Record<string, Words> = {
   "core:io": {
     title: "Lockbox couldn't reach that folder or file.",
     body: "Check that the drive is connected, then try again.",
+  },
+  // Help: the launcher could not start the browser (task 36). The design gives no words for it; they are the session's, for Ariel to change.
+  "core:io:guide": {
+    title: "Lockbox couldn't open the guide.",
+    body: "Check that this PC has a web browser, then try again.",
   },
 };
 
@@ -327,6 +342,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "folder changed",
   "folder is open",
   "folder name",
+  "guide",
   "header changed on disk",
   "id",
   "idle time",
@@ -342,6 +358,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "key name",
   "key slot",
   "key slots",
+  "leftover files changed",
   "link",
   "link type",
   "network drive",
@@ -392,6 +409,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "state file",
   "state folder",
   "too many before-restore copies",
+  "unreadable items",
   "urls",
   "use delete_collection",
   "vault already here",

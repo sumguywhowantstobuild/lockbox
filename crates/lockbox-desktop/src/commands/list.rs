@@ -38,6 +38,7 @@ pub const COMMANDS: &[&str] = &[
     "delete_collection",
     "purge_item",
     "old_trash",
+    "empty_trash",
     "search_all",
     "open_url",
     "list_orphans",
@@ -61,6 +62,8 @@ pub const COMMANDS: &[&str] = &[
     "cancel_operation",
     "save_recovery_pdf",
     "save_readable_confirm",
+    "export_csv",
+    "export_repick",
     "list_printers",
     "print_recovery_key",
     "env_read",
@@ -104,4 +107,5 @@ pub const COMMANDS: &[&str] = &[
     "set_settings",
     "get_startup",
     "set_startup",
+    "open_help",
 ];

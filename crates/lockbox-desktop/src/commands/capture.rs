@@ -250,7 +250,8 @@ impl Shell {
 
     /// Hands the copied text to a paste: the same rows `env_read` gives, the text waiting with them for `env_save` (and its
     /// clear of the clipboard), and the slot empty. Refused as `env_read` is; `NotFound` for an id that is not the slot's and
-    /// for a slot with no value. A refusal leaves the text in the slot.
+    /// for a slot with no value; [`CAPTURE_VAULT`] for a session the copy is not handed to, as `capture_save`. A refusal
+    /// leaves the text in the slot.
     pub fn capture_env(
         &self,
         session: SessionId,
@@ -258,7 +259,10 @@ impl Shell {
         capture_id: &str,
     ) -> ShellResult<Tagged<EnvRows>> {
         self.live_writable(session, generation)?;
-        let (CaptureState::Value, Some(text)) = self.capture.snapshot(capture_id)? else {
+        let (CaptureState::Value, Some(text)) = self
+            .capture
+            .snapshot_bound(capture_id, session, generation)?
+        else {
             return Err(ShellError::NotFound);
         };
         let rows = self.env_read(session, generation, text)?;
@@ -1772,6 +1776,7 @@ mod tests {
         // More keys than a paste takes: the engine's refusal, and the text is still in the slot.
         let many: String = (0..=MAX_KEYS).map(|i| format!("K{i}=v\n")).collect();
         let id = press(&ts, &many);
+        ts.shell.capture_choose(s, g, &id).unwrap();
         assert_eq!(ts.shell.capture_env(s, g, &id).err(), Some(TOO_MANY_KEYS));
         assert_eq!(state_of(&ts), Some(CaptureState::Value));
         assert_eq!(parked(&ts), 0);
@@ -1780,9 +1785,11 @@ mod tests {
         assert!(ts.clipboard.user_copy_non_text());
         ts.shell.save_shortcut_pressed();
         let id = ts.shell.capture_state().unwrap().capture_id;
+        ts.shell.capture_choose(s, g, &id).unwrap();
         assert_eq!(ts.shell.capture_env(s, g, &id).err(), NOT_FOUND);
         press(&ts, &"a".repeat(MAX_ITEM_JSON + 1));
         let id = ts.shell.capture_state().unwrap().capture_id;
+        ts.shell.capture_choose(s, g, &id).unwrap();
         assert_eq!(ts.shell.capture_env(s, g, &id).err(), NOT_FOUND);
 
         let (r, gr) = read_only_session(&ts);
@@ -1791,6 +1798,34 @@ mod tests {
         assert_eq!(state_of(&ts), Some(CaptureState::Value));
         assert_eq!(parked(&ts), 0);
         assert_clean(&BAD_ROWS, "A");
+    }
+
+    /// `capture_env` takes the copy only into the vault it is handed to, as `capture_save` does: nothing chosen, or another
+    /// vault chosen, is `capture_vault`, with nothing parked and the slot kept (the generation half of the same check,
+    /// `snapshot_bound`, is `capture.rs`'s own test).
+    #[test]
+    fn capture_env_goes_only_to_the_vault_the_copy_is_handed_to() {
+        let ts = TestShell::new();
+        let a = ts.open_vault("Family");
+        let b = ts.open_vault("Work");
+        let id = press(&ts, "A=1\n");
+        assert_eq!(
+            ts.shell.capture_env(a.0, a.1, &id).err(),
+            Some(CAPTURE_VAULT),
+            "nothing chosen yet"
+        );
+        ts.shell.capture_choose(b.0, b.1, &id).unwrap();
+        assert_eq!(
+            ts.shell.capture_env(a.0, a.1, &id).err(),
+            Some(CAPTURE_VAULT),
+            "another vault was chosen"
+        );
+        assert_eq!(state_of(&ts), Some(CaptureState::Value));
+        assert_eq!(parked(&ts), 0);
+        let rows = ts.shell.capture_env(b.0, b.1, &id).unwrap();
+        assert_eq!((rows.session, rows.generation), b);
+        assert_eq!(parked(&ts), 1);
+        assert_eq!(state_of(&ts), None);
     }
 
     // ---- the requests and the answers

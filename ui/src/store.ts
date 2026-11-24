@@ -9,7 +9,7 @@
 // session it was for is gone.
 import { useSyncExternalStore } from "react";
 import * as api from "./api";
-import { batchHasFocus, focusList, takeJobFocus } from "./focus";
+import { batchHasFocus, focusList, focusListIfLost, takeJobFocus } from "./focus";
 import { resetCloseAskForTests, startCloseAsk } from "./closeAsk";
 import { awayMessage, partialWords, refusalWords, wasClean } from "./addFilesWords";
 import { spokenEnd } from "./saveAllWords";
@@ -88,7 +88,23 @@ export type Tool =
   /** Change password (27a, 27b), for this vault, from Settings, Ask 9 or Ask 2. Where it is, is `SessionData.passwordChange`; what is typed is the form's own state. */
   | { kind: "change_password" }
   /** A new recovery key (29a), for this vault, from Settings or Ask 2. Where it is, is `SessionData.newKey`; what is typed is the form's own state. */
-  | { kind: "new_recovery_key" };
+  | { kind: "new_recovery_key" }
+  /** Export to a readable file (34a to 34c), for this vault, from Settings. Where it is, is `SessionData.exportFlow`; what is typed is the form's own state. */
+  | { kind: "export" };
+
+/**
+ * Where an export of this vault is (34a, the cloud question of 34b, and 34c after it), or `null` when none is begun. Like `NewKeyFlow` it lives in the
+ * session's record, so it belongs to its vault: a switch leaves it as it is, a lock takes it, and an answer that comes for one vault lands in that vault's
+ * record. The vault's password is never here: what is typed is the form's own state, wiped as it is sent. The file's own folder is only text to say, and
+ * is never sent back.
+ */
+export type ExportFlow =
+  /** The form. `sending`: the password is out and has no answer yet (Windows' dialog is open, or the file is being written), so a second press does nothing. `problem`: what the last try was refused with. */
+  | { phase: "ask"; sending: boolean; problem: PasswordProblem | null }
+  /** The cloud question: the folder picked is synced to the cloud. `token` is the choice the shell parked, for Continue and Pick another folder; Cancel lets it go. */
+  | { phase: "cloud"; token: string; sending: boolean }
+  /** The file was written: 34c. `folder` is where, to say; `summary` holds counts and titles, never a value; `output` is the shell's handle for Show in Explorer (a token, never a path). */
+  | { phase: "done"; folder: string; summary: api.ExportSummary; output: string };
 
 /**
  * Where a new recovery key the person asked for is (29a, and 29c after it), or `null` when none is begun. Like `PasswordChange` it lives in the session's
@@ -560,7 +576,32 @@ export interface SessionData {
   passwordChange: PasswordChange | null;
   /** A new recovery key, begun from Settings or Ask 2 and not put away: see {@link NewKeyFlow}. The key it makes is `recovery`. */
   newKey: NewKeyFlow | null;
+  /** An export of this vault, begun from Settings and not put away: see {@link ExportFlow}. */
+  exportFlow: ExportFlow | null;
+  /**
+   * The ids the shell last said have been in the Trash 30 days or more (`old_trash`), for the Trash view's own group. Empty until it has
+   * answered and for a read-only vault, which is never asked. The list is only a way to group rows: an id no longer in the Trash is ignored.
+   */
+  oldTrash: readonly string[];
+  /**
+   * The leftover files (Ask 5): see {@link LeftoverList}. Read at the unlock (so files left from an earlier one are still said), when the view
+   * opens, after a delete and on Try again. A read-only vault is never asked.
+   */
+  leftover: LeftoverList;
+  /** The "Leftover files" view is on screen instead of the list (then `folder` is `null` and `trash` is false). Never for a read-only vault. */
+  leftoverView: boolean;
 }
+
+/**
+ * What the page knows of the vault's leftover files (Ask 5), the three states of a listing kept apart: being read (`loading`, with the files an
+ * earlier read gave, which are shown but are not a list to delete from), read (`ready`: the current list, and the only one a delete is offered
+ * on) and refused (`failed`, with the shell's refusal, to say in words with a Try again; no rows are kept, since they may be out of date).
+ * Only a hex id, a size and a time each ever crosses: never a name or a path.
+ */
+export type LeftoverList =
+  | { phase: "loading"; files: readonly api.OrphanFile[] | null }
+  | { phase: "ready"; files: readonly api.OrphanFile[] }
+  | { phase: "failed"; error: unknown };
 
 /** One batch of files, from the pick to its end. The paths stay in Rust: the page holds names and sizes for display, and the choice (a token). */
 export interface AddFilesFlow {
@@ -992,6 +1033,8 @@ function publishUnlock(
   if (unfinished && !details) void makeNewKey(record.session);
   // The 30-day reminder (Ask 1) is read beside the list, never ahead of it. A read-only copy has none to make.
   if (!info.read_only) void readBackupDue(record.session, record.generation);
+  // The leftover files (Ask 5) are listed at every unlock, not only the one whose cleanup moved them: files left from an earlier unlock still wait.
+  if (!info.read_only) void loadLeftover(record.session);
   // A copy that waited on the lock screen (8b) opens its box in this vault, and is handed to it.
   seatCapture();
   return loadItems(record);
@@ -1039,6 +1082,10 @@ function newRecord(
     operations: [],
     passwordChange: null,
     newKey: null,
+    exportFlow: null,
+    oldTrash: [],
+    leftover: { phase: "loading", files: null },
+    leftoverView: false,
   };
 }
 
@@ -1316,8 +1363,23 @@ async function printCommand<T>(session: number, run: (vault: api.SessionRef) => 
   const entry = sessionOf(session);
   if (entry === undefined) return "stale";
   const { generation } = entry;
+  let request: Promise<T>;
   try {
-    const answer = await run({ session, generation });
+    request = run({ session, generation });
+  } catch (error) {
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the refusal is passed on as it came
+    request = Promise.reject(error);
+  }
+  return settled(session, generation, request);
+}
+
+/**
+ * What `printCommand` does with a command already sent in `generation`: its answer, or `"stale"` for a lock (see above); any other refusal is thrown. It takes
+ * the promise itself, so a caller that sent a secret holds no closure over it while the answer is awaited.
+ */
+async function settled<T>(session: number, generation: number, request: Promise<T>): Promise<T | "stale"> {
+  try {
+    const answer = await request;
     return stillOpen(session, generation) ? answer : "stale";
   } catch (error) {
     // A stale answer says the bridge has seen a later generation than this call began in, as a `locked` refusal does: a session the
@@ -1334,7 +1396,7 @@ async function printCommand<T>(session: number, run: (vault: api.SessionRef) => 
  * five minutes as well as at a lock, so it says nothing of a lock. A real lock is heard as the lock event, or as the `locked` refusal of
  * the next command, and takes the session then. Carries only the words' key, never anything the shell sent.
  */
-function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired"): Error {
+function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired" | "export_expired"): Error {
   return Object.assign(new Error(kind), { code: "page", kind });
 }
 
@@ -1345,7 +1407,7 @@ function expiredQuestion(kind: "key_pdf_expired" | "env_file_expired" | "file_co
  * off the page and comes back as `"stale"`: nothing is said. A session that is still live had only an old question: the page's refusal
  * (`expiredQuestion`) is thrown to say so. If the lookup itself fails another way, that failure is thrown to be said, and the session stays.
  */
-async function whyNotFound(session: number, kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired"): Promise<"stale"> {
+async function whyNotFound(session: number, kind: "key_pdf_expired" | "env_file_expired" | "file_copy_expired" | "export_expired"): Promise<"stale"> {
   const seen = await printCommand(session, (vault) => api.listItems(vault));
   if (seen === "stale") return "stale";
   throw expiredQuestion(kind);
@@ -1454,6 +1516,8 @@ async function loadItems(record: SessionData, options: { quiet?: boolean } = {})
       };
       return orphaned ? { ...endReveals(next), openItem: null } : next;
     });
+    // The Trash view groups what is old: read again whenever its list is.
+    if (sessionOf(session)?.trash === true) void loadOldTrash(session);
     return "opened";
   } catch (error) {
     // A lock that overtook the question: the bridge says so, and so does the shell ("locked"). If the page never heard
@@ -1464,6 +1528,118 @@ async function loadItems(record: SessionData, options: { quiet?: boolean } = {})
     update(session, (entry) => ({ ...entry, loadError: error }));
     return "opened";
   }
+}
+
+/** How long an item has been in the Trash when the Trash view lists it as old, in days (the design's "30 days or more"). */
+export const OLD_TRASH_DAYS = 30;
+
+/** The number of the latest `old_trash` asked of each session: an older answer that comes after a newer one is dropped. */
+const oldTrashRuns = new Map<number, number>();
+
+/**
+ * Asks the shell which items have been in the Trash 30 days or more and keeps their ids for the Trash view's group. A read-only vault is not
+ * asked (it can delete nothing). The group is only a way to sort rows, so a refusal says nothing: the Trash stays one list. A lock drops the
+ * answer.
+ */
+async function loadOldTrash(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const { generation } = entry;
+  const run = (oldTrashRuns.get(session) ?? 0) + 1;
+  oldTrashRuns.set(session, run);
+  try {
+    const answer = await api.oldTrash({ session, generation }, OLD_TRASH_DAYS);
+    if (!stillOpen(session, generation) || oldTrashRuns.get(session) !== run) return;
+    update(session, (current) => ({ ...current, oldTrash: answer.data }));
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+  }
+}
+
+/** The number of the latest `list_orphans` asked of each session: an older answer that comes after a newer one is dropped. */
+const leftoverRuns = new Map<number, number>();
+
+/**
+ * Asks the shell for the vault's leftover files (Ask 5) and keeps what it said, success and refusal apart (`LeftoverList`): while it asks, the list is
+ * `loading` (the earlier files stay in sight, but are no list to delete from); a good answer makes it `ready`, with the banner's count; a refusal makes
+ * it `failed`, which the banner and the view say in words with a Try again. With no file left the view closes, since there is nothing to show. A read-only
+ * vault is not asked (it has no quarantine to list or delete). A lock drops the answer, and an older answer that comes after a newer one is dropped
+ * (`"stale"`).
+ */
+async function loadLeftover(session: number): Promise<"ready" | "stale" | { failed: unknown }> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return "stale";
+  const { generation } = entry;
+  const run = (leftoverRuns.get(session) ?? 0) + 1;
+  leftoverRuns.set(session, run);
+  update(session, (current) => ({ ...current, leftover: { phase: "loading", files: current.leftover.phase === "failed" ? null : current.leftover.files } }));
+  try {
+    const answer = await api.listOrphans({ session, generation });
+    if (!stillOpen(session, generation) || leftoverRuns.get(session) !== run) return "stale";
+    const files = answer.data;
+    update(session, (current) => ({
+      ...current,
+      leftover: { phase: "ready", files },
+      leftoverView: current.leftoverView && files.length > 0,
+      asks: { ...current.asks, leftover: files.length },
+    }));
+    return "ready";
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation) || leftoverRuns.get(session) !== run) return "stale";
+    update(session, (current) => ({ ...current, leftover: { phase: "failed", error } }));
+    return { failed: error };
+  }
+}
+
+/** Try again, on a leftover list the shell refused: the list is read again. */
+export function retryLeftover(session: number): void {
+  void loadLeftover(session);
+}
+
+/**
+ * The banner's "See them": the "Leftover files" view takes the list's place (as the Trash view does), and the list is read again for it. Not in a
+ * read-only vault, which has none to show or delete, whatever is asked.
+ */
+export function openLeftover(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  update(session, (current) => ({ ...endReveals(current), folder: null, trash: false, leftoverView: true, openItem: null, tool: null }));
+  void loadLeftover(session);
+}
+
+/**
+ * Delete them all, once the person said yes in the question: the shell deletes the leftover files for good, but only if `files` (the ids the question was
+ * asked over, which the page showed) are exactly the files it lists now: a file that came or went since is refused with "The leftover files changed", nothing is
+ * deleted and the list is read again. A vault with an item that can't be read refuses too. The question belongs to the session and generation it was opened
+ * for: a vault that has since locked or been unlocked again, or a read-only one, sends nothing. The list is read again, so a view with nothing left closes, and
+ * what is said follows: how many went, or the refusal (a disk error partway leaves what could not be deleted listed; a list the shell then refused is said as
+ * that refusal, never as success). A lock meanwhile says nothing.
+ */
+export async function deleteLeftover(session: number, generation: number, files: readonly string[]): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly || entry.generation !== generation) return;
+  let deleted: number;
+  try {
+    deleted = (await api.deleteOrphans({ session, generation }, files)).data;
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+    // Some may have gone before a disk refusal, and the list may have changed under a refusal that says so: the list is read again.
+    sayFailure(session, error);
+    await loadLeftover(session);
+    return;
+  }
+  if (!stillOpen(session, generation)) return;
+  const read = await loadLeftover(session);
+  if (!stillOpen(session, generation)) return;
+  if (typeof read === "object") {
+    sayFailure(session, read.failed);
+    return;
+  }
+  say(session, deleted === 0 ? "No leftover files were left to delete" : `${deleted === 1 ? "1 leftover file" : `${String(deleted)} leftover files`} deleted for good`);
+  // The button the question came from goes with the view: if focus fell with it, it goes to the page's heading, unless the person has moved on.
+  if (state.sessions.at(-1)?.session === session) focusListIfLost();
 }
 
 /**
@@ -1826,8 +2002,9 @@ export async function selectItem(session: number, id: string | null, opened: Ope
   update(session, (current) => ({
     ...endReveals(current),
     tool: null,
-    // An item of the list is never opened in the Trash view: a result of the search takes the person out of it.
+    // An item of the list is never opened in the Trash view: a result of the search takes the person out of it. The same for the leftover files' view.
     trash: false,
+    leftoverView: false,
     openItem: { id, detail: opened.detail ?? null, error: null, saved, focusEdit },
   }));
   const run = nextDetailRun(session);
@@ -2288,6 +2465,185 @@ export async function makeNewRecoveryKey(session: number, currentPassword: strin
     if ((issueOf(current.recovery) ?? 0) >= issue) return closed;
     return { ...closed, recovery: { phase: "show", key: words, issue, unfinished: false, voluntary: true, missed: false } };
   });
+}
+
+// ---- Export to a readable file (Plan 4D Task 2: 34a to 34c) ----
+//
+// Asked for from inside a writable vault, with the vault's password checked in the same call. The form (34a) is the vault's own, as the new recovery key's is: what is
+// typed lives in the form and is wiped as it is sent. Rust opens Windows' save dialog, refuses a vault's folder and Lockbox's own, and writes the CSV; the page hears
+// the folder to say, counts, and the titles of the rows whose values have line breaks, and nothing else of the vault. A cloud-synced folder asks first (34b) by a
+// token the shell parked: Continue and Pick another folder send that token alone, never the password, and Cancel lets it go. The file's folder is never sent back.
+
+/** Whether an export's command is out and has no answer yet, so the panel can't be put away and a second press sends nothing. */
+function exportIsOut(flow: ExportFlow | null): boolean {
+  return flow !== null && flow.phase !== "done" && flow.sending;
+}
+
+/** Opens the Export form (34a) in the vault's panel. Not in a read-only copy, which the page never exports. An export that is out keeps its place. */
+export function openExport(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  const out = exportIsOut(entry.exportFlow);
+  // An end that was left on the record has its handle put away as the form replaces it.
+  if (entry.exportFlow?.phase === "done") putAwayOutput(entry.exportFlow.output);
+  update(session, (current) => ({
+    ...endReveals(current),
+    openItem: null,
+    trash: false,
+    tool: { kind: "export" },
+    exportFlow: out ? current.exportFlow : { phase: "ask", sending: false, problem: null },
+  }));
+}
+
+/** Closes the panel (Cancel, Close panel, Escape, or Done after 34c). What was typed goes with it, and a cloud question's token. An export that is out goes on. */
+export function closeExport(session: number): void {
+  const flow = sessionOf(session)?.exportFlow;
+  // The end (34c) holds the shell's handle for Show in Explorer: it is put away with the panel.
+  if (flow?.phase === "done") putAwayOutput(flow.output);
+  update(session, (current) => ({
+    ...current,
+    tool: current.tool?.kind === "export" ? null : current.tool,
+    exportFlow: exportIsOut(current.exportFlow) ? current.exportFlow : null,
+  }));
+}
+
+/** The person has begun to mend the form: what the last refusal said goes. */
+export function clearExportProblem(session: number): void {
+  update(session, (current) =>
+    current.exportFlow?.phase === "ask" && current.exportFlow.problem !== null ? { ...current, exportFlow: { ...current.exportFlow, problem: null } } : current,
+  );
+}
+
+/** Escape on the cloud question: the token is let go and nothing is written. The form is back, empty. A question whose answer is out stays. */
+export function cancelExportQuestion(session: number): void {
+  update(session, (current) =>
+    current.exportFlow?.phase === "cloud" && !current.exportFlow.sending
+      ? { ...current, exportFlow: { phase: "ask", sending: false, problem: null } }
+      : current,
+  );
+}
+
+/** What the shell's answer to an export command leaves for the panel: the form again (a closed dialog), the cloud question, or 34c. */
+function exportStep(outcome: api.Outcome<api.SavedView>): ExportFlow {
+  if (outcome === "Dismissed") return { phase: "ask", sending: false, problem: null };
+  if ("Done" in outcome) {
+    const { export: summary, output } = outcome.Done;
+    // An export is always answered with its summary and its handle for Show in Explorer; one without is not an answer the page knows, and says nothing of what was written.
+    if (summary === undefined || output === undefined) return { phase: "ask", sending: false, problem: { field: "form", error: UNEXPECTED } };
+    return { phase: "done", folder: outcome.Done.folder, summary, output };
+  }
+  if (typeof outcome.Confirm === "object" && "CloudFolder" in outcome.Confirm) {
+    return { phase: "cloud", token: outcome.Confirm.CloudFolder.token, sending: false };
+  }
+  return { phase: "ask", sending: false, problem: { field: "form", error: UNEXPECTED } };
+}
+
+/**
+ * Sends one of the export's three commands for a session whose flow is in phase `from`, and lands the answer in that vault's record:
+ *
+ * - **Dismissed, a cloud folder, or the file written:** the form again, the cloud question, or 34c (`exportStep`).
+ * - **A lock** (the bridge's stale answer, a `locked` refusal, or a lock epoch that began before the answer landed): nothing is said and nothing is shown; the vault goes.
+ * - **A refusal:** said on the form, with the field empty and the shell having written nothing: the wrong password on its own field, any other (a vault's folder, the
+ *   state folder, a busy vault) on the form. A cloud question's yes or Pick another folder that finds nothing parked (`not_found`) asks the shell about the session
+ *   first (`whyNotFound`): a lock says nothing, a live session had only an old question.
+ */
+function beginExport(session: number, from: "ask" | "cloud"): { generation: number; epoch: number } | null {
+  const entry = sessionOf(session);
+  const flow = entry?.exportFlow;
+  if (entry === undefined || entry.readOnly || flow === null || flow === undefined || flow.phase === "done" || flow.phase !== from || flow.sending) return null;
+  update(session, (current) => ({
+    ...current,
+    exportFlow: flow.phase === "ask" ? { phase: "ask", sending: true, problem: null } : { ...flow, sending: true },
+  }));
+  // The lock epoch the export is sent in: a lock that starts before the reply lands can reach the page before this vault's own `locked` event.
+  return { generation: entry.generation, epoch: currentLockEpoch() };
+}
+
+/**
+ * Lands the answer of an export command that is already sent (by `beginExport`'s caller, in one call, so no closure over a typed password is left to wait for the
+ * answer): the lock epoch is checked before either a result or a refusal is handled, and again after the lookup a cloud question's `not_found` makes.
+ *
+ * - **Dismissed, a cloud folder, or the file written:** the form again, the cloud question, or 34c (`exportStep`).
+ * - **A lock** (the bridge's stale answer, a `locked` refusal, or a lock epoch that began before the answer landed, whether it is a result or a refusal): nothing is
+ *   said and nothing is shown; the vault goes.
+ * - **A refusal:** said on the form, with the field empty and the shell having written nothing: the wrong password on its own field, any other (a vault's folder, the
+ *   state folder, a busy vault) on the form. A cloud question's yes or Pick another folder that finds nothing parked (`not_found`) asks the shell about the session
+ *   first (`whyNotFound`): a lock says nothing, a live session had only an old question.
+ */
+async function landExport(
+  session: number,
+  begun: { generation: number; epoch: number },
+  from: "ask" | "cloud",
+  request: Promise<api.Tagged<api.Outcome<api.SavedView>>>,
+): Promise<void> {
+  const { generation, epoch } = begun;
+  let answer;
+  let refused = false;
+  let failure: unknown;
+  try {
+    answer = await settled(session, generation, request);
+  } catch (error) {
+    refused = true;
+    failure = error;
+  }
+  // A lock epoch that began before the answer landed beats whatever it says, a refusal as much as a result.
+  if (currentLockEpoch() !== epoch) {
+    dropIfStillOpen(session, generation);
+    return;
+  }
+  if (refused) {
+    if (from === "cloud" && refusedWith(failure, "not_found")) {
+      try {
+        // A lock leaves nothing to say; a live session had only a question that waited too long.
+        await whyNotFound(session, "export_expired");
+        return;
+      } catch (found) {
+        failure = found;
+      }
+      if (currentLockEpoch() !== epoch) {
+        dropIfStillOpen(session, generation);
+        return;
+      }
+    }
+    if (!stillOpen(session, generation)) return;
+    const wrong = refusedWith(failure, "core") && (failure as { kind?: unknown }).kind === "wrong_password";
+    const problem: PasswordProblem = wrong ? { field: "current", error: WRONG_CURRENT } : { field: "form", error: failure };
+    update(session, (current) => ({ ...current, exportFlow: { phase: "ask", sending: false, problem } }));
+    return;
+  }
+  if (answer === undefined || answer === "stale") return;
+  const next = exportStep(answer.data);
+  update(session, (current) => ({ ...current, exportFlow: next }));
+}
+
+/**
+ * Exports the vault (34a's "Choose where it goes"): the password is sent to the shell in this one call and is held by nothing here afterwards: no closure, retry or
+ * callback is left behind, only the promise of the answer is awaited. The session is the one the form was opened in. A second press while an export is out sends
+ * nothing.
+ */
+export function exportVault(session: number, password: string): Promise<void> {
+  const begun = beginExport(session, "ask");
+  if (begun === null) return Promise.resolve();
+  const request = api.exportVault({ session, generation: begun.generation }, password);
+  return landExport(session, begun, "ask", request);
+}
+
+/** The cloud question's Continue: the shell goes on with the folder it parked, by its token. No password is sent. */
+export function continueExport(session: number): Promise<void> {
+  const flow = sessionOf(session)?.exportFlow;
+  if (flow?.phase !== "cloud") return Promise.resolve();
+  const begun = beginExport(session, "cloud");
+  if (begun === null) return Promise.resolve();
+  return landExport(session, begun, "cloud", api.saveReadableConfirm(flow.token));
+}
+
+/** The cloud question's Pick another folder: the shell lets that folder go and opens its dialog afresh, by the token alone. No password is sent. */
+export function pickAnotherExportFolder(session: number): Promise<void> {
+  const flow = sessionOf(session)?.exportFlow;
+  if (flow?.phase !== "cloud") return Promise.resolve();
+  const begun = beginExport(session, "cloud");
+  if (begun === null) return Promise.resolve();
+  return landExport(session, begun, "cloud", api.exportRepick(flow.token));
 }
 
 // ---- Back up a vault (Plan 4B Task 3: 22a to 22d, Ask 1 and Ask 2) ----
@@ -4256,12 +4612,13 @@ async function saveThen(
 
 /** Shows a folder's items (`null`: all items), and closes the panel. */
 export function selectFolder(session: number, folder: string | null): void {
-  update(session, (entry) => ({ ...endReveals(entry), folder, trash: false, openItem: null }));
+  update(session, (entry) => ({ ...endReveals(entry), folder, trash: false, leftoverView: false, openItem: null }));
 }
 
 /** Shows the Trash view in place of the list, and closes the panel and any form (the Trash has nothing to add). */
 export function openTrash(session: number): void {
-  update(session, (entry) => ({ ...endReveals(entry), folder: null, trash: true, openItem: null, tool: null }));
+  update(session, (entry) => ({ ...endReveals(entry), folder: null, trash: true, leftoverView: false, openItem: null, tool: null }));
+  void loadOldTrash(session);
 }
 
 /**
@@ -4411,6 +4768,31 @@ async function openAndTell(session: number, id: string, index: number): Promise<
 export async function openSite(session: number, id: string, index: number): Promise<void> {
   const done = await openAndTell(session, id, index);
   if (typeof done === "object") set({ ...state, toast: { kind: "failed", session, error: done.failed } });
+}
+
+/** The latest press of Help, and the failure Help itself last put on screen (so a retry takes away that one and no other message). */
+let helpPress = 0;
+let helpFailure: Toast | null = null;
+
+/**
+ * Help (21g, 31a): asks the shell to open the guide. It sends nothing. A refusal is said through `messageFor`, like every refusal (the launcher's own
+ * `io` error has Help's words in the table). It is said only if it is still news: this press is the latest, and the vault it was pressed in is still
+ * open in the generation it was pressed in and is the one on screen. Pressing again takes away Help's own earlier failure, and nothing else.
+ */
+export async function openHelp(session: number): Promise<void> {
+  const generation = sessionOf(session)?.generation;
+  if (generation === undefined) return;
+  helpPress += 1;
+  const press = helpPress;
+  if (helpFailure !== null && state.toast === helpFailure) set({ ...state, toast: null });
+  helpFailure = null;
+  try {
+    await api.openHelp();
+  } catch (error) {
+    if (press !== helpPress || !stillOpen(session, generation) || state.sessions.at(-1)?.session !== session) return;
+    helpFailure = { kind: "failed", session, error };
+    set({ ...state, toast: helpFailure });
+  }
 }
 
 /** What a change the shell writes came to: done, the vault locked meanwhile (nothing to say), or the shell's refusal. */
@@ -5239,6 +5621,41 @@ export async function showSavedFolder(session: number): Promise<void> {
   }
 }
 
+/**
+ * Show in Explorer on an export's end (34c), by the handle the export's answer gave (no path comes to the page). Any refusal says to open the folder from
+ * Windows (the file is unprotected and the person is looking for it), after two checks: a handle the shell has let go of may be news of a lock the page
+ * missed, so the session is asked about first (`list_items`, as a cloud question's `not_found` does): a locked one goes from the page and nothing is
+ * said. And a refusal that comes after the end was put away, or replaced by another export's, says nothing.
+ */
+export async function showExportedFolder(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.exportFlow;
+  if (entry === undefined || flow?.phase !== "done") return;
+  const { output } = flow;
+  const { generation } = entry;
+  // The end that asked is still on screen for this vault: the same generation, and the same handle.
+  const stillOurs = () => {
+    const now = sessionOf(session);
+    return now?.generation === generation && now.exportFlow?.phase === "done" && now.exportFlow.output === output;
+  };
+  try {
+    await api.showOutputInExplorer(output);
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+    if (!stillOurs()) return;
+    let refusal: unknown = { code: "page", kind: "output_expired" };
+    if (refusedWith(error, "choice_expired")) {
+      try {
+        if ((await printCommand(session, (vault) => api.listItems(vault))) === "stale") return;
+      } catch (lookup) {
+        refusal = lookup;
+      }
+      if (!stillOurs()) return;
+    }
+    sayFailure(session, refusal);
+  }
+}
+
 /** Open on a file result of the search: as the panel's, and the search steps aside once it worked. A program file is asked over the search. */
 export async function openFileFromSearch(session: number, id: string, file: FileView, confirmed = false): Promise<void> {
   const origin = searchOrigin();
@@ -5335,6 +5752,55 @@ export async function purgeTrashed(session: number, id: string): Promise<void> {
   if (stillThere) update(session, (current) => ({ ...endReveals(current), openItem: null }));
   say(session, "Deleted for good");
   if (stillThere) focusList();
+}
+
+/**
+ * Empty trash, once the person said yes in the question (32b): everything in this vault's Trash goes for good, one item at a time in Rust,
+ * which reads the Trash at the call (the page sends no item). The question belongs to the session and generation it was opened for: a
+ * vault that has since locked or been unlocked again, or a read-only one, sends nothing. The list is read again, a panel whose item went
+ * closes, and what is said follows what is left in the refreshed Trash: "Trash emptied" when nothing is, else how many went and how many
+ * remain. A lock meanwhile says nothing; a refusal (a disk error partway, a busy vault) is said as a message, and the list shows what is
+ * left. `expected` is the count the question said: when the Trash was another size at the call nothing was deleted, the page says so in a
+ * plain message (no alarm), reads the old group again, and answers `"changed"` so the question can be asked again with the new count.
+ * With `olderThanDays` (the old group's "Delete these N permanently", 32a: 30) only what has been in the Trash that many days or more goes.
+ */
+export async function emptyTrash(
+  session: number,
+  generation: number,
+  expected: number,
+  olderThanDays?: number,
+): Promise<"done" | "changed" | "stale"> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly || entry.generation !== generation) return "stale";
+  const done = await change(session, (vault) => api.emptyTrash(vault, expected, olderThanDays));
+  if (done === "stale") return "stale";
+  if ("failed" in done) {
+    sayFailure(session, done.failed);
+    return "done";
+  }
+  const outcome = done.done.data;
+  if (typeof outcome !== "object" || !("Done" in outcome)) {
+    sayFailure(session, UNEXPECTED);
+    return "done";
+  }
+  const { purged, trash_changed: changed } = outcome.Done;
+  if (changed) {
+    // The list was read again by `change`; the old group is read again too, so the new question has the new count.
+    await loadOldTrash(session);
+    if (!stillOpen(session, generation)) return "stale";
+    say(session, "The Trash changed, so nothing was deleted. Check the new count and answer again.");
+    return "changed";
+  }
+  const left = (sessionOf(session)?.items ?? []).filter((item) => item.trashed).length;
+  if (purged === 0) {
+    say(session, olderThanDays !== undefined ? "Nothing old was left to delete" : left === 0 ? "Nothing was left in the Trash" : `Nothing was deleted. ${String(left)} still in the Trash.`);
+  } else {
+    say(session, left === 0 ? "Trash emptied" : `${String(purged)} deleted for good. ${String(left)} still in the Trash.`);
+  }
+  // The button the question came from may be gone with the Trash: if focus fell with it, it goes to the list, unless the person has moved
+  // to another vault; focus the person put elsewhere meanwhile stays.
+  if (state.sessions.at(-1)?.session === session && sessionOf(session)?.trash === true) focusListIfLost();
+  return "done";
 }
 
 /** What making a folder came to: its id, a lock meanwhile (nothing to say), or the shell's refusal to say under the box. */
@@ -6133,6 +6599,15 @@ export type CaptureEnvResult = "opened" | "stale" | "gone" | { failed: unknown }
  * closed meanwhile (Cancel while the shell was reading), the panel does not open and the values are let go as Cancel would. A refusal is said in the box.
  */
 export async function captureAsEnv(session: number, id: string, folder: string): Promise<CaptureEnvResult> {
+  // The shell takes the copy only into the vault it is handed to, as Save: a hand-over that is out is waited for, and a box whose choice is not this vault
+  // (the hand-over is settled again) gets the shell's own refusal, with nothing asked.
+  if (handingOver(id) && !(await handedOver(id))) return "gone";
+  const capture = state.capture;
+  if (capture?.id !== id) return "gone";
+  if (capture.chosen !== session) {
+    seatCapture();
+    return { failed: NOT_HANDED_OVER };
+  }
   const entry = sessionOf(session);
   if (entry === undefined || entry.readOnly) return "stale";
   const { generation } = entry;
@@ -6156,6 +6631,12 @@ export async function captureAsEnv(session: number, id: string, folder: string):
   } catch (error) {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    if (refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "capture vault") {
+      // As Save: the shell holds the copy for another vault than the box's choice, so the hand-over is sent again and the refusal is said.
+      chooseSent = null;
+      seatCapture();
+      return { failed: error };
+    }
     if (refusedWith(error, "not_found")) {
       if (state.capture?.id === id) endCapture(false);
       return "gone";
@@ -6399,6 +6880,8 @@ export function debugState(): StoreState {
 
 /** For tests: back to a page that has just opened. */
 export function resetStoreForTests(): void {
+  helpPress = 0;
+  helpFailure = null;
   started = undefined;
   noticesStarted = undefined;
   captureStarted = undefined;

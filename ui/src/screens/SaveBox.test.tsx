@@ -1000,6 +1000,45 @@ test("env_keys_offers_save_as_separate_keys", async () => {
   expect(within(panel).queryByRole("button", { name: "Save as separate keys" })).toBeNull();
 });
 
+test("save_as_separate_keys_waits_for_the_hand_over_that_is_out", async () => {
+  await startUnlocked();
+  shell.setClipboard(ENV_TEXT);
+  const release = shell.holdCaptureChoose();
+  await press({ text: ENV_TEXT });
+  const panel = await boxPanel();
+  fireEvent.click(within(panel).getByRole("button", { name: "Save as separate keys" }));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  // The shell takes the copy only into the vault it is handed to: nothing is asked until the hand-over is done.
+  expect(sent("capture_env")).toEqual([]);
+  release();
+  const paste = await screen.findByRole("complementary", { name: "Paste a .env" });
+  expect(sent("capture_env")).toHaveLength(1);
+  expect(within(paste).getByRole("heading", { level: 3, name: "3 keys found" })).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("save_as_separate_keys_refused_as_not_handed_over_hands_over_again", async () => {
+  await startUnlocked();
+  shell.setClipboard(ENV_TEXT);
+  await press({ text: ENV_TEXT });
+  const panel = await boxPanel();
+  await waitFor(() => {
+    expect(sent("capture_choose")).toHaveLength(1);
+  });
+  shell.refuseNext("capture_env", CAPTURE_VAULT);
+  fireEvent.click(within(panel).getByRole("button", { name: "Save as separate keys" }));
+  // Said as Save's is; the copy waits, and the hand-over is sent again, so the next press goes through.
+  expect((await within(panel).findByRole("alert")).textContent).toBe("That vault wasn't ready for the save. Press Save again.");
+  expect(shell.captureSlot()).not.toBeNull();
+  await waitFor(() => {
+    expect(sent("capture_choose")).toHaveLength(2);
+  });
+  fireEvent.click(within(panel).getByRole("button", { name: "Save as separate keys" }));
+  await screen.findByRole("complementary", { name: "Paste a .env" });
+});
+
 test("save_as_separate_keys_opens_the_paste_panel_on_the_rows", async () => {
   const { container } = await startUnlocked();
   shell.setClipboard(ENV_TEXT);

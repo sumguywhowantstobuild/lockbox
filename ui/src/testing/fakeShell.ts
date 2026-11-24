@@ -79,8 +79,17 @@ export interface FakeVault {
   cloud?: "OneDrive" | "GoogleDrive" | "Dropbox" | "Other";
   /** Items that can't be read: reported as `skipped_damaged` at unlock and as `damaged` in the item list. */
   unreadable?: number;
-  /** Files no item uses, moved aside by the unlock's cleanup (`orphans_quarantined`). */
+  /**
+   * Files no item uses, moved aside by the unlock's cleanup (`orphans_quarantined`), and listed by `list_orphans` while they wait: with no `orphans`
+   * given, each is made up (an id, a size, a time at noon UTC on a March day of 2026). `delete_orphans` takes them all away.
+   */
   leftover?: number;
+  /**
+   * The leftover files themselves (`list_orphans`'s answer), when a test needs their own sizes and times. They wait in the vault whatever `leftover`
+   * says: the unlock's cleanup counts only the files it moved aside just then, and files left from an earlier unlock are still listed. A file with
+   * `used` is a copy an item still attaches: it waits in the quarantine for the next unlock, and is neither listed nor deleted.
+   */
+  orphans?: { file_id: string; length: number; stored: number; used?: boolean }[];
   /** A newer Lockbox made this vault: unlock is refused as `unsupported_version`. */
   newer?: boolean;
   /** A long change holds the vault past the short wait: a search reports it in `busy` and gives none of its items. */
@@ -221,6 +230,32 @@ export function sampleItems(): FakeItem[] {
   ];
 }
 
+/** What an export says it wrote (`ExportSummary` in `views.rs`): counts and titles, never a value. */
+export interface FakeExport {
+  items: number;
+  left_out_files: number;
+  line_breaks: string[];
+  /** The vault's damaged items (the same count the item list's `damaged` shows), which aren't in the file. */
+  unreadable: number;
+}
+
+/**
+ * What the shell's export works out from a vault (the frozen connection): the rows are the live logins, notes and keys (not the trashed, not the ones being deleted
+ * for good); `left_out_files` counts every stored file on a live item, a file item's and any other item's alike; `line_breaks` names the rows, in order, whose
+ * password, key value or notes hold a CR or an LF; `unreadable` is the vault's damaged items.
+ */
+function exportSummary(items: FakeItem[], unreadable: number): FakeExport {
+  const live = items.filter((item) => !(item.trashed ?? false) && !(item.purging ?? false));
+  const rows = live.filter((item) => item.kind === "login" || item.kind === "note" || item.kind === "key");
+  const broken = (text: string | undefined) => text !== undefined && /[\r\n]/.test(text);
+  return {
+    items: rows.length,
+    left_out_files: live.reduce((sum, item) => sum + (item.attachments?.length ?? 0), 0),
+    line_breaks: rows.filter((row) => broken(row.password) || broken(row.value) || broken(row.notes)).map((row) => row.title),
+    unreadable,
+  };
+}
+
 /**
  * What the shell's `ItemSummary.site` holds (`views.rs`): the host of a login's first website and nothing else of the
  * address, or null when there is none, it does not parse, or it is not an `http` or `https` one.
@@ -318,10 +353,12 @@ export interface FakeShell {
   holdStartNewList(): () => void;
   /** The folders a recovery key PDF was saved in, in order (a PDF the shell never wrote is not here). */
   pdfs: string[];
-  /** The next Save as PDF, or Save as .env file, is closed without a choice. */
+  /** The next Save as PDF, Save as .env file, or export's dialog (`export_csv`, `export_repick`) is closed without a choice. */
   dismissPdfNext(): void;
-  /** The next Save as PDF, or Save as .env file, finds a cloud-synced folder and asks first. Each call is one more question. */
+  /** The next Save as PDF, Save as .env file, or export's dialog finds a cloud-synced folder and asks first. Each call is one more question. */
   cloudPdfNext(): void;
+  /** What each export that was written said it held (`export_csv`, or its cloud question's yes): a refusal, a closed dialog or a question not yet answered is not here. */
+  exports: FakeExport[];
   /** The next Save as PDF or Print is refused with this. */
   refusePrintNext(error: object): void;
   /** Holds every print command's answer, and a `.env` file's, until `release` is called (the PDF is still being made, the job is on its way). */
@@ -402,8 +439,8 @@ export interface FakeShell {
    * writes it, and the answer is read later, so a lock in between leaves an answer tagged with the generation from before.
    */
   holdUpdate(): () => void;
-  /** The next `cmd` sent is refused with `error` (once), before anything else is done for it. */
-  refuseNext(cmd: string, error: object): void;
+  /** The next `cmd` sent is refused with `error` (once, or the next `times` sent), before anything else is done for it. */
+  refuseNext(cmd: string, error: object, times?: number): void;
   /**
    * Holds every `reveal_password` answer until `release` is called: the value is read when the command arrives, as the
    * shell reads it, and the answer comes later, so the person can open another item or lock in between.
@@ -419,7 +456,7 @@ export interface FakeShell {
    */
   holdNewItem(): () => void;
   /**
-   * Holds every answer of `trash_item`, `restore_item`, `delete_collection` and `purge_item` until `release` is called: the
+   * Holds every answer of `trash_item`, `restore_item`, `delete_collection`, `purge_item` and `empty_trash` until `release` is called: the
    * change is made when the command arrives, as the shell writes it, and the answer is read later, so a lock or another click in
    * between leaves an answer tagged with the generation from before.
    */
@@ -515,7 +552,11 @@ export interface FakeShell {
   openedFolders: string[];
   /** The next `show_output_in_explorer` fails to open the folder (`{ code: "io" }`). */
   explorerFailsNext(): void;
-  /** How many summary handles the shell holds now (one per finished Save all files, until `close_output`, a lock or `dropParkedChoices`). */
+  /** How many times `open_help` reached the shell, which opens only its own fixed address (the body is `{}`, nothing else). */
+  helpOpened: () => number;
+  /** The next `open_help` fails to start the browser (the shell's usual `io` refusal, which carries no address). */
+  helpFailsNext(): void;
+  /** How many summary handles the shell holds now (one per finished Save all files or export, until `close_output`, a lock or `dropParkedChoices`). */
   heldOutputs(): number;
   /**
    * Holds every stored-file command's answer until `release` is called, as a big file would: `lockbox://busy` says the vault is
@@ -1154,6 +1195,24 @@ function linesOf(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
 
+/** The files in a vault's quarantine: the ones a test gave, or `leftover` made-up ones (a March 2026 day each, noon UTC, one more MB each). */
+function quarantined(vault: FakeVault): { file_id: string; length: number; stored: number; used?: boolean }[] {
+  if (vault.orphans !== undefined) return vault.orphans;
+  const noon = Date.UTC(2026, 2, 12, 12, 0, 0) / 1000;
+  return Array.from({ length: vault.leftover ?? 0 }, (_, n) => ({
+    file_id: (n + 1).toString(16).padStart(32, "a"),
+    length: (n + 1) * 1_048_576,
+    stored: noon + n * 86_400,
+  }));
+}
+
+/** The leftover files the shell lists and may delete: the quarantined ones no item uses, with nothing else of them than their id, size and time. */
+function leftoverFiles(vault: FakeVault): { file_id: string; length: number; stored: number }[] {
+  return quarantined(vault)
+    .filter((file) => file.used !== true)
+    .map(({ file_id, length, stored }) => ({ file_id, length, stored }));
+}
+
 function exactly(args: unknown, keys: string[]): Record<string, unknown> {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return refuse(MALFORMED);
   const found = Object.keys(args).sort();
@@ -1235,6 +1294,18 @@ export function installFakeShell(
   let interruptRecover: Parameters<FakeShell["interruptRecoverNext"]>[0] | undefined;
   let heldTrash: (() => void)[] | undefined;
   const refusals = new Map<string, object>();
+  /** How many more sends of a command are refused after the one in `refusals` (`refuseNext`'s `times`). */
+  const refusalsLeft = new Map<string, number>();
+  /** A refusal has been used: it is gone, unless `refuseNext` asked for more of them. */
+  const used = (cmd: string, error: object): void => {
+    const left = refusalsLeft.get(cmd) ?? 0;
+    refusals.delete(cmd);
+    refusalsLeft.delete(cmd);
+    if (left > 0) {
+      refusals.set(cmd, error);
+      refusalsLeft.set(cmd, left - 1);
+    }
+  };
   const edited: FakeShell["edited"] = [];
   const made: FakeShell["made"] = [];
   const generated: FakeShell["generated"] = [];
@@ -1292,7 +1363,36 @@ export function installFakeShell(
   const printed: string[] = [];
   // The save a cloud question parked: its session and generation, to go on with it (`save_readable_confirm`), and the folder
   // of a `.env` file (null for the recovery key's PDF).
-  const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null; copy?: { id: string; file_id: string } }>();
+  const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null; copy?: { id: string; file_id: string }; exported?: boolean }>();
+  // The exports the shell wrote (Plan 4D Task 2): what each said it held and left out. A closed dialog, a refusal or a cloud question not yet answered is not here.
+  const exportsWritten: FakeExport[] = [];
+  /**
+   * The CSV is "written": the summary (counts and titles) is worked out from the vault's live items, and the answer carries it beside the folder and the handle
+   * for Show in Explorer (`SavedView.output`: one per export, for that session and generation, shown as Save all's, until `close_output`, a lock or a drop).
+   */
+  const writeExport = (session: number, generation: number, vault: FakeVault) => {
+    const summary = exportSummary(vault.items ?? [], vault.unreadable ?? 0);
+    exportsWritten.push(summary);
+    nextToken += 1;
+    const output = nextToken.toString(16).padStart(32, "0");
+    outputs.set(output, { session, generation, shown: SAVED_FOLDER });
+    return { Done: { folder: SAVED_FOLDER, export: summary, output } };
+  };
+  /** The save dialog an export opens (after the password was checked): closed, a cloud-synced folder (asks first, nothing built), or a folder that is written to. */
+  const exportDialog = (session: number, generation: number, vault: FakeVault) => {
+    if (dismissPdf) {
+      dismissPdf = false;
+      return tagged(session, generation, "Dismissed");
+    }
+    if (cloudPdf > 0) {
+      cloudPdf -= 1;
+      nextToken += 1;
+      const token = `export-token-${String(nextToken)}`;
+      pendingPdfs.set(token, { session, generation, envFolder: null, exported: true });
+      return tagged(session, generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
+    }
+    return tagged(session, generation, writeExport(session, generation, vault));
+  };
   // The pasted `.env`s the shell holds, by token: their rows, values included, which never leave the fake.
   const envPastes = new Map<string, { session: number; generation: number; rows: EnvPasted[]; text: string }>();
   let heldEnvRead: (() => void)[] | undefined;
@@ -1333,6 +1433,8 @@ export function installFakeShell(
   let goneNames: string[] = [];
   let changeAfterPlan = false;
   let explorerFails = false;
+  let helpCount = 0;
+  let helpFails = false;
   // Test a backup (Task 4): the backups the shell holds paths of, by choice (the password each was made with is the shell's own), the next pick, what a test
   // finds, a damage to find once, the holds a test can put on the picker and on the test, and the backup the last `backup_vault` wrote.
   const testHeld = new Map<string, { name: string; size: number; password: string }>();
@@ -2013,6 +2115,16 @@ export function installFakeShell(
       case "app_info":
         exactly(args ?? {}, []);
         return { version: "1.2.3" };
+      case "open_help":
+        // The shell takes no input at all: any field is a malformed request, and nothing is opened.
+        // The body is checked as sent: `null` is no `{}` (the real command refuses it too), so a call without one counts no launch.
+        exactly(args, []);
+        helpCount += 1;
+        if (helpFails) {
+          helpFails = false;
+          return refuse({ code: "core", kind: "io", what: "guide" });
+        }
+        return null;
       case "unlock_vault": {
         const { vault: row, password } = exactly(args, ["vault", "password"]);
         const vault = vaultRefOf(row);
@@ -2285,10 +2397,33 @@ export function installFakeShell(
         const parked = pendingPdfs.get(token);
         if (parked === undefined) return refuse({ code: "not_found" });
         pendingPdfs.delete(token);
-        vaultFor(parked.session, parked.generation);
+        const vault = vaultFor(parked.session, parked.generation);
+        // An export's yes builds and writes the CSV now, with the summary beside the folder.
+        if (parked.exported ?? false) return tagged(parked.session, parked.generation, writeExport(parked.session, parked.generation, vault));
         if (parked.envFolder === null) pdfs.push(SAVED_FOLDER);
         else envFiles.push(parked.envFolder);
         return tagged(parked.session, parked.generation, { Done: { folder: SAVED_FOLDER } });
+      }
+      case "export_csv": {
+        const sent = exactly(args, ["session", "generation", "password"]) as { session: number; generation: number; password: unknown };
+        const vault = vaultFor(sent.session, sent.generation);
+        if (typeof sent.password !== "string") return refuse(MALFORMED);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        // The password is checked in this call, before any dialog: a wrong one opens nothing and writes nothing.
+        if (sent.password !== (vault.password ?? PASSWORD)) return refuse(WRONG_PASSWORD);
+        return exportDialog(sent.session, sent.generation, vault);
+      }
+      case "export_repick": {
+        const { token } = exactly(args, ["token"]) as { token: string };
+        const parked = pendingPdfs.get(token);
+        // Only an export's question is Pick another folder's to answer; the choice is used up either way.
+        if (parked === undefined || !(parked.exported ?? false)) {
+          pendingPdfs.delete(token);
+          return refuse({ code: "not_found" });
+        }
+        pendingPdfs.delete(token);
+        const vault = vaultFor(parked.session, parked.generation);
+        return exportDialog(parked.session, parked.generation, vault);
       }
       case "env_read": {
         const sent = exactly(args, ["session", "generation", "text"]) as { session: number; generation: number; text: unknown };
@@ -2335,7 +2470,10 @@ export function installFakeShell(
         const sent = exactly(args, ["session", "generation", "capture_id"]) as { session: number; generation: number; capture_id: string };
         const vault = vaultFor(sent.session, sent.generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
-        if (slot?.id !== sent.capture_id || slot.text === null || slot.state !== "value") return refuse({ code: "not_found" });
+        if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
+        // As `capture_save`: only into the vault the copy is handed to, at that generation.
+        if (slot.chosen !== sent.session || slot.chosenGeneration !== sent.generation) return refuse(CAPTURE_VAULT);
+        if (slot.text === null || slot.state !== "value") return refuse({ code: "not_found" });
         const rows = parkPaste(sent.session, sent.generation, vault, slot.text);
         // The text moves into the paste: the slot is empty.
         emptySlot();
@@ -2902,6 +3040,36 @@ export function installFakeShell(
         lastBackup = { name, choice: token };
         return tagged(sent.session, sent.generation, { Done: { ...view, test: { choice: token, file_name: name, size: view.size_on_disk } } });
       }
+      case "list_orphans": {
+        // The leftover files, as the shell lists them: a writable vault only, and no name or path, whatever the vault holds.
+        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        return tagged(session, generation, leftoverFiles(vault));
+      }
+      case "delete_orphans": {
+        // The files the page showed go for good, and how many is the answer: a read-only vault is refused, and so is a vault with an item that can't be
+        // read (an unreadable item may use one) or a set of ids that is not exactly the files listed now (a file came, or went, since the page read
+        // the list; a file an item uses is not one of them). Nothing is deleted in any of those cases.
+        const { session, generation, files } = exactly(args, ["session", "generation", "files"]) as {
+          session: number;
+          generation: number;
+          files: unknown;
+        };
+        if (!Array.isArray(files) || files.some((id) => typeof id !== "string")) return refuse(MALFORMED);
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if ((vault.unreadable ?? 0) > 0) return refuse({ code: "core", kind: "invalid_input", what: "unreadable items" });
+        const listed = leftoverFiles(vault).map((file) => file.file_id).sort();
+        const asked = [...(files as string[])].sort();
+        if (asked.length !== listed.length || asked.some((id, at) => id !== listed[at])) {
+          return refuse({ code: "core", kind: "invalid_input", what: "leftover files changed" });
+        }
+        // What an item uses stays in the quarantine.
+        vault.orphans = quarantined(vault).filter((file) => file.used === true);
+        vault.leftover = 0;
+        return tagged(session, generation, listed.length);
+      }
       case "vault_backup_due": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
@@ -3377,6 +3545,57 @@ export function installFakeShell(
         if (folder !== undefined) outOfTrash(folder);
         outOfTrash(item);
         return tagged(session, generation, null);
+      }
+      case "old_trash": {
+        // The ids in the trash for `days` days or more, by the clock the page runs on; a read-only vault is refused, as the shell does.
+        const { session, generation, days } = exactly(args, ["session", "generation", "days"]) as {
+          session: number;
+          generation: number;
+          days: number;
+        };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const cutoff = Date.now() - days * 86_400_000;
+        const old = (vault.items ?? []).filter(
+          (item) => (item.trashed ?? false) && Date.parse(item.trashedAt ?? "2026-11-01T09:00:00Z") <= cutoff,
+        );
+        return tagged(
+          session,
+          generation,
+          old.map((item) => item.id),
+        );
+      }
+      case "empty_trash": {
+        // Everything in this vault's trash goes (the vault's own list is changed in place, as `purge_item` removes one); a
+        // read-only vault is refused. The answer is a count, as the shell's is.
+        // With `older_than_days` (the old group's button) only what has been there that many days or more, by the clock the page runs on.
+        const given = typeof args === "object" && args !== null && "older_than_days" in args;
+        // `expected` is how many items the question said would go: another number deletes nothing and says the trash changed.
+        const { session, generation, older_than_days, expected } = exactly(
+          args,
+          given ? ["session", "generation", "expected", "older_than_days"] : ["session", "generation", "expected"],
+        ) as {
+          session: number;
+          generation: number;
+          expected: number;
+          older_than_days?: number;
+        };
+        if ((given && !Number.isInteger(older_than_days)) || !Number.isInteger(expected)) return refuse(MALFORMED);
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        const all = vault.items ?? [];
+        const cutoff = Date.now() - (older_than_days ?? 0) * 86_400_000;
+        const goes = (item: FakeItem | undefined) =>
+          (item?.trashed ?? false) && (!given || Date.parse(item?.trashedAt ?? "2026-11-01T09:00:00Z") <= cutoff);
+        if (all.filter(goes).length !== expected) return tagged(session, generation, { Done: { purged: 0, trash_changed: true } });
+        let purged = 0;
+        for (let at = all.length - 1; at >= 0; at -= 1) {
+          if (goes(all[at])) {
+            all.splice(at, 1);
+            purged += 1;
+          }
+        }
+        return tagged(session, generation, { Done: { purged, trash_changed: false } });
       }
       case "generate_password": {
         const { options } = exactly(args, ["options"]) as { options: unknown };
@@ -3903,7 +4122,7 @@ export function installFakeShell(
     // A stored-file command that is being held is refused when it is let go, as the shell decides it (a refusal that comes late).
     const heldFile = heldFiles !== undefined && Object.hasOwn(OPERATION, cmd);
     if (refusal !== undefined && !heldFile) {
-      refusals.delete(cmd);
+      used(cmd, refusal);
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
       return Promise.reject(refusal);
     }
@@ -4013,7 +4232,12 @@ export function installFakeShell(
     }
     if (
       heldPrint !== undefined &&
-      (cmd === "save_recovery_pdf" || cmd === "print_recovery_key" || cmd === "save_readable_confirm" || cmd === "env_save_file")
+      (cmd === "save_recovery_pdf" ||
+        cmd === "print_recovery_key" ||
+        cmd === "save_readable_confirm" ||
+        cmd === "env_save_file" ||
+        cmd === "export_csv" ||
+        cmd === "export_repick")
     ) {
       // Decided when released, as the shell does: a lock in between leaves no file, and the answer is a refusal.
       const waiting = heldPrint;
@@ -4108,7 +4332,7 @@ export function installFakeShell(
         const settle = (): void => {
           const late = refusals.get(cmd);
           if (late !== undefined) {
-            refusals.delete(cmd);
+            used(cmd, late);
             // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
             reject(late);
             return;
@@ -4243,7 +4467,7 @@ export function installFakeShell(
         });
       }
       if (
-        (cmd === "trash_item" || cmd === "restore_item" || cmd === "delete_collection" || cmd === "purge_item") &&
+        (cmd === "trash_item" || cmd === "restore_item" || cmd === "delete_collection" || cmd === "purge_item" || cmd === "empty_trash") &&
         heldTrash !== undefined
       ) {
         const release = heldTrash;
@@ -4386,6 +4610,7 @@ export function installFakeShell(
       };
     },
     pdfs,
+    exports: exportsWritten,
     dismissPdfNext: () => {
       dismissPdf = true;
     },
@@ -4518,8 +4743,9 @@ export function installFakeShell(
         for (const release of waiting) release();
       };
     },
-    refuseNext: (cmd, error) => {
+    refuseNext: (cmd, error, times = 1) => {
       refusals.set(cmd, error);
+      refusalsLeft.set(cmd, times - 1);
     },
     holdChangePassword: () => {
       const waiting: (() => void)[] = [];
@@ -4645,6 +4871,10 @@ export function installFakeShell(
     openedFolders,
     explorerFailsNext: () => {
       explorerFails = true;
+    },
+    helpOpened: () => helpCount,
+    helpFailsNext: () => {
+      helpFails = true;
     },
     heldOutputs: () => outputs.size,
     holdFiles: () => {

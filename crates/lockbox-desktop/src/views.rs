@@ -3,12 +3,15 @@
 //! nonce. A password or a key's value crosses only through `reveal_password`. IDs are 32 lowercase hex characters. No `Debug`: titles, usernames, names
 //! and notes are item content (R5).
 
+use std::time::SystemTime;
+
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::item::{FileRef, Item, ItemKind};
 use serde::Serialize;
 use tauri::Url;
 use zeroize::Zeroizing;
 
+use crate::dates;
 use crate::pending::Token;
 use crate::session::{SessionId, Tagged};
 
@@ -216,12 +219,43 @@ pub struct SearchResults {
     pub busy: Vec<SessionId>,
 }
 
-/// Where a readable file was saved (`save_recovery_pdf`, `save_readable_confirm`): the folder that holds it, as the
-/// user's own path, for the page to show. No command takes it back (spec 4.1: the page never receives a path it can
-/// send back).
+/// Where a readable file was saved (`save_recovery_pdf`, `save_readable_confirm`, `export_csv`): the folder that holds
+/// it, as the user's own path, for the page to show. No command takes it back (spec 4.1: the page never receives a path
+/// it can send back). An export's answer also carries its counts ([`ExportSummary`]); the PDF's and the `.env` file's
+/// carry none and serialise as `{ "folder": ... }` alone.
+///
+/// An export's answer also carries `output`: the handle Show in Explorer uses (`show_output_in_explorer`, put away by
+/// `close_output`), a token the shell holds for this session and generation with the destination's folder behind it.
+/// It is a token and never a path.
 #[derive(Serialize)]
 pub struct SavedView {
     pub folder: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export: Option<ExportSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<Token>,
+}
+
+/// What an export to a readable CSV wrote, for the page to tell the person: how many items are rows, how many stored
+/// files were left out (the CSV holds no files), how many of the vault's items could not be read (they are not in the
+/// file: the same ones `list_items` shows as damaged), and the titles of the rows whose password, key value or notes hold
+/// a line break (another app may change those values when it reads the file). Titles are the person's own, shown in the
+/// vault already; no value crosses. No `Debug`: a title is item content (R5).
+#[derive(Serialize)]
+pub struct ExportSummary {
+    pub items: u32,
+    pub left_out_files: u32,
+    pub unreadable: u32,
+    pub line_breaks: Vec<String>,
+}
+
+/// What emptying the trash did (`empty_trash`): how many items this call deleted for good, and whether it stopped at the
+/// start because the trash was not the size the person was asked about (`trash_changed`: nothing was deleted, and the page
+/// reads the list again and asks again). Only counts; an item that was restored or already gone meanwhile is not counted.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct EmptiedView {
+    pub purged: u32,
+    pub trash_changed: bool,
 }
 
 /// The printers Lockbox can print to (`list_printers`), by the names Windows shows, and the default one when it is
@@ -268,18 +302,22 @@ pub enum Confirmation {
     Superseded,
 }
 
-/// A quarantined file no item references (spec §6.4), with its size in bytes.
+/// A quarantined file no item references (spec §6.4), with its size in bytes and when it was last written (whole
+/// seconds since 1970): the only date the page can show of a file whose name was kept in the item. No path and no
+/// name cross to the page.
 #[derive(Serialize)]
 pub struct OrphanView {
     pub file_id: String,
     pub length: u64,
+    pub stored: u64,
 }
 
 impl OrphanView {
-    pub fn of((file_id, length): &(FileId, u64)) -> OrphanView {
+    pub fn of((file_id, length, written): &(FileId, u64, SystemTime)) -> OrphanView {
         OrphanView {
             file_id: file_id.to_hex(),
             length: *length,
+            stored: dates::unix_secs(*written),
         }
     }
 }

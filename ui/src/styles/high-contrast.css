@@ -158,4 +158,12 @@
     outline: 2px solid Highlight;
     outline-offset: -2px;
   }
+
+  /* An error is told from help text by its red, which this mode removes: a warning mark goes before its words (not
+     before an empty one, which says nothing yet). Its alternative text is empty, so a screen reader reads the words alone,
+     as it does now. */
+  .app :is(.err, .ferr):not(:empty)::before {
+    content: "\26A0\FE0E" / "";
+    margin-inline-end: 0.35em;
+  }
 }

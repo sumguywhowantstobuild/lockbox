@@ -5,7 +5,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
-import { debugState, resetStoreForTests } from "../store";
+import { debugState, emptyTrash, resetStoreForTests, showSession, unlock } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import {
   FOLDER,
@@ -17,6 +17,7 @@ import {
   STALE_REVISION,
   type FakeItem,
   type FakeShell,
+  type FakeVault,
 } from "../testing/fakeShell";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
@@ -635,19 +636,19 @@ test("the_trash_view_lists_folders_first_then_newest_deleted_first", async () =>
   const rows = screen.getAllByRole("button").filter((button) => /^(Folder|Login|Key|Note|File):/.test(button.textContent));
   const named = rows.map((button) => button.textContent.replace(/\s+/g, " ").trim());
   expect(named).toEqual([
+    // The two that have been there 30 days or more are their own group, first (32a): newest first, last month then September.
+    "Note: Earlier note Deleted last month",
+    "Login: Old CRM login Deleted in September",
+    // Then the newer ones, folders first, then newest first: two days ago (the three that went with the folder), then this month.
     "Folder: Slotted Folder · deleted 2 days ago",
-    // Newest first: two days ago (the three that went with the folder), then this month, last month and September.
     "Note: Slotted note A Deleted 2 days ago",
     "Note: Slotted note B Deleted 2 days ago",
     "Note: Slotted note C Deleted 2 days ago",
     "Login: Old login in the trash Deleted this month",
-    "Note: Earlier note Deleted last month",
-    "Login: Old CRM login Deleted in September",
   ]);
   // Items that went with a folder are rows too, and no Add or copy buttons are here (the Filter, kind and sort are: 13b).
   expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
   expect(screen.queryByRole("button", { name: /^Copy / })).toBeNull();
-  expect(screen.queryByText(/Empty trash/)).toBeNull();
   await expectNoAxe(document.body);
 });
 
@@ -715,8 +716,8 @@ test("the_trash_can_be_filtered_by_word_and_kind_and_sorted_as_drawn", async () 
   // A folder deleted long ago, so by kind (folders first) and by when deleted (it goes last) give different orders.
   await unlocked({ extra: [{ id: itemId(46), kind: "collection", title: "Archive", trashed: true, trashedAt: "2026-08-01T09:00:00Z" }] });
   await openTrash();
-  // As before, by kind: folders first, then the one deleted last first.
-  expect(trashTitles()).toEqual(["Slotted", "Archive", "Slotted note A", "Slotted note B", "Slotted note C", "Old login in the trash", "Earlier note", "Old CRM login"]);
+  // By kind: folders first, then the one deleted last first, in each of the two groups (32a): 30 days or more, then the newer ones.
+  expect(trashTitles()).toEqual(["Archive", "Earlier note", "Old CRM login", "Slotted", "Slotted note A", "Slotted note B", "Slotted note C", "Old login in the trash"]);
   const all = trashTitles().length;
   // A word narrows it, and the list says so, as the main list does.
   fireEvent.change(screen.getByLabelText("Filter this list"), { target: { value: "slotted" } });
@@ -733,16 +734,20 @@ test("the_trash_can_be_filtered_by_word_and_kind_and_sorted_as_drawn", async () 
   expect(trashTitles()).toHaveLength(all);
   // One kind: logins only (a folder is not a kind, so it goes too).
   await choose("Show only one kind", "Logins");
-  expect(trashTitles()).toEqual(["Old login in the trash", "Old CRM login"]);
+  expect(trashTitles()).toEqual(["Old CRM login", "Old login in the trash"]);
   await choose("Show only one kind", "All kinds");
-  // By name: every row, A to Z.
+  // By name: every row, A to Z, within each group.
   await choose("Sort", "Name");
-  const byName = trashTitles();
-  expect(byName).toEqual([...byName].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" })));
-  expect(byName).toHaveLength(all);
-  // By when it went: the one deleted last first, folders among the rest (the old folder now last).
+  const byName = (group: HTMLElement) => titlesIn(group);
+  const aToZ = (names: string[]) => [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  const olds = byName(trashGroup(/^In the trash 30 days or more\s*3$/));
+  const newers = byName(trashGroup(/^Newer\s*5$/));
+  expect(olds).toEqual(aToZ(olds));
+  expect(newers).toEqual(aToZ(newers));
+  expect([...olds, ...newers]).toHaveLength(all);
+  // By when it went: the one deleted last first, folders among the rest, within each group (the old folder last of the old ones).
   await choose("Sort", "Changed");
-  expect(trashTitles()).toEqual(["Slotted", "Slotted note A", "Slotted note B", "Slotted note C", "Old login in the trash", "Earlier note", "Old CRM login", "Archive"]);
+  expect(trashTitles()).toEqual(["Earlier note", "Old CRM login", "Archive", "Slotted", "Slotted note A", "Slotted note B", "Slotted note C", "Old login in the trash"]);
   await expectNoAxe(document.body);
 });
 
@@ -1003,6 +1008,544 @@ test("a_refused_delete_for_good_is_said_in_words_and_the_row_stays", async () =>
   expect(screen.getByRole("button", { name: /^Login:\s*Old CRM login/ })).toBeTruthy();
 });
 
+// ---- Delete permanently, and Empty trash (32a, 32b) ----
+
+/** The question's words, as drawn (32b) and as 13d says them: the files go too, it can't be undone, backups still hold it. */
+const WHOLE_TRASH = "Their attached files go too. This can't be undone. Backups you already made still hold them.";
+const ONE_ITEM = "Its attached files go too. This can't be undone. Backups you already made still hold it.";
+
+/** The trash of the sample vault: the loose item, the folder with its three, the earlier note and the old CRM login. */
+const IN_TRASH = 7;
+
+function emptyTrashButton(): HTMLElement {
+  return screen.getByRole("button", { name: "Empty trash" });
+}
+
+/** The group of the Trash view under the heading `name` (its count follows the words). */
+function trashGroup(name: RegExp): HTMLElement {
+  const heading = screen.getByRole("heading", { level: 2, name });
+  return heading.closest("section") as HTMLElement;
+}
+
+function titlesIn(group: HTMLElement): string[] {
+  return [...group.querySelectorAll("li.lrow .rname")].map((name) => name.textContent);
+}
+
+/** Opens the question the Empty trash button asks, with focus on the button as a click leaves it. */
+async function askToEmpty(name = `Delete ${String(IN_TRASH)} items for good?`): Promise<HTMLElement> {
+  const open = emptyTrashButton();
+  open.focus();
+  fireEvent.click(open);
+  return screen.findByRole("dialog", { name });
+}
+
+test("old_items_are_listed_with_delete_permanently", async () => {
+  await unlocked();
+  await openTrash();
+  // Asked of the shell for this writable vault, for 30 days or more, and of nothing else.
+  const live = shell.sessionOf(7);
+  expect(live).toBeDefined();
+  expect(sent("old_trash")).toEqual([{ session: live?.session, generation: live?.generation, days: 30 }]);
+  // 32a: the items there 30 days or more are their own group, with the drawn pill that deletes them, and the rest are "Newer".
+  const old = trashGroup(/^In the trash 30 days or more\s*2$/);
+  expect(titlesIn(old)).toEqual(["Earlier note", "Old CRM login"]);
+  expect(within(old).getByRole("button", { name: "Delete these 2 permanently" })).toBeTruthy();
+  const newer = trashGroup(/^Newer\s*5$/);
+  expect(titlesIn(newer)).toEqual(["Slotted", "Slotted note A", "Slotted note B", "Slotted note C", "Old login in the trash"]);
+  expect(within(newer).queryByRole("button", { name: /permanently/ })).toBeNull();
+  // The pill is in the group's header, beside its heading, and the drawing's other words are not added.
+  expect(within(old).getByRole("heading", { level: 2 }).parentElement).toBe(within(old).getByRole("button", { name: /permanently/ }).parentElement);
+  expect(screen.queryByText("Delete permanently?", { exact: false })).toBeNull();
+  // The group goes first, as drawn, and a row still opens the panel that has Delete for good (13d).
+  expect(old.compareDocumentPosition(newer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const panel = await openTrashed("Login", "Old CRM login");
+  expect(within(panel).getByRole("button", { name: "Delete for good" })).toBeTruthy();
+});
+
+test("a_trash_with_nothing_old_has_no_groups_and_a_read_only_vault_asks_nothing", async () => {
+  // Nothing is 30 days old: one list, as before.
+  await unlocked({ only: sampleItems() });
+  await openTrash();
+  expect(trashTitles()).toEqual(["Old login in the trash"]);
+  expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+  expect(screen.queryByRole("button", { name: /permanently/ })).toBeNull();
+  cleanup();
+  resetStoreForTests();
+  invoke.mockReset();
+  // A read-only vault can delete nothing: no old_trash is asked, no group, no question.
+  await unlocked({ readOnly: true });
+  await openTrash();
+  expect(sent("old_trash")).toEqual([]);
+  expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+  expect(screen.queryByRole("button", { name: /permanently/ })).toBeNull();
+});
+
+test("the_old_group_pill_asks_first_and_sends_thirty_days", async () => {
+  await unlocked();
+  await openTrash();
+  const pill = screen.getByRole("button", { name: "Delete these 2 permanently" });
+  const ask = async () => {
+    pill.focus();
+    fireEvent.click(pill);
+    return screen.findByRole("dialog", { name: "Delete 2 items for good?" });
+  };
+  // Nothing goes by the pill being there; its question says the same words as Empty trash's, with the old group's count.
+  expect(sent("empty_trash")).toEqual([]);
+  const dialog = await ask();
+  expect(within(dialog).getByText(WHOLE_TRASH)).toBeTruthy();
+  const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(cancel);
+  });
+  expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual(["Cancel", "Delete permanently"]);
+  expect(within(dialog).getByRole("button", { name: "Delete permanently" }).classList.contains("dfill")).toBe(true);
+  expect(cancel.classList.contains("dfill")).toBe(false);
+  await expectNoAxe(document.body);
+  // Cancel, and Escape, send nothing, and focus goes back to the pill.
+  fireEvent.click(cancel);
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(pill);
+  });
+  fireEvent.keyDown(await ask(), { key: "Escape" });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  expect(sent("empty_trash")).toEqual([]);
+
+  // A Filter that hides one of the two old rows changes nothing about what the pill says or does: it is about the whole old group.
+  fireEvent.change(screen.getByLabelText("Filter this list"), { target: { value: "earlier" } });
+  expect(trashTitles()).toEqual(["Earlier note"]);
+  const filtered = screen.getByRole("button", { name: "Delete these 2 permanently" });
+  filtered.focus();
+  fireEvent.click(filtered);
+  const asked = await screen.findByRole("dialog", { name: "Delete 2 items for good?" });
+  // A yes sends exactly one empty_trash, for this vault at its generation, with 30 days and nothing else.
+  fireEvent.click(within(asked).getByRole("button", { name: "Delete permanently" }));
+  const vault = shell.sessionOf(7);
+  expect(vault).toBeDefined();
+  await waitFor(() => {
+    expect(sent("empty_trash")).toEqual([{ session: vault?.session, generation: vault?.generation, expected: 2, older_than_days: 30 }]);
+  });
+  await waitFor(() => {
+    expect(statusText()).toContain("2 deleted for good. 5 still in the Trash.");
+  });
+  // Both old items went (the hidden one too); the newer five are still in the trash.
+  expect(stored.filter((item) => item.trashed === true).map((item) => item.id)).not.toContain(EARLIER);
+  expect(stored.filter((item) => item.trashed === true)).toHaveLength(IN_TRASH - 2);
+  expect(stored.find((item) => item.id === OLD_CRM)).toBeUndefined();
+  expect(trashEntry().textContent).toBe("Trash 5");
+  expect(sent("purge_item")).toEqual([]);
+});
+
+test("a_dialog_from_the_old_group_empties_only_that_vault_and_only_its_old_items", async () => {
+  const trashed = (n: number, title: string, at: string): FakeItem => ({ id: itemId(n), kind: "note", title, trashed: true, trashedAt: at });
+  const mine: FakeVault = { id: 7, name: "My vault", items: [...items()] };
+  const work: FakeVault = {
+    id: 8,
+    name: "Work",
+    items: [
+      { id: itemId(70), kind: "note", title: "Work live note" },
+      trashed(71, "Work old one", "2026-08-01T09:00:00Z"),
+      trashed(72, "Work new one", "2026-11-08T09:00:00Z"),
+    ],
+  };
+  shell = installFakeShell(invoke, listen, [mine, work]);
+  render(<App />);
+  const field = await screen.findByLabelText(/^Password for /);
+  fireEvent.change(field, { target: { value: PASSWORD } });
+  fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+  await screen.findByRole("heading", { level: 1, name: "All items" });
+  await act(async () => {
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
+  });
+  const inTrash = (vault: FakeVault) => (vault.items ?? []).filter((item) => item.trashed === true).length;
+
+  // Work is on screen with one old item: the pill asks, and the person goes to the other vault before answering.
+  await openTrash();
+  const pill = await screen.findByRole("button", { name: "Delete this item permanently" });
+  fireEvent.click(pill);
+  await screen.findByRole("dialog", { name: "Delete 1 item for good?" });
+  expect(screen.getByText(ONE_ITEM)).toBeTruthy();
+  act(() => {
+    showSession(shell.sessionOf(7)?.session ?? 0);
+  });
+  await screen.findByRole("heading", { level: 1, name: "All items", hidden: true });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(sent("empty_trash")).toEqual([]);
+  expect([inTrash(mine), inTrash(work)]).toEqual([IN_TRASH, 2]);
+
+  // Back in Work, answered there: only Work's old item goes; its newer one and the other vault's whole trash stay.
+  act(() => {
+    showSession(shell.sessionOf(8)?.session ?? 0);
+  });
+  await screen.findByRole("heading", { level: 1, name: "Trash", hidden: true });
+  fireEvent.click(await screen.findByRole("button", { name: "Delete this item permanently" }));
+  const dialog = await screen.findByRole("dialog", { name: "Delete 1 item for good?" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete permanently" }));
+  const live = shell.sessionOf(8);
+  await waitFor(() => {
+    expect(sent("empty_trash")).toEqual([{ session: live?.session, generation: live?.generation, expected: 1, older_than_days: 30 }]);
+  });
+  await waitFor(() => {
+    expect((work.items ?? []).map((item) => item.title)).toEqual(["Work live note", "Work new one"]);
+  });
+  expect(inTrash(mine)).toBe(IN_TRASH);
+});
+
+const CHANGED = "The Trash changed, so nothing was deleted. Check the new count and answer again.";
+
+test("the_old_group_pill_asks_again_when_an_item_aged_in_meanwhile", async () => {
+  await unlocked();
+  await openTrash();
+  fireEvent.click(screen.getByRole("button", { name: "Delete these 2 permanently" }));
+  const first = await screen.findByRole("dialog", { name: "Delete 2 items for good?" });
+  // While the question is open, a newer item passes the 30 days.
+  const loose = stored.find((item) => item.id === LOOSE_TRASHED);
+  if (loose !== undefined) loose.trashedAt = "2026-09-01T09:00:00Z";
+  fireEvent.click(within(first).getByRole("button", { name: "Delete permanently" }));
+  // Nothing was deleted, the page says so without an alarm, and asks again with the new count.
+  const again = await screen.findByRole("dialog", { name: "Delete 3 items for good?" });
+  expect(sent("empty_trash")).toHaveLength(1);
+  expect(sent("empty_trash")[0]).toMatchObject({ expected: 2, older_than_days: 30 });
+  expect(stored.filter((item) => item.trashed === true)).toHaveLength(IN_TRASH);
+  expect(screen.queryByRole("alert")).toBeNull();
+  // (The question is up again over the page, so the message is read from the page as it is.)
+  expect(toastText()).toContain(CHANGED);
+  await waitFor(() => {
+    expect(document.activeElement).toBe(within(again).getByRole("button", { name: "Cancel" }));
+  });
+  // The new answer is for the new count, and only then do the three go.
+  fireEvent.click(within(again).getByRole("button", { name: "Delete permanently" }));
+  await waitFor(() => {
+    expect(sent("empty_trash")).toHaveLength(2);
+  });
+  expect(sent("empty_trash")[1]).toMatchObject({ expected: 3, older_than_days: 30 });
+  await waitFor(() => {
+    expect(stored.filter((item) => item.trashed === true)).toHaveLength(IN_TRASH - 3);
+  });
+  await waitFor(() => {
+    expect(statusText()).toContain("3 deleted for good. 4 still in the Trash.");
+  });
+});
+
+test("empty_trash_asks_again_when_an_item_was_trashed_meanwhile", async () => {
+  await unlocked();
+  await openTrash();
+  const first = await askToEmpty();
+  // While the question is open, another item goes to the trash (another program, or the Undo of an earlier move).
+  const item = stored.find((one) => one.id === itemId(1));
+  if (item !== undefined) item.trashed = true;
+  fireEvent.click(within(first).getByRole("button", { name: "Empty trash" }));
+  const again = await screen.findByRole("dialog", { name: `Delete ${String(IN_TRASH + 1)} items for good?` });
+  expect(sent("empty_trash")).toHaveLength(1);
+  expect(sent("empty_trash")[0]).toMatchObject({ expected: IN_TRASH });
+  expect(stored.filter((one) => one.trashed === true)).toHaveLength(IN_TRASH + 1);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(toastText()).toContain(CHANGED);
+  fireEvent.click(within(again).getByRole("button", { name: "Empty trash" }));
+  await waitFor(() => {
+    expect(sent("empty_trash")).toHaveLength(2);
+  });
+  expect(sent("empty_trash")[1]).toMatchObject({ expected: IN_TRASH + 1 });
+  await screen.findByText("Trash is empty.");
+  expect(statusText()).toContain("Trash emptied");
+});
+
+test("a_late_empty_trash_answer_leaves_focus_where_the_person_put_it", async () => {
+  await unlocked();
+  await openTrash();
+  const release = shell.holdTrash();
+  const dialog = await askToEmpty();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Empty trash" }));
+  await waitFor(() => {
+    expect(sent("empty_trash")).toHaveLength(1);
+  });
+  // The person goes to the Filter while the answer is on its way, and is typing there when it arrives.
+  const filter = screen.getByLabelText("Filter this list");
+  filter.focus();
+  expect(document.activeElement).toBe(filter);
+  await act(async () => {
+    release();
+    await Promise.resolve();
+  });
+  await screen.findByText("Trash is empty.");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(document.activeElement).toBe(filter);
+});
+
+test("focus_goes_to_the_list_when_the_button_that_held_it_is_gone", async () => {
+  await unlocked();
+  await openTrash();
+  const dialog = await askToEmpty();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Empty trash" }));
+  await screen.findByText("Trash is empty.");
+  // The Empty trash button had focus and went with the Trash: focus does not fall to the top of the page, it goes to the heading.
+  await waitFor(() => {
+    expect(document.activeElement?.tagName).toBe("H1");
+  });
+});
+
+test("empty_trash_is_said_by_what_is_left_in_the_trash", async () => {
+  await unlocked();
+  await openTrash();
+  // The old group goes: five are left, and the words say so (not "Trash emptied").
+  fireEvent.click(screen.getByRole("button", { name: "Delete these 2 permanently" }));
+  const old = await screen.findByRole("dialog", { name: "Delete 2 items for good?" });
+  fireEvent.click(within(old).getByRole("button", { name: "Delete permanently" }));
+  await waitFor(() => {
+    expect(statusText()).toContain("2 deleted for good. 5 still in the Trash.");
+  });
+  expect(statusText()).not.toContain("Trash emptied");
+  // Then the rest: nothing is left, and the words say that.
+  const last = await screen.findByRole("button", { name: "Empty trash" });
+  last.focus();
+  fireEvent.click(last);
+  const dialog = await screen.findByRole("dialog", { name: "Delete 5 items for good?" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Empty trash" }));
+  await waitFor(() => {
+    expect(statusText()).toContain("Trash emptied");
+  });
+});
+
+test("empty_trash_says_it_cant_be_undone_and_asks_first", async () => {
+  await unlocked();
+  await openTrash();
+  const open = emptyTrashButton();
+  // Nothing goes by being on screen: a button, with the question after it.
+  expect(sent("empty_trash")).toEqual([]);
+  const dialog = await askToEmpty();
+  expect(within(dialog).getByText(WHOLE_TRASH)).toBeTruthy();
+  const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(cancel);
+  });
+  expect(within(dialog).getAllByRole("button").map((button) => button.textContent)).toEqual(["Cancel", "Empty trash"]);
+  // The dangerous answer is the filled red one, as drawn (32b); Cancel is the quiet one, and has focus.
+  expect(within(dialog).getByRole("button", { name: "Empty trash" }).classList.contains("dfill")).toBe(true);
+  expect(cancel.classList.contains("dfill")).toBe(false);
+  await expectNoAxe(document.body);
+
+  // Cancel closes it, sends nothing, and focus goes back to the button.
+  fireEvent.click(cancel);
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  await waitFor(() => {
+    expect(document.activeElement).toBe(open);
+  });
+  expect(sent("empty_trash")).toEqual([]);
+  // So does Escape.
+  const again = await askToEmpty();
+  fireEvent.keyDown(again, { key: "Escape" });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  expect(sent("empty_trash")).toEqual([]);
+  expect(stored.filter((item) => item.trashed === true)).toHaveLength(IN_TRASH);
+
+  // A yes sends exactly one empty_trash, for this vault at its generation and nothing else, and the trash is gone.
+  const last = await askToEmpty();
+  fireEvent.click(within(last).getByRole("button", { name: "Empty trash" }));
+  const vault = shell.sessionOf(7);
+  expect(vault).toBeDefined();
+  await waitFor(() => {
+    expect(sent("empty_trash")).toEqual([{ session: vault?.session, generation: vault?.generation, expected: IN_TRASH }]);
+  });
+  await screen.findByText("Trash is empty.");
+  expect(statusText()).toContain("Trash emptied");
+  expect(trashEntry().textContent).toBe("Trash 0");
+  expect(stored.filter((item) => item.trashed === true)).toEqual([]);
+  // What was live stays.
+  expect(stored.map((item) => item.id)).toEqual(sampleItems().map((item) => item.id).filter((id) => id !== LOOSE_TRASHED));
+  expect(screen.queryByRole("button", { name: "Empty trash" })).toBeNull();
+  expect(sent("purge_item")).toEqual([]);
+});
+
+test("a_filtered_trash_view_still_says_everything_goes", async () => {
+  await unlocked();
+  await openTrash();
+  // A word hides most rows: the question is still about the whole trash of this vault.
+  fireEvent.change(screen.getByLabelText("Filter this list"), { target: { value: "slotted" } });
+  expect(trashTitles()).toEqual(["Slotted", "Slotted note A", "Slotted note B", "Slotted note C"]);
+  const dialog = await askToEmpty();
+  expect(within(dialog).getByText(WHOLE_TRASH)).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  // A word that matches nothing leaves no row to look at, and the whole trash is still there to empty.
+  fireEvent.change(screen.getByLabelText("Filter this list"), { target: { value: "zzz" } });
+  expect(trashTitles()).toEqual([]);
+  const none = await askToEmpty();
+  fireEvent.click(within(none).getByRole("button", { name: "Empty trash" }));
+  await waitFor(() => {
+    expect(sent("empty_trash")).toHaveLength(1);
+  });
+  // The hidden rows went too: it was the whole trash.
+  await waitFor(() => {
+    expect(stored.filter((item) => item.trashed === true)).toEqual([]);
+  });
+});
+
+test("a_dialog_opened_in_one_vault_empties_only_that_vault", async () => {
+  const trashed = (n: number, title: string): FakeItem => ({ id: itemId(n), kind: "note", title, trashed: true, trashedAt: "2026-11-01T09:00:00Z" });
+  const mine: FakeVault = { id: 7, name: "My vault", items: [...items()] };
+  const work: FakeVault = { id: 8, name: "Work", items: [{ id: itemId(70), kind: "note", title: "Work live note" }, trashed(71, "Work trashed one"), trashed(72, "Work trashed two")] };
+  shell = installFakeShell(invoke, listen, [mine, work]);
+  render(<App />);
+  const field = await screen.findByLabelText(/^Password for /);
+  fireEvent.change(field, { target: { value: PASSWORD } });
+  fireEvent.submit((field as HTMLInputElement).form as HTMLFormElement);
+  await screen.findByRole("heading", { level: 1, name: "All items" });
+  await act(async () => {
+    expect(await unlock({ list: shell.listIdentity(), id: 8 }, PASSWORD)).toBe("opened");
+  });
+  const session = (id: number) => shell.sessionOf(id)?.session ?? 0;
+  /** How many items the vault with this list number has in its trash, read from the fake vault itself. */
+  const ours = (id: number) => ((id === 7 ? mine : work).items ?? []).filter((item) => item.trashed === true).length;
+
+  // Work is on screen: the question is opened there, and the person goes to the other vault before answering.
+  await openTrash();
+  await askToEmpty("Delete 2 items for good?");
+  act(() => {
+    showSession(session(7));
+  });
+  await screen.findByRole("heading", { level: 1, name: "All items", hidden: true });
+  // The question went with its vault: nothing to answer, and nothing was sent for either vault.
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(sent("empty_trash")).toEqual([]);
+  expect([ours(7), ours(8)]).toEqual([IN_TRASH, 2]);
+
+  // Locked while it is open: gone too, nothing sent.
+  act(() => {
+    showSession(session(8));
+  });
+  await screen.findByRole("heading", { level: 1, name: "Trash", hidden: true });
+  await askToEmpty("Delete 2 items for good?");
+  const live = shell.sessionOf(8);
+  await act(async () => {
+    shell.lock(live?.session ?? 0);
+    await Promise.resolve();
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  expect(sent("empty_trash")).toEqual([]);
+  expect([ours(7), ours(8)]).toEqual([IN_TRASH, 2]);
+
+  // Whatever is left of a question opened before (a generation the vault no longer has, or a vault that is gone) sends nothing either.
+  await emptyTrash(session(7), (shell.sessionOf(7)?.generation ?? 0) + 1, IN_TRASH);
+  await emptyTrash(session(8), shell.sessionOf(8)?.generation ?? 0, 2);
+  expect(sent("empty_trash")).toEqual([]);
+
+  // Answered in the vault it was opened in: that vault's trash goes and the other's stays.
+  await screen.findByRole("heading", { level: 1, name: "All items", hidden: true });
+  await openTrash();
+  const mineAsked = await askToEmpty();
+  fireEvent.click(within(mineAsked).getByRole("button", { name: "Empty trash" }));
+  await waitFor(() => {
+    expect(sent("empty_trash")).toEqual([{ session: session(7), generation: shell.sessionOf(7)?.generation, expected: IN_TRASH }]);
+  });
+  await waitFor(() => {
+    expect(ours(7)).toBe(0);
+  });
+  expect(ours(8)).toBe(2);
+  expect((work.items ?? []).map((item) => item.title)).toEqual(["Work live note", "Work trashed one", "Work trashed two"]);
+});
+
+test("empty_trash_hidden_when_the_trash_is_empty_or_read_only", async () => {
+  // An empty trash has nothing to empty.
+  await unlocked({ only: sampleItems().filter((item) => item.trashed !== true) });
+  await openTrash();
+  expect(screen.getByText("Trash is empty.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Empty trash" })).toBeNull();
+  cleanup();
+  resetStoreForTests();
+  invoke.mockReset();
+  // A read-only vault, trash and all: it can be looked at and not emptied; it is not asked either.
+  await unlocked({ readOnly: true });
+  await openTrash();
+  expect(screen.getAllByRole("button").filter((button) => /^(Folder|Login|Key|Note|File):/.test(button.textContent))).toHaveLength(IN_TRASH);
+  expect(screen.queryByRole("button", { name: "Empty trash" })).toBeNull();
+  expect(sent("empty_trash")).toEqual([]);
+});
+
+test("deleting_one_item_still_says_it_cant_be_undone_and_asks_first", async () => {
+  // 13d stays as it was: one item has its own question, and Empty trash is not what answers it.
+  await unlocked();
+  await openTrash();
+  const panel = await openTrashed("Login", "Old CRM login");
+  fireEvent.click(within(panel).getByRole("button", { name: "Delete for good" }));
+  const dialog = await screen.findByRole("dialog", { name: "Delete Old CRM login for good?" });
+  expect(within(dialog).getByText(ONE_ITEM)).toBeTruthy();
+  expect(sent("purge_item")).toEqual([]);
+  expect(sent("empty_trash")).toEqual([]);
+  await waitFor(() => {
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" }));
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete for good" }));
+  await waitFor(() => {
+    expect(sent("purge_item")).toEqual([expect.objectContaining({ id: OLD_CRM })]);
+  });
+  expect(sent("empty_trash")).toEqual([]);
+});
+
+test("a_lock_during_empty_trash_shows_no_error", async () => {
+  await unlocked();
+  await openTrash();
+  const release = shell.holdTrash();
+  const dialog = await askToEmpty();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Empty trash" }));
+  await waitFor(() => {
+    expect(sent("empty_trash")).toHaveLength(1);
+  });
+  await lockNow();
+  await act(async () => {
+    release();
+    await Promise.resolve();
+  });
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(thePage()).not.toContain("Trash emptied");
+  expect(JSON.stringify(debugState().toast)).toBe("null");
+  nothingOfTheVaultOnScreen();
+});
+
+test("a_refused_empty_trash_is_said_in_words_and_the_rows_stay", async () => {
+  await unlocked();
+  await openTrash();
+  shell.refuseNext("empty_trash", { code: "core", kind: "io" });
+  const dialog = await askToEmpty();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Empty trash" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Lockbox couldn't reach that folder or file.");
+  expect(thePage()).not.toContain("Trash emptied");
+  expect(stored.filter((item) => item.trashed === true)).toHaveLength(IN_TRASH);
+});
+
+test("trash_screens_have_no_axe_violations", async () => {
+  await unlocked();
+  await openTrash();
+  // 32a: the old group, the newer one and the Empty trash button.
+  trashGroup(/^In the trash 30 days or more\s*2$/);
+  await expectNoAxe(document.body);
+  // 32b: the question over the Trash.
+  const dialog = await askToEmpty();
+  await expectNoAxe(dialog);
+  await expectNoAxe({ include: [document.body], exclude: [dialog] });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  // 32a's pill and the same question with the old group's count.
+  fireEvent.click(screen.getByRole("button", { name: "Delete these 2 permanently" }));
+  const old = await screen.findByRole("dialog", { name: "Delete 2 items for good?" });
+  await expectNoAxe(old);
+  await expectNoAxe({ include: [document.body], exclude: [old] });
+});
+
 // ---- Never by time ----
 
 test("trash_never_empties_by_itself", async () => {
@@ -1017,16 +1560,15 @@ test("trash_never_empties_by_itself", async () => {
     await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
   });
   vi.useRealTimers();
-  for (const cmd of ["purge_item", "restore_item", "trash_item", "delete_collection"]) {
+  for (const cmd of ["purge_item", "restore_item", "trash_item", "delete_collection", "empty_trash"]) {
     expect(sent(cmd), cmd).toEqual([]);
   }
   const after = screen.getAllByRole("button").filter((button) => /^(Folder|Login|Key|Note|File):/.test(button.textContent)).length;
   expect(after).toBe(before);
   expect(stored.filter((item) => item.trashed === true)).toHaveLength(7);
-  // No Empty trash, no "30 days" group, no "Delete these permanently": none of that is built yet.
-  expect(screen.queryByText(/Empty trash/i)).toBeNull();
-  expect(screen.queryByText(/30 days/)).toBeNull();
-  expect(screen.queryByText(/permanently/i)).toBeNull();
+  // Empty trash and the 30-days group are there to be used (32a); a button on screen is still not an answer, so no question is up.
+  expect(screen.queryByRole("button", { name: "Empty trash" })).not.toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
 // ---- Folders (14a to 14d) ----

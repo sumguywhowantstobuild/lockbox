@@ -8,7 +8,9 @@
 //! no command carries it. WebView2 refuses an existing hidden file and writes straight over the path it is given, so
 //! the printer gets a new file inside a new hidden folder beside the destination, both with Lockbox's own temp names and
 //! both written in the journal before they exist. The `.env` file's bytes are made in Rust (`commands::env`), written to
-//! one journaled temp beside the destination and published the same way.
+//! one journaled temp beside the destination and published the same way. A vault's export as a readable CSV is the same
+//! kind of file: its rows are made in Rust (`export_csv`) after the destination is approved, and the vault's password
+//! is checked in the call that asks for it.
 
 use std::fs;
 use std::path::Path;
@@ -16,17 +18,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lockbox_core::blob::{CancelToken, OutputJournal};
-use lockbox_core::fsio::{hidden_temp_path, publish_readable};
+use lockbox_core::fsio::{clear_hidden, hidden_temp_path, publish_readable};
 use lockbox_core::ids::ItemId;
+use lockbox_core::item::ItemKind;
 use serde::Deserialize;
 use tauri::State;
 use tauri::ipc::Request;
+use zeroize::Zeroizing;
 
+#[cfg(test)]
+use super::env::reached;
+use super::env::write_new;
 use super::{NoArgs, args, blocking};
 use crate::error::{
     Confirm, Outcome, PDF_NOT_MADE, PRINT_NOT_SENT, PRINTER_BUSY, PRINTER_GONE, ShellError,
     ShellResult,
 };
+use crate::export_csv::{self, Plaintext};
 use crate::os::{PrintFailed, win};
 use crate::outputs::{FOLDER_SUFFIX, LAUNCH_OPEN_TRIES};
 use crate::pending::{PendingChoice, Token};
@@ -45,6 +53,12 @@ pub const PRINT_ANSWER_WAIT: Duration = Duration::from_secs(30);
 /// What the dialog's PDF filter is called, and the extension it shows.
 const PDF_FILTER: (&str, &[&str]) = ("PDF", &["pdf"]);
 
+/// The same for an export's CSV.
+const CSV_FILTER: (&str, &[&str]) = ("CSV", &["csv"]);
+
+/// What a vault's export is called when the vault's name leaves nothing to name it by.
+const EXPORT_FALLBACK_NAME: &str = "Lockbox export.csv";
+
 /// A readable file to write: the dialog's title and suggested name, and what goes in it.
 pub struct ReadableJob {
     /// The save dialog's title.
@@ -62,6 +76,10 @@ pub enum ReadableKind {
     /// A folder's keys as a `.env` file. It holds the folder's id and never any text: the keys are read again when the
     /// file is written, after the dialog and after a cloud folder's yes, so the file is what the folder holds then.
     EnvFile { collection: ItemId },
+    /// Every login, note and key of the vault as a readable CSV. The job holds nothing of the vault but its name (in the
+    /// suggested file name): the rows are read when the file is written, after the dialog and after a cloud folder's yes,
+    /// under a fresh check of the session and generation that asked.
+    Export,
 }
 
 impl ReadableJob {
@@ -83,12 +101,35 @@ impl ReadableJob {
         }
     }
 
+    /// The vault's export as a CSV. The suggested name is `<vault name> export.csv`, with every character Windows does not
+    /// allow in a file name made a `-` and trailing dots and spaces taken off the vault's name.
+    pub fn export(vault_name: &str) -> ReadableJob {
+        let safe: String = vault_name
+            .chars()
+            .map(|c| match c {
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+                c if c.is_control() => '-',
+                c => c,
+            })
+            .collect();
+        let base = safe.trim_end_matches(['.', ' ']);
+        ReadableJob {
+            title: "Export this vault",
+            file_name: match base.is_empty() {
+                true => EXPORT_FALLBACK_NAME.to_owned(),
+                false => format!("{base} export.csv"),
+            },
+            kind: ReadableKind::Export,
+        }
+    }
+
     /// The dialog's filter. A `.env` file has none: a filter makes Windows add its extension to a name typed without
     /// one, so the name the person keeps would not be the name written. With no filter the dialog adds nothing.
     fn filter(&self) -> Option<(&'static str, &'static [&'static str])> {
         match self.kind {
             ReadableKind::RecoveryPdf => Some(PDF_FILTER),
             ReadableKind::EnvFile { .. } => None,
+            ReadableKind::Export => Some(CSV_FILTER),
         }
     }
 }
@@ -132,6 +173,154 @@ impl Shell {
             // A token for another question: used up, and its choice dropped (no lock is held here).
             _ => Err(ShellError::NotFound),
         }
+    }
+
+    /// Exports the vault as a readable CSV where the user picks, once `password` is checked to be this vault's, in this
+    /// same call and with the engine's own `check_password` (so a vault opened with its recovery key counts the
+    /// password set in that recovery, as 4C's change of password does). Refused first, before any dialog, as
+    /// [`save_readable`](Self::save_readable) is: for a session that is locked, stale or not ours, and for a read-only
+    /// one (`ReadOnly`, before the password is looked at); a wrong password is the engine's `wrong_password` and writes
+    /// nothing, opens no dialog and leaves every file as it was.
+    ///
+    /// The password is dropped (wiped) when the check returns: what goes on to the dialog holds this session and
+    /// generation and nothing else, and that is the whole authorisation. Every later step looks at the session again, so a
+    /// lock or a new generation while the dialog or the cloud question is open ends it. The rows are read and written only
+    /// after the destination is approved ([`write_export_csv`](Self::write_export_csv)).
+    pub fn export_csv(
+        &self,
+        session: SessionId,
+        generation: u64,
+        password: Zeroizing<String>,
+    ) -> ShellResult<Tagged<Outcome<SavedView>>> {
+        let named = self
+            .sessions
+            .read(session, generation, |vault, _| match vault {
+                VaultRef::Writable(vault) => {
+                    vault.check_password(&password)?;
+                    Ok(vault.name().to_owned())
+                }
+                VaultRef::ReadOnly(_) => Err(ShellError::ReadOnly),
+            })?;
+        // Wiped now, before the dialog opens and waits for the person.
+        drop(password);
+        self.save_readable(session, generation, ReadableJob::export(&named.data))
+    }
+
+    /// The cloud question's other answer, Pick another folder: uses the question's token up (whatever the answer), leaves
+    /// the destination it was about untouched, and opens a new dialog whose answer runs every check again (the vault's and
+    /// state folders, the cloud question, the journal) for the session and generation that asked. A token that is another
+    /// kind of question's, one used, or one that was never given is `NotFound` (the choice, if any, is dropped).
+    pub fn export_repick(&self, token: &Token) -> ShellResult<Tagged<Outcome<SavedView>>> {
+        match self.sessions.pending().take(token)? {
+            PendingChoice::Readable {
+                session,
+                generation,
+                job,
+                ..
+            } if matches!(job.kind, ReadableKind::Export) => {
+                self.save_readable(session, generation, job)
+            }
+            // Another question's token: used up, and its choice dropped (no lock is held here).
+            _ => Err(ShellError::NotFound),
+        }
+    }
+
+    /// The CSV's part of [`save_readable`](Self::save_readable): reads the vault's rows now, after the dialog and after any
+    /// cloud yes, under a fresh read of the session that asked (a stale generation or a lock is refused here), into a
+    /// buffer that is wiped when dropped; then writes it as the `.env` file is written: a journaled hidden temp beside the
+    /// destination, moved into place only while the session is still unlocked in the generation that asked (the gate is
+    /// the rename itself, under the session's publish guard). An existing file is untouched until then.
+    fn write_export_csv(
+        &self,
+        session: SessionId,
+        generation: u64,
+        cancel: &CancelToken,
+        dest: &Path,
+    ) -> ShellResult<Tagged<Outcome<SavedView>>> {
+        let (plain, summary) = self
+            .sessions
+            .read(session, generation, |vault, _| match vault {
+                VaultRef::Writable(vault) => {
+                    let live_folder = |id: ItemId| {
+                        let folder = vault.get_item(&id).ok()?;
+                        let live = matches!(folder.kind, ItemKind::Collection)
+                            && folder.trashed_at.is_none()
+                            && !folder.purging;
+                        live.then(|| Zeroizing::new(folder.title.clone()))
+                    };
+                    let (bytes, mut summary) = export_csv::rows(vault.items(), live_folder);
+                    // The records the vault could not open are not in the file, and the person is told how many.
+                    summary.unreadable =
+                        u32::try_from(vault.damaged_items().len()).unwrap_or(u32::MAX);
+                    Ok((Plaintext::new(bytes), summary))
+                }
+                VaultRef::ReadOnly(_) => Err(ShellError::ReadOnly),
+            })?
+            .data;
+        let docs = dest
+            .parent()
+            .ok_or(ShellError::InvalidInput { what: "file name" })?;
+        let journal = self.outputs.for_call(&self.sessions, session, generation);
+        let temp = hidden_temp_path(docs, ".lockbox-partial");
+        journal.finish(journal.record(&temp))?;
+        #[cfg(test)]
+        reached("export_temp_recorded");
+        // A lock that came after the entry was written, and before the temp exists: no file is made, and none gets the
+        // vault's text. Nothing is on disk, so the entry is only written off.
+        if cancel.is_cancelled() {
+            journal.clear(&temp);
+            return Err(ShellError::Locked);
+        }
+        // A lock that came after the entry was written, and before the temp exists: no file is made, and none gets the
+        // vault's text. Nothing is on disk, so the entry is only written off.
+        let written = write_new(&temp, plain.as_bytes());
+        drop(plain);
+        if let Err(error) = written {
+            self.discard_env_temp(&temp);
+            return Err(error.into());
+        }
+        #[cfg(test)]
+        reached("export_temp_written");
+        if cancel.is_cancelled() {
+            self.discard_env_temp(&temp);
+            return Err(ShellError::Locked);
+        }
+        if let Err(error) = clear_hidden(&temp) {
+            self.discard_env_temp(&temp);
+            return Err(error.into());
+        }
+        // The last point before the rename: a lock that arrives here is stopped by the rename's own gate.
+        #[cfg(test)]
+        reached("export_before_publish");
+        let published = journal.finish(publish_readable(&temp, dest, |attempt| {
+            journal.publish(attempt)
+        }));
+        if let Err(error) = published {
+            // The move is the last thing that can fail before it happens; if the temp is gone, it happened.
+            match is_certainly_gone(&temp) {
+                true => journal.clear(&temp),
+                false => self.discard_env_temp(&temp),
+            }
+            return Err(error);
+        }
+        journal.clear(&temp);
+        #[cfg(test)]
+        reached("export_published");
+        // The handle for Show in Explorer: the folder the file went to, for this session and generation, only now that the
+        // file is in place. A lock between here and the answer takes the answer, and the handle with it.
+        let pending = self.sessions.pending();
+        let output = pending.put(PendingChoice::SavedFolder {
+            session,
+            generation,
+            folder: docs.to_path_buf(),
+        });
+        let saved = SavedView {
+            folder: shown(docs),
+            export: Some(summary),
+            output: Some(output.clone()),
+        };
+        self.still_current(session, generation, Outcome::Done(saved))
+            .inspect_err(|_| pending.close_saved_folder(&output))
     }
 
     /// The printers Lockbox offers for the recovery key, read from Windows now: the ones that send a page to a device,
@@ -234,6 +423,7 @@ impl Shell {
             ReadableKind::EnvFile { collection } => {
                 self.write_env_file(session, generation, &cancel, &dest, collection)
             }
+            ReadableKind::Export => self.write_export_csv(session, generation, &cancel, &dest),
         }
     }
 
@@ -290,7 +480,7 @@ impl Shell {
         }));
         if let Err(error) = published {
             // The move is the last thing that can fail before it happens; if the file is gone, it happened.
-            let moved = fs::symlink_metadata(&file).is_err();
+            let moved = is_certainly_gone(&file);
             self.discard_pdf(&folder, (!moved).then_some(file.as_path()));
             return Err(error);
         }
@@ -298,6 +488,8 @@ impl Shell {
         self.discard_pdf(&folder, None);
         let saved = SavedView {
             folder: shown(docs),
+            export: None,
+            output: None,
         };
         self.still_current(session, generation, Outcome::Done(saved))
     }
@@ -329,6 +521,30 @@ impl Shell {
     }
 }
 
+/// Whether `path` is certainly gone: only the file system's own "not found" says so. Any other answer (access denied, a
+/// volume that cannot be read) leaves it unknown, and an unknown temp keeps its journal entry, for the launch sweep.
+pub(super) fn is_certainly_gone(path: &Path) -> bool {
+    let looked = fs::symlink_metadata(path).map(drop);
+    #[cfg(test)]
+    let looked = match METADATA_ERROR.with(std::cell::Cell::take) {
+        Some(kind) => Err(std::io::Error::from(kind)),
+        None => looked,
+    };
+    matches!(looked, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests only: the next [`is_certainly_gone`] on this thread finds this error instead of the file system's answer.
+    static METADATA_ERROR: std::cell::Cell<Option<std::io::ErrorKind>> = const { std::cell::Cell::new(None) };
+}
+
+/// Tests only: the next look at whether a temp is gone fails with `kind`.
+#[cfg(test)]
+pub(super) fn fail_next_metadata_with(kind: std::io::ErrorKind) {
+    METADATA_ERROR.with(|next| next.set(Some(kind)));
+}
+
 /// `error`, unless the session locked meanwhile: a lock at any point is answered `Locked`, and the page shows no error.
 fn locked_or(cancel: &CancelToken, error: ShellError) -> ShellError {
     match cancel.is_cancelled() {
@@ -354,11 +570,20 @@ struct PrintArgs {
     printer: String,
 }
 
-/// `save_readable_confirm`.
+/// `save_readable_confirm` and `export_repick`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ConfirmArgs {
+pub(super) struct ConfirmArgs {
     token: Token,
+}
+
+/// `export_csv`: the vault's current password, typed for this one call (checked in it, then dropped).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExportArgs {
+    session: SessionId,
+    generation: u64,
+    password: Zeroizing<String>,
 }
 
 /// Saves the recovery key's PDF where the user picks (the page asks for nothing but the session: the key reaches the PDF
@@ -384,6 +609,33 @@ pub(super) async fn save_readable_confirm(
     let ConfirmArgs { token } = args(&request)?;
     let shell = Arc::clone(&shell);
     blocking(move || shell.save_readable_confirm(&token)).await
+}
+
+/// Exports the vault as a readable CSV where the user picks, once the vault's password is checked in this call. Runs on
+/// the blocking pool: the check is an Argon2 run.
+#[tauri::command]
+pub(super) async fn export_csv(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<Outcome<SavedView>>> {
+    let ExportArgs {
+        session,
+        generation,
+        password,
+    } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.export_csv(session, generation, password)).await
+}
+
+/// The cloud question's other answer for an export: pick another folder.
+#[tauri::command]
+pub(super) async fn export_repick(
+    shell: State<'_, Arc<Shell>>,
+    request: Request<'_>,
+) -> ShellResult<Tagged<Outcome<SavedView>>> {
+    let ConfirmArgs { token } = args(&request)?;
+    let shell = Arc::clone(&shell);
+    blocking(move || shell.export_repick(&token)).await
 }
 
 /// The printers Lockbox offers for the recovery key, and the default one when it is among them. Reads Windows' list on

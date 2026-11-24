@@ -537,8 +537,8 @@ PRD says. Plan numbers there may shift, and the PRD follows when plans are writt
   on when downloads happen, signing and the name. Two findings are carried for that plan: Tauri's "delete application data"
   option misses `%LOCALAPPDATA%\Lockbox`, so an uninstall hook has to remove `open\`; and the minimum Windows version and how
   WebView2 gets installed are decided there.
-- **The landing page and its guide:** the app's Help link goes to it. The page is separate work, and the app's link waits
-  for its address.
+- **The landing page and its guide:** the app's Help link goes to it. The page is separate work; until plan 5 moves it
+  there, Help opens `docs/GUIDE.md` on GitHub (plan 4D, decision 1(a)).
 - **The final name and logo:** decided before release.
 - **Parked in the PRD's "Not in v1":** a whole folder added with its structure, moving items between vaults, a check-my-key
   button, a Windows-wide search shortcut.

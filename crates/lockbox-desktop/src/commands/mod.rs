@@ -7,8 +7,11 @@ pub mod backup;
 mod batch;
 pub mod capture;
 pub mod env;
+#[cfg(test)]
+mod export_tests;
 pub mod files;
 mod generator;
+pub mod guide;
 pub mod items;
 mod jobs;
 mod list;
@@ -70,6 +73,7 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         items::delete_collection,
         items::purge_item,
         items::old_trash,
+        items::empty_trash,
         items::search_all,
         items::open_url,
         items::list_orphans,
@@ -93,6 +97,8 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         jobs::cancel_operation,
         readable::save_recovery_pdf,
         readable::save_readable_confirm,
+        readable::export_csv,
+        readable::export_repick,
         readable::list_printers,
         readable::print_recovery_key,
         env::env_read,
@@ -135,7 +141,8 @@ pub fn handler<R: Runtime>() -> impl Fn(Invoke<R>) -> bool + Send + Sync + 'stat
         settings::get_settings,
         settings::set_settings,
         settings::get_startup,
-        settings::set_startup
+        settings::set_startup,
+        guide::open_help
     ]
 }
 

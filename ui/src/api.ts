@@ -501,6 +501,48 @@ export async function closeAnswer(question: number, go: boolean): Promise<null> 
  */
 export interface SavedView {
   folder: string;
+  /** Only an export has this: what it holds and what it left out. A saved PDF or `.env` file has none. */
+  export?: ExportSummary;
+  /**
+   * Only an export has this: the handle the shell holds for Show in Explorer (`showOutputInExplorer`), a token and never a path, for this session and
+   * generation, with the folder the file went to behind it. Put away with `closeOutput` when the end is closed; a lock drops it.
+   */
+  output?: string;
+}
+
+/**
+ * What an export wrote, in counts and titles only (never a value): the rows written, the stored files left out (every file on a live item), and the
+ * titles of the rows whose password, key value or notes have a line break, which another app's importer may change. The titles are the vault's own,
+ * which the person already sees in it.
+ */
+export interface ExportSummary {
+  items: number;
+  left_out_files: number;
+  line_breaks: string[];
+  /** How many of the vault's items couldn't be read (the item list's `damaged`): they aren't in the file, and the export is not refused for them. */
+  unreadable: number;
+}
+
+/**
+ * Exports the vault to a readable CSV file (34a to 34c). The vault's password is checked in the same call, and is sent once: it is the page's only
+ * secret here, and nothing else of the vault crosses. Rust opens the save dialog, refuses a vault's folder and Lockbox's own folder (`core`
+ * `invalid_input`, what `"destination in a vault folder"`; `invalid_input`, what `"state folder"`), and writes the file only once the place is
+ * approved. Answers `"Dismissed"` when the dialog is closed, `{ Confirm: { CloudFolder: { token, provider } } }` before anything is built for a
+ * cloud-synced folder (go on with `saveReadableConfirm(token)`, or `exportRepick(token)` to pick another folder), or `{ Done: SavedView }` with
+ * `export` set. A wrong password is refused as `core` `wrong_password` and writes nothing; a read-only session as `read_only`; a lock while it runs
+ * makes the answer stale: no file, no error.
+ */
+export function exportVault(vault: SessionRef, password: string): Promise<Tagged<Outcome<SavedView>>> {
+  return call<Outcome<SavedView>>("export_csv", { session: vault.session, generation: vault.generation, password });
+}
+
+/**
+ * Pick another folder, at the export's cloud question: the parked choice is used up (that folder is left untouched) and the dialog opens again, with
+ * every check on the new answer. It carries the token alone: the password is not sent again. Answers as `exportVault` does; `not_found` when the
+ * question is gone (a lock, or five minutes).
+ */
+export function exportRepick(token: string): Promise<Tagged<Outcome<SavedView>>> {
+  return call<Outcome<SavedView>>("export_repick", { token });
 }
 
 /**
@@ -701,6 +743,61 @@ export function deleteFolder(vault: SessionRef, id: string): Promise<Tagged<numb
  */
 export function purgeItem(vault: SessionRef, id: string): Promise<Tagged<null>> {
   return call<null>("purge_item", { session: vault.session, generation: vault.generation, id });
+}
+
+/**
+ * The ids of the items that have been in the trash for `days` days or more, for the Trash view's "Delete permanently?" group. It lists
+ * and removes nothing. Asked only of a writable vault: a read-only one is refused as `read_only`.
+ */
+export function oldTrash(vault: SessionRef, days: number): Promise<Tagged<string[]>> {
+  return call<string[]>("old_trash", { session: vault.session, generation: vault.generation, days });
+}
+
+/**
+ * A leftover file (Ask 5): one in the vault's `files/orphaned/` that no item uses. The file's name was kept in the item, so only
+ * its size and when it was last written (`stored`, whole seconds since 1970) can show. `file_id` is the hex id the shell keeps it under:
+ * never a path, and never sent back.
+ */
+export interface OrphanFile {
+  file_id: string;
+  length: number;
+  stored: number;
+}
+
+/** The vault's leftover files, by id. Asked only of a writable vault: a read-only one is refused as `read_only`. It lists and removes nothing. */
+export function listOrphans(vault: SessionRef): Promise<Tagged<OrphanFile[]>> {
+  return call<OrphanFile[]>("list_orphans", { session: vault.session, generation: vault.generation });
+}
+
+/**
+ * Deletes the leftover files for good, once the person said yes: how many went. `files` are the ids of the files the person was shown (the list
+ * the question was asked over). Rust deletes nothing unless they are exactly the files it lists now (`core` `invalid_input` "leftover files
+ * changed": a file came or went since), nor while an item can't be read ("unreadable items"). Refused as `read_only` in a vault opened from a
+ * backup; a real disk error is `core` with its kind.
+ */
+export function deleteOrphans(vault: SessionRef, files: readonly string[]): Promise<Tagged<number>> {
+  return call<number>("delete_orphans", { session: vault.session, generation: vault.generation, files: [...files] });
+}
+
+/**
+ * What emptying the trash did: how many items it deleted for good (one restored or already gone meanwhile is not counted), and
+ * `trash_changed`: the trash was not the size the question said, so nothing was deleted and the page asks again.
+ */
+export interface EmptiedView {
+  purged: number;
+  trash_changed: boolean;
+}
+
+/**
+ * Deletes everything in the vault's trash for good, once the person said yes. It sends no item: Rust reads the trash at the call and
+ * deletes item by item, so what is restored or trashed again meanwhile stays, and a lock stops the rest (`locked`). `expected` is the
+ * count the question said would go: a trash of another size at the call deletes nothing (`trash_changed`). With `olderThanDays` (the old
+ * group's button sends 30) only what has been in the trash that many days or more goes, the cutoff fixed at the call. Refused as
+ * `read_only` in a vault opened from a backup; a real disk error is `core` with its kind.
+ */
+export function emptyTrash(vault: SessionRef, expected: number, olderThanDays?: number): Promise<Tagged<Outcome<EmptiedView>>> {
+  const body = { session: vault.session, generation: vault.generation, expected };
+  return call<Outcome<EmptiedView>>("empty_trash", olderThanDays === undefined ? body : { ...body, older_than_days: olderThanDays });
 }
 
 /** The generator's options for a password, as the engine takes them (`length` is 8 to 128). */
@@ -1300,6 +1397,14 @@ export function retryOpenCleanup(): Promise<RemoveReport> {
  */
 export function openUrl(vault: SessionRef, id: string, index: number): Promise<Tagged<null>> {
   return call<null>("open_url", { session: vault.session, generation: vault.generation, id, index });
+}
+
+/**
+ * Help (task 36): asks the shell to open the guide in the default browser. It takes nothing and sends nothing: the address is the shell's
+ * own, so the page never holds, builds or sends one. Refused with the shell's usual `io` refusal when the browser can't be started.
+ */
+export function openHelp(): Promise<null> {
+  return callPlain<null>("open_help", {});
 }
 
 /** What 2c's Clear now found: Lockbox's copy taken off, nothing of Lockbox's left to clear, or the clipboard held by another app. */

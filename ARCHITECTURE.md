@@ -2,12 +2,13 @@
 
 This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
 restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
-The real screens come in Plan 4, in four parts; the first three, daily use (4A), files and long jobs (4B), and vaults and passwords (4C), are built: `ui/` has the bridge to Rust, first-time
+The real screens come in Plan 4, in four parts, and all four are built: daily use (4A), files and long jobs (4B), vaults and passwords (4C), and the rest (4D). `ui/` has the bridge to Rust, first-time
 setup with the recovery key, the lock screen, and the main window with search, the item panel, the forms, the Trash, folders,
 `.env` in and out, the save shortcut's box and settings ([the UI design](docs/design/2026-11-05-user-interface-design.md)),
 and the backup, restore, older-copy, open-a-backup, move-in, add-files and Save all screens with progress and a Stop, and, from 4C, changing the password, forgot password, a new
-recovery key, a second vault unlocked and switched to in the window, a new vault, rename, remove and add back.
-Emptying the trash and export come in 4D. The target design and the
+recovery key, a second vault unlocked and switched to in the window, a new vault, rename, remove and add back, and, from
+4D, export to a readable CSV, emptying the trash, Help, the notice shown when Lockbox can't start, and end-to-end tests
+that drive the real app ([below](#export-empty-the-trash-help-and-a-failed-start)). The target design and the
 reasons behind it are in the [design spec](docs/design/2026-10-07-lockbox-design.md); this file cites its sections as
 "spec 5.2" and so on.
 
@@ -320,6 +321,8 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | Module | Its one job |
 |---|---|
 | `lib.rs` | Builds the app: the launch order, the signal and tick threads, locking on every way out |
+| `launch.rs` | Starting the app, and Ask 14: setup's one error, `Failed`, carries nothing, a failed build is dropped unread, and both end in one Windows notice with fixed words |
+| `export_csv.rs` | A vault's export rows in Bitwarden's CSV layout (design decision B): no I/O, one buffer made at its exact size and wiped when dropped |
 | `shell.rs` | `Shell`: owns everything below, runs the launch work, sends the page's events |
 | `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard (`SessionInfo` also says its `kind`, from the location and the read-only flag: `vault`, `older_copy` or `backup`; a backup's `name` is its file's name without `.lockbox-backup`); the lock epoch and the launch token (cancelled and replaced with each lock of all vaults); locking in two phases; the ordered lock-hook thread; `KeyState`, per writable session: whether it may make a recovery key without the password (the unconfirmed-key step) and the number of the last key made, so a key's confirmation never races a newer key (`write_keys`) |
 | `autolock.rs` | The idle timer, the table of long operations (jobs) that pauses it, Windows signals, and the shutdown with its 2 s bound |
@@ -334,16 +337,18 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `startup.rs` | Start with Windows: the `Run` value's name and command line, how Windows' own on/off value reads, the `--hidden` rule, and the two commands' answers |
 | `vault_state.rs` | What is noted about each vault folder (`vault-state.json`, keyed by folder, never by vault ID): the "recovery key not confirmed" mark, written before a key is made, and when the vault was last backed up (`YYYY-MM-DDTHH:MM:SSZ`, UTC, written when a backup is published and never otherwise) |
 | `dates.rs` | The one date shape the shell writes and reads (RFC 3339, UTC, whole seconds), and "whole days since": the 30-day backup reminder counts from the last backup, else from the vault's creation |
-| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again; a backup picked to be opened read-only (`PendingChoice::OpenBackup`) is held the same way, as a kind of its own that the test never answers for (and the other way round), with `forget_open_backup`; a backup picked to be restored is held the same way (`PendingChoice::RestorePick`, with `forget_restore_pick`, and every use of it, a check or a copy, in use until it ends), and once the password has worked it also holds the credential that worked and what the check found (the vault's name, ID and date, and the folder), so the typed text is on the page only until it is sent; a lock of all vaults of any kind, an idle one included, drops it; a recovery key checked for "forgot password" (`PendingChoice::Recovery`: the key, both header files' bytes as read and the lock epoch) is held the same way, drops at a lock of all vaults, five minutes or closing, and is told apart from every other kind |
+| `pending.rs` | One-time tokens for a question whose answer needs something kept (a credential, a chosen folder); they end after five minutes or when all vaults lock, and a pasted `.env`'s values, the copies waiting in a cloud question, the files picked to be added, and Save all's plans, cloud questions and summary handles (an export's summary uses the same handle) also when their own vault locks (the picked list keeps one token while Pick more and Remove change it, each starting its five minutes again; a Save all plan is read, then used up by its start, and told apart from its cloud question, which is the same choice with no files; the summary's handle is read, never used up, and closed by `close_output`); a backup picked to be tested (its path, and the lock epoch it was held in) belongs to no vault, so only a lock of all vaults, expiry, a new pick or `forget_test_backup` drop it, and each `test_backup` attempt starts its five minutes again; a backup picked to be opened read-only (`PendingChoice::OpenBackup`) is held the same way, as a kind of its own that the test never answers for (and the other way round), with `forget_open_backup`; a backup picked to be restored is held the same way (`PendingChoice::RestorePick`, with `forget_restore_pick`, and every use of it, a check or a copy, in use until it ends), and once the password has worked it also holds the credential that worked and what the check found (the vault's name, ID and date, and the folder), so the typed text is on the page only until it is sent; a lock of all vaults of any kind, an idle one included, drops it; a recovery key checked for "forgot password" (`PendingChoice::Recovery`: the key, both header files' bytes as read and the lock epoch) is held the same way, drops at a lock of all vaults, five minutes or closing, and is told apart from every other kind |
 | `paths.rs` | The state folder and default vault folder from Windows' known folders; the size-capped, strict state-file reader |
 | `views.rs` | What an item looks like to the page: no keys, no nonces, no password unless revealed |
 | `error.rs` | `ShellError`: a fixed code and fixed fields, never a path, a name or input |
 | `window.rs` | The one window: what it may load, open, download or receive, and how it starts (shown, or hidden for a `--hidden` start) |
 | `commands/` | The `#[tauri::command]` wrappers. `list.rs` names every command; `args.rs` parses a request strictly |
+| `commands/readable.rs` | The one way to write a readable file (the recovery key's PDF, a folder's `.env`, a vault's export): Rust's save dialog, the vault-folder, state-folder and cloud checks, a journaled temp, then a move gated on the session's generation |
+| `commands/guide.rs` | Help: the guide's fixed `https` address, opened through the `Launcher`; the command takes no input |
 | `commands/add_files.rs` | Many files in: the picker and its held list (paths stay in Rust), and `add_files`, one job for the batch (one bar over every file's bytes) where each file is its own change of the vault, the vault is let go between two files, a file that cannot be read, or is no longer the size measured, is named and skipped, and a Stop or a refusal names what was not added |
 | `commands/batch.rs` | What the two batch jobs share: the bar over every file's bytes together, the 30 ms the vault is let go between two files, the wait while another command has the vault (tried every 50 ms for 30 s by the shell's clock), and what a cancelled job's token means |
-| `commands/save_all.rs` | Saving all of a folder's files: `save_all_files` (the picker, the shared destination checks, the batch's space, the plan), `save_all_files_confirm` (the cloud question's yes), `save_all_start` (the checks again, then one job over every file, each its own read of the vault, never replacing; a damaged file, one that went, a full drive and a Stop each named in the summary) and the summary's handle (`show_output_in_explorer`, `close_output`) |
-| `os/mod.rs` | The traits (`Dialogs`, `Launcher` (a link, an opened copy, a folder in Explorer), `IdleSource`, `Power`, `Clock` (monotonic time, the wall clock, the PC's local date and its offset from UTC, which turns a backup's UTC date into the day the person calls it), `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`) and the shared clipboard steps |
+| `commands/save_all.rs` | Saving all of a folder's files: `save_all_files` (the picker, the shared destination checks, the batch's space, the plan), `save_all_files_confirm` (the cloud question's yes), `save_all_start` (the checks again, then one job over every file, each its own read of the vault, never replacing; a damaged file, one that went, a full drive and a Stop each named in the summary) and the summary's handle, Save all's and an export's (`show_output_in_explorer`, which opens only a folder that is not a link, and `close_output`) |
+| `os/mod.rs` | The traits (`Dialogs`, `Launcher` (a link, an opened copy, a folder in Explorer), `IdleSource`, `Power`, `Clock` (monotonic time, the wall clock, the PC's local date and its offset from UTC, which turns a backup's UTC date into the day the person calls it), `Timer`, `ClipboardBackend`, `Volumes`, `Env`, `MainWindow`, `Hotkey`, `StartupEntry`, `StartupNotice` (Ask 14's notice when Lockbox can't start)) and the shared clipboard steps |
 | `os/win.rs` | The real Windows calls (the real clocks included), the hidden signal window and the one-copy mutex. The only place the shell allows `unsafe` |
 | `os/signals.rs` | Turns a window message into an `OsSignal` |
 | `testing.rs` | The fakes (test builds only) |
@@ -597,6 +602,48 @@ journal and looked up once it is done, never a path. A `finished` restore whose 
 vault is listed by recovery, as that does, so the notice can name it. `drive_missing` carries `folder`, the target's parent
 as text (what the drive-missing screen names); the page never sends it back.
 
+### Export, empty the trash, Help and a failed start
+
+**Export** (`export_csv`, `export_repick`; design task 34, decision B). The page sends the session, its generation and the
+vault's current password, once. The password is checked in the same call by the engine's `check_password` (the same
+rule as changing the password, so a vault opened with its recovery key counts the password set then), and wiped when the
+check returns. A wrong one writes nothing and opens no dialog, and a read-only session is refused before the password is
+looked at. What goes on to Rust's save dialog holds only the session and generation. The destination then goes through
+`save_readable`'s checks: no vault folder, not Lockbox's state folder, and the cloud question for a synced folder, whose
+Pick another folder is `export_repick`. Only after that are the rows read, under a fresh check of the session, and made
+by `export_csv.rs` into one wiped buffer. They are written as a `.env` is: a journaled hidden temp beside the
+destination, moved into place under the session's publish guard, so a lock at any step leaves no file and an existing
+file untouched. The answer (`ExportSummary`) carries only counts, the titles of items whose values hold line breaks, the
+folder as text, and Save all's summary handle (`PendingChoice::SavedFolder`) for Show in Explorer, read through
+`show_output_in_explorer` and dropped by `close_output`, a lock of that vault or five minutes; no value reaches the page.
+Stored files, earlier passwords and the trash stay out; folder items are not rows, but each row names its live folder
+(a wiped copy of its title).
+
+**Empty the trash** (`empty_trash`; design task 32). The page sends the count its question named, and for the old
+group's "Delete these N permanently" a number of days. The trash is read once, at the call. If the count differs (an item
+trashed or aged since), nothing is deleted and the answer says the trash changed, so the page reads it again and asks
+again. Otherwise each item goes through the engine's `purge_item` (marked, then deleted, so a crash leaves only the
+marked one for cleanup at unlock), each in its own write for the same generation. An item restored, or trashed again
+since, stays; a lock or a new generation stops the rest; a real error comes back at once. A file another item still
+attaches is kept (the engine's rule). Lockbox never empties the trash by itself: `old_trash` only lists.
+
+**Help** (`open_help`; design task 36). The command takes no fields at all. It opens the one fixed `https` address of
+`docs/GUIDE.md` (`commands/guide.rs`) through the `Launcher` trait, in the person's own browser. Lockbox itself makes no
+network call.
+
+**A failed start** (Ask 14, `launch.rs`). A failure of setup ends in `Failed`, which carries nothing, and a failed
+build is dropped unread (`built`): either way the error, and any path or name in it, stays where it happened (R5). Lockbox then shows one Windows task dialog
+with fixed words ("Lockbox can't start. Your vaults aren't affected. …"), Open the guide and Close, and exits with
+code 1. Only Open the guide opens the guide.
+
+**End-to-end tests** (`scripts/e2e.mjs`, `e2e/`; spec testing line). The release app is built once and driven through
+`tauri-driver` and Microsoft Edge WebDriver with WebdriverIO, on a test state swapped in for each spec by
+`e2e/lib/state.mjs` (the real folders are set aside and put back; see CONTRIBUTING.md). `e2e/real-app.test.mjs` checks
+the built app itself: the shipped grants and config allow only the listed commands, a normal launch opens no debugging
+port, and the driver attaches only to the instance it started. The specs in `e2e/specs` walk the design's acceptance
+paths. CI runs them in the `End-to-end: the real app (windows)` job on GitHub's Windows runner. Nothing for driving is added to
+the shipped app: the driver reaches it through WebView2's own debugging setting, given for that run only.
+
 ### Rules the shell must keep
 
 Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind this list are the fuller record.
@@ -611,7 +658,7 @@ Each rule names the tests that pin it. Spec 9 and the spec-to-test map behind th
    Paths go the other way as text, for showing only and never accepted back, in four cases: a restore that cannot
    finish (its notice, and the question before dismissing it), the folder a restore will use, the folder Save all
    files is about to write to (and later saved to), and a readable file Lockbox saved where you chose (the recovery
-   key's PDF, a saved `.env`).
+   key's PDF, a saved `.env`, an export).
 3. **Every command needs a permission, and the window has exactly the expected set.** `capability_grants_exactly_the_expected_set`,
    `granted_command_runs_in_main_window`, `every_listed_command_reaches_its_handler`, `other_window_is_refused`,
    `remote_origin_is_refused`, `plugin_commands_are_refused`. Spec 4.2.

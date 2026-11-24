@@ -3,7 +3,7 @@
 // Exit 0 = CLEAN, 1 = FINDINGS, 2 = INCOMPLETE (a tool is missing or failed, so "clean" can't be claimed).
 // Usage: node scripts/scan.mjs [--json]
 // Env LOCKBOX_GITLEAKS / LOCKBOX_SEMGREP / LOCKBOX_OSV point at a tool; a .mjs path is run with this Node (tests use that).
-// LOCKBOX_CARGO_LOCK / LOCKBOX_UI_LOCK override where the lockfiles are looked for (tests only).
+// LOCKBOX_CARGO_LOCK / LOCKBOX_UI_LOCK / LOCKBOX_E2E_LOCK override where the lockfiles are looked for (tests only).
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
@@ -11,14 +11,19 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = join(root, ".scan");
-// Lockfiles osv-scanner reads, relative to the repo root. Cargo.lock is always required; the UI's lockfile is
-// required once the UI exists, so its npm dependencies can never go unchecked.
+// Lockfiles osv-scanner reads, relative to the repo root. Cargo.lock is always required; the UI's and the end-to-end
+// tests' lockfiles are required once their package.json exists, so their npm dependencies can never go unchecked.
 const lockfiles = [
   { name: "Cargo.lock", path: process.env.LOCKBOX_CARGO_LOCK ?? "Cargo.lock", required: true },
   {
     name: "ui/package-lock.json",
     path: process.env.LOCKBOX_UI_LOCK ?? "ui/package-lock.json",
     required: existsSync(join(root, "ui", "package.json")),
+  },
+  {
+    name: "e2e/package-lock.json",
+    path: process.env.LOCKBOX_E2E_LOCK ?? "e2e/package-lock.json",
+    required: existsSync(join(root, "e2e", "package.json")),
   },
 ];
 // pip installs semgrep here (not on PATH); see docs/SETUP.md troubleshooting.

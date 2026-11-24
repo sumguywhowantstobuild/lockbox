@@ -281,23 +281,10 @@ impl Capture {
         Ok((chosen, Zeroizing::new(value.to_owned())))
     }
 
-    /// A copy of the slot's state and raw text, for a command that works on the text after the mutex is let go.
-    pub(crate) fn snapshot(
-        &self,
-        id: &str,
-    ) -> ShellResult<(CaptureState, Option<Zeroizing<String>>)> {
-        let mut slot = lock(&self.slot);
-        let held = Self::current(&mut slot, id)?;
-        let raw = held
-            .text
-            .as_ref()
-            .map(|held| Zeroizing::new(held.text.to_string()));
-        Ok((held.state, raw))
-    }
-
-    /// [`Capture::snapshot`] for a save into `session` at `generation`: in the same hold of the slot's mutex, `NotFound`
-    /// for an id that is not the slot's, then `Err(CAPTURE_VAULT)` unless the capture is handed to exactly that session at
-    /// exactly that generation. The check and the copy are one step, so a hand-over cannot change between them.
+    /// A copy of the slot's state and raw text, for a command that works on the text after the mutex is let go, and only
+    /// for a save or a paste into `session` at `generation`: in the same hold of the slot's mutex, `NotFound` for an id
+    /// that is not the slot's, then `Err(CAPTURE_VAULT)` unless the capture is handed to exactly that session at exactly
+    /// that generation. The check and the copy are one step, so a hand-over cannot change between them.
     pub(crate) fn snapshot_bound(
         &self,
         id: &str,

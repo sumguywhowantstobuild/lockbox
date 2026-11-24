@@ -37,8 +37,8 @@ export const PUT_BACK = "Put this item back in a vault you're using.";
 /** 25c's button, and the form's own name. */
 export const COPY_TO_A_VAULT = "Copy to a vault";
 
-/** What the form says when no vault is open to copy into †. */
-export const NOWHERE_TO_COPY = "Unlock a vault first, then copy into it.";
+/** What the form says when no vault is open to copy into (the design's "Nowhere to copy to"). */
+export const NOWHERE_TO_COPY = "Unlock a vault first, so there's somewhere to copy this to.";
 
 /** What is said, politely, when a copy has gone in †. */
 export function copiedTo(vault: string, leftOut: number): string {

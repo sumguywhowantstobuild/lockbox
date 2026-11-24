@@ -52,6 +52,12 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Takes the icon away again: a start that failed after the icon was made takes it down before it says so, so that
+/// nothing in it can be chosen while the notice is up, and no stale icon is left by the clock when the process ends.
+pub fn remove<R: Runtime>(app: &AppHandle<R>) {
+    drop(app.remove_tray_by_id(TRAY_ID));
+}
+
 /// What a click on the icon chooses: the left button, on its release, is "Open Lockbox" (Windows' convention). Any other
 /// click chooses nothing (the right button opens the menu on its own).
 fn click_chooses(button: MouseButton, state: MouseButtonState) -> Option<&'static str> {
@@ -378,6 +384,31 @@ mod tests {
         ] {
             assert_eq!(click_chooses(button, state), None, "{button:?} {state:?}");
         }
+    }
+
+    /// A start that failed takes the icon down: it is there after `build`, gone after `remove`, and `remove` with no icon
+    /// (a start that failed before it was made) does nothing.
+    #[test]
+    fn remove_takes_the_icon_down_and_is_harmless_without_one() {
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("the mock app builds");
+        remove(app.handle());
+        // The mock app has no window icon for `build`; an icon of one transparent pixel stands in for it.
+        TrayIconBuilder::with_id(TRAY_ID)
+            .icon(tauri::image::Image::new_owned(vec![0; 4], 1, 1))
+            .build(app.handle())
+            .expect("the icon is made");
+        assert!(
+            app.handle().tray_by_id(TRAY_ID).is_some(),
+            "no icon to remove"
+        );
+        remove(app.handle());
+        assert!(
+            app.handle().tray_by_id(TRAY_ID).is_none(),
+            "the icon is still there"
+        );
+        remove(app.handle());
     }
 
     /// The menu is exactly Open Lockbox, Lock all and Quit, in that order, with ids the handler knows.

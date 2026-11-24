@@ -334,7 +334,7 @@ test("key_shows_once_with_the_plain_warning", async () => {
   expect(screen.getByText(/Don't keep the saved key on this PC\./)).toBeTruthy();
   expect(screen.getByText(/Writing it down by hand is fine\./)).toBeTruthy();
   expect(screen.getByText(/Screenshots won't work/)).toBeTruthy();
-  // Saving it as a PDF and printing are here; Help waits for a later task.
+  // Saving it as a PDF and printing are here; Help is not (the design has it on the empty vault, 21g, and in Settings, 31a).
   expect(screen.getByRole("button", { name: "Print" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Save as PDF" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /help/i })).toBeNull();
@@ -789,7 +789,7 @@ test("a_vault_that_could_not_be_marked_is_not_made", async () => {
   expect(await screen.findByRole("heading", { level: 1, name: "Save your recovery key" })).toBeTruthy();
 });
 
-test("ready_screen_says_what_to_do_first", async () => {
+test("ready_shows_what_to_do_first_and_help", async () => {
   const { container } = start([]);
   await toTheKey();
   const key = shell.keyOf(1) ?? "";
@@ -798,16 +798,24 @@ test("ready_screen_says_what_to_do_first", async () => {
   await screen.findByRole("heading", { level: 1, name: "All items" });
   const main = screen.getByRole("main");
   expect(within(main).getByText("Your vault is empty")).toBeTruthy();
-  expect(within(main).getByText("What to do first: add a login, or a key, a note or a file.")).toBeTruthy();
+  expect(
+    within(main).getByText("What to do first: add a login, or a key, a note or a file. Once it holds things you'd miss, make a backup from Settings."),
+  ).toBeTruthy();
   // The key is gone from the page for good. Add is in the toolbar (Task 11) and right there in the empty vault (Task 12), with
-  // the kinds that can be made, as drawn; nothing else from a later task (Help) is offered.
+  // the kinds that can be made, then Help (21g), as drawn.
   expect(keyWordsOnPage(key)).toEqual([]);
   expect(screen.getByRole("button", { name: "Add" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /^Help/ })).toBeNull();
   const list = main.querySelector<HTMLElement>(".lscroll");
   expect(list).not.toBeNull();
-  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env"]);
+  expect(within(list as HTMLElement).getAllByRole("button").map((button) => button.textContent)).toEqual(["Login", "Key", "Note", "File", "Paste a .env", "Help"]);
   await expectNoAxe(container);
+  // Help asks the shell to open its own address: the body is empty, so nothing from the page can name one.
+  expect(shell.helpOpened()).toBe(0);
+  click("Help");
+  await vi.waitFor(() => {
+    expect(shell.helpOpened()).toBe(1);
+  });
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === "open_help")).toEqual([["open_help", {}]]);
 });
 
 test("cloud_folder_asks_before_creating", async () => {

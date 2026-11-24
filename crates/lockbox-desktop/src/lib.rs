@@ -16,7 +16,9 @@ pub mod clipboard;
 pub mod commands;
 pub mod dates;
 pub mod error;
+mod export_csv;
 pub mod jobs;
+mod launch;
 pub mod locations;
 pub mod open;
 mod os;
@@ -44,11 +46,11 @@ use std::{io, thread};
 
 use tauri::{AppHandle, CloseRequestApi, Manager, RunEvent, Runtime, WindowEvent};
 
-use crate::shell::{Events, Shell};
+use crate::shell::Shell;
 
 /// Starts the app and runs it until it exits.
 pub fn run() {
-    let app = tauri::Builder::default()
+    let built = tauri::Builder::default()
         // First: a second copy of the app hands over to this one and exits inside `build()`, before any setup runs.
         // Its working directory is ignored, and its arguments are only compared with `--hidden` (never logged): see
         // [`second_launch`].
@@ -56,99 +58,29 @@ pub fn run() {
             second_launch(&args, || window::bring_to_front(app))
         }))
         .invoke_handler(handler())
+        // Setup runs inside the event loop once it is ready, and Tauri ends the process with a panic that prints the
+        // error when it returns one. So no error leaves this closure: a failure is answered here with the notice
+        // ([`launch::launch`]) and the process ends with its exit code, before the page loads. A hand-off to a running
+        // copy ends with code 0 and says nothing.
         .setup(|app| {
-            // First of all, before any launch work: the one copy of the app in this sign-in. The single-instance
-            // plugin falls through when its mutex exists but its window does not exist yet, so two copies can reach
-            // here, and the second one's launch work would remove the first one's staging folder and temps. Nothing
-            // has started in this copy, so it simply ends. Fail closed when Windows will not say.
-            match os::win::claim_instance() {
-                Err(_) => {
-                    return Err(
-                        "Lockbox will not run: it could not tell whether it is already running"
-                            .into(),
-                    );
-                }
-                Ok(None) => std::process::exit(0),
-                Ok(Some(running)) => {
-                    // For the life of the process: dropping the guard would let a second copy start.
-                    if !app.manage(running) {
-                        return Err(
-                            "Lockbox will not run: its running copy could not be kept".into()
-                        );
-                    }
-                }
+            let launched = launch::launch(
+                app.handle(),
+                &launch::RealSteps,
+                &os::win::WinStartupNotice,
+                &os::win::WinLauncher,
+                std::env::args_os(),
+            );
+            match launched.exit_code() {
+                None => Ok(()),
+                Some(code) => std::process::exit(code),
             }
-            // Fail closed: never run without Windows' lock, sleep and drive notices (spec §7.4). Tauri ends the
-            // process on a setup error (it panics with this message), before the event loop goes on to load and run
-            // the app page. The app's state keeps the signal thread for as long as the app runs: dropping it would
-            // stop the notices.
-            let (sink, signals) = mpsc::channel();
-            let Ok(signal_thread) = os::win::spawn(sink) else {
-                return Err(
-                    "Lockbox will not run: it could not listen for Windows lock and sleep".into(),
-                );
-            };
-            // The save shortcut is registered below, once the shell exists to answer a press and to tell the page when
-            // Windows says no. `manage` refuses (and drops, which closes the window) a second value of the same type.
-            if !app.manage(signal_thread) {
-                return Err(
-                    "Lockbox will not run: its Windows lock and sleep listener could not be kept"
-                        .into(),
-                );
-            }
-
-            // Before the window, so every command finds it. No vault may live in the folders Tauri keeps for the
-            // app, which an uninstaller may delete (spec §6.10).
-            let app_dirs = vec![app.path().app_data_dir()?, app.path().app_local_data_dir()?];
-            let shell = Shell::new(
-                Arc::new(Events(app.handle().clone())),
-                os::Os::windows(app.handle().clone()),
-                app_dirs,
-            )?;
-            // Launch work, here only: a second copy of the app exits before setup, so it never recovers or sweeps the
-            // first copy's folders. It comes before the shell is managed and before the window exists, so no command
-            // can answer before it has run: a half-done restore is settled first (spec §6.8), then the output journal's
-            // leftovers (spec §7.2), then the "Open" folders'.
-            shell.launch_work();
-            if !app.manage(Arc::clone(&shell)) {
-                return Err("Lockbox will not run: its vault sessions could not be kept".into());
-            }
-            // Fail closed here too: never run without the auto-lock. Signals that came before this wait in the channel.
-            route_signals(signals, Arc::clone(&shell))?;
-            // After the route, so a press that comes at once is answered. The app runs whatever Windows says.
-            shell.register_save_shortcut();
-            start_ticks(Arc::clone(&shell))?;
-
-            // The icon by the clock, where the window hides to: fail closed, since a hidden window with no icon could
-            // never be reached again.
-            if tray::build(app.handle()).is_err() {
-                return Err("Lockbox will not run: its icon by the clock could not be made".into());
-            }
-
-            // The window is built hidden and shown only once its protections are in place. Fail closed as well: never
-            // run with files droppable into the page, or with the browser's keys and menu (Ctrl+P, F12, the context
-            // menu) able to reach a revealed secret. The window stays hidden when either is not confirmed. A start from
-            // Windows' sign-in (`--hidden`, and nothing else) puts the same protections in place and leaves the window
-            // in the tray: the launch work above has run, and its notices wait for the page to ask.
-            let window = window::main_window(app.handle())?;
-            let hidden = startup::hidden_launch(std::env::args_os());
-            if window::start_main_window(&window, &shell, hidden).is_err() {
-                return Err(match (
-                    window::external_drop_is_off(),
-                    window::browser_keys_are_off(),
-                ) {
-                    (false, _) => "Lockbox will not run: its window could not turn off file drops",
-                    (_, false) => {
-                        "Lockbox will not run: its window could not turn off the browser's keys and menu"
-                    }
-                    (true, true) => "Lockbox will not run: its window could not be shown",
-                }
-                .into());
-            }
-            Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("the Lockbox app could not start");
+        .build(tauri::generate_context!());
+    // A build that fails (before setup) gets the same notice, and not the panic that would print its error.
+    let app = match launch::built(built, &os::win::WinStartupNotice, &os::win::WinLauncher) {
+        Ok(app) => app,
+        Err(code) => std::process::exit(code),
+    };
 
     app.run(on_run_event);
 }

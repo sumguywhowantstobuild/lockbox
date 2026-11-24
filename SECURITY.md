@@ -35,7 +35,9 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 ## What Lockbox does not protect against
 
-- **Malware on your PC while a vault is unlocked.** It can read whatever Lockbox can read.
+- **Malware on your PC while a vault is unlocked.** It can read whatever Lockbox can read. A program running as you can
+  also start Lockbox with WebView2's debugging settings and read what the window shows; Lockbox's end-to-end tests
+  drive the real app this way.
 - **Someone who has your password or recovery key.**
 - **A weak password.** The core insists on at least 12 characters when a password is set, but a guessable password is
   still guessable. Argon2id makes each guess costly; it cannot make a poor password good.
@@ -67,7 +69,8 @@ Lockbox keeps everything on your own PC, in one folder per vault. It is built so
 
 The Rust core (Plans 1 and 2), the desktop shell (Plan 3), the daily-use screens (4A) and the backup, restore, files and
 long-job screens (4B) and the vault and password screens (4C: change password, forgot password, a new recovery key,
-several vaults open, a new vault, rename, remove and add back) exist. Export, and emptying the trash, come in 4D. If you
+several vaults open, a new vault, rename, remove and add back) exist, and so do the last screens (4D: export, emptying
+the trash, Help, and the notice when Lockbox can't start). If you
 lose both the password and the recovery key, nothing opens the vault, or a backup made since you last changed them.
 
 | Requirement | State |
@@ -75,8 +78,8 @@ lose both the password and the recovery key, nothing opens the vault, or a backu
 | R1 Confidentiality at rest | Built into the core's file formats |
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
-| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export comes with the last screens (4D) |
-| R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else |
+| R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export (a CSV in Bitwarden's layout, after the current password is checked in the same call) is written the same way |
+| R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else. When Lockbox can't start, its notice has the same fixed words for every cause, and Lockbox never shows the cause (with any path or name in it); WebView2's own error box, outside Lockbox, may name its data folder before that notice |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box when the vault it would save to locks, or every vault does (a lock of another vault leaves it) |
 | R7 Documented limits | This file |
 
@@ -98,8 +101,13 @@ trusted than Rust.
   the page. Paths go to the page as text, for showing only and never accepted back, in four cases: a restore that cannot
   finish (its notice, and the question before dismissing it), the folder a restore will use, the folder Save all files
   is about to write to (and later saved to), and a readable file Lockbox saved where you chose (the recovery key's PDF,
-  a saved `.env`). Stored links are opened from Rust, and only for `http`
-  and `https`.
+  a saved `.env`, an export). An export's answer carries only counts, the titles of items whose values hold line breaks
+  (already shown in the vault), that folder and a Show in Explorer handle (a token, dropped as Save all's is: by Done, a
+  lock of that vault or five minutes); no exported value reaches the page. Show in Explorer checks, as it is pressed,
+  that the saved folder is still a folder and not a link, and refuses otherwise (a program already running as you could
+  still swap it in the instant before Explorer opens it). Stored links are opened from Rust,
+  and only for `http` and `https`. Help, and the notice when Lockbox can't start, open one fixed `https` address (the
+  guide), held in Rust; the Help command takes no input. Lockbox itself makes no network call.
 - **A backup picked to be tested.** "Test a backup" asks for the file first and holds its path in Rust under a one-time
   token; the page gets the token, the file's name and its size, never the path, and the path is in no error or event.
   The held pick belongs to no vault: locking one vault leaves it, and a lock of all vaults, an idle lock, Windows
@@ -461,10 +469,10 @@ memory of the running program (malware, a debugger, a crash dump) is already pas
   nothing), though Microsoft does not formally document it. Crashes of Lockbox itself are tested by simulation (the
   tests make each step fail in turn and rebuild the folder a crash would leave); no process is actually killed and power
   cuts are not tested (spec 6.2). *Accepted:* it is how nearly all software saves files on Windows.
-- **A crash during "Save a copy" or "Save all files" can leave a decrypted file behind.** The copy is first built in a
-  hidden temp file (`.<random>.lockbox-partial`) beside the destination (for "Save all files", one at a time, each
+- **A crash during "Save a copy", "Save all files", an export or saving a `.env` can leave a decrypted file behind.** The
+  copy is first built in a hidden temp file (`.<random>.lockbox-partial`) beside the destination (for "Save all files", one at a time, each
   recorded before it exists, the ones already saved being whole files under their own names), and moved into place only
-  after every chunk has been checked. If
+  when it is whole (for a stored file, after every chunk has been checked). If
   Lockbox crashes, is killed or loses power while that temp file exists, it stays there as plaintext (part of the file
   you chose to export), until the next launch: the output journal, a record of temp files, lets the launch sweep delete
   it (see "What the launch sweep deletes"). A leftover on a drive that is not connected waits until it is. A normal
@@ -672,10 +680,11 @@ Lockbox defends.
 
 ### Not built yet
 
-These are described in the spec but do not exist, so nothing here should be relied on yet: the screens of Plan 4D
-(emptying the trash, the list of items that have been in the trash for 30 days or more, and export), the
-end-to-end tests on the running app, and the installer. Plans 4A, 4B and 4C are built
-(first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
+These are described in the spec but do not exist, so nothing here should be relied on yet: the installer, updates and
+uninstalling (Plan 5). Plans 4A to 4D are built (export, emptying the trash and the list of items in the trash
+for 30 days or more, the list of leftover files with no item that uses them and Delete them all, which asks first and
+sends no file name or path, Help and the guide, the notice when Lockbox can't start, and end-to-end tests on the running app,
+besides first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
 folders and the trash, `.env` in and out, the save shortcut, stored files, settings, and backing up, testing and
 restoring a backup, older copies, opening a backup read-only, moving a vault to a new computer, adding many files,
 Save all files, changing the password, forgot password with the recovery key, a new recovery key, unlocking a second vault from inside the window and switching, a new vault, renaming a vault, removing a vault from the list and adding it back, and progress and a stop for long jobs), and the page clears what it shows at
@@ -684,7 +693,7 @@ cleanup); to look at a vault or a backup without writing, open it read-only.
 
 ### Limits that come with the screens
 
-These come with the screens of Plans 4A, 4B and 4C, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
+These come with the screens of Plans 4A to 4D, which are built ([Plan 4 design](docs/design/2026-11-05-user-interface-design.md)).
 
 - **The save shortcut reads the clipboard once, each time it's pressed.** The only other read is when you ask Lockbox to clear
   that value (the save box's tick box, and the same tick box in the paste panel for a `.env` you pasted): after the key is
@@ -702,6 +711,10 @@ These come with the screens of Plans 4A, 4B and 4C, which are built ([Plan 4 des
   cloud provider's version history.
 - **Earlier passwords stay in old backups.** They're encrypted like everything else, and dropping one from a login doesn't remove
   it from a backup already made.
+- **Emptying the trash can't be undone, and old backups still hold what it deleted.** Lockbox never empties the trash by
+  itself; it asks first, naming how many items go, and deletes nothing if that number changed after it asked. Items
+  deleted for good stay in any backup made before (encrypted), and their bytes may stay on the drive (an SSD especially)
+  until Windows reuses the space.
 - **Asking for the current password slows someone at an unlocked PC.** It isn't protection against malware (spec 5.6), and there's
   no lockout.
 - **File names in search.** The search index holds attached file names (never a file's contents, notes or a password), so they
@@ -712,5 +725,7 @@ These come with the screens of Plans 4A, 4B and 4C, which are built ([Plan 4 des
 
 Every push runs formatting, lint, the test suite (the engine on Windows and Linux, the desktop app on Windows, the UI's
 tests and build; the three slow checks that are run on purpose are left out) and a security scan (gitleaks for secrets, semgrep for risky code, osv-scanner for vulnerable
-dependencies). Per the spec, a release only counts as "reviewed" when a written walk-through of this file against the
+dependencies). A separate job drives the real release app on Windows end to end (setup, unlock, saving a copied key,
+backup and restore, signing in to a site) and checks that a normal launch opens no debugging port and that the shipped
+app grants only its listed commands. Per the spec, a release only counts as "reviewed" when a written walk-through of this file against the
 code is signed off first; none has been done because there is no release.

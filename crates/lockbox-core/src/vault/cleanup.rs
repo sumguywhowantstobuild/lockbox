@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub(super) const ORPHANED_DIR: &str = "orphaned";
 
@@ -50,6 +51,14 @@ pub(super) fn remove_scraps(dir: &Path, report: &mut CleanupReport) {
 /// The canonical blobs directly inside `folder` (regular files named `<32 lowercase hex>.blob`)
 /// with their sizes, sorted by ID. A missing folder holds none; a link is an error.
 pub(super) fn list_blobs(folder: &Path) -> Result<Vec<(FileId, u64)>> {
+    scan_blobs(folder, |meta| Ok(meta.len()))
+}
+
+/// The same listing as [`list_blobs`], with what `pick` reads of each blob's metadata in place of the size.
+fn scan_blobs<T: Ord>(
+    folder: &Path,
+    pick: impl Fn(&fs::Metadata) -> std::io::Result<T>,
+) -> Result<Vec<(FileId, T)>> {
     check_folder(folder)?;
     let entries = match fs::read_dir(folder) {
         Ok(entries) => entries,
@@ -68,7 +77,7 @@ pub(super) fn list_blobs(folder: &Path) -> Result<Vec<(FileId, u64)>> {
         if let Some(id) = id {
             let meta = entry.metadata()?;
             if meta.is_file() {
-                blobs.push((id, meta.len()));
+                blobs.push((id, pick(&meta)?));
             }
         }
     }
@@ -292,22 +301,45 @@ impl Vault {
         report.failed += ids.len() - moved;
     }
 
-    /// The quarantined blobs with their sizes in bytes, sorted by ID.
-    pub fn orphans(&self) -> Result<Vec<(FileId, u64)>> {
-        list_blobs(&self.checked_orphaned_dir()?)
+    /// The quarantined blobs that no loaded item references, with their sizes in bytes and the time each was last
+    /// written, sorted by ID: the files [`Vault::delete_orphans`] may delete, and no others (a copy an item uses
+    /// again waits in the quarantine for the next unlock to put it back, and is not a leftover). The time is the only
+    /// date left of a file whose name was kept in the item that used it.
+    pub fn orphans(&self) -> Result<Vec<(FileId, u64, SystemTime)>> {
+        let folder = self.checked_orphaned_dir()?;
+        let referenced = self.referenced_blobs();
+        let found = scan_blobs(&folder, |meta| Ok((meta.len(), meta.modified()?)))?;
+        Ok(found
+            .into_iter()
+            .filter(|(id, _)| !referenced.contains(id))
+            .map(|(id, (size, written))| (id, size, written))
+            .collect())
     }
 
-    /// Permanently deletes the quarantined blobs that no item references, and returns how
-    /// many. Stops at the first one that cannot be deleted.
-    pub fn delete_orphans(&mut self) -> Result<usize> {
+    /// Permanently deletes the quarantined files the person was shown, and returns how many. `shown` must be exactly
+    /// the files [`Vault::orphans`] lists now (in any order, none twice): a file that came since, one that went, or
+    /// one an item uses refuses the call with `InvalidInput` "leftover files changed", and nothing is deleted. It
+    /// is refused too, with "unreadable items", while any item can't be read: an unreadable item may still use one of
+    /// them, and nothing says which. Stops at the first file that cannot be deleted.
+    pub fn delete_orphans(&mut self, shown: &[FileId]) -> Result<usize> {
         let orphaned = self.checked_orphaned_dir()?;
-        let referenced = self.referenced_blobs();
+        if !self.damaged.is_empty() {
+            return Err(CoreError::InvalidInput {
+                what: "unreadable items",
+            });
+        }
+        let listed: Vec<FileId> = self.orphans()?.into_iter().map(|(id, ..)| id).collect();
+        let mut asked = shown.to_vec();
+        asked.sort();
+        if asked != listed {
+            return Err(CoreError::InvalidInput {
+                what: "leftover files changed",
+            });
+        }
         let mut deleted = 0;
-        for (id, _) in list_blobs(&orphaned)? {
-            if !referenced.contains(&id) {
-                remove_file_retry(&blob_in(&orphaned, &id))?;
-                deleted += 1;
-            }
+        for id in &listed {
+            remove_file_retry(&blob_in(&orphaned, id))?;
+            deleted += 1;
         }
         Ok(deleted)
     }
@@ -324,6 +356,7 @@ mod tests {
     use crate::vault::items::edited;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{Duration, UNIX_EPOCH};
 
     const PW: &str = "correct horse battery";
 
@@ -654,7 +687,7 @@ mod tests {
             fs::read(blob_in(&vault.orphaned_dir(), &stray)).unwrap(),
             b"stray bytes"
         );
-        assert_eq!(vault.orphans().unwrap(), [(stray, 11)]);
+        assert_eq!(sized_orphans(&vault), [(stray, 11)]);
         assert!(short.exists() && folder.is_dir());
         assert!(upper.exists());
     }
@@ -800,25 +833,159 @@ mod tests {
         };
         let mut expected = vec![(a, size(&a)), (b, size(&b))];
         expected.sort();
-        assert_eq!(vault.orphans().unwrap(), expected);
+        assert_eq!(sized_orphans(&vault), expected);
 
-        // A blob that an item references is not deleted, even if it sits in the quarantine.
+        // A blob that an item references is not listed, and is not deleted, even if it sits in the quarantine.
         fs::rename(
             blob_in(&vault.files_dir(), &kept),
             blob_in(&vault.orphaned_dir(), &kept),
         )
         .unwrap();
-        assert_eq!(vault.delete_orphans().unwrap(), 2);
-        let kept_len = fs::metadata(blob_in(&vault.orphaned_dir(), &kept))
-            .unwrap()
-            .len();
-        assert_eq!(vault.orphans().unwrap(), [(kept, kept_len)]);
+        assert_eq!(
+            sized_orphans(&vault),
+            expected,
+            "the referenced copy is left out of the list"
+        );
+        assert_eq!(vault.delete_orphans(&[a, b]).unwrap(), 2);
+        assert!(blob_in(&vault.orphaned_dir(), &kept).exists());
         assert!(!blob_in(&vault.orphaned_dir(), &a).exists());
+        assert!(vault.orphans().unwrap().is_empty());
 
         // Without a quarantine folder there is nothing to list or delete.
         fs::remove_dir_all(vault.orphaned_dir()).unwrap();
         assert!(vault.orphans().unwrap().is_empty());
-        assert_eq!(vault.delete_orphans().unwrap(), 0);
+        assert_eq!(vault.delete_orphans(&[]).unwrap(), 0);
+    }
+
+    /// A delete goes only for the files the person was shown: the set it is given must be the files the vault would list now. A file
+    /// that came since, a different file in the same number, a listed file that is gone, a repeat and a file an item uses all delete
+    /// nothing. The same files in another order are the same set.
+    #[test]
+    fn delete_orphans_refuses_unless_it_is_given_exactly_the_listed_files() {
+        let (parent, mut vault) = new_vault();
+        let (_id, used) = file_item(&parent, &mut vault, b"mine");
+        let (a, b) = (
+            plant_blob(&vault.files_dir(), b"aaa"),
+            plant_blob(&vault.files_dir(), b"bbbbb"),
+        );
+        let (mut vault, report) = reopen(vault);
+        assert_eq!(report.orphans_quarantined, 2);
+        let stranger = FileId::random();
+        let refused = |vault: &mut Vault, shown: &[FileId]| {
+            let answer = vault.delete_orphans(shown);
+            assert!(
+                matches!(
+                    answer,
+                    Err(CoreError::InvalidInput {
+                        what: "leftover files changed"
+                    })
+                ),
+                "{shown:?}: {answer:?}"
+            );
+            assert!(blob_in(&vault.orphaned_dir(), &a).exists());
+            assert!(blob_in(&vault.orphaned_dir(), &b).exists());
+        };
+        // A file came after the list was shown: the person saw one.
+        refused(&mut vault, &[a]);
+        // The same number, another file.
+        refused(&mut vault, &[a, stranger]);
+        // More than there are, a repeat that makes the count right, nothing, and a file an item uses.
+        refused(&mut vault, &[a, b, stranger]);
+        refused(&mut vault, &[a, a]);
+        refused(&mut vault, &[]);
+        refused(&mut vault, &[a, used]);
+        assert!(blob_in(&vault.files_dir(), &used).exists());
+        // What was shown is what goes, in whatever order it was sent.
+        assert_eq!(vault.delete_orphans(&[b, a]).unwrap(), 2);
+        assert!(vault.orphans().unwrap().is_empty());
+        assert!(blob_in(&vault.files_dir(), &used).exists());
+    }
+
+    /// A quarantined attachment whose item can't be read this time is not known to be unused: nothing is deleted while any item is
+    /// unreadable, though the files are listed, and they go once the item is readable again.
+    #[test]
+    fn delete_orphans_refuses_while_an_item_cannot_be_read() {
+        let (parent, mut vault) = new_vault();
+        let (id, file) = file_item(&parent, &mut vault, b"keep me for the item");
+        // An earlier unlock quarantined the blob (its item file was missing then); the item is back now, but damaged.
+        let dir = vault.dir().to_path_buf();
+        let item_path = item_file(&vault, &id);
+        let item_bytes = fs::read(&item_path).unwrap();
+        corrupt(&vault, &id);
+        drop(vault);
+        fs::create_dir_all(dir.join("files").join("orphaned")).unwrap();
+        fs::rename(
+            blob_in(&dir.join("files"), &file),
+            blob_in(&dir.join("files").join("orphaned"), &file),
+        )
+        .unwrap();
+        let (mut vault, report) = reopen_dir(&dir);
+        assert_eq!(report.skipped_damaged, 1);
+        assert_eq!(vault.damaged_items(), [id]);
+        // It is listed (no readable item uses it), but not deleted.
+        let listed: Vec<FileId> = sized_orphans(&vault)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(listed, [file]);
+        let answer = vault.delete_orphans(&[file]);
+        assert!(
+            matches!(
+                answer,
+                Err(CoreError::InvalidInput {
+                    what: "unreadable items"
+                })
+            ),
+            "{answer:?}"
+        );
+        assert!(blob_in(&vault.orphaned_dir(), &file).exists());
+        // The item is mended: the unlock finds its attachment and puts the blob back, so nothing is left to delete.
+        drop(vault);
+        fs::write(&item_path, item_bytes).unwrap();
+        let (vault, report) = reopen_dir(&dir);
+        assert_eq!(report.orphans_restored, 1);
+        assert!(vault.orphans().unwrap().is_empty());
+        assert!(blob_in(&vault.files_dir(), &file).exists());
+    }
+
+    /// The quarantined blobs with their sizes alone, as the listing was before it carried a time.
+    fn sized_orphans(vault: &Vault) -> Vec<(FileId, u64)> {
+        let listed = vault.orphans().unwrap();
+        listed.into_iter().map(|(id, size, _)| (id, size)).collect()
+    }
+
+    /// Each quarantined file comes with the time it was last written, the one thing the page can show of a file whose
+    /// name lived in the item: the file's own time, not a time read from anywhere else, and one for each file.
+    #[test]
+    fn orphans_carry_their_last_write_time() {
+        let (_parent, vault) = new_vault();
+        let (old, recent) = (
+            plant_blob(&vault.files_dir(), b"older"),
+            plant_blob(&vault.files_dir(), b"newer one"),
+        );
+        let (mut vault, report) = reopen(vault);
+        assert_eq!(report.orphans_quarantined, 2);
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        let (march, april) = (at(1_773_300_000), at(1_775_200_000));
+        for (id, when) in [(old, march), (recent, april)] {
+            let file = fs::File::options()
+                .write(true)
+                .open(blob_in(&vault.orphaned_dir(), &id))
+                .unwrap();
+            file.set_modified(when).unwrap();
+        }
+
+        let found: Vec<_> = vault.orphans().unwrap();
+        assert_eq!(found.len(), 2, "both files are listed");
+        let time_of = |id| found.iter().find(|(each, ..)| *each == id).unwrap().2;
+        assert_eq!(time_of(old), march);
+        assert_eq!(time_of(recent), april);
+        let sizes: Vec<u64> = found.iter().map(|(_, size, _)| *size).collect();
+        assert!(sizes.contains(&5) && sizes.contains(&9));
+
+        // Deleting still goes by what no item references, and leaves nothing listed.
+        assert_eq!(vault.delete_orphans(&[old, recent]).unwrap(), 2);
+        assert!(vault.orphans().unwrap().is_empty());
     }
 
     /// Replaces the folder `path` with a link to a folder outside the vault.
@@ -899,7 +1066,7 @@ mod tests {
         );
         assert!(!blob_in(&vault.files_dir(), &file).exists());
         assert!(vault.orphans().is_err());
-        assert!(vault.delete_orphans().is_err());
+        assert!(vault.delete_orphans(&[]).is_err());
         assert!(blob_in(outside.path(), &theirs).exists() && scrap.exists());
         assert!(blob_in(outside.path(), &file).exists());
     }
@@ -989,7 +1156,7 @@ mod tests {
         link_folder(&vault.files_dir(), outside.path());
         // Not through `reopen`: cleanup would already refuse; this is the later calls.
         assert!(vault.orphans().is_err());
-        assert!(vault.delete_orphans().is_err());
+        assert!(vault.delete_orphans(&[]).is_err());
         assert!(blob_in(&quarantine, &theirs).exists());
     }
 }

@@ -598,14 +598,15 @@ impl Shell {
     /// Opens the folder the summary's files were saved in, in Explorer, through the handle the summary gave: no command
     /// takes a path. The handle is read, not used up, so the button can be pressed again. `ChoiceExpired` for a handle
     /// that is gone (closed, five minutes old, dropped by a lock) and for a token that is not one, and the page then says
-    /// to open the folder from Windows; a launch that fails is the `io` refusal, with no path.
+    /// to open the folder from Windows; a launch that fails is the `io` refusal, with no path. Only a folder is opened,
+    /// as the vault list's Show in Explorer: one replaced by a file or a link is `InvalidInput { "folder" }`, one gone is
+    /// `NotFound`, and the page says the same words for both.
     pub fn show_output_in_explorer(&self, output: &Token) -> ShellResult<()> {
         let (session, generation, folder) = self.sessions.pending().peek_saved_folder(output)?;
         // A lock's hook may still be on its way to drop the handle: a session that has locked has no summary.
         self.still_current(session, generation, ())
             .map_err(|_| ShellError::ChoiceExpired)?;
-        self.os.launcher.open_folder(&folder)?;
-        Ok(())
+        self.open_only_a_folder(&folder)
     }
 
     /// Drops the summary's handle, as the summary closes. Idempotent: closing one that is gone, or a token that was never

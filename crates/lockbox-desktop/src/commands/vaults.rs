@@ -1091,7 +1091,13 @@ impl Shell {
     /// `NotFound` for a row of another list, an ID not on the list, a damaged list, or a folder that is not there.
     pub fn show_vault_in_explorer(&self, vault: VaultRef) -> ShellResult<()> {
         let dir = self.registry.path_of(vault).ok_or(ShellError::NotFound)?;
-        let meta = match fs::symlink_metadata(&dir) {
+        self.open_only_a_folder(&dir)
+    }
+
+    /// Hands `dir` to the launcher only if it is a directory and not a link or junction (`InvalidInput { "folder" }`;
+    /// `NotFound` if it is not there): every Show in Explorer goes through here.
+    pub(crate) fn open_only_a_folder(&self, dir: &Path) -> ShellResult<()> {
+        let meta = match fs::symlink_metadata(dir) {
             Ok(meta) => meta,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ShellError::NotFound),
             Err(e) => return Err(e.into()),
@@ -1100,7 +1106,7 @@ impl Shell {
         if !meta.is_dir() || meta.file_type().is_symlink() {
             return Err(ShellError::InvalidInput { what: "folder" });
         }
-        self.os.launcher.open_folder(&dir)?;
+        self.os.launcher.open_folder(dir)?;
         Ok(())
     }
 }

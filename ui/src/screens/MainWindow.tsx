@@ -29,6 +29,7 @@ import { AddMenu } from "./AddMenu";
 import { DetailsChangedAsk, LostOutputsAsk, OpenFilesAsk, ShortcutAsk, VaultBanners } from "./Asks";
 import { BackupPanel, BackupRefusedAsk } from "./BackupFlow";
 import { ChangePasswordDone, ChangePasswordPanel } from "./ChangePassword";
+import { ExportPanel } from "./ExportFlow";
 import { NewRecoveryKeyDone, NewRecoveryKeyPanel } from "./NewRecoveryKey";
 import { TestBackupPanel } from "./TestBackup";
 import { BackupReminder } from "./BackupReminder";
@@ -43,6 +44,7 @@ import { LoginForm } from "./forms/LoginForm";
 import { NoteForm } from "./forms/NoteForm";
 import { GeneratorPage } from "./GeneratorPanel";
 import { ItemList } from "./ItemList";
+import { LeftoverView } from "./LeftoverView";
 import { FILTER, itemCount, kindCount, kindPlural, ListTools, showAll, useKind, useSort } from "./ListTools";
 import { OlderCopiesPanel } from "./OlderCopies";
 import { OpenBackupPanel } from "./OpenBackup";
@@ -52,7 +54,7 @@ import { SaveAllCloudQuestion, SaveAllFiles, SaveAllLeft } from "./SaveAllFiles"
 import { SearchPanel } from "./SearchPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { foldersOf, SideMenu } from "./SideMenu";
-import { TrashPanel, TrashView } from "./TrashView";
+import { DeleteOld, EmptyTrash, TrashPanel, TrashView } from "./TrashView";
 import { VaultStrip } from "./VaultStrip";
 
 /** The words for the vaults that are not open, so the list does not look as if their items were missing. */
@@ -88,6 +90,10 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
     const now = document.activeElement;
     if (now === null || now === document.body) heading.current?.focus();
   }, [data.session]);
+  // The leftover files' view opens from a banner's button, which steps aside with the banner: focus goes to the view's heading, which a screen reader says.
+  useEffect(() => {
+    if (data.leftoverView) heading.current?.focus();
+  }, [data.leftoverView]);
   const everything = useMemo(() => data.items ?? [], [data.items]);
   // The lists below are kept between redraws while what they come from is unchanged, so the item list's rows are not drawn again.
   const items = useMemo(() => everything.filter((item) => item.kind !== "collection" && !item.trashed), [everything]);
@@ -213,7 +219,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   // The place that holds the items, by name: the Trash, the folder, or the vault for All items.
   const holder = data.trash ? "Trash" : (folderName ?? data.name);
   const rest = inView.length === 1 ? "it" : "them";
-  const title = data.trash ? "Trash" : (folderName ?? "All items");
+  const title = data.leftoverView ? "Leftover files" : data.trash ? "Trash" : (folderName ?? "All items");
   const openVaults = new Set(sessions.map((session) => session.vaultId));
   const locked = lockedLine(
     (vaults ?? [])
@@ -222,8 +228,9 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   );
   const problem = data.loadError === null ? null : messageFor(data.loadError);
   // Which of the list's states is up, in the order they win.
-  const state =
-    problem !== null
+  const state = data.leftoverView
+    ? "leftover"
+    : problem !== null
       ? "problem"
       : data.items === null
         ? "opening"
@@ -239,6 +246,20 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                   ? "no_kind"
                   : "list";
   const narrowed = (state === "list" || (state === "trash" && inView.length > 0)) && !(needle === "" && kind === "all");
+  // Empty trash (32a): offered when this writable vault has a trash, whatever the Filter hides: the question is about the whole trash. Its key
+  // is the session and generation, so a switch or a lock takes the question away with its vault.
+  const emptyBar =
+    data.trash && !data.readOnly && data.items !== null && inTrash.length > 0 ? (
+      <EmptyTrash key={`${String(data.session)}:${String(data.generation)}`} data={data} count={inTrash.length} />
+    ) : null;
+  // "Delete these N permanently" (32a) in the old group's header: N is the vault's whole old group, whatever the Filter hides, and it is
+  // offered only where the Trash can be changed. Bound to its vault and generation like the button above.
+  const oldIds = new Set(data.oldTrash);
+  const oldCount = inTrash.filter((item) => oldIds.has(item.id)).length;
+  const oldPill =
+    data.trash && !data.readOnly && data.items !== null && oldCount > 0 ? (
+      <DeleteOld key={`${String(data.session)}:${String(data.generation)}`} data={data} count={oldCount} />
+    ) : null;
   // What narrowing left, for a screen reader, when it left nothing: the card below says it on screen, and this says it as it changes.
   let leftNothing: string | null = null;
   if (state === "no_match") leftNothing = `Nothing here matches “${word}”. ${holder} has ${itemCount(inView.length)}.`;
@@ -256,42 +277,44 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               {title}
             </span>
             <span className="sp" />
-            {/* The Filter, the kind and the order: on every list, the Trash included (13b). */}
-            <div className="fil">
-              <FilterIcon />
-              <input
-                className="fin"
-                type="search"
-                aria-label="Filter this list"
-                placeholder="Filter"
-                autoComplete="off"
-                spellCheck={false}
-                value={filter}
-                onChange={(event) => {
-                  setForm(data.session, FILTER, event.currentTarget.value);
-                }}
-              />
-              {filter === "" ? null : (
-                <button
-                  type="button"
-                  className="fx"
-                  aria-label="Clear filter"
-                  onClick={() => {
-                    setForm(data.session, FILTER, "");
+            {/* The Filter, the kind and the order: on every list, the Trash included (13b); not on the leftover files, which are no items to narrow or sort. */}
+            {data.leftoverView ? null : (
+              <div className="fil">
+                <FilterIcon />
+                <input
+                  className="fin"
+                  type="search"
+                  aria-label="Filter this list"
+                  placeholder="Filter"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={filter}
+                  onChange={(event) => {
+                    setForm(data.session, FILTER, event.currentTarget.value);
                   }}
-                >
-                  <CloseIcon />
-                </button>
-              )}
-            </div>
-            <ListTools session={data.session} />
+                />
+                {filter === "" ? null : (
+                  <button
+                    type="button"
+                    className="fx"
+                    aria-label="Clear filter"
+                    onClick={() => {
+                      setForm(data.session, FILTER, "");
+                    }}
+                  >
+                    <CloseIcon />
+                  </button>
+                )}
+              </div>
+            )}
+            {data.leftoverView ? null : <ListTools session={data.session} />}
             {folderMenu === null || folderMenuItems.length === 0 ? null : (
               // The folder's own menu (14b, 15d, T09f): Paste a .env, the two ways to take the keys out (only when the folder holds a key), Save all
               // files (only when it holds a stored file) set apart, then Rename and Delete set apart. Not on All items, not in the Trash. A
               // read-only vault has the menu for Save all files alone, and none at all when the folder holds no file.
               <Menu label="More for this folder" icon={<MoreIcon />} triggerClassName="ib" items={folderMenuItems} />
             )}
-            {data.readOnly || data.trash ? null : <AddMenu session={data.session} folder={data.folder} />}
+            {data.readOnly || data.trash || data.leftoverView ? null : <AddMenu session={data.session} folder={data.folder} />}
           </div>
           <div className="lscroll">
             <h1 ref={heading} className="big" tabIndex={-1}>
@@ -339,7 +362,12 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             <div className="lsay sr" aria-live="polite" aria-atomic="true">
               {said}
             </div>
-            {state === "problem" && problem !== null ? (
+            {/* A Filter that leaves no row in the Trash still leaves the Trash to empty: the button is above the card that says so. */}
+            {state === "no_match" || state === "no_kind" ? emptyBar : null}
+            {state === "leftover" ? (
+              // Its key is the session and generation, so a switch to another vault or a lock takes the view's question away with it.
+              <LeftoverView key={`${String(data.session)}:${String(data.generation)}`} data={data} />
+            ) : state === "problem" && problem !== null ? (
               <p className="err" role="alert">
                 {problem.title} {problem.body}
               </p>
@@ -355,9 +383,12 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
                 onOpen={(id) => {
                   pickTrashed(data.session, id);
                 }}
+                old={data.readOnly ? [] : data.oldTrash}
+                bar={emptyBar}
+                oldPill={oldPill}
               />
             ) : state === "ready" ? (
-              <Ready>{data.readOnly ? null : <EmptyAdd session={data.session} folder={data.folder} />}</Ready>
+              <Ready session={data.session} writable={!data.readOnly}>{data.readOnly ? null : <EmptyAdd session={data.session} folder={data.folder} />}</Ready>
             ) : state === "empty" ? (
               <div className="grp lempty">
                 <p className="le-t">
@@ -482,6 +513,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             {data.tool?.kind === "open_backup" ? <OpenBackupPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
             {data.tool?.kind === "change_password" ? <ChangePasswordPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
             {data.tool?.kind === "new_recovery_key" ? <NewRecoveryKeyPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
+            {data.tool?.kind === "export" ? <ExportPanel key={`${String(data.session)}:${String(data.generation)}`} data={data} /> : null}
           </>
         )}
       </div>

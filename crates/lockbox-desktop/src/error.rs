@@ -90,6 +90,19 @@ pub const PRINTER_GONE: ShellError = ShellError::InvalidInput {
     what: "printer name",
 };
 
+/// Help could not start the browser: the engine's own `io` refusal with a `what` of its own, so the page can word it as the browser's
+/// (and no other `io` as that). Fixed text, no address (R5).
+pub const GUIDE_NOT_OPENED: ShellError = ShellError::Core(CoreErrorView {
+    kind: "io",
+    what: Some("guide"),
+    needed: None,
+    available: None,
+    max_file: None,
+    min: None,
+    position: None,
+    found: None,
+});
+
 /// A create whose vault the vault list could not take, and that could not be removed again: the vault is on disk,
 /// in the folder the user chose, but not on the list and its recovery key never shown. The page tells the user to add
 /// it with "Add existing vault" and make a new recovery key. Fixed text, no path (R5).
