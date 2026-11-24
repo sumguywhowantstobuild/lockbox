@@ -49,7 +49,7 @@ const BACKUP_MENU = `${BACKUP}, read-only, vault menu`;
 /** The lock screen's step says the file and its size as one line. */
 const LOCK_ROW = `${BACKUP_NAME}, 1.2 GB`;
 const PUT_BACK = "Put this item back in a vault you're using.";
-const NOWHERE = "Unlock a vault first, then copy into it.";
+const NOWHERE = "Unlock a vault first, so there's somewhere to copy this to.";
 const OLDER = "My vault.before-restore";
 const ANY_REQUEST = expect.any(Number) as number;
 

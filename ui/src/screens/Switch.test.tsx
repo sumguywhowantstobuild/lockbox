@@ -45,7 +45,7 @@ const ASK9_HEADING = "Opened from the backup copy of this vault's details";
 const ASK9 = "If you changed this vault's password recently, it may need your previous password. Change the password again now that it's open.";
 const BACKUP = "My vault 2026-10-02";
 const OLDER = "My vault.before-restore";
-const NOWHERE = "Unlock a vault first, then copy into it.";
+const NOWHERE = "Unlock a vault first, so there's somewhere to copy this to.";
 const LABEL = "Password or recovery key from when it was made";
 
 /** A vault's menu row by its name: an open vault's row reads "<name>Unlocked" (its status line, 4C Task 13b), so either way finds it. */
