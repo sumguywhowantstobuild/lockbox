@@ -107,7 +107,8 @@ temp folder (never the default vault folder), and the run stops at the first spe
 The run keeps the app's window off your screen and puts the real folders back when it ends; if it is cut short,
 `node e2e/lib/state.mjs recover` does. Each spec's test state stays beside the real folders as `<folder>.test-<run>-s<n>`
 (the run prints where; nothing it parked is ever deleted, since someone may have opened Lockbox meanwhile), so delete
-those by hand when you are done. Only the run's own folder in the temp folder is deleted. A second run started while one
+those by hand when you are done. Look inside each one first: if you opened Lockbox while a run had its test state in
+place and made a real vault, that vault is in there. Only the run's own folder in the temp folder is deleted. A second run started while one
 is going is refused and leaves the first alone. The run sends one mouse event that moves nothing, because Lockbox's idle
 lock counts the session's input and would otherwise lock a vault that nobody has touched for minutes. The steps that use
 the clipboard, the keyboard (the save shortcut is pressed as real keys) or the browser (`sign-in` opens a made-up

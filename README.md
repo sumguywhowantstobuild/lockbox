@@ -12,16 +12,18 @@ documented and honest about its limits.
 
 ## What exists today
 
-The first three of five planned stages are built, and the first three parts of the fourth: the screens for daily use (4A),
-for files and long jobs (4B), and for vaults and passwords (4C). You can build and run the desktop app, set up a vault with its recovery key, and keep
+The first four of five planned stages are built. The fourth, the screens, came in four parts: daily use (4A), files and
+long jobs (4B), vaults and passwords (4C), and the rest (4D). You can build and run the desktop app, set up a vault with its recovery key, and keep
 logins, keys, notes, files and `.env`s in it: search, reveal and copy, add and edit, move, trash and restore, folders, a
 folder's `.env` in and out, a shortcut that saves a copied key, and settings. You can also back up a vault, test a
 backup, restore one (the vault it replaces is kept as an older copy you can open or delete), open a backup read-only and
 copy single items out of it, bring vaults onto a new computer, add many files at once and save all of a folder's files,
 each with progress and a Stop or Cancel, and closing during a long job asks first. You can change a vault's password, get back in with the recovery key if you forget
 it, make a new recovery key, keep several vaults open and switch between them, make a new vault from inside the app,
-rename a vault, take one off the list and add it back, and see a vault's folder in Explorer. Export and emptying the
-trash come in the last part (4D). Together the five plans make up Phase 1, the Windows app (see the
+rename a vault, take one off the list and add it back, and see a vault's folder in Explorer. You can export a vault to a
+CSV file another password manager imports, empty the trash, and open a short [guide](docs/GUIDE.md) from Help; if
+Lockbox can't start, it says so in plain words. End-to-end tests drive the real app through the main paths. Together
+the five plans make up Phase 1, the Windows app (see the
 [phases](docs/PRD.md#phases)).
 
 | Plan | What it delivers | State |
@@ -29,7 +31,7 @@ trash come in the last part (4D). Together the five plans make up Phase 1, the W
 | 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
 | 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built |
 | 3 | Desktop shell (built with Tauri, a toolkit for desktop apps), `crates/lockbox-desktop`: sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Built |
-| 4 | The user interface, from clickable design mockups, in four parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C vaults and passwords, 4D the rest | 4A, 4B and 4C built; 4D to come |
+| 4 | The user interface, from clickable design mockups, in four parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C vaults and passwords, 4D the rest | Built, except the list of leftover files with a way to delete them (a notice gives only their count) |
 | 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
 
 The core can already create and unlock vaults (with the password, or with the recovery key: a long code shown once that
@@ -120,6 +122,7 @@ Their memory limits are only checked on Windows.
 
 | Document | What it is |
 |---|---|
+| [docs/GUIDE.md](docs/GUIDE.md) | The short guide for people using Lockbox, which Help opens: first steps, the recovery key, backups, limits |
 | [docs/PRD.md](docs/PRD.md) | What Lockbox is for: users, features, user stories, how success is measured |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the built core and desktop shell are organised, how data flows, and the rules the code keeps |
 | [SECURITY.md](SECURITY.md) | Threat model, the encryption used, honest limits, how to report a vulnerability |

@@ -62,6 +62,12 @@ help with these:
 - **Other programs.** Any program running as you can read the clipboard while a copy is on it. A file you open with
   another program may be copied by that program.
 
+## The trash
+
+Items you delete go to the **Trash**, and you can restore them from there. Lockbox never empties the trash by itself.
+**Empty trash** (or **Delete for good** on one item) deletes them for good and can't be undone, though a backup made
+earlier still holds them.
+
 ## Deleting a vault
 
 Lockbox can't delete a vault for you yet. To delete one, remove it from the list, then delete its folder yourself:
@@ -72,7 +78,8 @@ Lockbox can't delete a vault for you yet. To delete one, remove it from the list
 3. If you might want the vault back, check that you have a backup of it first, and test the backup (see "Backups"
    above). Deleting the folder deletes the vault and everything in it.
 4. In Explorer, delete that one folder. It goes to the Recycle Bin. To get rid of it for good, open the Recycle Bin and
-   delete just that folder from it. Leave everything else in the bin alone.
+   delete just that folder from it. Leave everything else in the bin alone. A big vault may be too large for the
+   Recycle Bin: Explorer then asks whether to delete it permanently, at once.
 
 ## Exporting a vault
 
