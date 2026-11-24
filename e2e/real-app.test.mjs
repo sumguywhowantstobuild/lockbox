@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -408,14 +408,21 @@ test("the_driver_attaches_only_to_the_instance_it_started", { skip: SKIP, timeou
     // the app has what the driver gives it, and its web-view data is in the run's own folder
     const lines = app.commandLines(app.treeOf([appRoot], snapshot).map((entry) => entry.pid));
     assert.ok([...lines.values()].some((line) => /remote-debugging-port=0/.test(line)), "the web view of the driven app has the debugging option");
-    assertRunOwnedWebViews(app.treeOf([appRoot], snapshot), lines, folders.temp, "driven launch");
-    const scoped = readdirSync(folders.temp).filter((name) => name.startsWith("scoped_dir"));
-    assert.ok(scoped.length >= 1, "msedgedriver made a folder of its own inside the run's folder");
-    const withData = scoped.filter((name) => existsSync(join(folders.temp, name, "EBWebView")));
-    assert.ok(withData.length >= 1, "the web view's data folder (EBWebView) is inside the run's folder");
-    const filled = countEntries(join(folders.temp, withData[0], "EBWebView"));
+    // msedgedriver keeps the web view's data in a folder named for its own process: inside the run's temp folder, or,
+    // elevated (the GitHub job), in Windows' SystemTemp, where an elevated msedgedriver puts it whatever TEMP says
+    const msedgedriver = app.treeOf([{ pid: handle.pid, created: handle.created }], snapshot).filter((entry) => entry.name.toLowerCase() === "msedgedriver.exe");
+    assert.equal(msedgedriver.length, 1, "one msedgedriver runs below the driver this run started");
+    const named = dataFolders(lines);
+    assert.ok(named.length >= 1, "the driven app's web view names its data folder");
+    const driverFolder = dirname(named[0]);
+    assert.match(basename(driverFolder), new RegExp(`^scoped_dir${msedgedriver[0].pid}_\\d+$`), "the data folder is inside the folder of this run's msedgedriver");
+    const expectedParent = handle.elevated ? join(process.env.SystemRoot ?? "C:\\Windows", "SystemTemp") : folders.temp;
+    assert.equal(longForm(dirname(driverFolder)).toLowerCase(), longForm(expectedParent).toLowerCase(), `msedgedriver's folder is in ${handle.elevated ? "SystemTemp (elevated)" : "the run's temp folder"}`);
+    assertRunOwnedWebViews(app.treeOf([appRoot], snapshot), lines, driverFolder, "driven launch");
+    assert.ok(existsSync(join(driverFolder, "EBWebView")), "the web view's data folder (EBWebView) is inside msedgedriver's folder");
+    const filled = countEntries(join(driverFolder, "EBWebView"));
     assert.ok(filled >= 5, `the run's web-view folder filled (${filled} entries)`);
-    t.diagnostic(`the run's web-view folder holds ${filled} entries; every web-view process of the driven app names it`);
+    t.diagnostic(`the run's web-view folder holds ${filled} entries; every web-view process of the driven app names it${handle.elevated ? " (elevated: msedgedriver's folder is in SystemTemp, the switch came from the machine policy)" : ""}`);
     // ending the session ends the app and its web view
     await fetch(`${base}/session/${session}`, { method: "DELETE" });
     session = undefined;

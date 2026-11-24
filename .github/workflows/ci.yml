@@ -146,6 +146,8 @@ jobs:
   # End-to-end tests on the real app: the shipped (release) build, driven through tauri-driver and the image's Edge
   # WebDriver. Not a required check (branch protection is not changed): a failure shows on the run and is fixed
   # first, but it does not block a merge. After the Rust job, so a build that is already broken is not built again.
+  # The job runs elevated, where WebView2 ignores the driver's settings: the driven launches get WebView2's machine policy
+  # for lockbox-desktop.exe instead, set and removed around each one (e2e/lib/app.mjs).
   e2e:
     name: "End-to-end: the real app (windows)"
     needs: rust

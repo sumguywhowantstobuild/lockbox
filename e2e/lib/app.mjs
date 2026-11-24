@@ -7,6 +7,10 @@
 //     WEBVIEW2_USER_DATA_FOLDER set to a temporary folder of its own (inside TEMP, which this run points at a folder it
 //     made), and tauri-driver adds TAURI_AUTOMATION and TAURI_WEBVIEW_AUTOMATION. All of that is on the app's process
 //     alone: nothing is set for the machine, and the app started any other way has none of it;
+//   - except on the GitHub job, which runs elevated: WebView2 (Runtime 150 on) ignores WEBVIEW2_* settings in an
+//     elevated app, so there `startLockbox` sets the debugging switch as WebView2's machine policy for lockbox-desktop.exe
+//     and `stopLockbox` removes it. An elevated msedgedriver also keeps its folder in Windows' SystemTemp, whatever TEMP
+//     says. An elevated run anywhere else is refused, so a PC's policy is never touched;
 //   - the debugging port is opened by the app's own web-view process, on 127.0.0.1, only in that driven launch.
 // The processes of a run are found and stopped by process ID (a creation time guards against a reused ID), never by
 // image name: other programs run web views too.
@@ -214,44 +218,138 @@ export function runEnvironment(base, { tempDir, webviewDir }) {
   return { ...env, TEMP: tempDir, TMP: tempDir, WEBVIEW2_USER_DATA_FOLDER: webviewDir };
 }
 
+// ---- an elevated run (the GitHub job) -----------------------------------------------------------------------------
+
+/** Whether `whoami /groups` output names a high (administrator) or system integrity level. */
+export function elevatedFromGroups(text) {
+  return /\bS-1-16-(12288|16384)\b/.test(text);
+}
+
+/** Whether this process runs elevated, as Windows' own `whoami /groups` says. */
+export function isElevated() {
+  // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- a fixed program by its full path and a fixed argument
+  const result = spawnSync(systemTool("whoami.exe"), ["/groups"], { encoding: "utf8", windowsHide: true });
+  if (result.status !== 0) throw new Error("could not ask Windows whether this run is elevated");
+  return elevatedFromGroups(result.stdout);
+}
+
+/** WebView2's machine policy keys, outermost first: the switch is a value named for the app's program file. */
+export const POLICY_KEYS = [
+  "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge",
+  "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2",
+  "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments",
+];
+export const POLICY_VALUE = "lockbox-desktop.exe";
+export const POLICY_DATA = "--remote-debugging-port=0";
+
+/**
+ * What a driven launch needs from the machine: "nothing" when the run is not elevated (msedgedriver's settings reach the
+ * app on its own process), "policy" when it is elevated on the GitHub job. Elevated anywhere else is refused: the machine
+ * policy is used only on a runner that is thrown away after the job.
+ */
+export function drivenLaunchNeeds({ elevated, ci }) {
+  if (!elevated) return "nothing";
+  if (ci) return "policy";
+  throw new Error(
+    "this run is elevated (run as administrator): WebView2 ignores the driver's settings in an elevated app, and the machine-wide way round it is used only on the GitHub job. Run from a shell that is not elevated",
+  );
+}
+
+/** reg.exe with `args`; its exit code (0 found or done, 1 not found or failed). */
+function runReg(args) {
+  // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- a fixed program by its full path; every argument is a constant above
+  return spawnSync(systemTool("reg.exe"), [...args, "/reg:64"], { stdio: "ignore", windowsHide: true }).status;
+}
+
+/** `error`, with what of the policy could not be removed added to its message (a removal that failed is never silent). */
+function withPolicyLeft(error, left) {
+  if (left.length > 0 && error instanceof Error) error.message += ` (and the WebView2 policy could not be removed: ${left.join(", ")})`;
+  return error;
+}
+
+/**
+ * Sets the debugging switch as WebView2's machine policy for lockbox-desktop.exe, refusing when the machine already has
+ * one for it (it is left as it is). Returns what `removeDebuggingPolicy` undoes: the keys this made. `reg` runs reg.exe.
+ */
+export function setDebuggingPolicy(reg = runReg) {
+  const existed = POLICY_KEYS.map((key) => reg(["query", key]) === 0);
+  if (existed[2] && reg(["query", POLICY_KEYS[2], "/v", POLICY_VALUE]) === 0) {
+    throw new Error(`the machine already has a WebView2 policy for ${POLICY_VALUE}: it is left as it is, and nothing is driven`);
+  }
+  const undo = { created: POLICY_KEYS.filter((_, index) => !existed[index]) };
+  if (reg(["add", POLICY_KEYS[2], "/v", POLICY_VALUE, "/t", "REG_SZ", "/d", POLICY_DATA, "/f"]) !== 0) {
+    throw withPolicyLeft(new Error("could not set the WebView2 policy for the driven launch"), removeDebuggingPolicy(undo, reg));
+  }
+  return undo;
+}
+
+/** Removes what `setDebuggingPolicy` set: the value, then the keys it made, innermost first. Returns what is left. */
+export function removeDebuggingPolicy(undo, reg = runReg) {
+  reg(["delete", POLICY_KEYS[2], "/v", POLICY_VALUE, "/f"]);
+  for (const key of [...undo.created].reverse()) reg(["delete", key, "/f"]);
+  const left = [];
+  if (reg(["query", POLICY_KEYS[2], "/v", POLICY_VALUE]) === 0) left.push(`${POLICY_KEYS[2]}\\${POLICY_VALUE}`);
+  for (const key of undo.created) if (reg(["query", key]) === 0) left.push(key);
+  return left;
+}
+
 /**
  * Starts tauri-driver (and so, in time, msedgedriver and the app) with ports of its own, for this run only. Returns the
- * handle `stopLockbox` takes. The app itself starts when a session is created.
+ * handle `stopLockbox` takes. The app itself starts when a session is created. Elevated on the GitHub job, it also sets
+ * WebView2's machine policy for the driven launch (the handle's `policy` says what `stopLockbox` removes); elevated
+ * anywhere else, it refuses before anything starts. `reg` runs reg.exe (a fake in tests).
  */
-export async function startLockbox({ tauriDriver, nativeDriver, tempDir, webviewDir, logFile, base = process.env }) {
+export async function startLockbox({ tauriDriver, nativeDriver, tempDir, webviewDir, logFile, base = process.env, elevated = isElevated(), reg = runReg }) {
+  const needs = drivenLaunchNeeds({ elevated, ci: base.LOCKBOX_E2E_CI === "1" });
   mkdirSync(tempDir, { recursive: true });
   mkdirSync(webviewDir, { recursive: true });
   const port = await freePort();
   const nativePort = await freePort();
-  const log = openSync(logFile, "w");
-  let exited = false;
-  // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- the program and driver are paths this run was given or found; every other argument is a number
-  const child = spawn(tauriDriver, ["--port", String(port), "--native-port", String(nativePort), "--native-driver", nativeDriver], {
-    env: runEnvironment(base, { tempDir, webviewDir }),
-    stdio: ["ignore", log, log],
-    windowsHide: true,
-  });
-  closeSync(log);
-  child.once("exit", () => {
-    exited = true;
-  });
-  child.once("error", () => {
-    exited = true;
-  });
+  const policy = needs === "policy" ? setDebuggingPolicy(reg) : undefined;
+  let child;
   try {
+    const log = openSync(logFile, "w");
+    try {
+      // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- the program and driver are paths this run was given or found; every other argument is a number
+      child = spawn(tauriDriver, ["--port", String(port), "--native-port", String(nativePort), "--native-driver", nativeDriver], {
+        env: runEnvironment(base, { tempDir, webviewDir }),
+        stdio: ["ignore", log, log],
+        windowsHide: true,
+      });
+    } finally {
+      closeSync(log);
+    }
+    let exited = false;
+    child.once("exit", () => {
+      exited = true;
+    });
+    child.once("error", () => {
+      exited = true;
+    });
     await waitForPort(port, 20_000, () => !exited);
     const me = snapshotProcesses().find((entry) => entry.pid === child.pid);
     if (me === undefined) throw new Error("the driver is not running");
-    return { pid: child.pid, created: me.created, port, nativePort, tempDir, webviewDir };
+    return { pid: child.pid, created: me.created, port, nativePort, tempDir, webviewDir, elevated, policy };
   } catch (error) {
-    if (child.pid !== undefined) killPid(child.pid);
-    throw error;
+    if (child?.pid !== undefined) killPid(child.pid);
+    throw policy === undefined ? error : withPolicyLeft(error, removeDebuggingPolicy(policy, reg));
   }
 }
 
-/** Stops the driver this run started, and what it started (msedgedriver, the app, its web-view processes). */
-export function stopLockbox(handle) {
-  return stopTree([{ pid: handle.pid, created: handle.created }]);
+/**
+ * Stops the driver this run started, and what it started (msedgedriver, the app, its web-view processes), then removes
+ * the machine policy the run set, if any, even when stopping failed. `remaining` lists the IDs still running and any
+ * policy key or value left.
+ */
+export function stopLockbox(handle, { stop = stopTree, removePolicy = removeDebuggingPolicy } = {}) {
+  if (handle.policy === undefined) return stop([{ pid: handle.pid, created: handle.created }]);
+  let outcome;
+  try {
+    outcome = stop([{ pid: handle.pid, created: handle.created }]);
+  } catch (error) {
+    throw withPolicyLeft(error, removePolicy(handle.policy));
+  }
+  return { ...outcome, remaining: [...outcome.remaining, ...removePolicy(handle.policy)] };
 }
 
 // ---- what runs where -----------------------------------------------------------------------------------------------

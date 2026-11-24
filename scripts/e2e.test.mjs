@@ -665,6 +665,143 @@ test("the_environment_for_a_run_is_for_the_child_only", () => {
   assert.equal(names.includes("TAURI_WEBVIEW_AUTOMATION"), false);
 });
 
+// ---- an elevated run (the GitHub job) ------------------------------------------------------------------------------
+
+/** A fake reg.exe over a set of keys and `key\value` entries; records every call. */
+const WINDOWS_KEYS = ["HKLM\\SOFTWARE", "HKLM\\SOFTWARE\\Policies", "HKLM\\SOFTWARE\\Policies\\Microsoft"];
+function fakeRegistry(keys = [], values = [], { failAdd = false } = {}) {
+  const k = new Set([...WINDOWS_KEYS, ...keys].map((key) => key.toLowerCase()));
+  const v = new Set(values.map((value) => value.toLowerCase()));
+  const calls = [];
+  const parents = (key) => key.split("\\").map((_, index, parts) => parts.slice(0, index + 1).join("\\")).slice(1);
+  const reg = (args) => {
+    calls.push(args.join(" "));
+    const [verb, key] = args;
+    const name = args.includes("/v") ? `${key}\\${args[args.indexOf("/v") + 1]}`.toLowerCase() : undefined;
+    if (verb === "query") return (name ? v.has(name) : k.has(key.toLowerCase())) ? 0 : 1;
+    if (verb === "add") {
+      if (failAdd) return 1;
+      for (const parent of parents(key)) k.add(parent.toLowerCase());
+      v.add(name);
+      return 0;
+    }
+    if (verb === "delete" && name) return v.delete(name) ? 0 : 1;
+    if (verb === "delete") {
+      const lower = key.toLowerCase();
+      if (!k.has(lower)) return 1;
+      for (const each of [...k]) if (each === lower || each.startsWith(`${lower}\\`)) k.delete(each);
+      for (const each of [...v]) if (each.startsWith(`${lower}\\`)) v.delete(each);
+      return 0;
+    }
+    throw new Error(`unexpected reg call: ${args.join(" ")}`);
+  };
+  return { reg, calls, keys: k, values: v };
+}
+
+test("an_elevated_run_is_known_from_its_integrity_level", () => {
+  const groups = (level) => `BUILTIN\\Administrators  Alias  S-1-5-32-544  Mandatory group\r\nMandatory Label\\${level}`;
+  assert.equal(app.elevatedFromGroups(groups("High Mandatory Level  Label  S-1-16-12288")), true, "high: elevated");
+  assert.equal(app.elevatedFromGroups(groups("System Mandatory Level  Label  S-1-16-16384")), true, "system: elevated");
+  assert.equal(app.elevatedFromGroups(groups("Medium Mandatory Level  Label  S-1-16-8192")), false, "medium (an administrator without elevation): not");
+  assert.equal(app.elevatedFromGroups("S-1-16-122880"), false, "a longer number is not the level");
+  assert.equal(typeof app.isElevated(), "boolean", "Windows answered for this run");
+});
+
+test("the_machine_policy_is_used_only_elevated_on_the_github_job", () => {
+  assert.equal(app.drivenLaunchNeeds({ elevated: false, ci: false }), "nothing");
+  assert.equal(app.drivenLaunchNeeds({ elevated: false, ci: true }), "nothing", "a job that is not elevated sets nothing");
+  assert.equal(app.drivenLaunchNeeds({ elevated: true, ci: true }), "policy");
+  assert.throws(() => app.drivenLaunchNeeds({ elevated: true, ci: false }), /elevated.*not elevated/, "an elevated PC run is refused");
+});
+
+test("start_lockbox_refuses_an_elevated_run_off_the_job_before_anything_starts", async () => {
+  const holder = mkdtempSync(join(tmpdir(), "lockbox-e2e-elevated-"));
+  try {
+    const where = { tauriDriver: join(holder, "no-such-driver.exe"), nativeDriver: join(holder, "no-such-native.exe"), tempDir: join(holder, "temp"), webviewDir: join(holder, "webview"), logFile: join(holder, "driver.log") };
+    await assert.rejects(app.startLockbox({ ...where, base: { LOCKBOX_E2E_CI: "true" }, elevated: true }), /elevated/, "only the marker's own value is the job");
+    assert.deepEqual(readdirSync(holder), [], "no folder, log or process was made");
+  } finally {
+    rmSync(holder, { recursive: true, force: true });
+  }
+});
+
+test("start_lockbox_sets_the_policy_only_elevated_on_the_job_and_a_failed_start_removes_it", async () => {
+  const holder = mkdtempSync(join(tmpdir(), "lockbox-e2e-policy-"));
+  try {
+    const where = (name) => ({ tauriDriver: join(holder, "no-such-driver.exe"), nativeDriver: join(holder, "no-such-native.exe"), tempDir: join(holder, name, "temp"), webviewDir: join(holder, name, "webview"), logFile: join(holder, `${name}.log`) });
+    // not elevated: reg.exe is never asked
+    const plain = fakeRegistry();
+    await assert.rejects(app.startLockbox({ ...where("plain"), base: { LOCKBOX_E2E_CI: "1" }, elevated: false, reg: plain.reg }));
+    assert.deepEqual(plain.calls, [], "a run that is not elevated touches no policy");
+    // elevated on the job: set before the driver starts, and gone again when it does not start
+    const job = fakeRegistry();
+    await assert.rejects(app.startLockbox({ ...where("job"), base: { LOCKBOX_E2E_CI: "1" }, elevated: true, reg: job.reg }));
+    assert.ok(job.calls.some((call) => call.startsWith("add ")), "the policy was set");
+    assert.equal(job.keys.size - WINDOWS_KEYS.length + job.values.size, 0, "the failed start left no policy");
+    // a removal that fails is said in the error
+    const stuck = fakeRegistry();
+    const stuckReg = (args) => (args[0] === "delete" ? 1 : stuck.reg(args));
+    await assert.rejects(app.startLockbox({ ...where("stuck"), base: { LOCKBOX_E2E_CI: "1" }, elevated: true, reg: stuckReg }), /policy could not be removed/);
+  } finally {
+    rmSync(holder, { recursive: true, force: true });
+  }
+});
+
+test("the_policy_is_set_for_the_app_and_removed_with_the_keys_it_made", () => {
+  const [edge, webview2, args] = app.POLICY_KEYS;
+  // a fresh runner: none of the keys exists
+  const fresh = fakeRegistry();
+  const undo = app.setDebuggingPolicy(fresh.reg);
+  assert.deepEqual(undo.created, [edge, webview2, args], "all three keys were made by this run");
+  assert.ok(fresh.calls.includes(`add ${args} /v lockbox-desktop.exe /t REG_SZ /d --remote-debugging-port=0 /f`), "the switch is set for lockbox-desktop.exe alone");
+  assert.equal(fresh.values.size, 1);
+  assert.deepEqual(app.removeDebuggingPolicy(undo, fresh.reg), [], "nothing is left");
+  assert.equal(fresh.keys.size - WINDOWS_KEYS.length + fresh.values.size, 0, "the machine is as it was");
+  // a machine with Edge policies of its own: only what this run made goes
+  const kept = fakeRegistry([edge, webview2, args], [`${args}\\other.exe`]);
+  const undoKept = app.setDebuggingPolicy(kept.reg);
+  assert.deepEqual(undoKept.created, [], "no key was made");
+  assert.deepEqual(app.removeDebuggingPolicy(undoKept, kept.reg), []);
+  assert.deepEqual([...kept.keys].sort(), [...WINDOWS_KEYS, edge, webview2, args].map((key) => key.toLowerCase()).sort(), "the machine's own keys stay");
+  assert.deepEqual([...kept.values], [`${args}\\other.exe`.toLowerCase()], "another program's policy stays");
+});
+
+test("a_policy_already_there_is_left_alone_and_a_failed_set_leaves_nothing", () => {
+  const [edge, webview2, args] = app.POLICY_KEYS;
+  const theirs = fakeRegistry([edge, webview2, args], [`${args}\\lockbox-desktop.exe`]);
+  assert.throws(() => app.setDebuggingPolicy(theirs.reg), /already has a WebView2 policy/);
+  assert.equal(theirs.calls.some((call) => call.startsWith("add ") || call.startsWith("delete ")), false, "nothing was changed");
+  const failing = fakeRegistry([], [], { failAdd: true });
+  assert.throws(() => app.setDebuggingPolicy(failing.reg), /could not set/);
+  assert.equal(failing.keys.size - WINDOWS_KEYS.length + failing.values.size, 0, "nothing is left");
+});
+
+test("stop_lockbox_removes_the_policy_after_the_processes_and_says_what_is_left", () => {
+  const order = [];
+  const stop = () => {
+    order.push("stop");
+    return { killed: [7], remaining: [] };
+  };
+  const removePolicy = (policy) => {
+    order.push("policy");
+    return policy.left;
+  };
+  assert.deepEqual(app.stopLockbox({ pid: 7, created: "1" }, { stop, removePolicy }), { killed: [7], remaining: [] }, "no policy: none removed");
+  assert.deepEqual(order, ["stop"]);
+  order.length = 0;
+  assert.deepEqual(app.stopLockbox({ pid: 7, created: "1", policy: { created: [], left: [] } }, { stop, removePolicy }).remaining, []);
+  assert.deepEqual(order, ["stop", "policy"], "the app is stopped before its policy goes");
+  const left = app.stopLockbox({ pid: 7, created: "1", policy: { created: [], left: ["HKLM\\x"] } }, { stop, removePolicy });
+  assert.deepEqual(left.remaining, ["HKLM\\x"], "a policy left behind is reported as left running");
+  order.length = 0;
+  const broken = () => {
+    order.push("stop");
+    throw new Error("Windows did not answer");
+  };
+  assert.throws(() => app.stopLockbox({ pid: 7, created: "1", policy: { created: [], left: ["HKLM\\x"] } }, { stop: broken, removePolicy }), /did not answer.*could not be removed: HKLM\\x/);
+  assert.deepEqual(order, ["stop", "policy"], "the policy goes even when stopping failed");
+});
+
 test("clipboard_and_shortcut_steps_run_on_ci_and_locally_only_when_the_pc_is_free", () => {
   assert.deepEqual(app.clipboardSteps({ LOCKBOX_E2E_CI: "1" }), { run: true, why: "on the GitHub end-to-end job" });
   const local = app.clipboardSteps({});
