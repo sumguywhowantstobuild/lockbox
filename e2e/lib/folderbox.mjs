@@ -42,6 +42,15 @@ export function dialogArguments({ title, pid, folder, timeoutSeconds }) {
   return ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", SCRIPT, "-Title", title, "-ProcessId", String(pid), "-Folder", folder, "-TimeoutSeconds", String(timeoutSeconds)];
 }
 
+/**
+ * Answers a Windows file box (Open or Save) titled like `title` that process `pid` shows, with `file`: a full path inside the
+ * run's own folder, under the same checks as a folder. Resolves once its default button was pressed; a Save box can seem to
+ * take a name and save elsewhere, so the spec checks that the file is where it asked.
+ */
+export function pickFile({ title, pid, file, runRoot, locations, timeoutSeconds = 20 }) {
+  return pickFolder({ title, pid, folder: file, runRoot, locations, timeoutSeconds });
+}
+
 /** Answers the box titled like `title` that process `pid` shows, with `folder`. Resolves once it was pressed. */
 export function pickFolder({ title, pid, folder, runRoot, locations, timeoutSeconds = 20 }) {
   checkPickable(folder, { runRoot, locations });

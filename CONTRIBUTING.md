@@ -95,15 +95,25 @@ test state swapped in as above. It refuses to start while any `lockbox-desktop.e
    <full path to msedgedriver.exe>` (or set `LOCKBOX_EDGEDRIVER`). The run refuses, naming both versions, when they
    differ. On the GitHub job the image's own driver (`EDGEWEBDRIVER`) is used.
 
-The run keeps the app's window off your screen, uses a vault folder it makes in the temp folder (never the default vault
-folder), and puts the real folders back when it ends; if it is cut short, `node e2e/lib/state.mjs recover` does. The
-test state of the run stays beside the real folders as `<folder>.test-<run>` (the run prints where; nothing it parked is
-ever deleted, since someone may have opened Lockbox meanwhile), so delete those by hand when you are done. Only the
-run's own folder in the temp folder is deleted. A second run started while one is going is refused and leaves the first
-alone. The run sends one mouse event that moves nothing, because Lockbox's idle lock counts the session's input and would
-otherwise lock a vault that nobody has touched for minutes. The steps that use the clipboard run on the GitHub job (which
-sets `LOCKBOX_E2E_CI=1`; the generic `CI=true` changes nothing here) and, on a PC, only with `LOCKBOX_E2E_PC_FREE=1`
-(they replace what is on your clipboard); the run says which steps it skipped. The auto-lock step needs a minute with no
+The specs in `e2e/specs` are the design's end-to-end paths: `thin-path` (first-time setup, lock, unlock, add a login,
+copy, auto-lock), `save-copied-key` (a copied key saved through the real save shortcut with every vault locked),
+`back-up-then-restore` (a backup made through Windows' Save box, restored over the vault and read back) and `sign-in`
+(the PRD's measure: pick a login, open its site, copy the username and the password in six keys or clicks or fewer).
+Each spec runs on a fresh test state of its own, as on a new PC, with its own vault folder and files folder in the run's
+temp folder (never the default vault folder), and the run stops at the first spec that fails. Shared steps are in
+`e2e/lib/steps.mjs`; Windows' file and folder boxes are answered by window messages, off the screen
+(`e2e/lib/folderbox.mjs`).
+
+The run keeps the app's window off your screen and puts the real folders back when it ends; if it is cut short,
+`node e2e/lib/state.mjs recover` does. Each spec's test state stays beside the real folders as `<folder>.test-<run>-s<n>`
+(the run prints where; nothing it parked is ever deleted, since someone may have opened Lockbox meanwhile), so delete
+those by hand when you are done. Only the run's own folder in the temp folder is deleted. A second run started while one
+is going is refused and leaves the first alone. The run sends one mouse event that moves nothing, because Lockbox's idle
+lock counts the session's input and would otherwise lock a vault that nobody has touched for minutes. The steps that use
+the clipboard, the keyboard (the save shortcut is pressed as real keys) or the browser (`sign-in` opens a made-up
+`.example` address) run on the GitHub job (which sets `LOCKBOX_E2E_CI=1`; the generic `CI=true` changes nothing here)
+and, on a PC, only with `LOCKBOX_E2E_PC_FREE=1` (they replace what is on your clipboard, press keys and open a browser
+tab); the run says which steps it skipped. The auto-lock step needs a minute with no
 input at the PC and waits up to about four and a half minutes for it; if the PC was in use throughout, that step is
 skipped and says so, and if the PC was quiet for over a minute and the vault did not lock, it fails. On the GitHub job
 a skipped step fails the run and the lock must come within a minute plus 25 seconds. The job (`End-to-end: the real app`)

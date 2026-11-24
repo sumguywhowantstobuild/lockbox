@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import net from "node:net";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -339,15 +339,25 @@ await runE2e({
 });
 
 test("on_ci_the_state_folders_must_be_fresh", async () => {
-  // CI's runner has no state, so the swap is not used there; a folder that is already there is refused.
+  // CI's runner has no state: a folder that is already there is refused. The swap is used as on a PC (it sets nothing aside
+  // there), so that each spec can have a fresh state of its own.
   const fresh = makeWorld();
   try {
     for (const key of state.LOCATION_KEYS) rmSync(fresh.locations[key], { recursive: true, force: true });
-    const run = fakeRun(fresh, { env: { LOCKBOX_E2E_CI: "1" }, suites: () => 0 });
+    let swapping = null;
+    const run = fakeRun(fresh, {
+      env: { LOCKBOX_E2E_CI: "1" },
+      suites: () => {
+        swapping = existsSync(fresh.journal);
+        return 0;
+      },
+    });
     const result = await run.promise;
     assert.equal(result.code, 0);
     assert.deepEqual(run.calls, ["isRunning", "checkTools", "build", "suites"]);
-    assert.equal(existsSync(fresh.journal), false, "no swap on CI");
+    assert.equal(swapping, true, "the suites run on a swapped test state on CI too");
+    assert.equal(existsSync(fresh.journal), false, "the swap is over after the run");
+    for (const key of state.LOCATION_KEYS) assert.equal(existsSync(fresh.locations[key]), false, `${key}: nothing is made where nothing was`);
   } finally {
     fresh.done();
   }
@@ -366,7 +376,7 @@ test("on_ci_the_state_folders_must_be_fresh", async () => {
 });
 
 test("ci_equal_true_alone_grants_nothing", async () => {
-  // Developer shells and local CI tools set CI=true. Only the GitHub e2e job's own marker skips the swap or allows the clipboard.
+  // Developer shells and local CI tools set CI=true. Only the GitHub e2e job's own marker asks for fresh folders or allows the clipboard.
   const world = makeWorld();
   try {
     const before = world.prints();
@@ -392,6 +402,145 @@ test("ci_equal_true_alone_grants_nothing", async () => {
   assert.throws(() => e2e.findNativeDriver({ env: { EDGEWEBDRIVER: "C:\\SeleniumWebDrivers\\EdgeDriver", CI: "true" } }), /--edgedriver|LOCKBOX_EDGEDRIVER/, "the image's driver folder is not taken on CI=true alone");
 });
 
+test("each_spec_gets_a_fresh_state_and_every_test_state_is_kept", async () => {
+  const world = makeWorld();
+  try {
+    const before = world.prints();
+    const names = [];
+    const run = fakeRun(world, {
+      suites: async (context) => {
+        names.push(context.runName);
+        for (const label of ["s1", "s2"]) {
+          // the app wrote into the state in place: the next fresh state must not show it
+          mkdirSync(world.locations.state, { recursive: true });
+          writeFileSync(join(world.locations.state, "MU-written.txt"), `Made-up state before ${label}\n`);
+          await context.freshState(label);
+          names.push(`${context.runName}-${label}`);
+          assert.equal(state.status(world.stateOptions).run, `${context.runName}-${label}`, "the journal names the new swap");
+          assert.equal(existsSync(world.locations.state), false, `${label}: the place is empty, as on a new PC`);
+          assert.equal(existsSync(join(`${world.locations.state}.aside-${context.runName}-${label}`, "MU-note.txt")), true, "the original is set aside under the new swap");
+        }
+        await assert.rejects(() => context.freshState("Bad label"), /label/);
+        return 0;
+      },
+    });
+    const result = await run.promise;
+    assert.equal(result.code, 0);
+    assert.equal(existsSync(world.journal), false, "no swap is left in progress");
+    assertSamePrints(before, world.prints(), "the originals after a run of fresh states");
+    // the test state each swap held is kept beside the real folder, and named in the run's output
+    for (const name of names.slice(0, 2)) {
+      assert.equal(existsSync(join(`${world.locations.state}.test-${name}`, "MU-written.txt")), true, `${name}: its test state is kept`);
+      assert.ok(result.lines.some((line) => line.includes(`.test-${name}`)), `${name}: the output names it`);
+    }
+    for (const name of names) assert.equal(existsSync(`${world.locations.state}.aside-${name}`), false, `${name}: nothing is left set aside`);
+  } finally {
+    world.done();
+  }
+});
+
+test("a_fresh_state_that_cannot_be_swapped_in_fails_the_run_and_puts_the_real_state_back", async () => {
+  const world = makeWorld();
+  try {
+    const before = world.prints();
+    let running = false;
+    world.stateOptions.isRunning = () => running;
+    const run = fakeRun(world, {
+      suites: async (context) => {
+        running = true;
+        try {
+          await context.freshState("s1");
+        } finally {
+          running = false;
+        }
+        return 0;
+      },
+    });
+    const result = await run.promise;
+    assert.equal(result.code, 1, "a refusal after the first swap is a failure, not a refusal");
+    assert.equal(existsSync(world.journal), false);
+    assertSamePrints(before, world.prints(), "the originals after a refused fresh state");
+  } finally {
+    world.done();
+  }
+});
+
+test("a_folder_busy_for_a_moment_is_put_right_and_the_fresh_state_tried_again", async () => {
+  // Windows can hold a real folder for a moment just after it is put back (EPERM on the rename). The swap that stopped
+  // part-way is recovered, and the same fresh state is swapped in again; a folder still busy on the third try fails the run.
+  for (const busyTimes of [1, 3]) {
+    const world = makeWorld();
+    try {
+      const before = world.prints();
+      let failures = 0;
+      let armed = false;
+      const seen = [];
+      // EPERM part-way through the suite's swap, the first `busyTimes` times: right after the first location (state) is set
+      // aside, before the others are touched, as when Windows holds a folder that was just put back.
+      world.stateOptions.afterStep = (step) => {
+        if (!armed) return;
+        seen.push(step);
+        if (step === "state: original set aside" && failures < busyTimes) {
+          failures += 1;
+          const busy = new Error("operation not permitted, rename");
+          busy.code = "EPERM";
+          throw busy;
+        }
+      };
+      let reached = false;
+      const run = fakeRun(world, {
+        suites: async (context) => {
+          armed = true;
+          await context.freshState("s1");
+          reached = true;
+          return 0;
+        },
+      });
+      const result = await run.promise;
+      if (busyTimes === 1) {
+        assert.equal(result.code, 0, "a folder busy once is tried again and the run goes on");
+        assert.equal(reached, true);
+        assert.ok(result.lines.some((line) => /a folder was busy \(EPERM\)/.test(line)), "the retry is said");
+      } else {
+        assert.equal(result.code, 1, "a folder busy three times fails the run");
+        assert.equal(reached, false);
+      }
+      assert.equal(failures, busyTimes, "the swap stopped part-way as often as asked");
+      assert.ok(!seen.includes("vaults: original set aside") || busyTimes === 1, "a swap that stopped never reached the later locations");
+      assert.equal(existsSync(world.journal), false, "no swap is left in progress");
+      assertSamePrints(before, world.prints(), `the originals after a folder busy ${String(busyTimes)} time(s)`);
+      for (const key of state.LOCATION_KEYS) {
+        const parent = dirname(world.locations[key]);
+        assert.deepEqual(readdirSync(parent).filter((entry) => entry.includes(".aside-")), [], `${key}: nothing is left set aside`);
+      }
+    } finally {
+      world.done();
+    }
+  }
+});
+
+test("spec_names_are_the_ones_asked_for_or_every_spec_file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "e2e-specs-"));
+  try {
+    const required = ["back-up", "thin-path"];
+    assert.throws(() => e2e.specNames([], dir, required), /no spec to run|required spec is missing/, "an empty folder runs nothing and fails");
+    for (const file of ["thin-path.e2e.mjs", "back-up.e2e.mjs", "notes.txt"]) writeFileSync(join(dir, file), "// made up\n");
+    assert.deepEqual(e2e.specNames([], dir, required), ["back-up", "thin-path"]);
+    assert.deepEqual(e2e.specNames(["thin-path"], dir, required), ["thin-path"]);
+    assert.throws(() => e2e.specNames(["missing"], dir, required), /no such spec/);
+    // a required path whose file is gone fails a default run, and a single named spec still runs alone
+    rmSync(join(dir, "back-up.e2e.mjs"));
+    assert.throws(() => e2e.specNames([], dir, required), /a required spec is missing: back-up\.e2e\.mjs/);
+    assert.deepEqual(e2e.specNames(["thin-path"], dir, required), ["thin-path"]);
+    rmSync(join(dir, "thin-path.e2e.mjs"));
+    assert.throws(() => e2e.specNames([], dir, []), /no spec to run/, "no spec files at all is a failure, not a pass");
+    // the repository's own specs are the required ones
+    assert.deepEqual(e2e.specNames([]), e2e.REQUIRED_SPECS);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---- the folders a run makes ---------------------------------------------------------------------------------------
 
 test("the_vault_folder_chosen_in_setup_is_a_temporary_folder_the_run_made", async () => {
@@ -401,12 +550,12 @@ test("the_vault_folder_chosen_in_setup_is_a_temporary_folder_the_run_made", asyn
     const run = fakeRun(world, {
       suites: (made) => {
         context = made;
-        for (const folder of [made.vaultFolder, made.tempDir, made.webviewDir, made.logDir]) {
+        for (const folder of [made.tempDir, made.webviewDir, made.logDir]) {
           assert.equal(existsSync(folder), true, "the run made its folder before the suites");
           assert.ok(relative(made.runRoot, folder).split("\\")[0] !== "..", "inside the run's own folder");
         }
-        assert.deepEqual(readdirSync(made.vaultFolder), [], "the vault folder starts empty");
-        folderbox.checkPickable(made.vaultFolder, { runRoot: made.runRoot, locations: world.locations });
+        // each spec's vault and files folders are made by runSpecs under these names, inside the run's own folder
+        for (const name of ["vaults-s1", "files-s1"]) folderbox.checkPickable(join(made.runRoot, name), { runRoot: made.runRoot, locations: world.locations });
         return 0;
       },
     });

@@ -386,6 +386,33 @@ export function clearClipboard() {
   spawnSync(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard -Value $null"], { windowsHide: true, stdio: "ignore" });
 }
 
+/**
+ * Puts `text` (a made-up value) on the clipboard, as a person's copy does. The text goes in on standard input, never on a
+ * command line. Only for steps `clipboardSteps` allows.
+ */
+export function writeClipboard(text) {
+  if (typeof text !== "string" || text === "") throw new Error("writeClipboard needs the text to put there");
+  // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- a fixed program by its full path and a fixed script; the text goes on stdin
+  const result = spawnSync(powershell(), ["-NoProfile", "-NonInteractive", "-Command", "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"], {
+    input: text,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0) throw new Error("could not set the clipboard");
+}
+
+// ---- the keyboard -------------------------------------------------------------------------------------------------
+
+/**
+ * Presses the save shortcut (Ctrl+Shift+L, the default) as real keyboard input: Windows gives it to Lockbox wherever its
+ * window is. Only for steps `clipboardSteps` allows: it is this PC's keyboard.
+ */
+export function pressSaveShortcut() {
+  // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- a fixed program by its full path and a script of this repository, with no arguments
+  const result = spawnSync(powershell(), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", here("shortcut.ps1")], { encoding: "utf8", windowsHide: true });
+  if (result.status !== 0 || !/pressed/.test(result.stdout ?? "")) throw new Error("the save shortcut could not be pressed");
+}
+
 // ---- the idle clock -----------------------------------------------------------------------------------------------
 
 /**

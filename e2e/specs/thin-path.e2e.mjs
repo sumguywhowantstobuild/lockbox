@@ -4,12 +4,11 @@
 // Every value is made up and carries a plain marker (MU-). Controls are found by role and accessible name.
 
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, readdirSync } from "node:fs";
 
-import { $, $$, browser } from "@wdio/globals";
+import { $, browser } from "@wdio/globals";
 
 import * as app from "../lib/app.mjs";
-import { pickFolder } from "../lib/folderbox.mjs";
+import { addLogin, attach, checkFoldersAfter, confirmRecoveryKey, createVault, env, note, readRecoveryKey, see } from "../lib/steps.mjs";
 
 const VAULT = "MU-e2e";
 // made at run time: nothing here is a literal secret, and each run's vault has its own
@@ -19,8 +18,6 @@ const LOGIN_TITLE = "MU-e2e login";
 const LOGIN_USER = "MU-e2e-user";
 const LOGIN_PASSWORD = ["MU", "e2e", "login", stamp].join("-");
 
-const env = process.env;
-const locations = JSON.parse(env.LOCKBOX_E2E_LOCATIONS ?? "{}");
 const clipboard = app.clipboardSteps(env);
 // the GitHub e2e job (its own marker; the generic CI=true counts for nothing)
 const onCi = env.LOCKBOX_E2E_CI === "1";
@@ -30,79 +27,15 @@ const CLIPBOARD_SECONDS = 300;
 const LOCK_ALLOWANCE_MS = 25_000;
 let copiedAt = 0;
 
-const see = async (role, name, timeout = 20_000) => {
-  const found = await $(app.by(role, name));
-  await found.waitForDisplayed({ timeout, timeoutMsg: `no ${role} named "${name}" appeared` });
-  return found;
-};
-
-const gone = async (role, name, timeout = 20_000) => {
-  const found = await $(app.by(role, name));
-  await found.waitForExist({ timeout, reverse: true, timeoutMsg: `the ${role} named "${name}" did not go` });
-};
-
-const note = (line) => appendFileSync(env.LOCKBOX_E2E_RESULTS, `${line}\n`);
-
 describe("thin_path_create_lock_unlock_add_copy_autolock", () => {
-  before(async () => {
-    const caps = browser.capabilities;
-    const attached = app.checkAttached({
-      debuggerAddress: caps["ms:edgeOptions"]?.debuggerAddress,
-      processId: caps["goog:processID"],
-      driver: { pid: Number(env.LOCKBOX_E2E_DRIVER_PID), created: env.LOCKBOX_E2E_DRIVER_CREATED },
-      snapshot: app.snapshotProcesses(),
-      listeners: app.tcpListeners(),
-    });
-    if (env.LOCKBOX_E2E_OFFSCREEN === "1") await browser.setWindowRect(-4000, -4000, null, null);
-    // Lockbox's idle lock counts the session's input, not the app's: restart that clock (see the function)
-    app.restartIdleClock();
-    await see("heading", "Welcome to Lockbox", 60_000);
-    assert.equal(existsSync(env.LOCKBOX_E2E_DEFAULT_VAULTS), false, "the default vault folder does not exist before the run");
-    assert.deepEqual(readdirSync(env.LOCKBOX_E2E_VAULT_FOLDER), [], "the vault folder the run made starts empty");
-    assert.ok(attached.pid > 0);
-  });
+  before(attach);
 
   it("creates the vault in a folder the run made", async () => {
-    await app.press("Create a vault");
-    await see("heading", "Create your vault");
-    await app.typeInto(app.by("textbox", "Vault name"), VAULT);
-    await app.typeInto(app.named("Password"), PASSWORD);
-    await app.typeInto(app.named("Password again"), PASSWORD);
-    await app.press("Change");
-    await app.press("Create vault");
-    await pickFolder({
-      title: "Choose where to create the vault",
-      pid: browser.capabilities["goog:processID"],
-      folder: env.LOCKBOX_E2E_VAULT_FOLDER,
-      runRoot: env.LOCKBOX_E2E_RUN_ROOT,
-      locations,
-    });
-    await see("heading", "Save your recovery key", 60_000);
+    await createVault(VAULT, PASSWORD);
   });
 
   it("confirms the recovery key by the words read from the screen", async () => {
-    const items = await $$("role/listitem");
-    const found = [];
-    for (const item of items) {
-      const match = /^(\d+)([a-z]+)$/.exec(String(await item.getProperty("textContent")).trim());
-      if (match) found.push({ place: Number(match[1]), word: match[2] });
-    }
-    assert.equal(found.length, 24, "the screen shows the 24 words of the key");
-    const words = new Map(found.map((entry) => [entry.place, entry.word]));
-    assert.equal(words.size, 24, "each of the 24 places is shown once");
-    await app.press("Continue");
-    await see("heading", "Check your recovery key");
-    let previous = "";
-    for (let asked = 0; asked < 3; asked += 1) {
-      const group = await $("role/group");
-      await browser.waitUntil(async () => (await group.getComputedLabel()) !== previous, { timeoutMsg: "the next question did not come" });
-      const label = await group.getComputedLabel();
-      previous = label;
-      const place = Number(/number (\d+)/.exec(label)?.[1]);
-      assert.ok(words.has(place), `a question about a place the key has (${label})`);
-      await app.press(words.get(place));
-    }
-    await see("button", "Login", 60_000);
+    await confirmRecoveryKey(await readRecoveryKey());
   });
 
   it("locks, and the lock screen shows", async () => {
@@ -128,13 +61,7 @@ describe("thin_path_create_lock_unlock_add_copy_autolock", () => {
   });
 
   it("adds a login", async () => {
-    await app.press("Login");
-    await see("heading", "New login");
-    await app.typeInto(app.by("textbox", "Title"), LOGIN_TITLE);
-    await app.typeInto(app.by("textbox", "Username"), LOGIN_USER);
-    await app.typeInto(app.named("Password"), LOGIN_PASSWORD);
-    await app.press("Save");
-    await see("button", "Copy password");
+    await addLogin({ title: LOGIN_TITLE, username: LOGIN_USER, password: LOGIN_PASSWORD });
   });
 
   it("copies the password, and the clipboard holds it", async function () {
@@ -186,8 +113,7 @@ describe("thin_path_create_lock_unlock_add_copy_autolock", () => {
   });
 
   after(async () => {
-    assert.equal(existsSync(env.LOCKBOX_E2E_DEFAULT_VAULTS), false, "the default vault folder was never made");
-    assert.ok(readdirSync(env.LOCKBOX_E2E_VAULT_FOLDER).length >= 1, "the vault is in the folder the run made");
+    checkFoldersAfter();
     if (clipboard.run && app.readClipboard() === LOGIN_PASSWORD) app.clearClipboard();
   });
 });

@@ -6,16 +6,17 @@
 // `spec` is a name in e2e/specs (`thin-path` for e2e/specs/thin-path.e2e.mjs); none means all of them. The Edge driver is
 // the flag, else LOCKBOX_EDGEDRIVER, else (on CI only) the runner image's EDGEWEBDRIVER folder; its major version must
 // equal the WebView2 runtime's. tauri-driver is %CARGO_HOME%\bin\tauri-driver.exe (LOCKBOX_TAURI_DRIVER overrides):
-// `cargo install tauri-driver --locked --version 2.1.0`. Steps that use the clipboard run on CI, and on a PC only with
-// LOCKBOX_E2E_PC_FREE=1.
+// `cargo install tauri-driver --locked --version 2.1.0`. Steps that use the clipboard or this PC's keyboard (the save
+// shortcut) run on CI, and on a PC only with LOCKBOX_E2E_PC_FREE=1.
 //
 // What a run does, in order, stopping at the first refusal: refuses while any `lockbox-desktop.exe` runs; finds the
 // drivers and checks their versions; builds the release app (the page, then the app with `custom-protocol`, as the full
-// check does); makes a folder of its own in the temp folder (the web-view data, a vault folder, logs); locally swaps the
-// test state in (`e2e/lib/state.mjs`; CI's runner is fresh, so it must hold no state and nothing is swapped); runs
-// the app-level tests (`e2e/real-app.test.mjs`) and then the WebdriverIO specs; and in `finally` stops what it started by
-// process ID, swaps the real state back, deletes the test state it made and its own folder. A run cut short is put right
-// by `node e2e/lib/state.mjs recover`.
+// check does); makes a folder of its own in the temp folder (the web-view data, a vault and a files folder per spec,
+// logs); swaps a test state in (`e2e/lib/state.mjs`; CI's runner must start with none, so there nothing is set aside);
+// runs the app-level tests (`e2e/real-app.test.mjs`) and then each WebdriverIO spec on a fresh test state of its own,
+// stopping at the first that fails; and in `finally` stops what it started by process ID, swaps the real state back, keeps
+// each test state beside the real folders (named in the output, to delete by hand) and deletes its own folder. A run cut
+// short is put right by `node e2e/lib/state.mjs recover`.
 // Exit code: 0 all passed, 1 something failed, 2 refused (nothing was started or changed).
 
 import { spawn, spawnSync } from "node:child_process";
@@ -268,49 +269,109 @@ export function judgeSpecResults(lines, { ci, code }) {
   return { passed, failed, skipped, reasons, ok: code === 0 && failed === 0 && passed > 0 && !(ci && skipped.length > 0) };
 }
 
-/** The WebdriverIO specs, against a driver this run starts and stops. 0 when every step passed. */
+/** The design's end-to-end paths: a run with no spec named runs them all, and refuses when one of them is missing. */
+export const REQUIRED_SPECS = ["back-up-then-restore", "save-copied-key", "sign-in", "thin-path"];
+
+/**
+ * The specs a run runs: the ones named, else every `*.e2e.mjs` in e2e/specs, by name. Throws for a name with no file, for
+ * a run with none, and, when none is named, for a required path whose spec is missing (a renamed or deleted file would
+ * otherwise drop that path and still pass).
+ */
+export function specNames(named, dir = join(root, "e2e", "specs"), required = REQUIRED_SPECS) {
+  const names = named.length > 0 ? named : readdirSync(dir).filter((file) => file.endsWith(".e2e.mjs")).map((file) => file.slice(0, -".e2e.mjs".length)).sort();
+  for (const name of names) if (!existsSync(join(dir, `${name}.e2e.mjs`))) throw new Error(`no such spec: ${name}.e2e.mjs`);
+  if (named.length === 0) for (const name of required) if (!names.includes(name)) throw new Error(`a required spec is missing: ${name}.e2e.mjs`);
+  if (names.length === 0) throw new Error("no spec to run");
+  return names;
+}
+
+/** Waits up to `seconds` for every `lockbox-desktop.exe` to be gone (a stopped app takes a moment); true once none runs. */
+async function lockboxGone(seconds) {
+  const until = Date.now() + seconds * 1000;
+  for (;;) {
+    if (state.isLockboxRunning() === false) return true;
+    if (Date.now() > until) return false;
+    await new Promise((done) => setTimeout(done, 250));
+  }
+}
+
+/**
+ * The WebdriverIO specs, one at a time, each on a fresh test state (`ctx.freshState`) with its own vault folder and files
+ * folder, against a driver started and stopped for it. A spec that fails does not stop the rest, so each push records every
+ * path's result; a fresh state that can't be made, or a stop that leaves a process or the machine policy behind, stops the
+ * run there, since what comes after could no longer be trusted. 0 when every spec passed.
+ */
 export async function runSpecs(ctx) {
   const { say, env, tools, locations } = ctx;
   const shared = sharedEnvironment(ctx);
-  const handle = await app.startLockbox({
-    tauriDriver: tools.tauriDriver,
-    nativeDriver: tools.nativeDriver,
-    tempDir: join(ctx.runRoot, "driver-temp"),
-    webviewDir: join(ctx.runRoot, "driver-webview"),
-    logFile: join(ctx.logDir, "tauri-driver.log"),
-    base: env,
-  });
-  try {
-    const results = join(ctx.logDir, "specs.txt");
-    const wdio = join(root, "e2e", "node_modules", "@wdio", "cli", "bin", "wdio.js");
-    if (!existsSync(wdio)) throw new Error("WebdriverIO is not installed: run `npm ci --ignore-scripts` in e2e/");
-    const specFiles = ctx.specs.map((name) => join(root, "e2e", "specs", `${name}.e2e.mjs`));
-    for (const file of specFiles) if (!existsSync(file)) throw new Error(`no such spec: ${basename(file)}`);
-    const code = await runNode([wdio, "run", "wdio.conf.mjs", ...specFiles.flatMap((file) => ["--spec", file])], {
-      cwd: join(root, "e2e"),
-      env: {
-        ...shared,
-        LOCKBOX_E2E_DRIVER_PORT: String(handle.port),
-        LOCKBOX_E2E_DRIVER_PID: String(handle.pid),
-        LOCKBOX_E2E_DRIVER_CREATED: handle.created,
-        LOCKBOX_E2E_VAULT_FOLDER: ctx.vaultFolder,
-        LOCKBOX_E2E_RESULTS: results,
-        LOCKBOX_E2E_LOCATIONS: JSON.stringify(locations),
-      },
-    });
-    const lines = existsSync(results) ? readFileSync(results, "utf8").split(/\r?\n/).filter(Boolean) : [];
-    const verdict = judgeSpecResults(lines, { ci: ctx.ci, code });
-    for (const line of verdict.skipped) say(`skipped: ${line}`);
-    if (!verdict.ok) {
-      say(`the specs did not pass (exit ${String(code)}; ${String(verdict.passed)} passed, ${String(verdict.failed)} failed${verdict.reasons.length ? `; ${verdict.reasons.join("; ")}` : ""})`);
-      return 1;
+  const wdio = join(root, "e2e", "node_modules", "@wdio", "cli", "bin", "wdio.js");
+  if (!existsSync(wdio)) throw new Error("WebdriverIO is not installed: run `npm ci --ignore-scripts` in e2e/");
+  const names = specNames(ctx.specs);
+  let passed = 0;
+  const failed = [];
+  let leftBehind = false;
+  for (const [at, name] of names.entries()) {
+    if (leftBehind) {
+      say(`the spec ${name} did not run: the last spec's stop left something behind`);
+      failed.push(name);
+      continue;
     }
-    say(`the specs passed (${String(verdict.passed)} steps)`);
-    return 0;
-  } finally {
-    const outcome = app.stopLockbox(handle);
-    if (outcome.remaining.length > 0) say(`could not stop every process this run started (${outcome.remaining.length} left)`);
+    const label = `s${String(at + 1)}`;
+    // the app of the suite before must be gone before its state is put back
+    if (!(await lockboxGone(15))) throw new Error("Lockbox was still running after the last spec");
+    await ctx.freshState(label);
+    const vaultFolder = join(ctx.runRoot, `vaults-${label}`);
+    const filesFolder = join(ctx.runRoot, `files-${label}`);
+    mkdirSync(vaultFolder);
+    mkdirSync(filesFolder);
+    const handle = await app.startLockbox({
+      tauriDriver: tools.tauriDriver,
+      nativeDriver: tools.nativeDriver,
+      tempDir: join(ctx.runRoot, `driver-temp-${label}`),
+      webviewDir: join(ctx.runRoot, `driver-webview-${label}`),
+      logFile: join(ctx.logDir, `tauri-driver-${label}.log`),
+      base: env,
+    });
+    try {
+      const results = join(ctx.logDir, `specs-${label}.txt`);
+      const code = await runNode([wdio, "run", "wdio.conf.mjs", "--spec", join(root, "e2e", "specs", `${name}.e2e.mjs`)], {
+        cwd: join(root, "e2e"),
+        env: {
+          ...shared,
+          LOCKBOX_E2E_DRIVER_PORT: String(handle.port),
+          LOCKBOX_E2E_DRIVER_PID: String(handle.pid),
+          LOCKBOX_E2E_DRIVER_CREATED: handle.created,
+          LOCKBOX_E2E_VAULT_FOLDER: vaultFolder,
+          LOCKBOX_E2E_FILES_FOLDER: filesFolder,
+          LOCKBOX_E2E_RESULTS: results,
+          LOCKBOX_E2E_LOCATIONS: JSON.stringify(locations),
+        },
+      });
+      const lines = existsSync(results) ? readFileSync(results, "utf8").split(/\r?\n/).filter(Boolean) : [];
+      const verdict = judgeSpecResults(lines, { ci: ctx.ci, code });
+      for (const line of verdict.skipped) say(`skipped (${name}): ${line}`);
+      if (verdict.ok) {
+        say(`the spec ${name} passed (${String(verdict.passed)} steps)`);
+        passed += verdict.passed;
+      } else {
+        say(`the spec ${name} did not pass (exit ${String(code)}; ${String(verdict.passed)} passed, ${String(verdict.failed)} failed${verdict.reasons.length ? `; ${verdict.reasons.join("; ")}` : ""})`);
+        failed.push(name);
+      }
+    } finally {
+      const outcome = app.stopLockbox(handle);
+      if (outcome.remaining.length > 0) {
+        say(`could not stop every process this run started, or remove the policy it set (${outcome.remaining.length} left)`);
+        leftBehind = true;
+        if (!failed.includes(name)) failed.push(name);
+      }
+    }
   }
+  if (failed.length > 0) {
+    say(`the specs did not all pass (${String(names.length - failed.length)} of ${String(names.length)}; not passed: ${failed.join(", ")})`);
+    return 1;
+  }
+  say(`the specs passed (${String(names.length)} specs, ${String(passed)} steps)`);
+  return 0;
 }
 
 // ---- the run ------------------------------------------------------------------------------------------------------
@@ -398,7 +459,6 @@ export async function runE2e({ env = process.env, specs = [], edgedriver, stateO
     tempDir: join(runRoot, "temp"),
     webviewDir: join(runRoot, "webview"),
     logDir: join(runRoot, "logs"),
-    vaultFolder: join(runRoot, "vaults"),
     locations,
     tools,
     specs,
@@ -406,26 +466,25 @@ export async function runE2e({ env = process.env, specs = [], edgedriver, stateO
     ci,
     say,
   };
-  for (const dir of [context.tempDir, context.webviewDir, context.logDir, context.vaultFolder]) mkdirSync(dir);
+  for (const dir of [context.tempDir, context.webviewDir, context.logDir]) mkdirSync(dir);
 
   let code = 1;
-  // "starting" while swapIn runs (it may stop part-way, with its journal kept), "in" once it has finished
-  let swap = "none";
-  try {
-    if (!ci) {
-      swap = "starting";
-      for (const line of state.swapIn(runName, stateOptions).lines) say(`swap: ${line}`);
-      swap = "in";
-    }
-    code = await (steps.suites ?? defaultSuites)(context);
-  } catch (error) {
-    say(`e2e: ${error instanceof state.SwapRefused ? error.message : `the run failed: ${error.message}`}`);
-    code = error instanceof state.SwapRefused && swap === "starting" ? 2 : 1;
-  } finally {
-    // What is undone depends on whose swap it is. A swap that stopped part-way is put right by recover, but only when the
-    // journal names this run: a run refused because another run owns the journal must leave that run's swap alone.
-    let undo = swap === "in" ? "back" : "none";
-    if (swap === "starting") {
+  // The test state in place: `name` is its swap's run name (this run's, or this run's with a suite's label), and `phase` is
+  // "starting" while swapIn runs (it may stop part-way, with its journal kept), "in" once it has finished. CI's runner is
+  // swapped like a PC: there the real folders are missing, so nothing is set aside and each swap starts the app fresh.
+  const swap = { phase: "none", name: runName };
+  const swapIn = (name) => {
+    swap.name = name;
+    swap.phase = "starting";
+    for (const line of state.swapIn(name, stateOptions).lines) say(`swap: ${line}`);
+    swap.phase = "in";
+  };
+  // Puts the real state back from the swap in place; throws when it is not back. What is undone depends on whose swap it
+  // is. A swap that stopped part-way is put right by recover, but only when the journal names this swap: a run refused
+  // because another run owns the journal must leave that run's swap alone.
+  const putBack = () => {
+    let undo = swap.phase === "in" ? "back" : "none";
+    if (swap.phase === "starting") {
       let owner = null;
       let inProgress = false;
       try {
@@ -433,22 +492,55 @@ export async function runE2e({ env = process.env, specs = [], edgedriver, stateO
       } catch {
         // the journal can't be read: nothing is touched
       }
-      if (inProgress && owner === runName) undo = "recover";
+      if (inProgress && owner === swap.name) undo = "recover";
       else if (inProgress) say(`e2e: a swap of another run (${owner ?? "unreadable"}) is in progress; left alone`);
     }
-    if (undo !== "none") {
+    if (undo === "none") {
+      swap.phase = "none";
+      return;
+    }
+    const done = undo === "back" ? state.swapBack(swap.name, stateOptions) : state.recover(stateOptions);
+    for (const line of done.lines) say(`swap: ${line}`);
+    // Nothing the swap parked is deleted: what was written into the substituted folders (by the app, or by a person who
+    // opened Lockbox meanwhile) stays where swap back put it. The run names them in one line.
+    const kept = state.LOCATION_KEYS.map((key) => `${locations[key]}.test-${swap.name}`).filter((folder) => existsSync(folder));
+    if (kept.length > 0) say(`swap: the test state of this run is kept, not deleted, beside the real folders; delete it by hand when you are done: ${kept.join("; ")}`);
+    if (state.status(stateOptions).inProgress) throw new Error("a swap is still in progress");
+    swap.phase = "none";
+  };
+  // A suite that needs the app as on a new PC asks for it: the test state in place is put back and kept, and a new, empty one
+  // (this run's name and `label`) is swapped in. A failure to put back stops the run before anything else is swapped. A real
+  // folder that was just put back can be held for a moment by Windows (the search indexer or a virus scan of the renamed
+  // folder), so a rename the system refused as busy is put right by recover and tried again, up to three times in all.
+  context.freshState = async (label) => {
+    if (typeof label !== "string" || !/^[a-z0-9]{1,8}$/.test(label)) throw new Error("a fresh state's label is 1 to 8 of a-z and 0-9");
+    putBack();
+    for (let attempt = 1; ; attempt += 1) {
       try {
-        const done = undo === "back" ? state.swapBack(runName, stateOptions) : state.recover(stateOptions);
-        for (const line of done.lines) say(`swap: ${line}`);
-        // Nothing the swap parked is deleted: what was written into the substituted folders (by the app, or by a person who
-        // opened Lockbox meanwhile) stays where swap back put it. The run names them in one line.
-        const kept = state.LOCATION_KEYS.map((key) => `${locations[key]}.test-${runName}`).filter((folder) => existsSync(folder));
-        if (kept.length > 0) say(`swap: the test state of this run is kept, not deleted, beside the real folders; delete it by hand when you are done: ${kept.join("; ")}`);
-        if (state.status(stateOptions).inProgress) throw new Error("a swap is still in progress");
+        swapIn(`${runName}-${label}`);
+        return;
       } catch (error) {
-        say(`e2e: the real state could not be put back (${error.message}); run: node e2e/lib/state.mjs recover`);
-        code = 1;
+        const busy = error instanceof Error && ["EPERM", "EBUSY", "EACCES"].includes(error.code);
+        if (!busy || attempt >= 3) throw error;
+        say(`swap: a folder was busy (${error.code}); putting everything back and trying again`);
+        putBack();
+        await new Promise((done) => setTimeout(done, 2000 * attempt));
       }
+    }
+  };
+  try {
+    swapIn(runName);
+    code = await (steps.suites ?? defaultSuites)(context);
+  } catch (error) {
+    say(`e2e: ${error instanceof state.SwapRefused ? error.message : `the run failed: ${error.message}`}`);
+    // refused (2) only when this run's first swap was: nothing had been started or changed
+    code = error instanceof state.SwapRefused && swap.phase === "starting" && swap.name === runName ? 2 : 1;
+  } finally {
+    try {
+      putBack();
+    } catch (error) {
+      say(`e2e: the real state could not be put back (${error.message}); run: node e2e/lib/state.mjs recover`);
+      code = 1;
     }
     // On the CI job, a run that did not pass keeps its logs (never the web-view data) in target/e2e-logs/run, which the
     // job uploads: the run's own folder is about to go, and with it the only record of why.

@@ -1,8 +1,8 @@
 // WebdriverIO's settings for the end-to-end run. `node scripts/e2e.mjs` starts tauri-driver (which starts msedgedriver,
 // which starts the app) and sets every LOCKBOX_E2E_* variable read here; this file is not meant to be run by hand.
 //
-// One session per spec file: the app starts when the session is made and is closed when it ends. The specs run in
-// order, and the first failure stops the run: a path's steps depend on the ones before them.
+// The script runs this once per spec file, each on a fresh test state: the app starts when the session is made and is
+// closed when it ends. Within a spec the first failure stops it: a path's steps depend on the ones before them.
 
 import { appendFileSync } from "node:fs";
 
