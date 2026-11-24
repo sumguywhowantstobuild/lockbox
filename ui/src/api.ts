@@ -503,6 +503,11 @@ export interface SavedView {
   folder: string;
   /** Only an export has this: what it holds and what it left out. A saved PDF or `.env` file has none. */
   export?: ExportSummary;
+  /**
+   * Only an export has this: the handle the shell holds for Show in Explorer (`showOutputInExplorer`), a token and never a path, for this session and
+   * generation, with the folder the file went to behind it. Put away with `closeOutput` when the end is closed; a lock drops it.
+   */
+  output?: string;
 }
 
 /**

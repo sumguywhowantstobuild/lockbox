@@ -13,6 +13,7 @@ import {
   continueExport,
   exportVault,
   pickAnotherExportFolder,
+  showExportedFolder,
   type ExportFlow as Flow,
   type SessionData,
 } from "../store";
@@ -21,7 +22,8 @@ import { CloudCopyQuestion } from "./FileActions";
 // Export to a readable file (34a to 34c), on the session whose Settings opened it. 34a warns that anyone who gets the file can read everything in it, then asks for
 // the vault's password. What is typed is the form's own state and is wiped from it the moment it is sent; the page learns the folder, counts and the titles of the
 // rows whose values have line breaks, and sends none of it back. 34b is the refusals (said on the form, in the table's words) and the cloud question, which
-// answers by a token and never sends the password again. 34c says to delete the file and empty the Recycle Bin. Every refusal goes through `messageFor`.
+// answers by a token and never sends the password again. 34c says to delete the file and empty the Recycle Bin, and offers Show in Explorer by the handle the
+// shell gave (as Save all's summary does). Every refusal goes through `messageFor`.
 
 /**
  * The Export panel, as the export follows: the form (34a, with the line a refusal puts on it, and the cloud question of 34b over it) and the end (34c).
@@ -163,8 +165,8 @@ function Form({ data, flow }: { data: SessionData; flow: Extract<Flow, { phase: 
 
 /**
  * 34c: the file was written. It says where, how many items and stored files, that the file isn't protected (delete it, and empty the Recycle Bin), and, when
- * there are any, the items whose values have line breaks, which another app may change. Show in Explorer isn't here: the page holds only the folder to read,
- * and no command takes it back. Focus is on the heading as it appears, so what to do next is read first.
+ * there are any, the items whose values have line breaks, which another app may change. Show in Explorer opens the folder by the shell's handle (the page holds
+ * only the folder to read, and no command takes it back); Done puts the handle away. Focus is on the heading as it appears, so what to do next is read first.
  */
 function Done({ data, flow }: { data: SessionData; flow: Extract<Flow, { phase: "done" }> }) {
   const { session } = data;
@@ -190,9 +192,18 @@ function Done({ data, flow }: { data: SessionData; flow: Extract<Flow, { phase: 
       onClose={close}
       onKeyDown={onKeyDown}
       footer={
-        <Button look="pill-main" onClick={close}>
-          Done
-        </Button>
+        <>
+          <Button
+            onClick={() => {
+              void showExportedFolder(session);
+            }}
+          >
+            Show in Explorer
+          </Button>
+          <Button look="pill-main" onClick={close}>
+            Done
+          </Button>
+        </>
       }
     >
       <p className="psub">{exportCounts(summary.items, summary.left_out_files)}</p>

@@ -31,8 +31,13 @@ test("export_wrappers_send_and_read_the_shell_shapes", async () => {
   const summary = { items: 7, left_out_files: 2, line_breaks: ["Made-up note"], unreadable: 2 };
 
   // Done, with the summary beside the folder.
-  invoke.mockResolvedValueOnce({ ...VAULT, data: { Done: { folder: "C:\\Made-up\\Folder", export: summary } } });
-  await expect(api.exportVault(VAULT, TYPED)).resolves.toEqual({ ...VAULT, data: { Done: { folder: "C:\\Made-up\\Folder", export: summary } } });
+  // The handle for Show in Explorer comes with it: a token, never a path (Save all's `output`). The PDF's and the `.env` file's answers carry none.
+  const handle = "0123456789abcdef0123456789abcdef";
+  const done = { Done: { folder: "C:\\Made-up\\Folder", export: summary, output: handle } };
+  invoke.mockResolvedValueOnce({ ...VAULT, data: done });
+  const answered = await api.exportVault(VAULT, TYPED);
+  expect(answered).toEqual({ ...VAULT, data: done });
+  expect(Object.keys((answered.data as { Done: object }).Done).sort()).toEqual(["export", "folder", "output"]);
   expect(invoke).toHaveBeenLastCalledWith("export_csv", { session: 7, generation: 3, password: TYPED });
 
   // The cloud question, and the closed picker.

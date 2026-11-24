@@ -103,8 +103,8 @@ export type ExportFlow =
   | { phase: "ask"; sending: boolean; problem: PasswordProblem | null }
   /** The cloud question: the folder picked is synced to the cloud. `token` is the choice the shell parked, for Continue and Pick another folder; Cancel lets it go. */
   | { phase: "cloud"; token: string; sending: boolean }
-  /** The file was written: 34c. `folder` is where, to say; `summary` holds counts and titles, never a value. */
-  | { phase: "done"; folder: string; summary: api.ExportSummary };
+  /** The file was written: 34c. `folder` is where, to say; `summary` holds counts and titles, never a value; `output` is the shell's handle for Show in Explorer (a token, never a path). */
+  | { phase: "done"; folder: string; summary: api.ExportSummary; output: string };
 
 /**
  * Where a new recovery key the person asked for is (29a, and 29c after it), or `null` when none is begun. Like `PasswordChange` it lives in the session's
@@ -2375,6 +2375,8 @@ export function openExport(session: number): void {
   const entry = sessionOf(session);
   if (entry === undefined || entry.readOnly) return;
   const out = exportIsOut(entry.exportFlow);
+  // An end that was left on the record has its handle put away as the form replaces it.
+  if (entry.exportFlow?.phase === "done") putAwayOutput(entry.exportFlow.output);
   update(session, (current) => ({
     ...endReveals(current),
     openItem: null,
@@ -2386,6 +2388,9 @@ export function openExport(session: number): void {
 
 /** Closes the panel (Cancel, Close panel, Escape, or Done after 34c). What was typed goes with it, and a cloud question's token. An export that is out goes on. */
 export function closeExport(session: number): void {
+  const flow = sessionOf(session)?.exportFlow;
+  // The end (34c) holds the shell's handle for Show in Explorer: it is put away with the panel.
+  if (flow?.phase === "done") putAwayOutput(flow.output);
   update(session, (current) => ({
     ...current,
     tool: current.tool?.kind === "export" ? null : current.tool,
@@ -2413,10 +2418,10 @@ export function cancelExportQuestion(session: number): void {
 function exportStep(outcome: api.Outcome<api.SavedView>): ExportFlow {
   if (outcome === "Dismissed") return { phase: "ask", sending: false, problem: null };
   if ("Done" in outcome) {
-    const summary = outcome.Done.export;
-    // An export is always answered with its summary; one without is not an answer the page knows, and says nothing of what was written.
-    if (summary === undefined) return { phase: "ask", sending: false, problem: { field: "form", error: UNEXPECTED } };
-    return { phase: "done", folder: outcome.Done.folder, summary };
+    const { export: summary, output } = outcome.Done;
+    // An export is always answered with its summary and its handle for Show in Explorer; one without is not an answer the page knows, and says nothing of what was written.
+    if (summary === undefined || output === undefined) return { phase: "ask", sending: false, problem: { field: "form", error: UNEXPECTED } };
+    return { phase: "done", folder: outcome.Done.folder, summary, output };
   }
   if (typeof outcome.Confirm === "object" && "CloudFolder" in outcome.Confirm) {
     return { phase: "cloud", token: outcome.Confirm.CloudFolder.token, sending: false };
@@ -5504,6 +5509,41 @@ export async function showSavedFolder(session: number): Promise<void> {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (!stillOpen(session, generation)) return;
     sayFailure(session, refusedWith(error, "choice_expired") ? { code: "page", kind: "output_expired" } : error);
+  }
+}
+
+/**
+ * Show in Explorer on an export's end (34c), by the handle the export's answer gave (no path comes to the page). Any refusal says to open the folder from
+ * Windows (the file is unprotected and the person is looking for it), after two checks: a handle the shell has let go of may be news of a lock the page
+ * missed, so the session is asked about first (`list_items`, as a cloud question's `not_found` does): a locked one goes from the page and nothing is
+ * said. And a refusal that comes after the end was put away, or replaced by another export's, says nothing.
+ */
+export async function showExportedFolder(session: number): Promise<void> {
+  const entry = sessionOf(session);
+  const flow = entry?.exportFlow;
+  if (entry === undefined || flow?.phase !== "done") return;
+  const { output } = flow;
+  const { generation } = entry;
+  // The end that asked is still on screen for this vault: the same generation, and the same handle.
+  const stillOurs = () => {
+    const now = sessionOf(session);
+    return now?.generation === generation && now.exportFlow?.phase === "done" && now.exportFlow.output === output;
+  };
+  try {
+    await api.showOutputInExplorer(output);
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+    if (!stillOurs()) return;
+    let refusal: unknown = { code: "page", kind: "output_expired" };
+    if (refusedWith(error, "choice_expired")) {
+      try {
+        if ((await printCommand(session, (vault) => api.listItems(vault))) === "stale") return;
+      } catch (lookup) {
+        refusal = lookup;
+      }
+      if (!stillOurs()) return;
+    }
+    sayFailure(session, refusal);
   }
 }
 

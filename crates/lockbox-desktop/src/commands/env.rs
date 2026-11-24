@@ -751,6 +751,7 @@ impl Shell {
         let saved = SavedView {
             folder: shown(docs),
             export: None,
+            output: None,
         };
         self.still_current(session, generation, Outcome::Done(saved))
     }
@@ -2412,6 +2413,7 @@ mod tests {
         let saved = EnvOut::Saved(Outcome::Done(SavedView {
             folder: "C:\\Docs".to_owned(),
             export: None,
+            output: None,
         }));
         assert_eq!(
             serde_json::to_value(saved).unwrap(),

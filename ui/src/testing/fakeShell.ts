@@ -547,7 +547,7 @@ export interface FakeShell {
   helpOpened: () => number;
   /** The next `open_help` fails to start the browser (the shell's usual `io` refusal, which carries no address). */
   helpFailsNext(): void;
-  /** How many summary handles the shell holds now (one per finished Save all files, until `close_output`, a lock or `dropParkedChoices`). */
+  /** How many summary handles the shell holds now (one per finished Save all files or export, until `close_output`, a lock or `dropParkedChoices`). */
   heldOutputs(): number;
   /**
    * Holds every stored-file command's answer until `release` is called, as a big file would: `lockbox://busy` says the vault is
@@ -1327,11 +1327,17 @@ export function installFakeShell(
   const pendingPdfs = new Map<string, { session: number; generation: number; envFolder: string | null; copy?: { id: string; file_id: string }; exported?: boolean }>();
   // The exports the shell wrote (Plan 4D Task 2): what each said it held and left out. A closed dialog, a refusal or a cloud question not yet answered is not here.
   const exportsWritten: FakeExport[] = [];
-  /** The CSV is "written": the summary (counts and titles) is worked out from the vault's live items, and the answer carries it beside the folder. */
-  const writeExport = (vault: FakeVault) => {
+  /**
+   * The CSV is "written": the summary (counts and titles) is worked out from the vault's live items, and the answer carries it beside the folder and the handle
+   * for Show in Explorer (`SavedView.output`: one per export, for that session and generation, shown as Save all's, until `close_output`, a lock or a drop).
+   */
+  const writeExport = (session: number, generation: number, vault: FakeVault) => {
     const summary = exportSummary(vault.items ?? [], vault.unreadable ?? 0);
     exportsWritten.push(summary);
-    return { Done: { folder: SAVED_FOLDER, export: summary } };
+    nextToken += 1;
+    const output = nextToken.toString(16).padStart(32, "0");
+    outputs.set(output, { session, generation, shown: SAVED_FOLDER });
+    return { Done: { folder: SAVED_FOLDER, export: summary, output } };
   };
   /** The save dialog an export opens (after the password was checked): closed, a cloud-synced folder (asks first, nothing built), or a folder that is written to. */
   const exportDialog = (session: number, generation: number, vault: FakeVault) => {
@@ -1346,7 +1352,7 @@ export function installFakeShell(
       pendingPdfs.set(token, { session, generation, envFolder: null, exported: true });
       return tagged(session, generation, { Confirm: { CloudFolder: { token, provider: "Other" } } });
     }
-    return tagged(session, generation, writeExport(vault));
+    return tagged(session, generation, writeExport(session, generation, vault));
   };
   // The pasted `.env`s the shell holds, by token: their rows, values included, which never leave the fake.
   const envPastes = new Map<string, { session: number; generation: number; rows: EnvPasted[]; text: string }>();
@@ -2354,7 +2360,7 @@ export function installFakeShell(
         pendingPdfs.delete(token);
         const vault = vaultFor(parked.session, parked.generation);
         // An export's yes builds and writes the CSV now, with the summary beside the folder.
-        if (parked.exported ?? false) return tagged(parked.session, parked.generation, writeExport(vault));
+        if (parked.exported ?? false) return tagged(parked.session, parked.generation, writeExport(parked.session, parked.generation, vault));
         if (parked.envFolder === null) pdfs.push(SAVED_FOLDER);
         else envFiles.push(parked.envFolder);
         return tagged(parked.session, parked.generation, { Done: { folder: SAVED_FOLDER } });

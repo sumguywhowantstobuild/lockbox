@@ -157,8 +157,8 @@ pub enum PendingChoice {
         dest: PathBuf,
         files: Vec<(ItemId, FileId)>,
     },
-    /// The summary of a Save all, for Show in Explorer: the folder the files were saved in, behind a token the page
-    /// holds, for the session and generation that saved them. Read, never used up (it can be used again); dropped when the
+    /// The summary of a Save all or of an export, for Show in Explorer: the folder the files were saved in, behind a token
+    /// the page holds, for the session and generation that saved them. Read, never used up (it can be used again); dropped when the
     /// summary closes (`close_output`), by the lock of that one vault ([`Pending::drop_saved_folders`]), Lock all, Windows
     /// locking or sleep, the app closing, and its five minutes.
     SavedFolder {

@@ -304,11 +304,23 @@ impl Shell {
             return Err(error);
         }
         journal.clear(&temp);
+        #[cfg(test)]
+        reached("export_published");
+        // The handle for Show in Explorer: the folder the file went to, for this session and generation, only now that the
+        // file is in place. A lock between here and the answer takes the answer, and the handle with it.
+        let pending = self.sessions.pending();
+        let output = pending.put(PendingChoice::SavedFolder {
+            session,
+            generation,
+            folder: docs.to_path_buf(),
+        });
         let saved = SavedView {
             folder: shown(docs),
             export: Some(summary),
+            output: Some(output.clone()),
         };
         self.still_current(session, generation, Outcome::Done(saved))
+            .inspect_err(|_| pending.close_saved_folder(&output))
     }
 
     /// The printers Lockbox offers for the recovery key, read from Windows now: the ones that send a page to a device,
@@ -477,6 +489,7 @@ impl Shell {
         let saved = SavedView {
             folder: shown(docs),
             export: None,
+            output: None,
         };
         self.still_current(session, generation, Outcome::Done(saved))
     }

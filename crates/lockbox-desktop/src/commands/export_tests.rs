@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use lockbox_core::blob::{CancelToken, NoProgress};
 use lockbox_core::internals::fsio::failpoint;
@@ -30,6 +31,7 @@ use super::{MALFORMED, parse};
 use crate::error::{Confirm, Outcome, ShellError, ShellResult};
 use crate::export_csv::{self, HEADER, counted};
 use crate::pending::{PendingChoice, Token};
+use crate::restore::shown;
 use crate::session::{Location, LockReason, OpenStep, Opened, SessionId, Tagged};
 use crate::testing::{TEST_PASSWORD, TestShell, heavy};
 use crate::views::SavedView;
@@ -1193,6 +1195,14 @@ fn pick_another_folder_leaves_the_first_destination_untouched() {
     );
     assert!(second.is_file());
     assert_eq!(parsed(&fs::read(&second).unwrap()).1.len(), wants().len());
+    // The handle of the repick's answer opens the folder that was written to, and never the cloud folder declined.
+    w.ts.shell
+        .show_output_in_explorer(&handle_of(&view))
+        .unwrap();
+    let opened = w.ts.launcher.opened_folders();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(shown(&opened[0]), shown(&elsewhere));
+    assert_ne!(shown(&opened[0]), w.shown(), "not the declined folder");
     w.untouched();
     assert_eq!(counted::made(), 1);
     assert_eq!(counted::alive(), 0);
@@ -1206,7 +1216,11 @@ fn pick_another_folder_leaves_the_first_destination_untouched() {
     });
     w.ts.dialogs.answer(Some(second.clone()));
     assert_eq!(w.ts.shell.export_repick(&pdf).err(), NOT_FOUND);
-    assert_eq!(w.ts.shell.sessions.pending().len(), 0, "used up");
+    assert_eq!(
+        w.ts.shell.sessions.pending().len(),
+        1,
+        "used up: only the handle of the export that was written is left"
+    );
     assert_eq!(w.ts.shell.export_repick(&made_up_token()).err(), NOT_FOUND);
 }
 
@@ -1489,6 +1503,262 @@ fn pdf_and_env_replies_are_unchanged() {
     );
 }
 
+// ---- Show in Explorer after an export (34c): the handle
+
+const EXPIRED: Option<ShellError> = Some(ShellError::ChoiceExpired);
+const FIVE_MINUTES: Duration = Duration::from_secs(5 * 60);
+
+/// The handle of a finished export.
+fn handle_of(view: &SavedView) -> Token {
+    view.output.clone().expect("a handle")
+}
+
+/// A finished export's answer carries a handle for Show in Explorer: a token the pending table holds for that session
+/// and generation, with the destination's folder and nothing else, and its JSON is one more field of `Done` (32 hex
+/// characters, no path). A refusal, a closed dialog, a cloud question and a lock before the move issue none.
+#[test]
+fn export_answer_carries_a_handle_and_never_a_path_back() {
+    let w = World::new();
+    w.pick();
+    let answer = w.export().unwrap();
+    let json = serde_json::to_value(&answer).unwrap();
+    let Outcome::Done(view) = answer.data else {
+        panic!("not saved");
+    };
+    let output = handle_of(&view);
+
+    // The exact keys of `Done`, and the handle as the bridge writes it.
+    let done = json["data"]["Done"].as_object().expect("Done");
+    let mut keys: Vec<&str> = done.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["export", "folder", "output"]);
+    let written = done["output"].as_str().expect("a token");
+    assert!(
+        written.len() == 32
+            && written
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{written}"
+    );
+    assert_eq!(serde_json::to_value(&output).unwrap(), json!(written));
+    assert!(
+        !json.to_string().contains(NAME),
+        "the file's name is not in the answer"
+    );
+
+    // The table holds it for this session and generation, with the folder (not the file) and nothing more.
+    let pending = w.ts.shell.sessions.pending();
+    assert_eq!(pending.len(), 1);
+    let (session, generation, folder) = pending.peek_saved_folder(&output).unwrap();
+    assert_eq!((session, generation), (w.s, w.g));
+    assert_eq!(shown(&folder), w.shown());
+    assert!(folder.is_dir());
+
+    // The cloud question's yes issues a handle of its own, for the same session and generation.
+    w.ts.volumes.add_sync_root(&w.docs);
+    w.pick();
+    let asked = cloud_token(w.export());
+    assert_eq!(pending.len(), 2, "the question is parked beside the handle");
+    let second = handle_of(&finished(w.ts.shell.save_readable_confirm(&asked)));
+    assert_eq!(pending.len(), 2, "the question is used up, a handle parked");
+    assert_ne!(
+        serde_json::to_value(&second).unwrap(),
+        serde_json::to_value(&output).unwrap()
+    );
+    assert_eq!(
+        pending.peek_saved_folder(&second).unwrap().0,
+        w.s,
+        "the yes's handle is the session's too"
+    );
+}
+
+/// A lock that comes before the file is moved writes nothing and issues no handle.
+#[test]
+fn a_lock_before_the_move_issues_no_handle() {
+    let w = World::new();
+    let (shell, s) = (Arc::clone(&w.ts.shell), w.s);
+    at("export_before_publish", move || {
+        shell.sessions.lock(s, LockReason::Manual);
+    });
+    w.pick();
+    assert_eq!(w.export().err(), LOCKED);
+    assert_eq!(w.ts.shell.sessions.pending().len(), 0);
+}
+
+/// A lock that completes after the file is in place and before the handle is issued: the answer is dropped as `Locked`
+/// (the file stays, as the lock's own rule says) and no handle is left parked for the locked session.
+#[test]
+fn a_lock_after_the_move_leaves_no_handle() {
+    let w = World::new();
+    let (shell, s) = (Arc::clone(&w.ts.shell), w.s);
+    at("export_published", move || {
+        shell.sessions.lock(s, LockReason::Manual);
+    });
+    w.pick();
+    assert_eq!(w.export().err(), LOCKED);
+    assert_ne!(
+        fs::read(&w.dest).unwrap(),
+        OLD,
+        "the move had happened when the lock came"
+    );
+    assert_eq!(w.ts.shell.sessions.pending().len(), 0, "no stale handle");
+}
+
+/// A wrong password, a closed dialog and a refused folder issue no handle either.
+#[test]
+fn a_refused_export_issues_no_handle() {
+    let w = World::new();
+    assert_eq!(w.export_as(w.s, w.g, WRONG).err(), wrong_password());
+    w.ts.dialogs.answer(None);
+    assert!(matches!(w.export().unwrap().data, Outcome::Dismissed));
+    let vault = w.ts.shell.registry.entries()[0].1.clone();
+    w.ts.dialogs.answer(Some(vault.join(NAME)));
+    assert_eq!(w.export().err(), in_a_vault_folder());
+    assert_eq!(w.ts.shell.sessions.pending().len(), 0);
+}
+
+/// Show in Explorer opens exactly the folder the file went to, through the launcher, and as often as the person presses
+/// it; a token of any other kind, or one never given, opens nothing; a failed launch is the `io` refusal with no path.
+#[test]
+fn export_handle_opens_only_the_saved_folder() {
+    let w = World::new();
+    w.pick();
+    let output = handle_of(&finished(w.export()));
+    w.ts.shell.show_output_in_explorer(&output).unwrap();
+    w.ts.shell.show_output_in_explorer(&output).unwrap();
+    let opened = w.ts.launcher.opened_folders();
+    assert_eq!(opened.len(), 2);
+    for folder in &opened {
+        assert_eq!(shown(folder), w.shown(), "the destination's folder");
+        assert!(folder.is_dir(), "a folder, not the file");
+    }
+    assert!(
+        w.ts.launcher.opened_files().is_empty() && w.ts.launcher.opened().is_empty(),
+        "no file and no link is opened"
+    );
+
+    w.ts.launcher.fail_next_folder();
+    let failed = w.ts.shell.show_output_in_explorer(&output).err();
+    assert_eq!(failed, Some(ShellError::from(std::io::Error::other("x"))));
+    assert_eq!(
+        serde_json::to_value(failed.unwrap()).unwrap(),
+        json!({ "code": "core", "kind": "io" })
+    );
+    let tried = w.ts.launcher.opened_folders().len();
+    assert_eq!(tried, 3, "the failed try was a launch of the same folder");
+
+    // The cloud question's token is no handle (and stays the question's), and nor is a token never given.
+    w.ts.volumes.add_sync_root(&w.docs);
+    w.pick();
+    let question = cloud_token(w.export());
+    for token in [&question, &made_up_token()] {
+        assert_eq!(w.ts.shell.show_output_in_explorer(token).err(), EXPIRED);
+    }
+    assert_eq!(
+        w.ts.launcher.opened_folders().len(),
+        tried,
+        "nothing more opened"
+    );
+    // The question can still be answered, and its yes gives a handle of its own that opens the same folder.
+    let again = handle_of(&finished(w.ts.shell.save_readable_confirm(&question)));
+    w.ts.shell.show_output_in_explorer(&again).unwrap();
+    assert_eq!(w.ts.launcher.opened_folders().len(), tried + 1);
+
+    // A handle does not answer a question or start another export.
+    assert_eq!(w.ts.shell.export_repick(&again).err(), NOT_FOUND);
+}
+
+/// Two exports each have their own handle: closing the older leaves the newer working, and the older is the one gone.
+#[test]
+fn export_handles_are_each_their_own() {
+    let w = World::new();
+    w.pick();
+    let older = handle_of(&finished(w.export()));
+    w.pick();
+    let newer = handle_of(&finished(w.export()));
+    w.ts.shell.close_output(&older).unwrap();
+    assert_eq!(w.ts.shell.show_output_in_explorer(&older).err(), EXPIRED);
+    assert!(w.ts.shell.show_output_in_explorer(&newer).is_ok());
+    assert_eq!(w.ts.launcher.opened_folders().len(), 1);
+}
+
+/// The handle is dropped by the lock of its vault (another vault's lock leaves it), by Lock all, by Windows locking or
+/// sleeping and by the app closing, by `close_output` (Done, closing the panel; again is no error, and a question's
+/// token is not a handle), and at its five minutes.
+#[test]
+fn export_handle_is_dropped_by_a_lock_and_by_done() {
+    // A lock of its own vault drops it; a lock of another leaves it.
+    let w = World::new();
+    w.pick();
+    let output = handle_of(&finished(w.export()));
+    let (other, _) = w.ts.open_vault("MU-other");
+    w.ts.shell.sessions.lock(other, LockReason::Manual);
+    assert!(
+        w.ts.shell.show_output_in_explorer(&output).is_ok(),
+        "another vault's lock leaves it"
+    );
+    w.lock();
+    assert_eq!(w.ts.shell.show_output_in_explorer(&output).err(), EXPIRED);
+    assert_eq!(w.ts.shell.sessions.pending().len(), 0);
+
+    // Lock all, Windows locking or sleeping, and closing.
+    for reason in [
+        LockReason::Manual,
+        LockReason::WindowsLocked,
+        LockReason::Sleep,
+        LockReason::AppClosing,
+    ] {
+        let w = World::new();
+        w.pick();
+        let output = handle_of(&finished(w.export()));
+        w.ts.shell.sessions.lock_all(reason);
+        assert_eq!(
+            w.ts.shell.show_output_in_explorer(&output).err(),
+            EXPIRED,
+            "{reason:?}"
+        );
+        assert_eq!(w.ts.shell.sessions.pending().len(), 0, "{reason:?}");
+        assert!(w.ts.launcher.opened_folders().is_empty(), "{reason:?}");
+    }
+
+    // Done (`close_output`), twice, with a question's token beside it.
+    let w = World::new();
+    w.pick();
+    let before = Instant::now();
+    let waiting = handle_of(&finished(w.export()));
+    let issued = (before, Instant::now());
+    w.ts.volumes.add_sync_root(&w.docs);
+    w.pick();
+    let question = cloud_token(w.export());
+    let output = handle_of(&finished(w.ts.shell.save_readable_confirm(&question)));
+    w.ts.shell.close_output(&question).unwrap();
+    assert_eq!(
+        w.ts.shell.sessions.pending().len(),
+        2,
+        "a used question closes nothing"
+    );
+    w.ts.shell.close_output(&output).unwrap();
+    w.ts.shell.close_output(&output).unwrap();
+    assert_eq!(w.ts.shell.show_output_in_explorer(&output).err(), EXPIRED);
+    assert_eq!(w.ts.shell.sessions.pending().len(), 1);
+    assert!(w.ts.launcher.opened_folders().is_empty());
+
+    // Five minutes, from times that bracket the handle's issue: it was issued between `before` and `after`, so it is
+    // certainly still there a moment short of five minutes after `before`, and certainly gone five minutes after `after`.
+    let pending = w.ts.shell.sessions.pending();
+    assert!(
+        pending
+            .peek_saved_folder_at(&waiting, issued.0 + FIVE_MINUTES - Duration::from_millis(1))
+            .is_ok()
+    );
+    assert_eq!(
+        pending
+            .peek_saved_folder_at(&waiting, issued.1 + FIVE_MINUTES)
+            .err(),
+        EXPIRED
+    );
+}
+
 /// The words of every answer an export gives, as the bridge serialises them: counts, the titles of items whose values
 /// break a line, and the folder; no value, no password, no file name and no path beyond the folder.
 #[test]
@@ -1535,9 +1805,25 @@ fn export_answers_carry_only_counts_titles_and_the_folder() {
     let counts = json!({
         "items": 3, "left_out_files": 1, "unreadable": 0, "line_breaks": ["MU-t-cr"]
     });
+    // The handle for Show in Explorer is one more field of `Done`: a token of 32 lowercase hex characters, never a path.
+    let written_handle = |answer: &Value| -> String {
+        let handle = answer["data"]["Done"]["output"]
+            .as_str()
+            .expect("a handle")
+            .to_owned();
+        assert!(
+            handle.len() == 32
+                && handle
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "{handle}"
+        );
+        handle
+    };
+    let first_handle = written_handle(&direct);
     assert_eq!(
         direct,
-        tag(json!({ "Done": { "folder": shown, "export": counts } }))
+        tag(json!({ "Done": { "folder": shown, "export": counts, "output": first_handle } }))
     );
     said.push(direct.to_string());
 
@@ -1557,9 +1843,14 @@ fn export_answers_carry_only_counts_titles_and_the_folder() {
     said.push(asked.to_string());
     let parked: Token = serde_json::from_value(Value::String(token)).unwrap();
     let confirmed = serde_json::to_value(ts.shell.save_readable_confirm(&parked).unwrap()).unwrap();
+    let second_handle = written_handle(&confirmed);
+    assert_ne!(
+        first_handle, second_handle,
+        "each export has its own handle"
+    );
     assert_eq!(
         confirmed,
-        tag(json!({ "Done": { "folder": shown, "export": counts } }))
+        tag(json!({ "Done": { "folder": shown, "export": counts, "output": second_handle } }))
     );
     said.push(confirmed.to_string());
 

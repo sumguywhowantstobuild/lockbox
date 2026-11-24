@@ -559,9 +559,8 @@ test("afterwards_says_to_delete_the_file_and_empty_the_recycle_bin", { timeout: 
   // The items whose values have line breaks, by title, with one sentence about them.
   expect(within(panel).getByText(LINE_BREAKS)).toBeTruthy();
   expect(within(panel).getAllByRole("listitem").map((row) => row.textContent)).toEqual(WITH_BREAKS);
-  // Only Done: Show in Explorer isn't offered, as nothing the page holds could say which folder to open.
-  expect(within(panel).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual(["Close panel", "Done"]);
-  expect(within(panel).queryByRole("button", { name: "Show in Explorer" })).toBeNull();
+  // Show in Explorer, then Done (the drawing's order).
+  expect(within(panel).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual(["Close panel", "Show in Explorer", "Done"]);
   // The heading has focus as it appears, so the instruction is read first.
   await waitFor(() => {
     expect(document.activeElement).toBe(within(panel).getByRole("heading", { level: 2, name: "Exported" }));
@@ -604,6 +603,212 @@ test("afterwards_says_to_delete_the_file_and_empty_the_recycle_bin", { timeout: 
   ]);
   const plural = await toTheEnd();
   expect(within(plural).getByText("8 items saved. 3 stored files left out.")).toBeTruthy();
+});
+
+const HEX_32 = /^[0-9a-f]{32}$/;
+const CAN_NOT_OPEN = "Lockbox can't open that folder now. Open it from Windows.";
+const COULD_NOT_REACH = "Lockbox couldn't reach that folder or file.";
+
+function toast(): string {
+  return document.querySelector(".tstack")?.textContent ?? "";
+}
+
+function label(button: HTMLElement): string {
+  return button.getAttribute("aria-label") ?? button.textContent;
+}
+
+test("exported_shows_show_in_explorer_beside_done", { timeout: 30_000 }, async () => {
+  await unlocked();
+  const panel = await toTheEnd();
+  // 34c's order: Show in Explorer (the grey pill), then Done (the primary one).
+  const show = within(panel).getByRole("button", { name: "Show in Explorer" });
+  const done = within(panel).getByRole("button", { name: "Done" });
+  expect(show.compareDocumentPosition(done) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(panel).getAllByRole("button").map(label)).toEqual(["Close panel", "Show in Explorer", "Done"]);
+  expect(show.className).toBe("pill");
+  expect(done.className).toBe("pill t cp");
+  // Nothing is sent before it is pressed, and the shell holds one handle for this export.
+  expect(sent("show_output_in_explorer")).toEqual([]);
+  expect(shell.heldOutputs()).toBe(1);
+  fireEvent.click(show);
+  await waitFor(() => {
+    expect(sent("show_output_in_explorer")).toHaveLength(1);
+  });
+  // Only the handle goes back: no path, no name. The handle is read, so the button works again.
+  expect(sent("show_output_in_explorer")).toEqual([{ output: expect.stringMatching(HEX_32) as string }]);
+  expect(shell.openedFolders).toEqual([SAVED_FOLDER]);
+  fireEvent.click(show);
+  await waitFor(() => {
+    expect(shell.openedFolders).toEqual([SAVED_FOLDER, SAVED_FOLDER]);
+  });
+  expect(shell.heldOutputs()).toBe(1);
+  // JSON writes each backslash of a Windows path twice, so the folder is looked for as it is and as JSON writes it (and the check is shown to find it).
+  const written = JSON.stringify(SAVED_FOLDER).slice(1, -1);
+  expect(written).not.toBe(SAVED_FOLDER);
+  expect(JSON.stringify([{ folder: SAVED_FOLDER }])).toContain(written);
+  const everyCall = JSON.stringify(invoke.mock.calls);
+  expect(everyCall).not.toContain(SAVED_FOLDER);
+  expect(everyCall).not.toContain(written);
+  expect(within(panel).getByRole("heading", { level: 2, name: "Exported" })).toBeTruthy();
+  // The handle is for the page's calls only: it is nowhere in the words, a label or a link.
+  const handle = String(sent("show_output_in_explorer")[0]?.output);
+  expect(document.body.textContent).not.toContain(handle);
+  for (const element of document.body.querySelectorAll("*")) {
+    for (const attr of Array.from(element.attributes)) expect(attr.value, `${element.tagName} ${attr.name}`).not.toContain(handle);
+  }
+  // The same after the cloud question's two answers.
+  for (const answer of ["Continue", "Pick another folder"]) {
+    fresh();
+    await unlocked();
+    const asked = await toTheCloudQuestion();
+    fireEvent.click(within(asked.dialog).getByRole("button", { name: answer }));
+    const end = await screen.findByRole("complementary", { name: "Exported" });
+    fireEvent.click(within(end).getByRole("button", { name: "Show in Explorer" }));
+    await waitFor(() => {
+      expect(shell.openedFolders, answer).toEqual([SAVED_FOLDER]);
+    });
+    expect(shell.heldOutputs(), answer).toBe(1);
+  }
+});
+
+test("show_in_explorer_refused_says_open_it_from_windows", { timeout: 30_000 }, async () => {
+  await unlocked();
+  const panel = await toTheEnd();
+  // A launch that fails (the shell's `io` refusal, in the shape Rust writes it) says to open the folder from Windows too, with no path.
+  shell.refuseNext("show_output_in_explorer", { code: "core", kind: "io" });
+  fireEvent.click(within(panel).getByRole("button", { name: "Show in Explorer" }));
+  await waitFor(() => {
+    expect(toast()).toContain(CAN_NOT_OPEN);
+  });
+  expect(toast()).not.toContain(COULD_NOT_REACH);
+  expect(toast()).not.toContain(SAVED_FOLDER);
+  expect(shell.openedFolders).toEqual([]);
+  // A handle the shell has let go of (closed, five minutes, a lock it had not told the page of) says to open the folder from Windows.
+  shell.dropParkedChoices();
+  fireEvent.click(within(panel).getByRole("button", { name: "Show in Explorer" }));
+  await waitFor(() => {
+    expect(toast()).toContain(CAN_NOT_OPEN);
+  });
+  expect(shell.openedFolders).toEqual([]);
+  // The end is still there to read, and Done still works.
+  expect(within(screen.getByRole("complementary", { name: "Exported" })).getByRole("button", { name: "Done" })).toBeTruthy();
+  expect(sent("show_output_in_explorer")).toHaveLength(2);
+});
+
+test("a_missed_lock_at_show_in_explorer_takes_the_vault_away_and_says_nothing", { timeout: 30_000 }, async () => {
+  await unlocked();
+  const panel = await toTheEnd();
+  // The vault locked and the page missed the event: the handle is gone with it, and the refusal is only news of the lock.
+  shell.lockWithoutEvent(sessionOfVault(7).session);
+  fireEvent.click(within(panel).getByRole("button", { name: "Show in Explorer" }));
+  await screen.findByLabelText(/^Password for /);
+  expect(debugState().sessions).toEqual([]);
+  expect(screen.queryByRole("complementary", { name: "Exported" })).toBeNull();
+  expect(document.body.textContent).not.toContain(SAVED_FOLDER);
+  expect(document.body.textContent).not.toContain(WITH_BREAKS[0]);
+  expect(toast()).toBe("");
+  expect(sent("show_output_in_explorer")).toHaveLength(1);
+  expect(sent("list_items").length).toBeGreaterThan(0);
+  expect(sent("close_output")).toEqual([]);
+  expect(shell.openedFolders).toEqual([]);
+});
+
+test("a_refusal_that_comes_after_done_says_nothing", { timeout: 30_000 }, async () => {
+  const refusals: [string, object][] = [
+    ["the launch failed", { code: "core", kind: "io" }],
+    ["the handle was gone", { code: "choice_expired" }],
+  ];
+  for (const [what, refusal] of refusals) {
+    fresh();
+    await unlocked();
+    const panel = await toTheEnd();
+    shell.refuseNext("show_output_in_explorer", refusal);
+    const late = hold("show_output_in_explorer");
+    fireEvent.click(within(panel).getByRole("button", { name: "Show in Explorer" }));
+    await waitFor(() => {
+      expect(late.count(), what).toBe(1);
+    });
+    // Done puts the end away before the refusal arrives.
+    fireEvent.click(within(panel).getByRole("button", { name: "Done" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("complementary", { name: "Exported" }), what).toBeNull();
+    });
+    await act(async () => {
+      late.release();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(toast(), what).toBe("");
+    expect(screen.queryByRole("alert"), what).toBeNull();
+    // The vault is still open: only the message was dropped.
+    expect(debugState().sessions, what).toHaveLength(1);
+  }
+});
+
+test("done_and_close_put_the_handle_away", { timeout: 30_000 }, async () => {
+  const ways: [string, (panel: HTMLElement) => void][] = [
+    ["Done", (panel) => fireEvent.click(within(panel).getByRole("button", { name: "Done" }))],
+    ["Close panel", (panel) => fireEvent.click(within(panel).getByRole("button", { name: "Close panel" }))],
+    ["Escape", (panel) => fireEvent.keyDown(panel, { key: "Escape" })],
+  ];
+  for (const [way, leave] of ways) {
+    fresh();
+    await unlocked();
+    const panel = await toTheEnd();
+    expect(shell.heldOutputs(), way).toBe(1);
+    // Nothing is closed while the end is on screen, and the panel's own press of Show in Explorer doesn't close it.
+    expect(sent("close_output"), way).toEqual([]);
+    fireEvent.click(within(panel).getByRole("button", { name: "Show in Explorer" }));
+    await waitFor(() => {
+      expect(sent("show_output_in_explorer"), way).toHaveLength(1);
+    });
+    expect(sent("close_output"), way).toEqual([]);
+    leave(panel);
+    await waitFor(() => {
+      expect(screen.queryByRole("complementary", { name: "Exported" }), way).toBeNull();
+    });
+    // The handle that Show in Explorer used is the one put away, once, and the shell no longer holds it.
+    await waitFor(() => {
+      expect(sent("close_output"), way).toEqual([{ output: sent("show_output_in_explorer")[0]?.output }]);
+    });
+    expect(shell.heldOutputs(), way).toBe(0);
+    expect(debugState().sessions[0]?.exportFlow, way).toBeNull();
+  }
+
+  // An export begun again over the end (the store's own call, with the panel still held) puts the first end's handle away too.
+  fresh();
+  await unlocked();
+  await toTheEnd();
+  const { session } = sessionOfVault(7);
+  act(() => {
+    openExport(session);
+  });
+  await waitFor(() => {
+    expect(sent("close_output")).toHaveLength(1);
+  });
+  expect(shell.heldOutputs()).toBe(0);
+  expect(await screen.findByRole("complementary", { name: "Export" })).toBeTruthy();
+});
+
+test("a_lock_drops_the_exported_panel_without_a_call", { timeout: 30_000 }, async () => {
+  await unlocked();
+  await toTheEnd();
+  expect(shell.heldOutputs()).toBe(1);
+  await act(async () => {
+    shell.lock(sessionOfVault(7).session);
+    await Promise.resolve();
+  });
+  // The shell let the handle go with the lock; the page asks nothing of it and says nothing.
+  await screen.findByLabelText(/^Password for /);
+  expect(screen.queryByRole("complementary", { name: "Exported" })).toBeNull();
+  expect(debugState().sessions).toEqual([]);
+  expect(shell.heldOutputs()).toBe(0);
+  expect(sent("close_output")).toEqual([]);
+  expect(sent("show_output_in_explorer")).toEqual([]);
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(toast()).toBe("");
 });
 
 test("the_page_never_sends_the_folder_back", { timeout: 20_000 }, async () => {

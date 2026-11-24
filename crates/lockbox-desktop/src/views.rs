@@ -220,11 +220,17 @@ pub struct SearchResults {
 /// it, as the user's own path, for the page to show. No command takes it back (spec 4.1: the page never receives a path
 /// it can send back). An export's answer also carries its counts ([`ExportSummary`]); the PDF's and the `.env` file's
 /// carry none and serialise as `{ "folder": ... }` alone.
+///
+/// An export's answer also carries `output`: the handle Show in Explorer uses (`show_output_in_explorer`, put away by
+/// `close_output`), a token the shell holds for this session and generation with the destination's folder behind it.
+/// It is a token and never a path.
 #[derive(Serialize)]
 pub struct SavedView {
     pub folder: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub export: Option<ExportSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<Token>,
 }
 
 /// What an export to a readable CSV wrote, for the page to tell the person: how many items are rows, how many stored
