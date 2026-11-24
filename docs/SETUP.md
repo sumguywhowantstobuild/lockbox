@@ -117,8 +117,8 @@ the account's email setting, so turn on "Keep my email addresses private" in Git
   `Cargo.lock` next to it), as an `[[IgnoredVulns]]` entry with a one-line `reason` and an `ignoreUntil` date. Every
   entry must expire: when the date passes the scan fails again, and the entry is fixed or renewed after a fresh
   look. Today's entries are Linux-only crates and one compile-time-only crate in Tauri's tree. An npm finding goes
-  in `ui/osv-scanner.toml` instead (osv-scanner reads the file next to each lockfile); today's entry is a lint-time
-  dev tool. `node scripts/shipped-page-check.mjs` (run by `scripts/check.mjs` and CI's UI job) builds the page in
+  in `ui/osv-scanner.toml` instead (osv-scanner reads the file next to each lockfile); it has no entries today.
+  `node scripts/shipped-page-check.mjs` (run by `scripts/check.mjs` and CI's UI job) builds the page in
   memory and fails if any chunk holds picomatch, minimatch or tinyglobby, so "never shipped" stays true.
 - CI job "Security scan" (Windows) installs pinned versions: gitleaks 8.30.1 and osv-scanner 2.7.0 downloaded from their
   GitHub releases and checked against SHA-256 values copied from the releases (the job fails on a mismatch), and
