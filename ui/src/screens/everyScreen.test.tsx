@@ -1,6 +1,8 @@
 // Every screen of the app, reached as a person reaches it (through the lock screen, the menus and the keys, against the
 // pretend shell), and checked by axe-core. The list is kept whole: every component a file under `screens/` exports must be
-// claimed by a case here, so a new screen without a check fails `every_screen_passes_axe: the list names every screen`.
+// claimed by a case here, so a new screen without a check fails `every_screen_and_dialog_state_runs_axe: the list names
+// every screen`; and every dialog a screen draws must be claimed by a case that has it open, or `the list opens every
+// dialog` fails.
 // While each screen is up, the page must also have made no `<style>` element: the Content Security Policy refuses them
 // (`style-src 'self'`), so one made here would be a screen that breaks in the real window.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -170,6 +172,8 @@ interface Case {
   name: string;
   /** The exported components (`<file under screens/>#<name>`) this case puts on the page and so checks. */
   shows: string[];
+  /** The dialogs (`<file under screens/>#<the function it is in>`) this case has open when axe runs. */
+  dialogs?: { id: string; name: string }[];
   /**
    * Gets the app to the screen and waits for something only that screen shows. A screen with a menu or a list open returns that
    * popup: it is checked on its own, and the page around it without it. Base UI draws a popup at the end of the app's element,
@@ -380,6 +384,7 @@ const CASES: Case[] = [
   {
     name: "The vault's details changed (Ask 3)",
     shows: ["Asks#DetailsChangedAsk"],
+    dialogs: [{ id: "Asks#DetailsChangedAsk", name: "My vault's details were changed outside Lockbox." }],
     reach: async () => {
       start([vault({ headerChanged: true })]);
       await unlockIt(null);
@@ -638,6 +643,7 @@ const CASES: Case[] = [
   {
     name: "Open a program? (10b)",
     shows: ["FileActions#ProgramQuestion"],
+    dialogs: [{ id: "FileActions#ProgramQuestion", name: "Open a program?" }],
     reach: async () => {
       await unlocked();
       const panel = await select("Setup tool");
@@ -648,6 +654,7 @@ const CASES: Case[] = [
   {
     name: "Replace a stored file (10c)",
     shows: ["FileActions#FileRows"],
+    dialogs: [{ id: "FileActions#ReplaceQuestion", name: "Replace contract-demo.pdf?" }],
     reach: async () => {
       await unlocked();
       const panel = await select("Client contract");
@@ -658,6 +665,7 @@ const CASES: Case[] = [
   {
     name: "Save a copy into a cloud folder (21e on a copy)",
     shows: ["FileActions#CloudCopyQuestion"],
+    dialogs: [{ id: "FileActions#CloudCopyQuestion", name: "This folder is synced to the cloud" }],
     reach: async () => {
       await unlocked();
       const panel = await select("Client contract");
@@ -815,6 +823,7 @@ const CASES: Case[] = [
   {
     name: "Change password: the offer of a fresh backup once it is changed (27c)",
     shows: ["ChangePassword#ChangePasswordDone"],
+    dialogs: [{ id: "ChangePassword#ChangePasswordDone", name: "Make a fresh backup now?" }],
     reach: async () => {
       await unlocked();
       click("Settings", side());
@@ -859,6 +868,7 @@ const CASES: Case[] = [
   {
     name: "New recovery key: the offer of a fresh backup once it is picked back (29c)",
     shows: ["NewRecoveryKey#NewRecoveryKeyDone"],
+    dialogs: [{ id: "NewRecoveryKey#NewRecoveryKeyDone", name: "Make a fresh backup now?" }],
     reach: async () => {
       await unlocked();
       click("Settings", side());
@@ -932,6 +942,7 @@ const CASES: Case[] = [
   {
     name: "A backup open: Copy to a vault and the question about the files it lacks (25b to 25d)",
     shows: ["OpenBackup#CopyToVault"],
+    dialogs: [{ id: "OpenBackup#CopyToVault", name: "Copy without these files?" }],
     reach: async () => {
       await unlocked();
       shell.backupHolds(
@@ -1037,6 +1048,7 @@ const CASES: Case[] = [
   {
     name: "Delete an older copy, asked first and for good (24g)",
     shows: [],
+    dialogs: [{ id: "OlderCopies#OlderCopiesList", name: "Delete My vault.before-restore?" }],
     reach: async () => {
       start([vault()]);
       shell.olderCopies([{ vault: 7, folder: "My vault.before-restore", last_written: "2026-11-04", size: 1_395_864_371 }]);
@@ -1073,6 +1085,7 @@ const CASES: Case[] = [
   {
     name: "Backup refused, and the questions beside it (Ask 2)",
     shows: ["BackupFlow#BackupRefusedAsk"],
+    dialogs: [{ id: "BackupFlow#BackupRefusedAsk", name: "Can't back up My vault yet" }],
     reach: async () => {
       await unlocked();
       click("Settings", side());
@@ -1087,6 +1100,7 @@ const CASES: Case[] = [
   {
     name: "Backup overdue (Ask 1)",
     shows: ["BackupReminder#BackupReminder"],
+    dialogs: [{ id: "BackupReminder#BackupReminder", name: "My vault hasn't been backed up in 30 days" }],
     reach: async () => {
       start([vault({ backupDays: 40 })]);
       await unlockIt(null);
@@ -1143,6 +1157,7 @@ const CASES: Case[] = [
   {
     name: "Save a folder's keys as a .env file (15e)",
     shows: ["EnvOut#EnvFileDialog"],
+    dialogs: [{ id: "EnvOut#EnvFileDialog", name: "Save as .env file" }],
     reach: async () => {
       await unlocked();
       await openFolder("Agency support agent");
@@ -1162,6 +1177,7 @@ const CASES: Case[] = [
   {
     name: "Rename a folder (14b)",
     shows: ["forms/FolderForm#RenameFolderDialog"],
+    dialogs: [{ id: "forms/FolderForm#RenameFolderDialog", name: "Rename folder" }],
     reach: async () => {
       await unlocked();
       await openFolder("Agency support agent");
@@ -1182,6 +1198,7 @@ const CASES: Case[] = [
   {
     name: "Remove a vault from the list, asked in the vault menu's place (18g, Task 9)",
     shows: ["VaultBoxes#RemoveVaultBox"],
+    dialogs: [{ id: "VaultBoxes#RemoveVaultBox", name: "Remove vault from this list" }],
     reach: async () => {
       await unlocked();
       const menu = await openMenu(screen.getByRole("button", { name: "My vault, vault menu" }));
@@ -1219,6 +1236,7 @@ const CASES: Case[] = [
   {
     name: "Delete a folder (14c)",
     shows: ["forms/FolderForm#DeleteFolderDialog"],
+    dialogs: [{ id: "forms/FolderForm#DeleteFolderDialog", name: "Delete Agency support agent?" }],
     reach: async () => {
       await unlocked();
       await openFolder("Agency support agent");
@@ -1264,6 +1282,7 @@ const CASES: Case[] = [
   {
     name: "Empty trash asks first (32b)",
     shows: ["TrashView#EmptyTrash"],
+    dialogs: [{ id: "TrashView#AskToDelete", name: "Delete 2 items for good?" }],
     reach: async () => {
       await unlockedWithAnOldTrash();
       click(/^Trash\s+\d+$/, side());
@@ -1286,6 +1305,7 @@ const CASES: Case[] = [
   {
     name: "The first close (5b)",
     shows: ["FirstClose#FirstClose"],
+    dialogs: [{ id: "FirstClose#FirstClose", name: "Lockbox stays by the clock" }],
     reach: async () => {
       await unlocked();
       act(() => {
@@ -1297,6 +1317,7 @@ const CASES: Case[] = [
   {
     name: "Closing or quitting with a job running (33b, Ask 15)",
     shows: ["CloseQuestion#CloseQuestion"],
+    dialogs: [{ id: "CloseQuestion#CloseQuestion", name: "A backup is running" }],
     reach: async () => {
       await unlocked();
       act(() => {
@@ -1305,7 +1326,90 @@ const CASES: Case[] = [
       await screen.findByRole("dialog", { name: "A backup is running" });
     },
   },
+  {
+    name: "Save the recovery key's PDF into a cloud folder (21e on 21c)",
+    shows: [],
+    dialogs: [{ id: "setup/KeyActions#KeyActions", name: "This folder is synced to the cloud" }],
+    reach: async () => {
+      await toTheKey();
+      shell.cloudPdfNext();
+      fireEvent.click(screen.getAllByRole("button", { name: "Save as PDF" })[0] as HTMLElement);
+      return screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+    },
+  },
+  {
+    name: "Restore into a cloud folder asks first (24b)",
+    shows: [],
+    dialogs: [{ id: "RestoreFlow#CloudQuestion", name: "This folder is synced to the cloud" }],
+    reach: async () => {
+      await toWhereItGoes();
+      shell.restoreAsksNext("cloud");
+      click("Restore");
+      return screen.findByRole("dialog", { name: "This folder is synced to the cloud" });
+    },
+  },
+  {
+    name: "Restore beside a vault it can't tell apart, under a new folder's name (24b)",
+    shows: [],
+    dialogs: [{ id: "RestoreFlow#NameQuestion", name: "Restore into a new folder?" }],
+    reach: async () => {
+      await toWhereItGoes();
+      shell.restoreAsksNext("name");
+      click("Restore");
+      return screen.findByRole("dialog", { name: "Restore into a new folder?" });
+    },
+  },
+  {
+    name: "Forgot password on a vault whose details changed asks first (28a, Ask 3)",
+    shows: [],
+    dialogs: [{ id: "ForgotPassword#ChangedDetails", name: "My vault's details were changed outside Lockbox." }],
+    reach: async () => {
+      start([vault({ headerChanged: true })]);
+      fireEvent.click(await screen.findByRole("button", { name: "Forgot password?" }));
+      await screen.findByRole("heading", { level: 1, name: "Forgot password?" });
+      fireEvent.change(screen.getByLabelText("Recovery key"), { target: { value: shell.recoveryKeyOf(7) } });
+      click("Continue");
+      return screen.findByRole("dialog", { name: "My vault's details were changed outside Lockbox." });
+    },
+  },
+  {
+    name: "A trashed item's Delete for good asks first (13d)",
+    shows: [],
+    dialogs: [{ id: "TrashView#TrashPanel", name: "Delete Old login in the trash for good?" }],
+    reach: async () => {
+      await unlocked();
+      click(/^Trash\s+\d+$/, side());
+      await screen.findByRole("heading", { level: 1, name: "Trash" });
+      fireEvent.click(screen.getByRole("button", { name: /^Login:\s*Old login in the trash/ }));
+      const panel = await screen.findByRole("complementary", { name: "Old login in the trash" });
+      click("Delete for good", panel);
+      return screen.findByRole("dialog", { name: "Delete Old login in the trash for good?" });
+    },
+  },
+  {
+    name: "Save what you copied under a name the folder has, asked first (8d)",
+    shows: [],
+    dialogs: [{ id: "SaveBox#SaveBox", name: "This folder already has CLASH_DEMO_KEY" }],
+    reach: async () => {
+      await unlocked({ items: [...items(), { id: itemId(32), kind: "key", title: "CLASH_DEMO_KEY", collection: null, value: "demo-screen-key-3" }] });
+      await pressTheShortcut();
+      const panel = await screen.findByRole("complementary", { name: "Save what you copied" });
+      fireEvent.change(within(panel).getByLabelText("Name"), { target: { value: "CLASH_DEMO_KEY" } });
+      click("Save", panel);
+      return screen.findByRole("dialog", { name: "This folder already has CLASH_DEMO_KEY" });
+    },
+  },
 ];
+
+/** The restore from the lock screen, up to 24b (where it goes). */
+async function toWhereItGoes() {
+  start([vault()]);
+  fireEvent.click(await screen.findByRole("button", { name: "Restore a backup" }));
+  await screen.findByRole("heading", { level: 1, name: "Restore a backup" });
+  fireEvent.change(screen.getByLabelText("Password or recovery key from when it was made"), { target: { value: BACKUP_PASSWORD } });
+  click("Continue");
+  await screen.findByRole("heading", { level: 1, name: "Where it goes" });
+}
 
 /**
  * Every component a file under `screens/` exports (a PascalCase name, as a function or a constant such as a `memo`), as
@@ -1322,10 +1426,44 @@ function everyScreenComponent(): string[] {
   });
 }
 
+/**
+ * Every dialog a file under `screens/` draws (a `<Dialog`, or a popup with `role="alertdialog"`), as `<file>#<the function
+ * it is in>`, with `#2` and on for a second one in the same function.
+ */
+function everyDialog(): string[] {
+  const files = listBelow(import.meta.url, "./").filter((path) => path.endsWith(".tsx") && !path.endsWith(".test.tsx"));
+  return files.flatMap((path) => {
+    const source = readBeside(import.meta.url, `./${path}`);
+    const file = path.replace(/\.tsx$/, "");
+    const seen = new Map<string, number>();
+    return [...source.matchAll(/<Dialog\b|role="alertdialog"/g)].map((match) => {
+      const before = source.slice(0, match.index);
+      const inside = [...before.matchAll(/^(?:export )?function (\w+)/gm)].at(-1)?.[1] ?? "(top)";
+      const count = (seen.get(inside) ?? 0) + 1;
+      seen.set(inside, count);
+      return `${file}#${inside}${count > 1 ? `#${String(count)}` : ""}`;
+    });
+  });
+}
+
 /** For each case, how many `<style>` elements the page had made while it was up; filled in as the cases run. */
 const styleElements = new Map<string, number>();
 
-describe("every_screen_passes_axe", () => {
+describe("every_screen_and_dialog_state_runs_axe", () => {
+  test("the list opens every dialog", () => {
+    const claimed = new Set(CASES.flatMap((one) => (one.dialogs ?? []).map((claim) => claim.id)));
+    const found = everyDialog();
+    expect(found.length, "the dialogs were found").toBeGreaterThan(20);
+    expect(
+      found.filter((name) => !claimed.has(name)),
+      "a dialog no case opens: add one that opens it",
+    ).toEqual([]);
+    expect(
+      [...claimed].filter((name) => !found.includes(name)),
+      "a case names a dialog that no screen draws",
+    ).toEqual([]);
+  });
+
   test("the list names every screen", () => {
     const claimed = new Set(CASES.flatMap((one) => one.shows));
     const found = everyScreenComponent();
@@ -1343,6 +1481,11 @@ describe("every_screen_passes_axe", () => {
   for (const one of CASES) {
     test(one.name, async () => {
       const popup = await one.reach();
+      // Each dialog a case claims is open, by its own name, when axe runs.
+      for (const claim of one.dialogs ?? []) {
+        const open = [...screen.queryAllByRole("dialog", { name: claim.name }), ...screen.queryAllByRole("alertdialog", { name: claim.name })];
+        expect(open.length, `${one.name}: ${claim.id} ("${claim.name}") is open`).toBeGreaterThan(0);
+      }
       // Before axe, which adds a style element of its own.
       styleElements.set(one.name, document.querySelectorAll("style").length);
       if (popup instanceof Element) {

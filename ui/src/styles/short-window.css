@@ -18,7 +18,11 @@
     height: 100%;
   }
 
+  /* The right side is the one that scrolls (as tall as the window, so the picture stays put). A control Tab reaches is
+     scrolled clear of the step's buttons kept at its foot (below), never left behind them. */
   .plate {
+    max-height: 100%;
+    scroll-padding-bottom: 72px;
     justify-content: safe center;
     overflow-y: auto;
     padding: 20px 48px;
@@ -67,6 +71,25 @@
 
   .pal.find {
     max-height: calc(100% - 72px);
+  }
+
+  /* A question sits under the page's heading, so the page it asks about stays named (the heading ends about 103px down);
+     one taller than the room left scrolls inside itself. */
+  .pal.dlg {
+    top: 112px;
+    max-height: calc(100% - 124px);
+    overflow-y: auto;
+  }
+
+  /* A step's buttons stay in sight: the step's own last row keeps to the foot of the side that scrolls, on the page's
+     ground, while what is above it scrolls under (the new recovery key's Continue at 1093 by 534). A row inside a form or
+     a group (the recovery key's Print and Save as PDF, a picker's Pick another) scrolls with the rest. */
+  .plate .fu > .fu-row:last-child {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    padding: 12px 0;
+    background: var(--ground);
   }
 }
 
