@@ -22,10 +22,10 @@ pub const HEADER: &str = "folder,favorite,type,name,notes,fields,reprompt,login_
 
 /// The export's rows for `items` (every item of one vault, in the order given; trashed ones, ones being deleted, stored
 /// files and folders are left out), as the file's bytes, and what the page may be told about them. `folder_title` is the
-/// title of a live folder, or `None` for one that is not.
+/// title of a live folder, or `None` for one that is not; a copy of it is plaintext too, so it is wiped as it drops.
 pub fn rows<'a>(
     items: impl Iterator<Item = &'a Item>,
-    folder_title: impl Fn(ItemId) -> Option<String>,
+    folder_title: impl Fn(ItemId) -> Option<Zeroizing<String>>,
 ) -> (Zeroizing<Vec<u8>>, ExportSummary) {
     // Live items only, whatever their kind: the files on them are counted below.
     let live: Vec<&Item> = items
@@ -94,7 +94,7 @@ impl<O: Out> Out for Doubling<'_, O> {
 
 fn write_all<O: Out>(
     live: &[&Item],
-    folder_title: &impl Fn(ItemId) -> Option<String>,
+    folder_title: &impl Fn(ItemId) -> Option<Zeroizing<String>>,
     out: &mut O,
     mut summary: Option<&mut ExportSummary>,
 ) {

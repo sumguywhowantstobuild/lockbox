@@ -21,6 +21,15 @@ Never passwords or keys here, only where they're kept.
 | semgrep | 1.179.0 | `python -m pip install --user semgrep` | Spots risky code patterns |
 | opensrc | 0.7.3 | `npm install -g opensrc@0.7.3` | Fetches a library's published source, to read before using its API |
 
+### End-to-end tools
+| Tool | Version | How | Why |
+|---|---|---|---|
+| tauri-driver | 2.1.0 | `cargo install tauri-driver --locked --version 2.1.0` | Drives the release app for `node scripts/e2e.mjs` |
+| Microsoft Edge WebDriver | the first three parts of your WebView2 runtime's version | Microsoft's download, checked against its publisher signature | The browser driver behind tauri-driver |
+| WebdriverIO | pinned in `e2e/package-lock.json` | `npm ci --ignore-scripts` in `e2e/` | The end-to-end specs' runner |
+
+[CONTRIBUTING.md](../CONTRIBUTING.md#end-to-end-tests-on-the-real-app) has the setup steps and what each run does.
+
 ### Rust toolchain
 | Tool | Version | How | Why |
 |---|---|---|---|

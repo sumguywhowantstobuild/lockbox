@@ -6490,6 +6490,15 @@ export type CaptureEnvResult = "opened" | "stale" | "gone" | { failed: unknown }
  * closed meanwhile (Cancel while the shell was reading), the panel does not open and the values are let go as Cancel would. A refusal is said in the box.
  */
 export async function captureAsEnv(session: number, id: string, folder: string): Promise<CaptureEnvResult> {
+  // The shell takes the copy only into the vault it is handed to, as Save: a hand-over that is out is waited for, and a box whose choice is not this vault
+  // (the hand-over is settled again) gets the shell's own refusal, with nothing asked.
+  if (handingOver(id) && !(await handedOver(id))) return "gone";
+  const capture = state.capture;
+  if (capture?.id !== id) return "gone";
+  if (capture.chosen !== session) {
+    seatCapture();
+    return { failed: NOT_HANDED_OVER };
+  }
   const entry = sessionOf(session);
   if (entry === undefined || entry.readOnly) return "stale";
   const { generation } = entry;
@@ -6513,6 +6522,12 @@ export async function captureAsEnv(session: number, id: string, folder: string):
   } catch (error) {
     if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
     if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return "stale";
+    if (refusedWith(error, "invalid_input") && (error as { what?: unknown }).what === "capture vault") {
+      // As Save: the shell holds the copy for another vault than the box's choice, so the hand-over is sent again and the refusal is said.
+      chooseSent = null;
+      seatCapture();
+      return { failed: error };
+    }
     if (refusedWith(error, "not_found")) {
       if (state.capture?.id === id) endCapture(false);
       return "gone";

@@ -2431,7 +2431,10 @@ export function installFakeShell(
         const sent = exactly(args, ["session", "generation", "capture_id"]) as { session: number; generation: number; capture_id: string };
         const vault = vaultFor(sent.session, sent.generation);
         if (vault.readOnly ?? false) return refuse({ code: "read_only" });
-        if (slot?.id !== sent.capture_id || slot.text === null || slot.state !== "value") return refuse({ code: "not_found" });
+        if (slot?.id !== sent.capture_id) return refuse({ code: "not_found" });
+        // As `capture_save`: only into the vault the copy is handed to, at that generation.
+        if (slot.chosen !== sent.session || slot.chosenGeneration !== sent.generation) return refuse(CAPTURE_VAULT);
+        if (slot.text === null || slot.state !== "value") return refuse({ code: "not_found" });
         const rows = parkPaste(sent.session, sent.generation, vault, slot.text);
         // The text moves into the paste: the slot is empty.
         emptySlot();

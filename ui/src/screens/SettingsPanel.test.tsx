@@ -718,7 +718,7 @@ test("a_read_only_vault_with_older_copies_offers_them_too", async () => {
   expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["Test a backup", "Open a backup", "Restore a backup", "Older copies (1)"]);
 });
 
-test("no_password_links_until_their_plans", async () => {
+test("settings_lists_only_the_built_rows_in_order", async () => {
   const { panel } = await opened();
   // Back up came with 4B's Task 3 (`BackupFlow.test.tsx`), Test a backup with Task 4 (`TestBackup.test.tsx`), Restore a backup with Task 5
   // (`RestoreFlow.test.tsx`), Older copies with Task 8 (`OlderCopies.test.tsx`, hidden here while none are kept), Open a backup with Task 7

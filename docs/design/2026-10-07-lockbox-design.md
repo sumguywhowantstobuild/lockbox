@@ -188,7 +188,8 @@ Recovery secret ─► HKDF-SHA256 ────► recovery key ──┘  ─�
   of the header (an earlier copy of the vault folder, an old backup) plus the old password or old recovery key can
   recover the vault key, and that key decrypts **current and future data too**, if they ever get copies of the newer
   items and blobs. Full revocation needs **Rotate vault key** (v1.1).
-- **The current password is asked again.** Changing the password and making a new recovery key from an open vault check
+- **The current password is asked again.** Changing the password, making a new recovery key and exporting a vault to a
+  readable file (plan 4D) from an open vault check
   the current password in the same call that writes, so an unlocked, unattended PC cannot do either without it; a wrong
   password changes nothing. This is a delay, not protection against malware (5.6), and there is no lockout. The one
   exception is the step that makes a recovery key nobody has confirmed (a new vault's, or one found unconfirmed at

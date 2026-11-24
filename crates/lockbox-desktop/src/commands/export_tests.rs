@@ -353,7 +353,7 @@ fn rows_of(items: &[Item]) -> (Zeroizing<Vec<u8>>, crate::views::ExportSummary) 
             .find(|f| {
                 f.id == id && matches!(f.kind, ItemKind::Collection) && f.trashed_at.is_none()
             })
-            .map(|f| f.title.clone())
+            .map(|f| Zeroizing::new(f.title.clone()))
     })
 }
 
@@ -1617,6 +1617,35 @@ fn a_refused_export_issues_no_handle() {
     assert_eq!(w.ts.shell.sessions.pending().len(), 0);
 }
 
+/// Show in Explorer opens only a folder, as the vault list's does: the saved folder replaced by a file of its name, or
+/// gone, is refused before anything is launched (`InvalidInput { "folder" }`, `NotFound`), and the handle stays for a
+/// later press once the folder is back.
+#[test]
+fn export_handle_opens_nothing_once_its_folder_is_a_file_or_gone() {
+    let w = World::new();
+    w.pick();
+    let output = handle_of(&finished(w.export()));
+    let aside = w.docs.with_file_name("Documents-aside");
+    fs::rename(&w.docs, &aside).unwrap();
+    fs::write(&w.docs, b"not a folder").unwrap();
+    assert_eq!(
+        w.ts.shell.show_output_in_explorer(&output).err(),
+        Some(ShellError::InvalidInput { what: "folder" })
+    );
+    fs::remove_file(&w.docs).unwrap();
+    assert_eq!(
+        w.ts.shell.show_output_in_explorer(&output).err(),
+        Some(ShellError::NotFound)
+    );
+    assert!(
+        w.ts.launcher.opened_folders().is_empty() && w.ts.launcher.opened().is_empty(),
+        "nothing was launched"
+    );
+    fs::rename(&aside, &w.docs).unwrap();
+    w.ts.shell.show_output_in_explorer(&output).unwrap();
+    assert_eq!(w.ts.launcher.opened_folders().len(), 1);
+}
+
 /// Show in Explorer opens exactly the folder the file went to, through the launcher, and as often as the person presses
 /// it; a token of any other kind, or one never given, opens nothing; a failed launch is the `io` refusal with no path.
 #[test]
@@ -1760,9 +1789,10 @@ fn export_handle_is_dropped_by_a_lock_and_by_done() {
 }
 
 /// The words of every answer an export gives, as the bridge serialises them: counts, the titles of items whose values
-/// break a line, and the folder; no value, no password, no file name and no path beyond the folder.
+/// break a line, the folder and the Show in Explorer handle (a token); no value, no password, no file name and no path
+/// beyond the folder.
 #[test]
-fn export_answers_carry_only_counts_titles_and_the_folder() {
+fn export_answers_carry_only_counts_titles_the_folder_and_its_handle() {
     let ts = TestShell::new();
     let (s, g) = ts.open_vault(VAULT);
     fill(

@@ -57,6 +57,7 @@ npm --prefix ui run build
 npm --prefix ui test
 cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc
 node --test "scripts/*.test.mjs"
+node scripts/shipped-page-check.mjs
 node scripts/scan.mjs
 ```
 
@@ -74,7 +75,8 @@ test state in their place, and renames everything back when the run ends. It fin
 (and refuses if `%LOCALAPPDATA%`, `%APPDATA%` or `%USERPROFILE%` say something else), refuses while any
 `lockbox-desktop.exe` runs, refuses a folder that is a link or junction, and runs one command at a time. If a run is cut short (a crash, a closed terminal), put
 everything back from any later terminal with `node e2e/lib/state.mjs recover`; `node e2e/lib/state.mjs status` says
-what is set aside. A run started from a packaged app (one installed as an MSIX package) swaps that app's private copy
+what is set aside. Run recover only once the run has ended: it holds the swap's lock one command at a time and sees only a
+running `lockbox-desktop.exe`, so it cannot tell a run that is between its swap and the app's start. A run started from a packaged app (one installed as an MSIX package) swaps that app's private copy
 of AppData, which is the copy the app under test opens too, and `status` names it. The swap's journal and lock sit
 beside the default vault folder in your profile, which every terminal sees alike; a terminal that cannot see that
 private copy refuses to recover and says to run recover from a terminal inside the app. Recovery only renames folders

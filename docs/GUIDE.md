@@ -17,7 +17,8 @@ passwords in it yet.
    the right word for three of the numbers, to show you saved it.
 5. Your vault is open and empty. Add a login, a key, a note or a file, or paste a whole `.env`.
 
-Lockbox locks your vaults by itself after 5 minutes of not using it (you can change this in Settings), and when Windows
+Lockbox locks your vaults by itself after 5 minutes with no keyboard or mouse use on this PC (you can change this in
+Settings), so working in other apps keeps them open; it also locks them when Windows
 locks or goes to sleep. It clears a password you copied from the clipboard after 30 seconds.
 
 ## The recovery key
@@ -46,7 +47,8 @@ A backup is one encrypted file with a copy of a vault. Make one once the vault h
 
 ## What Lockbox can't protect against
 
-Lockbox protects a copy of your vault folder: without your password or recovery key it is just unreadable data. It can't
+Lockbox protects a copy of your vault folder: without your password or recovery key nobody can read your items, though
+the vault's name, how many files it has, their sizes and dates can be seen. It can't
 help with these:
 
 - **Malware on your PC while a vault is open.** It can see what Lockbox can see.

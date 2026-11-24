@@ -79,7 +79,7 @@ lose both the password and the recovery key, nothing opens the vault, or a backu
 | R2 Integrity | Built: every key slot, item and file chunk is authenticated; the header has a MAC (a tamper-evident stamp); a backup carries a MAC-protected list of its contents, and restore checks every entry against it |
 | R3 Guessing cost | Built: settings enforced and bounded, calibrated at creation |
 | R4 No plaintext written except on request | Built: plaintext is written only for "Save a copy" and "Save all files" (all of a folder's files, none replacing an existing file), to a place you choose, and for "Open", into a folder only you can reach. A crash can leave a hidden partial copy until the next launch (see "Honest limits"). Backup, restore and copying an item between vaults never write plaintext. The recovery key's PDF and a folder's keys saved as a `.env` file are written like "Save a copy", through the same journaled writer (see "Printing the recovery key"); an export (a CSV in Bitwarden's layout, after the current password is checked in the same call) is written the same way |
-| R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else. When Lockbox can't start, its notice has the same fixed words for every cause, and the cause (with any path or name in it) never reaches the screen |
+| R5 No secrets in logs and errors | Built in the core and the shell: errors reaching the page carry fixed text and numbers only. There is no logging; debug builds print each Windows signal's name, and a removed drive's letter mask, and nothing else. When Lockbox can't start, its notice has the same fixed words for every cause, and Lockbox never shows the cause (with any path or name in it); WebView2's own error box, outside Lockbox, may name its data folder before that notice |
 | R6 Locking stops access | Built in the shell (see "Locking" below). The page's half (clearing what it shows) is built with the daily-use screens (4A): the bridge drops stale answers, and the page's store drops a vault's list, open item, shown values, typed text, the rows read from a pasted `.env` (its text goes to Rust at once and never stays in the page) and the save box when the vault it would save to locks, or every vault does (a lock of another vault leaves it) |
 | R7 Documented limits | This file |
 
@@ -102,7 +102,10 @@ trusted than Rust.
   finish (its notice, and the question before dismissing it), the folder a restore will use, the folder Save all files
   is about to write to (and later saved to), and a readable file Lockbox saved where you chose (the recovery key's PDF,
   a saved `.env`, an export). An export's answer carries only counts, the titles of items whose values hold line breaks
-  (already shown in the vault) and that folder; no exported value reaches the page. Stored links are opened from Rust,
+  (already shown in the vault), that folder and a Show in Explorer handle (a token, dropped as Save all's is: by Done, a
+  lock of that vault or five minutes); no exported value reaches the page. Show in Explorer checks, as it is pressed,
+  that the saved folder is still a folder and not a link, and refuses otherwise (a program already running as you could
+  still swap it in the instant before Explorer opens it). Stored links are opened from Rust,
   and only for `http` and `https`. Help, and the notice when Lockbox can't start, open one fixed `https` address (the
   guide), held in Rust; the Help command takes no input. Lockbox itself makes no network call.
 - **A backup picked to be tested.** "Test a backup" asks for the file first and holds its path in Rust under a one-time

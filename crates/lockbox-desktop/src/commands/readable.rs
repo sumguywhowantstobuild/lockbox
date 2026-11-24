@@ -246,7 +246,7 @@ impl Shell {
                         let live = matches!(folder.kind, ItemKind::Collection)
                             && folder.trashed_at.is_none()
                             && !folder.purging;
-                        live.then(|| folder.title.clone())
+                        live.then(|| Zeroizing::new(folder.title.clone()))
                     };
                     let (bytes, mut summary) = export_csv::rows(vault.items(), live_folder);
                     // The records the vault could not open are not in the file, and the person is told how many.

@@ -80,7 +80,8 @@ describe("thin_path_create_lock_unlock_add_copy_autolock", () => {
     await (await see("combobox", "Lock after idle")).click();
     await (await see("option", "1 minute")).click();
     // the copied password is on the clipboard now, before the wait begins
-    if (clipboard.run) assert.equal(app.readClipboard(), LOGIN_PASSWORD, "the copied password is on the clipboard before the idle wait");
+    // A boolean, as every other clipboard check: a failed equal would print what the clipboard held.
+    if (clipboard.run) assert.ok(app.readClipboard() === LOGIN_PASSWORD, "the copied password is on the clipboard before the idle wait");
     // The idle clock starts now, after the setting: the lock comes a minute after the last input, whatever came before.
     app.restartIdleClock();
     const started = Date.now();
