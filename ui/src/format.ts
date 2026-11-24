@@ -80,6 +80,16 @@ export function fullDay(when: string): string {
 }
 
 /**
+ * What a leftover file is called on its row (Ask 5), as drawn: "File from 12 March 2026", the day in the PC's own time from the seconds since
+ * 1970 the shell gave. A time that is no date (0, which is what a clock set before 1970 reads as) gives only "File": nothing is guessed.
+ */
+export function fileFromWords(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "File";
+  const day = fullDay(new Date(seconds * 1000).toISOString());
+  return day === "" ? "File" : `File from ${day}`;
+}
+
+/**
  * How long ago `when` was, in the words "changed ..." and "deleted ..." follow and a list sorted by date shows on each row:
  * "today", "yesterday", "2 days ago" for the first week, then "this month", "last month", "in September", "in December
  * 2025". Empty when the date cannot be read.

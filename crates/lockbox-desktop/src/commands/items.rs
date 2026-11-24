@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use lockbox_core::Vault;
-use lockbox_core::ids::ItemId;
+use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::item::{Item, ItemKind};
 use lockbox_core::{CoreError, ReadOnlyVault, Result as CoreResult, SearchHit};
 use serde::Deserialize;
@@ -849,7 +849,7 @@ impl Shell {
         })
     }
 
-    /// The vault's quarantined files no item references (spec §6.4).
+    /// The vault's quarantined files no item references (spec §6.4): the ones `delete_orphans` may delete, and no others.
     pub fn list_orphans(
         &self,
         session: SessionId,
@@ -861,14 +861,22 @@ impl Shell {
         })
     }
 
-    /// Deletes the quarantined files for good, once the page has asked the user: how many.
+    /// Deletes the quarantined files for good, once the page has asked the user, for the files the page showed (`shown`, their
+    /// ids): how many. The engine refuses, and deletes nothing, unless `shown` is exactly the files it lists now, and while any
+    /// item can't be read. An id that is not an id is refused before anything is touched.
     pub fn delete_orphans(
         &self,
         session: SessionId,
         generation: u64,
+        shown: &[String],
     ) -> ShellResult<Tagged<usize>> {
-        self.sessions
-            .write(session, generation, |vault, _| Ok(vault.delete_orphans()?))
+        let shown = shown
+            .iter()
+            .map(|id| FileId::from_hex(id))
+            .collect::<CoreResult<Vec<FileId>>>()?;
+        self.sessions.write(session, generation, |vault, _| {
+            Ok(vault.delete_orphans(&shown)?)
+        })
     }
 }
 
@@ -877,6 +885,15 @@ impl Shell {
 struct SessionArgs {
     session: SessionId,
     generation: u64,
+}
+
+/// Delete them all: the session, its generation and the ids of the leftover files the person was shown.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteOrphansArgs {
+    session: SessionId,
+    generation: u64,
+    files: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1175,12 +1192,13 @@ pub(super) async fn delete_orphans(
     shell: State<'_, Arc<Shell>>,
     request: Request<'_>,
 ) -> ShellResult<Tagged<usize>> {
-    let SessionArgs {
+    let DeleteOrphansArgs {
         session,
         generation,
+        files,
     } = args(&request)?;
     let shell = Arc::clone(&shell);
-    blocking(move || shell.delete_orphans(session, generation)).await
+    blocking(move || shell.delete_orphans(session, generation, &files)).await
 }
 
 #[cfg(test)]
@@ -1191,7 +1209,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, mpsc};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use lockbox_core::blob::{CancelToken, NoProgress};
     use lockbox_core::ids::{FileId, ItemId, VaultId};
@@ -2098,7 +2116,8 @@ mod tests {
         assert_eq!(shell.restore_item(r, gr, &id).err(), read_only);
         assert_eq!(shell.purge_item(r, gr, &id).err(), read_only);
         assert_eq!(shell.delete_collection(r, gr, &id).err(), read_only);
-        assert_eq!(shell.delete_orphans(r, gr).err(), read_only);
+        assert_eq!(shell.delete_orphans(r, gr, &[]).err(), read_only);
+        assert_eq!(shell.list_orphans(r, gr).err(), read_only);
         // Reading still works, and nothing changed.
         let list = shell.list_items(r, gr).unwrap().data;
         assert_eq!(list.items.len(), 1);
@@ -2856,32 +2875,174 @@ mod tests {
         fs::write(orphaned.join(format!("{}.blob", stray.to_hex())), b"12345").unwrap();
         let kept_blob = format!("{}.blob", kept.to_hex());
         fs::copy(files.join(&kept_blob), orphaned.join(&kept_blob)).unwrap();
-        let kept_len = fs::metadata(files.join(&kept_blob)).unwrap().len();
+        // Each file's own last-write time, set so that the answer can be told from the time of the test run.
+        let (march, april) = (1_773_300_000_u64, 1_775_200_000_u64);
+        for (blob, secs) in [(&stray, march), (&kept, april)] {
+            let file = fs::File::options()
+                .write(true)
+                .open(orphaned.join(format!("{}.blob", blob.to_hex())))
+                .unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+                .unwrap();
+        }
 
+        // The list is the files nothing uses: the copy the login still attaches is not a leftover, and is not counted.
         let listed = serde_json::to_value(ts.shell.list_orphans(s, g).unwrap().data).unwrap();
-        let mut expected = vec![
-            json!({ "file_id": stray.to_hex(), "length": 5 }),
-            json!({ "file_id": kept.to_hex(), "length": kept_len }),
-        ];
-        expected.sort_by_key(|orphan| orphan["file_id"].as_str().unwrap().to_owned());
-        assert_eq!(listed, Value::Array(expected));
+        assert_eq!(
+            listed,
+            json!([{ "file_id": stray.to_hex(), "length": 5, "stored": march }])
+        );
 
-        assert_eq!(ts.shell.delete_orphans(s, g).unwrap().data, 1);
+        let shown = [stray.to_hex()];
+        assert_eq!(ts.shell.delete_orphans(s, g, &shown).unwrap().data, 1);
         assert!(!orphaned.join(format!("{}.blob", stray.to_hex())).exists());
         assert!(
             orphaned.join(&kept_blob).exists(),
             "a referenced file stays"
         );
         assert!(files.join(&kept_blob).exists());
-        let left: Vec<String> = ts
-            .shell
-            .list_orphans(s, g)
-            .unwrap()
-            .data
-            .iter()
-            .map(|orphan| orphan.file_id.clone())
-            .collect();
-        assert_eq!(left, [kept.to_hex()]);
+        assert_eq!(
+            serde_json::to_value(ts.shell.list_orphans(s, g).unwrap().data).unwrap(),
+            json!([])
+        );
+    }
+
+    /// A delete is for the files the person was shown: the shell sends the page's ids to the engine, which refuses (with the
+    /// words the page has) when they are not exactly the files listed now, and deletes nothing. A file that came after the list
+    /// was read, and another file in the same number, are both refused; an id that is not an id is refused too.
+    #[test]
+    fn delete_orphans_deletes_only_what_was_shown() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let orphaned = vault_dir(&ts, 0).join("files").join("orphaned");
+        fs::create_dir_all(&orphaned).unwrap();
+        let plant = |byte: u8| {
+            let id = FileId([byte; 16]);
+            fs::write(orphaned.join(format!("{}.blob", id.to_hex())), b"left over").unwrap();
+            id
+        };
+        let (first, second) = (plant(0x11), plant(0x22));
+        let shown = vec![first.to_hex()];
+        let changed = ShellError::from(CoreError::InvalidInput {
+            what: "leftover files changed",
+        });
+        // The list read showed one file; another came.
+        assert_eq!(ts.shell.delete_orphans(s, g, &shown).err(), Some(changed));
+        // The same number, another file.
+        assert_eq!(
+            ts.shell.delete_orphans(s, g, &[second.to_hex()]).err(),
+            Some(changed)
+        );
+        // Not an id at all.
+        assert!(
+            ts.shell
+                .delete_orphans(s, g, &["../escape".into()])
+                .is_err()
+        );
+        for id in [first, second] {
+            assert!(orphaned.join(format!("{}.blob", id.to_hex())).exists());
+        }
+        assert_eq!(
+            serde_json::to_value(
+                ts.shell
+                    .delete_orphans(s, g, &[second.to_hex(), first.to_hex()])
+                    .unwrap()
+                    .data
+            )
+            .unwrap(),
+            json!(2)
+        );
+        // The answer the page reads for the refusal is the engine's, by its fixed words.
+        assert_eq!(
+            serde_json::to_value(changed).unwrap(),
+            json!({ "code": "core", "kind": "invalid_input", "what": "leftover files changed" })
+        );
+    }
+
+    /// The delete's request is the session, its generation and the ids the person was shown, as a list of text: no other field, no call
+    /// without the list, and nothing that is not text in it.
+    #[test]
+    fn delete_orphans_request_has_the_session_the_generation_and_the_shown_ids() {
+        let body = |value: Value| InvokeBody::Json(value);
+        let good = json!({ "session": 1, "generation": 1, "files": ["ab".repeat(16)] });
+        assert!(parse::<DeleteOrphansArgs>(&body(good.clone())).is_ok());
+        assert!(
+            parse::<DeleteOrphansArgs>(&body(
+                json!({ "session": 1, "generation": 1, "files": [] })
+            ))
+            .is_ok()
+        );
+        for wrong in [
+            json!({ "session": 1, "generation": 1 }),
+            json!({ "session": 1, "generation": 1, "files": "ab" }),
+            json!({ "session": 1, "generation": 1, "files": [1] }),
+            json!({ "session": 1, "generation": 1, "files": [], "expected": 1 }),
+            json!({ "session": 1, "generation": 1, "files": [], "path": "C:\\x" }),
+        ] {
+            assert_eq!(
+                parse::<DeleteOrphansArgs>(&body(wrong)).err(),
+                Some(MALFORMED)
+            );
+        }
+    }
+
+    /// Nothing is deleted while an item can't be read (Ask 4): it may be the one that uses a quarantined file. The files are still listed.
+    #[test]
+    fn delete_orphans_is_refused_while_an_item_cannot_be_read() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let bad = login(&ts, s, g, "Mail");
+        let (registry_id, _) = ts.shell.registry.entries()[0].clone();
+        ts.shell.sessions.lock_all(LockReason::Manual);
+        let file = item_file(&ts, 0, &bad);
+        let mut bytes = fs::read(&file).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        fs::write(&file, bytes).unwrap();
+        let orphaned = vault_dir(&ts, 0).join("files").join("orphaned");
+        fs::create_dir_all(&orphaned).unwrap();
+        let id = FileId([0x33; 16]);
+        let blob = orphaned.join(format!("{}.blob", id.to_hex()));
+        fs::write(&blob, b"maybe the damaged item's").unwrap();
+
+        let unlocked = heavy(|| ts.shell.unlock_vault(ts.vault(registry_id), secret(PW))).unwrap();
+        let (s, g) = (unlocked.session, unlocked.generation);
+        assert_eq!(ts.shell.list_orphans(s, g).unwrap().data.len(), 1);
+        let answer = ts.shell.delete_orphans(s, g, &[id.to_hex()]).err();
+        assert_eq!(
+            answer,
+            Some(ShellError::from(CoreError::InvalidInput {
+                what: "unreadable items"
+            }))
+        );
+        assert!(blob.exists());
+    }
+
+    /// The two leftover-file commands are refused for a generation that has gone (before and after a lock) and for a
+    /// session that is not there, and a refused delete leaves the file where it is.
+    #[test]
+    fn orphan_commands_refuse_a_stale_generation_and_a_foreign_session() {
+        let ts = TestShell::new();
+        let (s, g) = open_vault(&ts, "Family");
+        let orphaned = vault_dir(&ts, 0).join("files").join("orphaned");
+        fs::create_dir_all(&orphaned).unwrap();
+        let stray = orphaned.join(format!("{}.blob", FileId([0xCD; 16]).to_hex()));
+        fs::write(&stray, b"left over").unwrap();
+        let refused = |session: SessionId, generation: u64| {
+            (
+                ts.shell.list_orphans(session, generation).err(),
+                ts.shell
+                    .delete_orphans(session, generation, &[FileId([0xCD; 16]).to_hex()])
+                    .err(),
+            )
+        };
+        let (locked, missing) = (Some(ShellError::Locked), Some(ShellError::NotFound));
+        assert_eq!(refused(s, g + 1), (locked, locked));
+        assert_eq!(refused(SessionId(s.0 + 1000), g), (missing, missing));
+        assert!(stray.exists());
+        ts.shell.sessions.lock(s, LockReason::Manual);
+        assert_eq!(refused(s, g), (locked, locked));
+        assert!(stray.exists());
     }
 
     /// Each field reaches the clipboard, and only the clipboard: the answer carries no value. A link index out of

@@ -1292,6 +1292,30 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "The leftover files (Ask 5)",
+    shows: ["LeftoverView#LeftoverView"],
+    reach: async () => {
+      start([vault({ leftover: 2 })]);
+      await unlockIt();
+      click("See them", (await screen.findByText("2 leftover files have no item that uses them.")).closest(".ask") as HTMLElement);
+      await screen.findByRole("heading", { level: 1, name: "Leftover files" });
+      await screen.findByRole("button", { name: "Delete them all" });
+    },
+  },
+  {
+    name: "Delete them all asks first (Ask 5)",
+    shows: ["LeftoverView#LeftoverView"],
+    dialogs: [{ id: "LeftoverView#LeftoverView", name: "Delete 2 leftover files permanently?" }],
+    reach: async () => {
+      start([vault({ leftover: 2 })]);
+      await unlockIt();
+      click("See them", (await screen.findByText("2 leftover files have no item that uses them.")).closest(".ask") as HTMLElement);
+      await screen.findByRole("heading", { level: 1, name: "Leftover files" });
+      click("Delete them all");
+      return screen.findByRole("dialog", { name: "Delete 2 leftover files permanently?" });
+    },
+  },
+  {
     name: "The old group's pill asks first (32a)",
     shows: ["TrashView#DeleteOld"],
     reach: async () => {

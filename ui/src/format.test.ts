@@ -1,5 +1,18 @@
 import { expect, test } from "vitest";
-import { agoWords, changedText, dayWords, deletedText, formatBytes, fullDay } from "./format";
+import { agoWords, changedText, dayWords, deletedText, formatBytes, fileFromWords, fullDay } from "./format";
+
+test("a_leftover_file_is_named_by_the_local_day_it_was_written", () => {
+  // Ask 5's rows, as drawn: "File from 12 March 2026". The seconds are the shell's (since 1970); the day is the PC's own.
+  const at = (iso: string) => Date.parse(iso) / 1000;
+  expect(fileFromWords(at("2026-03-12T12:00:00Z"))).toBe("File from 12 March 2026");
+  expect(fileFromWords(at("2026-04-03T12:00:00Z"))).toBe("File from 3 April 2026");
+  // The local day, not the UTC one: whatever the PC's zone puts that moment on.
+  const moment = new Date(at("2026-03-12T23:30:00Z") * 1000);
+  expect(fileFromWords(at("2026-03-12T23:30:00Z"))).toBe(`File from ${String(moment.getDate())} ${moment.toLocaleString("en-GB", { month: "long" })} 2026`);
+  // A time that can't be a date says nothing wrong: a file from no known day.
+  expect(fileFromWords(Number.NaN)).toBe("File");
+  expect(fileFromWords(0)).toBe("File");
+});
 
 test("a_row_sorted_by_date_says_when_in_the_words_of_a_change", () => {
   const now = new Date("2026-11-10T12:00:00Z");

@@ -3,12 +3,15 @@
 //! nonce. A password or a key's value crosses only through `reveal_password`. IDs are 32 lowercase hex characters. No `Debug`: titles, usernames, names
 //! and notes are item content (R5).
 
+use std::time::SystemTime;
+
 use lockbox_core::ids::{FileId, ItemId};
 use lockbox_core::item::{FileRef, Item, ItemKind};
 use serde::Serialize;
 use tauri::Url;
 use zeroize::Zeroizing;
 
+use crate::dates;
 use crate::pending::Token;
 use crate::session::{SessionId, Tagged};
 
@@ -299,18 +302,22 @@ pub enum Confirmation {
     Superseded,
 }
 
-/// A quarantined file no item references (spec §6.4), with its size in bytes.
+/// A quarantined file no item references (spec §6.4), with its size in bytes and when it was last written (whole
+/// seconds since 1970): the only date the page can show of a file whose name was kept in the item. No path and no
+/// name cross to the page.
 #[derive(Serialize)]
 pub struct OrphanView {
     pub file_id: String,
     pub length: u64,
+    pub stored: u64,
 }
 
 impl OrphanView {
-    pub fn of((file_id, length): &(FileId, u64)) -> OrphanView {
+    pub fn of((file_id, length, written): &(FileId, u64, SystemTime)) -> OrphanView {
         OrphanView {
             file_id: file_id.to_hex(),
             length: *length,
+            stored: dates::unix_secs(*written),
         }
     }
 }

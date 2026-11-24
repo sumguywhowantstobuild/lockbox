@@ -65,12 +65,9 @@ const IN_THE_SHELL = new Set(["Can't start (Ask 14)"]);
 
 /**
  * Rows not built, each waiting on Ariel's call, with why. The check still runs on them and fails once one is built, so
- * this list can't outlive the gap.
+ * this list can't outlive the gap. None waits now: Ask 5, the last, was built as drawn (4D Task 11b).
  */
-const WAITING_ON_ARIEL: Record<string, string> = {
-  "Leftover files (Ask 5)":
-    "the list of leftover files and Delete them all were never built (the banner says only the count): new behaviour that deletes files, Ariel's call (4D Task 7)",
-};
+const WAITING_ON_ARIEL: Record<string, string> = {};
 
 /**
  * The parts of a message that are fixed words, split at what changes (the vault's name, the cloud service's name,

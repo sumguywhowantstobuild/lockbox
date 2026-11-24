@@ -226,6 +226,14 @@ export const MESSAGES: Record<string, Words> = {
   },
   "core:too_large": { title: "That is too big for Lockbox to keep.", body: "" },
   "core:invalid_input": { title: "Lockbox can't use that.", body: "Check what you entered and try again." },
+  // Delete them all on the leftover files (Ask 5). The files the person was shown are not the files the vault has now (one came, or went), so nothing was
+  // deleted and the list is read again; and an item that can't be read may be the one that uses a file, so nothing is deleted at all while Ask 4 stands. The
+  // words are the session's, for Ariel to change.
+  "core:invalid_input:leftover files changed": { title: "The leftover files changed.", body: "Look at the list again, then delete." },
+  "core:invalid_input:unreadable items": {
+    title: "Some items in this vault can't be read, so Lockbox is keeping these files until that's sorted.",
+    body: "",
+  },
   // A key's name is a variable name, since a `.env` file is where keys go out: the engine refuses any other.
   "core:invalid_input:key name": {
     title: "That isn't a name Lockbox can use for a key.",
@@ -350,6 +358,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "key name",
   "key slot",
   "key slots",
+  "leftover files changed",
   "link",
   "link type",
   "network drive",
@@ -400,6 +409,7 @@ export const KNOWN_WHATS: readonly string[] = [
   "state file",
   "state folder",
   "too many before-restore copies",
+  "unreadable items",
   "urls",
   "use delete_collection",
   "vault already here",

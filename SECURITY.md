@@ -681,9 +681,9 @@ Lockbox defends.
 ### Not built yet
 
 These are described in the spec but do not exist, so nothing here should be relied on yet: the installer, updates and
-uninstalling (Plan 5), and the list of leftover files with no item that uses them, with a way to delete them (today a
-notice gives only their count). Plans 4A to 4D are built (export, emptying the trash and the list of items in the trash
-for 30 days or more, Help and the guide, the notice when Lockbox can't start, and end-to-end tests on the running app,
+uninstalling (Plan 5). Plans 4A to 4D are built (export, emptying the trash and the list of items in the trash
+for 30 days or more, the list of leftover files with no item that uses them and Delete them all, which asks first and
+sends no file name or path, Help and the guide, the notice when Lockbox can't start, and end-to-end tests on the running app,
 besides first-time setup and the recovery key, unlock, the list, search and signing in, adding and editing logins, keys and notes,
 folders and the trash, `.env` in and out, the save shortcut, stored files, settings, and backing up, testing and
 restoring a backup, older copies, opening a backup read-only, moving a vault to a new computer, adding many files,

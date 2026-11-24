@@ -44,6 +44,7 @@ import { LoginForm } from "./forms/LoginForm";
 import { NoteForm } from "./forms/NoteForm";
 import { GeneratorPage } from "./GeneratorPanel";
 import { ItemList } from "./ItemList";
+import { LeftoverView } from "./LeftoverView";
 import { FILTER, itemCount, kindCount, kindPlural, ListTools, showAll, useKind, useSort } from "./ListTools";
 import { OlderCopiesPanel } from "./OlderCopies";
 import { OpenBackupPanel } from "./OpenBackup";
@@ -89,6 +90,10 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
     const now = document.activeElement;
     if (now === null || now === document.body) heading.current?.focus();
   }, [data.session]);
+  // The leftover files' view opens from a banner's button, which steps aside with the banner: focus goes to the view's heading, which a screen reader says.
+  useEffect(() => {
+    if (data.leftoverView) heading.current?.focus();
+  }, [data.leftoverView]);
   const everything = useMemo(() => data.items ?? [], [data.items]);
   // The lists below are kept between redraws while what they come from is unchanged, so the item list's rows are not drawn again.
   const items = useMemo(() => everything.filter((item) => item.kind !== "collection" && !item.trashed), [everything]);
@@ -214,7 +219,7 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   // The place that holds the items, by name: the Trash, the folder, or the vault for All items.
   const holder = data.trash ? "Trash" : (folderName ?? data.name);
   const rest = inView.length === 1 ? "it" : "them";
-  const title = data.trash ? "Trash" : (folderName ?? "All items");
+  const title = data.leftoverView ? "Leftover files" : data.trash ? "Trash" : (folderName ?? "All items");
   const openVaults = new Set(sessions.map((session) => session.vaultId));
   const locked = lockedLine(
     (vaults ?? [])
@@ -223,8 +228,9 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
   );
   const problem = data.loadError === null ? null : messageFor(data.loadError);
   // Which of the list's states is up, in the order they win.
-  const state =
-    problem !== null
+  const state = data.leftoverView
+    ? "leftover"
+    : problem !== null
       ? "problem"
       : data.items === null
         ? "opening"
@@ -271,42 +277,44 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
               {title}
             </span>
             <span className="sp" />
-            {/* The Filter, the kind and the order: on every list, the Trash included (13b). */}
-            <div className="fil">
-              <FilterIcon />
-              <input
-                className="fin"
-                type="search"
-                aria-label="Filter this list"
-                placeholder="Filter"
-                autoComplete="off"
-                spellCheck={false}
-                value={filter}
-                onChange={(event) => {
-                  setForm(data.session, FILTER, event.currentTarget.value);
-                }}
-              />
-              {filter === "" ? null : (
-                <button
-                  type="button"
-                  className="fx"
-                  aria-label="Clear filter"
-                  onClick={() => {
-                    setForm(data.session, FILTER, "");
+            {/* The Filter, the kind and the order: on every list, the Trash included (13b); not on the leftover files, which are no items to narrow or sort. */}
+            {data.leftoverView ? null : (
+              <div className="fil">
+                <FilterIcon />
+                <input
+                  className="fin"
+                  type="search"
+                  aria-label="Filter this list"
+                  placeholder="Filter"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={filter}
+                  onChange={(event) => {
+                    setForm(data.session, FILTER, event.currentTarget.value);
                   }}
-                >
-                  <CloseIcon />
-                </button>
-              )}
-            </div>
-            <ListTools session={data.session} />
+                />
+                {filter === "" ? null : (
+                  <button
+                    type="button"
+                    className="fx"
+                    aria-label="Clear filter"
+                    onClick={() => {
+                      setForm(data.session, FILTER, "");
+                    }}
+                  >
+                    <CloseIcon />
+                  </button>
+                )}
+              </div>
+            )}
+            {data.leftoverView ? null : <ListTools session={data.session} />}
             {folderMenu === null || folderMenuItems.length === 0 ? null : (
               // The folder's own menu (14b, 15d, T09f): Paste a .env, the two ways to take the keys out (only when the folder holds a key), Save all
               // files (only when it holds a stored file) set apart, then Rename and Delete set apart. Not on All items, not in the Trash. A
               // read-only vault has the menu for Save all files alone, and none at all when the folder holds no file.
               <Menu label="More for this folder" icon={<MoreIcon />} triggerClassName="ib" items={folderMenuItems} />
             )}
-            {data.readOnly || data.trash ? null : <AddMenu session={data.session} folder={data.folder} />}
+            {data.readOnly || data.trash || data.leftoverView ? null : <AddMenu session={data.session} folder={data.folder} />}
           </div>
           <div className="lscroll">
             <h1 ref={heading} className="big" tabIndex={-1}>
@@ -356,7 +364,10 @@ export function MainWindow({ data, look }: { data: SessionData; look: VaultLook 
             </div>
             {/* A Filter that leaves no row in the Trash still leaves the Trash to empty: the button is above the card that says so. */}
             {state === "no_match" || state === "no_kind" ? emptyBar : null}
-            {state === "problem" && problem !== null ? (
+            {state === "leftover" ? (
+              // Its key is the session and generation, so a switch to another vault or a lock takes the view's question away with it.
+              <LeftoverView key={`${String(data.session)}:${String(data.generation)}`} data={data} />
+            ) : state === "problem" && problem !== null ? (
               <p className="err" role="alert">
                 {problem.title} {problem.body}
               </p>

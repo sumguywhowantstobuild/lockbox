@@ -754,6 +754,32 @@ export function oldTrash(vault: SessionRef, days: number): Promise<Tagged<string
 }
 
 /**
+ * A leftover file (Ask 5): one in the vault's `files/orphaned/` that no item uses. The file's name was kept in the item, so only
+ * its size and when it was last written (`stored`, whole seconds since 1970) can show. `file_id` is the hex id the shell keeps it under:
+ * never a path, and never sent back.
+ */
+export interface OrphanFile {
+  file_id: string;
+  length: number;
+  stored: number;
+}
+
+/** The vault's leftover files, by id. Asked only of a writable vault: a read-only one is refused as `read_only`. It lists and removes nothing. */
+export function listOrphans(vault: SessionRef): Promise<Tagged<OrphanFile[]>> {
+  return call<OrphanFile[]>("list_orphans", { session: vault.session, generation: vault.generation });
+}
+
+/**
+ * Deletes the leftover files for good, once the person said yes: how many went. `files` are the ids of the files the person was shown (the list
+ * the question was asked over). Rust deletes nothing unless they are exactly the files it lists now (`core` `invalid_input` "leftover files
+ * changed": a file came or went since), nor while an item can't be read ("unreadable items"). Refused as `read_only` in a vault opened from a
+ * backup; a real disk error is `core` with its kind.
+ */
+export function deleteOrphans(vault: SessionRef, files: readonly string[]): Promise<Tagged<number>> {
+  return call<number>("delete_orphans", { session: vault.session, generation: vault.generation, files: [...files] });
+}
+
+/**
  * What emptying the trash did: how many items it deleted for good (one restored or already gone meanwhile is not counted), and
  * `trash_changed`: the trash was not the size the question said, so nothing was deleted and the page asks again.
  */

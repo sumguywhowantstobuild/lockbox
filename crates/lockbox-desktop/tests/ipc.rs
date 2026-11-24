@@ -9,7 +9,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, UNIX_EPOCH};
 
+use lockbox_core::ids::FileId;
 use lockbox_desktop::commands::COMMANDS;
 use lockbox_desktop::handler;
 use lockbox_desktop::jobs::{
@@ -20,6 +22,7 @@ use lockbox_desktop::session::{LockReason, Notifier, SessionId};
 use lockbox_desktop::shell::{
     CLOSE_ASKED_EVENT, Events, JOB_STARTED_EVENT, LOCK_EPOCH_EVENT, PROGRESS_EVENT,
 };
+use lockbox_desktop::views::OrphanView;
 use lockbox_desktop::window::{allowed_navigation, main_window};
 use serde_json::{Value, json};
 use tauri::ipc::{CallbackFn, InvokeBody};
@@ -751,6 +754,66 @@ fn vault_backup_due_is_granted_to_the_main_window_only() {
     }
     assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
     assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+}
+
+/// The two leftover-file commands (Ask 5's list and its Delete them all) are listed, granted to the main window and reach
+/// their handler from it; another window and a remote origin are refused by the ACL, before the handler. The list takes a
+/// session and its generation; the delete also the ids of the files the person was shown (their bodies are checked in
+/// `commands::items`'s own tests).
+#[test]
+fn leftover_file_commands_are_granted_to_the_main_window_only() {
+    let capability = read_json("capabilities/main.json");
+    let granted: Vec<&str> = capability["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let app = app();
+    let main = main_webview(&app);
+    let other = WebviewWindowBuilder::new(&app, "probe", WebviewUrl::App("index.html".into()))
+        .build()
+        .expect("the probe window builds");
+    for (cmd, permission, request) in [
+        (
+            "list_orphans",
+            "allow-list-orphans",
+            json!({ "session": 1, "generation": 1 }),
+        ),
+        // The delete also carries the ids the person was shown, and nothing else.
+        (
+            "delete_orphans",
+            "allow-delete-orphans",
+            json!({ "session": 1, "generation": 1, "files": ["ab".repeat(16)] }),
+        ),
+    ] {
+        let body = || InvokeBody::Json(request.clone());
+        assert!(COMMANDS.contains(&cmd), "{cmd} is not listed");
+        assert!(granted.contains(&permission), "{permission} is not granted");
+        match invoke(&main, APP_ORIGIN, cmd, body()) {
+            Err(Value::String(answer)) if answer.contains("state not managed") => {}
+            answer => panic!("{cmd} did not reach its handler: {answer:?}"),
+        }
+        assert_refused_by_acl(cmd, invoke(&other, APP_ORIGIN, cmd, body()));
+        assert_refused_by_acl(cmd, invoke(&main, "https://example.com", cmd, body()));
+    }
+}
+
+/// What a leftover file crosses to the page as: its hex ID, its size and the time it was last written (whole seconds
+/// since 1970), and nothing else. No path and no file name: the page never learns where the file is, and the name
+/// was never kept outside the item.
+#[test]
+fn a_leftover_file_crosses_as_id_size_and_time_only() {
+    let listed = [(
+        FileId([0xAB; 16]),
+        4_404_019_u64,
+        UNIX_EPOCH + Duration::from_secs(1_773_300_000),
+    )];
+    let views: Vec<OrphanView> = listed.iter().map(OrphanView::of).collect();
+    assert_eq!(
+        serde_json::to_value(views).unwrap(),
+        json!([{ "file_id": "ab".repeat(16), "length": 4_404_019, "stored": 1_773_300_000_u64 }])
+    );
 }
 
 /// The commands of "Test a backup" (the pick, the test, the forget) are listed, granted to the main window and reach

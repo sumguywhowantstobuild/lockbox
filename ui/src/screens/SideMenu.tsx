@@ -286,8 +286,8 @@ export function SideMenu({
       <div className="projs">
         <button
           type="button"
-          className={data.folder === null && !data.trash ? "nav on" : "nav"}
-          aria-current={data.folder === null && !data.trash ? "page" : undefined}
+          className={data.folder === null && !data.trash && !data.leftoverView ? "nav on" : "nav"}
+          aria-current={data.folder === null && !data.trash && !data.leftoverView ? "page" : undefined}
           {...named("All items", total)}
           onClick={() => {
             selectFolder(data.session, null);

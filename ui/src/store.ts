@@ -583,7 +583,25 @@ export interface SessionData {
    * answered and for a read-only vault, which is never asked. The list is only a way to group rows: an id no longer in the Trash is ignored.
    */
   oldTrash: readonly string[];
+  /**
+   * The leftover files (Ask 5): see {@link LeftoverList}. Read at the unlock (so files left from an earlier one are still said), when the view
+   * opens, after a delete and on Try again. A read-only vault is never asked.
+   */
+  leftover: LeftoverList;
+  /** The "Leftover files" view is on screen instead of the list (then `folder` is `null` and `trash` is false). Never for a read-only vault. */
+  leftoverView: boolean;
 }
+
+/**
+ * What the page knows of the vault's leftover files (Ask 5), the three states of a listing kept apart: being read (`loading`, with the files an
+ * earlier read gave, which are shown but are not a list to delete from), read (`ready`: the current list, and the only one a delete is offered
+ * on) and refused (`failed`, with the shell's refusal, to say in words with a Try again; no rows are kept, since they may be out of date).
+ * Only a hex id, a size and a time each ever crosses: never a name or a path.
+ */
+export type LeftoverList =
+  | { phase: "loading"; files: readonly api.OrphanFile[] | null }
+  | { phase: "ready"; files: readonly api.OrphanFile[] }
+  | { phase: "failed"; error: unknown };
 
 /** One batch of files, from the pick to its end. The paths stay in Rust: the page holds names and sizes for display, and the choice (a token). */
 export interface AddFilesFlow {
@@ -1015,6 +1033,8 @@ function publishUnlock(
   if (unfinished && !details) void makeNewKey(record.session);
   // The 30-day reminder (Ask 1) is read beside the list, never ahead of it. A read-only copy has none to make.
   if (!info.read_only) void readBackupDue(record.session, record.generation);
+  // The leftover files (Ask 5) are listed at every unlock, not only the one whose cleanup moved them: files left from an earlier unlock still wait.
+  if (!info.read_only) void loadLeftover(record.session);
   // A copy that waited on the lock screen (8b) opens its box in this vault, and is handed to it.
   seatCapture();
   return loadItems(record);
@@ -1064,6 +1084,8 @@ function newRecord(
     newKey: null,
     exportFlow: null,
     oldTrash: [],
+    leftover: { phase: "loading", files: null },
+    leftoverView: false,
   };
 }
 
@@ -1534,6 +1556,92 @@ async function loadOldTrash(session: number): Promise<void> {
   }
 }
 
+/** The number of the latest `list_orphans` asked of each session: an older answer that comes after a newer one is dropped. */
+const leftoverRuns = new Map<number, number>();
+
+/**
+ * Asks the shell for the vault's leftover files (Ask 5) and keeps what it said, success and refusal apart (`LeftoverList`): while it asks, the list is
+ * `loading` (the earlier files stay in sight, but are no list to delete from); a good answer makes it `ready`, with the banner's count; a refusal makes
+ * it `failed`, which the banner and the view say in words with a Try again. With no file left the view closes, since there is nothing to show. A read-only
+ * vault is not asked (it has no quarantine to list or delete). A lock drops the answer, and an older answer that comes after a newer one is dropped
+ * (`"stale"`).
+ */
+async function loadLeftover(session: number): Promise<"ready" | "stale" | { failed: unknown }> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return "stale";
+  const { generation } = entry;
+  const run = (leftoverRuns.get(session) ?? 0) + 1;
+  leftoverRuns.set(session, run);
+  update(session, (current) => ({ ...current, leftover: { phase: "loading", files: current.leftover.phase === "failed" ? null : current.leftover.files } }));
+  try {
+    const answer = await api.listOrphans({ session, generation });
+    if (!stillOpen(session, generation) || leftoverRuns.get(session) !== run) return "stale";
+    const files = answer.data;
+    update(session, (current) => ({
+      ...current,
+      leftover: { phase: "ready", files },
+      leftoverView: current.leftoverView && files.length > 0,
+      asks: { ...current.asks, leftover: files.length },
+    }));
+    return "ready";
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation) || leftoverRuns.get(session) !== run) return "stale";
+    update(session, (current) => ({ ...current, leftover: { phase: "failed", error } }));
+    return { failed: error };
+  }
+}
+
+/** Try again, on a leftover list the shell refused: the list is read again. */
+export function retryLeftover(session: number): void {
+  void loadLeftover(session);
+}
+
+/**
+ * The banner's "See them": the "Leftover files" view takes the list's place (as the Trash view does), and the list is read again for it. Not in a
+ * read-only vault, which has none to show or delete, whatever is asked.
+ */
+export function openLeftover(session: number): void {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly) return;
+  update(session, (current) => ({ ...endReveals(current), folder: null, trash: false, leftoverView: true, openItem: null, tool: null }));
+  void loadLeftover(session);
+}
+
+/**
+ * Delete them all, once the person said yes in the question: the shell deletes the leftover files for good, but only if `files` (the ids the question was
+ * asked over, which the page showed) are exactly the files it lists now: a file that came or went since is refused with "The leftover files changed", nothing is
+ * deleted and the list is read again. A vault with an item that can't be read refuses too. The question belongs to the session and generation it was opened
+ * for: a vault that has since locked or been unlocked again, or a read-only one, sends nothing. The list is read again, so a view with nothing left closes, and
+ * what is said follows: how many went, or the refusal (a disk error partway leaves what could not be deleted listed; a list the shell then refused is said as
+ * that refusal, never as success). A lock meanwhile says nothing.
+ */
+export async function deleteLeftover(session: number, generation: number, files: readonly string[]): Promise<void> {
+  const entry = sessionOf(session);
+  if (entry === undefined || entry.readOnly || entry.generation !== generation) return;
+  let deleted: number;
+  try {
+    deleted = (await api.deleteOrphans({ session, generation }, files)).data;
+  } catch (error) {
+    if (refusedAsLocked(error)) dropIfStillOpen(session, generation);
+    if (error instanceof api.StaleAnswer || !stillOpen(session, generation)) return;
+    // Some may have gone before a disk refusal, and the list may have changed under a refusal that says so: the list is read again.
+    sayFailure(session, error);
+    await loadLeftover(session);
+    return;
+  }
+  if (!stillOpen(session, generation)) return;
+  const read = await loadLeftover(session);
+  if (!stillOpen(session, generation)) return;
+  if (typeof read === "object") {
+    sayFailure(session, read.failed);
+    return;
+  }
+  say(session, deleted === 0 ? "No leftover files were left to delete" : `${deleted === 1 ? "1 leftover file" : `${String(deleted)} leftover files`} deleted for good`);
+  // The button the question came from goes with the view: if focus fell with it, it goes to the page's heading, unless the person has moved on.
+  if (state.sessions.at(-1)?.session === session) focusListIfLost();
+}
+
 /**
  * Locks every vault. The lock events drop their records; if one is lost on the way, the shell's answer that it has
  * locked everything drops what the page held when Lock all was pressed. A refusal is shown as a message.
@@ -1894,8 +2002,9 @@ export async function selectItem(session: number, id: string | null, opened: Ope
   update(session, (current) => ({
     ...endReveals(current),
     tool: null,
-    // An item of the list is never opened in the Trash view: a result of the search takes the person out of it.
+    // An item of the list is never opened in the Trash view: a result of the search takes the person out of it. The same for the leftover files' view.
     trash: false,
+    leftoverView: false,
     openItem: { id, detail: opened.detail ?? null, error: null, saved, focusEdit },
   }));
   const run = nextDetailRun(session);
@@ -4503,12 +4612,12 @@ async function saveThen(
 
 /** Shows a folder's items (`null`: all items), and closes the panel. */
 export function selectFolder(session: number, folder: string | null): void {
-  update(session, (entry) => ({ ...endReveals(entry), folder, trash: false, openItem: null }));
+  update(session, (entry) => ({ ...endReveals(entry), folder, trash: false, leftoverView: false, openItem: null }));
 }
 
 /** Shows the Trash view in place of the list, and closes the panel and any form (the Trash has nothing to add). */
 export function openTrash(session: number): void {
-  update(session, (entry) => ({ ...endReveals(entry), folder: null, trash: true, openItem: null, tool: null }));
+  update(session, (entry) => ({ ...endReveals(entry), folder: null, trash: true, leftoverView: false, openItem: null, tool: null }));
   void loadOldTrash(session);
 }
 

@@ -31,7 +31,7 @@ the five plans make up Phase 1, the Windows app (see the
 | 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
 | 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built |
 | 3 | Desktop shell (built with Tauri, a toolkit for desktop apps), `crates/lockbox-desktop`: sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Built |
-| 4 | The user interface, from clickable design mockups, in four parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C vaults and passwords, 4D the rest | Built, except the list of leftover files with a way to delete them (a notice gives only their count) |
+| 4 | The user interface, from clickable design mockups, in four parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C vaults and passwords, 4D the rest | Built |
 | 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
 
 The core can already create and unlock vaults (with the password, or with the recovery key: a long code shown once that

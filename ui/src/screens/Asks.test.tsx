@@ -332,15 +332,16 @@ test("ask5_banner_closes_with_no_delete", async () => {
   const words = "2 leftover files have no item that uses them.";
   expect(await screen.findByText(words)).toBeTruthy();
   expect(screen.queryByRole("dialog")).toBeNull();
-  // Count only: the sentences about "these files", their date and size wait for the list (4B), and so does Delete.
+  // The banner says the count, and its buttons are See them and Close: the sentences about "these files", their date and size, Restore a
+  // backup and Delete them all are the view's (LeftoverView.test.tsx).
   expect(container.textContent).not.toMatch(/these files|date and size|Delete them all/);
   expect(screen.queryByRole("button", { name: /Delete|Restore a backup/ })).toBeNull();
+  expect(buttonNames().filter((name) => name === "See them" || name === "Close")).toEqual(["See them", "Close"]);
   await expectNoAxe(container);
 
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByText(words)).toBeNull();
   expect(commandsSent()).not.toContain("delete_orphans");
-  expect(commandsSent()).not.toContain("list_orphans");
 });
 
 test("ask9_later_closes_it", async () => {

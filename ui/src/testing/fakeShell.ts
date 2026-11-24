@@ -79,8 +79,17 @@ export interface FakeVault {
   cloud?: "OneDrive" | "GoogleDrive" | "Dropbox" | "Other";
   /** Items that can't be read: reported as `skipped_damaged` at unlock and as `damaged` in the item list. */
   unreadable?: number;
-  /** Files no item uses, moved aside by the unlock's cleanup (`orphans_quarantined`). */
+  /**
+   * Files no item uses, moved aside by the unlock's cleanup (`orphans_quarantined`), and listed by `list_orphans` while they wait: with no `orphans`
+   * given, each is made up (an id, a size, a time at noon UTC on a March day of 2026). `delete_orphans` takes them all away.
+   */
   leftover?: number;
+  /**
+   * The leftover files themselves (`list_orphans`'s answer), when a test needs their own sizes and times. They wait in the vault whatever `leftover`
+   * says: the unlock's cleanup counts only the files it moved aside just then, and files left from an earlier unlock are still listed. A file with
+   * `used` is a copy an item still attaches: it waits in the quarantine for the next unlock, and is neither listed nor deleted.
+   */
+  orphans?: { file_id: string; length: number; stored: number; used?: boolean }[];
   /** A newer Lockbox made this vault: unlock is refused as `unsupported_version`. */
   newer?: boolean;
   /** A long change holds the vault past the short wait: a search reports it in `busy` and gives none of its items. */
@@ -430,8 +439,8 @@ export interface FakeShell {
    * writes it, and the answer is read later, so a lock in between leaves an answer tagged with the generation from before.
    */
   holdUpdate(): () => void;
-  /** The next `cmd` sent is refused with `error` (once), before anything else is done for it. */
-  refuseNext(cmd: string, error: object): void;
+  /** The next `cmd` sent is refused with `error` (once, or the next `times` sent), before anything else is done for it. */
+  refuseNext(cmd: string, error: object, times?: number): void;
   /**
    * Holds every `reveal_password` answer until `release` is called: the value is read when the command arrives, as the
    * shell reads it, and the answer comes later, so the person can open another item or lock in between.
@@ -1186,6 +1195,24 @@ function linesOf(text: string): string {
   return text.replace(/\r\n?/g, "\n");
 }
 
+/** The files in a vault's quarantine: the ones a test gave, or `leftover` made-up ones (a March 2026 day each, noon UTC, one more MB each). */
+function quarantined(vault: FakeVault): { file_id: string; length: number; stored: number; used?: boolean }[] {
+  if (vault.orphans !== undefined) return vault.orphans;
+  const noon = Date.UTC(2026, 2, 12, 12, 0, 0) / 1000;
+  return Array.from({ length: vault.leftover ?? 0 }, (_, n) => ({
+    file_id: (n + 1).toString(16).padStart(32, "a"),
+    length: (n + 1) * 1_048_576,
+    stored: noon + n * 86_400,
+  }));
+}
+
+/** The leftover files the shell lists and may delete: the quarantined ones no item uses, with nothing else of them than their id, size and time. */
+function leftoverFiles(vault: FakeVault): { file_id: string; length: number; stored: number }[] {
+  return quarantined(vault)
+    .filter((file) => file.used !== true)
+    .map(({ file_id, length, stored }) => ({ file_id, length, stored }));
+}
+
 function exactly(args: unknown, keys: string[]): Record<string, unknown> {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return refuse(MALFORMED);
   const found = Object.keys(args).sort();
@@ -1267,6 +1294,18 @@ export function installFakeShell(
   let interruptRecover: Parameters<FakeShell["interruptRecoverNext"]>[0] | undefined;
   let heldTrash: (() => void)[] | undefined;
   const refusals = new Map<string, object>();
+  /** How many more sends of a command are refused after the one in `refusals` (`refuseNext`'s `times`). */
+  const refusalsLeft = new Map<string, number>();
+  /** A refusal has been used: it is gone, unless `refuseNext` asked for more of them. */
+  const used = (cmd: string, error: object): void => {
+    const left = refusalsLeft.get(cmd) ?? 0;
+    refusals.delete(cmd);
+    refusalsLeft.delete(cmd);
+    if (left > 0) {
+      refusals.set(cmd, error);
+      refusalsLeft.set(cmd, left - 1);
+    }
+  };
   const edited: FakeShell["edited"] = [];
   const made: FakeShell["made"] = [];
   const generated: FakeShell["generated"] = [];
@@ -3001,6 +3040,36 @@ export function installFakeShell(
         lastBackup = { name, choice: token };
         return tagged(sent.session, sent.generation, { Done: { ...view, test: { choice: token, file_name: name, size: view.size_on_disk } } });
       }
+      case "list_orphans": {
+        // The leftover files, as the shell lists them: a writable vault only, and no name or path, whatever the vault holds.
+        const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        return tagged(session, generation, leftoverFiles(vault));
+      }
+      case "delete_orphans": {
+        // The files the page showed go for good, and how many is the answer: a read-only vault is refused, and so is a vault with an item that can't be
+        // read (an unreadable item may use one) or a set of ids that is not exactly the files listed now (a file came, or went, since the page read
+        // the list; a file an item uses is not one of them). Nothing is deleted in any of those cases.
+        const { session, generation, files } = exactly(args, ["session", "generation", "files"]) as {
+          session: number;
+          generation: number;
+          files: unknown;
+        };
+        if (!Array.isArray(files) || files.some((id) => typeof id !== "string")) return refuse(MALFORMED);
+        const vault = vaultFor(session, generation);
+        if (vault.readOnly ?? false) return refuse({ code: "read_only" });
+        if ((vault.unreadable ?? 0) > 0) return refuse({ code: "core", kind: "invalid_input", what: "unreadable items" });
+        const listed = leftoverFiles(vault).map((file) => file.file_id).sort();
+        const asked = [...(files as string[])].sort();
+        if (asked.length !== listed.length || asked.some((id, at) => id !== listed[at])) {
+          return refuse({ code: "core", kind: "invalid_input", what: "leftover files changed" });
+        }
+        // What an item uses stays in the quarantine.
+        vault.orphans = quarantined(vault).filter((file) => file.used === true);
+        vault.leftover = 0;
+        return tagged(session, generation, listed.length);
+      }
       case "vault_backup_due": {
         const { session, generation } = exactly(args, ["session", "generation"]) as { session: number; generation: number };
         const vault = vaultFor(session, generation);
@@ -4053,7 +4122,7 @@ export function installFakeShell(
     // A stored-file command that is being held is refused when it is let go, as the shell decides it (a refusal that comes late).
     const heldFile = heldFiles !== undefined && Object.hasOwn(OPERATION, cmd);
     if (refusal !== undefined && !heldFile) {
-      refusals.delete(cmd);
+      used(cmd, refusal);
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
       return Promise.reject(refusal);
     }
@@ -4263,7 +4332,7 @@ export function installFakeShell(
         const settle = (): void => {
           const late = refusals.get(cmd);
           if (late !== undefined) {
-            refusals.delete(cmd);
+            used(cmd, late);
             // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- Tauri rejects with the plain object
             reject(late);
             return;
@@ -4674,8 +4743,9 @@ export function installFakeShell(
         for (const release of waiting) release();
       };
     },
-    refuseNext: (cmd, error) => {
+    refuseNext: (cmd, error, times = 1) => {
       refusals.set(cmd, error);
+      refusalsLeft.set(cmd, times - 1);
     },
     holdChangePassword: () => {
       const waiting: (() => void)[] = [];
