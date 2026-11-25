@@ -2215,6 +2215,7 @@ dependencies = [
  "clipboard-win",
  "getrandom 0.4.3",
  "lockbox-core",
+ "png",
  "rfd",
  "serde",
  "serde_json",

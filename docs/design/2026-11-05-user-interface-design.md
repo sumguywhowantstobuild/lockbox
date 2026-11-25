@@ -213,8 +213,9 @@ Tray icon, save shortcut and close button arrive at the shell, not the page.
 - **Name and logo:** the name stays for now; the final logo follows once it's decided before release. The vault mark stands
   in, and the final logo needs a simpler version for 16 to 20 pixels.
   2026-11-25 (Ariel's picks, Plan 5 Tasks 0a and 0b): the name is Petalock and the logo is the three petals. Its colour is
-  slate blue, `#5B7BA8` on the icon (3.8 to 1 on Windows' dark taskbar, 3.9 to 1 on its light one) and `#9DB6DA` on the
-  app's dark side (Ariel, the same day: rose "not complementing the gray", then slate blue for a password manager that
+  slate blue, `#5B7BA8` on the icon for a light taskbar (3.9 to 1) and `#9DB6DA` for a dark one (7.9 to 1; Ariel saw the
+  slate blue look dull there beside other apps' icons), the app picking by Windows' own light or dark setting and
+  switching when it changes (Explorer's icon for the program stays the slate blue), and `#9DB6DA` on the app's dark side (Ariel, the same day: rose "not complementing the gray", then slate blue for a password manager that
   must feel trustworthy and secure; it shares the greys' cool tint and no vault uses blue). The colour shows only on the
   icon, the window's title bar and the small two-line mark beside the name on the lock and setup screens; every large
   pattern stays white lines (the setup screens show the three petals, the lock screen the vault's own), so inside the app

@@ -76,9 +76,9 @@ use windows_sys::Win32::System::Power::{
     SetThreadExecutionState, UnregisterSuspendResumeNotification,
 };
 use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, REG_OPTION_NON_VOLATILE,
-    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
-    RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_BINARY, REG_DWORD,
+    REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW,
+    RegQueryValueExW, RegSetValueExW,
 };
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
@@ -115,6 +115,9 @@ use super::{
 use crate::error::ShellResult;
 use crate::startup::{self, StartupState};
 use crate::{lock, window};
+
+/// The main window's icons for the taskbar Windows shows, and the watch for its light or dark setting changing.
+pub mod icons;
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -1063,6 +1066,39 @@ fn registry_binary(key: &RegistryKey, name: &[u16]) -> io::Result<Option<Vec<u8>
     match code {
         ERROR_SUCCESS if kind == REG_BINARY => Ok(data.get(..size as usize).map(<[u8]>::to_vec)),
         ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_MORE_DATA => Ok(None),
+        other => Err(registry_error(other)),
+    }
+}
+
+/// Where Windows keeps its light or dark choices for the current user.
+const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+
+/// Whether Windows shows a light taskbar: its "Choose your default Windows mode" setting (`SystemUsesLightTheme`,
+/// 1 light, 0 dark), which colours the taskbar and the clock's corner, not the apps' own (`AppsUseLightTheme`).
+/// `false` when the value is not there, Windows 11's dark default.
+pub fn taskbar_is_light() -> io::Result<bool> {
+    let Some(key) = open_registry_key(PERSONALIZE_KEY, KEY_QUERY_VALUE)? else {
+        return Ok(false);
+    };
+    let name = registry_text("SystemUsesLightTheme");
+    let mut data = 0u32;
+    let mut size = 4u32;
+    let mut kind = 0;
+    // SAFETY: `name` is NUL-terminated and outlives the call; `kind` is writable; `data` is writable for `size` (4)
+    // bytes, the length of a DWORD.
+    let code = unsafe {
+        RegQueryValueExW(
+            key.0,
+            name.as_ptr(),
+            ptr::null(),
+            &mut kind,
+            ptr::from_mut(&mut data).cast(),
+            &mut size,
+        )
+    };
+    match code {
+        ERROR_SUCCESS if kind == REG_DWORD && size == 4 => Ok(data != 0),
+        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_MORE_DATA => Ok(false),
         other => Err(registry_error(other)),
     }
 }

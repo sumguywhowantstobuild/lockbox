@@ -7,6 +7,7 @@ use tauri::menu::{IsMenuItem, Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime};
 
+use crate::app_icon;
 use crate::jobs::CloseReason;
 use crate::shell::Shell;
 use crate::window;
@@ -55,38 +56,25 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-/// The tray's picture: the app icon's own frame at Windows' small icon size, so the three petals drawn for 16 pixels (and
-/// 20, 24, 32 at higher scaling) are the ones by the clock. The window's icon is the large frame, which Windows would
-/// otherwise shrink into a blur here. Falls back to the window's icon when the app file has no icon (a test build).
+/// The tray's picture: the frame drawn for Windows' small icon size, in the colour for the taskbar Windows shows now
+/// ([`app_icon`]), so the three petals drawn for 16 pixels (and 20, 24, 32 at higher scaling) are the ones by the clock.
+/// Falls back to the window's icon should the frame not read (it is built into the program, so only a broken build).
 fn tray_icon<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::image::Image<'static>> {
-    let scale = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map_or(1.0, |monitor| monitor.scale_factor());
-    tray_icon_at(app, scale)
+    app_icon::tray_picture(app_icon::Taskbar::now()).or_else(|| {
+        app.default_window_icon()
+            .map(|icon| icon.clone().to_owned())
+    })
 }
 
-/// [`tray_icon`] at a given scaling.
-fn tray_icon_at<R: Runtime>(app: &AppHandle<R>, scale: f64) -> Option<tauri::image::Image<'static>> {
-    let size = small_icon_size(scale);
-    tauri::image::Image::from_icon_resource(
-        tauri::utils::platform::WINDOWS_APP_ICON_RESOURCE_ID,
-        size,
-        size,
-    )
-    .ok()
-    .or_else(|| app.default_window_icon().map(|icon| icon.clone().to_owned()))
-}
-
-/// Windows' small icon size, the one the clock's corner draws: 16 pixels at 100 % scaling, 20 at 125 %, 24 at 150 %, 32
-/// at 200 %. A scale Windows can't report (zero, negative or not a number) reads as 100 %.
-fn small_icon_size(scale: f64) -> u32 {
-    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
-    // In range by the clamp, so the cast neither truncates nor wraps.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let size = (16.0 * scale).round().clamp(16.0, 256.0) as u32;
-    size
+/// Changes the picture by the clock (Windows' light or dark setting changed). `None`, or no icon there yet, changes
+/// nothing.
+pub(crate) fn set_picture<R: Runtime>(
+    app: &AppHandle<R>,
+    picture: Option<tauri::image::Image<'static>>,
+) {
+    if let (Some(picture), Some(tray)) = (picture, app.tray_by_id(TRAY_ID)) {
+        let _ = tray.set_icon(Some(picture));
+    }
 }
 
 /// Takes the icon away again: a start that failed after the icon was made takes it down before it says so, so that
@@ -448,27 +436,57 @@ mod tests {
         remove(app.handle());
     }
 
-    /// The tray takes Windows' small icon size at each scaling (the frames the app icon draws by hand), and a scale that
-    /// can't be read is 100 %.
+    /// The tray's picture is the icon's own small frame in the colour for the taskbar Windows shows, built into the
+    /// program, so even a test program with no icon in its file has one.
     #[test]
-    fn tray_icon_takes_the_small_frame_for_the_scaling() {
-        for (scale, size) in [(1.0, 16), (1.25, 20), (1.5, 24), (1.75, 28), (2.0, 32), (3.0, 48)] {
-            assert_eq!(small_icon_size(scale), size, "at {scale}");
-        }
-        for odd in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert_eq!(small_icon_size(odd), 16, "at {odd}");
-        }
-        assert_eq!(small_icon_size(40.0), 256);
-    }
-
-    /// A build with no icon in its file (this test program has none) falls back to the window's icon, and with neither
-    /// there is no picture, which `build` refuses (fail closed).
-    #[test]
-    fn tray_icon_falls_back_when_the_file_has_no_icon() {
+    fn tray_icon_is_the_small_frame_for_the_taskbar() {
         let app = mock_builder()
             .build(mock_context(noop_assets()))
             .expect("the mock app builds");
-        assert!(tray_icon_at(app.handle(), 1.0).is_none());
+        let picture = tray_icon(app.handle()).expect("a picture");
+        // The drawn frame for Windows' small icon size at this PC's scaling: that size, or at 175 % (28) and 225 % (36) the
+        // next larger drawing, square.
+        let size = crate::os::win::icons::small_icon_size();
+        let drawn_sizes = [16, 20, 24, 32, 40, 48, 64, 256];
+        let expected = drawn_sizes
+            .into_iter()
+            .find(|drawn| *drawn >= size)
+            .unwrap_or(256);
+        assert_eq!((picture.width(), picture.height()), (expected, expected));
+        // Every drawn pixel in the colour for the taskbar Windows shows now.
+        let colour: [u8; 3] = match app_icon::Taskbar::now() {
+            app_icon::Taskbar::Light => [0x5b, 0x7b, 0xa8],
+            app_icon::Taskbar::Dark => [0x9d, 0xb6, 0xda],
+        };
+        let drawn: Vec<&[u8; 4]> = picture
+            .rgba()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|[.., alpha]| *alpha > 0)
+            .collect();
+        assert!(!drawn.is_empty());
+        assert!(drawn.iter().all(|[r, g, b, _]| [*r, *g, *b] == colour));
+    }
+
+    /// With no icon by the clock yet, a new picture changes nothing (no icon appears); with one, changing it, or a
+    /// missing picture, leaves the icon in place. (The test runtime can't read a tray icon's picture back.)
+    #[test]
+    fn set_picture_changes_the_icon_only_when_there_is_one() {
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("the mock app builds");
+        let dark = app_icon::tray_picture(app_icon::Taskbar::Dark);
+        set_picture(app.handle(), dark.clone());
+        assert!(app.handle().tray_by_id(TRAY_ID).is_none());
+        TrayIconBuilder::with_id(TRAY_ID)
+            .icon(tauri::image::Image::new_owned(vec![0; 4], 1, 1))
+            .build(app.handle())
+            .expect("the icon is made");
+        set_picture(app.handle(), dark);
+        set_picture(app.handle(), None);
+        assert!(app.handle().tray_by_id(TRAY_ID).is_some());
+        remove(app.handle());
     }
 
     /// The menu is exactly Open Petalock, Lock all and Quit, in that order, with ids the handler knows.

@@ -263,7 +263,10 @@ impl<R: Runtime> Steps<R> for RealSteps {
     }
 
     fn make_window(&self, app: &AppHandle<R>) -> StepResult<WebviewWindow<R>> {
-        Ok(window::main_window(app)?)
+        let window = window::main_window(app)?;
+        // The icon for the taskbar Windows shows, on the window and by the clock, changing with Windows' setting.
+        crate::app_icon::follow_taskbar(app, &window);
+        Ok(window)
     }
 
     fn start_window(

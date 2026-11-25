@@ -1,15 +1,17 @@
 // Draws Petalock's app icon, the three petals in slate blue, from the same formula as the page's line drawings
-// (ui/src/parts/Pattern.tsx), and writes crates/lockbox-desktop/icons/icon.ico and icon.png.
+// (ui/src/parts/Pattern.tsx), and writes crates/lockbox-desktop/icons/icon.ico, icon.png and icon-dark-taskbar.ico.
 //
-//   node scripts/make-icon.mjs            writes both files
+//   node scripts/make-icon.mjs            writes the three files
 //   node scripts/make-icon.mjs --check    exits 1 when the files differ from what the script draws
 //
 // Each frame of the .ico is drawn at its own size rather than shrunk from a big picture, so the small ones stay
 // sharp: 16 and 20 pixels take the solid trefoil, 24 and 32 the bolder small drawing (deeper petals, thicker lines),
 // 40 to 64 the two-line mark, 256 the fourteen-line pattern. Windows picks the frame for each place and scaling: 16, 20, 24 and 32 by the clock
 // and in lists at 100 to 200 %, 32, 40, 48 and 64 for the window and the taskbar, 256 in Explorer's large views.
-// One colour serves a light and a dark taskbar: the design's slate blue #5B7BA8 measures 3.8 to 1 on Windows' dark
-// taskbar (#202020) and 3.9 to 1 on its light one (#F3F3F3), above the 3 to 1 a line drawing needs.
+// Two colours, one for each Windows taskbar, which the app picks from Windows' own light or dark setting (`app_icon.rs`):
+// icon.ico in the design's slate blue #5B7BA8 (3.9 to 1 on the light taskbar, #F3F3F3), which is also the program's
+// own icon in Explorer, and icon-dark-taskbar.ico in the light slate blue #9DB6DA (7.9 to 1 on the dark one, #202020;
+// the slate blue there measured 3.8 and looked dull beside other apps' icons, Ariel 2026-11-25).
 //
 // No package is used: a pixel's colour is how much of it the drawing covers (64 samples a pixel), and the PNG and
 // ICO files are written by hand (zlib comes with Node). The same input always gives the same bytes.
@@ -19,7 +21,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync, inflateSync } from "node:zlib";
 
+/** The icon's colour for a light taskbar, and the program's own icon. */
 export const COLOUR = [0x5b, 0x7b, 0xa8];
+/** The icon's colour for a dark taskbar: the colour the app's dark side draws the mark in (`--field-mark`). */
+export const COLOUR_ON_DARK = [0x9d, 0xb6, 0xda];
 const ICONS = join(dirname(fileURLToPath(import.meta.url)), "..", "crates", "lockbox-desktop", "icons");
 
 // The drawings, in the formula's own units (a circle of 62 in a 200 square): radius = 100 (base + amp sin(points
@@ -114,9 +119,9 @@ function chunk(type, data) {
  * A frame's pixels as a PNG holds them before compression: each row a filter byte (0, none) then red, green, blue and
  * alpha per pixel, the icon's colour everywhere and its cover as the alpha (straight, not premultiplied, as PNG wants).
  */
-export function rawRows(frame) {
+export function rawRows(frame, colour = COLOUR) {
   const { size } = frame;
-  const cover = coverage(frame);
+  const cover = coveredOnce(frame);
   const rows = Buffer.alloc(size * (1 + size * 4));
   for (let y = 0; y < size; y += 1) {
     const row = y * (1 + size * 4);
@@ -124,19 +129,32 @@ export function rawRows(frame) {
     for (let x = 0; x < size; x += 1) {
       const at = row + 1 + x * 4;
       const alpha = Math.round((cover[y * size + x] ?? 0) * 255);
-      rows[at] = alpha === 0 ? 0 : COLOUR[0];
-      rows[at + 1] = alpha === 0 ? 0 : COLOUR[1];
-      rows[at + 2] = alpha === 0 ? 0 : COLOUR[2];
+      rows[at] = alpha === 0 ? 0 : colour[0];
+      rows[at + 1] = alpha === 0 ? 0 : colour[1];
+      rows[at + 2] = alpha === 0 ? 0 : colour[2];
       rows[at + 3] = alpha;
     }
   }
   return rows;
 }
 
-/** A frame as a PNG file. */
-export function png(frame) {
+const covered = new Map();
+
+/** [`coverage`], worked out once per frame: both colours of an icon share each frame's drawing. */
+function coveredOnce(frame) {
+  const key = `${String(frame.size)}/${frame.drawing}/${String(frame.stroke)}`;
+  let cover = covered.get(key);
+  if (cover === undefined) {
+    cover = coverage(frame);
+    covered.set(key, cover);
+  }
+  return cover;
+}
+
+/** A frame as a PNG file, in `colour`. */
+export function png(frame, colour = COLOUR) {
   const { size } = frame;
-  const rows = rawRows(frame);
+  const rows = rawRows(frame, colour);
   const header = Buffer.alloc(13);
   header.writeUInt32BE(size, 0);
   header.writeUInt32BE(size, 4);
@@ -151,8 +169,8 @@ export function png(frame) {
 }
 
 /** The .ico: every frame as a PNG inside it (Windows reads PNG frames since Vista), smallest first. */
-export function ico(frames = FRAMES) {
-  const images = frames.map(png);
+export function ico(frames = FRAMES, colour = COLOUR) {
+  const images = frames.map((frame) => png(frame, colour));
   const head = Buffer.alloc(6 + 16 * frames.length);
   head.writeUInt16LE(0, 0);
   head.writeUInt16LE(1, 2); // an icon
@@ -171,9 +189,13 @@ export function ico(frames = FRAMES) {
   return Buffer.concat([head, ...images]);
 }
 
-/** What the files should hold: the icon and the large picture. */
+/** What the files should hold: the icon, the large picture and the icon for a dark taskbar. */
 export function files() {
-  return { "icon.ico": ico(), "icon.png": png(PNG_FRAME) };
+  return {
+    "icon.ico": ico(),
+    "icon.png": png(PNG_FRAME),
+    "icon-dark-taskbar.ico": ico(FRAMES, COLOUR_ON_DARK),
+  };
 }
 
 /** A PNG file's size and its rows before compression (the IDAT chunks joined, then inflated). */
@@ -201,43 +223,46 @@ export function icoFrames(bytes) {
   });
 }
 
-/** Why one PNG is not the frame the script draws, or undefined when it is. */
-export function frameProblem(bytes, frame) {
+/** Why one PNG is not the frame the script draws in `colour`, or undefined when it is. */
+export function frameProblem(bytes, frame, colour = COLOUR) {
   const read = readPng(bytes);
   if (read === undefined || read.size !== frame.size) return `not a ${String(frame.size)} px PNG`;
-  if (!read.rows.equals(rawRows(frame))) return "its pixels differ from the drawing";
+  if (!read.rows.equals(rawRows(frame, colour))) return "its pixels differ from the drawing";
   return undefined;
+}
+
+/** Why one .ico is not the frames the script draws in `colour`, one line a problem, each starting with `name`. */
+function icoProblems(bytes, colour, name) {
+  const frames = icoFrames(bytes);
+  if (bytes.readUInt16LE(2) !== 1 || frames.length !== FRAMES.length) {
+    return [`${name}: ${String(frames.length)} frames, ${String(FRAMES.length)} drawn`];
+  }
+  return FRAMES.flatMap((frame, i) => {
+    const listed = frame.size >= 256 ? 0 : frame.size;
+    if (frames[i].listed !== listed) return [`${name} frame ${String(i + 1)}: lists ${String(frames[i].listed)}, drawn ${String(listed)}`];
+    const problem = frameProblem(frames[i].png, frame, colour);
+    return problem === undefined ? [] : [`${name} ${String(frame.size)} px: ${problem}`];
+  });
 }
 
 /**
  * Why the committed files are not what the script draws, one line a problem, or none. The pixels are compared, not the
  * compressed bytes: zlib's output may differ between Node builds and processors while the picture is the same.
  */
-export function problems(icoBytes, pngBytes) {
-  const found = [];
-  const same = (bytes, frame, name) => {
-    const problem = frameProblem(bytes, frame);
-    if (problem !== undefined) found.push(`${name}: ${problem}`);
-  };
-  const frames = icoFrames(icoBytes);
-  if (icoBytes.readUInt16LE(2) !== 1 || frames.length !== FRAMES.length) {
-    found.push(`icon.ico: ${String(frames.length)} frames, ${String(FRAMES.length)} drawn`);
-  } else {
-    FRAMES.forEach((frame, i) => {
-      const listed = frame.size >= 256 ? 0 : frame.size;
-      if (frames[i].listed !== listed) found.push(`icon.ico frame ${String(i + 1)}: lists ${String(frames[i].listed)}, drawn ${String(listed)}`);
-      else same(frames[i].png, frame, `icon.ico ${String(frame.size)} px`);
-    });
-  }
-  same(pngBytes, PNG_FRAME, "icon.png");
+export function problems(icoBytes, pngBytes, darkIcoBytes) {
+  const found = icoProblems(icoBytes, COLOUR, "icon.ico");
+  const large = frameProblem(pngBytes, PNG_FRAME);
+  if (large !== undefined) found.push(`icon.png: ${large}`);
+  found.push(...icoProblems(darkIcoBytes, COLOUR_ON_DARK, "icon-dark-taskbar.ico"));
   return found;
 }
 
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (process.argv.includes("--check")) {
-    const found = problems(readFileSync(join(ICONS, "icon.ico")), readFileSync(join(ICONS, "icon.png")));
+    const read = (name) => readFileSync(join(ICONS, name));
+    const found = problems(read("icon.ico"), read("icon.png"), read("icon-dark-taskbar.ico"));
     for (const line of found) console.error(`${line}; run node scripts/make-icon.mjs to remake the icon`);
-    if (found.length === 0) console.log("icon.ico and icon.png match the drawing");
+    if (found.length === 0) console.log("icon.ico, icon.png and icon-dark-taskbar.ico match the drawing");
     process.exit(found.length === 0 ? 0 : 1);
   }
   const wanted = files();
