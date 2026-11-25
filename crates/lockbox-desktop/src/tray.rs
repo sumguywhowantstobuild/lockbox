@@ -456,7 +456,7 @@ mod tests {
         // Every drawn pixel in the colour for the taskbar Windows shows now.
         let colour: [u8; 3] = match app_icon::Taskbar::now() {
             app_icon::Taskbar::Light => [0x5b, 0x7b, 0xa8],
-            app_icon::Taskbar::Dark => [0x9d, 0xb6, 0xda],
+            app_icon::Taskbar::Dark => [0xbc, 0xd0, 0xec],
         };
         let drawn: Vec<&[u8; 4]> = picture
             .rgba()

@@ -92,9 +92,24 @@ test("icon_holds_each_frame_once: each .ico lists every size, smallest first, ea
   assert.equal(readPng(PNG)?.size, PNG_FRAME.size);
 });
 
+test("icon_is_the_solid_petals_up_to_64: the tray, title bar, taskbar and Alt+Tab show one shape", () => {
+  // Ariel's pick on board H (2026-11-25): the two crossing lines read as six loops on the taskbar button.
+  for (const { size, drawing } of FRAMES) assert.equal(drawing, size <= 64 ? "solid" : "pattern", `the ${String(size)} frame`);
+  assert.equal(PNG_FRAME.drawing, "pattern");
+});
+
+test("dark_icon_matches_the_apps_mark: the dark taskbar's icon and the lock screen's small mark are one colour", () => {
+  const tokens = readFileSync(join(dirname(SCRIPT), "..", "ui", "src", "styles", "tokens.css"), "utf8");
+  const found = [...tokens.matchAll(/--field-mark:\s*#([0-9a-f]{6});/gi)].map(([, hex]) => hex.toLowerCase());
+  // Both modes set it; none found would pass the loop below without checking anything.
+  assert.equal(found.length, 2);
+  const hex = COLOUR_ON_DARK.map((c) => c.toString(16).padStart(2, "0")).join("");
+  for (const value of found) assert.equal(value, hex);
+});
+
 test("icon_frames_are_drawn_in_the_apps_colour: slate blue for a light taskbar, light slate blue for a dark one", () => {
   assert.deepEqual(COLOUR, [0x5b, 0x7b, 0xa8]);
-  assert.deepEqual(COLOUR_ON_DARK, [0x9d, 0xb6, 0xda]);
+  assert.deepEqual(COLOUR_ON_DARK, [0xbc, 0xd0, 0xec]);
   const icons = [
     [[...icoFrames(ICO).map((frame) => frame.png), PNG], COLOUR],
     [icoFrames(DARK_ICO).map((frame) => frame.png), COLOUR_ON_DARK],

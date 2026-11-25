@@ -5,13 +5,15 @@
 //   node scripts/make-icon.mjs --check    exits 1 when the files differ from what the script draws
 //
 // Each frame of the .ico is drawn at its own size rather than shrunk from a big picture, so the small ones stay
-// sharp: 16 and 20 pixels take the solid trefoil, 24 and 32 the bolder small drawing (deeper petals, thicker lines),
-// 40 to 64 the two-line mark, 256 the fourteen-line pattern. Windows picks the frame for each place and scaling: 16, 20, 24 and 32 by the clock
-// and in lists at 100 to 200 %, 32, 40, 48 and 64 for the window and the taskbar, 256 in Explorer's large views.
+// sharp: 16 to 64 pixels take the solid trefoil, 256 the fourteen-line pattern. Windows picks the frame for each place
+// and scaling: 16, 20, 24 and 32 by the clock and in lists at 100 to 200 %, 32, 40, 48 and 64 for the window, the
+// taskbar and Alt+Tab, 256 in Explorer's large views. So the tray, the title bar, the taskbar button and Alt+Tab all
+// show one shape (Ariel's pick on board H, 2026-11-25: the two crossing lines read as six loops on the taskbar button).
 // Two colours, one for each Windows taskbar, which the app picks from Windows' own light or dark setting (`app_icon.rs`):
 // icon.ico in the design's slate blue #5B7BA8 (3.9 to 1 on the light taskbar, #F3F3F3), which is also the program's
-// own icon in Explorer, and icon-dark-taskbar.ico in the light slate blue #9DB6DA (7.9 to 1 on the dark one, #202020;
-// the slate blue there measured 3.8 and looked dull beside other apps' icons, Ariel 2026-11-25).
+// own icon in Explorer, and icon-dark-taskbar.ico in the light slate blue #BCD0EC (10.4 to 1 on the dark one, #202020;
+// the slate blue there measured 3.8 and looked dull beside other apps' icons, and Ariel picked the brighter of board H's
+// three light blues, 2026-11-25).
 //
 // No package is used: a pixel's colour is how much of it the drawing covers (64 samples a pixel), and the PNG and
 // ICO files are written by hand (zlib comes with Node). The same input always gives the same bytes.
@@ -24,15 +26,12 @@ import { deflateSync, inflateSync } from "node:zlib";
 /** The icon's colour for a light taskbar, and the program's own icon. */
 export const COLOUR = [0x5b, 0x7b, 0xa8];
 /** The icon's colour for a dark taskbar: the colour the app's dark side draws the mark in (`--field-mark`). */
-export const COLOUR_ON_DARK = [0x9d, 0xb6, 0xda];
+export const COLOUR_ON_DARK = [0xbc, 0xd0, 0xec];
 const ICONS = join(dirname(fileURLToPath(import.meta.url)), "..", "crates", "lockbox-desktop", "icons");
 
 // The drawings, in the formula's own units (a circle of 62 in a 200 square): radius = 100 (base + amp sin(points
-// angle + phase)) for each line. `small` is the design's bold drawing for 16 to 24 pixels (board D's "lines"),
-// `mark` the two-line mark, `pattern` the lock screen's fourteen lines.
+// angle + phase)) for each line. `pattern` is the lock screen's fourteen lines.
 const DRAWINGS = {
-  small: { base: 0.6, lines: [0, 1].map((i) => ({ amp: 0.26, phase: i * Math.PI })) },
-  mark: { base: 0.62, lines: [0, 1].map((i) => ({ amp: 0.17, phase: i * Math.PI })) },
   pattern: { base: 0.62, lines: Array.from({ length: 14 }, (_, i) => ({ amp: 0.16 + i * 0.012, phase: (i * Math.PI) / 14 })) },
   // Board D's "solid": one deep trefoil, filled, with a round hole of 15 in the middle (see-through here).
   solid: { base: 0.56, lines: [{ amp: 0.34, phase: 0 }], fill: true, hole: 15 },
@@ -40,14 +39,14 @@ const DRAWINGS = {
 
 /** Each frame: its size in pixels, its drawing and the width of its lines in pixels (tuned by eye at each size). */
 export const FRAMES = [
-  // At 16 and 20 the two crossing lines run into a grid, so these take the design's solid trefoil instead.
+  // Up to 64 the solid trefoil: two crossing lines run into a grid at 16 and 20 and read as six loops at 24 to 64.
   { size: 16, drawing: "solid", stroke: 0 },
   { size: 20, drawing: "solid", stroke: 0 },
-  { size: 24, drawing: "small", stroke: 1.75 },
-  { size: 32, drawing: "small", stroke: 2.1 },
-  { size: 40, drawing: "mark", stroke: 2.2 },
-  { size: 48, drawing: "mark", stroke: 2.4 },
-  { size: 64, drawing: "mark", stroke: 2.8 },
+  { size: 24, drawing: "solid", stroke: 0 },
+  { size: 32, drawing: "solid", stroke: 0 },
+  { size: 40, drawing: "solid", stroke: 0 },
+  { size: 48, drawing: "solid", stroke: 0 },
+  { size: 64, drawing: "solid", stroke: 0 },
   { size: 256, drawing: "pattern", stroke: 1.9 },
 ];
 

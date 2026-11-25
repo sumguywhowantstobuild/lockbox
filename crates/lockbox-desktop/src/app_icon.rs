@@ -131,7 +131,7 @@ mod tests {
         // Slate blue on a light taskbar, light slate blue on a dark one: the colours make-icon.mjs draws.
         for (taskbar, colour) in [
             (Taskbar::Light, [0x5b, 0x7b, 0xa8]),
-            (Taskbar::Dark, [0x9d, 0xb6, 0xda]),
+            (Taskbar::Dark, [0xbc, 0xd0, 0xec]),
         ] {
             let image =
                 picture(frame(taskbar.icon_file(), 16).expect("a 16 px frame")).expect("a picture");

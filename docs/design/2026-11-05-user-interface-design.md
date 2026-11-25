@@ -221,6 +221,12 @@ Tray icon, save shortcut and close button arrive at the shell, not the page.
   pattern stays white lines (the setup screens show the three petals, the lock screen the vault's own), so inside the app
   the vaults keep the only colour. A contrast theme draws the mark in its text colour. The app icon draws each small size
   on its own (a solid trefoil at 16 and 20 pixels, thicker lines at 24 and 32).
+  2026-11-25, later (Ariel's pick on the canvas's board H, "Solid, brighter", after a photo of the real taskbar): the two
+  crossing lines read as six loops on the taskbar button and didn't match the tray beside it, so the icon is the solid
+  trefoil at every size from 16 to 64 pixels (tray, title bar, taskbar button, Alt+Tab); only Explorer's 256 pixel view
+  keeps the fourteen-line pattern. The light slate blue for a dark taskbar and the app's dark side becomes `#BCD0EC`
+  (10.4 to 1 on the dark taskbar, was `#9DB6DA` at 7.9), brighter beside other apps' icons and still blue; the light
+  taskbar's `#5B7BA8` is unchanged.
 - **Words on screen:** "folder", never "collection" or "project". "Key" for an API key; "recovery key" always in full; the
   vault key never appears. "Details" for the header, "leftover files" for orphaned files. "Backup" is encrypted; "export"
   is readable.
