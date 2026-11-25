@@ -198,8 +198,9 @@ Tray icon, save shortcut and close button arrive at the shell, not the page.
 - **Vault colour:** each vault has one, shown on the main button, the selected row and the vault mark. Three accents are
   drawn, each with light and dark values: Work `#14663F` / `#4FD08A`, Home `#4E2FA8` / `#B49CF5`, a read-only old copy
   `#7A5A00` / `#F2C14E`. No gradients (Ariel: they looked unprofessional for strangers).
-- **Vault mark:** each vault's line mark has its own number of points, from its place on the vault list (3, 5, 6, 7 and
-  on; 4 stays the read-only copy's), while the colours take turns, Work then Home. So two vaults of one colour still look
+- **Vault mark:** each vault's line mark has its own number of points, from its place on the vault list (5, 6, 7 and on;
+  4 stays the read-only copy's; 3 is the app's own mark, changed 2026-11-25 from "3, 5, 6, 7" when the three petals became
+  Petalock's mark), while the colours take turns, Work then Home. So two vaults of one colour still look
   different (Ariel, 2026-11-06, at the first hands-on: the first and third vault looked alike). The small mark beside a
   name is drawn in its vault's colour (a contrast theme's text colour under one), with a line thick enough to stay clear
   at 36 pixels. On the lock screen every vault takes its place's look, since whether it's a read-only copy is known only
@@ -211,6 +212,14 @@ Tray icon, save shortcut and close button arrive at the shell, not the page.
 - **Type:** Geist, with Geist Mono for key values and recovery keys. Light and dark both ship.
 - **Name and logo:** the name stays for now; the final logo follows once it's decided before release. The vault mark stands
   in, and the final logo needs a simpler version for 16 to 20 pixels.
+  2026-11-25 (Ariel's picks, Plan 5 Tasks 0a and 0b): the name is Petalock and the logo is the three petals. Its colour is
+  slate blue, `#5B7BA8` on the icon (3.8 to 1 on Windows' dark taskbar, 3.9 to 1 on its light one) and `#9DB6DA` on the
+  app's dark side (Ariel, the same day: rose "not complementing the gray", then slate blue for a password manager that
+  must feel trustworthy and secure; it shares the greys' cool tint and no vault uses blue). The colour shows only on the
+  icon, the window's title bar and the small two-line mark beside the name on the lock and setup screens; every large
+  pattern stays white lines (the setup screens show the three petals, the lock screen the vault's own), so inside the app
+  the vaults keep the only colour. A contrast theme draws the mark in its text colour. The app icon draws each small size
+  on its own (a solid trefoil at 16 and 20 pixels, thicker lines at 24 and 32).
 - **Words on screen:** "folder", never "collection" or "project". "Key" for an API key; "recovery key" always in full; the
   vault key never appears. "Details" for the header, "leftover files" for orphaned files. "Backup" is encrypted; "export"
   is readable.

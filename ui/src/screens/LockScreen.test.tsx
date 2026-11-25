@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
 import { LockboxParts } from "../parts/LockboxParts";
+import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
 import { debugState, resetStoreForTests, startStore } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { installFakeShell, PASSWORD, sampleItems, type FakeShell } from "../testing/fakeShell";
@@ -52,6 +54,31 @@ test("one_vault_is_already_chosen", async () => {
   expect(screen.queryByRole("radio")).toBeNull();
   expect(screen.getByRole("button", { name: "Unlock" })).toBeTruthy();
   await expectNoAxe(container);
+});
+
+test("lock_screen_shows_the_app_mark_small", async () => {
+  const drawingOf = (element: ReactElement) => {
+    const { container, unmount } = render(element);
+    const d = container.querySelector("path")?.getAttribute("d") ?? "";
+    unmount();
+    return d;
+  };
+  const appMark = drawingOf(<VaultMark points={3} />);
+  const firstVault = drawingOf(<Pattern points={vaultLook(0, false).points} />);
+  // Both drawings exist, so the comparisons below can't pass on two empty ones.
+  expect(appMark).not.toBe("");
+  expect(firstVault).not.toBe("");
+  const { container } = await show([{ id: 7, name: "My vault", items: sampleItems() }]);
+  const field = container.querySelector(".field");
+  // 1a: the app's small three-petal mark beside its name, drawn for the eye only (the name is the words beside it)...
+  const name = field?.querySelector(".mark");
+  expect(name?.textContent).toBe("Petalock");
+  const mark = name?.querySelector("svg.appmark");
+  expect(mark?.getAttribute("aria-hidden")).toBe("true");
+  expect(mark?.querySelector("path")?.getAttribute("d")).toBe(appMark);
+  // ...and the vault's own pattern large behind it, in the look of its place on the list.
+  expect(field?.querySelector("svg.rose path")?.getAttribute("d")).toBe(firstVault);
+  expect(field?.querySelectorAll("svg.appmark")).toHaveLength(1);
 });
 
 test("two_vaults_list_with_the_first_chosen", async () => {

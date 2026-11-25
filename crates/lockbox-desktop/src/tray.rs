@@ -30,11 +30,11 @@ pub(crate) const ITEMS: [(&str, &str); 3] = [
 /// Puts Petalock's icon by the clock, with its menu: a left click opens the window, a right click opens the menu. The setup hook calls it
 /// and ends the app when it fails: with no icon, a hidden window could never be reached again (fail closed).
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let Some(icon) = app.default_window_icon() else {
+    let Some(icon) = tray_icon(app) else {
         return Err(std::io::Error::other("no icon for the tray").into());
     };
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon.clone())
+        .icon(icon)
         .tooltip(TOOLTIP)
         .menu(&menu(app)?)
         // The menu opens on the right button only: the left one opens the window.
@@ -53,6 +53,40 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// The tray's picture: the app icon's own frame at Windows' small icon size, so the three petals drawn for 16 pixels (and
+/// 20, 24, 32 at higher scaling) are the ones by the clock. The window's icon is the large frame, which Windows would
+/// otherwise shrink into a blur here. Falls back to the window's icon when the app file has no icon (a test build).
+fn tray_icon<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::image::Image<'static>> {
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map_or(1.0, |monitor| monitor.scale_factor());
+    tray_icon_at(app, scale)
+}
+
+/// [`tray_icon`] at a given scaling.
+fn tray_icon_at<R: Runtime>(app: &AppHandle<R>, scale: f64) -> Option<tauri::image::Image<'static>> {
+    let size = small_icon_size(scale);
+    tauri::image::Image::from_icon_resource(
+        tauri::utils::platform::WINDOWS_APP_ICON_RESOURCE_ID,
+        size,
+        size,
+    )
+    .ok()
+    .or_else(|| app.default_window_icon().map(|icon| icon.clone().to_owned()))
+}
+
+/// Windows' small icon size, the one the clock's corner draws: 16 pixels at 100 % scaling, 20 at 125 %, 24 at 150 %, 32
+/// at 200 %. A scale Windows can't report (zero, negative or not a number) reads as 100 %.
+fn small_icon_size(scale: f64) -> u32 {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    // In range by the clamp, so the cast neither truncates nor wraps.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let size = (16.0 * scale).round().clamp(16.0, 256.0) as u32;
+    size
 }
 
 /// Takes the icon away again: a start that failed after the icon was made takes it down before it says so, so that
@@ -412,6 +446,29 @@ mod tests {
             "the icon is still there"
         );
         remove(app.handle());
+    }
+
+    /// The tray takes Windows' small icon size at each scaling (the frames the app icon draws by hand), and a scale that
+    /// can't be read is 100 %.
+    #[test]
+    fn tray_icon_takes_the_small_frame_for_the_scaling() {
+        for (scale, size) in [(1.0, 16), (1.25, 20), (1.5, 24), (1.75, 28), (2.0, 32), (3.0, 48)] {
+            assert_eq!(small_icon_size(scale), size, "at {scale}");
+        }
+        for odd in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(small_icon_size(odd), 16, "at {odd}");
+        }
+        assert_eq!(small_icon_size(40.0), 256);
+    }
+
+    /// A build with no icon in its file (this test program has none) falls back to the window's icon, and with neither
+    /// there is no picture, which `build` refuses (fail closed).
+    #[test]
+    fn tray_icon_falls_back_when_the_file_has_no_icon() {
+        let app = mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("the mock app builds");
+        assert!(tray_icon_at(app.handle(), 1.0).is_none());
     }
 
     /// The menu is exactly Open Petalock, Lock all and Quit, in that order, with ids the handler knows.

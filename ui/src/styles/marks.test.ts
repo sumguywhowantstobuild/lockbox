@@ -4,6 +4,7 @@ import { expect, test } from "vitest";
 import { readBeside } from "../testing/files";
 
 const COMPONENTS = readBeside(import.meta.url, "./components.css").replace(/\/\*[\s\S]*?\*\//g, "");
+const HIGH_CONTRAST = readBeside(import.meta.url, "./high-contrast.css").replace(/\/\*[\s\S]*?\*\//g, "");
 
 function declarationsFor(selector: string): string {
   for (const rule of COMPONENTS.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
@@ -19,4 +20,23 @@ test("the_small_mark_takes_its_vaults_colour_and_a_line_of_about_a_pixel_and_a_h
   const pixels = (width * 36) / 200;
   expect(pixels).toBeGreaterThan(1.3);
   expect(pixels).toBeLessThan(1.8);
+});
+
+test("app_mark_has_a_contrast_colour", () => {
+  // The app's three petals take the app's slate blue on the dark side, about a pixel and a half thick at 24px...
+  const mark = declarationsFor(".appmark path");
+  expect(mark).toMatch(/stroke: var\(--field-mark\)/);
+  const pixels = (Number(/stroke-width: ([\d.]+)/.exec(mark)?.[1]) * 24) / 200;
+  expect(pixels).toBeGreaterThan(1.3);
+  expect(pixels).toBeLessThan(1.8);
+  expect(declarationsFor(".appmark")).toMatch(/width: 24px/);
+  // The patterns stay white lines: the app's colour is the small mark's alone.
+  expect(declarationsFor(".rose path")).toMatch(/stroke: var\(--field-ink\)/);
+  // ...and a contrast theme's text colour instead, like every other mark drawn in a fixed colour.
+  const forced = HIGH_CONTRAST.slice(HIGH_CONTRAST.indexOf("@media (forced-colors: active)"));
+  const rule = /\.app :is\(([^)]*)\) path\s*\{([^}]*)\}/.exec(forced);
+  const marks = (rule?.[1] ?? "").split(",").map((each) => each.trim());
+  expect(marks).toContain(".appmark");
+  expect(marks).toContain(".rose");
+  expect(rule?.[2] ?? "").toMatch(/stroke: CanvasText !important/);
 });

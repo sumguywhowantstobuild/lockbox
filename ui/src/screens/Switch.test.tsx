@@ -355,7 +355,7 @@ test("the_unlocked_vault_comes_on_screen_and_the_menu_marks_it", async () => {
   const root = () => document.querySelector(".app");
   expect(root()?.classList.contains(accent(2))).toBe(true);
   expect(markOnScreen()).toBe(markOf(vaultLook(2, false).points));
-  expect(vaultLook(2, false).points).toBe(6);
+  expect(vaultLook(2, false).points).toBe(7);
   let menu = await openVaultMenu();
   const selected = rowsOf(menu).find((row) => row.getAttribute("aria-checked") === "true");
   expect(selected?.textContent).toBe("WorkUnlocked");
@@ -745,7 +745,7 @@ test("vault_strip_two_listed_one_unlocked_shows", async () => {
   expect(buttons.map((button) => button.getAttribute("aria-current"))).toEqual(["true", null]);
   expect(buttons.map((button) => button.classList.contains("on"))).toEqual([true, false]);
   expect(buttons.map((button) => button.classList.contains(`v-${vaultLook(0, false).accent}`) || button.classList.contains(`v-${vaultLook(1, false).accent}`))).toEqual([true, true]);
-  expect(buttons.map((button) => button.querySelector("svg path")?.getAttribute("d"))).toEqual([markOf(3), markOf(5)]);
+  expect(buttons.map((button) => button.querySelector("svg path")?.getAttribute("d"))).toEqual([markOf(5), markOf(6)]);
   expect(buttons[0]?.querySelector(".dlock")).toBeNull();
   expect(buttons[1]?.querySelector(".dlock")).not.toBeNull();
   // A button is the vault's row: the locked one's opens its unlock step, an open one's switches.
@@ -772,8 +772,8 @@ test("vault_strip_two_named_alike_tells_them_apart", async () => {
   expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual(["My vault, 1 of 2", "My vault, 2 of 2, locked"]);
   expect(buttons.map((button) => button.getAttribute("title"))).toEqual(["My vault, 1 of 2", "My vault, 2 of 2, locked"]);
   const [first, second] = buttons.map((button) => button.querySelector("svg path")?.getAttribute("d"));
-  expect(first).toBe(markOf(3));
-  expect(second).toBe(markOf(5));
+  expect(first).toBe(markOf(5));
+  expect(second).toBe(markOf(6));
   expect(first).not.toBe(second);
   // The vault menu's rows say the same place (4C end review, astra6-4): two vaults with one status would otherwise read alike, the mark being a picture.
   const menu = await openVaultMenu();

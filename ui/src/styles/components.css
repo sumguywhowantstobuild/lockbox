@@ -41,8 +41,26 @@
   stroke-width: 0.22;
 }
 
+/* Petalock's small mark beside its name on the lock screen (1a) and the setup screens (21a), in the app's slate blue: the
+   only place the app's own colour shows inside it. 24px for 200 units, so 12.5 units is a line of about a pixel and a
+   half, as the vault marks are drawn. */
+.appmark {
+  width: 24px;
+  height: 24px;
+  flex: none;
+}
+
+.appmark path {
+  fill: none;
+  stroke: var(--field-mark);
+  stroke-width: 12.5;
+}
+
 .mark {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   font-size: 18px;
   font-weight: 700;

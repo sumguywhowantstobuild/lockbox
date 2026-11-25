@@ -134,7 +134,7 @@
   }
 
   /* Marks drawn in a fixed colour would disappear on a dark or a light contrast theme. */
-  .app :is(.vmini, .rose, .vprint, .dmark) path {
+  .app :is(.vmini, .rose, .vprint, .dmark, .appmark) path {
     stroke: CanvasText !important;
   }
 

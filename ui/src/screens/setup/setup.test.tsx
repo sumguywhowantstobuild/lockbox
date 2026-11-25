@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../../App";
 import { messageFor, messageText } from "../../messages";
-import { Pattern } from "../../parts/Pattern";
+import { APP_POINTS, Pattern } from "../../parts/Pattern";
 import { debugState, makeNewKey, resetStoreForTests } from "../../store";
 import { expectNoAxe } from "../../testing/axe";
 import {
@@ -144,10 +144,10 @@ test("no_vaults_goes_to_welcome", async () => {
   expect(screen.getByRole("button", { name: "I already have a vault or a backup" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "I already have a vault" })).toBeNull();
   expect(screen.queryByText(/forgot/i)).toBeNull();
-  // The nine-point pattern of the setup screens, not a vault's own.
+  // The app's own three petals on the setup screens, not a vault's own.
   const drawn = container.querySelector(".rose path")?.getAttribute("d");
-  const nine = render(<Pattern points={9} />).container.querySelector("path")?.getAttribute("d");
-  expect(drawn).toBe(nine);
+  const three = render(<Pattern points={APP_POINTS} />).container.querySelector("path")?.getAttribute("d");
+  expect(drawn).toBe(three);
   await expectNoAxe(container);
 });
 
@@ -341,9 +341,9 @@ test("key_shows_once_with_the_plain_warning", async () => {
   // The vault is marked and the key was made once: asking for another is not how this screen works.
   expect(shell.unconfirmed(1)).toBe(true);
   expect(commandsSent()).not.toContain("regenerate_recovery");
-  // The nine-point pattern.
-  const nine = render(<Pattern points={9} />).container.querySelector("path")?.getAttribute("d");
-  expect(container.querySelector(".rose path")?.getAttribute("d")).toBe(nine);
+  // The app's own three petals.
+  const three = render(<Pattern points={APP_POINTS} />).container.querySelector("path")?.getAttribute("d");
+  expect(container.querySelector(".rose path")?.getAttribute("d")).toBe(three);
   await expectNoAxe(container);
 });
 

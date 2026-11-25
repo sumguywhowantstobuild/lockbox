@@ -5,19 +5,20 @@ import { Pattern, VaultMark, vaultLook } from "./Pattern";
 
 afterEach(cleanup);
 
-test("each_listed_vault_has_its_own_number_of_points_and_the_colours_take_turns", () => {
-  expect(vaultLook(0, false)).toEqual({ accent: "work", points: 3 });
-  expect(vaultLook(1, false)).toEqual({ accent: "home", points: 5 });
-  expect(vaultLook(2, false)).toEqual({ accent: "work", points: 6 });
-  expect(vaultLook(3, false)).toEqual({ accent: "home", points: 7 });
-  expect(vaultLook(4, false)).toEqual({ accent: "work", points: 8 });
-  expect(vaultLook(5, false)).toEqual({ accent: "home", points: 9 });
-  expect(vaultLook(10, false)).toEqual({ accent: "work", points: 14 });
+test("vaults_start_at_five", () => {
+  // Three points are the app's own mark (Petalock's three petals), so the first vault takes five, and the colours take turns.
+  expect(vaultLook(0, false)).toEqual({ accent: "work", points: 5 });
+  expect(vaultLook(1, false)).toEqual({ accent: "home", points: 6 });
+  expect(vaultLook(2, false)).toEqual({ accent: "work", points: 7 });
+  expect(vaultLook(3, false)).toEqual({ accent: "home", points: 8 });
+  expect(vaultLook(10, false)).toEqual({ accent: "work", points: 15 });
+  expect(vaultLook(0, true)).toEqual({ accent: "old", points: 4 });
 });
 
-test("no_two_listed_vaults_share_a_shape_and_none_takes_the_amber_ones_four", () => {
+test("no_two_listed_vaults_share_a_shape_and_none_takes_the_apps_three_or_the_amber_ones_four", () => {
   const points = Array.from({ length: 40 }, (_, position) => vaultLook(position, false).points);
   expect(new Set(points).size).toBe(points.length);
+  expect(points).not.toContain(3);
   expect(points).not.toContain(4);
   // Only the colour repeats.
   expect(new Set(Array.from({ length: 40 }, (_, position) => vaultLook(position, false).accent))).toEqual(

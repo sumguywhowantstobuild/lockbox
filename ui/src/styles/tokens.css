@@ -39,6 +39,9 @@
   --lift: rgba(38, 41, 49, 0.22);
   --field: #1a1d22;
   --field-ink: #ffffff;
+  /* The app's slate blue (Petalock's three petals) on the dark side, which is dark in both modes: the icon's #5b7ba8
+     made light enough for it. */
+  --field-mark: #9db6da;
   --switch-off: #5b626d;
   --switch-knob: #ffffff;
   /* How much of its tile's colour the closed side menu's folder letter keeps; the rest is the text colour. The
@@ -70,6 +73,7 @@
   --lift: rgba(0, 0, 0, 0.8);
   --field: #1a1d22;
   --field-ink: #ffffff;
+  --field-mark: #9db6da;
   --switch-off: #a3a7ad;
   --switch-knob: #14171b;
   --tile-mix: 68%;

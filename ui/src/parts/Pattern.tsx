@@ -9,16 +9,20 @@ export interface VaultLook {
 
 /**
  * How a vault looks, worked out from its place on the list, not stored: every listed vault has a shape of its own, by
- * its place (3 points, then 5, 6, 7, 8, 9 and on; never 4), while the colour takes turns, Work then Home. A read-only
- * vault is the amber one with four points wherever it is, so no listed vault ever has its shape.
+ * its place (5 points, then 6, 7, 8 and on), while the colour takes turns, Work then Home. Three points are the app's own
+ * mark (`AppMark`), so no vault takes them. A read-only vault is the amber one with four points wherever it is, so no
+ * listed vault ever has its shape.
  */
 export function vaultLook(position: number, readOnly: boolean): VaultLook {
   if (readOnly) return { accent: "old", points: 4 };
   return {
     accent: position % 2 === 0 ? "work" : "home",
-    points: position === 0 ? 3 : position + 4,
+    points: position + 5,
   };
 }
+
+/** The app's own mark: the two-line drawing at three points, Petalock's three petals. */
+export const APP_POINTS = 3;
 
 const cache = new Map<string, string>();
 

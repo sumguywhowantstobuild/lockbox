@@ -3,6 +3,7 @@ import type { VaultEntry } from "../api";
 import { useLockEpoch } from "../jobs";
 import { messageFor, type Message } from "../messages";
 import { PasswordField } from "../parts/PasswordField";
+import { AppMark } from "../parts/AppMark";
 import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
 import { focusButton } from "../focus";
 import { folderWords } from "../moveInWords";
@@ -109,7 +110,10 @@ export function UnlockStep({ step }: { step: UnlockStepOf }) {
     >
       <header className="field">
         <Pattern points={vaultLook(position, false).points} className="rose" />
-        <p className="mark">Petalock</p>
+        <p className="mark">
+          <AppMark />
+          Petalock
+        </p>
         <p className="say">Your items stay encrypted until you enter the password.</p>
       </header>
       <main className="plate">
@@ -334,7 +338,10 @@ export function LockScreen() {
       {/* The page's banner: its line says what the save step holds, so a screen reader moving by landmarks must reach it. */}
       <header className="field">
         <Pattern points={vaultLook(position, false).points} className="rose" />
-        <p className="mark">Petalock</p>
+        <p className="mark">
+          <AppMark />
+          Petalock
+        </p>
         <p className="say">
           {capture === null
             ? "Your items stay encrypted until you enter the password."

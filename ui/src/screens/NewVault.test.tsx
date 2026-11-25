@@ -4,7 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
-import { Pattern } from "../parts/Pattern";
+import { APP_POINTS, Pattern } from "../parts/Pattern";
 import { debugState, resetStoreForTests } from "../store";
 import { expectNoAxe } from "../testing/axe";
 import { rowReads } from "../testing/menuRows";
@@ -875,8 +875,8 @@ test("new_vault_screens_have_no_axe_violations", async () => {
 
 test("the_inside_new_vault_form_draws_its_places_pattern", async () => {
   // 18b draws the new vault's own pattern, by the place it will take at the end of the list: with two listed, the third
-  // place's six points (as the unlock step draws a vault's), on the form and on its cloud warning; the first-use screens
-  // keep the setup screens' nine.
+  // place's seven points (as the unlock step draws a vault's), on the form and on its cloud warning; the first-use screens
+  // keep the app's own three petals.
   const drawn = () => document.querySelector("svg.rose path")?.getAttribute("d");
   const pattern = (points: number) => {
     const { container, unmount } = render(<Pattern points={points} />);
@@ -886,16 +886,16 @@ test("the_inside_new_vault_form_draws_its_places_pattern", async () => {
   };
   await unlocked([vault(7, "My vault"), vault(8, "Home")]);
   await toTheForm();
-  expect(drawn()).toBe(pattern(6));
+  expect(drawn()).toBe(pattern(7));
   fill("Work", NEW);
   shell.cloudNext();
   create();
   await cloudWarning();
-  expect(drawn()).toBe(pattern(6));
+  expect(drawn()).toBe(pattern(7));
   cleanup();
   resetStoreForTests();
   render(<CreateVault onBack={() => undefined} />);
-  expect(drawn()).toBe(pattern(9));
+  expect(drawn()).toBe(pattern(APP_POINTS));
 });
 
 // ---- Plan 4C Task 13b: 18c names the service and says where the folder is ----
