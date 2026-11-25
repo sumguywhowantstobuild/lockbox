@@ -343,7 +343,7 @@ const SAVE_CARD = {
 
 /**
  * 9b outside the Add files panel: the bar, the bytes in words and Cancel, for the Save a copy this vault is working on, or for a batch of
- * files once the person has gone from its panel, once the job has told the page which operation it is (`lockbox://job-started`, matched by the
+ * files once the person has gone from its panel, once the job has told the page which operation it is (`petalock://job-started`, matched by the
  * request the page sent). Nothing before that, and nothing for Open or Replace file, which have no progress of their own: 4A's "working" words
  * are all they show. A batch has its bar in the panel while that is on screen (one bar, never two); here it is what can still stop it.
  */
@@ -366,7 +366,7 @@ export function FileJobProgress({ data }: { data: SessionData }) {
 }
 
 /**
- * What 5d draws for a long job: while the shell says the vault is working (`lockbox://busy`), the window says what, and why it does not
+ * What 5d draws for a long job: while the shell says the vault is working (`petalock://busy`), the window says what, and why it does not
  * lock for being idle. Windows locking or sleeping still locks, and the words say so. Nothing while no job runs, and a lock takes it with
  * the vault's record. A job that has its own progress card says what it is doing, and the Windows part, there, so only "Auto-lock is waiting
  * until this finishes." is left here.

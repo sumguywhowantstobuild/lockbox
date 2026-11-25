@@ -3,7 +3,7 @@
 // questions asked of it), and what its unlock found that is still to be answered (the app's questions, `SessionAsks`).
 // Beside the sessions, only what launch told, a refusal for the lock screen, and the one search (what is typed and what
 // each vault found, which a lock takes away vault by vault). Nothing else. A lock wipes the lot at once: the
-// store listens for `lockbox://locked` before any command is sent, and a lock event drops the vault's whole record
+// store listens for `petalock://locked` before any command is sent, and a lock event drops the vault's whole record
 // (`dropSession`). An answer that comes back for a vault that has locked since is dropped without a word (it is the
 // expected outcome of a lock, not an error): the bridge refuses it with `StaleAnswer`, and so does this file when the
 // session it was for is gone.
@@ -141,7 +141,7 @@ export interface PasswordProblem {
 export type BackupStep =
   /** 22a. Where it goes is picked in Windows' own dialog, after Back up. `error` is what the last try was refused with, before anything was written (22d's numbers among them). */
   | { phase: "ask"; error: unknown }
-  /** Back up was pressed: the dialog is open, then the work runs. `request` names its job by `lockbox://job-started`, which is when the bar appears. */
+  /** Back up was pressed: the dialog is open, then the work runs. `request` names its job by `petalock://job-started`, which is when the bar appears. */
   | { phase: "running"; request: number }
   /** 22c. */
   | { phase: "saved"; view: api.BackupView }
@@ -172,7 +172,7 @@ export interface TestFlow {
   busy: boolean;
   /** What the last try was refused with, to say under the box (a wrong password among them), or `null`. */
   problem: unknown;
-  /** The number the test's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
+  /** The number the test's command was sent with, while it runs: the shell names the job by `petalock://job-started` with it. */
   request: number | null;
   /** What the test found, for 23b. */
   view: api.BackupSummaryView | null;
@@ -202,7 +202,7 @@ export interface OpenFlow {
   busy: boolean;
   /** What the last try was refused with, to say under the box (a wrong password among them) or the row, or `null`. */
   problem: unknown;
-  /** The number the open's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
+  /** The number the open's command was sent with, while it runs: the shell names the job by `petalock://job-started` with it. */
   request: number | null;
 }
 
@@ -322,7 +322,7 @@ export interface RestoreFlow {
   problem: unknown;
   /** What the checked backup is and where it would go (24b, and the date 24e names). `null` before the check. */
   checked: api.RestoreChecked | null;
-  /** The number the check's, the copy's or the swap's command was sent with, while it runs: the shell names the job by `lockbox://job-started` with it. */
+  /** The number the check's, the copy's or the swap's command was sent with, while it runs: the shell names the job by `petalock://job-started` with it. */
   request: number | null;
   /** The token a question waits under (`cloud`, `name`), and the name suggested for a new folder (`name`). */
   token: string | null;
@@ -570,7 +570,7 @@ export interface SessionData {
    * the handle that Show in Explorer uses. A lock takes it with the record.
    */
   saveAll: SaveAllFlow | null;
-  /** The long operations the shell says are running for this vault (`lockbox://busy`): while there are any, auto-lock waits and the window says so. */
+  /** The long operations the shell says are running for this vault (`petalock://busy`): while there are any, auto-lock waits and the window says so. */
   operations: string[];
   /** Change password, begun from Settings, Ask 9 or Ask 2 and not put away: see {@link PasswordChange}. */
   passwordChange: PasswordChange | null;
@@ -650,7 +650,7 @@ export interface FileJob {
   id: string | null;
   fileId: string | null;
   /**
-   * The number this job's command was sent with. The shell names the job's operation by `lockbox://job-started` with this number, so the
+   * The number this job's command was sent with. The shell names the job's operation by `petalock://job-started` with this number, so the
    * screen reads its progress with `useJob(request)`. Open and Replace send none and never get a job, so theirs matches nothing.
    */
   request: number;
@@ -1803,7 +1803,7 @@ function takeNotice(notice: unknown, live = false): void {
 }
 
 /**
- * Takes in `lockbox://busy`: the long operations running for a vault, which the window says (auto-lock waits for them). It is kept in that
+ * Takes in `petalock://busy`: the long operations running for a vault, which the window says (auto-lock waits for them). It is kept in that
  * vault's record, so a lock takes it away; an event for a vault the page does not hold, or for none, changes nothing. It holds only the
  * shell's fixed names of operations: anything else is not kept.
  */
@@ -1911,7 +1911,7 @@ export async function confirmFirstClose(): Promise<void> {
 let noticesStarted: Promise<void> | undefined;
 
 /**
- * Starts hearing notices, once the lock listener is up (call it after `startStore`): listens for `lockbox://notice`
+ * Starts hearing notices, once the lock listener is up (call it after `startStore`): listens for `petalock://notice`
  * first, then asks for what launch kept, so none falls between. A notice that can't be heard or read tells nothing and
  * stops nothing: the shell keeps launch notices for the next time the page asks.
  */
@@ -2649,7 +2649,7 @@ export function pickAnotherExportFolder(session: number): Promise<void> {
 // ---- Back up a vault (Plan 4B Task 3: 22a to 22d, Ask 1 and Ask 2) ----
 //
 // Back up is pressed in the panel; Rust opens Windows' save dialog and writes the file, so the page never holds a path. The command is a long job
-// with a `request` the page chose, which the shell turns into an operation by `lockbox://job-started` once the work starts (not for a closed
+// with a `request` the page chose, which the shell turns into an operation by `petalock://job-started` once the work starts (not for a closed
 // dialog, nor for a refusal before anything is written). What an answer does depends on where the person is when it comes: the panel, when it is
 // still open, shows the result; a panel closed meanwhile gets the result as a message instead. A lock, or a stale answer, says nothing at all.
 
@@ -5056,7 +5056,7 @@ async function runFile<T>(
   if (entry === undefined) return "stale";
   if (entry.fileJob !== null) return "busy";
   const { generation } = entry;
-  // The number this command is sent with: the shell names the job it becomes by `lockbox://job-started`, and the progress card reads it by this number.
+  // The number this command is sent with: the shell names the job it becomes by `petalock://job-started`, and the progress card reads it by this number.
   const request = nextRequest();
   // A new job takes away what the last one said about this item's files.
   update(session, (current) => ({
@@ -6047,7 +6047,7 @@ export async function confirmEnvFile(session: number, token: string): Promise<En
 // ---- The copy the save shortcut left (Task 18) ----
 //
 // The shell reads the clipboard when the shortcut is pressed and keeps the text in one slot; the page hears a state and an id
-// (`lockbox://capture`) and never the text, which comes only on Reveal and is kept by the box that asked for it, never here. The copy
+// (`petalock://capture`) and never the text, which comes only on Reveal and is kept by the box that asked for it, never here. The copy
 // is not a vault's: with every vault locked the lock screen asks for an unlock first (8b), and once a window is on screen the save box (8a, 8c)
 // is drawn over it, with the vault it saves into chosen in the box (Plan 4C Task 10). The box is the app's, not a window's: it stays through a
 // switch and a lock of the vault under it. The copy is handed to the vault chosen (`capture_choose`), or to none while a locked vault is chosen
@@ -6075,13 +6075,13 @@ let choosing: { id: string; kind: "choose" | "unchoose"; out: boolean; failed: b
 /** The number of the last hand-over asked: a waiting one that is no longer the last is not sent. */
 let handTicket = 0;
 
-/** How many `lockbox://capture` events the page has heard: an answer to `capture_state` that was asked before one came is older than it. */
+/** How many `petalock://capture` events the page has heard: an answer to `capture_state` that was asked before one came is older than it. */
 let captureHeard = 0;
 
 let captureStarted: Promise<void> | undefined;
 
 /**
- * Starts hearing the shortcut, once the lock listener is up (call it after `startStore`): listens for `lockbox://capture` first, then
+ * Starts hearing the shortcut, once the lock listener is up (call it after `startStore`): listens for `petalock://capture` first, then
  * asks what is waiting, so a copy made before the page loaded is shown and one made between is not lost. The answer is as old as the
  * moment the shell read the slot: if any event was heard while it was on its way, the event is newer and the answer is dropped (a newer
  * copy is not replaced by an older one, and a `gone` is not undone). Nothing is said when the listener or the question fails: the

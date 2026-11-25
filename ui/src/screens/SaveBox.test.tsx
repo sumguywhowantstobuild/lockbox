@@ -1,5 +1,5 @@
 // Task 18's screens: a copied key saved with the shortcut (8a to 8e), and the paste panel's tick box that clears the clipboard. The
-// shell reads the clipboard and keeps the text in a slot; the page hears only a state and an id (`lockbox://capture`) and asks for
+// shell reads the clipboard and keeps the text in a slot; the page hears only a state and an id (`petalock://capture`) and asks for
 // the value only on Reveal. These tests hold the page to that: most of them also look for the copied value in everything the page
 // shows or keeps.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -163,7 +163,7 @@ async function pickFolder(panel: HTMLElement, name: string) {
 
 /** An event sent to the page as the shell would, whatever the fake's own slot holds. */
 function fireCapture(event: object) {
-  const registered = listen.mock.calls.find(([name]) => name === "lockbox://capture");
+  const registered = listen.mock.calls.find(([name]) => name === "petalock://capture");
   const handler = registered?.[1] as ((event: { payload: unknown }) => void) | undefined;
   if (handler === undefined) throw new Error("the page is not listening for the shortcut");
   act(() => {
@@ -832,8 +832,8 @@ test("capture_state_is_asked_on_start_and_a_waiting_copy_is_shown", async () => 
   });
   // Heard after the listener was set, so a press that comes between is not lost.
   const order = shell.calls.map((call) => call.cmd);
-  expect(order.indexOf("listen:lockbox://capture")).toBeGreaterThanOrEqual(0);
-  expect(order.indexOf("listen:lockbox://capture")).toBeLessThan(order.indexOf("capture_state"));
+  expect(order.indexOf("listen:petalock://capture")).toBeGreaterThanOrEqual(0);
+  expect(order.indexOf("listen:petalock://capture")).toBeLessThan(order.indexOf("capture_state"));
   expect(await screen.findByRole("heading", { level: 1, name: PAGE_WORDS })).toBeTruthy();
   expectNoValue();
 });

@@ -2,7 +2,7 @@ import "@fontsource-variable/geist/index.css";
 import "@fontsource-variable/geist-mono/index.css";
 import { useEffect, useState } from "react";
 import { focusButton } from "./focus";
-import { LockboxParts } from "./parts/LockboxParts";
+import { PetalockParts } from "./parts/PetalockParts";
 import { PortalContainerProvider } from "./parts/Portal";
 import { vaultLook } from "./parts/Pattern";
 import { CloseQuestion } from "./screens/CloseQuestion";
@@ -148,7 +148,7 @@ export default function App() {
   const boxHost = onWindow && !covered ? (active ?? null) : null;
 
   return (
-    <LockboxParts>
+    <PetalockParts>
       <PortalContainerProvider value={root ?? undefined}>
         <div ref={setRoot} className={`app mode-${mode} v-${look.accent}`}>
           {restoring && moveIn?.step !== "here" ? (
@@ -169,6 +169,6 @@ export default function App() {
           <CloseQuestion />
         </div>
       </PortalContainerProvider>
-    </LockboxParts>
+    </PetalockParts>
   );
 }

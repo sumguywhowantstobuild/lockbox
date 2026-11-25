@@ -20,7 +20,7 @@ import {
 } from "./make-icon.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./make-icon.mjs", import.meta.url));
-const ICONS = join(dirname(SCRIPT), "..", "crates", "lockbox-desktop", "icons");
+const ICONS = join(dirname(SCRIPT), "..", "crates", "petalock-desktop", "icons");
 const ICO = readFileSync(join(ICONS, "icon.ico"));
 const PNG = readFileSync(join(ICONS, "icon.png"));
 const DARK_ICO = readFileSync(join(ICONS, "icon-dark-taskbar.ico"));

@@ -2,8 +2,8 @@
 // Security scan: gitleaks (secrets in git history), semgrep (risky code), osv-scanner (vulnerable dependencies).
 // Exit 0 = CLEAN, 1 = FINDINGS, 2 = INCOMPLETE (a tool is missing or failed, so "clean" can't be claimed).
 // Usage: node scripts/scan.mjs [--json]
-// Env LOCKBOX_GITLEAKS / LOCKBOX_SEMGREP / LOCKBOX_OSV point at a tool; a .mjs path is run with this Node (tests use that).
-// LOCKBOX_CARGO_LOCK / LOCKBOX_UI_LOCK / LOCKBOX_E2E_LOCK override where the lockfiles are looked for (tests only).
+// Env PETALOCK_GITLEAKS / PETALOCK_SEMGREP / PETALOCK_OSV point at a tool; a .mjs path is run with this Node (tests use that).
+// PETALOCK_CARGO_LOCK / PETALOCK_UI_LOCK / PETALOCK_E2E_LOCK override where the lockfiles are looked for (tests only).
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
@@ -14,15 +14,15 @@ const outDir = join(root, ".scan");
 // Lockfiles osv-scanner reads, relative to the repo root. Cargo.lock is always required; the UI's and the end-to-end
 // tests' lockfiles are required once their package.json exists, so their npm dependencies can never go unchecked.
 const lockfiles = [
-  { name: "Cargo.lock", path: process.env.LOCKBOX_CARGO_LOCK ?? "Cargo.lock", required: true },
+  { name: "Cargo.lock", path: process.env.PETALOCK_CARGO_LOCK ?? "Cargo.lock", required: true },
   {
     name: "ui/package-lock.json",
-    path: process.env.LOCKBOX_UI_LOCK ?? "ui/package-lock.json",
+    path: process.env.PETALOCK_UI_LOCK ?? "ui/package-lock.json",
     required: existsSync(join(root, "ui", "package.json")),
   },
   {
     name: "e2e/package-lock.json",
-    path: process.env.LOCKBOX_E2E_LOCK ?? "e2e/package-lock.json",
+    path: process.env.PETALOCK_E2E_LOCK ?? "e2e/package-lock.json",
     required: existsSync(join(root, "e2e", "package.json")),
   },
 ];
@@ -31,7 +31,7 @@ const semgrepDir = process.env.APPDATA && join(process.env.APPDATA, "Python", "P
 
 // gitleaks exit 1 means "leaks found" but is also its fatal-error code, hence findingsExit below.
 const gitleaks = {
-  env: "LOCKBOX_GITLEAKS",
+  env: "PETALOCK_GITLEAKS",
   bin: "gitleaks",
   okExit: [0, 1],
   findingsExit: 1,
@@ -59,7 +59,7 @@ const tools = [
   },
   {
     name: "semgrep",
-    env: "LOCKBOX_SEMGREP",
+    env: "PETALOCK_SEMGREP",
     bin: semgrepDir ? join(semgrepDir, "semgrep.exe") : "semgrep",
     pathPrefix: semgrepDir,
     okExit: [0],
@@ -81,7 +81,7 @@ const tools = [
   },
   {
     name: "osv-scanner",
-    env: "LOCKBOX_OSV",
+    env: "PETALOCK_OSV",
     bin: "osv-scanner",
     okExit: [0, 1, 128],
     emptyExit: 128, // no packages found: never expected, Cargo.lock is always there

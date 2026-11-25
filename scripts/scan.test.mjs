@@ -11,9 +11,9 @@ const shim = (name) => fileURLToPath(new URL(`./fixtures/${name}.mjs`, import.me
 
 // Every tool clean unless a test overrides it.
 const clean = {
-  LOCKBOX_GITLEAKS: shim("gitleaks"),
-  LOCKBOX_SEMGREP: shim("semgrep"),
-  LOCKBOX_OSV: shim("osv"),
+  PETALOCK_GITLEAKS: shim("gitleaks"),
+  PETALOCK_SEMGREP: shim("semgrep"),
+  PETALOCK_OSV: shim("osv"),
   FAKE_GITLEAKS_REPORT: "[]",
   FAKE_GITLEAKS_STAGED_REPORT: "[]",
   FAKE_SEMGREP_REPORT: '{"results":[],"errors":[]}',
@@ -64,7 +64,7 @@ test("gitleaks finding -> exit 1, shown without the secret value", () => {
 });
 
 test("semgrep missing -> exit 2 and INCOMPLETE", () => {
-  const { code, out } = run({ LOCKBOX_SEMGREP: "no-such-semgrep-binary" });
+  const { code, out } = run({ PETALOCK_SEMGREP: "no-such-semgrep-binary" });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: semgrep not found/);
 });
@@ -89,14 +89,14 @@ test("osv-scanner exit 128 (no packages) -> exit 2, this workspace always has pa
 });
 
 test("missing Cargo.lock -> exit 2, dependencies would go unchecked", () => {
-  const { code, out } = run({ LOCKBOX_CARGO_LOCK: "no/such/Cargo.lock" });
+  const { code, out } = run({ PETALOCK_CARGO_LOCK: "no/such/Cargo.lock" });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: osv-scanner needs Cargo\.lock, which is missing/);
 });
 
 test("osv_reads_ui_lockfile: osv-scanner is given ui/package-lock.json and e2e/package-lock.json next to Cargo.lock", () => {
   // A one-off osv stand-in that records the arguments it was called with, then behaves like the clean fake.
-  const dir = mkdtempSync(join(tmpdir(), "lockbox-scan-"));
+  const dir = mkdtempSync(join(tmpdir(), "petalock-scan-"));
   try {
     const argsFile = join(dir, "args.json");
     const recorder = join(dir, "osv-recorder.mjs");
@@ -108,7 +108,7 @@ writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2))
 fake("OSV");
 `,
     );
-    const { code } = run({ LOCKBOX_OSV: recorder });
+    const { code } = run({ PETALOCK_OSV: recorder });
     assert.equal(code, 0);
     const args = JSON.parse(readFileSync(argsFile, "utf8"));
     const lockfiles = args.flatMap((a, i) => (a === "-L" ? [args[i + 1]] : []));
@@ -119,13 +119,13 @@ fake("OSV");
 });
 
 test("missing_ui_lockfile_fails: ui/package.json without its lockfile -> exit 2", () => {
-  const { code, out } = run({ LOCKBOX_UI_LOCK: "no/such/package-lock.json" });
+  const { code, out } = run({ PETALOCK_UI_LOCK: "no/such/package-lock.json" });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: osv-scanner needs ui\/package-lock\.json, which is missing/);
 });
 
 test("missing_e2e_lockfile_fails: e2e/package.json without its lockfile -> exit 2", () => {
-  const { code, out } = run({ LOCKBOX_E2E_LOCK: "no/such/package-lock.json" });
+  const { code, out } = run({ PETALOCK_E2E_LOCK: "no/such/package-lock.json" });
   assert.equal(code, 2);
   assert.match(out, /INCOMPLETE: osv-scanner needs e2e\/package-lock\.json, which is missing/);
 });

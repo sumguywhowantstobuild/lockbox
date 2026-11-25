@@ -11,7 +11,7 @@ import * as app from "./app.mjs";
 import { pickFolder } from "./folderbox.mjs";
 
 export const env = process.env;
-export const locations = JSON.parse(env.LOCKBOX_E2E_LOCATIONS ?? "{}");
+export const locations = JSON.parse(env.PETALOCK_E2E_LOCATIONS ?? "{}");
 
 /** Waits for the control with `role` and accessible `name` to show, and returns it. */
 export async function see(role, name, timeout = 20_000) {
@@ -27,7 +27,7 @@ export async function gone(role, name, timeout = 20_000) {
 }
 
 /** A line for the run's results (`skip <step>: <why>`), read by scripts/e2e.mjs. */
-export const note = (line) => appendFileSync(env.LOCKBOX_E2E_RESULTS, `${line}\n`);
+export const note = (line) => appendFileSync(env.PETALOCK_E2E_RESULTS, `${line}\n`);
 
 /**
  * A row of the item list, by the start of its accessible name (`Login: <title>`, then what the row shows of it). Rows are
@@ -59,23 +59,23 @@ export async function attach() {
   const attached = app.checkAttached({
     debuggerAddress: caps["ms:edgeOptions"]?.debuggerAddress,
     processId: caps["goog:processID"],
-    driver: { pid: Number(env.LOCKBOX_E2E_DRIVER_PID), created: env.LOCKBOX_E2E_DRIVER_CREATED },
+    driver: { pid: Number(env.PETALOCK_E2E_DRIVER_PID), created: env.PETALOCK_E2E_DRIVER_CREATED },
     snapshot: app.snapshotProcesses(),
     listeners: app.tcpListeners(),
   });
-  if (env.LOCKBOX_E2E_OFFSCREEN === "1") await browser.setWindowRect(-4000, -4000, null, null);
+  if (env.PETALOCK_E2E_OFFSCREEN === "1") await browser.setWindowRect(-4000, -4000, null, null);
   // Petalock's idle lock counts the session's input, not the app's: restart that clock (see the function)
   app.restartIdleClock();
   await see("heading", "Welcome to Petalock", 60_000);
-  assert.equal(existsSync(env.LOCKBOX_E2E_DEFAULT_VAULTS), false, "the default vault folder does not exist before the spec");
-  assert.deepEqual(readdirSync(env.LOCKBOX_E2E_VAULT_FOLDER), [], "the vault folder the run made starts empty");
+  assert.equal(existsSync(env.PETALOCK_E2E_DEFAULT_VAULTS), false, "the default vault folder does not exist before the spec");
+  assert.deepEqual(readdirSync(env.PETALOCK_E2E_VAULT_FOLDER), [], "the vault folder the run made starts empty");
   assert.ok(attached.pid > 0);
 }
 
 /** The checks after a spec: the default vault folder was never made, and the vault is in the spec's own folder. */
 export function checkFoldersAfter() {
-  assert.equal(existsSync(env.LOCKBOX_E2E_DEFAULT_VAULTS), false, "the default vault folder was never made");
-  assert.ok(readdirSync(env.LOCKBOX_E2E_VAULT_FOLDER).length >= 1, "the vault is in the folder the run made");
+  assert.equal(existsSync(env.PETALOCK_E2E_DEFAULT_VAULTS), false, "the default vault folder was never made");
+  assert.ok(readdirSync(env.PETALOCK_E2E_VAULT_FOLDER).length >= 1, "the vault is in the folder the run made");
 }
 
 /** First-time setup up to the recovery key: the vault `name` with `password`, made in the spec's own vault folder. */
@@ -90,8 +90,8 @@ export async function createVault(name, password) {
   await pickFolder({
     title: "Choose where to create the vault",
     pid: browser.capabilities["goog:processID"],
-    folder: env.LOCKBOX_E2E_VAULT_FOLDER,
-    runRoot: env.LOCKBOX_E2E_RUN_ROOT,
+    folder: env.PETALOCK_E2E_VAULT_FOLDER,
+    runRoot: env.PETALOCK_E2E_RUN_ROOT,
     locations,
   });
   await see("heading", "Save your recovery key", 60_000);

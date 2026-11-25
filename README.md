@@ -28,9 +28,9 @@ the five plans make up Phase 1, the Windows app (see the
 
 | Plan | What it delivers | State |
 |---|---|---|
-| 1 | **Core engine:** a library written in Rust (the programming language), `crates/lockbox-core`, that does all the encryption and file handling | Built |
+| 1 | **Core engine:** a library written in Rust (the programming language), `crates/petalock-core`, that does all the encryption and file handling | Built |
 | 2 | Backup, restore, and opening a backup read-only, all in the same core library | Built |
-| 3 | Desktop shell (built with Tauri, a toolkit for desktop apps), `crates/lockbox-desktop`: sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Built |
+| 3 | Desktop shell (built with Tauri, a toolkit for desktop apps), `crates/petalock-desktop`: sessions, auto-lock, clipboard, dialogs, "Open" and "Save a copy" | Built |
 | 4 | The user interface, from clickable design mockups, in four parts: 4A daily use, 4B files and long jobs (backup and restore among them), 4C vaults and passwords, 4D the rest | Built |
 | 5 | Release: installer, final README, and the written walk-through of SECURITY.md against the code | Not started |
 
@@ -61,10 +61,10 @@ troubleshooting are in [docs/SETUP.md](docs/SETUP.md).
 rustup toolchain install     # installs the Rust version this project pins (1.99.1), from rust-toolchain.toml
 npm --prefix ui ci --ignore-scripts   # the UI's build tools, at the exact versions in ui/package-lock.json
 cargo test --locked          # most tests; it runs real password hashing, so allow a few minutes
-cargo test -p lockbox-core --locked --features test-internals   # every engine test, the internal ones too
+cargo test -p petalock-core --locked --features test-internals   # every engine test, the internal ones too
 ```
 
-To run the app, use `cargo tauri dev` from `crates/lockbox-desktop` (the Tauri command-line tool is
+To run the app, use `cargo tauri dev` from `crates/petalock-desktop` (the Tauri command-line tool is
 in [docs/SETUP.md](docs/SETUP.md#desktop-app-tauri)).
 
 The same checks that CI runs on every push, all in one command that runs them side by side where it can:
@@ -78,13 +78,13 @@ Or one by one:
 ```
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings
+cargo clippy -p petalock-core --locked --all-targets --features test-internals -- -D warnings
 cargo test --locked
-cargo test -p lockbox-core --locked --features test-internals --test '*'   # the engine's internal-only tests
+cargo test -p petalock-core --locked --features test-internals --test '*'   # the engine's internal-only tests
 npm --prefix ui run lint
 npm --prefix ui run build    # before the UI tests: some of them read the built page and style sheet
 npm --prefix ui test
-cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc   # after the UI build, which it embeds
+cargo test -p petalock-desktop --locked --features custom-protocol --test ipc   # after the UI build, which it embeds
 node --test "scripts/*.test.mjs"   # the scripts' own tests
 node scripts/scan.mjs        # security scan; needs gitleaks, semgrep and osv-scanner, see docs/SETUP.md
 ```
@@ -93,11 +93,11 @@ Three checks are slow, so they only run when asked (always in release mode, the 
 
 ```
 # 5 000 items: unlock and search must stay fast
-cargo test --release --locked -p lockbox-core --test search -- --ignored --nocapture
+cargo test --release --locked -p petalock-core --test search -- --ignored --nocapture
 # a file of 4 GiB + 1 byte goes in and out unchanged while memory stays flat
-cargo test --release --locked -p lockbox-core --features test-internals --test large_file -- --ignored --nocapture
+cargo test --release --locked -p petalock-core --features test-internals --test large_file -- --ignored --nocapture
 # the same file goes through backup, test, restore and export, and comes out unchanged
-cargo test --release --locked -p lockbox-core --features test-internals --test backup_large -- --ignored --nocapture
+cargo test --release --locked -p petalock-core --features test-internals --test backup_large -- --ignored --nocapture
 ```
 
 The large-file check writes about 12 GiB of temporary files and can take minutes. The backup check needs about 9 GiB

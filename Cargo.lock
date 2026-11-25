@@ -2185,50 +2185,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lockbox-core"
-version = "0.1.0"
-dependencies = [
- "aead-stream",
- "argon2",
- "base64 0.23.1",
- "chacha20poly1305",
- "ctutils",
- "getrandom 0.4.3",
- "hkdf",
- "hmac",
- "proptest",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.21",
- "unicode-normalization",
- "windows-sys 0.61.2",
- "zeroize",
- "zip",
-]
-
-[[package]]
-name = "lockbox-desktop"
-version = "0.1.0"
-dependencies = [
- "clipboard-win",
- "getrandom 0.4.3",
- "lockbox-core",
- "png",
- "rfd",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-single-instance",
- "webview2-com",
- "windows-core",
- "windows-sys 0.61.2",
- "zeroize",
-]
-
-[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2689,6 +2645,50 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "petalock-core"
+version = "0.1.0"
+dependencies = [
+ "aead-stream",
+ "argon2",
+ "base64 0.23.1",
+ "chacha20poly1305",
+ "ctutils",
+ "getrandom 0.4.3",
+ "hkdf",
+ "hmac",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "unicode-normalization",
+ "windows-sys 0.61.2",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
+name = "petalock-desktop"
+version = "0.1.0"
+dependencies = [
+ "clipboard-win",
+ "getrandom 0.4.3",
+ "petalock-core",
+ "png",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-single-instance",
+ "webview2-com",
+ "windows-core",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
 
 [[package]]
 name = "phc"

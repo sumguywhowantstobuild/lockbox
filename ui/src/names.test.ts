@@ -1,8 +1,8 @@
 // Plan 5, Task 0c, `no_lockbox_in_what_people_see` (the page's half; the shell's half is `src/names.rs` in the desktop
 // crate): the product is Petalock, and no word the page shows says Lockbox. Every string, template and piece of text the
-// page's code holds, the words of `index.html` and the style sheets' strings are read, and the only `lockbox` left is a
-// code name, listed here by file. A new one fails this test until someone decides it is a code name and lists it, with
-// the reason.
+// page's code holds, the words of `index.html` and the style sheets' strings are read, and none says `lockbox` since Task
+// 0e renamed the code names. A new one fails this test until someone decides it is a code name nobody is shown and lists
+// it, with the reason. The repository-wide scan is `scripts/names.test.mjs`.
 import ts from "typescript";
 import { expect, test } from "vitest";
 import { listBelow, readBeside } from "./testing/files";
@@ -63,18 +63,9 @@ function shippedFiles(): string[] {
   );
 }
 
-/** The `lockbox` strings that stay on the page, by file: the shell's event names, which the page and the shell share (code
- *  names, renamed with the crates in Task 0e). None of them is shown to anyone. */
-const ALLOWED: readonly (readonly [string, string])[] = [
-  ["bridge.ts", "lockbox://notice"],
-  ["bridge.ts", "lockbox://busy"],
-  ["bridge.ts", "lockbox://job-started"],
-  ["bridge.ts", "lockbox://progress"],
-  ["bridge.ts", "lockbox://lock-epoch"],
-  ["bridge.ts", "lockbox://close-asked"],
-  ["bridge.ts", "lockbox://capture"],
-  ["bridge.ts", "lockbox://locked"],
-];
+/** The `lockbox` strings that stay on the page, by file, and why; none may be shown to anyone. Empty since Task 0e renamed
+ *  the shell's event names, the last code names the page held. */
+const ALLOWED: readonly (readonly [string, string])[] = [];
 
 function lockboxTexts(files: readonly (readonly [string, string])[]): [string, string][] {
   const hits: [string, string][] = [];

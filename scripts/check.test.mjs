@@ -85,7 +85,7 @@ test("a phase waits for every lane of the one before", () =>
 
 test("a command that cannot start is a failure, not a crash", () =>
   withLogs(async (dir) => {
-    const results = await runPhases([[[{ name: "missing", cmd: "lockbox-no-such-command", args: [] }]]], dir);
+    const results = await runPhases([[[{ name: "missing", cmd: "petalock-no-such-command", args: [] }]]], dir);
     assert.equal(results[0].code, 127);
     assert.match(readFileSync(join(dir, "missing.log"), "utf8"), /could not start/);
   }));
@@ -96,7 +96,7 @@ const phaseLines = (phases, i) => (phases[i] ?? []).flat().map(line);
 const firstPhase = [
   "cargo fmt --all --check",
   "cargo clippy --locked --all-targets -- -D warnings",
-  "cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings",
+  "cargo clippy -p petalock-core --locked --all-targets --features test-internals -- -D warnings",
   "cargo test --locked --no-run",
   "npm run lint",
   "npm run build",
@@ -107,9 +107,9 @@ const firstPhase = [
 ];
 const fullSecondPhase = [
   "cargo test --locked --no-fail-fast",
-  "cargo test -p lockbox-core --locked --no-fail-fast --features test-internals --test *",
-  "cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc",
-  "cargo build -p lockbox-desktop --release --locked --features custom-protocol",
+  "cargo test -p petalock-core --locked --no-fail-fast --features test-internals --test *",
+  "cargo test -p petalock-desktop --locked --features custom-protocol --test ipc",
+  "cargo build -p petalock-desktop --release --locked --features custom-protocol",
 ];
 const planFor = (...argv) => {
   const parsed = parseArgs(argv);
@@ -126,16 +126,16 @@ test("short_check_always_runs_the_whole_first_phase", () => {
 
 test("short_engine_runs_the_engine_tests_only", () => {
   assert.deepEqual(phaseLines(planFor("--short", "engine"), 1), [
-    "cargo test -p lockbox-core --locked --no-fail-fast",
-    "cargo test -p lockbox-core --locked --no-fail-fast --features test-internals --test *",
+    "cargo test -p petalock-core --locked --no-fail-fast",
+    "cargo test -p petalock-core --locked --no-fail-fast --features test-internals --test *",
   ]);
 });
 
 test("short_desktop_runs_the_desktop_and_bridge_tests", () => {
   const second = phaseLines(planFor("--short", "desktop"), 1);
   assert.deepEqual(second, [
-    "cargo test -p lockbox-desktop --locked --no-fail-fast",
-    "cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc",
+    "cargo test -p petalock-desktop --locked --no-fail-fast",
+    "cargo test -p petalock-desktop --locked --features custom-protocol --test ipc",
   ]);
   assert.ok(!second.some((l) => l.includes("--release")), "the release build runs on GitHub, not in the short check");
 });

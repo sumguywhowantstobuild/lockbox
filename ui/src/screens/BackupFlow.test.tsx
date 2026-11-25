@@ -183,7 +183,7 @@ test("backup_shows_progress_and_cancel", async () => {
   const panel = await openBackup();
   const release = shell.holdFiles();
   press(panel, "Back up");
-  // The shell says the work started (`lockbox://job-started`, matched to the request the page sent); 22b is the bar, in words.
+  // The shell says the work started (`petalock://job-started`, matched to the request the page sent); 22b is the bar, in words.
   const card = await screen.findByRole("region", { name: "Backing up My vault" });
   const job = theJob();
   expect(job.kind).toBe("backup");

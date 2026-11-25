@@ -21,7 +21,7 @@ test("every_shell_error_has_a_message", () => {
   expect(sources.length, "the Rust sources were found").toBeGreaterThan(20);
 
   // Each variant of the shell's own refusal.
-  const errorSource = sources.find((source) => source.path === "lockbox-desktop/src/error.rs")?.text ?? "";
+  const errorSource = sources.find((source) => source.path === "petalock-desktop/src/error.rs")?.text ?? "";
   const body = /pub enum ShellError \{([\s\S]*?)\n\}/.exec(errorSource)?.[1] ?? "";
   const variants = [...body.matchAll(/^ {4}([A-Z]\w*)/gm)].map((match) => snake(match[1] ?? ""));
   expect(variants, "the variants were read").toContain("locked");
@@ -41,7 +41,7 @@ test("every_shell_error_has_a_message", () => {
   for (const { text } of sources) for (const match of text.matchAll(/\bwrite_change\(\s*\w+,\s*\w+,\s*"([^"]*)"/g)) whats.add(match[1] ?? "");
   // And the location check's own, which it makes through its local `refuse("…")` (it has no `what:` of its own to read).
   for (const { path, text } of sources) {
-    if (path.endsWith("lockbox-desktop/src/locations.rs")) for (const match of text.matchAll(/\brefuse\("([^"]*)"\)/g)) whats.add(match[1] ?? "");
+    if (path.endsWith("petalock-desktop/src/locations.rs")) for (const match of text.matchAll(/\brefuse\("([^"]*)"\)/g)) whats.add(match[1] ?? "");
   }
   expect(whats, "a change's label was read").toContain("password");
   expect(whats, "the location check's labels were read").toContain("network drive");

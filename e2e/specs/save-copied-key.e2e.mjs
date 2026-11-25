@@ -3,7 +3,7 @@
 // screen turns into "Save what you copied", the clipboard then gets another made-up value (the key must be the one held
 // when the shortcut was pressed, read once), the vault is unlocked there, the key is named and saved, and the saved value is
 // read back, and again after the vault is locked and opened. The shortcut and the clipboard are this PC's: those steps run
-// on CI, and on a PC only with LOCKBOX_E2E_PC_FREE=1 (the vault's setup and lock still run, and the skip is said with its
+// on CI, and on a PC only with PETALOCK_E2E_PC_FREE=1 (the vault's setup and lock still run, and the skip is said with its
 // reason). Values are compared without ever being printed.
 
 import assert from "node:assert/strict";

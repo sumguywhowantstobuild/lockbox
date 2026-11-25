@@ -1,7 +1,7 @@
 # Architecture
 
-This describes what is built today: the Rust core, `crates/lockbox-core` (Plans 1 and 2: the vault engine, then backup,
-restore and read-only vaults), and the desktop shell, `crates/lockbox-desktop` (Plan 3, [below](#the-desktop-shell)).
+This describes what is built today: the Rust core, `crates/petalock-core` (Plans 1 and 2: the vault engine, then backup,
+restore and read-only vaults), and the desktop shell, `crates/petalock-desktop` (Plan 3, [below](#the-desktop-shell)).
 The real screens come in Plan 4, in four parts, and all four are built: daily use (4A), files and long jobs (4B), vaults and passwords (4C), and the rest (4D). `ui/` has the bridge to Rust, first-time
 setup with the recovery key, the lock screen, and the main window with search, the item panel, the forms, the Trash, folders,
 `.env` in and out, the save shortcut's box and settings ([the UI design](docs/design/2026-11-05-user-interface-design.md)),
@@ -40,7 +40,7 @@ The public surface is what the shell uses, and nothing more:
 `Item`, `ItemKind` and `FileRef` have no serde: an item is only ever written sealed, through crate-private wire types,
 so no code outside the engine can serialise one to the screen. A `FileRef`'s key, nonce prefix, blob version and chunk
 size are crate-private. Raw keys, header writes and the other low-level modules are private. The `test-internals`
-feature (tests only, never in a shipped build) re-exports them under `lockbox_core::internals` and turns the
+feature (tests only, never in a shipped build) re-exports them under `petalock_core::internals` and turns the
 failpoints on, for the integration tests and the shell's tests. It also lets the shell's tests pretend a drive's free
 space (`internals::fsio::set_volume_override`, per thread): the one `check_space` stays the only check, and its refusal's
 `needed` counts the 64 MiB it keeps free, so "needs X, has Y" always has X above Y.
@@ -50,7 +50,7 @@ code builds and is tested on Linux CI and can be reused for Android later.
 
 ## Code map
 
-Everything in this table is in `crates/lockbox-core/src/`. App code goes through `Vault`; the low-level modules are private
+Everything in this table is in `crates/petalock-core/src/`. App code goes through `Vault`; the low-level modules are private
 (tests reach them through `internals`). A "blob" is one stored file, encrypted.
 
 | Module | Its one job |
@@ -309,14 +309,14 @@ slow key derivation and just before the writes, so the shell can stop a change w
 
 ## The desktop shell
 
-`crates/lockbox-desktop` is the Tauri 2 app between the screens and the engine (spec 4). The commands are thin wrappers
+`crates/petalock-desktop` is the Tauri 2 app between the screens and the engine (spec 4). The commands are thin wrappers
 that parse their own request and call a plain-Rust `Shell`, so almost every rule is tested without a window. Every call
 to Windows sits behind a small trait in `os/mod.rs`; tests use the fakes in `testing.rs`. The crate builds only on
 Windows.
 
 ### Code map
 
-Everything in this table is in `crates/lockbox-desktop/src/`.
+Everything in this table is in `crates/petalock-desktop/src/`.
 
 | Module | Its one job |
 |---|---|
@@ -326,7 +326,7 @@ Everything in this table is in `crates/lockbox-desktop/src/`.
 | `shell.rs` | `Shell`: owns everything below, runs the launch work, sends the page's events |
 | `session.rs` | `Sessions`: open vaults keyed by location, each with a generation, a cancel token and a publish guard (`SessionInfo` also says its `kind`, from the location and the read-only flag: `vault`, `older_copy` or `backup`; a backup's `name` is its file's name without `.petalock-backup`); the lock epoch and the launch token (cancelled and replaced with each lock of all vaults); locking in two phases; the ordered lock-hook thread; `KeyState`, per writable session: whether it may make a recovery key without the password (the unconfirmed-key step) and the number of the last key made, so a key's confirmation never races a newer key (`write_keys`) |
 | `autolock.rs` | The idle timer, the table of long operations (jobs) that pauses it, Windows signals, and the shutdown with its 2 s bound |
-| `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `lockbox://job-started`, `lockbox://progress` and `lockbox://lock-epoch` events; also the shape of `lockbox://close-asked` |
+| `jobs.rs` | A job as the page sees it: its operation ID, its scope (a session and generation, or a launch's lock epoch), its own cancel token, and the throttled `petalock://job-started`, `petalock://progress` and `petalock://lock-epoch` events; also the shape of `petalock://close-asked` |
 | `clipboard.rs` | A copy's life: write, its timer, and clearing only if the copy's own tag is still there |
 | `outputs.rs` | The output journal (`pending-outputs.json`), the gate every decrypted file is published through, and the launch sweep |
 | `open.rs` | "Open": the file name allowlist, executable types, the user-only folder, the internet mark, removal and retries; also `save_name`, the lighter name rule for a folder's saved files (only what Windows refuses, what could leave the folder, or a direction control that makes an executable read as a document is changed) |
@@ -402,7 +402,7 @@ unlock or job of it runs, and leaves the folder alone; Show in Explorer opens on
 session's generation goes up and its state becomes `Locked` or `Unavailable`, and from this moment no command gets
 through. Each publish guard is then passed once, so an attempt that saw the old generation has finished. Operations are
 cancelled, the session lets go of the vault, a lock of all vaults also drops every pending token, and the page gets its
-`lockbox://locked` event. Second, the hooks are queued on one ordered thread: the clipboard's (with a short timeout), the
+`petalock://locked` event. Second, the hooks are queued on one ordered thread: the clipboard's (with a short timeout), the
 "Open" folders' (its deletes run on a worker), then the restore's. The timer, the signal router and the folder check never
 wait for a hook; the page's lock commands and shutdown do, shutdown until its 2 s deadline. (If Windows refuses shutdown's
 helper thread, revocation runs inline and can wait past the deadline for one publish attempt.) The vault key goes when
@@ -421,17 +421,17 @@ an unlocked session (`JobScope::Session`, with the generation it started in), th
 (`JobScope::Launch`, with the lock epoch it started in). A lock of that session, or of all vaults for the launch's,
 stops every job in the scope; the page's Stop (`cancel_operation`, given the operation and its scope) stops one job and
 no other. A scope that has gone answers `Locked` and a job not running in it `NotFound`, and a launch job's answer after
-the epoch changed is refused as `Locked`. A command that takes the page's `request` number sends `lockbox://job-started`
-(request, operation, scope, kind) once its work starts, then `lockbox://progress` at most about ten times a second and
+the epoch changed is refused as `Locked`. A command that takes the page's `request` number sends `petalock://job-started`
+(request, operation, scope, kind) once its work starts, then `petalock://progress` at most about ten times a second and
 always one last event with `finished: true`; the page learns the operation from that event only, since an answer arrives
-after the job has ended. Every lock of all vaults also sends `lockbox://lock-epoch`, with or without a vault open. All three
+after the job has ended. Every lock of all vaults also sends `petalock://lock-epoch`, with or without a vault open. All three
 go to the main window only. Open, Replace file and copying an item are jobs in the table and send neither.
 
 **Close and Quit with a job running or a restore waiting** (`Shell::ask_before_closing`, `close_answer`). The window's
 close button and the tray's Quit first ask `AutoLock::running_kinds`, which lists the kinds of every operation the idle
 timer counts (each once, in start order), and `Restores::waiting`, which is true only in `RestoreState::Prepared` (a
 restore extracted, checked and waiting at 24d for the yes). With none running and none waiting, both do what they always
-did. With either, nothing is locked, hidden or cancelled: the page is sent `lockbox://close-asked` (`reason` close or
+did. With either, nothing is locked, hidden or cancelled: the page is sent `petalock://close-asked` (`reason` close or
 quit, the kinds, `past_swap`, `restore_waiting` and `question`; the page shows a job's question before the waiting restore's) and the shell keeps
 one pending question, with the lock epoch it was asked in and what was sent. `question` is the question's own ID, minted by the shell (a counter
 kept under the same lock as the pending question, counting up from 1 and never reused; a plain JSON number, far below 2^53 like the operation IDs
@@ -534,7 +534,7 @@ that opens is found there and replaced (kept as an older copy), and a folder who
 since the backup unpacks into a new folder beside it (the existing new-folder question, which refuses a name in use). The
 vault list tells the page which vaults Ask 8 is for: `VaultEntry.details_damaged` is true exactly when the folder holds a
 header file (`vault.json` or `vault.json.bak`) and every copy there is refused by the engine as damaged (corrupt or too
-large: `lockbox_core::header_is_damaged`); an empty folder, one with no header files, a header another program holds (a
+large: `petalock_core::header_is_damaged`); an empty folder, one with no header files, a header another program holds (a
 sharing violation) and a newer vault have no name from the header either but are not damaged; each such row shows the
 name the list kept for it, or none when it never had one (`both_headers_unreadable_listed_with_the_kept_name`,
 `a_listed_folder_with_no_vault_in_it_lists_the_same_way`, `a_header_held_by_another_program_is_not_damage`). While the
@@ -595,7 +595,7 @@ journal, whatever locks. A commit the engine says cannot be retried goes straigh
 `restore_prepare` runs recovery and answers with its result.
 
 **What a restore that did not finish tells the page** (`restore_notice`, `retry_restore_recovery`, `dismiss_restore`, and
-`lockbox://notice` with `kind: "restore"`). Recovery runs at launch before the window (`Shell::launch_work`) and its
+`petalock://notice` with `kind: "restore"`). Recovery runs at launch before the window (`Shell::launch_work`) and its
 result is kept (`RestoreNotice`), so a reloaded page asks again. `recovered` (`staging_removed`, `rolled_back` or `finished`)
 carries `vault: { id, name } | null`: the vault of the list at the journal's folder, read before recovery removes the
 journal and looked up once it is done, never a path. A `finished` restore whose swap ended before `restore_commit` listed the

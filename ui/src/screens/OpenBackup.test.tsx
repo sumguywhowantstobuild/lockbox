@@ -1177,7 +1177,7 @@ test("two_vaults_named_alike_are_told_apart_by_their_place_in_copy_to_a_vault", 
 test("a_busy_copy_says_copying_the_item", async () => {
   await unlocked();
   await openTheBackup();
-  const handler = listen.mock.calls.find(([name]) => name === "lockbox://busy")?.[1] as ((event: { payload: unknown }) => void) | undefined;
+  const handler = listen.mock.calls.find(([name]) => name === "petalock://busy")?.[1] as ((event: { payload: unknown }) => void) | undefined;
   if (handler === undefined) throw new Error("the page is not listening for busy");
   act(() => {
     handler({ payload: { session: backupSession(), operations: ["copy_item"] } });

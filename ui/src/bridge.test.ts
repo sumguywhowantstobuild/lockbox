@@ -154,7 +154,7 @@ test("call_plain_returns_answer_as_is", async () => {
 test("on_locked_makes_older_answers_stale", async () => {
   await bridge.onLocked();
   const [event, handler] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
-  expect(event).toBe("lockbox://locked");
+  expect(event).toBe("petalock://locked");
   await opened(1, 2);
   handler({ payload: { session: 1, generation: 3, reason: "windows_locked" } });
   invoke.mockResolvedValueOnce(tagged(1, 2, "items read before the lock"));
@@ -178,23 +178,23 @@ test("late_lock_event_for_older_generation_is_ignored", async () => {
   expect(cleared).toHaveBeenCalledOnce();
 });
 
-// `lockbox://notice` carries no vault data, so it has no generation: each notice is handed over as it came.
+// `petalock://notice` carries no vault data, so it has no generation: each notice is handed over as it came.
 test("on_notice_hands_over_each_notice_as_it_came", async () => {
   const seen = vi.fn();
   await bridge.onNotice(seen);
   const [event, handler] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
-  expect(event).toBe("lockbox://notice");
+  expect(event).toBe("petalock://notice");
   const sweep = { kind: "output_sweep", removed: 0, kept: 0, unreadable: true };
   handler({ payload: sweep });
   expect(seen).toHaveBeenCalledExactlyOnceWith(sweep);
 });
 
-// `lockbox://capture` says a state and an id and never the value, so like a notice it has no generation: it is handed over as it came.
+// `petalock://capture` says a state and an id and never the value, so like a notice it has no generation: it is handed over as it came.
 test("on_capture_hands_over_each_event_as_it_came", async () => {
   const seen = vi.fn();
   await bridge.onCapture(seen);
   const [event, handler] = listen.mock.calls[0] as [string, (event: { payload: unknown }) => void];
-  expect(event).toBe("lockbox://capture");
+  expect(event).toBe("petalock://capture");
   const made = { capture_id: "a".repeat(32), state: "value", changed: false, env_keys: null };
   handler({ payload: made });
   expect(seen).toHaveBeenCalledExactlyOnceWith(made);
@@ -202,12 +202,12 @@ test("on_capture_hands_over_each_event_as_it_came", async () => {
 
 // Task 2's three events, as the frozen connection names them: each is handed over as it came, and holds counts and ids only.
 test.each([
-  ["onJobStarted", "lockbox://job-started", { request: 4, operation: 9, scope: { type: "session", session: 3, generation: 7 }, kind: "import" }],
-  ["onProgress", "lockbox://progress", { operation: 9, scope: { type: "launch", epoch: 2 }, kind: "test", done: 5, total: 10, finished: false }],
-  ["onLockEpoch", "lockbox://lock-epoch", { epoch: 3, reason: "windows_locked" }],
+  ["onJobStarted", "petalock://job-started", { request: 4, operation: 9, scope: { type: "session", session: 3, generation: 7 }, kind: "import" }],
+  ["onProgress", "petalock://progress", { operation: 9, scope: { type: "launch", epoch: 2 }, kind: "test", done: 5, total: 10, finished: false }],
+  ["onLockEpoch", "petalock://lock-epoch", { epoch: 3, reason: "windows_locked" }],
   // Task 12: the shell asks before closing or quitting while a job runs; kinds, flags and the question's number only (Plan 4C Task 12).
-  ["onCloseAsked", "lockbox://close-asked", { reason: "close", running: ["import", "backup"], past_swap: false, restore_waiting: false, question: 1 }],
-  ["onCloseAsked", "lockbox://close-asked", { reason: "quit", running: [], past_swap: false, restore_waiting: true, question: 2 }],
+  ["onCloseAsked", "petalock://close-asked", { reason: "close", running: ["import", "backup"], past_swap: false, restore_waiting: false, question: 1 }],
+  ["onCloseAsked", "petalock://close-asked", { reason: "quit", running: [], past_swap: false, restore_waiting: true, question: 2 }],
 ] as const)("%s_hands_over_each_event_as_it_came", async (name, channel, payload) => {
   const seen = vi.fn();
   await (bridge[name] as (handler: (event: unknown) => void) => Promise<unknown>)(seen);

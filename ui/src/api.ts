@@ -459,7 +459,7 @@ export async function lockVault(session: number): Promise<void> {
 /**
  * What launch found (the output sweep's counts and whether its record could not be read, opened copies another program
  * still holds, a restore's outcome), asked once the page has loaded since launch work runs before it can listen. The shell
- * keeps them rather than using them up, so the same notice may arrive again as a `lockbox://notice` event: the latest of
+ * keeps them rather than using them up, so the same notice may arrive again as a `petalock://notice` event: the latest of
  * each kind is the one that counts.
  */
 export function launchNotices(): Promise<PageNotice[]> {
@@ -485,7 +485,7 @@ export async function closeExplainedOk(): Promise<void> {
 }
 
 /**
- * The answer to the question a close or a Quit asked while a job runs (`lockbox://close-asked`). `true` is Close anyway: the shell runs the old
+ * The answer to the question a close or a Quit asked while a job runs (`petalock://close-asked`). `true` is Close anyway: the shell runs the old
  * path for the reason it asked about (close locks every vault, which cancels the jobs; Quit quits). `false` is Keep it running: nothing
  * changes. Either answer clears the question. `question` is the number the event carried: an answer names the question it is for. Refused with
  * `not_found` when that question is not the pending one (it was cleared by a lock, answered already, or a newer one is pending, which the answer
@@ -857,7 +857,7 @@ export function searchAll(query: string): Promise<SearchResults<SearchHit[]>> {
 // ---- Stored files (Task 19): open, save a copy, replace, attach and add, one file at a time ----
 //
 // Every one of these is a long operation in the shell: Rust opens the Windows picker or save dialog inside the command, so the page
-// sends ids and never a path, and the shell says it is working with `lockbox://busy` (`onBusy`). A lock while one runs makes its answer
+// sends ids and never a path, and the shell says it is working with `petalock://busy` (`onBusy`). A lock while one runs makes its answer
 // stale (or the shell's `locked` refusal), and the screens say nothing of it.
 
 /**
@@ -954,7 +954,7 @@ export function removePickedFile(vault: SessionRef, choice: string, index: numbe
 
 /**
  * Stores every file of the pick, one after another, as one job with one progress over the batch's bytes (`request` names it for
- * `lockbox://job-started`). The choice is used up when the job starts; one refused before that (no room for the whole batch, a file over
+ * `petalock://job-started`). The choice is used up when the job starts; one refused before that (no room for the whole batch, a file over
  * 256 GiB) leaves it. Read-only refuses.
  */
 export function addFiles(vault: SessionRef, choice: string, into: AddInto, request: number): Promise<Tagged<Outcome<AddFilesView>>> {
@@ -1027,7 +1027,7 @@ export function saveAllFilesConfirm(token: string): Promise<Tagged<Outcome<SaveP
 }
 
 /**
- * Saves the files of a plan as one job with one progress over every file's bytes (`request` names it for `lockbox://job-started`, kind `save_all`).
+ * Saves the files of a plan as one job with one progress over every file's bytes (`request` names it for `petalock://job-started`, kind `save_all`).
  * Every check runs again; the choice is used up when the job starts. Refused as `invalid_input` `folder changed` when the folder's files are no longer
  * the planned ones. A Stop answers `Done` with `stopped` set; a lock answers `locked`.
  */
@@ -1051,7 +1051,7 @@ export function replaceFile(vault: SessionRef, id: string, fileId: string): Prom
 }
 
 /**
- * Stops one running job: `operation` as `lockbox://job-started` gave it, with the scope that event named. The job ends with its own
+ * Stops one running job: `operation` as `petalock://job-started` gave it, with the scope that event named. The job ends with its own
  * answer (`cancelled`). Refused (`locked`: the scope has gone; `not_found`: the job is over or was never there) when there is nothing to
  * stop: the screens show nothing for either.
  */
@@ -1109,7 +1109,7 @@ export interface BackupDue {
 
 /**
  * Backs up the open vault to a file the person picks in the Windows save dialog Rust opens (the path never comes to the page; the dialog
- * suggests the vault's name and the day). A long job: `request` is the number the page chose, and `lockbox://job-started` says which operation it
+ * suggests the vault's name and the day). A long job: `request` is the number the page chose, and `petalock://job-started` says which operation it
  * became (not sent for `"Dismissed"`, a closed dialog, or a refusal before anything is written). Cancel (`cancelOperation`) answers `cancelled`
  * with nothing half-made left. Refused before writing with `invalid_input` and `what` `details changed`, `password copies disagree`,
  * `recovery key copies disagree` or `details unchecked` (a backup made now might not open), `core` `not_enough_space` with its two numbers, or
@@ -1130,7 +1130,7 @@ export function testBackupPick(choice: string | null): Promise<Outcome<TestPick>
 
 /**
  * Tests the picked backup without restoring it: opens it with the typed text, checks everything in it and writes nothing. A launch-scoped job (`request`
- * names it for `lockbox://job-started` and `lockbox://progress`, kind `test`, scope `launch`; sent only once the job begins). Every answer keeps the
+ * names it for `petalock://job-started` and `petalock://progress`, kind `test`, scope `launch`; sent only once the job begins). Every answer keeps the
  * choice: a wrong password (`core` `wrong_password`, also for a well-formed recovery key that is not the one), a damaged backup (`core` `damaged` with the
  * first failing `what`), `core` `io`, `unsupported_version` or `params_out_of_bounds`, and a stop (`cancelled`). A choice that is gone (expired, used,
  * dropped by a lock) is `choice_expired`; `locked` means every vault was locked while it ran.
@@ -1170,8 +1170,8 @@ export async function forgetOpenBackup(choice: string): Promise<void> {
 }
 
 /**
- * Opens the picked backup read-only, with what was typed as one box's (`password_or_key`). A launch-scoped job (`request` names it for `lockbox://job-started`
- * and `lockbox://progress`, kind `open_backup`, scope `launch`): it shows progress and a Stop (`cancelOperation`). The answer is the new session, tagged: a
+ * Opens the picked backup read-only, with what was typed as one box's (`password_or_key`). A launch-scoped job (`request` names it for `petalock://job-started`
+ * and `petalock://progress`, kind `open_backup`, scope `launch`): it shows progress and a Stop (`cancelOperation`). The answer is the new session, tagged: a
  * read-only session of `kind` `backup` whose name is the backup file's name without `.petalock-backup`. A wrong password (`core` `wrong_password`), damage (`core`
  * `damaged`), `core` `io` and a stop (`cancelled`) keep the choice; a session opened uses it up. A choice that is gone is `choice_expired`; `locked` means every
  * vault was locked while it ran. A backup that is open already is answered as it is.
@@ -1286,7 +1286,7 @@ export function dismissRestore(confirm: boolean): Promise<Outcome<null>> {
  * Unlocks the picked backup read-only (nothing is unpacked) with the typed text, as one box's (`password_or_key`), and answers what it is and where it
  * would go. The shell keeps the working credential beside the pick, so the page sends the text once. A wrong one is `core` `wrong_password` (or a recovery
  * key kind) and keeps the pick; a damaged backup is `core` `damaged`; a pick that is gone is `choice_expired`. The check is a launch-scoped job (`request`
- * names it for `lockbox://job-started`, kind `restore_check`) that Cancel (`cancelOperation`) stops: it answers `cancelled` and keeps nothing new (the pick stays as it was).
+ * names it for `petalock://job-started`, kind `restore_check`) that Cancel (`cancelOperation`) stops: it answers `cancelled` and keeps nothing new (the pick stays as it was).
  */
 export function restoreCheck(choice: string, credential: CredentialArg, request: number): Promise<RestoreChecked> {
   return callPlain<RestoreChecked>("restore_check", { choice, credential, request });
@@ -1298,8 +1298,8 @@ export function restoreChooseFolder(choice: string): Promise<Outcome<RestoreChec
 }
 
 /**
- * The copy: checks the folder, then unpacks the backup beside the vault it replaces, as a launch-scoped job (`request` names it for `lockbox://job-started`
- * and `lockbox://progress`, kind `restore`) that Cancel (`cancelOperation`) stops, leaving the vault as it was. A cloud-synced folder asks first
+ * The copy: checks the folder, then unpacks the backup beside the vault it replaces, as a launch-scoped job (`request` names it for `petalock://job-started`
+ * and `petalock://progress`, kind `restore`) that Cancel (`cancelOperation`) stops, leaving the vault as it was. A cloud-synced folder asks first
  * (`Confirm` `CloudFolder`), and a folder holding a vault it can't tell apart asks for a new folder's name (`Confirm` `NewFolder`); both are answered with
  * `restorePrepareConfirm`. A refusal of the copy (not enough space, a drive a vault can't live on, a file system limit) keeps the pick.
  */

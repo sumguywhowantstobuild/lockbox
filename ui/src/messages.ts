@@ -19,7 +19,7 @@ export const GENERIC: Words = {
   body: "Try again. If it keeps happening, close Petalock and open it again.",
 };
 
-const UPDATE_LOCKBOX: Words = { title: "Update Petalock to open this vault.", body: "A newer version made it." };
+const UPDATE_PETALOCK: Words = { title: "Update Petalock to open this vault.", body: "A newer version made it." };
 const DAMAGED: Words = { title: "Petalock can't read part of this vault.", body: "It may be damaged. A backup can bring it back." };
 
 /**
@@ -219,7 +219,7 @@ export const MESSAGES: Record<string, Words> = {
   "core:password_too_short": { title: "That password is too short.", body: "" },
   "core:not_enough_space": { title: "There isn't enough room on that drive.", body: "" },
   "core:file_system_limit": { title: "That drive can't hold a file this big.", body: "" },
-  "core:unsupported_version": UPDATE_LOCKBOX,
+  "core:unsupported_version": UPDATE_PETALOCK,
   "core:params_out_of_bounds": {
     title: "Petalock can't open this vault safely.",
     body: "Its settings are outside what Petalock allows.",

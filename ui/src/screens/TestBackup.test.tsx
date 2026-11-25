@@ -136,7 +136,7 @@ test("settings_offers_test_a_backup_beside_back_up_and_the_pick_comes_first", as
   expect(buttonsIn(panel)).toEqual(["Close panel", "Pick another", "Show what you typed", "Cancel", "Test"]);
   expect(box(panel).getAttribute("type")).toBe("password");
   // No path, in the page or in what it was told.
-  expect(document.body.textContent).not.toMatch(/[A-Z]:[\\/]|\\Users|lockbox-test-folder/);
+  expect(document.body.textContent).not.toMatch(/[A-Z]:[\\/]|\\Users|petalock-test-folder/);
   expect(JSON.stringify(debugState())).not.toMatch(/[A-Z]:[\\/]|\\Users/);
   // Focus is on the step's heading.
   expect(document.activeElement).toBe(within(panel).getByRole("heading", { level: 2, name: "Test a backup" }));

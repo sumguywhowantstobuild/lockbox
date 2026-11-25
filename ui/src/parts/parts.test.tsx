@@ -1,4 +1,4 @@
-// The parts every later screen is built from, under the app's real policy (`LockboxParts`): each draws what a screen
+// The parts every later screen is built from, under the app's real policy (`PetalockParts`): each draws what a screen
 // reader needs, holds or returns focus as the design says, and writes no style into the page.
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
@@ -7,7 +7,7 @@ import { expectNoAxe } from "../testing/axe";
 import { Button } from "./Button";
 import { Combobox } from "./Combobox";
 import { Dialog } from "./Dialog";
-import { LockboxParts } from "./LockboxParts";
+import { PetalockParts } from "./PetalockParts";
 import { Menu } from "./Menu";
 import { Panel } from "./Panel";
 import { PasswordField } from "./PasswordField";
@@ -55,9 +55,9 @@ function Opener({ onClose }: { onClose?: () => void }) {
 test("a_dialog_holds_focus_and_gives_it_back", async () => {
   const closed = vi.fn();
   const { container } = render(
-    <LockboxParts>
+    <PetalockParts>
       <Opener onClose={closed} />
-    </LockboxParts>,
+    </PetalockParts>,
   );
   const opener = screen.getByRole("button", { name: "Open it" });
   opener.focus();
@@ -88,9 +88,9 @@ test("a_dialog_holds_focus_and_gives_it_back", async () => {
 
 test("a_dialog_answered_by_its_button_closes_and_gives_focus_back", async () => {
   render(
-    <LockboxParts>
+    <PetalockParts>
       <Opener />
-    </LockboxParts>,
+    </PetalockParts>,
   );
   const opener = screen.getByRole("button", { name: "Open it" });
   opener.focus();
@@ -107,7 +107,7 @@ test("a_dialog_answered_by_its_button_closes_and_gives_focus_back", async () => 
 test("a_menu_opens_from_its_button_and_chooses_one_item", async () => {
   const chosen = vi.fn<(which: string) => void>();
   render(
-    <LockboxParts>
+    <PetalockParts>
       <Menu
         label="More"
         items={[
@@ -126,7 +126,7 @@ test("a_menu_opens_from_its_button_and_chooses_one_item", async () => {
           },
         ]}
       />
-    </LockboxParts>,
+    </PetalockParts>,
   );
   const trigger = screen.getByRole("button", { name: "More" });
   expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
@@ -147,7 +147,7 @@ test("a_menu_opens_from_its_button_and_chooses_one_item", async () => {
 test("a_menu_with_rows_keeps_its_rows_as_menu_items_that_say_which_is_current", async () => {
   const chosen = vi.fn<(which: string) => void>();
   render(
-    <LockboxParts>
+    <PetalockParts>
       <Menu
         label="Vaults"
         rows={[
@@ -178,7 +178,7 @@ test("a_menu_with_rows_keeps_its_rows_as_menu_items_that_say_which_is_current", 
           },
         ]}
       />
-    </LockboxParts>,
+    </PetalockParts>,
   );
   const trigger = screen.getByRole("button", { name: "Vaults" });
   trigger.focus();
@@ -237,9 +237,9 @@ test("a_combobox_narrows_as_you_type_and_picks_one", async () => {
     );
   }
   render(
-    <LockboxParts>
+    <PetalockParts>
       <Pick />
-    </LockboxParts>,
+    </PetalockParts>,
   );
   const input = screen.getByRole("combobox", { name: "Folder" });
   input.focus();
@@ -273,9 +273,9 @@ function Choose({ onPick }: { onPick?: (value: string) => void }) {
 test("a_select_opens_by_keyboard_and_picks_with_arrows_and_enter", async () => {
   const picked = vi.fn<(value: string) => void>();
   const { container } = render(
-    <LockboxParts>
+    <PetalockParts>
       <Choose onPick={picked} />
-    </LockboxParts>,
+    </PetalockParts>,
   );
   // Named by its visible label, showing the chosen one, and nothing is open yet.
   const trigger = screen.getByRole("combobox", { name: "Printer" });
@@ -323,9 +323,9 @@ test("a_select_opens_by_keyboard_and_picks_with_arrows_and_enter", async () => {
 test("a_select_picks_with_a_click_and_escape_changes_nothing", async () => {
   const picked = vi.fn<(value: string) => void>();
   render(
-    <LockboxParts>
+    <PetalockParts>
       <Choose onPick={picked} />
-    </LockboxParts>,
+    </PetalockParts>,
   );
   const trigger = screen.getByRole("combobox", { name: "Printer" });
   trigger.focus();

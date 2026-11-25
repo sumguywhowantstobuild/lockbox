@@ -397,7 +397,7 @@ test("lock_all_returns_to_the_lock_screen_even_if_the_lock_event_is_lost", async
   await within(panel).findByText("admin@example.com");
   const real = invoke.getMockImplementation();
   if (real === undefined) throw new Error("no fake shell");
-  // The shell locks and answers; its `lockbox://locked` never reaches the page.
+  // The shell locks and answers; its `petalock://locked` never reaches the page.
   invoke.mockImplementation((cmd: string, args?: unknown) =>
     cmd === "lock_all" ? Promise.resolve(null) : (real(cmd, args) as Promise<unknown>),
   );

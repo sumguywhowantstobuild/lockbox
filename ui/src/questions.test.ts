@@ -6,7 +6,7 @@ import { expect, test } from "vitest";
 import { listBelow, readBeside } from "./testing/files";
 
 const DESIGN = "../../docs/design/2026-11-05-user-interface-design.md";
-const DESKTOP = "../../crates/lockbox-desktop/src/";
+const DESKTOP = "../../crates/petalock-desktop/src/";
 
 type Row = { moment: string; message: string; buttons: string[] };
 

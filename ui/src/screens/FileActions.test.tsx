@@ -1383,7 +1383,7 @@ const GB = 1024 ** 3;
 const KEEP_OPEN = "Keep the laptop open. Windows locking or sleeping cancels this, and files not finished aren't added.";
 const KEEP_OPEN_COPY = "Keep the laptop open. Windows locking or sleeping cancels this, and a copy not finished isn't saved.";
 
-/** The one job the shell says is running, which the page has not been given except through `lockbox://job-started`. */
+/** The one job the shell says is running, which the page has not been given except through `petalock://job-started`. */
 function theJob(): { request: number; operation: number; scope: { type: string; session: number; generation: number }; kind: string } {
   const [job, ...others] = shell.runningJobs();
   expect(others).toEqual([]);
@@ -1396,7 +1396,7 @@ test("one_file_add_shows_progress_and_stop", async () => {
   const release = shell.holdFiles();
   shell.pickNext("big-demo.zip", 3 * GB);
   await addOneFile();
-  // The shell says the job started (by `lockbox://job-started`, matched to the request the page sent) and the bar is on screen, as 9b draws it.
+  // The shell says the job started (by `petalock://job-started`, matched to the request the page sent) and the bar is on screen, as 9b draws it.
   const place = (await screen.findByRole("region", { name: "Adding files" })).closest("aside") as HTMLElement;
   const job = theJob();
   expect(job.kind).toBe("import");

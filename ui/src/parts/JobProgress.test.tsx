@@ -32,12 +32,12 @@ function spoken(): string {
 /** Starts a job for a request, as the shell does, and gives its operation. */
 function start(operation: number, kind = "import"): number {
   const request = jobs.nextRequest();
-  emit("lockbox://job-started", { request, operation, scope: SESSION, kind });
+  emit("petalock://job-started", { request, operation, scope: SESSION, kind });
   return request;
 }
 
 function move(operation: number, done: number, total: number, finished = false, kind = "import"): void {
-  emit("lockbox://progress", { operation, scope: SESSION, kind, done, total, finished });
+  emit("petalock://progress", { operation, scope: SESSION, kind, done, total, finished });
 }
 
 beforeEach(async () => {

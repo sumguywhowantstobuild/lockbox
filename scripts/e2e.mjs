@@ -4,12 +4,12 @@
 //   node scripts/e2e.mjs [--edgedriver <full path to msedgedriver.exe>] [spec ...]
 //
 // `spec` is a name in e2e/specs (`thin-path` for e2e/specs/thin-path.e2e.mjs); none means all of them. The Edge driver is
-// the flag, else LOCKBOX_EDGEDRIVER, else (on CI only) the runner image's EDGEWEBDRIVER folder; its major version must
-// equal the WebView2 runtime's. tauri-driver is %CARGO_HOME%\bin\tauri-driver.exe (LOCKBOX_TAURI_DRIVER overrides):
+// the flag, else PETALOCK_EDGEDRIVER, else (on CI only) the runner image's EDGEWEBDRIVER folder; its major version must
+// equal the WebView2 runtime's. tauri-driver is %CARGO_HOME%\bin\tauri-driver.exe (PETALOCK_TAURI_DRIVER overrides):
 // `cargo install tauri-driver --locked --version 2.1.0`. Steps that use the clipboard or this PC's keyboard (the save
-// shortcut) run on CI, and on a PC only with LOCKBOX_E2E_PC_FREE=1.
+// shortcut) run on CI, and on a PC only with PETALOCK_E2E_PC_FREE=1.
 //
-// What a run does, in order, stopping at the first refusal: refuses while any `lockbox-desktop.exe` runs; finds the
+// What a run does, in order, stopping at the first refusal: refuses while any `petalock.exe` runs; finds the
 // drivers and checks their versions; builds the release app (the page, then the app with `custom-protocol`, as the full
 // check does); makes a folder of its own in the temp folder (the web-view data, a vault and a files folder per spec,
 // logs); swaps a test state in (`e2e/lib/state.mjs`; CI's runner must start with none, so there nothing is set aside);
@@ -64,18 +64,18 @@ export function parseArgs(argv) {
 // ---- the drivers --------------------------------------------------------------------------------------------------
 
 /**
- * True only on the GitHub end-to-end job, which sets LOCKBOX_E2E_CI=1 itself. The generic CI=true that developer shells and
+ * True only on the GitHub end-to-end job, which sets PETALOCK_E2E_CI=1 itself. The generic CI=true that developer shells and
  * local tools set grants nothing: this marker is what skips the swap (a fresh runner has no state to protect) and allows
  * the clipboard steps.
  */
-export const onCiJob = (env) => env.LOCKBOX_E2E_CI === "1";
+export const onCiJob = (env) => env.PETALOCK_E2E_CI === "1";
 
-/** The Edge driver: the flag, else LOCKBOX_EDGEDRIVER, else (on the CI job) the runner image's folder. */
+/** The Edge driver: the flag, else PETALOCK_EDGEDRIVER, else (on the CI job) the runner image's folder. */
 export function findNativeDriver({ flag, env }) {
   const candidate =
-    flag ?? env.LOCKBOX_EDGEDRIVER ?? (onCiJob(env) && env.EDGEWEBDRIVER ? join(env.EDGEWEBDRIVER, "msedgedriver.exe") : undefined);
+    flag ?? env.PETALOCK_EDGEDRIVER ?? (onCiJob(env) && env.EDGEWEBDRIVER ? join(env.EDGEWEBDRIVER, "msedgedriver.exe") : undefined);
   if (candidate === undefined || candidate === "") {
-    throw new E2eRefused("no Edge WebDriver given: pass --edgedriver <full path to msedgedriver.exe> or set LOCKBOX_EDGEDRIVER");
+    throw new E2eRefused("no Edge WebDriver given: pass --edgedriver <full path to msedgedriver.exe> or set PETALOCK_EDGEDRIVER");
   }
   if (!isAbsolute(candidate)) throw new E2eRefused("the Edge WebDriver must be given as a full path");
   if (basename(candidate).toLowerCase() !== "msedgedriver.exe") throw new E2eRefused("the Edge WebDriver must be a file named msedgedriver.exe");
@@ -83,12 +83,12 @@ export function findNativeDriver({ flag, env }) {
   return candidate;
 }
 
-/** `tauri-driver.exe`: LOCKBOX_TAURI_DRIVER, else cargo's bin folder. */
+/** `tauri-driver.exe`: PETALOCK_TAURI_DRIVER, else cargo's bin folder. */
 export function findTauriDriver(env) {
   const cargoHome = env.CARGO_HOME ?? (env.USERPROFILE ? join(env.USERPROFILE, ".cargo") : undefined);
-  const candidate = env.LOCKBOX_TAURI_DRIVER ?? (cargoHome ? join(cargoHome, "bin", "tauri-driver.exe") : undefined);
+  const candidate = env.PETALOCK_TAURI_DRIVER ?? (cargoHome ? join(cargoHome, "bin", "tauri-driver.exe") : undefined);
   if (candidate === undefined || !isAbsolute(candidate) || !existsSync(candidate)) {
-    throw new E2eRefused("tauri-driver was not found: run `cargo install tauri-driver --locked --version 2.1.0` (or set LOCKBOX_TAURI_DRIVER)");
+    throw new E2eRefused("tauri-driver was not found: run `cargo install tauri-driver --locked --version 2.1.0` (or set PETALOCK_TAURI_DRIVER)");
   }
   return candidate;
 }
@@ -214,17 +214,17 @@ function runNode(args, { cwd, env }) {
 
 /** What the suites are told, in the environment of the processes they run in. */
 function sharedEnvironment(ctx) {
-  const exe = join(root, "target", "release", "lockbox-desktop.exe");
+  const exe = join(root, "target", "release", state.PROGRAM);
   if (!existsSync(exe)) throw new Error("the release build is missing");
   return {
     ...ctx.env,
-    LOCKBOX_E2E_APP: exe,
-    LOCKBOX_E2E_TAURI_DRIVER: ctx.tools.tauriDriver,
-    LOCKBOX_E2E_NATIVE_DRIVER: ctx.tools.nativeDriver,
-    LOCKBOX_E2E_RUN_ROOT: ctx.runRoot,
-    LOCKBOX_E2E_DEFAULT_VAULTS: ctx.locations.vaults,
+    PETALOCK_E2E_APP: exe,
+    PETALOCK_E2E_TAURI_DRIVER: ctx.tools.tauriDriver,
+    PETALOCK_E2E_NATIVE_DRIVER: ctx.tools.nativeDriver,
+    PETALOCK_E2E_RUN_ROOT: ctx.runRoot,
+    PETALOCK_E2E_DEFAULT_VAULTS: ctx.locations.vaults,
     // on a PC the app's window is kept off the screen; on CI nobody is looking
-    LOCKBOX_E2E_OFFSCREEN: ctx.ci ? "0" : "1",
+    PETALOCK_E2E_OFFSCREEN: ctx.ci ? "0" : "1",
   };
 }
 
@@ -242,7 +242,7 @@ export async function runAppTests(ctx) {
   const tap = join(ctx.logDir, "real-app.tap");
   const first = await runNode(
     ["--test", "--test-reporter=spec", "--test-reporter-destination=stdout", "--test-reporter=tap", `--test-reporter-destination=${tap}`, join(root, "e2e", "real-app.test.mjs")],
-    { cwd: root, env: { ...shared, LOCKBOX_E2E_REAL: "1" } },
+    { cwd: root, env: { ...shared, PETALOCK_E2E_REAL: "1" } },
   );
   const counted = readTap(tap);
   if (first !== 0 || counted === null || counted.fail !== 0 || counted.skipped !== 0 || !(counted.pass >= 3)) {
@@ -285,11 +285,11 @@ export function specNames(named, dir = join(root, "e2e", "specs"), required = RE
   return names;
 }
 
-/** Waits up to `seconds` for every `lockbox-desktop.exe` to be gone (a stopped app takes a moment); true once none runs. */
-async function lockboxGone(seconds) {
+/** Waits up to `seconds` for every `petalock.exe` to be gone (a stopped app takes a moment); true once none runs. */
+async function petalockGone(seconds) {
   const until = Date.now() + seconds * 1000;
   for (;;) {
-    if (state.isLockboxRunning() === false) return true;
+    if (state.isPetalockRunning() === false) return true;
     if (Date.now() > until) return false;
     await new Promise((done) => setTimeout(done, 250));
   }
@@ -318,13 +318,13 @@ export async function runSpecs(ctx) {
     }
     const label = `s${String(at + 1)}`;
     // the app of the suite before must be gone before its state is put back
-    if (!(await lockboxGone(15))) throw new Error("Petalock was still running after the last spec");
+    if (!(await petalockGone(15))) throw new Error("Petalock was still running after the last spec");
     await ctx.freshState(label);
     const vaultFolder = join(ctx.runRoot, `vaults-${label}`);
     const filesFolder = join(ctx.runRoot, `files-${label}`);
     mkdirSync(vaultFolder);
     mkdirSync(filesFolder);
-    const handle = await app.startLockbox({
+    const handle = await app.startPetalock({
       tauriDriver: tools.tauriDriver,
       nativeDriver: tools.nativeDriver,
       tempDir: join(ctx.runRoot, `driver-temp-${label}`),
@@ -338,13 +338,13 @@ export async function runSpecs(ctx) {
         cwd: join(root, "e2e"),
         env: {
           ...shared,
-          LOCKBOX_E2E_DRIVER_PORT: String(handle.port),
-          LOCKBOX_E2E_DRIVER_PID: String(handle.pid),
-          LOCKBOX_E2E_DRIVER_CREATED: handle.created,
-          LOCKBOX_E2E_VAULT_FOLDER: vaultFolder,
-          LOCKBOX_E2E_FILES_FOLDER: filesFolder,
-          LOCKBOX_E2E_RESULTS: results,
-          LOCKBOX_E2E_LOCATIONS: JSON.stringify(locations),
+          PETALOCK_E2E_DRIVER_PORT: String(handle.port),
+          PETALOCK_E2E_DRIVER_PID: String(handle.pid),
+          PETALOCK_E2E_DRIVER_CREATED: handle.created,
+          PETALOCK_E2E_VAULT_FOLDER: vaultFolder,
+          PETALOCK_E2E_FILES_FOLDER: filesFolder,
+          PETALOCK_E2E_RESULTS: results,
+          PETALOCK_E2E_LOCATIONS: JSON.stringify(locations),
         },
       });
       const lines = existsSync(results) ? readFileSync(results, "utf8").split(/\r?\n/).filter(Boolean) : [];
@@ -358,7 +358,7 @@ export async function runSpecs(ctx) {
         failed.push(name);
       }
     } finally {
-      const outcome = app.stopLockbox(handle);
+      const outcome = app.stopPetalock(handle);
       if (outcome.remaining.length > 0) {
         say(`could not stop every process this run started, or remove the policy it set (${outcome.remaining.length} left)`);
         leftBehind = true;
@@ -417,7 +417,7 @@ export async function runE2e({ env = process.env, specs = [], edgedriver, stateO
 
   let running;
   try {
-    running = (steps.isRunning ?? state.isLockboxRunning)();
+    running = (steps.isRunning ?? state.isPetalockRunning)();
   } catch {
     return refused("could not check whether Petalock is running");
   }
@@ -452,7 +452,7 @@ export async function runE2e({ env = process.env, specs = [], edgedriver, stateO
   }
 
   const runName = `e2e-${Date.now().toString(36)}-${randomBytes(2).toString("hex")}`;
-  const runRoot = mkdtempSync(join(tmpdir(), "lockbox-e2e-"));
+  const runRoot = mkdtempSync(join(tmpdir(), "petalock-e2e-"));
   const context = {
     runName,
     runRoot,

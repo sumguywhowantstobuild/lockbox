@@ -50,28 +50,28 @@ terminals opened before the install need restarting to see `cargo`.
   `ui/package.json` is pinned, no `^`). Then `npm run lint`, `npm run build`, `npm test` (from the repo root:
   `npm --prefix ui run lint` and so on), in that order: some tests read the built page and style sheet in `ui/dist`
   (that no font became a `data:` URI, and that the page carries no inline script or style), and say so when it is missing.
-- **Run the app:** `cargo tauri dev` from `crates/lockbox-desktop`. It starts the Vite dev server on port 5173 (`npm
+- **Run the app:** `cargo tauri dev` from `crates/petalock-desktop`. It starts the Vite dev server on port 5173 (`npm
   run dev` in `ui/`, set in `tauri.conf.json` `build.beforeDevCommand`, whose `cwd` is relative to the folder holding
   `tauri.conf.json`) and opens the window on it. The port is fixed (`strictPort`): the window may only show the app's
   own origin and, in dev builds, `http://localhost:5173`.
 - **Release configuration:** build the UI first (`npm --prefix ui run build`; the app embeds `ui/dist` at compile
-  time), then `cargo build -p lockbox-desktop --release --locked --features custom-protocol`. The program is
-  `target\release\lockbox-desktop.exe`, and it has no console. A release build without `custom-protocol` stops at
+  time), then `cargo build -p petalock-desktop --release --locked --features custom-protocol`. The program is
+  `target\release\petalock.exe`, and it has no console. A release build without `custom-protocol` stops at
   compile time, because it would load the dev server. The bridge tests that only exist in that configuration run with
-  `cargo test -p lockbox-desktop --locked --features custom-protocol --test ipc`.
+  `cargo test -p petalock-desktop --locked --features custom-protocol --test ipc`.
 - **Debug builds** print each Windows signal to the console, for checking the signal window by hand.
 - **App state** is in `%LOCALAPPDATA%\Petalock\` (the vault list, settings, journals, opened copies), and vaults default
   to `%USERPROFILE%\Petalock Vaults\`. Test against test vaults only: a debug and a release build share both folders.
 - **Real-clipboard checks:** the tests that touch the real clipboard are ignored by default. Run them with
-  `cargo test -p lockbox-desktop clipboard -- --ignored`, with nothing else using the clipboard meanwhile.
-- Tauri writes generated schemas to `crates/lockbox-desktop/gen/` on every build; it is git-ignored.
+  `cargo test -p petalock-desktop clipboard -- --ignored`, with nothing else using the clipboard meanwhile.
+- Tauri writes generated schemas to `crates/petalock-desktop/gen/` on every build; it is git-ignored.
 
 ## Workspace and CI
 - `rust-toolchain.toml` pins Rust 1.99.1 (minimal profile, plus rustfmt and clippy); `cargo` in the repo picks it up
   automatically.
 - Checks to run before every commit: `cargo fmt --all --check`, `cargo clippy --locked --all-targets -- -D warnings`,
-  `cargo clippy -p lockbox-core --locked --all-targets --features test-internals -- -D warnings`,
-  `cargo test --locked`, `cargo test -p lockbox-core --locked --features test-internals` (the engine's internal
+  `cargo clippy -p petalock-core --locked --all-targets --features test-internals -- -D warnings`,
+  `cargo test --locked`, `cargo test -p petalock-core --locked --features test-internals` (the engine's internal
   modules and the integration tests that build on them), and for the UI `npm --prefix ui run lint`,
   `npm --prefix ui test`, `npm --prefix ui run build`, then the release-configuration bridge tests above.
   `Cargo.lock` and `ui/package-lock.json` are committed so builds are repeatable.
@@ -82,14 +82,14 @@ terminals opened before the install need restarting to see `cargo`.
   runs the release-configuration bridge tests and makes a release build of the app (step `Tauri build`).
 
 ### Windows file code and the Linux CI run
-- `crates/lockbox-core` depends on `windows-sys` 0.61 (Windows only) for safe file moves, disk-space and file-system
+- `crates/petalock-core` depends on `windows-sys` 0.61 (Windows only) for safe file moves, disk-space and file-system
   checks. Its `unsafe` is confined to `src/fsio/windows.rs`; the rest of the crate denies `unsafe`.
 - The CI Rust job is a matrix on pinned images (`windows-2025-vs2026`, `ubuntu-24.04`), so the non-Windows file
   code in `src/fsio/portable.rs` is compiled and tested too. Job names are `Rust: format, lint, test (windows)` and
   `Rust: format, lint, test (linux)`, fixed across image bumps; required-status-check rules on GitHub must match them.
   Bump an image by changing only its `os:` value in `.github/workflows/ci.yml`.
-- The desktop app (`crates/lockbox-desktop`) is Windows-only, so the Linux run lints and tests
-  `--workspace --exclude lockbox-desktop` (building it there would need WebKitGTK for nothing).
+- The desktop app (`crates/petalock-desktop`) is Windows-only, so the Linux run lints and tests
+  `--workspace --exclude petalock-desktop` (building it there would need WebKitGTK for nothing).
 
 ## Commit identity
 Commits use GitHub's noreply address so no personal email is published:
@@ -110,7 +110,7 @@ the account's email setting, so turn on "Keep my email addresses private" in Git
   history can't be rewritten once pushed, so it goes in `.gitleaksignore` by its fingerprint (`commit:file:rule:line`,
   printed in gitleaks' JSON report). Never loosen a gitleaks rule globally.
 - Tools are found by name on PATH, except semgrep (see the troubleshooting entry below). To use another copy, set
-  `LOCKBOX_GITLEAKS`, `LOCKBOX_SEMGREP` or `LOCKBOX_OSV` to its path. The tests use this to swap in fake tools.
+  `PETALOCK_GITLEAKS`, `PETALOCK_SEMGREP` or `PETALOCK_OSV` to its path. The tests use this to swap in fake tools.
 - Tests: `node --test "scripts/*.test.mjs"`.
 - A semgrep hit we accept on purpose is silenced on that line with `// nosemgrep: <rule id> -- <reason>`.
 - An osv finding we accept for now goes in `osv-scanner.toml` at the repo root (osv-scanner reads it for the
@@ -128,7 +128,7 @@ the account's email setting, so turn on "Keep my email addresses private" in Git
 
 **Desktop app tests stop at once with `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139)**
 Tauri needs Windows' Common Controls 6, which a program asks for in its embedded manifest. tauri-build gives the app
-that manifest but not test programs. `crates/lockbox-desktop/build.rs` embeds the same manifest into the test
+that manifest but not test programs. `crates/petalock-desktop/build.rs` embeds the same manifest into the test
 programs (`embed_test_manifest`); keep it when changing the build script.
 
 **semgrep: `executing pysemgrep failed ... No such file or directory`**

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import App from "../App";
-import { LockboxParts } from "../parts/LockboxParts";
+import { PetalockParts } from "../parts/PetalockParts";
 import { Pattern, VaultMark, vaultLook } from "../parts/Pattern";
 import { debugState, resetStoreForTests, startStore } from "../store";
 import { expectNoAxe } from "../testing/axe";
@@ -27,9 +27,9 @@ async function show(vaults: Parameters<typeof installFakeShell>[2]) {
   shell = installFakeShell(invoke, listen, vaults);
   await startStore();
   const view = render(
-    <LockboxParts>
+    <PetalockParts>
       <LockScreen />
-    </LockboxParts>,
+    </PetalockParts>,
   );
   return view;
 }

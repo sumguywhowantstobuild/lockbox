@@ -12,7 +12,7 @@ const CSP =
   "connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 test("csp_config_unchanged", () => {
-  const config = JSON.parse(readBeside(import.meta.url, "../../crates/lockbox-desktop/tauri.conf.json")) as {
+  const config = JSON.parse(readBeside(import.meta.url, "../../crates/petalock-desktop/tauri.conf.json")) as {
     app: { security: Record<string, unknown> };
   };
   // Exactly these two keys: no devCsp, no `dangerousDisableAssetCspModification`, no asset protocol.

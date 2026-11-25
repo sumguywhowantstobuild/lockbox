@@ -1,5 +1,5 @@
 // WebdriverIO's settings for the end-to-end run. `node scripts/e2e.mjs` starts tauri-driver (which starts msedgedriver,
-// which starts the app) and sets every LOCKBOX_E2E_* variable read here; this file is not meant to be run by hand.
+// which starts the app) and sets every PETALOCK_E2E_* variable read here; this file is not meant to be run by hand.
 //
 // The script runs this once per spec file, each on a fresh test state: the app starts when the session is made and is
 // closed when it ends. Within a spec the first failure stops it: a path's steps depend on the ones before them.
@@ -12,12 +12,12 @@ const need = (name) => {
   return value;
 };
 
-const results = need("LOCKBOX_E2E_RESULTS");
+const results = need("PETALOCK_E2E_RESULTS");
 
 export const config = {
   runner: "local",
   hostname: "127.0.0.1",
-  port: Number(need("LOCKBOX_E2E_DRIVER_PORT")),
+  port: Number(need("PETALOCK_E2E_DRIVER_PORT")),
   path: "/",
   specs: ["./specs/**/*.e2e.mjs"],
   maxInstances: 1,
@@ -26,7 +26,7 @@ export const config = {
       maxInstances: 1,
       // WebDriver Classic only: msedgedriver is asked for nothing it does not answer
       "wdio:enforceWebDriverClassic": true,
-      "tauri:options": { application: need("LOCKBOX_E2E_APP") },
+      "tauri:options": { application: need("PETALOCK_E2E_APP") },
     },
   ],
   logLevel: "warn",

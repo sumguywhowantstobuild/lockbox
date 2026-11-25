@@ -1,4 +1,4 @@
-// Tests that need the built app and the drivers. `node scripts/e2e.mjs` runs this file (with LOCKBOX_E2E_REAL=1 and the
+// Tests that need the built app and the drivers. `node scripts/e2e.mjs` runs this file (with PETALOCK_E2E_REAL=1 and the
 // paths it found) after it has built the release app and swapped the test state in; run any other way it is skipped,
 // and says so. Each test starts what it needs and stops it again by process ID. Every comparison counts what it
 // compared and fails on zero.
@@ -11,10 +11,10 @@ import { fileURLToPath } from "node:url";
 
 import * as app from "./lib/app.mjs";
 
-const ENABLED = process.env.LOCKBOX_E2E_REAL === "1";
+const ENABLED = process.env.PETALOCK_E2E_REAL === "1";
 const SKIP = ENABLED ? false : "needs the built app and the drivers: run node scripts/e2e.mjs";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
-const DESKTOP = join(ROOT, "crates", "lockbox-desktop");
+const DESKTOP = join(ROOT, "crates", "petalock-desktop");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const setting = (name) => {
   const value = process.env[name];
@@ -88,7 +88,7 @@ test("shipped_grants_and_config_allow_only_the_listed_commands", { skip: SKIP, t
   assert.deepEqual(sorted(registered), sorted(PERMITTED_COMMANDS), "the invoke handler registers exactly the permitted commands");
 
   // the artifact itself
-  const exe = readFileSync(setting("LOCKBOX_E2E_APP")).toString("latin1");
+  const exe = readFileSync(setting("PETALOCK_E2E_APP")).toString("latin1");
   assert.ok(exe.length > 1_000_000, "the built app was read");
   let found = 0;
   for (const command of PERMITTED_COMMANDS) {
@@ -224,14 +224,14 @@ function assertRunOwnedWebViews(tree, lines, owned, what) {
 }
 
 const runFolder = (name) => {
-  const dir = join(setting("LOCKBOX_E2E_RUN_ROOT"), name);
+  const dir = join(setting("PETALOCK_E2E_RUN_ROOT"), name);
   mkdirSync(join(dir, "temp"), { recursive: true });
   mkdirSync(join(dir, "webview"), { recursive: true });
   return { temp: join(dir, "temp"), webview: join(dir, "webview"), log: join(dir, "driver.log") };
 };
 
 test("a_normal_launch_opens_no_debugging_port", { skip: SKIP, timeout: 120_000 }, async () => {
-  const exe = setting("LOCKBOX_E2E_APP");
+  const exe = setting("PETALOCK_E2E_APP");
   const folders = runFolder("normal");
   const { spawn } = await import("node:child_process");
   // started as a person starts it: no driver, and the run's own web-view folder so that no real cache is written
@@ -248,7 +248,7 @@ test("a_normal_launch_opens_no_debugging_port", { skip: SKIP, timeout: 120_000 }
     })();
     const root = { pid: me.pid, created: me.created };
     // off the screen of whoever is at this PC, as soon as the window is there
-    if (process.env.LOCKBOX_E2E_OFFSCREEN === "1") assert.ok(app.moveOffScreen(me.pid) >= 1, "the app's window was moved off screen");
+    if (process.env.PETALOCK_E2E_OFFSCREEN === "1") assert.ok(app.moveOffScreen(me.pid) >= 1, "the app's window was moved off screen");
     // looked at on the way up as well as once settled: IPv4 and IPv6, the app and every process below it
     let looks = 0;
     const onTheWay = [];
@@ -277,7 +277,7 @@ test("a_normal_launch_opens_no_debugging_port", { skip: SKIP, timeout: 120_000 }
 /** The app's, the web view's and the drivers' processes now, with their command lines: one line each. */
 function driverProcesses() {
   try {
-    const running = app.snapshotProcesses().filter((entry) => /^(lockbox-desktop|msedgewebview2|msedgedriver|tauri-driver)\.exe$/i.test(entry.name));
+    const running = app.snapshotProcesses().filter((entry) => /^(petalock|msedgewebview2|msedgedriver|tauri-driver)\.exe$/i.test(entry.name));
     const lines = app.commandLines(running.map((entry) => entry.pid));
     return running.map((entry) => `  ${entry.pid} (parent ${entry.ppid}) ${entry.name}: ${(lines.get(entry.pid) ?? "?").slice(0, 1500)}`).join("\n") || "  (none)";
   } catch (error) {
@@ -343,9 +343,9 @@ function drivenLaunchReport(folders, whileWaiting) {
 }
 
 test("the_driver_attaches_only_to_the_instance_it_started", { skip: SKIP, timeout: 180_000 }, async (t) => {
-  const exe = setting("LOCKBOX_E2E_APP");
+  const exe = setting("PETALOCK_E2E_APP");
   const folders = runFolder("driven");
-  const handle = await app.startLockbox({ tauriDriver: setting("LOCKBOX_E2E_TAURI_DRIVER"), nativeDriver: setting("LOCKBOX_E2E_NATIVE_DRIVER"), tempDir: folders.temp, webviewDir: folders.webview, logFile: folders.log });
+  const handle = await app.startPetalock({ tauriDriver: setting("PETALOCK_E2E_TAURI_DRIVER"), nativeDriver: setting("PETALOCK_E2E_NATIVE_DRIVER"), tempDir: folders.temp, webviewDir: folders.webview, logFile: folders.log });
   const base = `http://127.0.0.1:${handle.port}`;
   let session;
   let passed = false;
@@ -381,7 +381,7 @@ test("the_driver_attaches_only_to_the_instance_it_started", { skip: SKIP, timeou
     }
     session = body.value.sessionId;
     const caps = body.value.capabilities;
-    if (process.env.LOCKBOX_E2E_OFFSCREEN === "1") {
+    if (process.env.PETALOCK_E2E_OFFSCREEN === "1") {
       const moved = await fetch(`${base}/session/${session}/window/rect`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -435,7 +435,7 @@ test("the_driver_attaches_only_to_the_instance_it_started", { skip: SKIP, timeou
     passed = true;
   } finally {
     if (session) await fetch(`${base}/session/${session}`, { method: "DELETE" }).catch(() => {});
-    const outcome = app.stopLockbox(handle);
+    const outcome = app.stopPetalock(handle);
     // after a failure, a leftover is said and the failure itself stays the one reported
     if (passed) assert.deepEqual(outcome.remaining, [], "the driver and what it started are stopped");
     else if (outcome.remaining.length > 0) t.diagnostic(`left running after the failure: ${outcome.remaining.join(", ")}`);

@@ -2,7 +2,7 @@
 //
 // Where the release app keeps its state on Windows (read from the code, not guessed):
 //   state       <LocalAppData>\Petalock  the vault list, the journals and the "open" folders
-//                                        (crates/lockbox-desktop/src/paths.rs, state_paths)
+//                                        (crates/petalock-desktop/src/paths.rs, state_paths)
 //   appLocal    <LocalAppData>\io.github.sumguywhowantstobuild.petalock
 //                                        Tauri's app-local folder (app_local_data_dir). It holds WebView2's profile
 //                                        (EBWebView), Tauri's default web-view data folder, as the app sets no
@@ -11,7 +11,7 @@
 //                                        Tauri's app-data folder (app_data_dir, lib.rs). It may not exist
 //   vaults      <Profile>\Petalock Vaults
 //                                        the default folder new vaults are made in (paths.rs)
-// The identifier comes from crates/lockbox-desktop/tauri.conf.json; a test compares the two. The three roots are asked
+// The identifier comes from crates/petalock-desktop/tauri.conf.json; a test compares the two. The three roots are asked
 // of Windows (its known-folder lookup, as the app does), and a command refuses when %LOCALAPPDATA%, %APPDATA% or
 // %USERPROFILE% in the environment says something else, so a stale shell can't point a swap at the wrong folders.
 //
@@ -160,15 +160,19 @@ export function defaultLocations({ env = process.env, lookup = knownFolders } = 
   return locationsFrom(known);
 }
 
+/** The app's program file: the `[[bin]]` name in crates/petalock-desktop/Cargo.toml and `mainBinaryName` in its
+ * tauri.conf.json (a test compares the three). */
+export const PROGRAM = "petalock.exe";
+
 /** True when `tasklist`'s CSV answer lists a Petalock process (the name only, so the language of Windows doesn't matter). */
 export function parseTasklist(output) {
-  return /"lockbox-desktop\.exe"/i.test(output);
+  return output.toLowerCase().includes(`"${PROGRAM}"`);
 }
 
-/** Asks Windows whether `lockbox-desktop.exe` runs. Throws when it can't ask: the callers then refuse. */
-export function isLockboxRunning() {
+/** Asks Windows whether `petalock.exe` runs. Throws when it can't ask: the callers then refuse. */
+export function isPetalockRunning() {
   // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- a fixed program by its full path and fixed arguments
-  const result = spawnSync(systemTool("tasklist.exe"), ["/FI", "IMAGENAME eq lockbox-desktop.exe", "/NH", "/FO", "CSV"], {
+  const result = spawnSync(systemTool("tasklist.exe"), ["/FI", `IMAGENAME eq ${PROGRAM}`, "/NH", "/FO", "CSV"], {
     encoding: "utf8",
     windowsHide: true,
   });
@@ -292,7 +296,7 @@ function context(options) {
   return {
     locations,
     journal,
-    isRunning: options.isRunning ?? isLockboxRunning,
+    isRunning: options.isRunning ?? isPetalockRunning,
     step: options.afterStep ?? (() => {}),
     // every move of a location's folder goes through this one name (replaced only in tests)
     rename: options.rename ?? renameSync,

@@ -2,18 +2,18 @@
 
 ## EFF Large Wordlist for Passphrases
 
-- File: `crates/lockbox-core/wordlists/eff_large_wordlist.txt` (7,776 words, stored unchanged, byte for byte)
+- File: `crates/petalock-core/wordlists/eff_large_wordlist.txt` (7,776 words, stored unchanged, byte for byte)
 - Author: Electronic Frontier Foundation (EFF), 2016
 - Source: https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt
 - Downloaded: 2026-10-13
 - SHA-256: `addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e`
 - Licence: Creative Commons Attribution 3.0 United States (CC BY 3.0 US), https://creativecommons.org/licenses/by/3.0/us/
 
-Used by the passphrase generator (`crates/lockbox-core/src/generator.rs`). The list is used as published; Petalock does not modify it. This credit is required by the licence.
+Used by the passphrase generator (`crates/petalock-core/src/generator.rs`). The list is used as published; Petalock does not modify it. This credit is required by the licence.
 
 ## BIP39 English word list (the recovery key's words)
 
-- File: `crates/lockbox-core/src/wordlist/english.txt` (2,048 words, stored unchanged, byte for byte, LF endings)
+- File: `crates/petalock-core/src/wordlist/english.txt` (2,048 words, stored unchanged, byte for byte, LF endings)
 - Source: `src/mnemonic/wordlist/english.txt` of Trezor's `python-mnemonic`, https://github.com/trezor/python-mnemonic
   (last changed in that repository 2021-07-27). The same list is published as `bip-0039/english.txt` in
   https://github.com/bitcoin/bips; the two files were compared when this one was added and are byte-identical.
@@ -38,7 +38,7 @@ Used by the passphrase generator (`crates/lockbox-core/src/generator.rs`). The l
 > COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 > OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-Used by the recovery key (`crates/lockbox-core/src/recovery.rs`): its 24 words are written from this list. The list is
+Used by the recovery key (`crates/petalock-core/src/recovery.rs`): its 24 words are written from this list. The list is
 used as published; Petalock does not modify it.
 
 ## Libraries the desktop app uses directly

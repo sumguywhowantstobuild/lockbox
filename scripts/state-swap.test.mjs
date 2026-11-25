@@ -236,13 +236,13 @@ test("default locations are the four real places, from Windows' folders, and mat
   const lookup = () => ({ localAppData: env.LOCALAPPDATA, roamingAppData: env.APPDATA, profile: env.USERPROFILE });
   const found = state.defaultLocations({ env, lookup });
   assert.deepEqual(Object.keys(found), ["state", "appLocal", "appRoaming", "vaults"]);
-  const config = JSON.parse(readFileSync(new URL("../crates/lockbox-desktop/tauri.conf.json", import.meta.url), "utf8"));
+  const config = JSON.parse(readFileSync(new URL("../crates/petalock-desktop/tauri.conf.json", import.meta.url), "utf8"));
   assert.ok(typeof config.identifier === "string" && config.identifier.length > 0);
   assert.equal(found.state, join(env.LOCALAPPDATA, "Petalock"));
   assert.equal(found.appLocal, join(env.LOCALAPPDATA, config.identifier));
   assert.equal(found.appRoaming, join(env.APPDATA, config.identifier));
   assert.equal(found.vaults, join(env.USERPROFILE, "Petalock Vaults"));
-  // The folders the swap sets aside are the new product's: the identifier ends in petalock, never lockbox.
+  // The folders the swap sets aside are the new product's: the identifier ends in petalock, not the old name.
   assert.equal(config.identifier, "io.github.sumguywhowantstobuild.petalock");
   assert.deepEqual(state.locationsFrom(lookup()), found);
   if (process.platform === "win32") {
@@ -306,7 +306,7 @@ test("a run name is 1 to 40 of a-z, 0-9 and -, else refused with nothing renamed
     world.swapBack("x".repeat(40));
   }));
 
-test("swap_refuses_while_lockbox_runs", () =>
+test("swap_refuses_while_petalock_runs", () =>
   withWorld({}, (world) => {
     const before = snapshot(world.root);
     for (const isRunning of [() => true, () => { throw new Error("tasklist is gone"); }, () => undefined, () => "no", () => 0]) {
@@ -335,12 +335,24 @@ test("recover with no journal says nothing to recover and changes nothing, even 
     assertSame(before, snapshot(world.root), "after recover with no journal");
   }));
 
+test("program_name_is_the_built_exe: the scripts look for the program file the build makes", () => {
+  // Plan 5 Task 0c's review: the running-app check was proved only on a copy of Node given the old name. The name it
+  // looks for is the one Cargo builds (`[[bin]]`) and Tauri bundles (`mainBinaryName`).
+  const cargo = readFileSync(new URL("../crates/petalock-desktop/Cargo.toml", import.meta.url), "utf8");
+  const bin = /\[\[bin\]\]\s*\nname = "([^"]+)"/.exec(cargo);
+  assert.ok(bin !== null, "Cargo.toml names its program file");
+  const config = JSON.parse(readFileSync(new URL("../crates/petalock-desktop/tauri.conf.json", import.meta.url), "utf8"));
+  assert.equal(`${bin[1]}.exe`, state.PROGRAM);
+  assert.equal(`${config.mainBinaryName}.exe`, state.PROGRAM);
+  assert.equal(state.PROGRAM, "petalock.exe");
+});
+
 test("the real check for a running Petalock reads tasklist's answer", () => {
-  assert.equal(state.parseTasklist('"lockbox-desktop.exe","4242","Console","1","90,000 K"\r\n'), true);
-  assert.equal(state.parseTasklist('"LOCKBOX-DESKTOP.EXE","4242","Console","1","90,000 K"'), true);
+  assert.equal(state.parseTasklist('"petalock.exe","4242","Console","1","90,000 K"\r\n'), true);
+  assert.equal(state.parseTasklist('"PETALOCK.EXE","4242","Console","1","90,000 K"'), true);
   assert.equal(state.parseTasklist("INFO: No tasks are running which match the specified criteria.\r\n"), false);
   assert.equal(state.parseTasklist('"notepad.exe","1","Console","1","1 K"'), false);
-  if (process.platform === "win32") assert.equal(typeof state.isLockboxRunning(), "boolean");
+  if (process.platform === "win32") assert.equal(typeof state.isPetalockRunning(), "boolean");
 });
 
 // ---- swapping in --------------------------------------------------------------------------------------------------

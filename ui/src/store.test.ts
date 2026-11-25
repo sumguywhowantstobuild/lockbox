@@ -56,7 +56,7 @@ test("lock_subscribes_before_any_command", async () => {
   // The listener's answer is held back: until it comes, no command may have been sent.
   let subscribed: () => void = () => undefined;
   listen.mockImplementation(() => {
-    shell.calls.push({ cmd: "listen:lockbox://locked", args: undefined });
+    shell.calls.push({ cmd: "listen:petalock://locked", args: undefined });
     return new Promise((resolve) => {
       subscribed = () => {
         resolve(() => undefined);
@@ -66,11 +66,11 @@ test("lock_subscribes_before_any_command", async () => {
   const started = startStore();
   await Promise.resolve();
   await Promise.resolve();
-  expect(shell.calls.map((call) => call.cmd)).toEqual(["listen:lockbox://locked"]);
+  expect(shell.calls.map((call) => call.cmd)).toEqual(["listen:petalock://locked"]);
   subscribed();
   await started;
   // Then the settings (so the first screen is drawn in the saved theme), then the vault list.
-  expect(shell.calls.map((call) => call.cmd)).toEqual(["listen:lockbox://locked", "get_settings", "list_vaults"]);
+  expect(shell.calls.map((call) => call.cmd)).toEqual(["listen:petalock://locked", "get_settings", "list_vaults"]);
   // Started twice (React's strict mode does): subscribed once.
   await startStore();
   expect(shell.calls.filter((call) => call.cmd.startsWith("listen:"))).toHaveLength(1);

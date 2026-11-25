@@ -1,5 +1,5 @@
 // Draws Petalock's app icon, the three petals in slate blue, from the same formula as the page's line drawings
-// (ui/src/parts/Pattern.tsx), and writes crates/lockbox-desktop/icons/icon.ico, icon.png and icon-dark-taskbar.ico.
+// (ui/src/parts/Pattern.tsx), and writes crates/petalock-desktop/icons/icon.ico, icon.png and icon-dark-taskbar.ico.
 //
 //   node scripts/make-icon.mjs            writes the three files
 //   node scripts/make-icon.mjs --check    exits 1 when the files differ from what the script draws
@@ -27,7 +27,7 @@ import { deflateSync, inflateSync } from "node:zlib";
 export const COLOUR = [0x5b, 0x7b, 0xa8];
 /** The icon's colour for a dark taskbar: the colour the app's dark side draws the mark in (`--field-mark`). */
 export const COLOUR_ON_DARK = [0xbc, 0xd0, 0xec];
-const ICONS = join(dirname(fileURLToPath(import.meta.url)), "..", "crates", "lockbox-desktop", "icons");
+const ICONS = join(dirname(fileURLToPath(import.meta.url)), "..", "crates", "petalock-desktop", "icons");
 
 // The drawings, in the formula's own units (a circle of 62 in a 200 square): radius = 100 (base + amp sin(points
 // angle + phase)) for each line. `pattern` is the lock screen's fourteen lines.
